@@ -952,7 +952,6 @@ impl SystemView {
     }
 
     /// What a tenancy registry runs.
-    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     pub(crate) fn registry(dir: &Path) -> Self {
         Self {
             dir: super::make::SystemChain::dir_for(dir),
@@ -2240,8 +2239,14 @@ async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     }
 }
 
-/// Each tenant's applied project migrations, or why its ledger could not be read.
-pub(crate) type TenantApplied = Vec<(String, Result<std::collections::HashSet<String>, String>)>;
+/// Each tenant's applied migrations, or why its ledgers could not be read.
+pub(crate) type TenantApplied = Vec<(String, Result<TenantNames, String>)>;
+
+/// One tenant's applied names: the project ledger's and the system ledger's.
+pub(crate) struct TenantNames {
+    pub(crate) project: std::collections::HashSet<String>,
+    pub(crate) system: std::collections::HashSet<String>,
+}
 
 /// What a tenancy project adds to `check`: its deploy findings, awaited only
 /// under `--deploy`, and the tenant ledgers, read only for tenant-scoped files.
@@ -2317,11 +2322,12 @@ enum Ledgers<L> {
 }
 
 /// Model changes no file holds yet, and files the registry's or a tenant's
-/// ledger has not applied.
+/// ledger has not applied. `system` is the framework chain, checked in tenants.
 async fn pending_migration_audit<L>(
     pool: &Pool,
     dir: &Path,
     files: &[(String, Vec<super::Migration>)],
+    system: &[(String, Vec<super::Migration>)],
     ledgers: Ledgers<L>,
     findings: (&mut Vec<String>, &mut Vec<String>, &mut Vec<String>),
 ) where
@@ -2362,6 +2368,7 @@ async fn pending_migration_audit<L>(
     }
     let tenant_files = files
         .iter()
+        .chain(system)
         .flat_map(|(_, m)| m)
         .any(|m| m.scope == super::MigrationScope::Tenant);
     let Some(tenants) = tenants.filter(|_| tenant_files) else {
@@ -2372,24 +2379,27 @@ async fn pending_migration_audit<L>(
         return;
     };
     match ledgers.await {
-        Ok(tenants) => tenant_pending_audit(files, &tenants, warnings),
+        Ok(tenants) => tenant_pending_audit(files, system, &tenants, warnings),
         Err(e) => errors.push(format!("cannot list the tenants: {e}")),
     }
 }
 
-/// One warning naming the tenants behind on tenant-scoped files, one for
-/// those whose ledger could not be read.
+/// One warning naming the tenants behind on tenant-scoped files, the
+/// framework's `system` ones included, one for those whose ledgers could not be read.
 fn tenant_pending_audit(
     files: &[(String, Vec<super::Migration>)],
+    system: &[(String, Vec<super::Migration>)],
     tenants: &TenantApplied,
     warnings: &mut Vec<String>,
 ) {
+    let tenant = Some(super::MigrationScope::Tenant);
     let mut behind = Vec::new();
     let mut unreadable = Vec::new();
     for (slug, applied) in tenants {
         match applied {
             Ok(applied) => {
-                let pending = pending_names(files, applied, Some(super::MigrationScope::Tenant));
+                let mut pending = pending_names(system, &applied.system, tenant);
+                pending.extend(pending_names(files, &applied.project, tenant));
                 if !pending.is_empty() {
                     behind.push(format!("{slug}: {}", pending.join(", ")));
                 }
@@ -2518,6 +2528,14 @@ where
         for (app, d) in dirs {
             files.push((app, file::list_dir(&d)?));
         }
+        // The framework chain runs in each tenant too; its own ledger records it.
+        let system = match &ledgers {
+            Ledgers::Tenancy { .. } => SystemView::registry(dir)
+                .files()?
+                .map(|m| vec![("system/".to_owned(), m)])
+                .unwrap_or_default(),
+            Ledgers::Single => Vec::new(),
+        };
         let count: usize = files.iter().map(|(_, m)| m.len()).sum();
         if count == 0 && model_count > 0 {
             warnings.push(
@@ -2526,7 +2544,7 @@ where
         } else {
             info.push(format!("{count} migration(s) on disk"));
             let findings = (&mut info, &mut warnings, &mut errors);
-            pending_migration_audit(pool, dir, &files, ledgers, findings).await;
+            pending_migration_audit(pool, dir, &files, &system, ledgers, findings).await;
         }
     }
 

@@ -191,10 +191,12 @@ impl Env {
             BackendKind::Postgres => scratch(&mut self.guards, "DATABASE_URL").await,
             #[cfg(feature = "mysql")]
             BackendKind::MySql => scratch(&mut self.guards, "MYSQL_TEST_URL").await,
-            _ => format!(
-                "sqlite://{}?mode=rwc",
-                self.tmp.path().join(format!("{tag}.db")).display()
-            ),
+            _ => {
+                // Made, as a provisioned tenant's is: reseal opens no missing file.
+                let path = self.tmp.path().join(format!("{tag}.db"));
+                std::fs::File::create(&path).unwrap();
+                format!("sqlite://{}?mode=rwc", path.display())
+            }
         }
     }
 
@@ -246,6 +248,14 @@ impl Env {
         let mut out = Vec::new();
         typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
         Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// The verb's result and its output, also on an error.
+    async fn run_both(&self, dir: &Path, args: &[&str]) -> (Result<(), TenancyError>, String) {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let mut out = Vec::new();
+        let res = typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await);
+        (res, String::from_utf8_lossy(&out).into_owned())
     }
 }
 
@@ -1456,7 +1466,65 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
 }
 
 #[cfg(not(feature = "casts"))]
-async fn reseal_covers_sealed_casts(_: &Pool) {}
+async fn reseal_covers_sealed_casts(_: &Pool) {
+    panic!("this scenario needs the `casts` feature");
+}
+
+/// A schema-mode tenant's leftover URL is left alone, not a failure on every run.
+async fn reseal_leaves_a_schema_mode_url_alone(pool: &Pool) {
+    with_secret_key();
+    let env = Env::new(pool).await;
+    let url = "postgres://u:pw@127.0.0.1:1/x";
+    let mut org = Org {
+        slug: "schemaurl".into(),
+        display_name: "schemaurl".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some("mt_schemaurl".into()),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(url.into()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let (res, out) = env
+        .run_both(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await;
+    assert!(
+        out.contains("schemaurl: schema mode reads no URL, left alone"),
+        "{out}"
+    );
+    assert!(!out.contains("schemaurl: failed"), "{out}");
+    // Off PG a schema-mode tenant cannot be opened, so the tenant passes fail.
+    let opens_tenants = cfg!(any(feature = "sso", feature = "casts"));
+    if env.backend() == BackendKind::Postgres || !opens_tenants {
+        res.unwrap_or_else(|e| panic!("{e}: {out}"));
+    }
+    let stored = env.org("schemaurl").await.expect("row").database_url;
+    assert_eq!(stored.as_deref(), Some(url));
+}
+
+/// The SSO pass never creates a missing tenant's SQLite file.
+async fn reseal_creates_no_missing_tenant_file(pool: &Pool) {
+    with_secret_key();
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Sqlite {
+        return;
+    }
+    let path = env.tmp.path().join("gone.db");
+    let mut org = Org {
+        slug: "gone".into(),
+        display_name: "gone".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!("sqlite://{}?mode=rwc", path.display())),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let (_, out) = env
+        .run_both(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await;
+    assert!(!path.exists(), "a tenant file was created: {out}");
+}
 
 /// `--apply` leaves a sealed URL without a password as it is, not unsealed.
 async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
@@ -1582,6 +1650,41 @@ async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
     assert!(out.contains("blackhole: "), "{out}");
 }
 
+/// `check` compares the tenant-scoped system steps with each tenant's system ledger.
+async fn check_names_tenants_behind_on_system_steps(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let mut org = env.own_tenant("cks").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&org, &dir).await;
+    let system = env.dir("proj/system/migrations");
+    migration(&system, "0099_late_step", "SELECT 1");
+
+    let out = check_out(&env, &dir).await;
+    assert!(
+        out.contains(&format!("{}: system/0099_late_step", org.slug)),
+        "{out}"
+    );
+}
+
+/// `check` keeps no tenant pool open once that tenant's ledger is read.
+async fn check_keeps_no_tenant_pool_open(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let mut org = env.own_tenant("ckp").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&org, &dir).await;
+    let held = typed!(env.registry, p => {
+        let mut out = Vec::new();
+        let args = vec!["check".to_owned()];
+        let _ = rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await;
+        p.cached_scoped_pool_count().await + p.cached_database_pool_count().await
+    });
+    assert_eq!(held, 0, "{:?}", env.backend());
+}
+
 /// Flags a verb would ignore are refused, and nothing is written.
 async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
     let mut env = Env::new(pool).await;
@@ -1662,6 +1765,8 @@ tri_dialect_test! {
         migrate_storage_checks_the_target_url,
         reseal_seals_a_plain_password_url,
         reseal_covers_sealed_casts,
+        reseal_leaves_a_schema_mode_url_alone,
+        reseal_creates_no_missing_tenant_file,
         provision_resolves_an_env_reference,
         create_tenant_probes_before_writing,
         a_url_of_another_backend_is_refused,
@@ -1688,6 +1793,8 @@ tri_dialect_test! {
         check_deploy_names_a_role_named_schema,
         check_names_tenants_behind_on_tenant_migrations,
         check_bounds_an_unreachable_tenant,
+        check_names_tenants_behind_on_system_steps,
+        check_keeps_no_tenant_pool_open,
         ignored_tenancy_flags_are_refused,
         org_path_prefix_is_indexed,
     ],

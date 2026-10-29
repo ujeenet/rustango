@@ -15,7 +15,7 @@ use crate::tenancy::db_server::{self, Resealed};
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::org_edit::apply_values_if;
 use crate::tenancy::pools::TenantPools;
-use crate::tenancy::{Org, SecretsResolver as _};
+use crate::tenancy::{Org, SecretsResolver as _, StorageMode};
 
 pub(super) async fn reseal_tenant_secrets<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
@@ -47,10 +47,20 @@ where
     orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     let (mut todo, mut done, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    let mut left_alone = 0usize;
     for org in orgs {
         let Some(stored) = org.database_url.as_deref() else {
             continue;
         };
+        // Nothing reads it, and the edit path refuses to write it.
+        if matches!(
+            StorageMode::parse(&org.storage_mode),
+            Ok(StorageMode::Schema)
+        ) {
+            left_alone += 1;
+            writeln!(w, "  {}: schema mode reads no URL, left alone", org.slug)?;
+            continue;
+        }
         let sealed = stored.starts_with(SEALED_SCHEME);
         let resolved = match secrets.resolve(stored).await {
             Ok(url) => url,
@@ -177,11 +187,11 @@ where
             }
         }
     }
-    // SSO client secrets: the shared set, then each tenant's own.
+    // SSO client secrets: the shared set, then each tenant's own, one
+    // tenant pool open at a time.
     #[cfg(feature = "sso")]
     {
-        let mut tables: Vec<(String, Result<Vec<SsoSecret>, String>, crate::sql::Pool)> =
-            Vec::new();
+        let mut tally = Tally::default();
         #[cfg(feature = "admin-sso")]
         {
             use crate::tenancy::sso::SharedSsoProvider as P;
@@ -191,14 +201,14 @@ where
                 &registry,
             )
             .await;
-            tables.push(("shared".into(), rows, registry.clone()));
+            reseal_sso("shared", rows, &registry, apply, w, &mut tally).await?;
         }
         let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
         orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
         for org in orgs {
             use crate::sso::SsoProvider as P;
-            let Ok(pool) = pools.scoped_pool_dyn(&org).await else {
-                failed += 1;
+            let Ok((pool, own)) = pools.existing_pool_dyn(&org).await else {
+                tally.failed += 1;
                 writeln!(w, "  sso {}: cannot reach the tenant", org.slug)?;
                 continue;
             };
@@ -208,49 +218,25 @@ where
                 &pool,
             )
             .await;
-            tables.push((org.slug, rows, pool));
-        }
-        for (owner, rows, pool) in tables {
-            let rows = match rows {
-                Ok(r) => r,
-                // A tenant made before the table existed has nothing to reseal.
-                Err(e) if missing_table(&e) => continue,
-                Err(e) => {
-                    failed += 1;
-                    writeln!(w, "  sso {owner}: cannot open: {e}")?;
-                    continue;
-                }
-            };
-            for row in rows {
-                todo += 1;
-                let what = format!("sso {owner}/{}", row.slug);
-                if !apply {
-                    writeln!(w, "  {what}: would re-seal")?;
-                    continue;
-                }
-                match row.reseal(&pool).await {
-                    Ok(true) => {
-                        done += 1;
-                        writeln!(w, "  {what}: re-sealed")?;
-                    }
-                    Ok(false) => {
-                        skipped += 1;
-                        writeln!(w, "  {what}: skipped, changed meanwhile")?;
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        writeln!(w, "  {what}: failed: {e}")?;
-                    }
-                }
+            let run = reseal_sso(&org.slug, rows, &pool, apply, w, &mut tally).await;
+            if own {
+                pool.close().await;
+            } else {
+                pools.invalidate(&org.slug).await;
             }
+            run?;
         }
+        todo += tally.todo;
+        done += tally.done;
+        skipped += tally.skipped;
+        failed += tally.failed;
     }
     // Every other model's sealed `Cast` columns: registry models on the
     // registry, tenant models in each tenant, one tenant pool open at a time.
     #[cfg(feature = "casts")]
-    let left_alone = {
+    {
         use crate::core::ModelScope;
-        let mut tally = CastTally::default();
+        let mut tally = Tally::default();
         let (registry_columns, refused) = sealed_cast_columns(ModelScope::Registry);
         let (tenant_columns, refused_tenant) = sealed_cast_columns(ModelScope::Tenant);
         for line in refused.iter().chain(&refused_tenant) {
@@ -293,12 +279,10 @@ where
         done += tally.done;
         skipped += tally.skipped;
         failed += tally.failed;
-        tally.left_alone
-    };
-    #[cfg(not(feature = "casts"))]
-    let left_alone = 0usize;
+        left_alone += tally.left_alone;
+    }
     let left_alone = if left_alone > 0 {
-        format!(", {left_alone} left alone (cannot be opened)")
+        format!(", {left_alone} left alone")
     } else {
         String::new()
     };
@@ -388,10 +372,10 @@ fn single_key(
     }
 }
 
-/// Counts of the sealed-cast pass.
+/// Counts of the SSO and sealed-cast passes.
 #[cfg(feature = "casts")]
 #[derive(Default)]
-struct CastTally {
+struct Tally {
     todo: usize,
     done: usize,
     skipped: usize,
@@ -413,7 +397,7 @@ async fn reseal_columns<W: Write + Send>(
     columns: &[SealedColumn],
     apply: bool,
     w: &mut W,
-    tally: &mut CastTally,
+    tally: &mut Tally,
 ) -> std::io::Result<()> {
     for &(model, pk, column) in columns {
         let table = model.table;
@@ -478,6 +462,50 @@ async fn reseal_columns<W: Write + Send>(
                 after = Some(last);
             } else {
                 break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Re-seal `owner`'s SSO client secrets `rows` on `pool`.
+#[cfg(feature = "sso")]
+async fn reseal_sso<W: Write + Send>(
+    owner: &str,
+    rows: Result<Vec<SsoSecret>, String>,
+    pool: &crate::sql::Pool,
+    apply: bool,
+    w: &mut W,
+    tally: &mut Tally,
+) -> std::io::Result<()> {
+    let rows = match rows {
+        Ok(r) => r,
+        // A tenant made before the table existed has nothing to reseal.
+        Err(e) if missing_table(&e) => return Ok(()),
+        Err(e) => {
+            tally.failed += 1;
+            return writeln!(w, "  sso {owner}: cannot open: {e}");
+        }
+    };
+    for row in rows {
+        tally.todo += 1;
+        let what = format!("sso {owner}/{}", row.slug);
+        if !apply {
+            writeln!(w, "  {what}: would re-seal")?;
+            continue;
+        }
+        match row.reseal(pool).await {
+            Ok(true) => {
+                tally.done += 1;
+                writeln!(w, "  {what}: re-sealed")?;
+            }
+            Ok(false) => {
+                tally.skipped += 1;
+                writeln!(w, "  {what}: skipped, changed meanwhile")?;
+            }
+            Err(e) => {
+                tally.failed += 1;
+                writeln!(w, "  {what}: failed: {e}")?;
             }
         }
     }
@@ -554,13 +582,7 @@ impl SealedCell {
         after: Option<SqlValue>,
         pool: &crate::sql::Pool,
     ) -> Result<CastPage, String> {
-        use crate::core::{Filter, Op, OrderItem, WhereExpr};
-        let mut query = crate::core::SelectQuery::new(model).projection(vec![pk.column, column]);
-        if let Some(after) = after {
-            query.where_clause = WhereExpr::Predicate(Filter::new(pk.column, Op::Gt, after));
-        }
-        query.order_by = vec![OrderItem::column(pk.column, false)];
-        query.limit = Some(CAST_PAGE);
+        let query = Self::page_query(model, pk, column, after);
         let rows = crate::sql::fetch_values_list_on(pool, &query)
             .await
             .map_err(|e| e.to_string())?;
@@ -587,6 +609,26 @@ impl SealedCell {
             }
         }
         Ok(page)
+    }
+
+    /// The page's query: non-null cells only, so a sparse column costs no
+    /// pages of NULLs.
+    fn page_query(
+        model: &'static crate::core::ModelSchema,
+        pk: &'static crate::core::FieldSchema,
+        column: &'static str,
+        after: Option<SqlValue>,
+    ) -> crate::core::SelectQuery {
+        use crate::core::{Filter, Op, OrderItem, WhereExpr};
+        let mut filters = vec![Filter::new(column, Op::IsNull, false)];
+        if let Some(after) = after {
+            filters.push(Filter::new(pk.column, Op::Gt, after));
+        }
+        let mut query = crate::core::SelectQuery::new(model).projection(vec![pk.column, column]);
+        query.where_clause = WhereExpr::and_predicates(filters);
+        query.order_by = vec![OrderItem::column(pk.column, false)];
+        query.limit = Some(CAST_PAGE);
+        query
     }
 
     /// Either key opens it.
@@ -724,6 +766,31 @@ mod cast_tests {
             super::single_key(model(&TWO)).map(|f| f.column),
             Err("composite primary key")
         );
+    }
+
+    /// A page reads only non-null cells, on the first page and after.
+    #[test]
+    fn a_page_skips_null_cells() {
+        use crate::core::{Filter, Op, SqlValue, WhereExpr};
+        static FIELDS: [FieldSchema; 2] =
+            [key("id"), FieldSchema::new("v", "v", FieldType::String)];
+        let mut m = ModelSchema::new("m", "m");
+        m.fields = &FIELDS;
+        let m: &'static ModelSchema = Box::leak(Box::new(m));
+        let not_null = |w: &WhereExpr| {
+            let want = Filter::new("v", Op::IsNull, false);
+            match w {
+                WhereExpr::Predicate(f) => *f == want,
+                WhereExpr::And(all) => all
+                    .iter()
+                    .any(|e| matches!(e, WhereExpr::Predicate(f) if *f == want)),
+                _ => false,
+            }
+        };
+        for after in [None, Some(SqlValue::I64(7))] {
+            let q = super::SealedCell::page_query(m, &FIELDS[0], "v", after);
+            assert!(not_null(&q.where_clause), "{:?}", q.where_clause);
+        }
     }
 }
 

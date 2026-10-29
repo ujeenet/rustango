@@ -23,6 +23,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Tenancy `run-server` signs tenant sessions and links with `./var/.rustango_tenant_session.key` and the operator console with `./var/.rustango_operator_session.key`, as `server::Builder` and the CLI do, so a link `create-tenant --admin-email` prints works there.
 - Tenancy `check` reads eight tenant ledgers at once, each for at most 5 s; `check --no-tenants` skips them. App folders are found beside a relative `migrations` dir too.
 - The apex's shadowed-prefix warning is retried after a failed lookup instead of never showing.
+- `reseal-tenant-secrets` leaves a schema-mode tenant's stored URL alone instead of failing every run on it, opens each tenant's SSO providers one at a time and reports a missing SQLite file as unreachable instead of creating it, and skips NULL cells when paging a sealed column.
+- The apex's shadowed-prefix check runs in the background, so a slow registry no longer holds a console response, `/health` and `/ready` included.
+- Tenancy `check` also compares the framework's tenant-scoped system migrations with each tenant's system ledger, and keeps no tenant pool open after reading its ledgers.
 
 ## [0.61.11] — 2026-10-29
 
