@@ -206,7 +206,7 @@ where
     Ok(out)
 }
 
-/// `org`'s names in each of `ledgers`, through a pool closed after if opened here.
+/// `org`'s names in each of `ledgers`, through a pool closed or uncached after.
 async fn org_ledgers<DB: Database, const N: usize>(
     pools: &TenantPools<DB>,
     org: &crate::tenancy::org::Org,
@@ -233,6 +233,9 @@ where
     }
     if own {
         pool.close().await;
+    } else {
+        // A cached pool per tenant would stay open for the whole command.
+        pools.invalidate(&org.slug).await;
     }
     read.map(|()| out)
 }
@@ -243,8 +246,8 @@ const CHECK_CONCURRENCY: usize = 8;
 /// unreachable database costs this, not the pool's acquire timeout.
 const CHECK_TENANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Every active tenant's project ledger, or why it could not be read: what
-/// `check` compares the tenant-scoped files with. One bad tenant spoils no other.
+/// Every active tenant's project and system ledgers, or why they could not be
+/// read: what `check` compares the tenant-scoped files with. One bad tenant spoils no other.
 pub(super) async fn active_tenant_ledgers<DB: Database>(
     pools: &TenantPools<DB>,
 ) -> Result<rustango::migrate::manage::TenantApplied, String>
@@ -262,7 +265,8 @@ where
         .map_err(|e| e.to_string())?;
     let mut out: rustango::migrate::manage::TenantApplied = futures_util::stream::iter(orgs)
         .map(|org| async move {
-            let read = org_ledgers(pools, &org, [rustango::migrate::LEDGER_TABLE]);
+            use rustango::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
+            let read = org_ledgers(pools, &org, [LEDGER_TABLE, SYSTEM_LEDGER_TABLE]);
             let read = tokio::time::timeout(CHECK_TENANT_TIMEOUT, read)
                 .await
                 .unwrap_or_else(|_| {
@@ -271,7 +275,11 @@ where
                         CHECK_TENANT_TIMEOUT.as_secs()
                     ))
                 });
-            (org.slug, read.map(|[applied]| applied))
+            let read = read.map(|[project, system]| rustango::migrate::manage::TenantNames {
+                project,
+                system,
+            });
+            (org.slug, read)
         })
         .buffer_unordered(CHECK_CONCURRENCY)
         .collect()

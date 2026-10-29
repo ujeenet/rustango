@@ -1040,7 +1040,7 @@ impl<DB: Database> Builder<DB> {
                 }
             }
         }));
-        let shadow_checked = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let shadow_checked: Arc<ShadowChecked> = Arc::default();
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
@@ -1063,7 +1063,7 @@ impl<DB: Database> Builder<DB> {
                         let resp = operator.as_service().oneshot(req).await;
                         if let Ok(r) = &resp {
                             if r.extensions().get::<ConsoleUnmatched>().is_none() {
-                                warn_if_shadowed(&shadow_checked, &path, &registry).await;
+                                spawn_shadow_check(&shadow_checked, &path, &registry);
                             }
                         }
                         return resp.map_err(|e| -> std::convert::Infallible {
@@ -1255,38 +1255,52 @@ pub(crate) enum Resolution {
 #[derive(Clone, Copy)]
 struct ConsoleUnmatched;
 
-/// Warn if a tenant's path prefix is a console route's first segment. Looked up
-/// until answered once per segment: the console's segments are few and fixed.
-async fn warn_if_shadowed(
-    checked: &std::sync::Mutex<std::collections::HashSet<String>>,
+/// Segments whose shadow check is answered or under way.
+type ShadowChecked = std::sync::Mutex<std::collections::HashSet<String>>;
+
+/// Check `path`'s first segment off the request: a slow registry never holds
+/// a console response, `/health` and `/ready` included. One lookup per segment
+/// at a time; a failed one frees it for the next request.
+fn spawn_shadow_check(
+    checked: &Arc<ShadowChecked>,
     path: &str,
     registry: &crate::sql::Pool,
-) {
-    use crate::tenancy::OrgResolver as _;
+) -> Option<tokio::task::JoinHandle<()>> {
     let first = path.trim_start_matches('/').split('/').next().unwrap_or("");
     let prefix = format!("/{first}");
-    let lock = || {
-        checked
-            .lock()
+    let lock = |c: &ShadowChecked| {
+        c.lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(prefix.clone())
     };
-    if lock().contains(&prefix) {
-        return;
+    if !lock(checked) {
+        return None;
     }
-    let Ok(probe) = axum::http::Request::builder().uri(prefix.as_str()).body(()) else {
-        return;
+    let (checked, registry) = (checked.clone(), registry.clone());
+    Some(tokio::spawn(async move {
+        if !warn_if_shadowed(&prefix, &registry).await {
+            checked
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&prefix);
+        }
+    }))
+}
+
+/// Warn if a tenant's path prefix is the console segment `prefix`. `false`
+/// when the lookup failed, so it is tried again.
+async fn warn_if_shadowed(prefix: &str, registry: &crate::sql::Pool) -> bool {
+    use crate::tenancy::OrgResolver as _;
+    let Ok(probe) = axum::http::Request::builder().uri(prefix).body(()) else {
+        return true;
     };
     let (parts, ()) = probe.into_parts();
-    // Only an answer marks it checked: after a failed lookup the next request retries.
     let Ok(tenant) = crate::tenancy::PathPrefixResolver
         .resolve(&parts, registry)
         .await
     else {
-        return;
+        return false;
     };
-    if !lock().insert(prefix.clone()) {
-        return;
-    }
     if tenant.is_some() {
         tracing::warn!(
             target: "rustango::server",
@@ -1295,6 +1309,7 @@ async fn warn_if_shadowed(
              the console keeps it — give the tenant another prefix"
         );
     }
+    true
 }
 
 /// Resolve `req`'s tenant, on the apex or on the tenant's host, and
@@ -1689,12 +1704,42 @@ pub(crate) mod resolver_tests {
         );
         // No `rustango_orgs` table: every lookup fails.
         let registry = crate::sql::Pool::connect(&url).await.unwrap();
-        let checked = std::sync::Mutex::new(std::collections::HashSet::new());
-        warn_if_shadowed(&checked, "/login", &registry).await;
+        let checked: Arc<ShadowChecked> = Arc::default();
+        let task = spawn_shadow_check(&checked, "/login/x", &registry).expect("a lookup");
+        task.await.unwrap();
         assert!(checked.lock().unwrap().is_empty());
         let (_tmp, sq, _) = hosted_registry(false).await;
-        warn_if_shadowed(&checked, "/login", &crate::sql::Pool::Sqlite(sq)).await;
+        let answered = crate::sql::Pool::Sqlite(sq);
+        let task = spawn_shadow_check(&checked, "/login", &answered).expect("a retry");
+        task.await.unwrap();
         assert!(checked.lock().unwrap().contains("/login"));
+        // Answered once: never looked up again.
+        assert!(spawn_shadow_check(&checked, "/login", &answered).is_none());
+    }
+
+    /// A hung shadow lookup never holds a console response, `/health` included.
+    #[tokio::test]
+    async fn a_hung_shadow_lookup_does_not_delay_the_console() {
+        use std::time::Duration;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, _, url) = hosted_registry(true).await;
+        let sq = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(60))
+            .connect(&url)
+            .await
+            .unwrap();
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq.clone(), url, "localhost")
+            .with_health()
+            .into_router()
+            .await
+            .unwrap();
+        // The registry's one connection is taken, so every lookup waits.
+        let held = sq.acquire().await.unwrap();
+        let res = tokio::time::timeout(Duration::from_secs(5), get(&app, "localhost", "/health"));
+        let res = res.await;
+        drop(held);
+        assert_eq!(res.expect("the response waited on the lookup").0, 200);
     }
 
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.

@@ -20,6 +20,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"`, `"5\n"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
 - Tenancy `run-server` signs tenant sessions and links with `./var/.rustango_tenant_session.key` and the operator console with `./var/.rustango_operator_session.key`, as `server::Builder` and the CLI do, so a link `create-tenant --admin-email` prints works there.
 - The apex's shadowed-prefix warning is retried after a failed lookup instead of never showing.
+- `reseal-tenant-secrets` leaves a schema-mode tenant's stored URL alone instead of failing every run on it, opens each tenant's SSO providers one at a time and reports a missing SQLite file as unreachable instead of creating it, and skips NULL cells when paging a sealed column.
+- The apex's shadowed-prefix check runs in the background, so a slow registry no longer holds a console response, `/health` and `/ready` included.
+- Tenancy `check` also compares the framework's tenant-scoped system migrations with each tenant's system ledger, and keeps no tenant pool open after reading its ledgers.
 
 ## [0.61.11] — 2026-10-29
 

@@ -154,6 +154,7 @@ untouched.
 
 - `rustango_orgs.path_prefix` gets an index. In a tenancy project run `cargo run -- makemigrations` to write the system migration, commit `system/migrations/`, then `migrate`.
 - Tenancy `check` reports tenants behind on tenant-scoped migrations and reads every active tenant's ledger to do so (eight at once, 5 s each); an unreachable tenant is a warning. `check --no-tenants` skips them.
+- That report includes the framework's tenant-scoped system migrations, listed as `system/<name>`.
 - Off the prod tier, `run-server` now uses the same key files as `server::Builder`: `./var/.rustango_tenant_session.key` and `./var/.rustango_operator_session.key` instead of `./var/.rustango_session.key`. Dev sessions signed by `run-server` end once; with `RUSTANGO_SESSION_SECRET` set nothing changes.
 
 ### Tenancy CLI
@@ -173,6 +174,7 @@ untouched.
 - A hand-written `FieldSchema { .. }` literal inside the crate, or a `FieldSchemaParts` literal, must add `cast`; outside the crate use `FieldSchema::new`. `FieldCast` (`Sealed`, `Other`; `#[non_exhaustive]`) is a new public type in `rustango::core`. `CastValue::KIND` is doc-hidden: leave it at its default in your own casts.
 - The derive sees a cast only as `Cast<C>` or `Option<Cast<C>>` written out; a type alias for a cast is refused at compile time.
 - A model with a sealed cast but no single-column primary key is reported as `cast <table>: no primary key` (or `composite primary key`) and fails the run. A value neither key opens, or a non-text cell, is reported as `left alone` and does not fail the run; the summary counts them.
+- A schema-mode tenant that still stores a database URL is reported as `<slug>: schema mode reads no URL, left alone`. The summary now reads `N left alone` without `(cannot be opened)`.
 
 ### Admin inline history
 
