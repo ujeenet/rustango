@@ -2873,25 +2873,11 @@ where
     let forward: Option<&dyn tenant_migrate::TenantMigrationObserver> = Some(&forward);
 
     // No backend branch: `migrate_one_tenant` owns the
-    // schema-mode-is-PG-only dispatch that used to be duplicated here.
-    let mut applied = Vec::new();
-    for dir in migration_dirs(dir) {
-        match tenant_migrate::migrate_one_tenant(pools, org, &dir, registry_url, forward).await {
-            Ok(mut more) => applied.append(&mut more),
-            Err(e) => return MigrationsOutcome::Failed(e.to_string()),
-        }
-    }
-    MigrationsOutcome::Applied(applied)
-}
-
-/// A project root's `migrations/` and `<app>/migrations/` dirs, else `dir`
-/// itself as a flat migrations dir. The same shape `Builder::migrate` takes.
-fn migration_dirs(dir: &Path) -> Vec<std::path::PathBuf> {
-    let dirs = crate::migrate::file::discover_migration_dirs(dir);
-    if dirs.is_empty() {
-        vec![dir.to_path_buf()]
-    } else {
-        dirs
+    // schema-mode-is-PG-only dispatch that used to be duplicated here,
+    // and walks the app folders.
+    match tenant_migrate::migrate_one_tenant(pools, org, dir, registry_url, forward).await {
+        Ok(applied) => MigrationsOutcome::Applied(applied),
+        Err(e) => MigrationsOutcome::Failed(e.to_string()),
     }
 }
 

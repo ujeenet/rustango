@@ -155,6 +155,12 @@ untouched.
 - A path-prefix tenant's login only redirects inside its own prefix: a `next` of `/`, another tenant's prefix, or a path with `..` segments goes to the tenant root (`/t1/`) instead. This also applies to a tenant with both a host and a prefix when it is reached under its prefix.
 - `create-tenant --path-prefix` without `--host-pattern` (and the console form, `manage::api::create_tenant` and `Provisioner::provision`) no longer fills in `<slug>.<apex>`; such a tenant is reached at `<apex>/<prefix>/`. A tenant created that way earlier keeps that host and its links still use it: clear it with `edit-tenant <slug> --host-pattern ''`.
 - A path prefix equal to an operator console segment (`/orgs`, `/login`, `/audit`, `/__static__`, …) or `/health` / `/ready` is refused. Such a tenant was already unreachable on the apex; give it another prefix before its next console edit.
+- `manage migrate` (and `migrate-registry` / `migrate-tenants`) now applies `<app>/migrations/` folders; run it once after upgrading to catch up what only boot applied before.
+- `check` may now warn about pending `system/` steps; `manage migrate` applies them.
+- `migrate-tenant-storage` away from a database made with `--server` deletes its `rustango_tenant_databases` row; drop the old database and login by hand.
+- Boot, provisioning and `manage migrate` apply the project's one `system/migrations/` chain once per database, then each app folder's own files. App folders no longer get a `<app>/system/` dir: delete any that earlier runs wrote, and don't commit them.
+- `migrate_registry`, `migrate_tenants*` and `migrate_one_tenant` given a `migrations` dir or a project root now apply its `<app>/migrations/` folders too.
+- The tenancy CLI picks the registry backend from the `DATABASE_URL` scheme on every build. `mariadb://` is refused; write `mysql://`.
 
 ---
 

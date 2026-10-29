@@ -295,6 +295,30 @@ async fn check_reports_unapplied_and_unmade_migrations(backend: &Pool) {
     assert!(!out.contains("not applied"), "{out}");
     assert!(!out.contains("models have changes"), "{out}");
 
+    // A framework step the system ledger lacks is reported too.
+    let system = env.tmp.path().join("system").join("migrations");
+    let mut step = rustango::migrate::file::list_dir(&system)
+        .expect("system chain")
+        .into_iter()
+        .filter(|m| m.scope == rustango::migrate::MigrationScope::Tenant)
+        .last()
+        .expect("a generated step");
+    step.prev = Some(step.name.clone());
+    step.name = "0099_late_step".into();
+    step.replaces.clear();
+    step.forward = Vec::new();
+    rustango::migrate::file::write(&system.join("0099_late_step.json"), &step).unwrap();
+    let out = manage_out(&env.registry, &dir, &["check"]).await;
+    assert!(
+        out.contains(
+            "1 system migration(s) not applied — run `manage migrate`: system/0099_late_step"
+        ),
+        "{out}"
+    );
+    manage_out(&env.registry, &dir, &["migrate"]).await;
+    let out = manage_out(&env.registry, &dir, &["check"]).await;
+    assert!(!out.contains("not applied"), "{out}");
+
     // Only an empty file: every model is a change no migration holds.
     let bare = env.tmp.path().join("bare").join("migrations");
     std::fs::create_dir_all(&bare).unwrap();

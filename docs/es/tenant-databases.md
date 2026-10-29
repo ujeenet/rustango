@@ -232,6 +232,10 @@ Una base de datos que trajo el operador no tiene registro y conserva el
 comportamiento anterior: en Postgres se elimina a través de su propia URL; en
 los demás backends se deja en su sitio y la purga lo indica.
 
+`migrate-tenant-storage` desde una base registrada borra su registro con el
+traslado. La base antigua y su login siguen en el servidor; el comando nombra
+ambos, para borrarlos a mano cuando la nueva ubicación funcione.
+
 ## La clave secreta: copia de seguridad y rotación
 
 **Haz copia de `RUSTANGO_SECRET_KEY` junto con la del registry.** Sin ella no

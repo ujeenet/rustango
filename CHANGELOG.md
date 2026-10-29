@@ -9,6 +9,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Tenant admin login on a path-prefix tenant lands on the tenant's root (`/t1/`) by default, and a `next` outside its prefix falls back there instead of leaving for the apex or another tenant. Under `RouteConfig::legacy()` a `next` at the login page no longer loops back to it.
 - A tenant created with a path prefix and no host gets no `<slug>.<apex>` host, so its set-password and console links point at `<apex>/<prefix>/…`.
 - A tenant path prefix that the apex serves first (an operator console route, `/health`, `/ready`) is refused on create and edit, naming the clash, instead of only warned about at request time.
+- Tenancy `migrate`, `migrate-registry` and `migrate-tenants` apply the `<app>/migrations/` folders too, and so does `create-tenant` given a `migrations` dir; `--dry-run` previews them and `migrate <target>` finds a target in them.
+- Tenancy `migrate <target>` moving forward runs the project's registry-scope system chain on the registry, as `migrate` does, instead of a chain built from a temp copy that put tenant-scope framework steps in the registry.
+- A tenant migration that fails in an app folder names that folder and what ran before it, the system steps included.
+- Boot, provisioning and `manage migrate` apply the framework's system chain once per database, from the project root; an app folder no longer gets a `system/` dir of its own, so a read-only app folder migrates.
+- `check` lists the framework's `system/migrations/` steps the system ledger lacks: registry-scoped ones in tenancy, tenant-scoped ones in a single-database project.
+- `migrate-tenant-storage` deletes the record of a database rustango made with the move, so a later purge or `create-tenant` never drops it; the final message names the old database, login and server, and says to check first when rustango may not have made them.
+- The tenancy CLI on a build without `postgres` opens the registry by the URL's scheme: a `mysql://` URL on a `sqlite,mysql` build no longer opens as a SQLite file.
+- Tenancy's scoped-migration copies go to a new randomly named, owner-only temp dir, so a leftover or planted dir is never applied.
 
 ## [0.61.12] — 2026-10-29
 

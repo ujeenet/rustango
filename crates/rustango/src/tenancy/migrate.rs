@@ -47,8 +47,8 @@
 //! callers supply it explicitly when their connection-string layout
 //! demands.
 
-use crate::migrate::{Migration, MigrationScope};
-use std::path::Path;
+use crate::migrate::{MigrateError, Migration, MigrationScope};
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::core::Column as _;
@@ -192,14 +192,14 @@ pub(crate) const SYSTEM_LEDGER: &str = "__rustango_system_migrations__";
 /// Apply `chain`'s `scope` steps and the project chain via `project` to
 /// `pool`, in [`crate::migrate::chains::migrate_chains`]'s order.
 ///
-/// The caller prepares `chain` once per run from the project's own
-/// `migrations/` dir, never from a scoped temp copy, so every tenant sees
-/// the committed `system/migrations/` and the same origin (#1988).
+/// The caller prepares `chain` once per run from the project root, never
+/// from a scoped temp copy or an app folder, so every tenant sees the
+/// committed `system/migrations/` and the same origin (#1988).
 async fn migrate_with_system<F, Fut>(
     pool: &crate::sql::Pool,
     chain: &crate::migrate::make::SystemChain,
     scope: MigrationScope,
-    dir: &Path,
+    dirs: &[PathBuf],
     observer: Option<&dyn crate::migrate::MigrationObserver>,
     signals: crate::migrate::Signals<'_>,
     project: F,
@@ -208,19 +208,90 @@ where
     F: FnOnce(crate::migrate::LockHeld) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<Migration>, crate::migrate::MigrateError>>,
 {
-    let applied =
-        crate::migrate::chains::migrate_chains(pool, chain, scope, dir, observer, signals, project)
-            .await?;
+    let applied = crate::migrate::chains::migrate_chains(
+        pool, chain, scope, dirs, observer, signals, project,
+    )
+    .await?;
     let mut all = applied.system;
     all.extend(applied.project);
     Ok(all)
 }
 
-/// The tenant-scope system chain for the project whose migrations are `dir`.
-fn tenant_system_chain(
-    dir: &Path,
-) -> Result<crate::migrate::make::SystemChain, crate::migrate::MigrateError> {
-    crate::migrate::make::SystemChain::for_migrations_dir(dir, &[crate::core::ModelScope::Tenant])
+/// Each folder's project chain, in order, through `run`. A failure names
+/// its folder and what the folders before it applied.
+async fn each_dir<'d, G, Fut>(
+    project: &'d ScopedProject,
+    mut run: G,
+) -> Result<Vec<Migration>, MigrateError>
+where
+    G: FnMut(&'d Path) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<Migration>, MigrateError>>,
+{
+    let mut all: Vec<Migration> = Vec::new();
+    for (source, dir) in project.sources.iter().zip(&project.dirs) {
+        match run(dir).await {
+            Ok(applied) => all.extend(applied),
+            Err(e) if project.dirs.len() == 1 => return Err(e),
+            Err(e) => {
+                let before = if all.is_empty() {
+                    String::new()
+                } else {
+                    let names: Vec<&str> = all.iter().map(|m| m.name.as_str()).collect();
+                    format!("; applied before it: {}", names.join(", "))
+                };
+                return Err(MigrateError::Validation(format!(
+                    "{}: {e}{before}",
+                    source.display()
+                )));
+            }
+        }
+    }
+    Ok(all)
+}
+
+/// A project's migration dirs cut down to one scope, in apply order, and
+/// the root its one system chain lives under.
+pub(crate) struct ScopedProject {
+    root: PathBuf,
+    /// The folders as on disk, for messages.
+    sources: Vec<PathBuf>,
+    dirs: Vec<PathBuf>,
+    // Keeps the temp copies `dirs` points into alive.
+    _copies: Vec<ScopedDir>,
+}
+
+impl ScopedProject {
+    /// `dir`'s project: its `migrations/` and `<app>/migrations/` folders,
+    /// each cut down to `scope`.
+    pub(crate) async fn of(dir: &Path, scope: MigrationScope) -> Result<Self, TenancyError> {
+        let mut dirs = Vec::new();
+        let mut copies = Vec::new();
+        let sources = crate::migrate::file::project_migration_dirs(dir);
+        for source in &sources {
+            let copy = scoped_subset(source, scope).await?;
+            dirs.push(copy.path(source).to_path_buf());
+            copies.push(copy);
+        }
+        Ok(Self {
+            root: crate::migrate::file::project_root_of(dir).to_path_buf(),
+            sources,
+            dirs,
+            _copies: copies,
+        })
+    }
+
+    pub(crate) fn dirs(&self) -> &[PathBuf] {
+        &self.dirs
+    }
+
+    /// The project's system chain for `scope`, from its root: an app
+    /// folder never gets a `system/` of its own.
+    fn system_chain(
+        &self,
+        scope: crate::core::ModelScope,
+    ) -> Result<crate::migrate::make::SystemChain, MigrateError> {
+        crate::migrate::make::SystemChain::prepare(&self.root, &[scope])
+    }
 }
 
 /// Apply registry-scoped pending migrations to the registry DB.
@@ -260,24 +331,35 @@ pub async fn migrate_registry_pool(
     dir: &Path,
 ) -> Result<Vec<Migration>, TenancyError> {
     info!(target: "rustango::tenancy", "applying registry-scoped migrations");
-    let scoped_dir = scoped_subset(dir, MigrationScope::Registry).await?;
-    let project_dir = scoped_dir.path(dir);
+    let project = ScopedProject::of(dir, MigrationScope::Registry).await?;
     // Model-derived registry tables come from system-app migrations; the
     // `managed = false` ones from `ensure_bootstrap_tables` below.
-    let chain = crate::migrate::make::SystemChain::for_migrations_dir(
-        dir,
-        &[crate::core::ModelScope::Registry],
-    )?;
+    let chain = project.system_chain(crate::core::ModelScope::Registry)?;
     let applied = migrate_with_system(
         registry,
         &chain,
         MigrationScope::Registry,
-        project_dir,
+        project.dirs(),
         None,
         crate::migrate::Signals::Skip,
-        |held| crate::migrate::migrate_pool_locked(held, registry, project_dir, None),
+        |held| {
+            each_dir(&project, move |d| {
+                crate::migrate::migrate_pool_locked(held, registry, d, None)
+            })
+        },
     )
     .await?;
+    registry_after_migrate(registry).await?;
+    info!(
+        target: "rustango::tenancy",
+        applied = applied.len(),
+        "registry migrations done"
+    );
+    Ok(applied)
+}
+
+/// What the registry gets after its chains run, whichever way they ran.
+async fn registry_after_migrate(registry: &crate::sql::Pool) -> Result<(), TenancyError> {
     // Tenancy's `migrate` never reaches the single-database path (#2360).
     crate::migrate::manage::ensure_bootstrap_tables(registry).await?;
     // (#89) Auto-seed the `rustango_content_types` registry-side
@@ -300,12 +382,68 @@ pub async fn migrate_registry_pool(
     // write side to RFC3339 — the new assumption with none of the
     // repair, reported as success.
     normalise_datetimes_quietly(registry, "registry").await;
-    info!(
-        target: "rustango::tenancy",
-        applied = applied.len(),
-        "registry migrations done"
-    );
-    Ok(applied)
+    Ok(())
+}
+
+/// What a forward `migrate <target>` did on the registry.
+pub(crate) struct MovedTo {
+    pub(crate) system: Vec<Migration>,
+    pub(crate) applied: Vec<Migration>,
+    pub(crate) unapplied: Vec<Migration>,
+}
+
+/// `migrate <target>` forward on the registry: the project's registry-scope
+/// system chain, from its root, then the folder holding `target` moved to
+/// it. `None` when no registry-scoped file is named `target`.
+///
+/// # Errors
+/// Either chain's error, or the bootstrap after them.
+pub(crate) async fn migrate_registry_to(
+    registry: &crate::sql::Pool,
+    dir: &Path,
+    target: &str,
+) -> Result<Option<MovedTo>, TenancyError> {
+    let project = ScopedProject::of(dir, MigrationScope::Registry).await?;
+    let holds = |d: &PathBuf| {
+        rustango::migrate::file::list_dir(d).is_ok_and(|all| all.iter().any(|m| m.name == target))
+    };
+    let Some(target_dir) = project.dirs().iter().find(|d| holds(d)) else {
+        return Ok(None);
+    };
+    let chain = project.system_chain(crate::core::ModelScope::Registry)?;
+    let unapplied = std::sync::Mutex::new(Vec::new());
+    let slot = &unapplied;
+    let ran = crate::migrate::chains::migrate_chains(
+        registry,
+        &chain,
+        MigrationScope::Registry,
+        project.dirs(),
+        None,
+        crate::migrate::Signals::Skip,
+        |held| async move {
+            let moved = crate::migrate::migrate_to_locked(
+                held,
+                registry,
+                target_dir,
+                target,
+                crate::migrate::LEDGER_TABLE,
+            )
+            .await?;
+            *slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = moved.unapplied;
+            Ok(moved.applied)
+        },
+    )
+    .await?;
+    registry_after_migrate(registry).await?;
+    Ok(Some(MovedTo {
+        system: ran.system,
+        applied: ran.project,
+        unapplied: unapplied
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    }))
 }
 
 /// Apply tenant-scoped pending migrations to every active org.
@@ -361,13 +499,9 @@ async fn migrate_tenants_opts(
     registry_url: &str,
     observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<TenantMigrationReport, TenancyError> {
-    let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
-    let scoped_path = match &scoped {
-        ScopedDir::Owned(temp) => temp.path().to_path_buf(),
-        ScopedDir::Original => dir.to_path_buf(),
-    };
-    let chain = tenant_system_chain(dir)?;
-    let migrations_in_scope = rustango::migrate::file::list_dir(&scoped_path)
+    let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
+    let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
+    let migrations_in_scope = rustango::migrate::file::list_each(project.dirs())
         .map(|m| m.len())
         .unwrap_or(0);
 
@@ -413,7 +547,7 @@ async fn migrate_tenants_opts(
             });
         }
         let outcome =
-            run_for_one_tenant(pools, org, &scoped_path, &chain, registry_url, observer).await;
+            run_for_one_tenant(pools, org, &project, &chain, registry_url, observer).await;
         if let Some(observer) = observer {
             observer.on_event(TenantMigrationEvent::TenantFinished {
                 slug: org.slug.clone(),
@@ -534,12 +668,8 @@ pub async fn migrate_one_tenant<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
-    let scoped_path = match &scoped {
-        ScopedDir::Owned(temp) => temp.path().to_path_buf(),
-        ScopedDir::Original => dir.to_path_buf(),
-    };
-    let chain = tenant_system_chain(dir)?;
+    let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
+    let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
 
     // Schema-mode is PG-only by language, and only the PG runner knows
     // how to build a `search_path`-scoped pool for it. Route the same
@@ -557,12 +687,11 @@ where
                     org.slug
                 ))
             })?;
-        return run_for_one_tenant(pg_pools, org, &scoped_path, &chain, registry_url, observer)
-            .await;
+        return run_for_one_tenant(pg_pools, org, &project, &chain, registry_url, observer).await;
     }
     let _ = registry_url;
 
-    run_for_one_tenant_db(pools, org, &scoped_path, &chain, observer).await
+    run_for_one_tenant_db(pools, org, &project, &chain, observer).await
 }
 
 async fn migrate_tenants_db_opts<DB: Database>(
@@ -575,12 +704,8 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use crate::sql::FetcherPool as _;
-    let scoped = scoped_subset(dir, MigrationScope::Tenant).await?;
-    let scoped_path = match &scoped {
-        ScopedDir::Owned(temp) => temp.path().to_path_buf(),
-        ScopedDir::Original => dir.to_path_buf(),
-    };
-    let chain = tenant_system_chain(dir)?;
+    let project = ScopedProject::of(dir, MigrationScope::Tenant).await?;
+    let chain = project.system_chain(crate::core::ModelScope::Tenant)?;
 
     let registry_pool = pools.registry_pool();
     let orgs: Vec<Org> = Org::objects()
@@ -610,7 +735,7 @@ where
                 total,
             });
         }
-        let outcome = run_for_one_tenant_db(pools, org, &scoped_path, &chain, observer).await;
+        let outcome = run_for_one_tenant_db(pools, org, &project, &chain, observer).await;
         if let Some(observer) = observer {
             observer.on_event(TenantMigrationEvent::TenantFinished {
                 slug: org.slug.clone(),
@@ -653,7 +778,7 @@ where
 async fn run_for_one_tenant_db<DB: Database>(
     pools: &TenantPools<DB>,
     org: &Org,
-    dir: &Path,
+    project: &ScopedProject,
     chain: &crate::migrate::make::SystemChain,
     observer: Option<&dyn TenantMigrationObserver>,
 ) -> Result<Vec<Migration>, TenancyError>
@@ -696,7 +821,7 @@ where
         &inner_pool,
         chain,
         MigrationScope::Tenant,
-        dir,
+        project.dirs(),
         system_progress
             .as_ref()
             .map(|o| o as &dyn crate::migrate::MigrationObserver),
@@ -707,7 +832,10 @@ where
             let observer = project_progress
                 .as_ref()
                 .map(|o| o as &dyn crate::migrate::MigrationObserver);
-            crate::migrate::migrate_pool_locked(held, &inner_pool, dir, observer)
+            let pool = &inner_pool;
+            each_dir(project, move |d| {
+                crate::migrate::migrate_pool_locked(held, pool, d, observer)
+            })
         },
     )
     .await?;
@@ -850,7 +978,7 @@ async fn warn_hidden_public_passkeys(registry: &crate::sql::Pool, slug: &str, sc
 async fn run_for_one_tenant(
     pools: &TenantPools,
     org: &Org,
-    dir: &Path,
+    project: &ScopedProject,
     chain: &crate::migrate::make::SystemChain,
     registry_url: &str,
     observer: Option<&dyn TenantMigrationObserver>,
@@ -886,7 +1014,7 @@ async fn run_for_one_tenant(
                     &dbpool,
                     chain,
                     MigrationScope::Tenant,
-                    dir,
+                    project.dirs(),
                     system_progress,
                     crate::migrate::Signals::Fire {
                         tenant: Some(&org.slug),
@@ -895,7 +1023,10 @@ async fn run_for_one_tenant(
                         let observer = project_progress
                             .as_ref()
                             .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                        crate::migrate::migrate_locked(held, &pool, dir, observer)
+                        let pool = &pool;
+                        each_dir(project, move |d| {
+                            crate::migrate::migrate_locked(held, pool, d, observer)
+                        })
                     },
                 )
                 .await?;
@@ -937,7 +1068,7 @@ async fn run_for_one_tenant(
                 &dbpool,
                 chain,
                 MigrationScope::Tenant,
-                dir,
+                project.dirs(),
                 system_progress,
                 crate::migrate::Signals::Fire {
                     tenant: Some(&org.slug),
@@ -946,7 +1077,10 @@ async fn run_for_one_tenant(
                     let observer = project_progress
                         .as_ref()
                         .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                    crate::migrate::migrate_locked(held, tenant_pool.pool(), dir, observer)
+                    let pool = tenant_pool.pool();
+                    each_dir(project, move |d| {
+                        crate::migrate::migrate_locked(held, pool, d, observer)
+                    })
                 },
             )
             .await?;
@@ -1055,15 +1189,22 @@ pub(crate) async fn scoped_subset(
     if all.iter().all(|m| m.scope == scope) {
         return Ok(ScopedDir::Original);
     }
-    let temp = tempdir_under_target()?;
-    let temp_path = temp.path().to_path_buf();
-    for mig in &all {
+    Ok(ScopedDir::Owned(scoped_copy(dir, scope)?))
+}
+
+/// `dir`'s `scope` migrations copied into a new temp dir, even when that is all of them.
+pub(crate) fn scoped_copy(
+    dir: &Path,
+    scope: MigrationScope,
+) -> Result<tempfile::TempDir, TenancyError> {
+    let temp = scoped_tempdir()?;
+    for mig in rustango::migrate::file::list_dir(dir)? {
         if mig.scope == scope {
-            let target = temp_path.join(format!("{}.json", mig.name));
-            rustango::migrate::file::write(&target, mig)?;
+            let target = temp.path().join(format!("{}.json", mig.name));
+            rustango::migrate::file::write(&target, &mig)?;
         }
     }
-    Ok(ScopedDir::Owned(temp))
+    Ok(temp)
 }
 
 pub(crate) enum ScopedDir {
@@ -1072,18 +1213,7 @@ pub(crate) enum ScopedDir {
     Original,
     /// Materialized a temp dir holding only the matching files.
     /// Caller drops to clean up.
-    Owned(TempDir),
-}
-
-/// Minimal temp-dir RAII handle. We don't pull `tempfile` into the
-/// dep tree just for this — `std::env::temp_dir()` + a unique
-/// suffix is enough.
-pub(crate) struct TempDir(std::path::PathBuf);
-
-impl TempDir {
-    fn path(&self) -> &Path {
-        &self.0
-    }
+    Owned(tempfile::TempDir),
 }
 
 impl ScopedDir {
@@ -1096,27 +1226,19 @@ impl ScopedDir {
     }
 }
 
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+/// A new dir with a random name, owner-only on Unix: a leftover or planted
+/// dir is never reused, so only this run's files are applied.
+fn scoped_tempdir() -> Result<tempfile::TempDir, TenancyError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("rustango_tenancy_scoped_");
+    // tempfile makes dirs (unlike files) with the default 0777 less the umask.
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    builder.tempdir().map_err(|e| {
+        TenancyError::Validation(format!("could not create scoped-migration tempdir: {e}"))
+    })
 }
 
-fn tempdir_under_target() -> Result<TempDir, TenancyError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let pid = std::process::id();
-    let mut p = std::env::temp_dir();
-    p.push(format!("rustango_tenancy_scoped_{pid}_{n}"));
-    std::fs::create_dir_all(&p).map_err(|e| {
-        TenancyError::Validation(format!(
-            "could not create scoped-migration tempdir at {}: {e}",
-            p.display()
-        ))
-    })?;
-    Ok(TempDir(p))
-}
 #[cfg(all(test, feature = "postgres"))]
 mod schema_pool_tests {
     use super::build_schema_scoped_pool;
@@ -1186,5 +1308,62 @@ mod schema_pool_tests {
         let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
             .execute(&pg)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod scoped_subset_tests {
+    use super::{scoped_subset, MigrationScope};
+
+    fn write(dir: &std::path::Path, name: &str, scope: MigrationScope) {
+        let mig = crate::migrate::Migration {
+            name: name.to_owned(),
+            created_at: "2026-10-29T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope,
+            replaces: Vec::new(),
+            merges: Vec::new(),
+            snapshot: serde_json::from_value(serde_json::json!({ "tables": [] })).unwrap(),
+            forward: Vec::new(),
+        };
+        crate::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+    }
+
+    /// A dir left or planted under a guessable name is never reused; the
+    /// copy is owner-only and gone once dropped.
+    #[tokio::test]
+    async fn the_scoped_copy_is_fresh_and_private() {
+        let src = tempfile::tempdir().unwrap();
+        write(src.path(), "0001_reg", MigrationScope::Registry);
+        write(src.path(), "0002_ten", MigrationScope::Tenant);
+        let pid = std::process::id();
+        let planted: Vec<_> = (0..256)
+            .map(|n| std::env::temp_dir().join(format!("rustango_tenancy_scoped_{pid}_{n}")))
+            .collect();
+        for p in &planted {
+            std::fs::create_dir_all(p).unwrap();
+            write(p, "0099_planted", MigrationScope::Registry);
+        }
+        let scoped = scoped_subset(src.path(), MigrationScope::Registry).await;
+        for p in &planted {
+            let _ = std::fs::remove_dir_all(p);
+        }
+        let scoped = scoped.expect("scoped copy");
+        let path = scoped.path(src.path()).to_path_buf();
+        let names: Vec<String> = crate::migrate::file::list_dir(&path)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(names, ["0001_reg"], "{}", path.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        drop(scoped);
+        assert!(!path.exists(), "left behind: {}", path.display());
     }
 }

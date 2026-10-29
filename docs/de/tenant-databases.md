@@ -234,6 +234,10 @@ Eine Datenbank, die der Operator mitgebracht hat, hat keinen Eintrag und
 behält das alte Verhalten: Auf Postgres wird sie über ihre eigene URL
 gelöscht; anderswo bleibt sie stehen, und das Löschen sagt das.
 
+`migrate-tenant-storage` weg von einer erfassten Datenbank löscht deren
+Eintrag mit dem Umzug. Die alte Datenbank und ihr Login bleiben auf dem Server;
+der Befehl nennt beide, damit du sie von Hand löschst, sobald der neue Ort läuft.
+
 ## Der geheime Schlüssel: Backup und Rotation
 
 **Sichere `RUSTANGO_SECRET_KEY` zusammen mit dem Registry-Backup.** Ohne ihn

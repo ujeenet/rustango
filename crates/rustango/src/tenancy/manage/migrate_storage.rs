@@ -70,6 +70,7 @@ use std::process::Stdio;
 
 use crate::core::Column as _;
 use crate::sql::UpdaterPool as _;
+use crate::tenancy::db_server::TenantDatabase;
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::manage::args::{next_value, quote_ident};
 use crate::tenancy::org::{Org, StorageMode};
@@ -166,6 +167,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         }
         _ => (registry_url.to_owned(), registry_url.to_owned()),
     };
+    // The database rustango made for the tenant stays behind; its record
+    // goes with the move, so purge and rotate never act on it again.
+    let made = TenantDatabase::of_org(&pools.registry_pool(), &org).await?;
     let alias = match parsed.target {
         StorageMode::Database if parsed.database_url.is_some() => {
             crate::tenancy::provision::registry_alias(&target_url, &pools.registry_pool()).await
@@ -317,6 +321,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         target_url: &target_url,
         target_stored,
         target_schema: target_schema.as_ref(),
+        made: made.as_ref(),
     }
     .run(restore, &mut interrupt, writer)
     .await?;
@@ -335,7 +340,7 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     writeln!(
         writer,
         "  {}",
-        old_copy_advice(source_schema.as_ref(), &source_ref)
+        old_copy_advice(source_schema.as_ref(), &source_ref, made.as_ref())
     )?;
     Ok(())
 }
@@ -405,6 +410,8 @@ struct MoveCtx<'a> {
     /// What `database_url` becomes: the reference, or the literal sealed.
     target_stored: Option<String>,
     target_schema: Option<&'a SchemaName>,
+    /// The record of a database rustango made for the tenant, deleted by the switch.
+    made: Option<&'a TenantDatabase>,
 }
 
 impl MoveCtx<'_> {
@@ -549,7 +556,8 @@ impl MoveCtx<'_> {
         Ok(())
     }
 
-    /// 5. Only the storage columns (and `active`), one guarded update.
+    /// 5. Only the storage columns (and `active`), one guarded update, and
+    /// the made database's record deleted in the same transaction.
     async fn switch(&self) -> Result<(), TenancyError> {
         let (database_url, schema_name) = match self.parsed.target {
             StorageMode::Database => (self.target_stored.clone(), None),
@@ -564,8 +572,17 @@ impl MoveCtx<'_> {
         if self.reactivate {
             update = update.set_typed(Org::active.set(true));
         }
-        let n = update.execute_pool(&self.pools.registry_pool()).await?;
-        expect_one(n, &self.parsed.slug)
+        let mut tx = self.pools.registry().begin().await?;
+        let n = update.execute_on(&mut *tx).await?;
+        expect_one(n, &self.parsed.slug)?;
+        if let Some(id) = self.made.and_then(|r| r.id.get().copied()) {
+            TenantDatabase::objects()
+                .where_(TenantDatabase::id.eq(id))
+                .delete_on(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(())
     }
 }
 
@@ -616,7 +633,11 @@ fn shown(conninfo: &str) -> String {
 /// Where the old copy is and how to drop it. Never `purge-tenant`: it
 /// drops the tenant's current (new) storage and its Org row (#2382).
 /// `purge-tenant`'s check that no other tenant shares it is not done here.
-fn old_copy_advice(source_schema: Option<&SchemaName>, source_ref: &str) -> String {
+fn old_copy_advice(
+    source_schema: Option<&SchemaName>,
+    source_ref: &str,
+    made: Option<&TenantDatabase>,
+) -> String {
     let what = match source_schema {
         Some(s) => format!(
             "schema `{s}` on the registry database ({}); once the new location is \
@@ -630,9 +651,28 @@ fn old_copy_advice(source_schema: Option<&SchemaName>, source_ref: &str) -> Stri
             shown(source_ref)
         ),
     };
+    let made = made.map_or_else(String::new, |r| {
+        let login = r
+            .login_name
+            .as_deref()
+            .map_or_else(String::new, |l| format!(" and its login `{l}`"));
+        let (name, server) = (&r.database_name, &r.server_name);
+        if r.created {
+            format!(
+                " Database `{name}`{login} on server `{server}` are no longer tracked by \
+                 rustango; drop them there by hand too."
+            )
+        } else {
+            // The run that recorded it stopped before its `CREATE` succeeded.
+            format!(
+                " Its record of database `{name}`{login} on server `{server}` is gone; \
+                 rustango may not have made them, so check before dropping either."
+            )
+        }
+    });
     format!(
         "The old copy is still in {what} by hand. Not with `purge-tenant`: it would drop \
-         the new location and the Org row."
+         the new location and the Org row.{made}"
     )
 }
 
@@ -1502,5 +1542,91 @@ mod tests {
 
         pool.close().await;
         sqlx::query(drop_db).execute(&admin).await.unwrap();
+    }
+
+    /// A move away from a database rustango made deletes its record with the
+    /// switch, and the advice names the login left on the server.
+    #[tokio::test]
+    async fn the_switch_deletes_the_made_database_record() {
+        use crate::sql::{sqlx, Auto};
+        let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+            return;
+        };
+        let admin = sqlx::PgPool::connect(&admin_url).await.unwrap();
+        let drop_db = "DROP DATABASE IF EXISTS rustango_t_switch WITH (FORCE)";
+        sqlx::query(drop_db).execute(&admin).await.unwrap();
+        sqlx::query("CREATE DATABASE rustango_t_switch")
+            .execute(&admin)
+            .await
+            .unwrap();
+        let (base, _) = admin_url.rsplit_once('/').unwrap();
+        let url = format!("{base}/rustango_t_switch");
+        let pg = sqlx::PgPool::connect(&url).await.unwrap();
+        let registry = crate::sql::Pool::Postgres(pg.clone());
+        crate::testkit::migrate_framework(&registry).await.unwrap();
+        let mut org = Org {
+            database_url: Some("postgres://acme:pw@db.example/acme".into()),
+            active: false,
+            ..crate::testkit::org()
+        };
+        org.insert_pool(&registry).await.unwrap();
+        let id = *org.id.get().unwrap();
+        let mut record = TenantDatabase {
+            id: Auto::default(),
+            org_slug: "acme".into(),
+            org_id: Some(id),
+            server_name: "s".into(),
+            database_name: "acme".into(),
+            login_name: Some("acme".into()),
+            created: true,
+            created_at: Auto::default(),
+        };
+        record.insert_pool(&registry).await.unwrap();
+
+        let pools = TenantPools::new(pg.clone());
+        let parsed = parse_args(&s(&["acme", "--to", "schema"])).unwrap();
+        let schema = SchemaName::parse("acme").unwrap();
+        let ctx = |made| MoveCtx {
+            pools: &pools,
+            parsed: &parsed,
+            id,
+            reactivate: false,
+            source_url: &url,
+            source_schema: None,
+            target_url: &url,
+            target_stored: None,
+            target_schema: Some(&schema),
+            made,
+        };
+        ctx(Some(&record)).switch().await.unwrap();
+        let left = TenantDatabase::of_org(&registry, &org).await.unwrap();
+        let moved: Vec<Org> = Org::objects().fetch_on(&pg).await.unwrap();
+        pg.close().await;
+        sqlx::query(drop_db).execute(&admin).await.unwrap();
+        assert!(left.is_none(), "the record is still linked");
+        assert_eq!(moved[0].storage_mode, "schema");
+        let advice = old_copy_advice(None, "postgres://acme:pw@db.example/acme", Some(&record));
+        assert!(advice.contains("login `acme`"), "{advice}");
+        assert!(advice.contains("server `s`"), "{advice}");
+        assert!(advice.contains("drop them there by hand"), "{advice}");
+    }
+
+    /// A record whose `CREATE` never succeeded may name a database that is not
+    /// ours: the advice says to check, not to drop.
+    #[test]
+    fn the_advice_drops_only_what_rustango_made() {
+        let record = TenantDatabase {
+            id: crate::sql::Auto::default(),
+            org_slug: "acme".into(),
+            org_id: Some(1),
+            server_name: "s".into(),
+            database_name: "acme".into(),
+            login_name: Some("acme".into()),
+            created: false,
+            created_at: crate::sql::Auto::default(),
+        };
+        let advice = old_copy_advice(None, "postgres://acme@db.example/acme", Some(&record));
+        assert!(!advice.contains("drop them there by hand"), "{advice}");
+        assert!(advice.contains("check before dropping"), "{advice}");
     }
 }
