@@ -154,7 +154,7 @@ untouched.
 
 - On PG and MySQL, `a.union(b).intersection(c)` now returns `(a ∪ b) ∩ c`, not `a ∪ (b ∩ c)`; write `a.union(b.intersection(c))` for the old rows.
 - `bulk_upsert_pool` drops earlier rows that repeat a key in the batch; `dates()` / `datetimes()` leave out NULLs.
-- M2M `add` runs in a transaction that locks the source row and checks for the link first. It fires `Add` only when a row went in, so another unique key on the through table that skips the insert fires nothing.
+- M2M `add` fires `Add` only when a row went in, so another unique key on the through table that skips the insert fires nothing. On a through model with no unique `(src, dst)` key it checks for the link first, in a transaction; two concurrent adds of one link can still both insert on PG and MySQL.
 - A `union`, `intersection`, `difference` or `distinct()` branch ordered by a column outside a `values_*` projection now fails with `SqlError::SetOpOrderOutsideProjection`; select the column, or use `union_all`.
 
 ### Model attributes, check and MCP
@@ -206,12 +206,13 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - `latest(field)` / `earliest(field)` (and the `_default` forms) skip rows where `field` is NULL; they return `None` when every row is NULL.
 - `last()` on a queryset with `limit` / `offset` reads the slice and returns its last row.
 - `update().set()` on one field twice sends only the last assignment; on MySQL a later `set_expr` now reads the old value, not the earlier `set`.
-- `find_many`, `where_in` and `destroy` past the bind cap run one statement per batch; `destroy` is not atomic across batches.
+- `find_many`, `where_in` and `destroy` past the bind cap run one statement per batch; `destroy` runs its batches in one transaction.
 
 ### Migrations, secrets and auth
 
 - `makemigrations` (and `make_migrations*`) refuse a column dropped beside a same-type new column on one table. For a rename, write a `RenameColumn` in a `makemigrations --empty` file; for a real drop + add, pass `--drop-and-add` or call the matching `make_migrations*_with(.., DropAndAdd::Allow)` (`make_migrations_with`, `_for_scope_with`, `_for_app_with`, `_scoped_with`, `_from_with`).
 - `MigrateError::Validation` displays its message alone; code matching the `invalid migration:` text must drop the prefix.
+- `migrate <target>` on a pending target prints `unapplied` for the later files it rolls back and leaves them out of `post_migrate`'s `applied` list.
 - `jwt::decode` refuses a present `exp` / `nbf` that is not a non-negative number (it was read as absent), and honours a fractional one.
 - Run `reseal-tenant-secrets --apply` once more after a key rotation done on an earlier release, before removing `RUSTANGO_SECRET_KEY_PREVIOUS`, so operator TOTP secrets are re-sealed.
 

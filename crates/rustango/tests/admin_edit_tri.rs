@@ -924,7 +924,7 @@ async fn refused_edit_keys_typed_rows_by_pk(pool: &Pool) {
     assert_eq!(shown(&html, "aed_rline-2-qty"), "40", "typed new row lost");
     assert!(!html.contains("aed_rline-3-"), "an extra slot: {html}");
     assert!(
-        html.contains(&format!("Row {b} was deleted")),
+        html.contains(&format!("Row {b} is not in this list")),
         "the gone row is not flagged: {html}"
     );
 

@@ -1828,22 +1828,49 @@ where
         + Send
         + Unpin,
 {
+    delete_each_with_audit(pool, std::slice::from_ref(query), entry).await
+}
+
+/// [`delete_many_with_audit`] over several queries in one transaction:
+/// the generated `destroy` past the bind cap.
+///
+/// # Errors
+/// As [`delete_many_with_audit`].
+#[doc(hidden)]
+pub async fn delete_each_with_audit<M>(
+    pool: &crate::sql::Pool,
+    queries: &[crate::core::DeleteQuery],
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
     let mut affected = 0;
-    loop {
-        let chunk = pages.next(&mut tx, query.model).await?;
-        if chunk.is_empty() {
-            break;
+    for query in queries {
+        let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
+        loop {
+            let chunk = pages.next(&mut tx, query.model).await?;
+            if chunk.is_empty() {
+                break;
+            }
+            let pks = chunk.iter().map(M::__rustango_pk_value_impl).collect();
+            let delete = crate::core::DeleteQuery {
+                model: query.model,
+                where_clause: pk_in(query.model, pks)?,
+            };
+            affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
+            let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
+            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
         }
-        let pks = chunk.iter().map(M::__rustango_pk_value_impl).collect();
-        let delete = crate::core::DeleteQuery {
-            model: query.model,
-            where_clause: pk_in(query.model, pks)?,
-        };
-        affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
-        let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
-        emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
     }
     tx.commit().await?;
     Ok(affected)

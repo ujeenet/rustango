@@ -144,9 +144,10 @@ fn the_storefront_escapes_product_text() {
 }
 
 /// The tenant database for this build's backend, or `None` to skip:
-/// `DATABASE_URL` on Postgres, `MYSQL_TEST_URL` on MySQL, a temp file on SQLite.
-/// CI sets the URL on every leg, so a missing one fails there.
-fn tenant_db() -> Option<(String, &'static str)> {
+/// `DATABASE_URL` on Postgres, `MYSQL_TEST_URL` on MySQL, a temp file named
+/// for `test` on SQLite. CI sets the URL on every leg, so a missing one fails there.
+#[cfg_attr(not(feature = "sqlite"), allow(unused_variables))]
+fn tenant_db(test: &str) -> Option<(String, &'static str)> {
     let from_env = |var: &str, backend: &'static str| match std::env::var(var)
         .ok()
         .filter(|u| !u.is_empty())
@@ -162,7 +163,7 @@ fn tenant_db() -> Option<(String, &'static str)> {
         format!(
             "sqlite://{}?mode=rwc",
             std::env::temp_dir()
-                .join(format!("pcs_api_auth_{}.sqlite", std::process::id()))
+                .join(format!("pcs_{test}_{}.sqlite", std::process::id()))
                 .display()
         ),
         "sqlite",
@@ -197,33 +198,20 @@ impl rustango::tenancy::OrgResolver for OneTenant {
     }
 }
 
-/// The REST API refuses every anonymous write, and a bad token, with 401.
-#[tokio::test]
-async fn anonymous_api_writes_are_refused() {
-    use axum::body::Body;
-    use axum::http::{Method, Request, StatusCode};
+/// The API under test on the database `url`, with the login route.
+async fn api_app(url: &str, backend: &str) -> axum::Router {
     use rustango::extractors::TenantContext;
     use rustango::tenancy::auth_routes::{Config, JwtAuth};
     use rustango::tenancy::session::SessionSecret;
     use rustango::tenancy::{ChainResolver, DefaultTenantDb, Org, TenantPools};
-    use tower::ServiceExt as _;
 
-    let Some((url, backend)) = tenant_db() else {
-        eprintln!("skipping: no database URL for this backend");
-        return;
-    };
-    let _cleanup = RemoveOnDrop(
-        url.strip_prefix("sqlite://")
-            .and_then(|r| r.split('?').next())
-            .map(std::path::PathBuf::from),
-    );
     let org = Org {
         id: rustango::sql::Auto::Unset,
         slug: "acme".into(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),
         backend_kind: backend.into(),
-        database_url: Some(url.clone()),
+        database_url: Some(url.to_owned()),
         schema_name: None,
         host_pattern: None,
         port: None,
@@ -237,7 +225,7 @@ async fn anonymous_api_writes_are_refused() {
         primary_color: None,
         theme_mode: None,
     };
-    let registry = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(&url)
+    let registry = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(url)
         .await
         .expect("connect");
     let ctx = std::sync::Arc::new(TenantContext {
@@ -258,13 +246,38 @@ async fn anonymous_api_writes_are_refused() {
     };
     let cache: rustango::cache::BoxedCache =
         std::sync::Arc::new(rustango::cache::InMemoryCache::new());
-    let app = super::urls::rest_api(&auth)
+    super::urls::rest_api(&auth)
         .merge(
             super::urls::order_actions(&auth)
                 .merge(super::urls::payments(&auth, cache))
                 .with_state(state),
         )
-        .layer(axum::Extension(ctx));
+        .merge(auth.router())
+        .layer(axum::Extension(ctx))
+}
+
+/// `url` with its SQLite file removed when the guard drops.
+fn cleanup(url: &str) -> RemoveOnDrop {
+    RemoveOnDrop(
+        url.strip_prefix("sqlite://")
+            .and_then(|r| r.split('?').next())
+            .map(std::path::PathBuf::from),
+    )
+}
+
+/// The REST API refuses every anonymous write, and a bad token, with 401.
+#[tokio::test]
+async fn anonymous_api_writes_are_refused() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use tower::ServiceExt as _;
+
+    let Some((url, backend)) = tenant_db("anon") else {
+        eprintln!("skipping: no database URL for this backend");
+        return;
+    };
+    let _cleanup = cleanup(&url);
+    let app = api_app(&url, backend).await;
 
     let mut writes = Vec::new();
     for prefix in [
@@ -306,5 +319,120 @@ async fn anonymous_api_writes_are_refused() {
                 "{method} {path} with {bearer:?}"
             );
         }
+    }
+}
+
+/// A signed-in user without the order change codename gets 403 on the
+/// order writes; granting it lets every one of them past the gate.
+#[tokio::test]
+async fn order_writes_need_the_change_codename() {
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode};
+    use rustango::core::Model as _;
+    use rustango::tenancy::permissions;
+    use tower::ServiceExt as _;
+
+    let Some((url, backend)) = tenant_db("perm") else {
+        eprintln!("skipping: no database URL for this backend");
+        return;
+    };
+    let _cleanup = cleanup(&url);
+    let pool: rustango::sql::Pool =
+        rustango::sql::sqlx::Pool::<rustango::tenancy::DefaultTenantDb>::connect(&url)
+            .await
+            .expect("connect")
+            .into();
+    let users = rustango::migrate::ddl::create_table_if_not_exists_sql_with_dialect(
+        pool.dialect(),
+        rustango::tenancy::User::SCHEMA,
+    );
+    rustango::sql::raw_execute_pool(&pool, &users, Vec::new())
+        .await
+        .expect("users table");
+    permissions::ensure_tables_pool(&pool)
+        .await
+        .expect("permission tables");
+    // The database outlives the test on PG/MySQL: a fresh name per run.
+    let username = format!(
+        "perm-{}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    );
+    let mut user = rustango::tenancy::User {
+        id: rustango::sql::Auto::Unset,
+        username: username.clone(),
+        password_hash: rustango::tenancy::password::hash("pw-for-the-test").expect("hash"),
+        email: None,
+        is_superuser: false,
+        active: true,
+        created_at: chrono::Utc::now(),
+        data: serde_json::json!({}),
+        password_changed_at: None,
+        sessions_revoked_at: None,
+    };
+    user.insert_pool(&pool).await.expect("user");
+    let uid = *user.id.get().expect("user id");
+
+    let app = api_app(&url, backend).await;
+    let login = Request::builder()
+        .method(Method::POST)
+        .uri("/api/auth/login")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({ "username": username, "password": "pw-for-the-test" }).to_string(),
+        ))
+        .unwrap();
+    let resp = app.clone().oneshot(login).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK, "login");
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let bearer = format!("Bearer {}", body["access"].as_str().expect("access token"));
+
+    let writes = [
+        (Method::POST, "/api/v1/payments"),
+        (Method::POST, "/api/v1/orders/1/confirm"),
+        (Method::PATCH, "/api/v1/orders/1"),
+    ];
+    let call = |method: Method, path: &'static str| {
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", bearer.as_str())
+            .body(Body::from("{}"))
+            .unwrap();
+        let app = app.clone();
+        async move {
+            let resp = app.oneshot(req).await.unwrap();
+            let status = resp.status();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    // The soak-probe gate behind payments answers 403 too; it is not the codename's.
+    let refused = |status: StatusCode, body: &str| {
+        status == StatusCode::FORBIDDEN && !body.contains("SOAK_PROBES")
+    };
+    for (method, path) in &writes {
+        let (status, body) = call(method.clone(), path).await;
+        assert!(
+            refused(status, &body),
+            "{method} {path} without the codename: {status} {body}"
+        );
+    }
+
+    let codename = rustango::permissions::codename_for::<super::models::Order>("change");
+    permissions::set_user_perm_pool(uid, &codename, true, &pool)
+        .await
+        .expect("grant");
+    for (method, path) in &writes {
+        let (status, body) = call(method.clone(), path).await;
+        assert!(
+            !refused(status, &body),
+            "{method} {path} with `{codename}`: {status} {body}"
+        );
     }
 }

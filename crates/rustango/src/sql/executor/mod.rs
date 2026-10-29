@@ -819,7 +819,7 @@ macro_rules! bind_match {
                     $q.bind(v)
                 }
                 Some(_) => unreachable!(
-                    "SqlValue::Array elements other than I16/I32/I64/String/Bool/Uuid are not yet supported (v1, issue #30)"
+                    "SqlValue::Array elements other than I16/I32/I64/String/Bool/Uuid are not yet supported"
                 ),
             },
         }
@@ -1405,6 +1405,36 @@ pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecEr
 pub async fn delete_pool(pool: &Pool, query: &DeleteQuery) -> Result<u64, ExecError> {
     let plan = crate::sql::compile_delete_plan(pool.dialect(), query)?;
     delete_plan_pool(pool, plan).await
+}
+
+/// Run `queries` all or none, for the generated `destroy` past the bind
+/// cap: one transaction (a savepoint inside `atomic`) when more than one.
+///
+/// # Errors
+/// As [`delete_pool`].
+#[doc(hidden)]
+pub async fn __rustango_delete_all_or_none(
+    pool: &Pool,
+    queries: Vec<DeleteQuery>,
+) -> Result<u64, ExecError> {
+    if let [query] = queries.as_slice() {
+        return delete_pool(pool, query).await;
+    }
+    let plans = queries
+        .iter()
+        .map(|q| crate::sql::compile_delete_plan(pool.dialect(), q))
+        .collect::<Result<Vec<_>, _>>()?;
+    let run = atomic(pool, move |tx| {
+        Box::pin(async move {
+            let mut guard = tx.lock().await?;
+            let mut deleted = 0;
+            for plan in plans {
+                deleted += run_delete_plan_tx(&mut guard, plan).await?;
+            }
+            Ok(deleted)
+        })
+    });
+    crate::audit::cascade::via_pool(pool, run).await
 }
 
 /// Run a [`DeletePlan`](crate::sql::DeletePlan) on `pool`, in one
@@ -2860,6 +2890,14 @@ where
     /// # Errors
     /// As [`FetcherPool::fetch`].
     pub async fn last(self, pool: &Pool) -> Result<Option<T>, ExecError> {
+        // A non-empty tail ends at the table's last row: two bounded reads.
+        if self.is_offset_only() {
+            if self.clone().limit(1).fetch(pool).await?.is_empty() {
+                return Ok(None);
+            }
+            let qs = ensure_pk_ordering(self.without_offset(), /*reverse=*/ true);
+            return Ok(qs.limit(1).fetch(pool).await?.into_iter().next());
+        }
         // Flipping would move the window to the other end of the table.
         if self.is_sliced() {
             let qs = ensure_pk_ordering(self, /*reverse=*/ false);

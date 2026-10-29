@@ -717,8 +717,9 @@ pub struct InlineFormPanel {
     /// (so the delete-checkbox column lines up with the others).
     pub field_labels: Vec<String>,
     /// One entry per form row. Each row carries pre-rendered
-    /// `{ label, input_html }` cells, plus `pk` (empty for new rows)
-    /// and `delete_input_html` (empty for new rows).
+    /// `{ label, input_html }` cells, plus `pk`, `hidden_pk` and
+    /// `delete_input_html` (all empty for new rows). A posted row not in
+    /// the shown list has empty `cells` and an `error` message instead.
     pub rows: Vec<serde_json::Value>,
     /// Child-list query string for the rows past the formset cap;
     /// `None` when every row is shown (#1977).

@@ -20,7 +20,7 @@ script covers three categories:
 
 | category | what moves |
 |---|---|
-| manifests | `[workspace.package] version`, the three `[workspace.dependencies]` pins, the `rustango-macros` pin in `crates/rustango`, the `orm = { package = "rustango", … }` pin in `rustango-renamed-smoke` |
+| manifests | `[workspace.package] version`, the three `[workspace.dependencies]` pins, the `rustango-macros` pin in `crates/rustango`, the `orm = { package = "rustango", … }` pin in `rustango-renamed-smoke`, the `rgo = { package = "rustango", … }` pin in `rustango-rgo-smoke` |
 | prose | the `manage version` / `manage about` transcripts, the MCP `serverInfo`, and the `cargo install cargo-rustango --version …` line — in all four doc languages |
 | lockfiles | every `Cargo.lock` in the tree, **regenerated with `cargo metadata`**, never hand-edited |
 
