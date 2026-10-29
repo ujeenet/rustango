@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- `DatabaseCache::ensure_table`, `AppBuilder::bootstrap` and the testkit table helpers no longer fail on Postgres when two processes create the same table at once.
+- `contenttypes::ensure_seeded` and `get_or_create_role` / `get_or_create_role_pool` succeed for every concurrent caller; the PG `get_or_create_role` no longer returns `RowNotFound` to the loser.
+- `loaddata` reloads tables that reference each other: a nullable link in the cycle is inserted as NULL and set after every row is in.
+- Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade".
+
 ## [0.61.10] — 2026-10-29
 
 ### Fixed — auth review, round two

@@ -230,6 +230,24 @@ pub struct CycB {
     pub a_id: Option<i64>,
 }
 
+// An owner link back from the parent: nullable one way, NOT NULL the other.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_cyc_org", app = "mdv")]
+pub struct CycOrg {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "mdv_cyc_member", on = "id")]
+    pub owner_id: Option<i64>,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_cyc_member", app = "mdv")]
+pub struct CycMember {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub org: ForeignKey<CycOrg, i64>,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "mdv_counter", app = "mdv")]
 pub struct Counter {
@@ -560,6 +578,90 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
     ];
     out.expect("flush --app cli2318");
     assert_eq!(left, [0, 0], "rows left behind");
+}
+
+/// Tables that reference each other reload when one link is nullable.
+async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
+    use rustango::testkit::matrix::drop_table;
+    if let Ok(rows) = CycOrg::objects().fetch(pool).await {
+        for mut o in rows {
+            o.owner_id = None;
+            let _ = o.save_pool(pool).await;
+        }
+    }
+    // PG and MySQL drop the pair together; SQLite takes one table at a time.
+    let q = |t| pool.dialect().quote_ident(t);
+    let both = format!(
+        "DROP TABLE IF EXISTS {}, {}",
+        q(CycOrg::SCHEMA.table),
+        q(CycMember::SCHEMA.table)
+    );
+    let _ = raw_execute_pool(pool, &both, vec![]).await;
+    drop_table(pool, CycMember::SCHEMA.table).await;
+    drop_table(pool, CycOrg::SCHEMA.table).await;
+    rustango::testkit::create_tables(pool, &[CycOrg::SCHEMA, CycMember::SCHEMA])
+        .await
+        .expect("cycle tables");
+    let mut owners = Vec::new();
+    for _ in 0..2 {
+        let mut org = CycOrg {
+            id: Auto::default(),
+            owner_id: None,
+        };
+        org.insert_pool(pool).await.expect("org");
+        let org_id = org.id.get().copied().expect("org pk");
+        let mut member = CycMember {
+            id: Auto::default(),
+            org: ForeignKey::Unloaded(org_id),
+        };
+        member.insert_pool(pool).await.expect("member");
+        org.owner_id = member.id.get().copied();
+        org.save_pool(pool).await.expect("close the cycle");
+        owners.push((org_id, org.owner_id));
+    }
+
+    let dumped = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "mdv.CycMember",
+            "--model",
+            "mdv.CycOrg",
+            "--indent",
+            "0",
+        ],
+    )
+    .await
+    .expect("dumpdata");
+    let mut rows: Vec<serde_json::Value> = serde_json::from_str(dumped.trim()).unwrap();
+    // Members first: neither order loads without breaking the cycle.
+    rows.sort_by_key(|e| e["model"] != "mdv.CycMember");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("cycle.json");
+    std::fs::write(&fixture, serde_json::to_string(&rows).unwrap()).unwrap();
+
+    let flush = [
+        "flush",
+        "--yes",
+        "--model",
+        "mdv.CycOrg",
+        "--model",
+        "mdv.CycMember",
+    ];
+    manage(pool, &flush).await.expect("flush");
+    let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let mut orgs: Vec<(i64, Option<i64>)> = CycOrg::objects()
+        .fetch(pool)
+        .await
+        .expect("orgs")
+        .into_iter()
+        .map(|o| (o.id.get().copied().unwrap(), o.owner_id))
+        .collect();
+    orgs.sort_unstable();
+    assert_eq!(orgs, owners, "owner links restored");
+    assert_eq!(CycMember::objects().count(pool).await.expect("members"), 2);
 }
 
 /// Empty post and tag tables, joined by the junction migrations build.
@@ -974,5 +1076,6 @@ tri_dialect_test! {
         a_bad_m2m_link_skips_only_its_row,
         loaddata_leaves_missing_keys_to_the_column_default,
         dump_and_load_keeps_floats_and_json_null,
+        loaddata_breaks_a_nullable_cycle,
     ],
 }

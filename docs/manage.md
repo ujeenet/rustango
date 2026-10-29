@@ -410,6 +410,14 @@ cargo run -- downgrade                  # one step
 cargo run -- downgrade 3                # three steps
 ```
 
+In a tenancy project `downgrade` rolls back registry-scoped migrations.
+Tenant-scoped ones live in each tenant's ledger:
+
+```bash
+cargo run -- downgrade --tenant acme    # one tenant
+cargo run -- downgrade 2 --all-tenants  # every active tenant, two steps each
+```
+
 ### `showmigrations` / `status`
 
 Lists every migration and whether it's been applied. `[X]` means

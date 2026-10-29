@@ -148,6 +148,13 @@ untouched.
 
 ---
 
+## Unreleased
+
+- Tenancy `downgrade` runs over the registry-scoped files only and prints `registry: …`; add `--tenant <slug>` or `--all-tenants` to roll back tenant-scoped migrations.
+- `get_or_create_role` (PG) now runs two statements, an insert-or-ignore then a read, like `get_or_create_role_pool`.
+
+---
+
 ## 0.61.10
 
 ### ORM set operations and writes

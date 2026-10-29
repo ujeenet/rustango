@@ -433,6 +433,14 @@ cargo run -- downgrade                  # one step
 cargo run -- downgrade 3                # three steps
 ```
 
+Dans un projet multi-tenant, `downgrade` annule les migrations du registre.
+Les migrations de tenant sont dans le registre de chaque tenant :
+
+```bash
+cargo run -- downgrade --tenant acme    # un tenant
+cargo run -- downgrade 2 --all-tenants  # chaque tenant actif, deux étapes chacun
+```
+
 ### `showmigrations` / `status`
 
 Liste chaque migration et indique si elle a été appliquée.
