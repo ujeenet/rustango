@@ -231,3 +231,131 @@ fn uncomment_register_produces_code() {
         "only the register line may be uncommented: {out:?}"
     );
 }
+
+/// The code `make:api_routes`, `make:form` and `make:scheduled` write, wired
+/// in exactly as their hints say, compiles with no warning.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn generator_hints_compile_as_printed() {
+    if !in_repo() {
+        eprintln!("skipping: crates/rustango not alongside — not a repo checkout");
+        return;
+    }
+    let work = scratch();
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-rustango"))
+        .current_dir(&work)
+        .args(["rustango", "new", "probe", "--template", "fullstack"])
+        .arg("--rustango-path")
+        .arg(rustango_crate())
+        .output()
+        .expect("run the scaffolder");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let root = work.join("probe");
+    let append = |rel: &str, line: &str| {
+        let path = root.join(rel);
+        let src = std::fs::read_to_string(&path).expect(rel);
+        std::fs::write(&path, format!("{src}\n{line}\n")).expect(rel);
+    };
+
+    manage(&root, &["startapp", "blog"]);
+    let hint = manage(&root, &["make:api_routes", "blog"]);
+    append("src/blog/mod.rs", "pub mod api_routes;");
+    let mount = hint
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with(".nest_with("))
+        .unwrap_or_else(|| panic!("no mount line in:\n{hint}"));
+    let main = root.join("src/main.rs");
+    let src = std::fs::read_to_string(&main).expect("main.rs");
+    let anchor = "        .api(urls::api())\n";
+    assert!(src.contains(anchor), "{src}");
+    let src = src.replacen(anchor, &format!("{anchor}        {mount}\n"), 1);
+    std::fs::write(&main, src).expect("main.rs");
+
+    manage(&root, &["make:form", "PostForm"]);
+    append("src/lib.rs", "pub mod post_form;");
+
+    manage(&root, &["make:scheduled", "Tick"]);
+    append("src/lib.rs", "pub mod tick;");
+    // Last: a second binary makes plain `cargo run` ambiguous.
+    manage(&root, &["make:worker", "Drain"]);
+    let tick = std::fs::read_to_string(root.join("src/tick.rs")).expect("tick.rs");
+    let snippet: String = tick
+        .lines()
+        .filter_map(|l| l.strip_prefix("//   "))
+        .map(|l| format!("    {l}\n"))
+        .collect();
+    assert!(snippet.contains("Scheduler::new()"), "{tick}");
+    let worker = root.join("src/bin/drain.rs");
+    let src = std::fs::read_to_string(&worker).expect("drain.rs");
+    let anchor = "    let pool = Pool::connect(&url).await?;\n";
+    assert!(src.contains(anchor), "{src}");
+    std::fs::write(
+        &worker,
+        src.replacen(anchor, &format!("{anchor}{snippet}"), 1),
+    )
+    .expect("drain.rs");
+
+    let (ok, warnings, log) = check(&root);
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(
+        ok,
+        "following the generators' hints did not compile:\n{log}"
+    );
+    assert_eq!(warnings, 0, "{warnings} warning(s):\n{log}");
+}
+
+/// A tenant project's `make:viewset`, mounted as its file says, compiles
+/// clean; its router carries the auth layer its permission check needs.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn tenant_viewset_mounts_as_printed() {
+    if !in_repo() {
+        eprintln!("skipping: crates/rustango not alongside — not a repo checkout");
+        return;
+    }
+    let work = scratch();
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-rustango"))
+        .current_dir(&work)
+        .args(["rustango", "new", "probe", "--template", "tenant"])
+        .arg("--rustango-path")
+        .arg(rustango_crate())
+        .output()
+        .expect("run the scaffolder");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let root = work.join("probe");
+
+    manage(&root, &["make:viewset", "ItemViewSet", "--model", "Item"]);
+    let body = std::fs::read_to_string(root.join("src/item_view_set.rs")).expect("viewset");
+    assert!(body.contains(".require_auth("), "{body}");
+    let mount = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("//   "))
+        .find(|l| l.starts_with(".merge("))
+        .unwrap_or_else(|| panic!("no mount line in:\n{body}"));
+    let lib = root.join("src/lib.rs");
+    let src = std::fs::read_to_string(&lib).expect("lib.rs");
+    std::fs::write(&lib, format!("{src}pub mod item_view_set;\n")).expect("lib.rs");
+    let urls = root.join("src/urls.rs");
+    let src = std::fs::read_to_string(&urls).expect("urls.rs");
+    let anchor = "    Router::new()\n";
+    assert!(src.contains(anchor), "{src}");
+    std::fs::write(
+        &urls,
+        src.replacen(anchor, &format!("{anchor}        {mount}\n"), 1),
+    )
+    .expect("urls.rs");
+
+    let (ok, warnings, log) = check(&root);
+    let _ = std::fs::remove_dir_all(&work);
+    assert!(ok, "the mounted tenant viewset did not compile:\n{log}");
+    assert_eq!(warnings, 0, "{warnings} warning(s):\n{log}");
+}

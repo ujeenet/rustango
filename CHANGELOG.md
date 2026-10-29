@@ -10,6 +10,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `contenttypes::ensure_seeded` and `get_or_create_role` / `get_or_create_role_pool` succeed for every concurrent caller; the PG `get_or_create_role` no longer returns `RowNotFound` to the loser.
 - `loaddata` reloads tables that reference each other: a nullable link in the cycle is inserted as NULL and set after every row is in.
 - Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade".
+- Scaffolder: `new --features tenancy` picks the tenant template and is refused with another one; the tenant README and next steps add `create-operator`; the api template writes no unread `config/*.toml`.
+- `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it; `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
+- `Cli::with_csrf*()` exempts the `[mcp] prefix`, so MCP clients are not refused with 403.
+- Admin Home links and breadcrumbs point at `<prefix>`, not `<prefix>/`, which a nested admin answers with 404; tenancy help texts name `/login`, not `/__login`.
 
 ## [0.61.10] — 2026-10-29
 

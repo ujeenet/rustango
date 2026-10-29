@@ -683,6 +683,9 @@ die `make:job` emittierte, bevor dieser einen echten Job erzeugte.
 cargo run -- make:scheduled NightlySweep
 ```
 
+Starte ihn aus einem Worker-Binary (`make:worker`): `main.rs` hat keinen Pool,
+und Code vor `Cli::run()` liefe bei jedem CLI-Verb.
+
 ### `make:worker <Name>`
 
 Generiert ein eigenständiges Worker-Binary für `src/bin/` — ein Prozess, der die

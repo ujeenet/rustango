@@ -2063,7 +2063,6 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
             }
         }
     }
-    let base_label = into.clone().unwrap_or_else(|| "src".into());
     let opts = super::scaffold::StartAppOptions {
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(super::scaffold::SINGLE_TENANT_MANAGE_BIN),
@@ -2076,13 +2075,12 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     // help string so non-default invocations are an explicit `cd`.
     let cwd = std::env::current_dir()?;
     let report = super::scaffold::startapp(&cwd, &opts)?;
-    write_startapp_report(w, &app_name, &base_label, &report)
+    write_startapp_report(w, &app_name, &report)
 }
 
 fn write_startapp_report<W: Write>(
     w: &mut W,
     app_name: &str,
-    base_label: &str,
     report: &super::scaffold::StartAppReport,
 ) -> Result<(), MigrateError> {
     if report.written.is_empty() && report.skipped.is_empty() {
@@ -2104,14 +2102,7 @@ fn write_startapp_report<W: Write>(
     }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
-        writeln!(
-            w,
-            "  add `mod {app_name};` to {base_label}/main.rs (or {base_label}/lib.rs)"
-        )?;
-        writeln!(
-            w,
-            "  so the derive macros' `inventory` registrations are pulled in."
-        )?;
+        writeln!(w, "  {}", super::scaffold::STARTAPP_NEXT)?;
     }
     Ok(())
 }
@@ -2984,8 +2975,11 @@ fn viewset_template_tenant(name: &str, model: &ModelRef, snake: &str, crate_root
 //! builder chain — filter_fields / search_fields / ordering /
 //! page_size / permissions_for_model all work in tenant mode too.
 
+use std::sync::Arc;
+
 use axum::Router;
 use {crate_root}::core::Model as _;
+use {crate_root}::tenancy::{{ModelBackend, RouterAuthExt as _}};
 use {crate_root}::viewset::ViewSet;
 
 use {model_path};
@@ -3001,6 +2995,10 @@ pub fn router() -> Router<()> {{
         .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
+        // The permission check needs a signed-in tenant user: HTTP Basic
+        // against the tenant's users. Token clients: add `ApiKeyBackend`
+        // or a `JwtBackend` to the list.
+        .require_auth(vec![Arc::new(ModelBackend)])
 }}
 
 // Mount in your urls.rs:
@@ -3214,14 +3212,19 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     };
     write_source(&path, &body)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(
-        w,
-        "  add `pub mod api_routes;` to src/{app}/mod.rs (or `mod ...;`),"
-    )?;
-    writeln!(
-        w,
-        "  then `.merge({app}::api_routes::api())` from your top-level urls.rs."
-    )?;
+    writeln!(w, "  add `pub mod api_routes;` to src/{app}/mod.rs,")?;
+    if tenant_aware {
+        writeln!(w, "  then in src/urls.rs, inside `api()`:")?;
+        writeln!(w, "    .merge(crate::{app}::api_routes::api())")?;
+    } else {
+        // `urls::api()` has no pool; `nest_with` hands over the server's.
+        let app_crate = project_crate_name();
+        writeln!(w, "  then in src/main.rs, after `.api(urls::api())`:")?;
+        writeln!(
+            w,
+            "    .nest_with(\"/api\", |pool| {app_crate}::{app}::api_routes::api(pool))"
+        )?;
+    }
     Ok(())
 }
 
@@ -3241,21 +3244,18 @@ fn api_routes_template_tenant(app: &str) -> String {
     format!(
         r#"//! Auto-scaffolded by `manage make:api_routes {app} --tenant`.
 //!
-//! API routing for the `{app}` app. Per-model viewsets live under
-//! `viewsets/` and each exposes a `pub fn viewset() -> ViewSet`;
-//! this file composes them into a single `Router<()>`.
+//! API routing for the `{app}` app: composes tenant viewsets into a
+//! single `Router<()>`.
 //!
 //! Adding a resource:
-//!   1. Drop a new file under `viewsets/` exposing
-//!      `pub fn viewset() -> ViewSet`.
-//!   2. Declare it in `viewsets/mod.rs`.
-//!   3. Add one `.merge(...)` line below.
+//!   1. Run `manage make:viewset <Name> --model <Model> --tenant`.
+//!   2. Add one `.merge(...)` line below.
 
 use axum::Router;
 
 pub fn api() -> Router<()> {{
     Router::new()
-        // .merge(super::viewsets::<model>::viewset().tenant_router("/api/<model>"))
+        // .merge(crate::<snake>::router())
 }}
 "#
     )
@@ -3287,7 +3287,8 @@ use {crate_root}::sql::Pool;
 pub fn api(pool: Pool) -> Router<()> {{
     let _pool = pool;
     Router::new()
-        // .merge(super::viewsets::<snake>::router("/api/<snake>", _pool.clone()))
+        // `main.rs` nests this under `/api`.
+        // .merge(crate::<snake>::<Name>::router("/<snake>", _pool.clone()))
 }}
 "#
     )
@@ -3349,7 +3350,6 @@ fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErro
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:form {name}`.
 
-use {crate_root}::forms::Form;
 use {crate_root}::Form as DeriveForm;
 
 #[derive(DeriveForm)]
@@ -3441,6 +3441,7 @@ impl Job for {name} {{
 fn make_scheduled_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
+    let app_crate = project_crate_name();
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:scheduled {name}`.
 //!
@@ -3465,15 +3466,17 @@ impl {name} {{
     }}
 }}
 
-// Wire up in main.rs:
+// Start it from a worker binary (`manage make:worker`), not main.rs:
+// main.rs has no pool, and code before `Cli::run()` runs for every CLI
+// verb. In the worker, after `let pool = ...;`:
 //
 //   let scheduler = {crate_root}::scheduler::Scheduler::new();
-//   let task = Arc::new({name} {{ pool: pool.clone() }});
+//   let task = Arc::new({app_crate}::{snake}::{name} {{ pool: pool.clone() }});
 //   scheduler.every("{snake}", std::time::Duration::from_secs(60), move || {{
 //       let task = Arc::clone(&task);
 //       async move {{ task.run().await }}
 //   }});
-//   let handle = scheduler.start();
+//   let _schedule = scheduler.start(); // ticks until dropped
 //
 // The first run happens after one full interval, not immediately.
 "#
@@ -3518,7 +3521,6 @@ use {crate_root}::sql::Pool;
 
 #[{crate_root}::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {{
-    {crate_root}::logging::setup();
     // A worker never runs main.rs, so it loads `.env` itself.
     let _ = dotenvy::dotenv();
     // DATABASE_URL, or DB_USER + DB_NAME; the error names both.
@@ -7454,6 +7456,131 @@ mod gen_tests {
         );
     }
 
+    /// `#[rustango::main]` already installs logging; a second setup only warns.
+    #[test]
+    fn worker_leaves_logging_to_the_main_macro() {
+        let body = worker_template("Mailer", "mailer", "rustango", "my_app");
+        assert!(!body.contains("logging::setup"), "{body}");
+    }
+
+    /// Run `make:*` in a fresh project named `shop`; returns (output, files).
+    fn run_make(cmd: &str, args: &[&str], dirs: &[&str], read: &[&str]) -> (String, Vec<String>) {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"shop\"\n\n[dependencies]\nrustango = \"0.61\"\n",
+        )
+        .unwrap();
+        for d in dirs {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        std::fs::write(dir.path().join("src/lib.rs"), "pub mod urls;\n").unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let mut out = Vec::new();
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let run = make_cmd(cmd, &args, &mut out, |_| true);
+        let files: Vec<String> = read
+            .iter()
+            .map(|f| std::fs::read_to_string(f).unwrap_or_default())
+            .collect();
+        let _ = std::env::set_current_dir(&prev);
+        run.unwrap();
+        (String::from_utf8(out).unwrap(), files)
+    }
+
+    /// The pool `api()` takes the server's pool, so only `main.rs` can mount it.
+    #[test]
+    fn api_routes_hints_name_a_mount_that_compiles() {
+        let (out, files) = run_make(
+            "make:api_routes",
+            &["blog"],
+            &["src/blog"],
+            &["src/blog/api_routes.rs"],
+        );
+        assert!(
+            out.contains(r#".nest_with("/api", |pool| shop::blog::api_routes::api(pool))"#),
+            "{out}"
+        );
+        assert!(!out.contains(".merge("), "{out}");
+        let body = &files[0];
+        assert!(!body.contains("viewsets::"), "{body}");
+        assert!(body.contains("crate::<snake>::<Name>::router("), "{body}");
+
+        let (out, files) = run_make(
+            "make:api_routes",
+            &["blog", "--tenant"],
+            &["src/blog"],
+            &["src/blog/api_routes.rs"],
+        );
+        assert!(
+            out.contains(".merge(crate::blog::api_routes::api())"),
+            "{out}"
+        );
+        assert!(!files[0].contains("viewsets::"), "{}", files[0]);
+        assert!(
+            files[0].contains("crate::<snake>::router()"),
+            "{}",
+            files[0]
+        );
+    }
+
+    /// The derive needs no trait import; an unused one warns on first build.
+    #[test]
+    fn make_form_imports_only_what_it_uses() {
+        let (_, files) = run_make("make:form", &["PostForm"], &["src"], &["src/post_form.rs"]);
+        assert!(
+            !files[0].contains("use rustango::forms::Form;"),
+            "{}",
+            files[0]
+        );
+    }
+
+    /// `main.rs` has no `pool`; a worker binary has one and runs no CLI verb.
+    #[test]
+    fn make_scheduled_wires_into_a_worker() {
+        let (_, files) = run_make("make:scheduled", &["Tick"], &["src"], &["src/tick.rs"]);
+        let body = &files[0];
+        assert!(body.contains("make:worker"), "{body}");
+        assert!(!body.contains("in main.rs"), "{body}");
+        assert!(
+            body.contains("Arc::new(shop::tick::Tick { pool: pool.clone() })"),
+            "{body}"
+        );
+    }
+
+    /// The tenant viewset checks permissions, so it needs a user: mount auth.
+    #[test]
+    fn tenant_viewset_mounts_an_auth_layer() {
+        let body = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+        );
+        assert!(
+            body.contains(".require_auth(vec![Arc::new(ModelBackend)])"),
+            "{body}"
+        );
+        assert!(body.contains("use rustango::tenancy::{ModelBackend, RouterAuthExt as _};"));
+    }
+
+    /// `startapp` already registered the module; the next step is migrations.
+    #[test]
+    fn startapp_report_does_not_ask_for_the_mod_it_added() {
+        let report = super::super::scaffold::StartAppReport {
+            written: vec!["src/shop/mod.rs".into()],
+            patched: vec!["src/lib.rs".into(), "src/urls.rs".into()],
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        write_startapp_report(&mut out, "shop", &report).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("add `mod"), "{out}");
+        assert!(out.contains("makemigrations"), "{out}");
+    }
+
     // -------- dumpdata --------
 
     #[test]
@@ -8400,8 +8527,8 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "expected no-arg `pub fn api()`, got: {body}"
         );
         assert!(
-            body.contains("tenant_router("),
-            "expected tenant_router hint comment, got: {body}"
+            body.contains(".merge(crate::<snake>::router())"),
+            "expected a make:viewset --tenant mount hint, got: {body}"
         );
         assert!(
             !body.contains("PgPool"),

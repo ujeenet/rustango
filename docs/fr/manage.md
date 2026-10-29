@@ -696,6 +696,9 @@ Génère une tâche à intervalle fixe pour `scheduler::Scheduler` — la forme 
 cargo run -- make:scheduled NightlySweep
 ```
 
+Démarrez-la depuis un binaire worker (`make:worker`) : `main.rs` n'a pas de
+pool, et du code avant `Cli::run()` tournerait pour chaque verbe de la CLI.
+
 ### `make:worker <Name>`
 
 Génère un binaire de worker autonome pour `src/bin/` — un processus qui vide la

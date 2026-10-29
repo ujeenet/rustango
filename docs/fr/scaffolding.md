@@ -135,7 +135,6 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 
 | Fonctionnalité | Ce qu'elle ajoute |
 |---|---|
-| `tenancy` | Multi-tenancy : registry de tenants, bases par tenant, console opérateur |
 | `csrf` | Middleware de protection CSRF pour les POST de formulaires |
 | `sso` / `admin-sso` | Authentification unique OIDC, pour les utilisateurs / pour le site d'admin |
 | `passkey` | Authentification WebAuthn / passkey |
@@ -147,7 +146,7 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `http2` | Servir HTTP/2 en clair (h2c) à côté de HTTP/1 |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
 
-`cargo rustango new --help` affiche cette liste. Les backends ne sont **pas** valides ici — passez par `--backend`. En nommer un comme fonctionnalité est refusé : cela figerait le backend du framework alors que la fonctionnalité propre au projet resterait éteinte, et `#[derive(Model)]` aligne ses émissions sur les fonctionnalités du projet.
+`--features tenancy` seul choisit `--template tenant` ; avec un autre template il est refusé, car seul le `main.rs` du template tenant sert la multi-tenancy. `cargo rustango new --help` affiche cette liste. Les backends ne sont **pas** valides ici — passez par `--backend`. En nommer un comme fonctionnalité est refusé : cela figerait le backend du framework alors que la fonctionnalité propre au projet resterait éteinte, et `#[derive(Model)]` aligne ses émissions sur les fonctionnalités du projet.
 
 ### Un nom plus court : `rgo`
 

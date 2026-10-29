@@ -139,7 +139,6 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 
 | Feature | Was es hinzufügt |
 |---|---|
-| `tenancy` | Multi-Tenancy: Tenant-Registry, Datenbanken pro Tenant, Operator-Konsole |
 | `csrf` | CSRF-Schutz-Middleware für Formular-POSTs |
 | `sso` / `admin-sso` | OIDC Single Sign-on, für App-Benutzer / für die Admin-Site |
 | `passkey` | WebAuthn-/Passkey-Authentifizierung |
@@ -151,7 +150,7 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 | `http2` | Klartext-HTTP/2 (h2c) neben HTTP/1 bereitstellen |
 | `testkit` / `test_utils` | Nur-Test-Schema-Builder, Factories und Konstruktoren |
 
-`cargo rustango new --help` gibt diese Liste aus. Backends sind hier **nicht** gültig — nimm dafür `--backend`. Eines als Feature zu nennen wird abgelehnt, weil es das Backend des Frameworks festnageln würde, während das eigene Feature des Projekts aus bliebe, und `#[derive(Model)]` seine Ausgaben an den Features des Projekts ausrichtet.
+`--features tenancy` allein wählt `--template tenant`; mit einer anderen Vorlage wird es abgelehnt, weil nur die `main.rs` der Tenant-Vorlage Tenancy bedient. `cargo rustango new --help` gibt diese Liste aus. Backends sind hier **nicht** gültig — nimm dafür `--backend`. Eines als Feature zu nennen wird abgelehnt, weil es das Backend des Frameworks festnageln würde, während das eigene Feature des Projekts aus bliebe, und `#[derive(Model)]` seine Ausgaben an den Features des Projekts ausrichtet.
 
 ### Ein kürzerer Name: `rgo`
 
