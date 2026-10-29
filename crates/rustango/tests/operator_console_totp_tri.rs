@@ -531,7 +531,26 @@ async fn another_operator_resets_a_lost_device(pool: &Pool) {
     // A session opened with the lost device ends with it.
     let old = send(&app, "GET", "/orgs", &session, String::new()).await;
     assert!(location(&old).starts_with("/login"), "{}", location(&old));
-    password_session(&app, &lost).await;
+    let session = password_session(&app, &lost).await;
+
+    // A retry after the device is gone still ends the sessions.
+    let live = send(&app, "GET", "/orgs", &session, String::new()).await;
+    assert_eq!(live.status(), StatusCode::OK, "{}", location(&live));
+    let retry = send(
+        &app,
+        "POST",
+        &format!("/operators/{lost_id}/reset-totp"),
+        &admin_session,
+        String::new(),
+    )
+    .await;
+    assert!(
+        location(&retry).starts_with("/operators?notice="),
+        "{}",
+        location(&retry)
+    );
+    let old = send(&app, "GET", "/orgs", &session, String::new()).await;
+    assert!(location(&old).starts_with("/login"), "{}", location(&old));
 }
 
 tri_dialect_test!(

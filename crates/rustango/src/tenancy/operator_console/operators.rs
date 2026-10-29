@@ -430,7 +430,12 @@ pub(super) async fn operator_reset_totp(
         return back_err(&state, &op, &withheld(&op, "Could not reset", &e)).await;
     }
     match operator_totp::reset(&state.registry, &target).await {
-        Ok(0) => return back_ok(&format!("`{}` has no two-factor device", target.username)),
+        Ok(0) => {
+            return back_ok(&format!(
+                "`{}` has no two-factor device; they are now signed out everywhere",
+                target.username
+            ))
+        }
         Ok(_) => {}
         Err(e) => return back_err(&state, &op, &withheld(&op, "Could not reset", &e)).await,
     }

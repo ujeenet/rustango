@@ -221,6 +221,9 @@ struct Buckets {
     /// Username and IP pairs that signed in; see [`KNOWN_CLIENT_TTL`].
     known: BoxedCache,
     in_flight: InFlight,
+    /// A test's own lockout in place of the shared one.
+    #[cfg(test)]
+    lockout: Option<&'static crate::account_lockout::Lockout>,
 }
 
 /// How often a waiting attempt re-checks a limit held elsewhere.
@@ -292,6 +295,14 @@ enum Blocked {
 }
 
 impl Buckets {
+    fn lockout(&self) -> &'static crate::account_lockout::Lockout {
+        #[cfg(test)]
+        if let Some(l) = self.lockout {
+            return l;
+        }
+        crate::account_lockout::shared()
+    }
+
     /// Wait for an attempt in flight at the full gate to settle; refuse
     /// when none is, and answer busy past `deadline`.
     async fn wait(
@@ -432,6 +443,8 @@ impl LoginThrottle {
                 crate::cache::InMemoryCache::new().with_max_entries(KNOWN_CLIENT_MEMORY_CAP),
             ),
             in_flight: InFlight::default(),
+            #[cfg(test)]
+            lockout: None,
         }))
     }
 
@@ -462,6 +475,8 @@ impl LoginThrottle {
             },
             known: cache,
             in_flight: InFlight::default(),
+            #[cfg(test)]
+            lockout: None,
         }))
     }
 
@@ -605,7 +620,7 @@ impl LoginThrottle {
     ) -> Result<(), LoginRefused> {
         let scope_key = scope.key();
         if scope.locks_accounts() {
-            let lockout = crate::account_lockout::shared();
+            let lockout = self.0.lockout();
             if lockout.is_locked(&account_key(&scope_key, username)).await {
                 return Err(LoginRefused::Throttled {
                     retry_after_secs: lockout.lock_duration().as_secs().max(1),
@@ -644,14 +659,9 @@ impl LoginThrottle {
         username: &str,
     ) -> Result<PerRequestAttempt, LoginRefused> {
         let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
-        let quiet = if self.is_quiet(scope, ip, username).await {
-            self.take_quiet(scope, ip, username).await
-        } else {
-            None
-        };
-        let held = match quiet {
+        let held = match self.take_quiet(scope, ip, username).await {
             Some(slot) => PerRequestHeld::Quiet(slot),
-            // Full or locked meanwhile: the login path waits or refuses.
+            // Not quiet, or not counted: the login path counts, waits or refuses.
             None => {
                 PerRequestHeld::Reserved(self.begin_until(scope, ip, username, deadline).await?)
             }
@@ -666,8 +676,10 @@ impl LoginThrottle {
         })
     }
 
-    /// One atomic slot on the counter that bounds guesses here; `None`
-    /// when it is full or the account locked.
+    /// One atomic slot on the counter that bounds guesses here, when
+    /// admitting a right credential would change nothing: a known client,
+    /// room in the limits, and no lock or other attempt on the account.
+    /// `None` otherwise, or when the slot could not be counted.
     async fn take_quiet(
         &self,
         scope: &LoginScope,
@@ -675,57 +687,40 @@ impl LoginThrottle {
         username: &str,
     ) -> Option<QuietSlot> {
         let b = &self.0;
+        let scope_key = scope.key();
+        let ip_bucket = ip.0.as_deref().map(|ip| scope.ip_bucket(ip));
+        if scope.locks_accounts() {
+            if !b.is_known(scope, ip, username).await {
+                return None;
+            }
+        } else if b.global.peek(&scope_key).await.is_err() {
+            return None;
+        }
+        if let Some(bucket) = &ip_bucket {
+            b.ip.peek(bucket).await.ok()?;
+        }
         let mut gates = Gates {
             buckets: Arc::clone(b),
             held: Vec::with_capacity(1),
         };
         let counted = if scope.locks_accounts() {
-            let key = account_key(&scope.key(), username);
-            match crate::account_lockout::shared().reserve(&key).await {
-                Reservation::Counted(slot) => {
-                    gates.enter(key.clone());
-                    Counted::Account(key, slot)
-                }
-                _ => return None,
-            }
-        } else if let Some(bucket) = ip.0.as_deref().map(|ip| scope.ip_bucket(ip)) {
+            let key = account_key(&scope_key, username);
+            let slot = b.lockout().reserve_sole(&key).await?;
+            gates.enter(key.clone());
+            Counted::Account(key, slot)
+        } else if let Some(bucket) = ip_bucket {
             let spent = b.ip.take(&bucket).await.ok()?;
             gates.enter(ip_gate(&bucket));
             Counted::Ip(bucket, spent)
         } else {
-            let key = scope.key();
-            let spent = b.global.take(&key).await.ok()?;
-            gates.enter(global_gate(&key));
-            Counted::Global(key, spent)
+            let spent = b.global.take(&scope_key).await.ok()?;
+            gates.enter(global_gate(&scope_key));
+            Counted::Global(scope_key, spent)
         };
         Some(QuietSlot {
             counted: Some(counted),
             gates,
         })
-    }
-
-    /// `true` when admitting a right credential would change nothing: no
-    /// lock, no counted attempt, a known client, and room in the limits.
-    async fn is_quiet(&self, scope: &LoginScope, ip: &ClientIp, username: &str) -> bool {
-        let b = &self.0;
-        let scope_key = scope.key();
-        if scope.locks_accounts() {
-            let lockout = crate::account_lockout::shared();
-            let key = account_key(&scope_key, username);
-            // The count first: a lock is set before the count is cleared.
-            if lockout.attempt_count(&key).await > 0 || lockout.is_locked(&key).await {
-                return false;
-            }
-            if !b.is_known(scope, ip, username).await {
-                return false;
-            }
-        } else if b.global.peek(&scope_key).await.is_err() {
-            return false;
-        }
-        match ip.0.as_deref() {
-            Some(ip) => b.ip.peek(&scope.ip_bucket(ip)).await.is_ok(),
-            None => true,
-        }
     }
 
     /// Run a signed-in user's current-password check through the gate, so a
@@ -838,7 +833,7 @@ impl LoginAttempt {
     /// already counted it; this keeps the tokens and may lock the account.
     pub async fn failed(mut self) {
         let mut held = self.held();
-        let lockout = crate::account_lockout::shared();
+        let lockout = held.buckets.lockout();
         for (key, slot) in held.locks.drain(..) {
             lockout.reserved_failed(&key, slot).await;
         }
@@ -894,7 +889,7 @@ impl Counted {
     /// counted meanwhile stay.
     async fn refund(self, buckets: &Buckets) {
         match self {
-            Self::Account(key, slot) => crate::account_lockout::shared().release(&key, slot).await,
+            Self::Account(key, slot) => buckets.lockout().release(&key, slot).await,
             Self::Ip(key, spent) => buckets.ip.give_back(&key, spent).await,
             Self::Global(key, spent) => buckets.global.give_back(&key, spent).await,
         }
@@ -981,9 +976,7 @@ impl PerRequestAttempt {
                 let scope_key = self.scope.key();
                 match counted {
                     Counted::Account(key, lock) => {
-                        crate::account_lockout::shared()
-                            .reserved_failed(&key, lock)
-                            .await;
+                        b.lockout().reserved_failed(&key, lock).await;
                         if let Some(ip) = self.ip.0.as_deref() {
                             let _ = b.ip.take(&self.scope.ip_bucket(ip)).await;
                         }
@@ -1004,7 +997,7 @@ impl PerRequestAttempt {
 impl Held {
     /// Count the attempt against the account before the password check.
     async fn reserve_lock(&mut self, key: String) -> Result<(), Blocked> {
-        let lockout = crate::account_lockout::shared();
+        let lockout = self.buckets.lockout();
         crate::account_lockout::warn_once_on_weak_store(lockout);
         match lockout.reserve(&key).await {
             Reservation::Counted(slot) => {
@@ -1026,7 +1019,7 @@ impl Held {
     /// a sign-in clears failures; a per-request credential is sent so often
     /// it would wipe a guesser's misses on the same name.
     async fn right(mut self, clears_failures: bool) {
-        let lockout = crate::account_lockout::shared();
+        let lockout = self.buckets.lockout();
         for (key, slot) in std::mem::take(&mut self.locks) {
             if let Some(ip) = &self.ip {
                 // Written once per pair: an existing marker is left alone.
@@ -1046,7 +1039,7 @@ impl Held {
 
     /// Give back everything `begin` reserved.
     async fn release(mut self) {
-        let lockout = crate::account_lockout::shared();
+        let lockout = self.buckets.lockout();
         for (key, slot) in self.locks.drain(..) {
             lockout.release(&key, slot).await;
         }
@@ -1988,6 +1981,136 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let bucket = s.ip_bucket("10.9.70.6");
         assert!(t.0.ip.peek(&bucket).await.is_ok(), "the slot leaked");
+    }
+
+    /// Counts every call; with `fail`, every call errors.
+    #[derive(Default)]
+    struct CountingCalls {
+        inner: crate::cache::InMemoryCache,
+        calls: std::sync::atomic::AtomicUsize,
+        fail: bool,
+    }
+
+    impl CountingCalls {
+        fn call(&self) -> Result<(), crate::cache::CacheError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(crate::cache::CacheError::Connection("down".into()));
+            }
+            Ok(())
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for CountingCalls {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.call()?;
+            self.inner.set(k, v, ttl).await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.add(k, v, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.call()?;
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+        async fn incr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.incr(k, by, ttl).await
+        }
+        async fn decr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.call()?;
+            self.inner.decr(k, by, ttl).await
+        }
+    }
+
+    /// `t` counting account locks in `cache` instead of the shared lockout.
+    fn with_lockout(mut t: LoginThrottle, cache: Arc<CountingCalls>) -> LoginThrottle {
+        let lockout = crate::account_lockout::Lockout::new(cache);
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(Box::leak(Box::new(lockout)));
+        t
+    }
+
+    /// A lockout store that errors counts nothing, so a known client's
+    /// credential takes the full reservation, per-IP slot included.
+    #[tokio::test]
+    async fn an_uncounted_lock_slot_is_not_quiet() {
+        let down = Arc::new(CountingCalls {
+            fail: true,
+            ..CountingCalls::default()
+        });
+        let t = with_lockout(
+            LoginThrottle::new(LoginLimits {
+                ip_limit: 1,
+                ..LoginLimits::default()
+            }),
+            down,
+        );
+        let (s, client) = (
+            LoginScope::TenantBasic("t-lock-down".into()),
+            ip("10.9.70.7"),
+        );
+        t.begin(&s, &client, "fay").await.unwrap().succeeded().await;
+        let a = t.begin_per_request(&s, &client, "fay").await.unwrap();
+        assert!(matches!(a.held, PerRequestHeld::Reserved(_)));
+        let bucket = s.ip_bucket("10.9.70.7");
+        assert!(t.0.ip.peek(&bucket).await.is_err(), "no per-IP slot taken");
+        a.settle(true).await;
+    }
+
+    /// A known client's right credential: few cache calls, and the slot
+    /// comes back.
+    #[tokio::test]
+    async fn a_right_per_request_credential_costs_six_cache_calls() {
+        let calls = Arc::new(CountingCalls::default());
+        let cache: BoxedCache = calls.clone();
+        let t = with_lockout(on_cache(&cache, LoginLimits::default()), calls.clone());
+        let (s, client) = (LoginScope::TenantBasic("t-six".into()), ip("10.9.70.8"));
+        t.begin(&s, &client, "gil").await.unwrap().succeeded().await;
+        let before = calls.calls();
+        let a = t.begin_per_request(&s, &client, "gil").await.unwrap();
+        assert!(matches!(a.held, PerRequestHeld::Quiet(_)));
+        a.settle(true).await;
+        let spent = calls.calls() - before;
+        assert!(spent <= 6, "{spent} cache calls");
+        let key = account_key(&s.key(), "gil");
+        assert_eq!(t.0.lockout().attempt_count(&key).await, 0);
     }
 
     /// A per-request credential waits at most one `hash_wait` before a 503.

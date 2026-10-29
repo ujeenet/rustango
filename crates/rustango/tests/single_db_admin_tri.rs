@@ -377,10 +377,28 @@ async fn totp_off_by_code_and_by_cli(pool: &Pool) {
     assert!(audit_sources(pool, "rustango_admin_users", &pk)
         .await
         .contains(&"cli".to_owned()));
+
+    // A retry after the device is gone still ends the sessions.
+    let cookie = login(&app, &me).await;
+    let (status, _, _) = send(&app, "/account/password", String::new(), &cookie).await;
+    assert!(
+        !status.is_redirection(),
+        "the new session is dead: {status}"
+    );
+    manage(pool, &["reset-admin-totp", &me.username])
+        .await
+        .expect("reset-admin-totp again");
+    let (status, _, _) = send(&app, "/account/password", String::new(), &cookie).await;
+    assert!(
+        status.is_redirection(),
+        "a retry left the session: {status}"
+    );
 }
 
 #[cfg(not(feature = "totp"))]
-async fn totp_off_by_code_and_by_cli(_: &Pool) {}
+async fn totp_off_by_code_and_by_cli(_: &Pool) {
+    panic!("this scenario needs the `totp` feature");
+}
 
 tri_dialect_test!(
     setup: setup,
