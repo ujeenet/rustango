@@ -39,7 +39,7 @@ pub use query::{
 pub(crate) use schema::is_credential_column;
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,
-    ExclusionConstraint, FieldSchema, Fieldset, GenericRelation, GenericReverseRelation,
+    ExclusionConstraint, FieldCast, FieldSchema, Fieldset, GenericRelation, GenericReverseRelation,
     GlobalScope, IndexMethod, IndexSchema, ListSelectRelated, M2MRelation, Model, ModelEntry,
     ModelSchema, ModelScope, OnDeleteAction, PrepopulatedField, Relation, ReverseRelation,
     WriteKind,

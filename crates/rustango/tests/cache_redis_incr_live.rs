@@ -38,6 +38,20 @@ fn live_lock() -> &'static Mutex<()> {
     M.get_or_init(|| Mutex::new(()))
 }
 
+#[path = "support/cache_incr_parity.rs"]
+mod cache_incr_parity;
+
+/// Counter and text rules match the memory, file and database backends.
+#[tokio::test]
+async fn incr_rules_match_every_backend() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+    cache_incr_parity::assert_incr_rules(&redis, "redis").await;
+}
+
 async fn cache() -> Option<RedisCache> {
     let url = std::env::var("REDIS_TEST_URL").ok()?;
     Some(RedisCache::new(&url).await.expect("connect REDIS_TEST_URL"))

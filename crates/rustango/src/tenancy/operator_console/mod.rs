@@ -1465,6 +1465,8 @@ async fn login_submit(
                 attempted_username: Some(form.username.clone()),
                 reason: AuthFailureReason::InvalidCredentials,
                 request: meta,
+                // Operators live in the registry, outside any tenant.
+                tenant: None,
             })
             .await;
             return flash::redirect(
@@ -1524,6 +1526,8 @@ async fn start_session(
         // sessions. There's no separate flag on the Operator row.
         is_superuser: true,
         request: meta,
+        // Operators live in the registry, outside any tenant.
+        tenant: None,
     })
     .await;
     resp
@@ -1576,6 +1580,8 @@ async fn logout(
         user_id: oid,
         username: None,
         request: meta,
+        // Operators live in the registry, outside any tenant.
+        tenant: None,
     })
     .await;
     resp

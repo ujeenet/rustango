@@ -159,7 +159,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host-Routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Gespeicherte Datenbankserver |
 | `test-tenant-connection` | Prüft, ob die Datenbank eines Tenants erreichbar ist |
-| `reseal-tenant-secrets [--apply]` | Versiegelt gespeicherte Tenant-URLs, Server-Passwörter, Operator-TOTP- und SSO-Secrets neu mit dem aktuellen `RUSTANGO_SECRET_KEY`; ohne `--apply` ein Probelauf |
+| `reseal-tenant-secrets [--apply]` | Versiegelt gespeicherte Tenant-URLs, Server-Passwörter, Operator-TOTP- und SSO-Secrets sowie `Cast<EncryptedString>`-Spalten neu mit dem aktuellen `RUSTANGO_SECRET_KEY`; ohne `--apply` ein Probelauf |
 | `prewarm-pools` | Öffnet Tenant-Pools vor dem ersten Request |
 | `run-server` / `runserver` | Startet den Multi-Tenant-Server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup und interaktive Einstiegspunkte |
@@ -171,8 +171,10 @@ Das Verb gibt einmal einen Link zum Setzen des Passworts aus: Er funktioniert
 einmal, läuft nach 72 Stunden ab und gilt nur für diesen Tenant. Gib ihn dem
 Admin. Er ist mit dem Tenant-Session-Schlüssel des Servers signiert
 (`RUSTANGO_SESSION_SECRET` oder die Dev-Schlüsseldatei), also starte die CLI mit
-demselben Schlüssel wie den Server. `set-password-link <slug> <username>` gibt
-einen neuen aus.
+demselben Schlüssel wie den Server. Außerhalb der Prod-Stufe legt die CLI eine
+fehlende `./var/.rustango_tenant_session.key` so an, wie der Server es tut; das
+klappt also schon vor dem ersten Serverstart. `set-password-link <slug> <username>`
+gibt einen neuen aus.
 
 ### Audit **T**
 
@@ -804,7 +806,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.11
+rustango 0.61.12
 ```
 
 ### `about`
@@ -816,7 +818,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.11
+  version:        0.61.12
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -833,6 +835,7 @@ Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
 - Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
+- Migrationen, die das Ledger noch nicht angewendet hat. Im Tenancy-Projekt: Registry-Dateien gegen die Registry, Tenant-Dateien gegen das Ledger jedes aktiven Tenants (die zurückliegenden Tenants werden genannt, zehn vollständig), `<app>/migrations/`-Ordner eingeschlossen. Acht Tenants werden gleichzeitig gelesen, jeder höchstens 5 s; ein langsamerer gilt als nicht lesbar. `check --no-tenants` überspringt die Tenant-Ledger
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`

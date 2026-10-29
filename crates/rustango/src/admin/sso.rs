@@ -219,7 +219,14 @@ async fn sso_callback(
                     "sso refused: {e}"
                 );
                 if let Some(reason) = e.failure_reason() {
-                    signal_refused(SIGNAL_SOURCE, &normalized, reason, meta()).await;
+                    signal_refused(
+                        SIGNAL_SOURCE,
+                        &normalized,
+                        reason,
+                        meta(),
+                        state.config.tenant.clone(),
+                    )
+                    .await;
                 }
                 return login_error(&state, "nouser");
             }
@@ -233,6 +240,7 @@ async fn sso_callback(
             &normalized,
             AuthFailureReason::Inactive,
             meta(),
+            state.config.tenant.clone(),
         )
         .await;
         return login_error(&state, "inactive");
@@ -289,6 +297,7 @@ async fn mint_session(
         username: user.username.clone(),
         is_superuser: user.is_superuser,
         request,
+        tenant: state.config.tenant.clone(),
     })
     .await;
     resp
@@ -429,6 +438,7 @@ mod second_factor {
                     &headers,
                     Some("/login/sso-totp"),
                 ),
+                tenant: state.config.tenant.clone(),
             })
             .await;
             return crate::admin::login_view::sso_totp_response(

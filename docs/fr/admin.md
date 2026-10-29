@@ -343,9 +343,11 @@ connexion.
 Ajoutez `audit(track = "field1, field2")` à un modèle et chaque création,
 mise à jour et suppression est enregistrée dans la table
 `rustango_audit_log` (créée pour vous lors de l'exécution de `migrate`).
-Seuls les modèles portant un attribut `audit(...)` sont journalisés ; `track`
-sélectionne les champs capturés dans le diff (omettez-le pour suivre tous les
-scalaires).
+`track` sélectionne les champs capturés dans le diff (omettez-le pour suivre
+tous les scalaires). Les écritures de l'admin, lignes inline comprises, sont
+journalisées pour tout modèle : pour un modèle `audit(...)` dans la transaction
+de l'écriture, si bien qu'une entrée en échec annule l'écriture ; pour tout autre
+modèle au mieux, après le commit.
 
 ```rust
 #[rustango(table = "posts", audit(track = "title, body, status"))]

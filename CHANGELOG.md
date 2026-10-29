@@ -4,6 +4,28 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.12] — 2026-10-29
+
+**Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); the doc-hidden `FieldSchemaParts` has a new `cast` field. See UPGRADING.
+
+### Fixed
+
+- Tenancy `check` names the active tenants whose ledger lacks a tenant-scoped migration (ten in full, then a count), reading eight ledgers at once, each for at most 5 s; `check --no-tenants` skips them. It scans `<app>/migrations/` folders too, also beside a relative `migrations` dir.
+- Tenancy `create-tenant --admin-email` and `set-password-link` work before the first server run: off the prod tier they write `./var/.rustango_tenant_session.key` as the server does.
+- Tenancy: `create-tenant --mode database … --schema-name`, `migrate-tenant-storage --to database … --schema-name`, `--to schema … --database-url`, `edit-tenant <schema-mode tenant> --database-url` and `list-tenants <args>` are refused instead of ignoring the flag.
+- `Org.path_prefix` is indexed, and the apex looks a tenant up only for paths the operator console does not serve (run-server and `server::Builder`).
+- Getting started, Step 9: the sample `makemigrations` output lists only the app tables; the framework tables go to `system/migrations/`.
+- Admin inline add, edit and delete of a child without `audit(...)` now leave the same history as the child's own page, written best-effort after the commit.
+- `reseal-tenant-secrets` re-seals every model's `Cast<EncryptedString>` columns too, on the registry and in each tenant, so the previous key can go after a rotation. It opens one tenant at a time and pages each column by primary key; a value already under the current key is left alone, one neither key opens is reported as left alone, and a model without a single-column primary key is reported and fails the run. `FieldSchema::cast` records which cast a field uses.
+- SSO sign-in finds a link by subject through a new `(provider_source, provider_id, subject)` index on `rustango_sso_links` instead of reading every link of the provider.
+- The auth signals (`user_logged_in`, `user_logged_out`, `user_login_failed`) and the admin save and delete signals carry the tenant's slug (`tenant`), so a receiver can tell user ids and keys of different tenants apart.
+- The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"`, `"5\n"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
+- Tenancy `run-server` signs tenant sessions and links with `./var/.rustango_tenant_session.key` and the operator console with `./var/.rustango_operator_session.key`, as `server::Builder` and the CLI do, so a link `create-tenant --admin-email` prints works there.
+- The apex's shadowed-prefix warning is retried after a failed lookup instead of never showing.
+- `reseal-tenant-secrets` leaves a schema-mode tenant's stored URL alone instead of failing every run on it, opens each tenant's SSO providers one at a time and reports a missing SQLite file as unreachable instead of creating it, and skips NULL cells when paging a sealed column.
+- The apex's shadowed-prefix check runs in the background, so a slow registry no longer holds a console response, `/health` and `/ready` included.
+- Tenancy `check` also compares the framework's tenant-scoped system migrations with each tenant's system ledger, and keeps no tenant pool open after reading its ledgers.
+
 ## [0.61.11] — 2026-10-29
 
 **Breaking:** `CsrfConfig` has a new public field; `check_builtin_form_password` needs the `passwords` feature and reports `password_too_weak`; roles made by `get_or_create_role` / `get_or_create_role_pool` skip save hooks and signals. See UPGRADING.

@@ -81,6 +81,25 @@ pub(crate) fn incr_overflow() -> CacheError {
     CacheError::Connection("incr: integer out of range (i64 overflow)".to_owned())
 }
 
+/// A stored counter: only the exact text `i64::to_string` writes. Redis
+/// `INCRBY` reads the same set, so every backend agrees.
+pub(crate) fn counter_value(stored: &str) -> Option<i64> {
+    stored
+        .parse::<i64>()
+        .ok()
+        .filter(|n| n.to_string() == stored)
+}
+
+/// Every backend refuses a NUL in a text value: Postgres `TEXT` cannot hold one.
+pub(crate) fn check_text(value: &str) -> Result<(), CacheError> {
+    if value.contains('\0') {
+        return Err(CacheError::Serialization(
+            "a cache value cannot contain a NUL character; use `set_bytes`".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------ Cache trait
 
 /// Pluggable async cache.
@@ -94,7 +113,8 @@ pub trait Cache: Send + Sync + 'static {
 
     /// Store `value` under `key` with an optional TTL.
     ///
-    /// `ttl = None` means "no expiry" (store indefinitely).
+    /// `ttl = None` means "no expiry" (store indefinitely). A value with
+    /// a NUL character is a [`CacheError::Serialization`] on every backend.
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError>;
 
     /// Store `value` with no expiry, even on a backend built with a
@@ -105,7 +125,8 @@ pub trait Cache: Send + Sync + 'static {
     }
 
     /// Retrieve a value written by [`Self::set_bytes`]. Pair the two:
-    /// a backend may store bytes and text differently.
+    /// a backend may store bytes and text differently, so [`Self::get`]
+    /// on a `set_bytes` value differs between backends.
     ///
     /// The default base64-decodes [`Self::get`], so a text-only backend
     /// keeps working; a value that is not base64 is an error. The
@@ -156,8 +177,10 @@ pub trait Cache: Send + Sync + 'static {
     }
 
     /// Add `by` to the integer counter at `key` and return the new
-    /// value. A value that is not an integer counts as 0; an i64
-    /// overflow is an error and leaves the counter as it was.
+    /// value. A stored value counts as an integer only in the exact form
+    /// `i64::to_string` writes (no `+`, leading zero, space or `-0`);
+    /// anything else counts as 0. An i64 overflow is an error and leaves
+    /// the counter as it was. Every built-in backend follows these rules.
     ///
     /// The default is a get-parse-set, which is not atomic. Backends
     /// with a native counter override it: `RedisCache` uses `INCRBY` and
@@ -169,7 +192,7 @@ pub trait Cache: Send + Sync + 'static {
         let cur = self
             .get(key)
             .await?
-            .and_then(|s| s.parse::<i64>().ok())
+            .and_then(|s| counter_value(&s))
             .unwrap_or(0);
         let new = cur.checked_add(by).ok_or_else(incr_overflow)?;
         self.set(key, &new.to_string(), ttl).await?;
@@ -585,13 +608,8 @@ impl Cache for NullCache {
         Ok(None)
     }
 
-    async fn set(
-        &self,
-        _key: &str,
-        _value: &str,
-        _ttl: Option<Duration>,
-    ) -> Result<(), CacheError> {
-        Ok(())
+    async fn set(&self, _key: &str, value: &str, _ttl: Option<Duration>) -> Result<(), CacheError> {
+        check_text(value)
     }
 
     async fn delete(&self, _key: &str) -> Result<(), CacheError> {
@@ -948,6 +966,7 @@ impl Cache for InMemoryCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        check_text(value)?;
         self.insert(key, value.as_bytes(), self.resolve_ttl(ttl), false)
             .await;
         Ok(())
@@ -965,6 +984,7 @@ impl Cache for InMemoryCache {
 
     /// Pinned: no TTL, outside both budgets, never evicted while within the pinned caps (#2009).
     async fn set_forever(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        check_text(value)?;
         self.insert(key, value.as_bytes(), None, true).await;
         Ok(())
     }
@@ -981,7 +1001,7 @@ impl Cache for InMemoryCache {
             .map
             .get(key)
             .filter(|e| !e.is_expired())
-            .and_then(|e| std::str::from_utf8(&e.value).ok()?.parse::<i64>().ok())
+            .and_then(|e| counter_value(std::str::from_utf8(&e.value).ok()?))
             .unwrap_or(0);
         let new = current.checked_add(by).ok_or_else(incr_overflow)?;
         let value = bytes::Bytes::from(new.to_string());
@@ -1005,6 +1025,7 @@ impl Cache for InMemoryCache {
     /// the insert, so it is a real test-and-set. `DistributedLock`
     /// builds its acquire on this.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        check_text(value)?;
         let tick = self.next_tick();
         let mut store = self.inner.write().await;
         if store.map.get(key).is_some_and(|e| !e.is_expired()) {
@@ -1512,7 +1533,7 @@ impl FileCache {
             Entry::Live(v, at) => (
                 std::str::from_utf8(&v)
                     .ok()
-                    .and_then(|s| s.parse::<i64>().ok())
+                    .and_then(counter_value)
                     .unwrap_or(0),
                 Some(at),
             ),
@@ -1669,6 +1690,7 @@ impl Cache for FileCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        check_text(value)?;
         self.set_bytes(key, value.as_bytes(), ttl).await
     }
 
@@ -1708,6 +1730,7 @@ impl Cache for FileCache {
     /// Atomic across processes on the host: the check and the rename
     /// happen under the entry's stripe lock.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        check_text(value)?;
         let (key, value) = (key.to_owned(), value.as_bytes().to_vec());
         self.blocking(move |c| c.add_entry(&key, &value, ttl)).await
     }

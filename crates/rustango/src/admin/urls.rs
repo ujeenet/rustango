@@ -239,6 +239,8 @@ pub(crate) struct Config {
     /// impersonation. Drives the "you are impersonating" banner and
     /// tags audit entries. `None` for a normal login.
     pub(crate) impersonated_by: Option<i64>,
+    /// The tenant's slug, for the admin signals; `None` outside a tenant.
+    pub(crate) tenant: Option<String>,
     /// URL prefix the admin Router is mounted under, passed to every
     /// template as `{{ admin_prefix }}` so links and form actions
     /// resolve. Default `/__admin`; set another with
@@ -574,6 +576,14 @@ impl Builder {
     #[must_use]
     pub fn impersonated_by(mut self, operator_id: i64) -> Self {
         self.config.impersonated_by = Some(operator_id);
+        self
+    }
+
+    /// The tenant this admin serves, named in its signals.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub(crate) fn tenant(mut self, slug: &str) -> Self {
+        self.config.tenant = Some(slug.to_owned());
         self
     }
 

@@ -61,6 +61,10 @@ impl std::error::Error for SessionSecretError {}
 #[cfg(feature = "tenancy")]
 pub(crate) const TENANT_SESSION_KEY_PATH: &str = "./var/.rustango_tenant_session.key";
 
+/// The dev key file for operator console sessions.
+#[cfg(feature = "tenancy")]
+pub(crate) const OPERATOR_SESSION_KEY_PATH: &str = "./var/.rustango_operator_session.key";
+
 /// Server-held signing key. It wraps the bytes so they cannot be
 /// printed by accident. It is `Clone` so several cookie layers can
 /// share one key, each with its own cookie name and payload.
@@ -113,8 +117,17 @@ impl SessionSecret {
     /// comes from the environment or a secret manager, not a file.
     #[must_use]
     pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
-            match Self::from_b64(&raw) {
+        Self::from_raw_or_disk(
+            std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
+            disk_path,
+        )
+    }
+
+    /// [`Self::from_env_or_disk`] with the env value passed in, so a test
+    /// does not depend on the caller's environment.
+    pub(crate) fn from_raw_or_disk(raw: Option<&str>, disk_path: &std::path::Path) -> Self {
+        if let Some(raw) = raw {
+            match Self::from_b64(raw) {
                 Ok(secret) => return secret,
                 // Set but unusable. Say so loudly: otherwise a failed
                 // key rotation looks like it worked.

@@ -594,6 +594,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 
@@ -622,6 +623,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 
@@ -650,6 +652,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 
@@ -679,6 +682,7 @@ mod tests {
                 case_insensitive: false,
                 fk_on_delete: None,
                 validators: &[],
+                cast: None,
             },
             FieldSchema {
                 name: "title",
@@ -704,6 +708,7 @@ mod tests {
                 case_insensitive: false,
                 fk_on_delete: None,
                 validators: &[],
+                cast: None,
             },
             FieldSchema {
                 name: "author_id",
@@ -729,6 +734,7 @@ mod tests {
                 case_insensitive: false,
                 fk_on_delete: None,
                 validators: &[],
+                cast: None,
             },
         ];
         // Suppress unused warnings on field helpers if we keep them.
@@ -1137,6 +1143,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 

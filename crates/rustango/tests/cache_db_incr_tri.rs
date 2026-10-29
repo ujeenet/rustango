@@ -18,7 +18,17 @@ use rustango::sql::{raw_execute_pool, raw_query_pool, Pool};
 use rustango::test_assertions::QueryCounter;
 use rustango::tri_dialect_test;
 
+#[path = "support/cache_incr_parity.rs"]
+mod cache_incr_parity;
+
 async fn noop(_: &Pool) {}
+
+/// Counter and text rules match every other backend.
+async fn incr_rules_match_every_backend(pool: &Pool) {
+    let cache = fresh(pool, "rustango_cache_incr_parity").await;
+    cache_incr_parity::assert_incr_rules(&cache, pool.backend_name()).await;
+    let _ = cache.drop_table().await;
+}
 
 /// One table per scenario: nextest runs them in parallel.
 async fn fresh(pool: &Pool, table: &str) -> DatabaseCache {
@@ -252,6 +262,7 @@ tri_dialect_test! {
         incr_ttl_and_reset,
         incr_overflow_is_an_error,
         incr_covers_the_full_i64_range,
+        incr_rules_match_every_backend,
         purge_is_batched_and_indexed,
         index_failure_is_not_fatal,
         long_table_names_get_distinct_indexes,

@@ -158,7 +158,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Enrutado por host |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Servidores de bases de datos guardados |
 | `test-tenant-connection` | Verifica que la base de un tenant es alcanzable |
-| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant, las contraseñas de servidor y los secretos TOTP de operador y SSO guardados con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
+| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant, las contraseñas de servidor y los secretos TOTP de operador y SSO y las columnas `Cast<EncryptedString>` guardados con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
 | `prewarm-pools` | Abre los pools de tenants antes de la primera petición |
 | `run-server` / `runserver` | Ejecuta el servidor multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Puntos de entrada de configuración e interactivos |
@@ -170,7 +170,9 @@ contraseña. El verbo imprime una vez un enlace para fijar la contraseña: funci
 una sola vez, caduca en 72 horas y solo en este tenant. Dáselo al administrador.
 Está firmado con la clave de sesión de tenant del servidor
 (`RUSTANGO_SESSION_SECRET`, o el archivo de clave de desarrollo), así que ejecuta
-la CLI con la misma clave que el servidor. `set-password-link <slug> <username>`
+la CLI con la misma clave que el servidor. Fuera del nivel prod, si falta
+`./var/.rustango_tenant_session.key`, se crea como lo crea el servidor, así que
+funciona antes del primer arranque del servidor. `set-password-link <slug> <username>`
 imprime uno nuevo.
 
 ### Audit **T**
@@ -793,7 +795,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.11
+rustango 0.61.12
 ```
 
 ### `about`
@@ -805,7 +807,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.11
+  version:        0.61.12
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -823,6 +825,7 @@ producción.
 - ≥ 1 modelo registrado vía `inventory`
 - BD accesible (`SELECT 1`)
 - Modelos registrados pero **ninguna** migración en disco (no compara recuentos — un directorio `migrations/` existente se reporta como info, sea cual sea el número)
+- Migraciones que el ledger aún no aplicó. En un proyecto tenancy: los archivos del registro contra el registro, los de tenant contra el ledger de cada tenant activo (se nombran los tenants atrasados, diez completos), carpetas `<app>/migrations/` incluidas. Se leen ocho tenants a la vez, cada uno 5 s como máximo; uno más lento se informa como ilegible. `check --no-tenants` omite los ledgers de los tenants
 
 **Con `--deploy`:**
 - `RUSTANGO_ENV` es `prod` o `production`

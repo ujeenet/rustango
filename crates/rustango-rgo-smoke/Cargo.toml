@@ -23,4 +23,4 @@ serializer = ["rgo/serializer"]
 
 [dependencies]
 # `rgo` on crates.io is another crate, so the short name is a rename.
-rgo = { package = "rustango", path = "../rustango", version = "0.61.11" }
+rgo = { package = "rustango", path = "../rustango", version = "0.61.12" }

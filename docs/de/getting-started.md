@@ -178,7 +178,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.61.11`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.61.12`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -426,15 +426,13 @@ cargo run -- makemigrations
 Du siehst etwa Folgendes:
 
 ```
-wrote ./migrations/0001_create_item_and_posts_and_rustango_admin_users_etc.json
+wrote ./migrations/0001_create_item_and_posts.json
     + CreateTable("item")
     + CreateTable("posts")
-    + CreateTable("rustango_admin_users")
-    + CreateTable("rustango_content_types")
-    + CreateIndex { table: "posts", columns: ["status", "published_at"], ... }
+    + CreateIndex { name: "posts_status_published_at_idx", table: "posts", columns: ["status", "published_at"], ... }
 ```
 
-Diese erste Migration erstellt deine Modelle — `posts`, plus das Starter-Modell `item`, das das Gerüst in `src/models.rs` mitgeliefert hat — zusammen mit den Admin- und Content-Type-Tabellen des Frameworks. Öffne die JSON, wenn du willst: Sie enthält die Operationen plus einen vollständigen Schema-Snapshot.
+Diese erste Migration erstellt deine Modelle — `posts`, plus das Starter-Modell `item`, das das Gerüst in `src/models.rs` mitgeliefert hat. Die Tabellen des Frameworks selbst (Admin-Benutzer, Content-Types, Audit-Log, …) sind nicht darin: Sie haben eine eigene Kette in `system/migrations/`, die das erste `migrate` schreibt und vor deiner anwendet. Öffne die JSON, wenn du willst: Sie enthält die Operationen plus einen vollständigen Schema-Snapshot.
 
 Wende sie auf die Datenbank an:
 

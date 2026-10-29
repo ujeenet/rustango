@@ -325,8 +325,11 @@ conexión puede bloquear un pool SQLite de una sola conexión.
 
 Añade `audit(track = "field1, field2")` a un modelo y cada creación, actualización y
 eliminación se registra en la tabla `rustango_audit_log` (creada por ti cuando ejecutas
-`migrate`). Solo se registran los modelos con un atributo `audit(...)`; `track`
-selecciona qué campos se capturan en el diff (omítelo para rastrear todos los escalares).
+`migrate`). `track` selecciona qué campos se capturan en el diff (omítelo para rastrear
+todos los escalares). Las escrituras del admin, filas inline incluidas, se registran para
+todo modelo: para un modelo `audit(...)` en la transacción de la escritura, así que una
+entrada fallida deshace la escritura; para cualquier otro modelo con el mejor esfuerzo,
+tras el commit.
 
 ```rust
 #[rustango(table = "posts", audit(track = "title, body, status"))]

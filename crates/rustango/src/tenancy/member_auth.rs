@@ -748,8 +748,14 @@ async fn sso_callback_in(
             | MemberSignIn::Refused => Some(R::InvalidCredentials),
         };
         if let Some(reason) = reason {
-            crate::sso::link::signal_refused(MEMBER_SIGNAL_SOURCE, &normalized, reason, meta())
-                .await;
+            crate::sso::link::signal_refused(
+                MEMBER_SIGNAL_SOURCE,
+                &normalized,
+                reason,
+                meta(),
+                Some(t.org.slug.clone()),
+            )
+            .await;
         }
     }
     let member_id = match outcome {
@@ -787,6 +793,7 @@ async fn sso_callback_in(
         username: member.username.clone(),
         is_superuser: member.is_superuser,
         request: meta(),
+        tenant: Some(t.org.slug.clone()),
     })
     .await;
     clear_flow(redirect_with_cookie(&landing, &cookie))

@@ -191,10 +191,12 @@ impl Env {
             BackendKind::Postgres => scratch(&mut self.guards, "DATABASE_URL").await,
             #[cfg(feature = "mysql")]
             BackendKind::MySql => scratch(&mut self.guards, "MYSQL_TEST_URL").await,
-            _ => format!(
-                "sqlite://{}?mode=rwc",
-                self.tmp.path().join(format!("{tag}.db")).display()
-            ),
+            _ => {
+                // Made, as a provisioned tenant's is: reseal opens no missing file.
+                let path = self.tmp.path().join(format!("{tag}.db"));
+                std::fs::File::create(&path).unwrap();
+                format!("sqlite://{}?mode=rwc", path.display())
+            }
         }
     }
 
@@ -246,6 +248,14 @@ impl Env {
         let mut out = Vec::new();
         typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
         Ok(String::from_utf8_lossy(&out).into_owned())
+    }
+
+    /// The verb's result and its output, also on an error.
+    async fn run_both(&self, dir: &Path, args: &[&str]) -> (Result<(), TenancyError>, String) {
+        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let mut out = Vec::new();
+        let res = typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await);
+        (res, String::from_utf8_lossy(&out).into_owned())
     }
 }
 
@@ -1313,6 +1323,209 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     assert_eq!(opened, url);
 }
 
+/// A tenant model with a sealed cast, for `reseal-tenant-secrets`. Unmanaged:
+/// only that scenario makes the table, and the dump verbs skip it elsewhere.
+#[cfg(feature = "casts")]
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "rmt_patient", managed = false)]
+pub struct Patient {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    pub ssn: rustango::casts::Cast<rustango::casts::EncryptedString>,
+}
+
+/// A registry model with a sealed cast.
+#[cfg(feature = "casts")]
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "rmt_vault", scope = "registry", managed = false)]
+pub struct Vault {
+    #[rustango(primary_key, max_length = 16)]
+    pub name: String,
+    pub token: Option<rustango::casts::Cast<rustango::casts::EncryptedString>>,
+}
+
+/// After a key rotation, app models' sealed casts are re-sealed under the
+/// new key, on the registry and in each tenant; a re-run changes nothing.
+#[cfg(feature = "casts")]
+async fn reseal_covers_sealed_casts(pool: &Pool) {
+    use rustango::casts::Cast;
+    use rustango::sql::Auto;
+    use rustango::testkit::matrix::fresh_table;
+    const OLD: &str = "reseal-cast-old-key-0123456789abcdef";
+    const NEW: &str = "reseal-cast-new-key-0123456789abcdef";
+    std::env::set_var("RUSTANGO_SECRET_KEY", OLD);
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let opts = env.tenant_opts("cast").await;
+    env.create(&dir, "mt-cast", opts).await.expect("tenant");
+    let org = env.org("mt-cast").await.expect("org");
+    let tenant = typed!(env.registry, p => p.scoped_pool_dyn(&org).await.expect("tenant pool"));
+    fresh_table::<Patient>(&tenant).await;
+    fresh_table::<Vault>(&env.registry).await;
+    let mut patient = Patient {
+        id: Auto::default(),
+        ssn: Cast::new("123-45-6789".into()),
+    };
+    patient.insert_pool(&tenant).await.expect("insert patient");
+    let id = *patient.id.get().expect("pk");
+    // More rows than one page, then one sealed under a key nobody has.
+    let sealed = |key: &str, text: &str| {
+        use rustango::casts::CastValue as _;
+        std::env::set_var("RUSTANGO_SECRET_KEY", key);
+        let v = rustango::casts::EncryptedString::to_db(&text.to_owned());
+        std::env::set_var("RUSTANGO_SECRET_KEY", OLD);
+        rustango::core::SqlValue::String(v)
+    };
+    let rows = (0..600)
+        .map(|i| vec![sealed(OLD, &format!("p{i}"))])
+        .collect();
+    let bulk = rustango::core::BulkInsertQuery::new(
+        <Patient as rustango::core::Model>::SCHEMA,
+        vec!["ssn"],
+        rows,
+    );
+    rustango::sql::bulk_insert_pool(&tenant, &bulk)
+        .await
+        .expect("bulk insert patients");
+    let lost = rustango::core::BulkInsertQuery::new(
+        <Patient as rustango::core::Model>::SCHEMA,
+        vec!["ssn"],
+        vec![vec![sealed("a-key-nobody-has-0123456789abcdef", "lost")]],
+    );
+    rustango::sql::bulk_insert_pool(&tenant, &lost)
+        .await
+        .expect("insert a lost row");
+    let vault = Vault {
+        name: "main".into(),
+        token: Some(Cast::new("tok".into())),
+    };
+    vault
+        .insert_pool(&env.registry)
+        .await
+        .expect("insert vault");
+
+    std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", OLD);
+    std::env::set_var("RUSTANGO_SECRET_KEY", NEW);
+    let patient_line = format!("cast mt-cast/rmt_patient.ssn {id}");
+    let vault_line = "cast registry/rmt_vault.token main";
+    let dry = env
+        .run_out(&dir, &["reseal-tenant-secrets"])
+        .await
+        .expect("dry run");
+    assert!(
+        dry.contains(&format!("{patient_line}: would re-seal")),
+        "{dry}"
+    );
+    assert!(
+        dry.contains(&format!("{vault_line}: would re-seal")),
+        "{dry}"
+    );
+    assert!(dry.contains("undecryptable, left alone"), "{dry}");
+    // A MySQL tenant's sealed URL is counted too, so count the rows' lines.
+    let planned = dry
+        .lines()
+        .filter(|l| l.contains("rmt_patient.ssn") && l.ends_with(": would re-seal"))
+        .count();
+    assert_eq!(planned, 601, "every page: {dry}");
+    assert!(dry.contains(", 1 left alone"), "{dry}");
+    let out = env
+        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("apply");
+    assert!(out.contains(&format!("{patient_line}: re-sealed")), "{out}");
+    assert!(out.contains(&format!("{vault_line}: re-sealed")), "{out}");
+    let resealed = out
+        .lines()
+        .filter(|l| l.contains("rmt_patient.ssn") && l.ends_with(": re-sealed"))
+        .count();
+    assert_eq!(resealed, 601, "every page: {out}");
+    assert!(out.contains("0 failed, 1 left alone"), "{out}");
+
+    // The old key can go: both rows open under the new one alone.
+    std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+    let patients: Vec<Patient> = Patient::objects()
+        .filter("id", id)
+        .fetch(&tenant)
+        .await
+        .expect("read");
+    assert_eq!(&*patients[0].ssn, "123-45-6789");
+    let vaults: Vec<Vault> = Vault::objects().fetch(&env.registry).await.expect("read");
+    assert_eq!(vaults[0].token.as_deref().map(String::as_str), Some("tok"));
+    let again = env
+        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("re-run");
+    // The tenant URL pass re-seals a MySQL URL every run; casts are left alone.
+    assert!(
+        !again
+            .lines()
+            .any(|l| l.contains("cast ") && l.ends_with("re-sealed")),
+        "a re-run re-sealed again: {again}"
+    );
+    with_secret_key();
+}
+
+#[cfg(not(feature = "casts"))]
+async fn reseal_covers_sealed_casts(_: &Pool) {
+    panic!("this scenario needs the `casts` feature");
+}
+
+/// A schema-mode tenant's leftover URL is left alone, not a failure on every run.
+async fn reseal_leaves_a_schema_mode_url_alone(pool: &Pool) {
+    with_secret_key();
+    let env = Env::new(pool).await;
+    let url = "postgres://u:pw@127.0.0.1:1/x";
+    let mut org = Org {
+        slug: "schemaurl".into(),
+        display_name: "schemaurl".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some("mt_schemaurl".into()),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(url.into()),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let (res, out) = env
+        .run_both(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await;
+    assert!(
+        out.contains("schemaurl: schema mode reads no URL, left alone"),
+        "{out}"
+    );
+    assert!(!out.contains("schemaurl: failed"), "{out}");
+    // Off PG a schema-mode tenant cannot be opened, so the tenant passes fail.
+    let opens_tenants = cfg!(any(feature = "sso", feature = "casts"));
+    if env.backend() == BackendKind::Postgres || !opens_tenants {
+        res.unwrap_or_else(|e| panic!("{e}: {out}"));
+    }
+    let stored = env.org("schemaurl").await.expect("row").database_url;
+    assert_eq!(stored.as_deref(), Some(url));
+}
+
+/// The SSO pass never creates a missing tenant's SQLite file.
+async fn reseal_creates_no_missing_tenant_file(pool: &Pool) {
+    with_secret_key();
+    let env = Env::new(pool).await;
+    if env.backend() != BackendKind::Sqlite {
+        return;
+    }
+    let path = env.tmp.path().join("gone.db");
+    let mut org = Org {
+        slug: "gone".into(),
+        display_name: "gone".into(),
+        backend_kind: "sqlite".into(),
+        database_url: Some(format!("sqlite://{}?mode=rwc", path.display())),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let (_, out) = env
+        .run_both(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await;
+    assert!(!path.exists(), "a tenant file was created: {out}");
+}
+
 /// `--apply` leaves a sealed URL without a password as it is, not unsealed.
 async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     with_secret_key();
@@ -1349,6 +1562,200 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     assert_eq!(stored.as_deref(), Some(sealed.as_str()));
 }
 
+/// `check` output, whatever it returns.
+async fn check_out(env: &Env, dir: &Path) -> String {
+    check_out_with(env, dir, &[]).await
+}
+
+/// `check <extra>` output, whatever it returns.
+async fn check_out_with(env: &Env, dir: &Path, extra: &[&str]) -> String {
+    let mut out = Vec::new();
+    let mut args = vec!["check".to_owned()];
+    args.extend(extra.iter().map(|a| (*a).to_owned()));
+    let _ = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, dir, args, &mut out).await);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `check` names the tenants whose ledger lacks a tenant-scoped file,
+/// app folders included.
+async fn check_names_tenants_behind_on_tenant_migrations(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", "SELECT 1");
+    let mut ahead = env.own_tenant("cka").await;
+    ahead.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&ahead, &dir).await;
+    env.migrate(&ahead, &app).await;
+    let mut behind = env.own_tenant("ckb").await;
+    behind.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&behind, &dir).await;
+
+    let out = check_out(&env, &dir).await;
+    assert!(
+        out.contains("1 tenant(s) behind on tenant migrations"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{}: blog/0002_blog", behind.slug)),
+        "{out}"
+    );
+    assert!(!out.contains(&format!("{}: ", ahead.slug)), "{out}");
+
+    let out = check_out_with(&env, &dir, &["--no-tenants"]).await;
+    assert!(
+        out.contains("tenant ledgers not read (--no-tenants)"),
+        "{out}"
+    );
+    assert!(!out.contains("behind on tenant migrations"), "{out}");
+}
+
+/// A tenant whose database never answers costs `check` seconds, not the
+/// pool's acquire timeout, and is named as unreadable.
+async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
+    let env = Env::new(pool).await;
+    // Accepts every connection and never answers, so a connect hangs.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
+    let url = match env.backend() {
+        BackendKind::Postgres => format!("postgres://u:pw@127.0.0.1:{port}/x"),
+        BackendKind::MySql => format!("mysql://u:pw@127.0.0.1:{port}/x"),
+        BackendKind::Sqlite => return,
+    };
+    let mut org = Org {
+        slug: "blackhole".into(),
+        display_name: "blackhole".into(),
+        backend_kind: env.backend().as_str().into(),
+        database_url: Some(url),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let started = std::time::Instant::now();
+    let out = check_out(&env, &dir).await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(out.contains("could not read 1 tenant ledger(s)"), "{out}");
+    assert!(out.contains("blackhole: "), "{out}");
+}
+
+/// `check` compares the tenant-scoped system steps with each tenant's system ledger.
+async fn check_names_tenants_behind_on_system_steps(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let mut org = env.own_tenant("cks").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&org, &dir).await;
+    let system = env.dir("proj/system/migrations");
+    migration(&system, "0099_late_step", "SELECT 1");
+
+    let out = check_out(&env, &dir).await;
+    assert!(
+        out.contains(&format!("{}: system/0099_late_step", org.slug)),
+        "{out}"
+    );
+}
+
+/// `check` keeps no tenant pool open once that tenant's ledger is read.
+async fn check_keeps_no_tenant_pool_open(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    let mut org = env.own_tenant("ckp").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&org, &dir).await;
+    let held = typed!(env.registry, p => {
+        let mut out = Vec::new();
+        let args = vec!["check".to_owned()];
+        let _ = rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await;
+        p.cached_scoped_pool_count().await + p.cached_database_pool_count().await
+    });
+    assert_eq!(held, 0, "{:?}", env.backend());
+}
+
+/// Flags a verb would ignore are refused, and nothing is written.
+async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let err = env
+        .run(&dir, &["list-tenants", "--json"])
+        .await
+        .expect_err("list-tenants takes no arguments");
+    assert!(err.to_string().contains("--json"), "{err}");
+
+    let url = env.tenant_db_url("ign").await;
+    let err = env
+        .run(
+            &dir,
+            &[
+                "create-tenant",
+                "ign",
+                "--mode",
+                "database",
+                "--database-url",
+                &url,
+                "--schema-name",
+                "x",
+            ],
+        )
+        .await
+        .expect_err("--schema-name in database mode");
+    assert!(err.to_string().contains("--schema-name"), "{err}");
+    assert!(env.org("ign").await.is_none());
+
+    let mut org = Org {
+        slug: "schemy".into(),
+        display_name: "schemy".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some("mt_schemy".into()),
+        backend_kind: env.backend().as_str().into(),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let err = env
+        .run(&dir, &["edit-tenant", "schemy", "--database-url", &url])
+        .await
+        .expect_err("a URL on a schema-mode tenant");
+    assert!(err.to_string().contains("schema mode"), "{err}");
+    assert_eq!(env.org("schemy").await.unwrap().database_url, None);
+}
+
+/// The apex looks `path_prefix` up per new segment, so it is indexed.
+async fn org_path_prefix_is_indexed(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let sql = match env.backend() {
+        BackendKind::Postgres => {
+            "SELECT COUNT(*) FROM pg_indexes WHERE tablename = $1 AND indexname = $2"
+        }
+        BackendKind::MySql => {
+            "SELECT COUNT(*) FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?"
+        }
+        BackendKind::Sqlite => {
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ?"
+        }
+    };
+    let binds = ["rustango_orgs", "rustango_orgs_path_prefix_idx"]
+        .map(|v| rustango::core::SqlValue::String(v.to_owned()))
+        .to_vec();
+    let n: Vec<(i64,)> = rustango::sql::raw_query_pool(sql, binds, &env.registry)
+        .await
+        .expect("catalog");
+    assert_eq!(n[0].0, 1, "{:?}", env.backend());
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -1357,6 +1764,9 @@ tri_dialect_test! {
         a_resolved_secret_is_never_echoed,
         migrate_storage_checks_the_target_url,
         reseal_seals_a_plain_password_url,
+        reseal_covers_sealed_casts,
+        reseal_leaves_a_schema_mode_url_alone,
+        reseal_creates_no_missing_tenant_file,
         provision_resolves_an_env_reference,
         create_tenant_probes_before_writing,
         a_url_of_another_backend_is_refused,
@@ -1381,5 +1791,11 @@ tri_dialect_test! {
         a_duplicate_slug_leaves_no_run,
         the_registry_under_an_alias_is_flagged,
         check_deploy_names_a_role_named_schema,
+        check_names_tenants_behind_on_tenant_migrations,
+        check_bounds_an_unreachable_tenant,
+        check_names_tenants_behind_on_system_steps,
+        check_keeps_no_tenant_pool_open,
+        ignored_tenancy_flags_are_refused,
+        org_path_prefix_is_indexed,
     ],
 }

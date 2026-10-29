@@ -15,7 +15,7 @@ use crate::tenancy::db_server::{self, Resealed};
 use crate::tenancy::error::TenancyError;
 use crate::tenancy::org_edit::apply_values_if;
 use crate::tenancy::pools::TenantPools;
-use crate::tenancy::{Org, SecretsResolver as _};
+use crate::tenancy::{Org, SecretsResolver as _, StorageMode};
 
 pub(super) async fn reseal_tenant_secrets<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
@@ -47,10 +47,20 @@ where
     orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
 
     let (mut todo, mut done, mut skipped, mut failed) = (0usize, 0usize, 0usize, 0usize);
+    let mut left_alone = 0usize;
     for org in orgs {
         let Some(stored) = org.database_url.as_deref() else {
             continue;
         };
+        // Nothing reads it, and the edit path refuses to write it.
+        if matches!(
+            StorageMode::parse(&org.storage_mode),
+            Ok(StorageMode::Schema)
+        ) {
+            left_alone += 1;
+            writeln!(w, "  {}: schema mode reads no URL, left alone", org.slug)?;
+            continue;
+        }
         let sealed = stored.starts_with(SEALED_SCHEME);
         let resolved = match secrets.resolve(stored).await {
             Ok(url) => url,
@@ -150,7 +160,7 @@ where
                             Ok(sealed) => {
                                 let cell = SealedCell {
                                     model: <OperatorTotp as crate::core::Model>::SCHEMA,
-                                    pk: ("operator_id", id),
+                                    pk: ("operator_id", SqlValue::I64(id)),
                                     column,
                                     stored: stored.to_owned(),
                                 };
@@ -177,11 +187,11 @@ where
             }
         }
     }
-    // SSO client secrets: the shared set, then each tenant's own.
+    // SSO client secrets: the shared set, then each tenant's own, one
+    // tenant pool open at a time.
     #[cfg(feature = "sso")]
     {
-        let mut tables: Vec<(String, Result<Vec<SsoSecret>, String>, crate::sql::Pool)> =
-            Vec::new();
+        let mut tally = Tally::default();
         #[cfg(feature = "admin-sso")]
         {
             use crate::tenancy::sso::SharedSsoProvider as P;
@@ -191,14 +201,14 @@ where
                 &registry,
             )
             .await;
-            tables.push(("shared".into(), rows, registry.clone()));
+            reseal_sso("shared", rows, &registry, apply, w, &mut tally).await?;
         }
         let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
         orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
         for org in orgs {
             use crate::sso::SsoProvider as P;
-            let Ok(pool) = pools.scoped_pool_dyn(&org).await else {
-                failed += 1;
+            let Ok((pool, own)) = pools.existing_pool_dyn(&org).await else {
+                tally.failed += 1;
                 writeln!(w, "  sso {}: cannot reach the tenant", org.slug)?;
                 continue;
             };
@@ -208,52 +218,83 @@ where
                 &pool,
             )
             .await;
-            tables.push((org.slug, rows, pool));
+            let run = reseal_sso(&org.slug, rows, &pool, apply, w, &mut tally).await;
+            if own {
+                pool.close().await;
+            } else {
+                pools.invalidate(&org.slug).await;
+            }
+            run?;
         }
-        for (owner, rows, pool) in tables {
-            let rows = match rows {
-                Ok(r) => r,
-                // A tenant made before the table existed has nothing to reseal.
-                Err(e) if missing_table(&e) => continue,
-                Err(e) => {
-                    failed += 1;
-                    writeln!(w, "  sso {owner}: cannot open: {e}")?;
-                    continue;
-                }
-            };
-            for row in rows {
-                todo += 1;
-                let what = format!("sso {owner}/{}", row.slug);
-                if !apply {
-                    writeln!(w, "  {what}: would re-seal")?;
-                    continue;
-                }
-                match row.reseal(&pool).await {
-                    Ok(true) => {
-                        done += 1;
-                        writeln!(w, "  {what}: re-sealed")?;
+        todo += tally.todo;
+        done += tally.done;
+        skipped += tally.skipped;
+        failed += tally.failed;
+    }
+    // Every other model's sealed `Cast` columns: registry models on the
+    // registry, tenant models in each tenant, one tenant pool open at a time.
+    #[cfg(feature = "casts")]
+    {
+        use crate::core::ModelScope;
+        let mut tally = Tally::default();
+        let (registry_columns, refused) = sealed_cast_columns(ModelScope::Registry);
+        let (tenant_columns, refused_tenant) = sealed_cast_columns(ModelScope::Tenant);
+        for line in refused.iter().chain(&refused_tenant) {
+            tally.failed += 1;
+            writeln!(w, "  {line}")?;
+        }
+        reseal_columns(
+            "registry",
+            &registry,
+            &registry_columns,
+            apply,
+            w,
+            &mut tally,
+        )
+        .await?;
+        // No such column: no tenant needs opening.
+        if !tenant_columns.is_empty() {
+            let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
+            orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
+            for org in orgs {
+                let (pool, own) = match pools.existing_pool_dyn(&org).await {
+                    Ok(p) => p,
+                    Err(_) => {
+                        tally.failed += 1;
+                        writeln!(w, "  cast {}: cannot reach the tenant", org.slug)?;
+                        continue;
                     }
-                    Ok(false) => {
-                        skipped += 1;
-                        writeln!(w, "  {what}: skipped, changed meanwhile")?;
-                    }
-                    Err(e) => {
-                        failed += 1;
-                        writeln!(w, "  {what}: failed: {e}")?;
-                    }
+                };
+                let run =
+                    reseal_columns(&org.slug, &pool, &tenant_columns, apply, w, &mut tally).await;
+                if own {
+                    pool.close().await;
+                } else {
+                    pools.invalidate(&org.slug).await;
                 }
+                run?;
             }
         }
+        todo += tally.todo;
+        done += tally.done;
+        skipped += tally.skipped;
+        failed += tally.failed;
+        left_alone += tally.left_alone;
     }
+    let left_alone = if left_alone > 0 {
+        format!(", {left_alone} left alone")
+    } else {
+        String::new()
+    };
     if apply {
         writeln!(
             w,
-            "reseal-tenant-secrets: {done} done, {skipped} skipped, {failed} failed"
+            "reseal-tenant-secrets: {done} done, {skipped} skipped, {failed} failed{left_alone}"
         )?;
     } else {
         writeln!(
             w,
-            "reseal-tenant-secrets: {todo} to change (dry run; pass --apply)"
+            "reseal-tenant-secrets: {todo} to change{left_alone} (dry run; pass --apply)"
         )?;
     }
     if failed > 0 {
@@ -264,8 +305,243 @@ where
     Ok(())
 }
 
+/// One sealed `Cast` column: its model, single-column key and column.
+#[cfg(feature = "casts")]
+type SealedColumn = (
+    &'static crate::core::ModelSchema,
+    &'static crate::core::FieldSchema,
+    &'static str,
+);
+
+/// Every `Cast` column sealed under the framework key, of `scope`'s models,
+/// and one line per model refused because it has no single-column primary
+/// key (the compare-and-set needs one). The SSO provider tables have their
+/// own pass above.
+#[cfg(feature = "casts")]
+fn sealed_cast_columns(scope: crate::core::ModelScope) -> (Vec<SealedColumn>, Vec<String>) {
+    use crate::core::{FieldCast, ModelEntry};
+    let own_pass: &[&str] = &[
+        #[cfg(feature = "sso")]
+        <crate::sso::SsoProvider as crate::core::Model>::SCHEMA.table,
+        #[cfg(feature = "admin-sso")]
+        <crate::tenancy::sso::SharedSsoProvider as crate::core::Model>::SCHEMA.table,
+    ];
+    let mut out: Vec<SealedColumn> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in inventory::iter::<ModelEntry> {
+        let model = entry.schema;
+        if model.scope != scope
+            || model.is_view
+            || model.proxy
+            || own_pass.contains(&model.table)
+            || seen.contains(&model.table)
+        {
+            continue;
+        }
+        let sealed: Vec<&str> = model
+            .fields
+            .iter()
+            .filter(|f| f.cast == Some(FieldCast::Sealed))
+            .map(|f| f.column)
+            .collect();
+        if sealed.is_empty() {
+            continue;
+        }
+        seen.push(model.table);
+        match single_key(model) {
+            Ok(pk) => out.extend(sealed.into_iter().map(|c| (model, pk, c))),
+            Err(why) => refused.push(format!("cast {}: {why}", model.table)),
+        }
+    }
+    out.sort_by_key(|(m, _, c)| (m.table, *c));
+    refused.sort();
+    (out, refused)
+}
+
+/// The one primary-key column the compare-and-set writes through.
+#[cfg(feature = "casts")]
+fn single_key(
+    model: &'static crate::core::ModelSchema,
+) -> Result<&'static crate::core::FieldSchema, &'static str> {
+    let mut keys = model.fields.iter().filter(|f| f.primary_key);
+    match (keys.next(), keys.next()) {
+        (Some(pk), None) => Ok(pk),
+        (None, _) => Err("no primary key"),
+        (Some(_), Some(_)) => Err("composite primary key"),
+    }
+}
+
+/// Counts of the SSO and sealed-cast passes.
+#[cfg(feature = "casts")]
+#[derive(Default)]
+struct Tally {
+    todo: usize,
+    done: usize,
+    skipped: usize,
+    failed: usize,
+    /// Cells neither key opens, or that are not text: reported, never failed,
+    /// since no re-run can fix them.
+    left_alone: usize,
+}
+
+/// Rows read per page of a sealed column, in primary-key order.
+#[cfg(feature = "casts")]
+const CAST_PAGE: i64 = 500;
+
+/// Re-seal `columns` on `pool`, one page of rows at a time.
+#[cfg(feature = "casts")]
+async fn reseal_columns<W: Write + Send>(
+    owner: &str,
+    pool: &crate::sql::Pool,
+    columns: &[SealedColumn],
+    apply: bool,
+    w: &mut W,
+    tally: &mut Tally,
+) -> std::io::Result<()> {
+    for &(model, pk, column) in columns {
+        let table = model.table;
+        let mut after: Option<SqlValue> = None;
+        loop {
+            let page = match SealedCell::page(model, pk, column, after.take(), pool).await {
+                Ok(p) => p,
+                // A tenant made before the table existed has nothing to reseal.
+                Err(e) if missing_table(&e) => break,
+                Err(e) => {
+                    tally.failed += 1;
+                    writeln!(w, "  cast {owner}/{table}.{column}: cannot open: {e}")?;
+                    break;
+                }
+            };
+            let Some(last) = page.last.clone() else {
+                break;
+            };
+            for cell in page.cells {
+                let what = format!(
+                    "cast {owner}/{table}.{column} {}",
+                    cell.key().to_display_string()
+                );
+                let cell = match cell {
+                    PageCell::Text(cell) => cell,
+                    PageCell::NotText(_) => {
+                        tally.left_alone += 1;
+                        writeln!(w, "  {what}: not text, left alone")?;
+                        continue;
+                    }
+                };
+                // Already under the current key: a re-run is a no-op.
+                if cell.opens_under_current_key() {
+                    continue;
+                }
+                if !cell.opens() {
+                    tally.left_alone += 1;
+                    writeln!(w, "  {what}: undecryptable, left alone")?;
+                    continue;
+                }
+                tally.todo += 1;
+                if !apply {
+                    writeln!(w, "  {what}: would re-seal")?;
+                    continue;
+                }
+                match cell.reseal(pool).await {
+                    Ok(true) => {
+                        tally.done += 1;
+                        writeln!(w, "  {what}: re-sealed")?;
+                    }
+                    Ok(false) => {
+                        tally.skipped += 1;
+                        writeln!(w, "  {what}: skipped, changed meanwhile")?;
+                    }
+                    Err(e) => {
+                        tally.failed += 1;
+                        writeln!(w, "  {what}: failed: {e}")?;
+                    }
+                }
+            }
+            if page.full {
+                after = Some(last);
+            } else {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Re-seal `owner`'s SSO client secrets `rows` on `pool`.
+#[cfg(feature = "sso")]
+async fn reseal_sso<W: Write + Send>(
+    owner: &str,
+    rows: Result<Vec<SsoSecret>, String>,
+    pool: &crate::sql::Pool,
+    apply: bool,
+    w: &mut W,
+    tally: &mut Tally,
+) -> std::io::Result<()> {
+    let rows = match rows {
+        Ok(r) => r,
+        // A tenant made before the table existed has nothing to reseal.
+        Err(e) if missing_table(&e) => return Ok(()),
+        Err(e) => {
+            tally.failed += 1;
+            return writeln!(w, "  sso {owner}: cannot open: {e}");
+        }
+    };
+    for row in rows {
+        tally.todo += 1;
+        let what = format!("sso {owner}/{}", row.slug);
+        if !apply {
+            writeln!(w, "  {what}: would re-seal")?;
+            continue;
+        }
+        match row.reseal(pool).await {
+            Ok(true) => {
+                tally.done += 1;
+                writeln!(w, "  {what}: re-sealed")?;
+            }
+            Ok(false) => {
+                tally.skipped += 1;
+                writeln!(w, "  {what}: skipped, changed meanwhile")?;
+            }
+            Err(e) => {
+                tally.failed += 1;
+                writeln!(w, "  {what}: failed: {e}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One page of a sealed column.
+#[cfg(feature = "casts")]
+struct CastPage {
+    cells: Vec<PageCell>,
+    /// The page's last key, where the next page starts.
+    last: Option<SqlValue>,
+    /// `true` when the page was full, so another may follow.
+    full: bool,
+}
+
+/// A non-null cell of a sealed column.
+#[cfg(feature = "casts")]
+enum PageCell {
+    Text(SealedCell),
+    /// Its key; the value is not text, so it cannot be a sealed value.
+    NotText(SqlValue),
+}
+
+#[cfg(feature = "casts")]
+impl PageCell {
+    fn key(&self) -> &SqlValue {
+        match self {
+            Self::Text(c) => &c.pk.1,
+            Self::NotText(k) => k,
+        }
+    }
+}
+
 /// A driver error for a table that is not there, on any backend.
-#[cfg(any(feature = "sso", feature = "totp"))]
+#[cfg(any(feature = "sso", feature = "totp", feature = "casts"))]
 fn missing_table(e: &str) -> bool {
     e.contains("does not exist") || e.contains("no such table") || e.contains("doesn't exist")
 }
@@ -286,16 +562,96 @@ fn totp_cells(row: &[SqlValue]) -> Option<(i64, Vec<(&'static str, &str)>)> {
     Some((*id, cells))
 }
 
-/// One sealed value as stored, keyed by an integer primary key.
-#[cfg(any(feature = "sso", feature = "totp"))]
+/// One sealed value as stored, keyed by its primary key.
+#[cfg(any(feature = "sso", feature = "totp", feature = "casts"))]
 struct SealedCell {
     model: &'static crate::core::ModelSchema,
-    pk: (&'static str, i64),
+    pk: (&'static str, SqlValue),
     column: &'static str,
     stored: String,
 }
 
-#[cfg(any(feature = "sso", feature = "totp"))]
+#[cfg(feature = "casts")]
+impl SealedCell {
+    /// The non-null `column` cells of `model` with a key above `after`, raw,
+    /// at most [`CAST_PAGE`] rows in key order.
+    async fn page(
+        model: &'static crate::core::ModelSchema,
+        pk: &'static crate::core::FieldSchema,
+        column: &'static str,
+        after: Option<SqlValue>,
+        pool: &crate::sql::Pool,
+    ) -> Result<CastPage, String> {
+        let query = Self::page_query(model, pk, column, after);
+        let rows = crate::sql::fetch_values_list_on(pool, &query)
+            .await
+            .map_err(|e| e.to_string())?;
+        let full = i64::try_from(rows.len()).unwrap_or(i64::MAX) >= CAST_PAGE;
+        let mut page = CastPage {
+            cells: Vec::new(),
+            last: None,
+            full,
+        };
+        for row in rows {
+            let Ok([key, value]) = <[SqlValue; 2]>::try_from(row) else {
+                return Err("a row of an unexpected shape".into());
+            };
+            page.last = Some(key.clone());
+            match value {
+                SqlValue::Null => {}
+                SqlValue::String(stored) => page.cells.push(PageCell::Text(Self {
+                    model,
+                    pk: (pk.column, key),
+                    column,
+                    stored,
+                })),
+                _ => page.cells.push(PageCell::NotText(key)),
+            }
+        }
+        Ok(page)
+    }
+
+    /// The page's query: non-null cells only, so a sparse column costs no
+    /// pages of NULLs.
+    fn page_query(
+        model: &'static crate::core::ModelSchema,
+        pk: &'static crate::core::FieldSchema,
+        column: &'static str,
+        after: Option<SqlValue>,
+    ) -> crate::core::SelectQuery {
+        use crate::core::{Filter, Op, OrderItem, WhereExpr};
+        let mut filters = vec![Filter::new(column, Op::IsNull, false)];
+        if let Some(after) = after {
+            filters.push(Filter::new(pk.column, Op::Gt, after));
+        }
+        let mut query = crate::core::SelectQuery::new(model).projection(vec![pk.column, column]);
+        query.where_clause = WhereExpr::and_predicates(filters);
+        query.order_by = vec![OrderItem::column(pk.column, false)];
+        query.limit = Some(CAST_PAGE);
+        query
+    }
+
+    /// Either key opens it.
+    fn opens(&self) -> bool {
+        crate::aead::decrypt(&self.stored, b"").is_ok()
+    }
+
+    fn opens_under_current_key(&self) -> bool {
+        crate::aead::decrypt_with(crate::aead::env_key().as_deref(), &self.stored, b"").is_ok()
+    }
+
+    /// Open with either key, seal under the current one, and write it only
+    /// while the stored value is the one read. `Ok(false)`: it changed meanwhile.
+    async fn reseal(&self, pool: &crate::sql::Pool) -> Result<bool, String> {
+        let plain =
+            crate::aead::decrypt(&self.stored, b"").map_err(|e| format!("cannot open: {e:?}"))?;
+        let sealed =
+            crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
+        self.write(pool, sealed).await
+    }
+}
+
+#[cfg(any(feature = "sso", feature = "totp", feature = "casts"))]
 impl SealedCell {
     /// Write `sealed` only while the cell still holds what was read.
     /// `Ok(false)`: it changed meanwhile.
@@ -311,7 +667,7 @@ impl SealedCell {
                 Filter {
                     column: self.pk.0,
                     op: Op::Eq,
-                    value: SqlValue::I64(self.pk.1),
+                    value: self.pk.1.clone(),
                 },
                 Filter {
                     column: self.column,
@@ -372,11 +728,69 @@ impl SsoSecret {
             crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
         let cell = SealedCell {
             model: self.model,
-            pk: ("id", self.id),
+            pk: ("id", SqlValue::I64(self.id)),
             column: "client_secret",
             stored: self.stored.clone(),
         };
         cell.write(pool, sealed).await
+    }
+}
+
+#[cfg(all(test, feature = "casts"))]
+mod cast_tests {
+    use crate::core::{FieldSchema, FieldType, ModelSchema};
+
+    const fn key(name: &'static str) -> FieldSchema {
+        let mut f = FieldSchema::new(name, name, FieldType::I64);
+        f.primary_key = true;
+        f
+    }
+
+    /// A model without one key column is refused, not written by half a key.
+    #[test]
+    fn only_a_single_column_key_is_used() {
+        static ONE: [FieldSchema; 1] = [key("id")];
+        static NONE: [FieldSchema; 1] = [FieldSchema::new("v", "v", FieldType::String)];
+        static TWO: [FieldSchema; 2] = [key("a"), key("b")];
+        let model = |fields: &'static [FieldSchema]| -> &'static ModelSchema {
+            let mut m = ModelSchema::new("m", "m");
+            m.fields = fields;
+            Box::leak(Box::new(m))
+        };
+        assert_eq!(super::single_key(model(&ONE)).map(|f| f.column), Ok("id"));
+        assert_eq!(
+            super::single_key(model(&NONE)).map(|f| f.column),
+            Err("no primary key")
+        );
+        assert_eq!(
+            super::single_key(model(&TWO)).map(|f| f.column),
+            Err("composite primary key")
+        );
+    }
+
+    /// A page reads only non-null cells, on the first page and after.
+    #[test]
+    fn a_page_skips_null_cells() {
+        use crate::core::{Filter, Op, SqlValue, WhereExpr};
+        static FIELDS: [FieldSchema; 2] =
+            [key("id"), FieldSchema::new("v", "v", FieldType::String)];
+        let mut m = ModelSchema::new("m", "m");
+        m.fields = &FIELDS;
+        let m: &'static ModelSchema = Box::leak(Box::new(m));
+        let not_null = |w: &WhereExpr| {
+            let want = Filter::new("v", Op::IsNull, false);
+            match w {
+                WhereExpr::Predicate(f) => *f == want,
+                WhereExpr::And(all) => all
+                    .iter()
+                    .any(|e| matches!(e, WhereExpr::Predicate(f) if *f == want)),
+                _ => false,
+            }
+        };
+        for after in [None, Some(SqlValue::I64(7))] {
+            let q = super::SealedCell::page_query(m, &FIELDS[0], "v", after);
+            assert!(not_null(&q.where_clause), "{:?}", q.where_clause);
+        }
     }
 }
 

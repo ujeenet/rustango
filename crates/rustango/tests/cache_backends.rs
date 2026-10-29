@@ -8,6 +8,18 @@ use rustango::cache::{
     get_json, get_or_set, set_json, BoxedCache, Cache, InMemoryCache, NullCache,
 };
 
+#[path = "support/cache_incr_parity.rs"]
+mod cache_incr_parity;
+
+/// Counter and text rules match the database and Redis backends.
+#[tokio::test]
+async fn memory_and_file_follow_the_shared_incr_rules() {
+    cache_incr_parity::assert_incr_rules(&InMemoryCache::new(), "memory").await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = rustango::cache::FileCache::new(dir.path());
+    cache_incr_parity::assert_incr_rules(&file, "file").await;
+}
+
 // ------------------------------------------------------------------ NullCache
 
 #[tokio::test]
