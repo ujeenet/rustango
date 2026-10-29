@@ -168,7 +168,9 @@ fails, the run rolls back. The admin gets no password. The verb prints a
 set-password link once: it works once, expires in 72 hours, and only on this
 tenant. Give it to the admin. It is signed with the server's tenant session key
 (`RUSTANGO_SESSION_SECRET`, or the dev key file), so run the CLI with the same
-key as the server. `set-password-link <slug> <username>` prints a fresh one.
+key as the server. Off the prod tier, a missing `./var/.rustango_tenant_session.key`
+is created the way the server creates it, so this works before the first server
+run. `set-password-link <slug> <username>` prints a fresh one.
 
 ### Audit **T**
 
@@ -811,6 +813,7 @@ production-readiness checks.
 - ≥ 1 model registered via `inventory`
 - DB reachable (`SELECT 1`)
 - Models registered but **no** migrations on disk (it does not compare counts — an existing `migrations/` directory is reported as info, whatever the number)
+- Migrations the ledger has not applied. In a tenancy project: registry-scoped files against the registry, tenant-scoped ones against each active tenant's ledger (the tenants behind are named, ten in full), `<app>/migrations/` folders included
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`

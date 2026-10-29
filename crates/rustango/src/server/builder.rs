@@ -1019,20 +1019,21 @@ impl<DB: Database> Builder<DB> {
             operator_admin.access_log(operator_console::access_log_layer())
         };
         // The console's routes win on the apex: only a path it does not serve
-        // reaches a path-prefix tenant. Added after its layers, so they skip it.
+        // reaches a path-prefix tenant, so only such a path is looked up.
+        // Added after its layers, so they skip it.
         let operator_admin = operator_admin.fallback_service(tower::service_fn({
             let prefixed = prefix_app.clone();
             let unresolved = unresolved.clone();
+            let resolver = dispatch_resolver.clone();
+            let registry = registry_pool.clone();
             move |req: axum::http::Request<axum::body::Body>| {
                 let mut prefixed = prefixed.clone();
                 let unresolved = unresolved.clone();
+                let (resolver, registry) = (resolver.clone(), registry.clone());
                 async move {
-                    let unresolved = unresolved.filter(|_| {
-                        req.extensions().get::<Resolution>() == Some(&Resolution::None)
-                    });
-                    let mut resp = if req.extensions().get::<Resolution>()
-                        == Some(&Resolution::PrefixTenant)
-                    {
+                    let (req, resolution) = resolve(req, &resolver, &registry).await;
+                    let unresolved = unresolved.filter(|_| resolution == Resolution::None);
+                    let mut resp = if resolution == Resolution::PrefixTenant {
                         prefixed.as_service().oneshot(req).await?
                     } else if let Some(mut unresolved) = unresolved {
                         unresolved.as_service().oneshot(req).await?
@@ -1046,7 +1047,7 @@ impl<DB: Database> Builder<DB> {
                 }
             }
         }));
-        let shadowed = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
+        let shadow_checked = Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
 
         let app = Router::new().fallback_service(tower::service_fn({
             let operator = operator_admin.clone();
@@ -1062,22 +1063,22 @@ impl<DB: Database> Builder<DB> {
                 let apex = apex.clone();
                 let registry = registry_pool.clone();
                 let resolver = dispatch_resolver.clone();
-                let shadowed = shadowed.clone();
+                let shadow_checked = shadow_checked.clone();
                 async move {
-                    let on_apex = crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex);
-                    let (mut req, resolution) = resolve(req, &resolver, &registry).await;
-                    let prefixed_path = resolution == Resolution::PrefixTenant;
-                    let response = if on_apex {
+                    if crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex) {
                         let path = req.uri().path().to_owned();
-                        req.extensions_mut().insert(resolution);
                         let resp = operator.as_service().oneshot(req).await;
                         if let Ok(r) = &resp {
-                            if prefixed_path && r.extensions().get::<ConsoleUnmatched>().is_none() {
-                                warn_shadowed(&shadowed, &path);
+                            if r.extensions().get::<ConsoleUnmatched>().is_none() {
+                                warn_if_shadowed(&shadow_checked, &path, &registry).await;
                             }
                         }
-                        resp
-                    } else if prefixed_path {
+                        return resp.map_err(|e| -> std::convert::Infallible {
+                            panic!("axum router service is Infallible: {e}")
+                        });
+                    }
+                    let (req, resolution) = resolve(req, &resolver, &registry).await;
+                    let response = if resolution == Resolution::PrefixTenant {
                         prefixed.as_service().oneshot(req).await
                     } else if let (Resolution::None, Some(mut unresolved)) =
                         (resolution, unresolved)
@@ -1261,15 +1262,31 @@ pub(crate) enum Resolution {
 #[derive(Clone, Copy)]
 struct ConsoleUnmatched;
 
-/// Warn once per prefix that a console route keeps a tenant's path.
-fn warn_shadowed(shadowed: &std::sync::Mutex<std::collections::HashSet<String>>, path: &str) {
+/// Warn if a tenant's path prefix is a console route's first segment. Looked up
+/// once per segment: the console's segments are few and fixed, never client-chosen.
+async fn warn_if_shadowed(
+    checked: &std::sync::Mutex<std::collections::HashSet<String>>,
+    path: &str,
+    registry: &crate::sql::Pool,
+) {
+    use crate::tenancy::OrgResolver as _;
     let first = path.trim_start_matches('/').split('/').next().unwrap_or("");
     let prefix = format!("/{first}");
-    let new = shadowed
+    let new = checked
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(prefix.clone());
-    if new {
+    if !new {
+        return;
+    }
+    let Ok(probe) = axum::http::Request::builder().uri(prefix.as_str()).body(()) else {
+        return;
+    };
+    let (parts, ()) = probe.into_parts();
+    let tenant = crate::tenancy::PathPrefixResolver
+        .resolve(&parts, registry)
+        .await;
+    if matches!(tenant, Ok(Some(_))) {
         tracing::warn!(
             target: "rustango::server",
             prefix = %prefix,
@@ -1634,6 +1651,30 @@ pub(crate) mod resolver_tests {
         assert_eq!(get(&app, "10.0.0.5:8080", "/page").await.0, 400);
         assert_eq!(get(&app, "10.0.0.5:8080", "/health/x").await.0, 400);
         assert_eq!(get(&app, "acme.localhost", "/page").await.0, 301);
+    }
+
+    /// The apex serves a console route without a tenant lookup per request;
+    /// a path the console does not serve is still looked up.
+    #[tokio::test]
+    async fn console_paths_skip_the_tenant_lookup() {
+        use crate::tenancy::prefix_looked_up;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let registry = crate::sql::Pool::Sqlite(sq.clone());
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .into_router()
+            .await
+            .unwrap();
+        let _ = get(&app, "localhost", "/login").await;
+        // The once-per-segment shadow check may have looked it up; drop that.
+        crate::tenancy::invalidate_org_cache();
+        let _ = get(&app, "localhost", "/login").await;
+        assert!(
+            !prefix_looked_up(&registry, "/login"),
+            "a console path was resolved"
+        );
+        let _ = get(&app, "localhost", "/no-such-tenant").await;
+        assert!(prefix_looked_up(&registry, "/no-such-tenant"));
     }
 
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.

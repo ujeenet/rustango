@@ -170,7 +170,9 @@ contraseña. El verbo imprime una vez un enlace para fijar la contraseña: funci
 una sola vez, caduca en 72 horas y solo en este tenant. Dáselo al administrador.
 Está firmado con la clave de sesión de tenant del servidor
 (`RUSTANGO_SESSION_SECRET`, o el archivo de clave de desarrollo), así que ejecuta
-la CLI con la misma clave que el servidor. `set-password-link <slug> <username>`
+la CLI con la misma clave que el servidor. Fuera del nivel prod, si falta
+`./var/.rustango_tenant_session.key`, se crea como lo crea el servidor, así que
+funciona antes del primer arranque del servidor. `set-password-link <slug> <username>`
 imprime uno nuevo.
 
 ### Audit **T**
@@ -823,6 +825,7 @@ producción.
 - ≥ 1 modelo registrado vía `inventory`
 - BD accesible (`SELECT 1`)
 - Modelos registrados pero **ninguna** migración en disco (no compara recuentos — un directorio `migrations/` existente se reporta como info, sea cual sea el número)
+- Migraciones que el ledger aún no aplicó. En un proyecto tenancy: los archivos del registro contra el registro, los de tenant contra el ledger de cada tenant activo (se nombran los tenants atrasados, diez completos), carpetas `<app>/migrations/` incluidas
 
 **Con `--deploy`:**
 - `RUSTANGO_ENV` es `prod` o `production`

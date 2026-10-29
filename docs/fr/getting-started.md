@@ -430,15 +430,13 @@ cargo run -- makemigrations
 Vous verrez quelque chose comme :
 
 ```
-wrote ./migrations/0001_create_item_and_posts_and_rustango_admin_users_etc.json
+wrote ./migrations/0001_create_item_and_posts.json
     + CreateTable("item")
     + CreateTable("posts")
-    + CreateTable("rustango_admin_users")
-    + CreateTable("rustango_content_types")
-    + CreateIndex { table: "posts", columns: ["status", "published_at"], ... }
+    + CreateIndex { name: "posts_status_published_at_idx", table: "posts", columns: ["status", "published_at"], ... }
 ```
 
-Cette première migration crée vos modèles — `posts`, ainsi que le modèle de démarrage `item` fourni par le squelette dans `src/models.rs` — en même temps que les propres tables d'administration et de types de contenu du framework. Ouvrez le fichier JSON si vous le souhaitez : il contient les opérations ainsi qu'un instantané complet du schéma.
+Cette première migration crée vos modèles — `posts`, ainsi que le modèle de démarrage `item` fourni par le squelette dans `src/models.rs`. Les tables propres au framework (utilisateurs admin, types de contenu, journal d'audit, …) n'y sont pas : elles ont leur propre chaîne dans `system/migrations/`, que le premier `migrate` écrit et applique avant la vôtre. Ouvrez le fichier JSON si vous le souhaitez : il contient les opérations ainsi qu'un instantané complet du schéma.
 
 Appliquez-la à la base de données :
 

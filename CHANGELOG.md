@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- Tenancy `check` names the active tenants whose ledger lacks a tenant-scoped migration (ten in full, then a count), and scans `<app>/migrations/` folders too.
+- Tenancy `create-tenant --admin-email` and `set-password-link` work before the first server run: off the prod tier they write `./var/.rustango_tenant_session.key` as the server does.
+- Tenancy: `create-tenant --mode database … --schema-name`, `migrate-tenant-storage --to database … --schema-name`, `--to schema … --database-url`, `edit-tenant <schema-mode tenant> --database-url` and `list-tenants <args>` are refused instead of ignoring the flag.
+- `Org.path_prefix` is indexed, and the apex looks a tenant up only for paths the operator console does not serve (run-server and `server::Builder`).
+- Getting started, Step 9: the sample `makemigrations` output lists only the app tables; the framework tables go to `system/migrations/`.
+
 ## [0.61.11] — 2026-10-29
 
 **Breaking:** `CsrfConfig` has a new public field; `check_builtin_form_password` needs the `passwords` feature and reports `password_too_weak`; roles made by `get_or_create_role` / `get_or_create_role_pool` skip save hooks and signals. See UPGRADING.

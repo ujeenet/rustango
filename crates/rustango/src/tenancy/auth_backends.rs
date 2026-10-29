@@ -600,7 +600,8 @@ pub(crate) fn existing_api_key_secret() -> Result<
     if let Some(s) = API_KEY_SECRET.get() {
         return Ok((s, None));
     }
-    let (secret, source) = super::session::existing_tenant_secret()?;
+    let (secret, source) =
+        super::session::existing_tenant_secret(super::session::DevKeyFile::LoadOnly)?;
     Ok((API_KEY_SECRET.get_or_init(|| secret), Some(source)))
 }
 

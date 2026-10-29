@@ -1349,6 +1349,113 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     assert_eq!(stored.as_deref(), Some(sealed.as_str()));
 }
 
+/// `check` output, whatever it returns.
+async fn check_out(env: &Env, dir: &Path) -> String {
+    let mut out = Vec::new();
+    let args = vec!["check".to_owned()];
+    let _ = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, dir, args, &mut out).await);
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// `check` names the tenants whose ledger lacks a tenant-scoped file,
+/// app folders included.
+async fn check_names_tenants_behind_on_tenant_migrations(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", "SELECT 1");
+    let mut ahead = env.own_tenant("cka").await;
+    ahead.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&ahead, &dir).await;
+    env.migrate(&ahead, &app).await;
+    let mut behind = env.own_tenant("ckb").await;
+    behind.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&behind, &dir).await;
+
+    let out = check_out(&env, &dir).await;
+    assert!(
+        out.contains("1 tenant(s) behind on tenant migrations"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("{}: blog/0002_blog", behind.slug)),
+        "{out}"
+    );
+    assert!(!out.contains(&format!("{}: ", ahead.slug)), "{out}");
+}
+
+/// Flags a verb would ignore are refused, and nothing is written.
+async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let err = env
+        .run(&dir, &["list-tenants", "--json"])
+        .await
+        .expect_err("list-tenants takes no arguments");
+    assert!(err.to_string().contains("--json"), "{err}");
+
+    let url = env.tenant_db_url("ign").await;
+    let err = env
+        .run(
+            &dir,
+            &[
+                "create-tenant",
+                "ign",
+                "--mode",
+                "database",
+                "--database-url",
+                &url,
+                "--schema-name",
+                "x",
+            ],
+        )
+        .await
+        .expect_err("--schema-name in database mode");
+    assert!(err.to_string().contains("--schema-name"), "{err}");
+    assert!(env.org("ign").await.is_none());
+
+    let mut org = Org {
+        slug: "schemy".into(),
+        display_name: "schemy".into(),
+        storage_mode: "schema".into(),
+        schema_name: Some("mt_schemy".into()),
+        backend_kind: env.backend().as_str().into(),
+        ..rustango::testkit::org()
+    };
+    org.save_pool(&env.registry).await.expect("insert org");
+    let err = env
+        .run(&dir, &["edit-tenant", "schemy", "--database-url", &url])
+        .await
+        .expect_err("a URL on a schema-mode tenant");
+    assert!(err.to_string().contains("schema mode"), "{err}");
+    assert_eq!(env.org("schemy").await.unwrap().database_url, None);
+}
+
+/// The apex looks `path_prefix` up per new segment, so it is indexed.
+async fn org_path_prefix_is_indexed(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let sql = match env.backend() {
+        BackendKind::Postgres => {
+            "SELECT COUNT(*) FROM pg_indexes WHERE tablename = $1 AND indexname = $2"
+        }
+        BackendKind::MySql => {
+            "SELECT COUNT(*) FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?"
+        }
+        BackendKind::Sqlite => {
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = ? AND name = ?"
+        }
+    };
+    let binds = ["rustango_orgs", "rustango_orgs_path_prefix_idx"]
+        .map(|v| rustango::core::SqlValue::String(v.to_owned()))
+        .to_vec();
+    let n: Vec<(i64,)> = rustango::sql::raw_query_pool(sql, binds, &env.registry)
+        .await
+        .expect("catalog");
+    assert_eq!(n[0].0, 1, "{:?}", env.backend());
+}
+
 tri_dialect_test! {
     setup: setup,
     sqlite: file,
@@ -1381,5 +1488,8 @@ tri_dialect_test! {
         a_duplicate_slug_leaves_no_run,
         the_registry_under_an_alias_is_flagged,
         check_deploy_names_a_role_named_schema,
+        check_names_tenants_behind_on_tenant_migrations,
+        ignored_tenancy_flags_are_refused,
+        org_path_prefix_is_indexed,
     ],
 }

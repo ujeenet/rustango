@@ -233,6 +233,18 @@ pub(crate) async fn apply_values_if(
         let value = match (column, value) {
             // Blank keeps the current URL; it is a credential, never cleared here.
             ("database_url", v) if blank(&v) => continue,
+            // Nothing reads it in schema mode; moving storage is migrate-tenant-storage.
+            ("database_url", _)
+                if matches!(
+                    super::org::StorageMode::parse(&existing.storage_mode),
+                    Ok(super::org::StorageMode::Schema)
+                ) =>
+            {
+                return Err(TenancyError::Validation(format!(
+                    "tenant `{slug}` is in schema mode, which reads no database URL; \
+                     move it with `migrate-tenant-storage {slug} --to database`"
+                )));
+            }
             ("database_url", SqlValue::String(new)) => {
                 let url =
                     crate::tenancy::provision::vet_database_url(&new, secrets, registry, None)

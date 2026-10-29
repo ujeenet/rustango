@@ -426,15 +426,13 @@ cargo run -- makemigrations
 Verás algo como:
 
 ```
-wrote ./migrations/0001_create_item_and_posts_and_rustango_admin_users_etc.json
+wrote ./migrations/0001_create_item_and_posts.json
     + CreateTable("item")
     + CreateTable("posts")
-    + CreateTable("rustango_admin_users")
-    + CreateTable("rustango_content_types")
-    + CreateIndex { table: "posts", columns: ["status", "published_at"], ... }
+    + CreateIndex { name: "posts_status_published_at_idx", table: "posts", columns: ["status", "published_at"], ... }
 ```
 
-Esta primera migración crea tus modelos — `posts`, además del modelo inicial `item` que el andamiaje incluyó en `src/models.rs` — junto con las propias tablas de admin y de tipos de contenido del framework. Abre el JSON si quieres: contiene las operaciones más una instantánea completa del esquema.
+Esta primera migración crea tus modelos — `posts`, además del modelo inicial `item` que el andamiaje incluyó en `src/models.rs`. Las tablas propias del framework (usuarios del admin, tipos de contenido, registro de auditoría, …) no están en ella: tienen su propia cadena en `system/migrations/`, que el primer `migrate` escribe y aplica antes que la tuya. Abre el JSON si quieres: contiene las operaciones más una instantánea completa del esquema.
 
 Aplícala a la base de datos:
 

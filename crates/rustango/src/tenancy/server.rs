@@ -362,18 +362,21 @@ where
             .link_apex(link_apex.clone())
             .with_session(session_secret.clone())
             .build();
+    let apex = apex.to_owned();
+    let resolver = Arc::new(crate::server::apex_resolver(&apex));
     // The console's routes win on the apex: only a path it does not serve
-    // reaches a path-prefix tenant.
+    // reaches a path-prefix tenant, so only such a path is looked up.
     let operator_console = operator_console::router(registry.clone(), session_secret)
         .layer(axum::Extension(link_apex))
         .fallback_service(tower::service_fn({
             let tenants = tenant_admin.clone();
+            let (resolver, registry) = (resolver.clone(), registry.clone());
             move |req: Request<Body>| {
                 let mut tenants = tenants.clone();
+                let (resolver, registry) = (resolver.clone(), registry.clone());
                 async move {
-                    let prefixed = req.extensions().get::<crate::server::Resolution>()
-                        == Some(&crate::server::Resolution::PrefixTenant);
-                    if prefixed {
+                    let (req, resolution) = crate::server::resolve(req, &resolver, &registry).await;
+                    if resolution == crate::server::Resolution::PrefixTenant {
                         tenants.as_service().oneshot(req).await
                     } else {
                         Ok(axum::response::IntoResponse::into_response(
@@ -384,18 +387,13 @@ where
             }
         }));
 
-    let apex = apex.to_owned();
-    let resolver = Arc::new(crate::server::apex_resolver(&apex));
     axum::Router::new().fallback_service(tower::service_fn(move |req: Request<Body>| {
         let mut operator = operator_console.clone();
         let mut tenants = tenant_admin.clone();
-        let (apex, resolver, registry) = (apex.clone(), resolver.clone(), registry.clone());
+        let apex = apex.clone();
         async move {
             let response: Response<Body> =
                 if super::resolver::host_is_apex(req.headers(), req.uri(), &apex) {
-                    let (mut req, resolution) =
-                        crate::server::resolve(req, &resolver, &registry).await;
-                    req.extensions_mut().insert(resolution);
                     operator.as_service().oneshot(req).await
                 } else {
                     tenants.as_service().oneshot(req).await
@@ -485,13 +483,14 @@ mod app_tests {
         };
         org.insert_pool(&pools.registry_pool()).await.unwrap();
         let secret = crate::session::SessionSecret::from_bytes(vec![9; 32]);
+        let registry = pools.registry_pool();
         let app = app(pools, url, "apex.test", secret);
         let req = Request::builder()
             .uri("/acme/admin")
             .header("host", "apex.test")
             .body(Body::empty())
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
         let location = resp
             .headers()
             .get("location")
@@ -502,6 +501,25 @@ mod app_tests {
             "{} -> {location:?}",
             resp.status()
         );
+
+        // A console route is served without a tenant lookup; an unknown
+        // segment is looked up once and cached as a miss.
+        for path in ["/login", "/no-such-tenant"] {
+            let req = Request::builder()
+                .uri(path)
+                .header("host", "apex.test")
+                .body(Body::empty())
+                .unwrap();
+            let _ = app.clone().oneshot(req).await.unwrap();
+        }
+        assert!(
+            !crate::tenancy::prefix_looked_up(&registry, "/login"),
+            "a console path was resolved"
+        );
+        assert!(crate::tenancy::prefix_looked_up(
+            &registry,
+            "/no-such-tenant"
+        ));
     }
 }
 

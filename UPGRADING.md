@@ -148,6 +148,18 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Tenancy
+
+- `rustango_orgs.path_prefix` gets an index. In a tenancy project run `cargo run -- makemigrations` to write the system migration, commit `system/migrations/`, then `migrate`.
+- Tenancy `check` reports tenants behind on tenant-scoped migrations and reads every active tenant's ledger to do so; an unreachable tenant is a warning.
+
+### Tenancy CLI
+
+- Off the prod tier, `create-tenant --admin-email` and `set-password-link` create `./var/.rustango_tenant_session.key` when it is missing, as the server does on first boot. `create-api-key` still only loads it.
+- Flags a verb used to ignore are now errors: `--schema-name` with database mode (`create-tenant`, `migrate-tenant-storage --to database`), `--database-url` with `migrate-tenant-storage --to schema`, `edit-tenant --database-url` on a schema-mode tenant, and any argument to `list-tenants`.
+
 ## 0.61.11
 
 ### Migrations and data

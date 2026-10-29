@@ -172,7 +172,9 @@ pas de mot de passe. Le verbe affiche une fois un lien de définition de mot de
 passe : il ne sert qu'une fois, expire au bout de 72 heures, et uniquement sur
 ce tenant. Donnez-le à l'administrateur. Il est signé avec la clé de session de
 tenant du serveur (`RUSTANGO_SESSION_SECRET`, ou le fichier de clé de dev) :
-lancez donc la CLI avec la même clé que le serveur.
+lancez donc la CLI avec la même clé que le serveur. Hors du niveau prod, un
+`./var/.rustango_tenant_session.key` absent est créé comme le serveur le crée :
+cela marche donc avant le premier démarrage du serveur.
 `set-password-link <slug> <username>` en affiche un nouveau.
 
 ### Audit **T**
@@ -852,6 +854,7 @@ préparation à la production.
 - ≥ 1 modèle enregistré via `inventory`
 - Base de données accessible (`SELECT 1`)
 - Des modèles enregistrés mais **aucune** migration sur le disque (il ne compare pas les nombres — un répertoire `migrations/` existant est signalé en info, quel que soit son contenu)
+- Les migrations que le ledger n'a pas appliquées. Dans un projet tenancy : les fichiers du registre contre le registre, ceux des tenants contre le ledger de chaque tenant actif (les tenants en retard sont nommés, dix en entier), dossiers `<app>/migrations/` compris
 
 **Avec `--deploy` :**
 - `RUSTANGO_ENV` vaut `prod` ou `production`
