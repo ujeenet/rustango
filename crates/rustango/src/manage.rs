@@ -136,7 +136,7 @@ enum CsrfMount {
 #[cfg(feature = "csrf")]
 impl CsrfMount {
     /// `trusted` (`[security] csrf_trusted_origins`) adds to the config's own
-    /// list; `exempt` prefixes to its exemptions.
+    /// list; `exempt` exact paths to its exemptions.
     fn layer(self, trusted: &[String], exempt: &[String]) -> crate::forms::csrf::CsrfLayer {
         let mut cfg = match &self {
             Self::SessionPolicy => crate::forms::csrf::CsrfConfig::default(),
@@ -147,9 +147,9 @@ impl CsrfMount {
                 cfg.trusted_origins.push(origin.clone());
             }
         }
-        for prefix in exempt {
-            if !cfg.exempt_prefixes.contains(prefix) {
-                cfg.exempt_prefixes.push(prefix.clone());
+        for path in exempt {
+            if !cfg.exempt_paths.contains(path) {
+                cfg.exempt_paths.push(path.clone());
             }
         }
         match self {
@@ -1374,16 +1374,28 @@ impl Cli {
             .map_or(&[][..], |s| s.security.csrf_trusted_origins.as_slice());
         #[cfg(not(feature = "config"))]
         let trusted: &[String] = &[];
-        // MCP clients send a bearer token and no CSRF cookie or header.
+        // MCP clients send no CSRF cookie or header: exempt their endpoints,
+        // not the rest of the prefix.
         #[cfg(all(feature = "mcp", feature = "config"))]
-        let exempt = [self.settings_for_layers.as_ref().map_or_else(
+        let prefix = self.settings_for_layers.as_ref().map_or_else(
             || crate::config::McpSettings::default().prefix().to_owned(),
             |s| s.mcp.prefix().to_owned(),
-        )];
+        );
         #[cfg(all(feature = "mcp", not(feature = "config")))]
-        let exempt = ["/mcp".to_owned()];
+        let prefix = "/mcp".to_owned();
+        #[cfg(feature = "mcp")]
+        let exempt = crate::mcp::post_endpoints(&prefix).map_or_else(
+            || {
+                tracing::warn!(
+                    prefix = %prefix,
+                    "[mcp] prefix is the site root; MCP endpoints keep the CSRF check"
+                );
+                Vec::new()
+            },
+            Vec::from,
+        );
         #[cfg(not(feature = "mcp"))]
-        let exempt: [String; 0] = [];
+        let exempt: Vec<String> = Vec::new();
         self.csrf.clone().map(|mount| mount.layer(trusted, &exempt))
     }
 
@@ -3650,33 +3662,74 @@ mod assemble_app_tests {
         }
     }
 
-    /// MCP clients authenticate with a token and send no CSRF cookie, so the
-    /// `[mcp] prefix` is exempt; every other POST still needs the token.
+    /// An app whose POSTs go to `/`, `/p`, every MCP endpoint and a
+    /// cookie-auth page beside them, with `[mcp] prefix` set to `prefix`.
+    #[cfg(all(feature = "config", feature = "csrf", feature = "mcp"))]
+    async fn mcp_csrf_app(prefix: Option<&str>) -> Router {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let ok = || axum::routing::post(|| async { "ok" });
+        let mut api = Router::new().route("/p", ok()).route("/", ok());
+        for path in ["/mcp", "/agents"] {
+            for tail in ["", "/token", "/oauth/token", "/settings"] {
+                api = api.route(&format!("{path}{tail}"), ok());
+            }
+        }
+        api = api.route("/token", ok()).route("/oauth/token", ok());
+        let mut cli = Cli::new().with_csrf().api(api);
+        cli.settings_for_layers = prefix.map(|p| {
+            let mut s = crate::config::Settings::default();
+            s.mcp.prefix = Some(p.into());
+            s
+        });
+        cli.assemble_app(pool)
+    }
+
+    #[cfg(all(feature = "config", feature = "csrf", feature = "mcp"))]
+    async fn post_status(app: &Router, path: &str) -> StatusCode {
+        let req = Request::post(path).header("host", "localhost");
+        app.clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .expect("request")
+            .status()
+    }
+
+    /// MCP clients send no CSRF cookie: the MCP endpoints themselves are
+    /// exempt, and nothing else under or beside the prefix is.
     #[cfg(all(feature = "config", feature = "csrf", feature = "mcp"))]
     #[tokio::test]
-    async fn csrf_mount_exempts_the_mcp_prefix() {
+    async fn csrf_mount_exempts_only_the_mcp_endpoints() {
         let _serial = serialized();
-        let mut moved = crate::config::Settings::default();
-        moved.mcp.prefix = Some("/agents".into());
-        for (settings, mcp) in [(None, "/mcp"), (Some(moved), "/agents")] {
-            let pool = crate::sql::Pool::connect("sqlite::memory:")
-                .await
-                .expect("sqlite");
-            let ok = || Router::new().route("/", axum::routing::post(|| async { "ok" }));
-            let mut cli = Cli::new()
-                .with_csrf()
-                .api(Router::new().route("/p", axum::routing::post(|| async { "ok" })))
-                .nest_with(mcp, move |_| ok());
-            cli.settings_for_layers = settings;
-            let app = cli.assemble_app(pool);
-            let post = |path: &str| {
-                let req = Request::post(path).header("host", "localhost");
-                app.clone().oneshot(req.body(Body::empty()).unwrap())
-            };
-            let r = post(mcp).await.expect("request");
-            assert_eq!(r.status(), StatusCode::OK, "{mcp} is CSRF-checked");
-            let r = post("/p").await.expect("request");
-            assert_eq!(r.status(), StatusCode::FORBIDDEN, "/p lost its CSRF check");
+        for (prefix, mcp) in [
+            (None, "/mcp"),
+            (Some("/agents"), "/agents"),
+            (Some("/agents/"), "/agents"),
+        ] {
+            let app = mcp_csrf_app(prefix).await;
+            for tail in ["", "/token", "/oauth/token"] {
+                let path = format!("{mcp}{tail}");
+                assert_eq!(post_status(&app, &path).await, StatusCode::OK, "{path}");
+            }
+            for path in ["/p", &format!("{mcp}/settings")] {
+                let status = post_status(&app, path).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "{path} lost its CSRF check");
+            }
+        }
+    }
+
+    /// A root `[mcp] prefix` would exempt `/` and `/token`: exempt nothing.
+    #[cfg(all(feature = "config", feature = "csrf", feature = "mcp"))]
+    #[tokio::test]
+    async fn csrf_mount_refuses_a_root_mcp_prefix() {
+        let _serial = serialized();
+        for prefix in ["/", ""] {
+            let app = mcp_csrf_app(Some(prefix)).await;
+            for path in ["/", "/token", "/oauth/token", "/p"] {
+                let status = post_status(&app, path).await;
+                assert_eq!(status, StatusCode::FORBIDDEN, "prefix {prefix:?}: {path}");
+            }
         }
     }
 

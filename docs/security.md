@@ -272,7 +272,7 @@ let app = Router::new()
 
 **Exempting collector endpoints.** `CsrfConfig::exempt_prefix("/path")` (repeatable) skips CSRF enforcement for unsafe methods on requests whose path starts with the given prefix. This is for append-only, no-auth-state endpoints hit via `navigator.sendBeacon` — e.g. an analytics collector — which can't set an `X-CSRF-Token` header and, when the page is served from a CDN cache that strips `Set-Cookie`, may carry no CSRF cookie at all. Keep prefixes narrow and never exempt anything that reads or writes auth state.
 
-With the `mcp` feature, `Cli::with_csrf()` and `with_csrf_config()` exempt the `[mcp] prefix` (default `/mcp`) themselves: MCP clients authenticate with a bearer token and send no CSRF cookie.
+With the `mcp` feature, `Cli::with_csrf()` and `with_csrf_config()` exempt the MCP endpoints themselves: `{prefix}`, `{prefix}/token` and `{prefix}/oauth/token` for the `[mcp] prefix` (default `/mcp`), nothing else under it. MCP clients send no CSRF cookie. The tenant router checks an agent token there; the single-database `mcp::router(pool)` checks none, so put your own auth in front of it. A prefix of `/` exempts nothing and logs a warning.
 
 **The auto-admin.** When you call `.with_session_auth(...)`, CSRF is mounted on every admin mutation automatically — create, update, delete, bulk actions, audit cleanup — and every admin form renders its token for you. There is nothing to wire up and no way to opt out.
 

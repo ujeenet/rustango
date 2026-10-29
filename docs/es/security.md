@@ -272,7 +272,7 @@ let app = Router::new()
 
 **Eximir endpoints recolectores.** `CsrfConfig::exempt_prefix("/path")` (repetible) omite la aplicación de CSRF para los métodos inseguros en peticiones cuya ruta comienza con el prefijo dado. Esto es para endpoints de solo anexado, sin estado de autenticación, alcanzados vía `navigator.sendBeacon` — por ejemplo, un recolector de analíticas — que no pueden establecer una cabecera `X-CSRF-Token` y, cuando la página se sirve desde una caché de CDN que elimina `Set-Cookie`, puede que no lleven ninguna cookie CSRF en absoluto. Mantén los prefijos estrechos y nunca eximas nada que lea o escriba estado de autenticación.
 
-Con la funcionalidad `mcp`, `Cli::with_csrf()` y `with_csrf_config()` eximen por sí mismos el `[mcp] prefix` (por defecto `/mcp`): los clientes MCP se autentican con un token bearer y no envían cookie CSRF.
+Con la funcionalidad `mcp`, `Cli::with_csrf()` y `with_csrf_config()` eximen por sí mismos los endpoints MCP: `{prefix}`, `{prefix}/token` y `{prefix}/oauth/token` para el `[mcp] prefix` (por defecto `/mcp`), nada más por debajo. Los clientes MCP no envían cookie CSRF. El router tenant comprueba allí un token de agente; el `mcp::router(pool)` de base única no comprueba ninguno, así que pon tu propia autenticación delante. Un prefijo `/` no exime nada y registra un aviso.
 
 **El auto-admin.** En cuanto llamas a `.with_session_auth(...)`, CSRF se monta automáticamente en cada mutación del admin — crear, actualizar, borrar, acciones masivas, limpieza de auditoría — y cada formulario del admin renderiza su token por ti. No hay nada que cablear ni forma de desactivarlo.
 

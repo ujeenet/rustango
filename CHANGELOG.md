@@ -21,8 +21,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade".
 - Scaffolder: `new --features tenancy` picks the tenant template and is refused with another one; the tenant README and next steps add `create-operator`; the api template writes no unread `config/*.toml`.
-- `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it; `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
-- `Cli::with_csrf*()` exempts the `[mcp] prefix`, so MCP clients are not refused with 403.
+- `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it with HTTP Basic (a browser session still gets 401); `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
+- `Cli::with_csrf*()` exempts the MCP endpoints (`{prefix}`, `{prefix}/token`, `{prefix}/oauth/token`), so MCP clients are not refused with 403; the rest of the prefix keeps CSRF, and a `/` prefix exempts nothing. New `CsrfConfig::exempt_paths` / `exempt_path` for exact-path exemptions.
 - Admin Home links and breadcrumbs point at `<prefix>`, not `<prefix>/`, which a nested admin answers with 404; tenancy help texts name `/login`, not `/__login`.
 
 ## [0.61.10] — 2026-10-29

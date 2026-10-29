@@ -49,6 +49,25 @@ impl McpState {
     }
 }
 
+/// Where agents trade a credential for a token, below the mount prefix.
+const TOKEN_PATH: &str = "/token";
+/// The OAuth 2.1 `client_credentials` endpoint, below the mount prefix.
+const OAUTH_TOKEN_PATH: &str = "/oauth/token";
+
+/// Every path an MCP client POSTs to under `prefix`; CSRF exempts these.
+/// `None` for a root prefix, whose endpoints would be `/` and `/token`.
+pub(crate) fn post_endpoints(prefix: &str) -> Option<[String; 3]> {
+    let base = prefix.trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    Some([
+        base.to_owned(),
+        format!("{base}{TOKEN_PATH}"),
+        format!("{base}{OAUTH_TOKEN_PATH}"),
+    ])
+}
+
 /// State of the routers that authenticate: the token lifecycle is
 /// always there, so no handler has an "auth not configured" case.
 /// `pub` in a private module, so the `*_for::<DB>` bounds can name it
@@ -205,11 +224,11 @@ where
         .route("/", root)
         // Tokens, and refusals of them: no cache keeps either.
         .route(
-            "/token",
+            TOKEN_PATH,
             post(agent_token::<DB>).layer(map_response(crate::vary::token_reply)),
         )
         .route(
-            "/oauth/token",
+            OAUTH_TOKEN_PATH,
             post(oauth::oauth_token::<DB>).layer(map_response(crate::vary::token_reply)),
         )
         .route(

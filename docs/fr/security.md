@@ -272,7 +272,7 @@ let app = Router::new()
 
 **Exempter les endpoints collecteurs.** `CsrfConfig::exempt_prefix("/path")` (répétable) ignore l'application du CSRF pour les méthodes non sûres sur les requêtes dont le chemin commence par le préfixe donné. Ceci concerne les endpoints append-only, sans état d'authentification, atteints via `navigator.sendBeacon` — par exemple un collecteur d'analytics — qui ne peuvent pas définir un en-tête `X-CSRF-Token` et, lorsque la page est servie depuis un cache CDN qui supprime `Set-Cookie`, peuvent ne porter aucun cookie CSRF du tout. Gardez les préfixes étroits et n'exemptez jamais quoi que ce soit qui lit ou écrit un état d'authentification.
 
-Avec la fonctionnalité `mcp`, `Cli::with_csrf()` et `with_csrf_config()` exemptent eux-mêmes le `[mcp] prefix` (par défaut `/mcp`) : les clients MCP s'authentifient avec un jeton bearer et n'envoient pas de cookie CSRF.
+Avec la fonctionnalité `mcp`, `Cli::with_csrf()` et `with_csrf_config()` exemptent eux-mêmes les endpoints MCP : `{prefix}`, `{prefix}/token` et `{prefix}/oauth/token` pour le `[mcp] prefix` (par défaut `/mcp`), rien d'autre en dessous. Les clients MCP n'envoient pas de cookie CSRF. Le routeur tenant y vérifie un jeton d'agent ; le `mcp::router(pool)` mono-base n'en vérifie aucun, placez donc votre propre authentification devant. Un préfixe `/` n'exempte rien et journalise un avertissement.
 
 **L'auto-admin.** Dès que vous appelez `.with_session_auth(...)`, le CSRF est monté automatiquement sur chaque mutation de l'admin — création, modification, suppression, actions groupées, purge d'audit — et chaque formulaire de l'admin rend son jeton pour vous. Il n'y a rien à câbler et aucun moyen de s'y soustraire.
 

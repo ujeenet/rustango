@@ -2997,9 +2997,9 @@ pub fn router() -> Router<()> {{
         .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
-        // The permission check needs a signed-in tenant user: HTTP Basic
-        // against the tenant's users. Token clients: add `ApiKeyBackend`
-        // or a `JwtBackend` to the list.
+        // The permission check needs a tenant user. `ModelBackend` is HTTP
+        // Basic only; a browser session from `/login` is not read here (401).
+        // Token clients: add `ApiKeyBackend` or a `JwtBackend` to the list.
         .require_auth(vec![Arc::new(ModelBackend)])
 }}
 

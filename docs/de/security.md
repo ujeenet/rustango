@@ -272,7 +272,7 @@ let app = Router::new()
 
 **Collector-Endpunkte ausnehmen.** `CsrfConfig::exempt_prefix("/path")` (wiederholbar) überspringt die CSRF-Durchsetzung für unsichere Methoden bei Anfragen, deren Pfad mit dem angegebenen Präfix beginnt. Das ist für Append-only-, zustandslose Endpunkte gedacht, die per `navigator.sendBeacon` angesprochen werden — z. B. ein Analytics-Collector — die keinen `X-CSRF-Token`-Header setzen können und, wenn die Seite aus einem CDN-Cache ausgeliefert wird, der `Set-Cookie` entfernt, möglicherweise gar kein CSRF-Cookie mitführen. Halte Präfixe eng und nimm niemals etwas aus, das Auth-Zustand liest oder schreibt.
 
-Mit dem Feature `mcp` nehmen `Cli::with_csrf()` und `with_csrf_config()` das `[mcp] prefix` (Standard `/mcp`) selbst aus: MCP-Clients authentifizieren sich mit einem Bearer-Token und senden kein CSRF-Cookie.
+Mit dem Feature `mcp` nehmen `Cli::with_csrf()` und `with_csrf_config()` die MCP-Endpunkte selbst aus: `{prefix}`, `{prefix}/token` und `{prefix}/oauth/token` für das `[mcp] prefix` (Standard `/mcp`), sonst nichts darunter. MCP-Clients senden kein CSRF-Cookie. Der Tenant-Router prüft dort ein Agent-Token; das Single-Database-`mcp::router(pool)` prüft keins, also setze deine eigene Auth davor. Ein Präfix `/` nimmt nichts aus und loggt eine Warnung.
 
 **Der Auto-Admin.** Sobald du `.with_session_auth(...)` aufrufst, wird CSRF automatisch auf jede Admin-Mutation gelegt — anlegen, ändern, löschen, Bulk-Aktionen, Audit-Cleanup — und jedes Admin-Formular rendert seinen Token selbst. Es gibt nichts zu verdrahten und keine Möglichkeit, sich davon abzumelden.
 

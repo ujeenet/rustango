@@ -79,9 +79,6 @@ pub(crate) fn current_csrf_input() -> String {
     csrf_input_for(&super::session::current_csrf_token().unwrap_or_default())
 }
 
-/// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
-/// Used by tests and any path that has the session in hand directly
-/// (without going through the task-local). #253 slice B.
 /// The admin index URL. A nested router's `/` answers `<prefix>`, not
 /// `<prefix>/`, so the link carries no trailing slash; `/` at the root.
 pub(crate) fn admin_home(prefix: &str) -> &str {
@@ -91,6 +88,9 @@ pub(crate) fn admin_home(prefix: &str) -> &str {
     }
 }
 
+/// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
+/// Used by tests and any path that has the session in hand directly
+/// (without going through the task-local). #253 slice B.
 pub(crate) fn chrome_context_with_session(
     state: &AppState,
     active_table: Option<&str>,
@@ -1036,6 +1036,15 @@ impl FormLayout {
 
 #[cfg(test)]
 mod tests {
+    /// Home is the prefix itself, and `/` for an admin mounted at the root.
+    #[test]
+    fn admin_home_has_no_trailing_slash() {
+        assert_eq!(super::admin_home(""), "/");
+        assert_eq!(super::admin_home("/"), "/");
+        assert_eq!(super::admin_home("/admin"), "/admin");
+        assert_eq!(super::admin_home("/admin/"), "/admin");
+    }
+
     use super::*;
     use crate::core::FieldType;
 

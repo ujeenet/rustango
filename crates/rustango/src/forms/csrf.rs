@@ -143,6 +143,9 @@ pub struct CsrfConfig {
     /// `/beacon/x`, not `/beacon-admin`. Keep prefixes narrow and
     /// only exempt append-only endpoints that read/write no auth state.
     pub exempt_prefixes: Vec<String>,
+    /// Exact paths exempt from CSRF enforcement, nothing below them.
+    /// Default `[]`. `Cli::with_csrf*()` adds the MCP endpoints here.
+    pub exempt_paths: Vec<String>,
     /// Enforce CSRF on the HTTP `QUERY` method (RFC 10008). Default
     /// `false` — QUERY is a *safe* method, browsers can't form-submit it,
     /// and a cross-origin `fetch` with method `QUERY` is never a
@@ -177,6 +180,7 @@ impl Default for CsrfConfig {
             secure: true,
             trusted_origins: Vec::new(),
             exempt_prefixes: Vec::new(),
+            exempt_paths: Vec::new(),
             require_csrf_on_query: false,
             report_paths: vec!["/__csp-report".to_owned()],
         }
@@ -224,6 +228,13 @@ impl CsrfConfig {
     #[must_use]
     pub fn exempt_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.exempt_prefixes.push(prefix.into());
+        self
+    }
+
+    /// Builder — exempt one exact path, not the paths below it.
+    #[must_use]
+    pub fn exempt_path(mut self, path: impl Into<String>) -> Self {
+        self.exempt_paths.push(path.into());
         self
     }
 
@@ -529,6 +540,7 @@ where
                 Some(a) => (
                     Arc::new(CsrfConfig {
                         exempt_prefixes: Vec::new(),
+                        exempt_paths: Vec::new(),
                         ..CsrfConfig::clone(&a.cfg)
                     }),
                     a.secure_from,
@@ -555,7 +567,8 @@ where
                 // Enforce on unsafe methods — unless the path is exempt
                 // (beacon/collector endpoints; see `CsrfConfig::exempt_prefix`).
                 let enforced = !method_is_csrf_exempt(req.method(), &cfg)
-                    && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes);
+                    && !path_is_exempt(req.uri().path(), &cfg.exempt_prefixes)
+                    && !cfg.exempt_paths.iter().any(|p| p == req.uri().path());
                 let report = is_browser_report(&req, &cfg.report_paths);
                 let mut req = if enforced {
                     // Origin-header defense-in-depth. Always runs; an empty
