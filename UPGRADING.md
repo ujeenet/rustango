@@ -180,7 +180,7 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 - The bare admin's `static_url` is now under its mount: the favicon is `<admin_prefix>/__static__/icon.png`. Sessions are no longer waived for `/__static__` paths.
 - Basic-auth (admin and tenancy) and API-key credentials take one slot on a shared counter before the compare: the account lock for a known client, else the per-IP limit (the global one without a client IP). A right credential gives it back but never clears the account's failures; only a login does. That costs about ten cache calls per request (reads, an `incr`, a `decr`). A wrong one keeps it. When the lockout cache errors, the attempt is admitted uncounted (logged as a warning), so an outage disables the account lock rather than every login. Unknown clients reserve a full login slot, as before. Parallel right requests from one Basic account past `max_attempts` wait for a slot, at most one `hash_wait`.
 - `require_perm` returns `503` when the permission read fails (was `403`).
-- Resetting an operator's TOTP (console or `reset-operator-totp`) now signs that operator out everywhere.
+- Resetting a TOTP device (operator console, `reset-operator-totp`, `reset-admin-totp`) now signs that account out everywhere.
 - `[security] cors_allow_credentials = true` with `cors_allowed_origins = ["*"]` is now off, with a logged error; it never worked in browsers. With credentials, a `"*"` in `cors_allowed_headers` / `cors_expose_headers` is dropped: list the headers.
 - `default = "current_user"`, `"session_user"` and `"user"` still fail to compile, now with a message that names Postgres as the only backend that takes them.
 - `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.

@@ -368,6 +368,12 @@ async fn totp_off_by_code_and_by_cli(pool: &Pool) {
         .await
         .expect("reset-admin-totp");
     assert!(totp_store::device(pool, uid).await.is_none());
+    // A session opened with the lost device ends with it.
+    let (status, _, _) = send(&app, "/account/password", String::new(), &cookie).await;
+    assert!(
+        status.is_redirection(),
+        "the old session survived: {status}"
+    );
     assert!(audit_sources(pool, "rustango_admin_users", &pk)
         .await
         .contains(&"cli".to_owned()));
