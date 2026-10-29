@@ -853,7 +853,8 @@ async fn migrate<W: Write>(
                 "`migrate <target> --dry-run` is not supported — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
-        return migrate_dry_run_cmd(pool, dir, &SystemView::tenant(dir), w).await;
+        let dirs = [dir.to_path_buf()];
+        return migrate_dry_run_cmd(pool, &dirs, &SystemView::tenant(dir), w).await;
     }
 
     if let Some(target) = positional {
@@ -985,13 +986,14 @@ impl SystemView {
 const NOT_GENERATED: &str = "the framework's system migrations are not on disk yet; \
                              `migrate` generates and applies them";
 
-/// `migrate --dry-run`: what `migrate` runs from `system`, then from `dir`.
+/// `migrate --dry-run`: what `migrate` runs from `system`, then from each
+/// of `dirs` in order.
 ///
 /// # Errors
 /// As [`runner::preview_pending`].
 pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     pool: &Pool,
-    dir: &Path,
+    dirs: &[std::path::PathBuf],
     system: &SystemView,
     w: &mut W,
 ) -> Result<(), MigrateError> {
@@ -1000,7 +1002,7 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     let not_generated = system_files.is_none();
     let all = system.planned(system_files)?;
     let ledger = runner::SYSTEM_LEDGER_TABLE;
-    let owned = super::chains::project_owned(dir)?;
+    let owned = super::chains::project_owned(dirs)?;
     let steps = runner::preview_pending(
         pool,
         &system.dir,
@@ -1012,11 +1014,13 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     )
     .await?;
     previews.extend(steps.into_iter().map(|p| (p, "system, ")));
-    let project = runner::migrate_dry_run_pool(pool, dir).await?;
-    previews.extend(project.into_iter().map(|p| (p, "")));
+    for dir in dirs {
+        let project = runner::migrate_dry_run_pool(pool, dir).await?;
+        previews.extend(project.into_iter().map(|p| (p, "")));
+    }
     // What `migrate` runs after both chains.
     let mut after = Vec::new();
-    let converge = super::chains::converge_preview(pool, &all, system.scope, dir).await?;
+    let converge = super::chains::converge_preview(pool, &all, system.scope, dirs).await?;
     if !converge.is_empty() {
         after.push(("converge framework tables".to_owned(), converge));
     }
@@ -1024,7 +1028,7 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     let bootstrap = shared_bootstrap()
         .into_iter()
         .chain(tenant.then(tenant_bootstrap).into_iter().flatten());
-    let created = super::chains::pending_creates(pool, &all, system.scope, dir).await?;
+    let created = super::chains::pending_creates(pool, &all, system.scope, dirs).await?;
     for b in bootstrap {
         if created.contains(b.table) || runner::try_table_exists_here(pool, b.table).await? {
             continue;
@@ -1096,7 +1100,7 @@ where
         pool,
         &chain,
         super::MigrationScope::Tenant,
-        dir,
+        &[dir.to_path_buf()],
         None,
         signals,
         project,

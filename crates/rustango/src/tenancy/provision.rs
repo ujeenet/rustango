@@ -2849,15 +2849,12 @@ where
     let forward: Option<&dyn tenant_migrate::TenantMigrationObserver> = Some(&forward);
 
     // No backend branch: `migrate_one_tenant` owns the
-    // schema-mode-is-PG-only dispatch that used to be duplicated here.
-    let mut applied = Vec::new();
-    for dir in crate::migrate::file::project_migration_dirs(dir) {
-        match tenant_migrate::migrate_one_tenant(pools, org, &dir, registry_url, forward).await {
-            Ok(mut more) => applied.append(&mut more),
-            Err(e) => return MigrationsOutcome::Failed(e.to_string()),
-        }
+    // schema-mode-is-PG-only dispatch that used to be duplicated here,
+    // and walks the app folders.
+    match tenant_migrate::migrate_one_tenant(pools, org, dir, registry_url, forward).await {
+        Ok(applied) => MigrationsOutcome::Applied(applied),
+        Err(e) => MigrationsOutcome::Failed(e.to_string()),
     }
-    MigrationsOutcome::Applied(applied)
 }
 
 /// Provisioning for surfaces that have erased the backend type.

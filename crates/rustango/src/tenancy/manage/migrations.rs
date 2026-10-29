@@ -33,31 +33,16 @@ where
             max_positionals: 0,
         },
     )?;
-    let dirs = rustango::migrate::file::project_migration_dirs(dir);
-    let mut failed = None;
-    for d in &dirs {
-        dir_header(w, d, &dirs)?;
-        failed = failed.or(migrate_tenants_in(pools, registry_url, d, w).await?.err());
-    }
-    failed.map_or(Ok(()), Err)
+    migrate_tenants_in(pools, registry_url, dir, w).await
 }
 
-/// Names `d` when there are app folders to tell apart.
-fn dir_header<W: Write>(w: &mut W, d: &Path, dirs: &[std::path::PathBuf]) -> std::io::Result<()> {
-    if dirs.len() > 1 {
-        writeln!(w, "{}:", d.display())?;
-    }
-    Ok(())
-}
-
-/// Tenant-scoped files of `dir` across active tenants, then the report.
-/// The inner `Err` is the failed tenants, so the next dir still runs.
+/// Tenant-scoped files of `dir`'s project across active tenants, then the report.
 async fn migrate_tenants_in<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     dir: &Path,
     w: &mut W,
-) -> Result<Result<(), TenancyError>, TenancyError>
+) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
@@ -73,10 +58,10 @@ where
     )
     .await?;
     let w = progress.into_inner();
-    Ok(write_tenant_report(w, &report))
+    write_tenant_report(w, &report)
 }
 
-/// Registry-scoped files of `dir`, then what was applied.
+/// Registry-scoped files of `dir`'s project, then what was applied.
 async fn migrate_registry_in<W: Write, DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
@@ -402,12 +387,7 @@ where
     if parsed.has("--dry-run") {
         return run_registry_scoped(pools, dir, &["--dry-run".to_owned()], w).await;
     }
-    let dirs = rustango::migrate::file::project_migration_dirs(dir);
-    for d in &dirs {
-        dir_header(w, d, &dirs)?;
-        migrate_registry_in(pools, d, w).await?;
-    }
-    Ok(())
+    migrate_registry_in(pools, dir, w).await
 }
 
 // ---------- migrate (scope-aware) ----------
@@ -528,16 +508,11 @@ where
         return run_registry_scoped(pools, dir, args, w).await;
     }
 
-    // Per dir, in boot's order: the registry, then the tenants through the
-    // one dispatch seam (see `migrate_tenants_dyn_with_progress`).
-    let dirs = rustango::migrate::file::project_migration_dirs(dir);
-    let mut failed = None;
-    for d in &dirs {
-        dir_header(w, d, &dirs)?;
-        migrate_registry_in(pools, d, w).await?;
-        failed = failed.or(migrate_tenants_in(pools, registry_url, d, w).await?.err());
-    }
-    failed.map_or(Ok(()), Err)
+    // As boot does: the registry, then the tenants through the one
+    // dispatch seam (see `migrate_tenants_dyn_with_progress`); each walks
+    // the app folders itself.
+    migrate_registry_in(pools, dir, w).await?;
+    migrate_tenants_in(pools, registry_url, dir, w).await
 }
 
 /// Run the single-tenant `migrate` runner with `args` against the registry,
@@ -555,37 +530,52 @@ where
     use rustango::migrate::MigrationScope;
     let target = args.iter().find(|a| !a.starts_with('-'));
     if target.is_none() && args.iter().any(|a| a == "--dry-run") {
-        // The registry's system chain is registry-scoped.
-        let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
+        // The registry's system chain is registry-scoped; the app folders
+        // are previewed as `migrate` applies them.
+        let project = tenant_migrate::ScopedProject::of(dir, MigrationScope::Registry).await?;
         let system = rustango::migrate::manage::SystemView::registry(dir);
         return rustango::migrate::manage::migrate_dry_run_cmd(
             &pools.registry_pool(),
-            scoped.path(dir),
+            project.dirs(),
             &system,
             w,
         )
         .await
         .map_err(TenancyError::Migrate);
     }
+    // The folder holding the target: the project's own, or an app's.
+    let mut source = dir.to_path_buf();
     if let Some(target) = target {
-        let all = rustango::migrate::file::list_dir(dir)?;
-        if all
-            .iter()
-            .any(|m| &m.name == target && m.scope == MigrationScope::Tenant)
-        {
-            return Err(TenancyError::Validation(format!(
-                "`{target}` is tenant-scoped — `migrate <target>` moves the registry only; \
-                 apply it with `migrate-tenants`, roll it back with \
-                 `downgrade [N] --tenant <slug>` or `downgrade [N] --all-tenants`"
-            )));
+        for d in rustango::migrate::file::project_migration_dirs(dir) {
+            let all = rustango::migrate::file::list_dir(&d)?;
+            let Some(m) = all.iter().find(|m| &m.name == target) else {
+                continue;
+            };
+            if m.scope == MigrationScope::Tenant {
+                return Err(TenancyError::Validation(format!(
+                    "`{target}` is tenant-scoped — `migrate <target>` moves the registry only; \
+                     apply it with `migrate-tenants`, roll it back with \
+                     `downgrade [N] --tenant <slug>` or `downgrade [N] --all-tenants`"
+                )));
+            }
+            source = d;
+            break;
         }
     }
-    let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
+    // An app folder is always copied: run in place, it would get a `system/`.
+    let scoped = if source.as_path() == dir {
+        tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?
+    } else {
+        tenant_migrate::ScopedDir::Owned(tenant_migrate::scoped_copy(
+            &source,
+            MigrationScope::Registry,
+        )?)
+    };
     let mut forwarded = vec!["migrate".to_owned()];
     forwarded.extend(args.iter().cloned());
     rustango::migrate::manage::run_with_writer(
         &pools.registry_pool(),
-        scoped.path(dir),
+        scoped.path(&source),
         forwarded,
         w,
     )

@@ -1058,12 +1058,7 @@ impl Cli {
         args: Vec<String>,
         out: &mut W,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let registry = if lazy {
-            crate::sql::Pool::connect_lazy(url)?
-        } else {
-            crate::sql::Pool::connect(url).await?
-        };
-        match registry {
+        match open_registry(url, lazy).await? {
             #[cfg(feature = "postgres")]
             crate::sql::Pool::Postgres(p) => self.run_tenancy_verb_to(p, url, args, out).await,
             #[cfg(feature = "mysql")]
@@ -2360,6 +2355,30 @@ fn routes_from_settings(
     rc
 }
 
+/// The tenancy registry at `url`, its backend picked from the scheme alone,
+/// whatever other backends the build has; `lazy` opens it without dialling.
+#[cfg(feature = "tenancy")]
+async fn open_registry(
+    url: &str,
+    lazy: bool,
+) -> Result<crate::sql::Pool, Box<dyn std::error::Error>> {
+    use crate::sql::{Pool, PoolError};
+    let opened = if lazy {
+        Pool::connect_lazy(url)
+    } else {
+        Pool::connect(url).await
+    };
+    opened.map_err(|e| match e {
+        PoolError::UnsupportedScheme(_) | PoolError::FeatureNotEnabled { .. } => format!(
+            "`Cli::tenancy()` registry: {e}. Database-mode tenancy works on every compiled-in \
+             backend (`postgres`, `mysql`, `sqlite`); schema-mode tenancy, many tenants in one \
+             database through `SET search_path`, is Postgres-only"
+        )
+        .into(),
+        other => other.into(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2416,27 +2435,34 @@ mod tests {
         assert!(applied > 0, "no system migration applied");
     }
 
-    /// A MySQL registry URL is dialled as MySQL, SQLite compiled in or not.
-    #[cfg(all(feature = "tenancy", feature = "mysql"))]
+    /// The registry's backend comes from the URL's scheme alone, whatever
+    /// else is compiled in; an unknown scheme gets the tenancy hint.
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
-    async fn tenancy_cli_opens_a_mysql_url_as_mysql() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let cli = Cli::new()
-            .tenancy()
-            .migrations_dir(tmp.path().join("migrations"));
-        let mut out: Vec<u8> = Vec::new();
-        let err = cli
-            .run_tenancy_url(
-                "mysql://u:pw@127.0.0.1:1/app",
-                false,
-                vec!["list-tenants".to_owned()],
-                &mut out,
-            )
+    async fn the_registry_backend_follows_the_url_scheme() {
+        use crate::sql::Pool;
+        #[cfg(feature = "mysql")]
+        assert!(matches!(
+            open_registry("mysql://u:pw@db.example/app", true).await,
+            Ok(Pool::Mysql(_))
+        ));
+        #[cfg(feature = "sqlite")]
+        assert!(matches!(
+            open_registry("sqlite::memory:", true).await,
+            Ok(Pool::Sqlite(_))
+        ));
+        #[cfg(feature = "postgres")]
+        assert!(matches!(
+            open_registry("postgres://u:pw@db.example/app", true).await,
+            Ok(Pool::Postgres(_))
+        ));
+        let err = open_registry("mariadb://u:pw@db.example/app", true)
             .await
-            .expect_err("nothing listens on port 1")
+            .err()
+            .expect("an unknown scheme")
             .to_string();
-        assert!(!err.contains("unable to open database file"), "{err}");
-        assert!(err.contains("nothing is listening"), "{err}");
+        assert!(err.contains("schema-mode tenancy"), "{err}");
+        assert!(!err.contains("pw"), "{err}");
     }
 
     /// `with_tenant_pools` reaches a SQLite tenancy verb (#1914): cap 0

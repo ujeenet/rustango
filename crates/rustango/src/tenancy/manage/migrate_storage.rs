@@ -656,11 +656,19 @@ fn old_copy_advice(
             .login_name
             .as_deref()
             .map_or_else(String::new, |l| format!(" and its login `{l}`"));
-        format!(
-            " Database `{}`{login} on server `{}` are no longer tracked by rustango; \
-             drop them there by hand too.",
-            r.database_name, r.server_name
-        )
+        let (name, server) = (&r.database_name, &r.server_name);
+        if r.created {
+            format!(
+                " Database `{name}`{login} on server `{server}` are no longer tracked by \
+                 rustango; drop them there by hand too."
+            )
+        } else {
+            // The run that recorded it stopped before its `CREATE` succeeded.
+            format!(
+                " Its record of database `{name}`{login} on server `{server}` is gone; \
+                 rustango may not have made them, so check before dropping either."
+            )
+        }
     });
     format!(
         "The old copy is still in {what} by hand. Not with `purge-tenant`: it would drop \
@@ -1600,5 +1608,25 @@ mod tests {
         let advice = old_copy_advice(None, "postgres://acme:pw@db.example/acme", Some(&record));
         assert!(advice.contains("login `acme`"), "{advice}");
         assert!(advice.contains("server `s`"), "{advice}");
+        assert!(advice.contains("drop them there by hand"), "{advice}");
+    }
+
+    /// A record whose `CREATE` never succeeded may name a database that is not
+    /// ours: the advice says to check, not to drop.
+    #[test]
+    fn the_advice_drops_only_what_rustango_made() {
+        let record = TenantDatabase {
+            id: crate::sql::Auto::default(),
+            org_slug: "acme".into(),
+            org_id: Some(1),
+            server_name: "s".into(),
+            database_name: "acme".into(),
+            login_name: Some("acme".into()),
+            created: false,
+            created_at: crate::sql::Auto::default(),
+        };
+        let advice = old_copy_advice(None, "postgres://acme@db.example/acme", Some(&record));
+        assert!(!advice.contains("drop them there by hand"), "{advice}");
+        assert!(advice.contains("check before dropping"), "{advice}");
     }
 }

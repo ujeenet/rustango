@@ -35,7 +35,7 @@ pub(crate) async fn migrate_chains<F, Fut>(
     pool: &Pool,
     chain: &SystemChain,
     scope: MigrationScope,
-    project_dir: &Path,
+    project_dirs: &[PathBuf],
     observer: Option<&dyn MigrationObserver>,
     signals: Signals<'_>,
     project: F,
@@ -49,7 +49,7 @@ where
         pool,
         chain,
         scope,
-        project_dir,
+        project_dirs,
         observer,
         project,
     ));
@@ -66,7 +66,7 @@ async fn locked_chains<F, Fut>(
     pool: &Pool,
     chain: &SystemChain,
     scope: MigrationScope,
-    project_dir: &Path,
+    project_dirs: &[PathBuf],
     observer: Option<&dyn MigrationObserver>,
     project: F,
 ) -> Result<Applied, MigrateError>
@@ -75,7 +75,7 @@ where
     Fut: Future<Output = Result<Vec<Migration>, MigrateError>>,
 {
     runner::with_migrate_lock_held(pool, |held| async move {
-        let tables = ProjectTables::read(held, pool, project_dir).await?;
+        let tables = ProjectTables::read(held, pool, project_dirs).await?;
         let run = Run {
             held,
             pool,
@@ -114,8 +114,8 @@ struct ProjectTables {
 }
 
 impl ProjectTables {
-    async fn read(held: LockHeld, pool: &Pool, dir: &Path) -> Result<Self, MigrateError> {
-        let migs = file::list_dir(dir)?;
+    async fn read(held: LockHeld, pool: &Pool, dirs: &[PathBuf]) -> Result<Self, MigrateError> {
+        let migs = file::list_each(dirs)?;
         let applied = runner::ledger_names(held, pool, runner::LEDGER_TABLE).await?;
         Ok(Self::of(&migs, &applied))
     }
@@ -162,8 +162,8 @@ impl ProjectTables {
 ///
 /// # Errors
 /// An unreadable migrations directory.
-pub(crate) fn project_owned(dir: &Path) -> Result<Vec<String>, MigrateError> {
-    let owned = ProjectTables::of(&file::list_dir(dir)?, &Default::default()).owned;
+pub(crate) fn project_owned(dirs: &[PathBuf]) -> Result<Vec<String>, MigrateError> {
+    let owned = ProjectTables::of(&file::list_each(dirs)?, &Default::default()).owned;
     Ok(owned.into_iter().collect())
 }
 
@@ -524,11 +524,11 @@ pub(crate) async fn pending_creates(
     pool: &Pool,
     steps: &[Migration],
     scope: MigrationScope,
-    project_dir: &Path,
+    project_dirs: &[PathBuf],
 ) -> Result<BTreeSet<String>, MigrateError> {
     let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
     let system_applied = runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await?;
-    let project = file::list_dir(project_dir)?;
+    let project = file::list_each(project_dirs)?;
     let project = project.iter().filter(|m| !applied.contains(&m.name));
     let system = steps
         .iter()
@@ -546,10 +546,10 @@ pub(crate) async fn converge_preview(
     pool: &Pool,
     steps: &[Migration],
     scope: MigrationScope,
-    project_dir: &Path,
+    project_dirs: &[PathBuf],
 ) -> Result<Vec<PreviewLine>, MigrateError> {
     let applied = runner::applied_or_empty(pool, runner::LEDGER_TABLE).await?;
-    let tables = ProjectTables::of(&file::list_dir(project_dir)?, &applied);
+    let tables = ProjectTables::of(&file::list_each(project_dirs)?, &applied);
     let wanted: Vec<Migration> = steps.iter().filter(|m| m.scope == scope).cloned().collect();
     let Some(last) = wanted.last() else {
         return Ok(Vec::new());
@@ -913,7 +913,7 @@ mod tests {
                 &pool,
                 &chain,
                 MigrationScope::Tenant,
-                &dir,
+                std::slice::from_ref(&dir),
                 None,
                 Signals::Skip,
                 |held| runner::migrate_pool_locked(held, &pool, &dir, None),

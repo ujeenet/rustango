@@ -241,6 +241,19 @@ where
     Ok(out)
 }
 
+/// [`list_dir`] of each of `dirs`, kept in their order: the order a
+/// tenancy project applies its folders in.
+///
+/// # Errors
+/// Whatever [`list_dir`] returns for any of them.
+pub(crate) fn list_each(dirs: &[PathBuf]) -> Result<Vec<Migration>, MigrateError> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        out.extend(list_dir(dir)?);
+    }
+    Ok(out)
+}
+
 /// Every migrations directory under `project_root`: the top-level
 /// `migrations/`, plus one per app at `<app>/migrations/`.
 ///

@@ -1588,14 +1588,14 @@ async fn check_names_tenants_behind_on_tenant_migrations(pool: &Pool) {
     let dir = env.dir("proj/migrations");
     let app = env.dir("proj/blog/migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
+    let mut behind = env.own_tenant("ckb").await;
+    behind.save_pool(&env.registry).await.expect("insert org");
+    env.migrate(&behind, &dir).await;
+    // Migrating the project's dir applies its app folders too.
     migration(&app, "0002_blog", "SELECT 1");
     let mut ahead = env.own_tenant("cka").await;
     ahead.save_pool(&env.registry).await.expect("insert org");
     env.migrate(&ahead, &dir).await;
-    env.migrate(&ahead, &app).await;
-    let mut behind = env.own_tenant("ckb").await;
-    behind.save_pool(&env.registry).await.expect("insert org");
-    env.migrate(&behind, &dir).await;
 
     let out = check_out(&env, &dir).await;
     assert!(
@@ -1712,6 +1712,86 @@ async fn migrate_applies_app_folders(pool: &Pool) {
         .await
         .expect("registry ledger");
     assert!(registry.contains("0005_blog_registry"));
+
+    // One system chain, the project's: the app folder gets none.
+    let root = env.tmp.path().join("proj");
+    assert!(root.join("system/migrations").is_dir());
+    assert!(!root.join("blog/system").exists());
+    // A second run changes nothing.
+    let system_files = std::fs::read_dir(root.join("system/migrations"))
+        .unwrap()
+        .count();
+    let out = env
+        .run_out(&dir, &["migrate"])
+        .await
+        .expect("migrate again");
+    assert!(
+        out.contains("registry: nothing to migrate (already up to date)"),
+        "{out}"
+    );
+    assert!(
+        out.contains(&format!("· {}: up to date", org.slug)),
+        "{out}"
+    );
+    let again = std::fs::read_dir(root.join("system/migrations"))
+        .unwrap()
+        .count();
+    assert_eq!(system_files, again, "{out}");
+}
+
+/// An app folder the process may not write to still migrates: nothing is
+/// written beside it.
+#[cfg(unix)]
+async fn migrate_leaves_a_read_only_app_folder_alone(pool: &Pool) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let blog = env.dir("proj/blog");
+    let app = env.dir("proj/blog/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", "SELECT 1");
+    let mut org = env.own_tenant("mro").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    let read_only = std::fs::Permissions::from_mode(0o555);
+    for d in [&app, &blog] {
+        std::fs::set_permissions(d, read_only.clone()).unwrap();
+    }
+    let res = env.run_out(&dir, &["migrate"]).await;
+    for d in [&blog, &app] {
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let out = res.expect("migrate");
+    assert!(env.applied(&org).await.contains("0002_blog"), "{out}");
+}
+
+#[cfg(not(unix))]
+async fn migrate_leaves_a_read_only_app_folder_alone(_: &Pool) {}
+
+/// `migrate --dry-run` previews the app folders' registry files, and
+/// `migrate <target>` finds a target in one.
+async fn dry_run_and_target_see_app_folders(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Registry;
+    let env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
+    scoped_migration(&app, "0002_blog_registry", "SELECT 1", Registry);
+
+    let out = env
+        .run_out(&dir, &["migrate", "--dry-run"])
+        .await
+        .expect("dry run");
+    assert!(out.contains("0001_registry"), "{out}");
+    assert!(out.contains("0002_blog_registry"), "{out}");
+    let out = env
+        .run_out(&dir, &["migrate", "0002_blog_registry"])
+        .await
+        .expect("target");
+    let registry = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .expect("registry ledger");
+    assert!(registry.contains("0002_blog_registry"), "{out}");
+    assert!(!env.tmp.path().join("proj/blog/system").exists());
 }
 
 /// `check` lists the registry's pending framework steps from the system ledger.
@@ -1888,6 +1968,8 @@ tri_dialect_test! {
         check_names_tenants_behind_on_system_steps,
         check_keeps_no_tenant_pool_open,
         migrate_applies_app_folders,
+        migrate_leaves_a_read_only_app_folder_alone,
+        dry_run_and_target_see_app_folders,
         check_names_pending_registry_system_steps,
         ignored_tenancy_flags_are_refused,
         org_path_prefix_is_indexed,
