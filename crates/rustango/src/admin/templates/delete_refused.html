@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}
+    Cannot delete — {{ admin_title }}
+{% endblock title %}
+{% block body %}
+    <nav class="breadcrumb" aria-label="breadcrumb">
+        <ol>
+            <li>
+                <a href="{{ admin_home }}">{{ admin_title }}</a>
+            </li>
+            <li>
+                <a href="{{ admin_prefix }}/{{ model.table }}">{{ model.label_plural | default(value=model.name) }}</a>
+            </li>
+            <li>
+                <strong>Cannot delete</strong>
+            </li>
+        </ol>
+    </nav>
+    <h1>Cannot delete</h1>
+    <p class="error flash">{{ message }}</p>
+    <p>
+        <a href="{{ admin_prefix }}/{{ model.table }}">Back to {{ model.label_plural | default(value=model.name) }}</a>
+    </p>
+{% endblock body %}

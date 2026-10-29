@@ -361,6 +361,8 @@ empreinte inviolable. Deux endroits l'exposent :
   les changements récents (qui, quand, et le diff), avec un lien **Voir
   l'historique complet** (visible dans la [capture de détail](#inlines)
   ci-dessus).
+- Les entrées d'une ligne sont classées sous le texte canonique de sa clé : `/posts/007`
+  et `/posts/7` partagent un historique.
 - La vue **Activité** de la barre latérale (`GET /<prefix>/__audit`) est un
   flux transversal, du plus récent au plus ancien, avec des cartes de
   facettes par entité / opération / source et un formulaire de nettoyage pour
@@ -426,7 +428,9 @@ d'un modèle enregistré :
   `register_admin_queryset!("posts", hook)` où
   `hook: fn(&Parts) -> Vec<Filter>` restreint ce qu'une requête peut voir
   (p. ex. seulement les lignes de l'utilisateur courant). Plusieurs hooks sur
-  une table se combinent.
+  une table se combinent. Une création, une modification ou une ligne inline dont une FK
+  vise une ligne cible que ses hooks, le soft delete ou le hook `view` cachent est refusée
+  avec « no such object ».
 - **Permissions au niveau de la ligne** —
   `register_admin_object_permission!("posts", "change", check)` où
   `check: fn(&Parts, Option<&Value>) -> bool` autorise ou refuse par ligne.
@@ -640,7 +644,7 @@ Tous les chemins sont relatifs à `admin_prefix` :
 | `/<table>/<pk>` | GET | Vue détail (lecture seule), avec inlines + carte d'audit. |
 | `/<table>/<pk>` | POST | Soumission de mise à jour. |
 | `/<table>/<pk>/edit` | GET | Formulaire de modification. |
-| `/<table>/<pk>/delete` | POST | Suppression (après confirmation). |
+| `/<table>/<pk>/delete` | POST | Suppression (après confirmation). Une ligne encore référencée répond 409 : une page pour un navigateur, du JSON sinon. |
 | `/<table>/__action` | POST | Exécute une action groupée sur les PK sélectionnées. |
 | `/<table>/__autocomplete` | GET | JSON du typeahead FK (`?q=`). |
 | `/__docs` | GET | Référence de modèle. |

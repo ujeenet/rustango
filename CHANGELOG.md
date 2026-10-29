@@ -4,6 +4,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- Admin create, edit and inline rows refuse an FK that points at a target row the user cannot see (outside its queryset hooks, soft-deleted, or refused by its `view` hook) with "no such object"; a link the row already holds is kept.
+- Admin autocomplete works for a target whose primary key or display field has a `column` rename.
+- Admin edits and deletes are audited under the key's canonical text, so `/x/007` and `/x/7` share one history; the detail page reads it the same way.
+- An admin delete blocked by rows that still point at it shows a browser an admin page (409); other clients keep the JSON 409.
+
 ## [0.61.12] — 2026-10-29
 
 **Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); the doc-hidden `FieldSchemaParts` has a new `cast` field. See UPGRADING.

@@ -1748,6 +1748,14 @@ async fn plan_target(
                 &target.add_locked,
                 &mut values,
             );
+            if let Some(msg) =
+                super::views::hidden_fk_refusal(state, parts, target.child, &values, None).await?
+            {
+                return Err(InlinePlanError::Rejected(format!(
+                    "{name} row {}: {msg}",
+                    idx + 1
+                )));
+            }
             let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
                 values.into_iter().unzip();
             for (column, value) in &target.scope.0 {
@@ -1854,6 +1862,14 @@ async fn plan_target(
         }
         if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before)) {
             return Err(refused("change").into());
+        }
+        let stored = Some((target.pk, &pk));
+        if let Some(msg) =
+            super::views::hidden_fk_refusal(state, parts, target.child, &values, stored).await?
+        {
+            return Err(InlinePlanError::Rejected(format!(
+                "{name} row {raw_pk}: {msg}"
+            )));
         }
         let audit = ChildAudit {
             pk: pk.to_display_string(),

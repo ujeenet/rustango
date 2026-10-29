@@ -148,6 +148,14 @@ untouched.
 
 ---
 
+## Unreleased
+
+- Admin writes now refuse an FK to a target row the user's hooks hide; a form that relied on it gets "no such object".
+- Admin audit entries for edits and deletes are filed under the canonical key (`7`, not `007`); older entries keep the spelling they were filed under.
+- A blocked admin delete answers `Accept: text/html` with an HTML 409 page instead of JSON.
+
+---
+
 ## 0.61.12
 
 ### Tenancy

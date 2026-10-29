@@ -9,7 +9,7 @@ use axum::response::Response;
 use axum::Router;
 use tera::{Context, Tera};
 
-use super::{error_words, KeepBody, Message};
+use super::{accepts_html, error_words, KeepBody, Message};
 
 /// Largest plain-text error body read for its message.
 const MAX_MESSAGE_BYTES: usize = 2048;
@@ -370,14 +370,6 @@ fn add_vary(headers: &mut HeaderMap) {
             headers.append(header::VARY, HeaderValue::from_static(name));
         }
     }
-}
-
-fn accepts_html(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(header::ACCEPT)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .any(|a| a.to_ascii_lowercase().contains("text/html"))
 }
 
 #[cfg(feature = "admin")]

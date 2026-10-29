@@ -1691,6 +1691,7 @@ jobs:
           binary(=admin_row_scope_tri) |
           binary(=admin_list_state_tri) |
           binary(=admin_write_errors_tri) |
+          binary(=admin_write_targets_tri) |
           binary(=admin_edit_tri) |
           binary(=crud_refusals_tri) |
           binary(=admin_audit_writes_tri) |
