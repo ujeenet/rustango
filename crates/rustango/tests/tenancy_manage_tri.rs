@@ -269,12 +269,17 @@ async fn scratch(guards: &mut Vec<Box<dyn std::any::Any>>, var: &str) -> String 
 
 /// One tenant migration running `sql`.
 fn migration(dir: &Path, name: &str, sql: &str) {
+    scoped_migration(dir, name, sql, rustango::migrate::MigrationScope::Tenant);
+}
+
+/// One migration of `scope` running `sql`.
+fn scoped_migration(dir: &Path, name: &str, sql: &str, scope: rustango::migrate::MigrationScope) {
     let mig = rustango::migrate::Migration {
         name: name.to_owned(),
         created_at: "2026-10-09T00:00:00Z".into(),
         prev: None,
         atomic: true,
-        scope: rustango::migrate::MigrationScope::Tenant,
+        scope,
         replaces: Vec::new(),
         merges: Vec::new(),
         snapshot: serde_json::from_value(serde_json::json!({ "tables": [] })).unwrap(),
@@ -1668,6 +1673,93 @@ async fn check_names_tenants_behind_on_system_steps(pool: &Pool) {
     );
 }
 
+/// `migrate` and its two halves apply the `<app>/migrations/` folders too,
+/// so `check` has nothing left to report.
+async fn migrate_applies_app_folders(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Registry;
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", "SELECT 1");
+    scoped_migration(&app, "0003_blog_registry", "SELECT 1", Registry);
+    let mut org = env.own_tenant("mapp").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+
+    let out = env.run_out(&dir, &["migrate"]).await.expect("migrate");
+    let applied = env.applied(&org).await;
+    assert!(applied.contains("0001_tenant"), "{out}");
+    assert!(applied.contains("0002_blog"), "{out}");
+    let registry = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .expect("registry ledger");
+    assert!(registry.contains("0003_blog_registry"), "{out}");
+    let out = check_out(&env, &dir).await;
+    assert!(!out.contains("not applied"), "{out}");
+    assert!(!out.contains("behind on tenant migrations"), "{out}");
+
+    // The split verbs walk the same folders.
+    migration(&app, "0004_blog", "SELECT 1");
+    scoped_migration(&app, "0005_blog_registry", "SELECT 1", Registry);
+    env.run(&dir, &["migrate-registry"])
+        .await
+        .expect("migrate-registry");
+    env.run(&dir, &["migrate-tenants"])
+        .await
+        .expect("migrate-tenants");
+    assert!(env.applied(&org).await.contains("0004_blog"));
+    let registry = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .expect("registry ledger");
+    assert!(registry.contains("0005_blog_registry"));
+}
+
+/// `check` lists the registry's pending framework steps from the system ledger.
+async fn check_names_pending_registry_system_steps(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Registry;
+    let env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
+    env.run(&dir, &["migrate"]).await.expect("migrate");
+    late_system_step(
+        &env.dir("proj/system/migrations"),
+        "0099_late_registry_step",
+        Registry,
+    );
+
+    let out = check_out(&env, &dir).await;
+    assert!(
+        out.contains("system migration(s) not applied — run `manage migrate`"),
+        "{out}"
+    );
+    assert!(out.contains("system/0099_late_registry_step"), "{out}");
+    env.run(&dir, &["migrate"]).await.expect("migrate");
+    let out = check_out(&env, &dir).await;
+    assert!(!out.contains("0099_late_registry_step"), "{out}");
+}
+
+/// A framework step after the last one of `scope`, keeping its snapshot so
+/// `migrate` plans nothing more.
+fn late_system_step(system: &Path, name: &str, scope: rustango::migrate::MigrationScope) {
+    let mut step = rustango::migrate::file::list_dir(system)
+        .expect("system chain")
+        .into_iter()
+        .filter(|m| m.scope == scope)
+        .last()
+        .expect("a generated step");
+    step.prev = Some(step.name.clone());
+    step.name = name.to_owned();
+    step.replaces.clear();
+    step.forward = vec![rustango::migrate::Operation::Data(
+        rustango::migrate::DataOp {
+            sql: "SELECT 1".into(),
+            reverse_sql: Some("SELECT 1".into()),
+            reversible: true,
+        },
+    )];
+    rustango::migrate::file::write(&system.join(format!("{name}.json")), &step).unwrap();
+}
+
 /// `check` keeps no tenant pool open once that tenant's ledger is read.
 async fn check_keeps_no_tenant_pool_open(pool: &Pool) {
     let mut env = Env::new(pool).await;
@@ -1795,6 +1887,8 @@ tri_dialect_test! {
         check_bounds_an_unreachable_tenant,
         check_names_tenants_behind_on_system_steps,
         check_keeps_no_tenant_pool_open,
+        migrate_applies_app_folders,
+        check_names_pending_registry_system_steps,
         ignored_tenancy_flags_are_refused,
         org_path_prefix_is_indexed,
     ],

@@ -329,7 +329,8 @@ Im **Tenancy-Modus** (`Cli::tenancy()`) ist `migrate` scope-bewusst: es wendet
 zuerst Registry-Migrationen auf die gemeinsame Registry-Datenbank an, dann
 Tenant-Migrationen über jeden aktiven Tenant. Für feinere Kontrolle verwenden
 Sie [`migrate-registry`](#migrate-registry) /
-[`migrate-tenants`](#migrate-tenants).
+[`migrate-tenants`](#migrate-tenants). Alle drei wenden auch die `<app>/migrations/`-Ordner neben
+`migrations/` an, wie der Server beim Start.
 
 ### `migrate <target>`
 
@@ -835,7 +836,7 @@ Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
 - Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
-- Migrationen, die das Ledger noch nicht angewendet hat. Im Tenancy-Projekt: Registry-Dateien gegen die Registry, Tenant-Dateien gegen das Ledger jedes aktiven Tenants (die zurückliegenden Tenants werden genannt, zehn vollständig), `<app>/migrations/`-Ordner eingeschlossen. Acht Tenants werden gleichzeitig gelesen, jeder höchstens 5 s; ein langsamerer gilt als nicht lesbar. `check --no-tenants` überspringt die Tenant-Ledger
+- Migrationen, die das Ledger noch nicht angewendet hat. Im Tenancy-Projekt: Registry-Dateien gegen die Registry, Tenant-Dateien gegen das Ledger jedes aktiven Tenants (die zurückliegenden Tenants werden genannt, zehn vollständig), `<app>/migrations/`-Ordner eingeschlossen. Acht Tenants werden gleichzeitig gelesen, jeder höchstens 5 s; ein langsamerer gilt als nicht lesbar. `check --no-tenants` überspringt die Tenant-Ledger. Die Schritte des Frameworks in `system/migrations/` werden ebenfalls mit dem System-Ledger verglichen (im Tenancy-Projekt die Registry-Schritte mit der Registry)
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`

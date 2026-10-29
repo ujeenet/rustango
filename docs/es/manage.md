@@ -324,7 +324,8 @@ En **modo tenancy** (`Cli::tenancy()`), `migrate` es consciente del scope:
 primero aplica las migraciones de registry a la base de datos de registry
 compartida, luego aplica las migraciones de tenant a través de cada tenant
 activo. Para un control más fino, usa [`migrate-registry`](#migrate-registry) /
-[`migrate-tenants`](#migrate-tenants).
+[`migrate-tenants`](#migrate-tenants). Los tres aplican también las carpetas `<app>/migrations/` junto a
+`migrations/`, como hace el servidor al arrancar.
 
 ### `migrate <target>`
 
@@ -825,7 +826,7 @@ producción.
 - ≥ 1 modelo registrado vía `inventory`
 - BD accesible (`SELECT 1`)
 - Modelos registrados pero **ninguna** migración en disco (no compara recuentos — un directorio `migrations/` existente se reporta como info, sea cual sea el número)
-- Migraciones que el ledger aún no aplicó. En un proyecto tenancy: los archivos del registro contra el registro, los de tenant contra el ledger de cada tenant activo (se nombran los tenants atrasados, diez completos), carpetas `<app>/migrations/` incluidas. Se leen ocho tenants a la vez, cada uno 5 s como máximo; uno más lento se informa como ilegible. `check --no-tenants` omite los ledgers de los tenants
+- Migraciones que el ledger aún no aplicó. En un proyecto tenancy: los archivos del registro contra el registro, los de tenant contra el ledger de cada tenant activo (se nombran los tenants atrasados, diez completos), carpetas `<app>/migrations/` incluidas. Se leen ocho tenants a la vez, cada uno 5 s como máximo; uno más lento se informa como ilegible. `check --no-tenants` omite los ledgers de los tenants. Los pasos del framework en `system/migrations/` también se comparan con el ledger del sistema (en tenancy, los del registro contra el registro)
 
 **Con `--deploy`:**
 - `RUSTANGO_ENV` es `prod` o `production`

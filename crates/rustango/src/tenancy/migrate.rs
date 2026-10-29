@@ -1055,7 +1055,7 @@ pub(crate) async fn scoped_subset(
     if all.iter().all(|m| m.scope == scope) {
         return Ok(ScopedDir::Original);
     }
-    let temp = tempdir_under_target()?;
+    let temp = scoped_tempdir()?;
     let temp_path = temp.path().to_path_buf();
     for mig in &all {
         if mig.scope == scope {
@@ -1072,18 +1072,7 @@ pub(crate) enum ScopedDir {
     Original,
     /// Materialized a temp dir holding only the matching files.
     /// Caller drops to clean up.
-    Owned(TempDir),
-}
-
-/// Minimal temp-dir RAII handle. We don't pull `tempfile` into the
-/// dep tree just for this — `std::env::temp_dir()` + a unique
-/// suffix is enough.
-pub(crate) struct TempDir(std::path::PathBuf);
-
-impl TempDir {
-    fn path(&self) -> &Path {
-        &self.0
-    }
+    Owned(tempfile::TempDir),
 }
 
 impl ScopedDir {
@@ -1096,27 +1085,19 @@ impl ScopedDir {
     }
 }
 
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
+/// A new dir with a random name, owner-only on Unix: a leftover or planted
+/// dir is never reused, so only this run's files are applied.
+fn scoped_tempdir() -> Result<tempfile::TempDir, TenancyError> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("rustango_tenancy_scoped_");
+    // tempfile's default mode is 0777 less the umask.
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    builder.tempdir().map_err(|e| {
+        TenancyError::Validation(format!("could not create scoped-migration tempdir: {e}"))
+    })
 }
 
-fn tempdir_under_target() -> Result<TempDir, TenancyError> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    let pid = std::process::id();
-    let mut p = std::env::temp_dir();
-    p.push(format!("rustango_tenancy_scoped_{pid}_{n}"));
-    std::fs::create_dir_all(&p).map_err(|e| {
-        TenancyError::Validation(format!(
-            "could not create scoped-migration tempdir at {}: {e}",
-            p.display()
-        ))
-    })?;
-    Ok(TempDir(p))
-}
 #[cfg(all(test, feature = "postgres"))]
 mod schema_pool_tests {
     use super::build_schema_scoped_pool;
@@ -1186,5 +1167,62 @@ mod schema_pool_tests {
         let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
             .execute(&pg)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod scoped_subset_tests {
+    use super::{scoped_subset, MigrationScope};
+
+    fn write(dir: &std::path::Path, name: &str, scope: MigrationScope) {
+        let mig = crate::migrate::Migration {
+            name: name.to_owned(),
+            created_at: "2026-10-29T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope,
+            replaces: Vec::new(),
+            merges: Vec::new(),
+            snapshot: serde_json::from_value(serde_json::json!({ "tables": [] })).unwrap(),
+            forward: Vec::new(),
+        };
+        crate::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+    }
+
+    /// A dir left or planted under a guessable name is never reused; the
+    /// copy is owner-only and gone once dropped.
+    #[tokio::test]
+    async fn the_scoped_copy_is_fresh_and_private() {
+        let src = tempfile::tempdir().unwrap();
+        write(src.path(), "0001_reg", MigrationScope::Registry);
+        write(src.path(), "0002_ten", MigrationScope::Tenant);
+        let pid = std::process::id();
+        let planted: Vec<_> = (0..256)
+            .map(|n| std::env::temp_dir().join(format!("rustango_tenancy_scoped_{pid}_{n}")))
+            .collect();
+        for p in &planted {
+            std::fs::create_dir_all(p).unwrap();
+            write(p, "0099_planted", MigrationScope::Registry);
+        }
+        let scoped = scoped_subset(src.path(), MigrationScope::Registry).await;
+        for p in &planted {
+            let _ = std::fs::remove_dir_all(p);
+        }
+        let scoped = scoped.expect("scoped copy");
+        let path = scoped.path(src.path()).to_path_buf();
+        let names: Vec<String> = crate::migrate::file::list_dir(&path)
+            .unwrap()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(names, ["0001_reg"], "{}", path.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{mode:o}");
+        }
+        drop(scoped);
+        assert!(!path.exists(), "left behind: {}", path.display());
     }
 }

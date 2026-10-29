@@ -33,6 +33,34 @@ where
             max_positionals: 0,
         },
     )?;
+    let dirs = rustango::migrate::file::project_migration_dirs(dir);
+    let mut failed = None;
+    for d in &dirs {
+        dir_header(w, d, &dirs)?;
+        failed = failed.or(migrate_tenants_in(pools, registry_url, d, w).await?.err());
+    }
+    failed.map_or(Ok(()), Err)
+}
+
+/// Names `d` when there are app folders to tell apart.
+fn dir_header<W: Write>(w: &mut W, d: &Path, dirs: &[std::path::PathBuf]) -> std::io::Result<()> {
+    if dirs.len() > 1 {
+        writeln!(w, "{}:", d.display())?;
+    }
+    Ok(())
+}
+
+/// Tenant-scoped files of `dir` across active tenants, then the report.
+/// The inner `Err` is the failed tenants, so the next dir still runs.
+async fn migrate_tenants_in<W: Write + Send, DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    dir: &Path,
+    w: &mut W,
+) -> Result<Result<(), TenancyError>, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     // Progress goes to the same writer the report does, so `manage
     // migrate-tenants` shows each migration as it lands instead of
     // sitting silent for the length of the run.
@@ -45,7 +73,28 @@ where
     )
     .await?;
     let w = progress.into_inner();
-    write_tenant_report(w, &report)
+    Ok(write_tenant_report(w, &report))
+}
+
+/// Registry-scoped files of `dir`, then what was applied.
+async fn migrate_registry_in<W: Write, DB: Database>(
+    pools: &TenantPools<DB>,
+    dir: &Path,
+    w: &mut W,
+) -> Result<(), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let applied = tenant_migrate::migrate_registry(pools, dir).await?;
+    if applied.is_empty() {
+        writeln!(w, "registry: nothing to migrate (already up to date)")?;
+    } else {
+        writeln!(w, "registry: applied {} migration(s)", applied.len())?;
+        for m in &applied {
+            writeln!(w, "  + {}", m.name)?;
+        }
+    }
+    Ok(())
 }
 
 /// Prints tenant-migration progress to the verb's own writer.
@@ -353,14 +402,10 @@ where
     if parsed.has("--dry-run") {
         return run_registry_scoped(pools, dir, &["--dry-run".to_owned()], w).await;
     }
-    let applied = tenant_migrate::migrate_registry(pools, dir).await?;
-    if applied.is_empty() {
-        writeln!(w, "registry: nothing to migrate (already up to date)")?;
-    } else {
-        writeln!(w, "registry: applied {} migration(s)", applied.len())?;
-        for m in &applied {
-            writeln!(w, "  + {}", m.name)?;
-        }
+    let dirs = rustango::migrate::file::project_migration_dirs(dir);
+    for d in &dirs {
+        dir_header(w, d, &dirs)?;
+        migrate_registry_in(pools, d, w).await?;
     }
     Ok(())
 }
@@ -483,34 +528,16 @@ where
         return run_registry_scoped(pools, dir, args, w).await;
     }
 
-    // Registry phase.
-    let registry_applied = tenant_migrate::migrate_registry(pools, dir).await?;
-    if registry_applied.is_empty() {
-        writeln!(w, "registry: nothing to migrate (already up to date)")?;
-    } else {
-        writeln!(
-            w,
-            "registry: applied {} migration(s)",
-            registry_applied.len()
-        )?;
-        for m in &registry_applied {
-            writeln!(w, "  + {}", m.name)?;
-        }
+    // Per dir, in boot's order: the registry, then the tenants through the
+    // one dispatch seam (see `migrate_tenants_dyn_with_progress`).
+    let dirs = rustango::migrate::file::project_migration_dirs(dir);
+    let mut failed = None;
+    for d in &dirs {
+        dir_header(w, d, &dirs)?;
+        migrate_registry_in(pools, d, w).await?;
+        failed = failed.or(migrate_tenants_in(pools, registry_url, d, w).await?.err());
     }
-
-    // Tenant phase, through the one dispatch seam — see
-    // `migrate_tenants_dyn_with_progress` for why this is not a
-    // backend branch written out here.
-    let progress = CliProgress::new(w);
-    let report = tenant_migrate::migrate_tenants_dyn_with_progress(
-        pools,
-        dir,
-        registry_url,
-        Some(&progress),
-    )
-    .await?;
-    let w = progress.into_inner();
-    write_tenant_report(w, &report)
+    failed.map_or(Ok(()), Err)
 }
 
 /// Run the single-tenant `migrate` runner with `args` against the registry,

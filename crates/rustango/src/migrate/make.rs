@@ -625,11 +625,7 @@ impl SystemChain {
     /// The project root for a `migrations/` dir. A bare dir not named
     /// `migrations` keeps `system/` inside it.
     fn project_root(dir: &Path) -> &Path {
-        if dir.file_name().and_then(|n| n.to_str()) == Some("migrations") {
-            dir.parent().unwrap_or(dir)
-        } else {
-            dir
-        }
+        file::project_root_of(dir)
     }
 
     /// The chain's dir for that project, as is: a preview reads it

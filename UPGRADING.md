@@ -148,6 +148,16 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Tenancy
+
+- `manage migrate` (and `migrate-registry` / `migrate-tenants`) now applies `<app>/migrations/` folders; run it once after upgrading to catch up what only boot applied before.
+- `check` may now warn about pending `system/` steps; `manage migrate` applies them.
+- `migrate-tenant-storage` away from a database made with `--server` deletes its `rustango_tenant_databases` row; drop the old database and login by hand.
+
+---
+
 ## 0.61.12
 
 ### Tenancy

@@ -232,6 +232,11 @@ Une base apportée par l'opérateur n'a pas d'enregistrement et garde l'ancien
 comportement : sur Postgres, elle est supprimée via sa propre URL ; ailleurs,
 elle est laissée en place et la purge le signale.
 
+`migrate-tenant-storage` depuis une base enregistrée supprime son
+enregistrement avec le déplacement. L'ancienne base et son login restent sur le
+serveur ; la commande les nomme, à supprimer à la main une fois le nouvel
+emplacement sain.
+
 ## La clé secrète : sauvegarde et rotation
 
 **Sauvegardez `RUSTANGO_SECRET_KEY` avec la sauvegarde du registre.** Sans

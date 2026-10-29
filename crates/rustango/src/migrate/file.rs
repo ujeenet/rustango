@@ -292,6 +292,35 @@ pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The dirs tenancy migrates for `dir`: a `migrations` dir and the
+/// `<app>/migrations/` beside it, a project root's dirs, else `dir` alone.
+/// Boot, provisioning, `migrate` and `check` all walk this list.
+#[must_use]
+pub(crate) fn project_migration_dirs(dir: &Path) -> Vec<PathBuf> {
+    let found = discover_migration_dirs(project_root_of(dir));
+    if found.is_empty() {
+        vec![dir.to_path_buf()]
+    } else {
+        found
+    }
+}
+
+/// The dir whose `migrations/` and `<app>/migrations/` belong with `dir`:
+/// its parent when it is a `migrations` dir, else `dir` itself.
+pub(crate) fn project_root_of(dir: &Path) -> &Path {
+    match dir.parent() {
+        // A bare `migrations` has the parent `""`, which `read_dir` refuses.
+        Some(p) if dir.file_name().is_some_and(|n| n == "migrations") => {
+            if p.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                p
+            }
+        }
+        _ => dir,
+    }
+}
+
 /// Check that every `prev` names another migration in the same list.
 /// `origin` is a directory path or a label, and appears in the error
 /// so the reader knows where the migrations came from.

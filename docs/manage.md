@@ -321,7 +321,8 @@ In **tenancy mode** (`Cli::tenancy()`), `migrate` is scope-aware: it
 first applies registry migrations to the shared registry database, then
 applies tenant migrations across every active tenant. For finer control,
 use [`migrate-registry`](#migrate-registry) /
-[`migrate-tenants`](#migrate-tenants).
+[`migrate-tenants`](#migrate-tenants). All three also apply the `<app>/migrations/` folders beside
+`migrations/`, as the server does at boot.
 
 ### `migrate <target>`
 
@@ -813,7 +814,7 @@ production-readiness checks.
 - ≥ 1 model registered via `inventory`
 - DB reachable (`SELECT 1`)
 - Models registered but **no** migrations on disk (it does not compare counts — an existing `migrations/` directory is reported as info, whatever the number)
-- Migrations the ledger has not applied. In a tenancy project: registry-scoped files against the registry, tenant-scoped ones against each active tenant's ledger (the tenants behind are named, ten in full), `<app>/migrations/` folders included. Eight tenants are read at once, each for at most 5 s; a slower one is reported as unreadable. `check --no-tenants` skips the tenant ledgers
+- Migrations the ledger has not applied. In a tenancy project: registry-scoped files against the registry, tenant-scoped ones against each active tenant's ledger (the tenants behind are named, ten in full), `<app>/migrations/` folders included. Eight tenants are read at once, each for at most 5 s; a slower one is reported as unreadable. `check --no-tenants` skips the tenant ledgers. The framework's `system/migrations/` steps are compared with the system ledger too (in tenancy, the registry-scoped ones against the registry)
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`

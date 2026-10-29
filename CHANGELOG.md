@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- Tenancy `migrate`, `migrate-registry` and `migrate-tenants` apply the `<app>/migrations/` folders too, as boot does; `create-tenant` given a `migrations` dir does as well.
+- `check` lists the framework's `system/migrations/` steps the system ledger lacks: registry-scoped ones in tenancy, tenant-scoped ones in a single-database project.
+- `migrate-tenant-storage` deletes the record of a database rustango made with the move, so a later purge or `create-tenant` never drops it; the final message names the old database, login and server.
+- The tenancy CLI on a build without `postgres` opens the registry by the URL's scheme: a `mysql://` URL on a `sqlite,mysql` build no longer opens as a SQLite file.
+- Tenancy's scoped-migration copies go to a new randomly named, owner-only temp dir, so a leftover or planted dir is never applied.
+
 ## [0.61.12] — 2026-10-29
 
 **Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); the doc-hidden `FieldSchemaParts` has a new `cast` field. See UPGRADING.
