@@ -487,6 +487,10 @@ pub(super) fn write_compound_with_total(
         lock_mode: None,
         ..query.clone()
     };
+    let extra = order_cols_outside_projection(query);
+    if !extra.is_empty() {
+        return write_compound_ordered_outside(b, query, &extra, true);
+    }
     b.sql.push_str("SELECT ");
     b.write_ident("__rustango_page");
     b.sql.push_str(".*, COUNT(*) OVER () AS ");
@@ -545,7 +549,7 @@ pub(super) fn write_distinct_with_total(
 fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     let extra = order_cols_outside_projection(query);
     if !extra.is_empty() {
-        return write_compound_ordered_outside(b, query, &extra);
+        return write_compound_ordered_outside(b, query, &extra, false);
     }
     // The first branch is the outer query itself. Its order_by /
     // limit / offset were set before the first `.union()`, so they
@@ -701,12 +705,24 @@ fn order_cols_outside_projection(query: &SelectQuery) -> Vec<&'static str> {
 }
 
 /// A set operation ordered by `extra` columns its projection drops: every
-/// branch also selects them, and an outer SELECT keeps the projected ones.
+/// branch also selects them, and an outer SELECT keeps the projected ones
+/// (plus `__rustango_total` when `with_total`). Only for UNION ALL without
+/// DISTINCT: a wider row would change what counts as a duplicate.
 fn write_compound_ordered_outside(
     b: &mut Sql<'_>,
     query: &SelectQuery,
     extra: &[&'static str],
+    with_total: bool,
 ) -> Result<(), SqlError> {
+    fn dedupes(q: &SelectQuery) -> bool {
+        matches!(q.distinct, Some(crate::core::DistinctMode::All))
+            || q.compound
+                .iter()
+                .any(|branch| branch.op != crate::core::SetOp::UnionAll || dedupes(&branch.query))
+    }
+    if dedupes(query) {
+        return Err(SqlError::SetOpOrderOutsideProjection { column: extra[0] });
+    }
     fn widen(q: &mut SelectQuery, extra: &[&'static str]) {
         if let Some(projection) = &mut q.projection {
             for col in extra {
@@ -747,6 +763,10 @@ fn write_compound_ordered_outside(
         }
         b.write_ident(&label);
     }
+    if with_total {
+        b.sql.push_str(", COUNT(*) OVER () AS ");
+        b.write_ident("__rustango_total");
+    }
     b.sql.push_str(" FROM (");
     write_compound_select(b, &merged)?;
     b.sql.push_str(") AS ");
@@ -757,7 +777,8 @@ fn write_compound_ordered_outside(
         query.compound_limit,
         query.compound_offset,
     )?;
-    if let Some(lock) = &query.lock_mode {
+    // The paginated form drops the lock, as `write_compound_with_total` does.
+    if let Some(lock) = query.lock_mode.as_ref().filter(|_| !with_total) {
         write_lock_clause(b, lock);
     }
     Ok(())

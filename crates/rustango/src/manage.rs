@@ -1810,17 +1810,7 @@ impl Cli {
         let apex = apex_flag
             .clone()
             .unwrap_or_else(crate::tenancy::server::apex_domain);
-        let registry_url =
-            crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
-                format!(
-                    "{e} — sqlite/mysql tenancy projects need an explicit registry URL \
-                     (e.g. `sqlite:./var/registry.db` or `mysql://…`), or build the \
-                     server manually via `server::Builder::from_pool`."
-                )
-                .into()
-            })?;
-        use crate::tenancy::RegistryConnect as _;
-        let registry = crate::tenancy::DefaultTenantDb::connect_registry(&registry_url).await?;
+        let (registry, registry_url) = env_registry().await?;
         let mut builder = crate::server::Builder::<crate::tenancy::DefaultTenantDb>::from_pool(
             registry,
             registry_url,
@@ -1867,6 +1857,24 @@ impl Cli {
         run_shutdown_hook(on_shutdown).await;
         Ok(())
     }
+}
+
+/// The registry pool for a SQLite/MySQL tenancy `runserver`, from the
+/// environment's database URL, with the framework's connect setup.
+#[cfg(all(feature = "tenancy", not(feature = "postgres")))]
+async fn env_registry(
+) -> Result<(sqlx::Pool<crate::tenancy::DefaultTenantDb>, String), Box<dyn std::error::Error>> {
+    use crate::tenancy::RegistryConnect as _;
+    let url = crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
+        format!(
+            "{e} — sqlite/mysql tenancy projects need an explicit registry URL \
+             (e.g. `sqlite:./var/registry.db` or `mysql://…`), or build the \
+             server yourself with `Builder::from_pool`."
+        )
+        .into()
+    })?;
+    let registry = crate::tenancy::DefaultTenantDb::connect_registry(&url).await?;
+    Ok((registry, url))
 }
 
 impl Default for Cli {

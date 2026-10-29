@@ -126,10 +126,12 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::errors` | An error-page template that failed to render, or a template dir that did not load |
 | `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
+| `rustango::auth` | Permission checks that failed on a database error |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
 | `rustango::aead` | A blank previous secret key, or a dev secret key that cannot be saved |
 | `rustango::hmac_auth` | HMAC request auth setup |
 | `rustango::humanize` | Humanize filters |
+| `rustango::i18n` | Translation keys kept out of the database, catalog reloads that failed |
 | `rustango::jobs` | Background job queues |
 | `rustango::logging` | This subsystem's own warnings |
 | `rustango::manage` | `manage` verbs |

@@ -202,6 +202,11 @@ se ignora. En UpdateView, un campo listado que no llega conserva su valor; solo 
 `bool` pasa a `false`, porque una casilla sin marcar no envía nada. En CreateView,
 un campo listado con default de columna que no llega recibe ese default.
 
+**Cada campo listado es entrada del usuario.** Aquí el navegador envía
+`author_id`, así que cualquiera puede publicar en nombre de otro. CreateView aún
+no puede fijar un campo en el servidor: para un campo que decide el servidor (el
+autor con sesión), escribe tu propio handler.
+
 La plantilla del formulario (`posts_form.html`) se comparte con UpdateView. `is_update`
 distingue las dos, y **`form`** transporta tanto los campos como cualquier mensaje de
 validación:

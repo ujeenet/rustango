@@ -29,6 +29,23 @@ const JUNCTION: &ModelSchema = &{
     s
 };
 
+/// A junction whose only unique key is `post_id`: one tag per post.
+const ONE_TAG: &ModelSchema = &{
+    const FIELDS: &[FieldSchema] = &[
+        FieldSchema::new("post_id", "post_id", FieldType::I64),
+        FieldSchema::new("tag_id", "tag_id", FieldType::I64),
+    ];
+    const INDEXES: &[IndexSchema] = &[{
+        let mut i = IndexSchema::new("m2m_noop_one_tag_post", &["post_id"]);
+        i.unique = true;
+        i
+    }];
+    let mut s = ModelSchema::new("OneTag", "m2m_noop_one_tag");
+    s.fields = FIELDS;
+    s.indexes = INDEXES;
+    s
+};
+
 /// A registered through model with `INT` keys, not the junction's usual `BIGINT`.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "m2m_noop_post_tag_i32", app = "m2mnoop")]
@@ -87,6 +104,7 @@ const GENERIC_UUID: &ModelSchema = generic_junction!("m2m_noop_gen_uuid", FieldT
 async fn setup(pool: &Pool) {
     let tables = [
         JUNCTION,
+        ONE_TAG,
         PostTagI32::SCHEMA,
         Doc::SCHEMA,
         GENERIC_INT,
@@ -152,6 +170,23 @@ async fn add_twice_on_a_keyless_through_model(pool: &Pool) {
     p.add(5_i64, pool).await.expect("duplicate add");
     assert_eq!(actions(&fired), [M2mAction::Add]);
     assert_eq!(p.all_as::<i32>(pool).await.expect("all"), [5]);
+}
+
+/// A unique key the link check does not cover skips the insert: no `Add`.
+async fn add_skipped_by_another_unique_key(pool: &Pool) {
+    let (_signals, fired) = record().await;
+    let p = M2MManager {
+        src_pk: SqlValue::I64(1),
+        through: ONE_TAG.table,
+        src_col: "post_id",
+        dst_col: "tag_id",
+    };
+    p.add(5_i64, pool).await.expect("add");
+    p.add(6_i64, pool)
+        .await
+        .expect("add the unique post_id skips");
+    assert_eq!(actions(&fired), [M2mAction::Add]);
+    assert_eq!(p.all_as::<i64>(pool).await.expect("all"), [5]);
 }
 
 async fn generic_noop_set_and_clear_fire_nothing(pool: &Pool) {
@@ -270,6 +305,7 @@ tri_dialect_test! {
         noop_set_and_clear_fire_nothing,
         set_on_an_i32_through_model,
         add_twice_on_a_keyless_through_model,
+        add_skipped_by_another_unique_key,
         generic_noop_set_and_clear_fire_nothing,
         generic_set_with_string_keys,
         generic_set_on_an_int_column,

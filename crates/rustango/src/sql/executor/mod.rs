@@ -1051,6 +1051,40 @@ pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, 
     }
 }
 
+/// [`insert_or_ignore`] inside an open transaction.
+///
+/// # Errors
+/// As [`insert_or_ignore`].
+pub(crate) async fn insert_or_ignore_tx(
+    tx: &mut PoolTx<'_>,
+    query: &InsertQuery,
+) -> Result<bool, ExecError> {
+    let query = InsertQuery {
+        on_conflict: Some(crate::core::ConflictClause::DoNothing),
+        ..query.clone()
+    };
+    query.validate()?;
+    let stmt = tx.dialect().compile_insert(&query)?;
+    #[cfg(feature = "mysql")]
+    #[allow(irrefutable_let_patterns)]
+    {
+        let gate = atomic::gate(tx)?;
+        if let PoolTx::Mysql(t) = tx {
+            // A skip reports one affected row too: read the insert id instead.
+            crate::test_assertions::query_counter::bump();
+            let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
+                sqlx::query(&stmt.sql);
+            for v in stmt.params {
+                q = bind_query_my(q, v);
+            }
+            let done = gate.check(q.execute(&mut **t).await.map_err(ExecError::from))?;
+            return Ok(done.rows_affected() > 0
+                && done.last_insert_id() != crate::sql::mysql::SKIPPED_INSERT_ID);
+        }
+    }
+    Ok(execute_tx(tx, &stmt.sql, stmt.params).await? > 0)
+}
+
 /// `INSERT` that returns the new row's data, on any backend. The
 /// result shape differs per backend, so callers `match` on
 /// [`InsertReturningPool`].
@@ -3253,6 +3287,96 @@ mod in_chunk_tests {
         // A row wider than the cap still gets a batch of its own.
         assert_eq!(rows_per_batch(pg, 70_000, usize::MAX), 1);
         assert_eq!(rows_per_batch(pg, 0, 0), 1);
+    }
+}
+
+#[cfg(test)]
+mod last_per_conflict_key_tests {
+    use super::*;
+    use crate::core::{ConflictClause, FieldSchema, FieldType, ModelSchema};
+
+    const ROW: &ModelSchema = &{
+        const FIELDS: &[FieldSchema] = &[
+            FieldSchema::new("a", "a", FieldType::I64),
+            FieldSchema::new("b", "b", FieldType::I64),
+            FieldSchema::new("v", "v", FieldType::I64),
+        ];
+        let mut s = ModelSchema::new("UpsertRow", "upsert_row");
+        s.fields = FIELDS;
+        s
+    };
+
+    /// An upsert of `(a, b, v)` rows on the `target` key.
+    fn upsert(target: &[&'static str], rows: Vec<[SqlValue; 3]>) -> BulkInsertQuery {
+        let mut q = BulkInsertQuery::new(
+            ROW,
+            vec!["a", "b", "v"],
+            rows.into_iter().map(Vec::from).collect(),
+        );
+        q.on_conflict = Some(ConflictClause::DoUpdate {
+            target: target.to_vec(),
+            update_columns: vec!["v"],
+        });
+        q
+    }
+
+    fn kept(q: &BulkInsertQuery) -> Vec<SqlValue> {
+        q.last_per_conflict_key()
+            .rows
+            .iter()
+            .map(|r| r[2].clone())
+            .collect()
+    }
+
+    fn row(a: Option<i64>, b: i64, v: i64) -> [SqlValue; 3] {
+        [
+            a.map_or(SqlValue::Null, SqlValue::I64),
+            SqlValue::I64(b),
+            SqlValue::I64(v),
+        ]
+    }
+
+    #[test]
+    fn null_keys_never_collapse() {
+        let q = upsert(
+            &["a"],
+            vec![row(None, 1, 1), row(None, 1, 2), row(Some(1), 1, 3)],
+        );
+        assert_eq!(
+            kept(&q),
+            [SqlValue::I64(1), SqlValue::I64(2), SqlValue::I64(3)]
+        );
+        // A composite key with one NULL part is no key either.
+        let q = upsert(&["a", "b"], vec![row(None, 1, 1), row(None, 1, 2)]);
+        assert_eq!(kept(&q), [SqlValue::I64(1), SqlValue::I64(2)]);
+    }
+
+    #[test]
+    fn a_composite_key_matches_on_every_part() {
+        let q = upsert(
+            &["a", "b"],
+            vec![row(Some(1), 1, 1), row(Some(1), 2, 2), row(Some(1), 1, 3)],
+        );
+        assert_eq!(kept(&q), [SqlValue::I64(2), SqlValue::I64(3)]);
+    }
+
+    /// The repeat is resolved before chunking: the earlier row is gone from
+    /// the first batch, not left to clash with the later one in another.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn a_key_repeated_across_a_chunk_boundary_keeps_the_last() {
+        let d = &crate::sql::Sqlite;
+        let per_batch = i64::try_from(rows_per_batch(d, 3, usize::MAX)).unwrap();
+        let mut rows: Vec<[SqlValue; 3]> = (0..per_batch).map(|i| row(Some(i), 0, i)).collect();
+        rows.push(row(Some(0), 0, -1));
+        let batches = compile_bulk_insert_batches(d, &upsert(&["a", "b"], rows)).unwrap();
+        let params: Vec<&SqlValue> = batches.iter().flat_map(|s| &s.params).collect();
+        assert_eq!(params.len(), usize::try_from(per_batch).unwrap() * 3);
+        assert_eq!(
+            params[..3],
+            [&SqlValue::I64(1), &SqlValue::I64(0), &SqlValue::I64(1)]
+        );
+        assert_eq!(params[params.len() - 1], &SqlValue::I64(-1));
     }
 }
 

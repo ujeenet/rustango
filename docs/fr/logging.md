@@ -133,10 +133,12 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
 | `rustango::errors` | Un template de page d'erreur dont le rendu a échoué, ou un répertoire de templates non chargé |
 | `rustango::forms` | Valeurs `DynamicForm` acceptées pour l'instant mais refusées dans une version future |
+| `rustango::auth` | Vérifications de permission échouées sur une erreur de base de données |
 | `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
 | `rustango::aead` | Une clé secrète précédente vide, ou une clé de dev impossible à enregistrer |
 | `rustango::hmac_auth` | Configuration de l'authentification HMAC des requêtes |
 | `rustango::humanize` | Filtres humanize |
+| `rustango::i18n` | Clés de traduction non stockées en base, rechargements du catalogue échoués |
 | `rustango::jobs` | Files de tâches de fond |
 | `rustango::logging` | Avertissements de ce sous-système lui-même |
 | `rustango::manage` | Verbes `manage` |

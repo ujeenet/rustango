@@ -199,6 +199,10 @@ these fields, and any other posted key (say `id=1`) is ignored. On
 create, a listed field with a column default that the POST leaves out gets
 that default.
 
+**Every listed field is user input.** Here the browser posts `author_id`, so any
+user can post as anyone. CreateView cannot set a field on the server yet: for a
+field the server owns (the signed-in author), write your own handler.
+
 The form template (`posts_form.html`) is shared with UpdateView. `is_update`
 tells the two apart, and **`form`** carries both the fields and any validation
 messages:

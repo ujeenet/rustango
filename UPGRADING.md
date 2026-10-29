@@ -154,7 +154,8 @@ untouched.
 
 - On PG and MySQL, `a.union(b).intersection(c)` now returns `(a ∪ b) ∩ c`, not `a ∪ (b ∩ c)`; write `a.union(b.intersection(c))` for the old rows.
 - `bulk_upsert_pool` drops earlier rows that repeat a key in the batch; `dates()` / `datetimes()` leave out NULLs.
-- M2M `add` runs in a transaction that locks the source row and checks for the link first.
+- M2M `add` runs in a transaction that locks the source row and checks for the link first. It fires `Add` only when a row went in, so another unique key on the through table that skips the insert fires nothing.
+- A `union`, `intersection`, `difference` or `distinct()` branch ordered by a column outside a `values_*` projection now fails with `SqlError::SetOpOrderOutsideProjection`; select the column, or use `union_all`.
 
 ### Model attributes, check and MCP
 
@@ -207,16 +208,16 @@ Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database
 
 ### Migrations, secrets and auth
 
-- `makemigrations` (and `make_migrations*`) refuse a column dropped beside a same-type new column on one table. For a rename, write a `RenameColumn` in a `makemigrations --empty` file; for a real drop + add, pass `--drop-and-add` or call `make_migrations_from_with(.., DropAndAdd::Allow)`.
+- `makemigrations` (and `make_migrations*`) refuse a column dropped beside a same-type new column on one table. For a rename, write a `RenameColumn` in a `makemigrations --empty` file; for a real drop + add, pass `--drop-and-add` or call the matching `make_migrations*_with(.., DropAndAdd::Allow)` (`make_migrations_with`, `_for_scope_with`, `_for_app_with`, `_scoped_with`, `_from_with`).
 - `MigrateError::Validation` displays its message alone; code matching the `invalid migration:` text must drop the prefix.
 - `jwt::decode` refuses a present `exp` / `nbf` that is not a non-negative number (it was read as absent), and honours a fractional one.
 - Run `reseal-tenant-secrets --apply` once more after a key rotation done on an earlier release, before removing `RUSTANGO_SECRET_KEY_PREVIOUS`, so operator TOTP secrets are re-sealed.
 
 ### Cache counters, dumps and admin inlines
 
-- `InMemoryCache`, `FileCache` and the default `Cache::incr` return an error on i64 overflow instead of saturating, as `DatabaseCache` and `RedisCache` do; `decr(key, i64::MIN)` is an error.
-- `dumpdata` writes a JSON column holding JSON `null` as `{"$json": null}`, and a value that is itself a one-key `{"$json": …}` object wrapped once more. `loaddata` unwraps it; plain `null` still loads as SQL NULL (JSON `null` on a NOT NULL column). An older dump whose JSON column holds a one-key `{"$json": …}` object loads its inner value.
-- serde_json is built with `float_roundtrip`, so JSON floats parse exactly across the app.
+- `InMemoryCache`, `FileCache` and the default `Cache::incr` return an error on i64 overflow instead of saturating, as `DatabaseCache` and `RedisCache` do. `decr(key, i64::MIN)` is an error on every backend, `RedisCache` and `DatabaseCache` included (they used to saturate).
+- `dumpdata` writes a JSON column holding JSON `null` as `{"$json": null}`, and a value that is itself a one-key `{"$json": …}` object wrapped once more. `loaddata` unwraps it; plain `null` still loads as SQL NULL (JSON `null` on a NOT NULL column). An older dump whose JSON column holds a one-key `{"$json": …}` object loads its inner value. Seed fixtures loaded through `rustango::fixtures` are not dumps: they keep the tag literal and `null` as SQL NULL.
+- serde_json is built with `float_roundtrip`, so JSON floats parse exactly across the app. Cargo unifies the feature, so every crate in an app that depends on rustango gets it too, with slightly slower float parsing.
 - An inline row error in a re-shown admin form is a row with `error` set in `InlineFormPanel::rows`; a custom `form.html` should render it.
 
 ---

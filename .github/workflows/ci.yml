@@ -836,45 +836,9 @@ jobs:
       fail-fast: false
       matrix:
         backend: [postgres, mysql, sqlite]
-    # The saas API-auth test needs its leg's database; an empty image
-    # starts no service on the other legs.
-    services:
-      postgres:
-        image: ${{ matrix.backend == 'postgres' && 'ghcr.io/ujeenet/ci-postgres:16-alpine' || '' }}
-        credentials:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          POSTGRES_USER: rustango
-          POSTGRES_PASSWORD: rustango
-          POSTGRES_DB: rustango_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U rustango -d rustango_test"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 20
-      mysql:
-        image: ${{ matrix.backend == 'mysql' && 'ghcr.io/ujeenet/ci-mysql:8.0' || '' }}
-        credentials:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-        env:
-          MYSQL_ROOT_PASSWORD: rustango
-          MYSQL_DATABASE: rustango_test
-          MYSQL_USER: rustango
-          MYSQL_PASSWORD: rustango
-        ports:
-          - 3306:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"
-          --health-interval 2s
-          --health-timeout 2s
-          --health-retries 30
+    # No job-level database URL: only the saas API-auth test reads one,
+    # and its per-backend steps below set it.
     env:
-      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
-      MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
       # One shared target dir across both examples, for the reason
       # bin/examples.sh documents: each example's own target/ is ~1.3 GB.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target-examples
@@ -906,19 +870,51 @@ jobs:
         # types the server dispatches), and this command was not re-run
         # after that move.
         run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
-      - name: Unit tests (no database needed) — saas
+      # The saas API-auth test needs its leg's database: started by an
+      # explicit per-backend step, its URL set only on that leg's test step.
+      - name: Start PostgreSQL
+        if: matrix.backend == 'postgres'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker run -d --name pce-db -p 5432:5432 \
+            -e POSTGRES_USER=rustango -e POSTGRES_PASSWORD=rustango -e POSTGRES_DB=rustango_test \
+            --health-cmd "pg_isready -U rustango -d rustango_test" --health-interval 2s \
+            ghcr.io/ujeenet/ci-postgres:16-alpine
+          for _ in $(seq 60); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' pce-db)" = healthy ] && exit 0
+            sleep 2
+          done
+          docker logs pce-db; exit 1
+      - name: Start MySQL
+        if: matrix.backend == 'mysql'
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker run -d --name pce-db -p 3306:3306 \
+            -e MYSQL_ROOT_PASSWORD=rustango -e MYSQL_DATABASE=rustango_test \
+            -e MYSQL_USER=rustango -e MYSQL_PASSWORD=rustango \
+            --health-cmd "mysqladmin ping -h 127.0.0.1 -u rustango -prustango" --health-interval 2s \
+            ghcr.io/ujeenet/ci-mysql:8.0
+          for _ in $(seq 90); do
+            [ "$(docker inspect -f '{{.State.Health.Status}}' pce-db)" = healthy ] && exit 0
+            sleep 2
+          done
+          docker logs pce-db; exit 1
+      - name: Unit tests — saas (postgres)
+        if: matrix.backend == 'postgres'
         working-directory: crates/rustango/examples/platform_commerce_saas
-        # `--lib --bins`, not `--bins`. Every test in these examples lives
-        # under `src/commerce/`, which is reachable only from `src/lib.rs`
-        # — neither binary declares `mod commerce` and neither contains a
-        # `#[test]`. With `--bins` alone these six steps compiled two
-        # empty test binaries and reported `0 passed`, three times over.
-        #
-        # The tests *were* in the bin target before the examples grew a
-        # library (the worker binary needs one to reach the same job
-        # types the server dispatches), and this command was not re-run
-        # after that move.
-        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
+        env:
+          DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+        run: cargo test --locked --no-default-features --features postgres --lib --bins
+      - name: Unit tests — saas (mysql)
+        if: matrix.backend == 'mysql'
+        working-directory: crates/rustango/examples/platform_commerce_saas
+        env:
+          MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
+        run: cargo test --locked --no-default-features --features mysql --lib --bins
+      - name: Unit tests — saas (sqlite)
+        if: matrix.backend == 'sqlite'
+        working-directory: crates/rustango/examples/platform_commerce_saas
+        run: cargo test --locked --no-default-features --features sqlite --lib --bins
 
   # Trivy security scan — the non-bypassable "detect vulnerabilities
   # before releases" gate. Complements `deny` (RustSec advisories) with

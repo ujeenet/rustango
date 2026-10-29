@@ -197,6 +197,11 @@ Bei UpdateView behält ein gelistetes, aber nicht gesendetes Feld seinen Wert; n
 ein `bool` wird `false`, weil eine nicht angehakte Checkbox nichts sendet. Bei
 CreateView bekommt ein gelistetes, nicht gesendetes Feld mit Spalten-Default diesen Default.
 
+**Jedes gelistete Feld ist Nutzereingabe.** Hier sendet der Browser `author_id`,
+also kann jeder Nutzer als jemand anderes posten. CreateView kann noch kein Feld
+auf dem Server setzen: für ein Feld, das der Server bestimmt (der angemeldete
+Autor), schreib einen eigenen Handler.
+
 Das Formular-Template (`posts_form.html`) wird mit UpdateView geteilt. `is_update`
 unterscheidet die beiden, und **`form`** trägt sowohl die Felder als auch etwaige
 Validierungsmeldungen:

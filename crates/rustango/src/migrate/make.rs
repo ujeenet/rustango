@@ -53,7 +53,10 @@ pub fn make_migrations(
 }
 
 /// [`make_migrations`] with an explicit [`DropAndAdd`] policy.
-pub(crate) fn make_migrations_with(
+///
+/// # Errors
+/// As [`make_migrations`].
+pub fn make_migrations_with(
     dir: &Path,
     name_override: Option<&str>,
     drops: DropAndAdd,
@@ -89,7 +92,10 @@ pub fn make_migrations_for_scope(
 }
 
 /// [`make_migrations_for_scope`] with an explicit [`DropAndAdd`] policy.
-pub(crate) fn make_migrations_for_scope_with(
+///
+/// # Errors
+/// As [`make_migrations_for_scope`].
+pub fn make_migrations_for_scope_with(
     dir: &Path,
     scope: crate::core::ModelScope,
     name_override: Option<&str>,
@@ -98,10 +104,7 @@ pub(crate) fn make_migrations_for_scope_with(
     super::snapshot::check_registry_junctions()?;
     super::snapshot::check_relation_targets()?;
     let current = SchemaSnapshot::from_registry_for_scope(scope);
-    let migration_scope = match scope {
-        crate::core::ModelScope::Registry => super::MigrationScope::Registry,
-        crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
-    };
+    let migration_scope = migration_scope(scope);
     make_migrations_scoped_with(dir, &current, scope, migration_scope, name_override, drops)
 }
 
@@ -125,7 +128,10 @@ pub fn make_migrations_for_app(
 }
 
 /// [`make_migrations_for_app`] with an explicit [`DropAndAdd`] policy.
-pub(crate) fn make_migrations_for_app_with(
+///
+/// # Errors
+/// As [`make_migrations_for_app`].
+pub fn make_migrations_for_app_with(
     project_root: &Path,
     app: &str,
     name_override: Option<&str>,
@@ -167,7 +173,10 @@ pub fn make_migrations_scoped(
 }
 
 /// [`make_migrations_scoped`] with an explicit [`DropAndAdd`] policy.
-pub(crate) fn make_migrations_scoped_with(
+///
+/// # Errors
+/// As [`make_migrations_scoped`].
+pub fn make_migrations_scoped_with(
     dir: &Path,
     current: &SchemaSnapshot,
     model_scope: crate::core::ModelScope,
@@ -187,10 +196,7 @@ pub(crate) fn make_migrations_scoped_with(
     else {
         return Ok(None);
     };
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
-    }
-    file::write(&dir.join(format!("{}.json", mig.name)), &mig)?;
+    write_planned(dir, &mig)?;
     Ok(Some(mig))
 }
 
@@ -203,7 +209,6 @@ pub(crate) fn planned_migrations(
     dir: &Path,
     tenancy: bool,
 ) -> Result<Vec<Migration>, MigrateError> {
-    use crate::core::ModelScope;
     super::snapshot::check_registry_junctions()?;
     super::snapshot::check_relation_targets()?;
     let prior = file::list_dir(dir)?;
@@ -217,22 +222,118 @@ pub(crate) fn planned_migrations(
         .into_iter()
         .collect());
     }
+    Ok(
+        plan_scopes(&prior, &registry_scopes(), None, DropAndAdd::Allow)?
+            .into_iter()
+            .flatten()
+            .collect(),
+    )
+}
+
+/// Today's models split by scope, registry first, as tenancy writes them.
+fn registry_scopes() -> [(crate::core::ModelScope, SchemaSnapshot); 2] {
+    use crate::core::ModelScope;
+    [ModelScope::Registry, ModelScope::Tenant]
+        .map(|scope| (scope, SchemaSnapshot::from_registry_for_scope(scope)))
+}
+
+/// One file per scope after `prior`, unwritten. Each planned file joins
+/// the chain, so the next scope numbers after it.
+fn plan_scopes(
+    prior: &[Migration],
+    scopes: &[(crate::core::ModelScope, SchemaSnapshot)],
+    name_override: Option<&str>,
+    drops: DropAndAdd,
+) -> Result<Vec<Option<Migration>>, MigrateError> {
+    let mut chain = prior.to_vec();
     let mut out = Vec::new();
-    for (scope, ms) in [
-        (ModelScope::Registry, super::MigrationScope::Registry),
-        (ModelScope::Tenant, super::MigrationScope::Tenant),
-    ] {
-        let current = SchemaSnapshot::from_registry_for_scope(scope);
-        out.extend(plan_scoped(
-            &prior,
-            &current,
-            scope,
-            ms,
-            None,
-            DropAndAdd::Allow,
-        )?);
+    for (scope, current) in scopes {
+        let mig = plan_scoped(
+            &chain,
+            current,
+            *scope,
+            migration_scope(*scope),
+            name_override,
+            drops,
+        )?;
+        chain.extend(mig.clone());
+        out.push(mig);
     }
     Ok(out)
+}
+
+fn migration_scope(scope: crate::core::ModelScope) -> super::MigrationScope {
+    match scope {
+        crate::core::ModelScope::Registry => super::MigrationScope::Registry,
+        crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
+    }
+}
+
+/// What a flagless tenancy `makemigrations` wrote: the framework's system
+/// steps, then one app file (or none) per scope, registry first.
+#[derive(Debug)]
+pub(crate) struct TenancyRun {
+    pub(crate) system: Vec<(crate::core::ModelScope, Migration)>,
+    pub(crate) app: Vec<(crate::core::ModelScope, Option<Migration>)>,
+}
+
+/// A flagless tenancy `makemigrations`: every scope's file is planned
+/// before any is written, so a refused scope leaves both dirs as they were.
+///
+/// # Errors
+/// As [`make_migrations`].
+pub(crate) fn make_migrations_tenancy(
+    dir: &Path,
+    name_override: Option<&str>,
+    drops: DropAndAdd,
+) -> Result<TenancyRun, MigrateError> {
+    super::snapshot::check_registry_junctions()?;
+    super::snapshot::check_relation_targets()?;
+    make_tenancy_from(dir, &registry_scopes(), name_override, drops)
+}
+
+/// [`make_migrations_tenancy`] with the app snapshots passed in.
+fn make_tenancy_from(
+    dir: &Path,
+    scopes: &[(crate::core::ModelScope, SchemaSnapshot)],
+    name_override: Option<&str>,
+    drops: DropAndAdd,
+) -> Result<TenancyRun, MigrateError> {
+    let project_root = dir.parent().unwrap_or(dir);
+    let sys_dir = project_root.join("system").join("migrations");
+    let mut sys_chain = if sys_dir.exists() {
+        file::list_dir(&sys_dir)?
+    } else {
+        Vec::new()
+    };
+    let mut system = Vec::new();
+    for scope in [
+        crate::core::ModelScope::Registry,
+        crate::core::ModelScope::Tenant,
+    ] {
+        if let Some(m) = plan_system_step(scope, name_override, &sys_chain)? {
+            sys_chain.push(m.clone());
+            system.push((scope, m));
+        }
+    }
+    let app = plan_scopes(&file::list_dir(dir)?, scopes, name_override, drops)?;
+    for (_, m) in &system {
+        write_planned(&sys_dir, m)?;
+    }
+    for m in app.iter().flatten() {
+        write_planned(dir, m)?;
+    }
+    Ok(TenancyRun {
+        system,
+        app: scopes.iter().map(|(s, _)| *s).zip(app).collect(),
+    })
+}
+
+fn write_planned(dir: &Path, mig: &Migration) -> Result<(), MigrateError> {
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+    }
+    file::write(&dir.join(format!("{}.json", mig.name)), mig)
 }
 
 /// The file [`make_migrations_scoped`] would write after `prior`, unwritten.
@@ -457,10 +558,7 @@ pub(crate) fn plan_system_step(
     {
         return Ok(None);
     }
-    let migration_scope = match scope {
-        crate::core::ModelScope::Registry => super::MigrationScope::Registry,
-        crate::core::ModelScope::Tenant => super::MigrationScope::Tenant,
-    };
+    let migration_scope = migration_scope(scope);
     super::snapshot::check_registry_junctions()?;
     let current = SchemaSnapshot::from_registry_system_for_scope(scope);
     let prior_scoped: Vec<&Migration> = prior
@@ -630,10 +728,7 @@ pub fn make_migrations_from_with(
     let Some(mig) = plan_from(&prior, current, name_override, drops)? else {
         return Ok(None);
     };
-    if !dir.exists() {
-        std::fs::create_dir_all(dir)?;
-    }
-    file::write(&dir.join(format!("{}.json", mig.name)), &mig)?;
+    write_planned(dir, &mig)?;
     Ok(Some(mig))
 }
 
@@ -1965,5 +2060,62 @@ mod tests {
             assert!(!dir.join("0003_merge.json").exists(), "{what}");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// A refused tenant scope writes nothing: not the registry file planned
+    /// before it, not the framework's system steps.
+    #[test]
+    fn tenancy_run_writes_no_file_when_a_scope_is_refused() {
+        let root = tempdir();
+        let dir = root.join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let posts = |col: &str| {
+            let mut p = t("posts");
+            let mut f = p.fields[0].clone();
+            f.name = col.into();
+            f.column = col.into();
+            f.ty = "string".into();
+            f.primary_key = false;
+            f.auto = false;
+            f.max_length = Some(100);
+            p.fields.push(f);
+            p
+        };
+        let prior = Migration {
+            name: "0001_initial".into(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            prev: None,
+            atomic: true,
+            scope: MigrationScope::Tenant,
+            replaces: Vec::new(),
+            merges: Vec::new(),
+            snapshot: snap_with(vec![posts("subtitle")]),
+            forward: vec![],
+        };
+        file::write(&dir.join("0001_initial.json"), &prior).unwrap();
+        let scopes = [
+            (ModelScope::Registry, snap_with(vec![t("orgs")])),
+            (ModelScope::Tenant, snap_with(vec![posts("tagline")])),
+        ];
+        let err = make_tenancy_from(&dir, &scopes, None, DropAndAdd::Refuse)
+            .expect_err("the tenant rename is refused");
+        assert!(err.to_string().contains("renamed field"), "{err}");
+        let names = |d: &Path| -> Vec<String> {
+            file::list_dir(d)
+                .unwrap()
+                .into_iter()
+                .map(|m| m.name)
+                .collect()
+        };
+        assert_eq!(names(&dir), ["0001_initial"]);
+        assert!(!root.join("system").exists(), "no system step written");
+
+        let run = make_tenancy_from(&dir, &scopes, None, DropAndAdd::Allow).expect("allowed");
+        let app: Vec<_> = run.app.iter().flat_map(|(_, m)| m.clone()).collect();
+        assert_eq!(app.len(), 2);
+        assert!(app[0].name.starts_with("0002_"), "{}", app[0].name);
+        assert!(app[1].name.starts_with("0003_"), "{}", app[1].name);
+        assert_eq!(names(&dir).len(), 3);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
