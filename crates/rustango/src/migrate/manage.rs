@@ -4736,8 +4736,10 @@ pub(crate) async fn loaddata_cmd<W: Write>(
     }
 
     // Parents first: fixtures come in registration order, and a child
-    // inserted before its parent fails its FK (#1911).
-    let entries = in_fk_order(entries, &schemas);
+    // inserted before its parent fails its FK (#1911). A nullable link in a
+    // cycle goes in as NULL and is set once every row is in.
+    let deferred = cycle_links(&schemas);
+    let entries = in_fk_order(entries, &schemas, &deferred);
     let mut named: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for s in entries
         .iter()
@@ -4763,6 +4765,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         String,
         Vec<RowLinks>,
     )> = Vec::new();
+    let mut relinks: Vec<(String, crate::core::UpdateQuery)> = Vec::new();
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -4847,6 +4850,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             continue;
         }
 
+        let relink = take_deferred(schema, &columns, &mut values, &deferred);
         let query = crate::core::InsertQuery {
             model: schema,
             columns,
@@ -4858,6 +4862,9 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         match crate::sql::insert_pool(pool, &query).await {
             Ok(()) => {
                 loaded += 1;
+                if let Some(update) = relink {
+                    relinks.push((format!("entry #{line} (`{model_name}`)"), update));
+                }
                 if !touched.iter().any(|t| t.table == schema.table) {
                     touched.push(schema);
                 }
@@ -4884,6 +4891,20 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         }
     }
 
+    if abort.is_none() {
+        for (what, update) in relinks {
+            if let Err(e) = crate::sql::update_pool(pool, &update).await {
+                let msg = format!("loaddata: {what} link: {e}");
+                if parsed.fail_fast {
+                    abort = Some(msg);
+                    break;
+                }
+                tracing::warn!("{msg}");
+                loaded -= 1;
+                skipped += 1;
+            }
+        }
+    }
     if abort.is_none() {
         'rels: for (schema, rel, model_name, rows) in links {
             let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.fail_fast).await
@@ -4931,17 +4952,87 @@ fn dumpable(ty: crate::core::FieldType) -> bool {
     )
 }
 
+/// `(table, column)` of each nullable FK or one-to-one link that closes a
+/// cycle between tables. Self-links are left to [`self_parents_first`].
+fn cycle_links(
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> DeferredLinks {
+    use std::collections::HashMap;
+    let by_table: HashMap<&'static str, &'static crate::core::ModelSchema> =
+        schemas.values().map(|s| (s.table, *s)).collect();
+    let reaches = |from: &'static str, to: &str| {
+        let mut seen = vec![from];
+        let mut next = vec![from];
+        while let Some(t) = next.pop() {
+            if t == to {
+                return true;
+            }
+            for (target, _) in by_table.get(t).into_iter().flat_map(|s| fk_edges(*s)) {
+                if target != t && !seen.contains(&target) {
+                    seen.push(target);
+                    next.push(target);
+                }
+            }
+        }
+        false
+    };
+    by_table
+        .values()
+        .flat_map(|s| {
+            fk_edges(s)
+                .filter(|(to, _)| *to != s.table && reaches(to, s.table))
+                .filter_map(|(_, col)| col.map(|c| (s.table, c)))
+        })
+        .collect()
+}
+
+/// Nullable links [`loaddata_cmd`] inserts as NULL and sets afterwards.
+type DeferredLinks = std::collections::HashSet<(&'static str, &'static str)>;
+
+/// Swap this row's [`DeferredLinks`] values for NULL; the `UPDATE` that
+/// sets them back by pk. `None` without a pk: the row keeps its links.
+fn take_deferred(
+    schema: &'static crate::core::ModelSchema,
+    columns: &[&'static str],
+    values: &mut [crate::core::SqlValue],
+    deferred: &DeferredLinks,
+) -> Option<crate::core::UpdateQuery> {
+    use crate::core::{Assignment, SqlValue, UpdateQuery, WhereExpr};
+    let pk = schema.primary_key()?;
+    let pk_value = columns
+        .iter()
+        .position(|c| *c == pk.column)
+        .map(|i| values[i].clone())?;
+    let set: Vec<Assignment> = columns
+        .iter()
+        .zip(values.iter_mut())
+        .filter(|(c, v)| deferred.contains(&(schema.table, **c)) && !matches!(v, SqlValue::Null))
+        .map(|(c, v)| Assignment::new(c, std::mem::replace(v, SqlValue::Null)))
+        .collect();
+    (!set.is_empty()).then(|| UpdateQuery {
+        model: schema,
+        set,
+        where_clause: WhereExpr::Predicate(crate::core::Filter {
+            column: pk.column,
+            op: crate::core::Op::Eq,
+            value: pk_value,
+        }),
+    })
+}
+
 /// Stable-sort fixture entries so each model's FK targets load before it,
-/// and a self-FK parent before its child. Best effort: rows in a cycle keep
-/// their fixture order.
+/// and a self-FK parent before its child. `deferred` links don't order.
+/// Best effort: rows in a cycle of other links keep their fixture order.
 fn in_fk_order(
     entries: Vec<serde_json::Value>,
     schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+    deferred: &DeferredLinks,
 ) -> Vec<serde_json::Value> {
     use std::collections::HashMap;
     fn depth(
         table: &'static str,
         by_table: &HashMap<&'static str, &'static crate::core::ModelSchema>,
+        deferred: &DeferredLinks,
         memo: &mut HashMap<&'static str, usize>,
         visiting: &mut Vec<&'static str>,
     ) -> usize {
@@ -4957,10 +5048,11 @@ fn in_fk_order(
         visiting.push(table);
         let d = schema
             .scalar_fields()
+            .filter(|f| !deferred.contains(&(table, f.column)))
             .filter_map(|f| match f.relation {
                 Some(
                     crate::core::Relation::Fk { to, .. } | crate::core::Relation::O2O { to, .. },
-                ) if to != table => Some(1 + depth(to, by_table, memo, visiting)),
+                ) if to != table => Some(1 + depth(to, by_table, deferred, memo, visiting)),
                 _ => None,
             })
             .max()
@@ -4979,7 +5071,9 @@ fn in_fk_order(
                 .get("model")
                 .and_then(|v| v.as_str())
                 .and_then(|m| schemas.get(m))
-                .map_or(0, |s| depth(s.table, &by_table, &mut memo, &mut Vec::new()));
+                .map_or(0, |s| {
+                    depth(s.table, &by_table, deferred, &mut memo, &mut Vec::new())
+                });
             (rank, e)
         })
         .collect();
