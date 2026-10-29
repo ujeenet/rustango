@@ -374,6 +374,40 @@ async fn tenant_admin_login_locks_with_429() {
     assert!(is_429(&env.admin_login(&next_ip(), &name, PASS).await));
 }
 
+/// A tenant admin sign-in and a refused one name the tenant in their signals.
+#[tokio::test]
+async fn tenant_admin_login_signals_name_the_tenant() {
+    use rustango::signals::auth as sig;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("ts");
+    env.user(&name).await;
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let (s1, s2, n1, n2) = (seen.clone(), seen.clone(), name.clone(), name.clone());
+    let ok = sig::connect_user_logged_in(move |c| {
+        if c.username == n1 {
+            s1.lock().unwrap().push(format!("in:{:?}", c.tenant));
+        }
+        async {}
+    });
+    let bad = sig::connect_user_login_failed(move |c| {
+        if c.attempted_username.as_deref() == Some(n2.as_str()) {
+            s2.lock().unwrap().push(format!("failed:{:?}", c.tenant));
+        }
+        async {}
+    });
+    env.admin_login(&next_ip(), &name, "wrong").await;
+    let r = env.admin_login(&next_ip(), &name, PASS).await;
+    sig::disconnect_user_logged_in(ok);
+    sig::disconnect_user_login_failed(bad);
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let want = Some(env.slug.clone());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [format!("failed:{want:?}"), format!("in:{want:?}")]
+    );
+}
+
 /// Through `server::Builder`, failures from one IP get 429 once the
 /// per-IP limit is reached: the client address must reach the gate.
 fn change_password_req(uri: &str, cookie: &str, current: &str) -> Request<Body> {

@@ -249,6 +249,12 @@ To change the key:
    `Cast<EncryptedString>` column (registry and tenants) with the new key.
 4. Remove `RUSTANGO_SECRET_KEY_PREVIOUS` and restart.
 
+The verb finds a sealed column from the field type the model derive saw:
+`Cast<EncryptedString>` or `Option<Cast<EncryptedString>>`, written out. The
+derive refuses any other spelling, such as a type alias, so no column is missed.
+Each model needs a single-column primary key; a model without one is reported
+as failed. A value neither key opens is reported and left alone.
+
 Values sealed under a blank key before blank keys were refused still open
 when `RUSTANGO_SECRET_KEY_PREVIOUS` is set and empty; re-seal them the same way.
 

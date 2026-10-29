@@ -1932,7 +1932,6 @@ pub(crate) async fn apply_plan_tx(
 ) -> Result<InlineApplied, InlineApplyError> {
     use super::views::Written;
     use crate::audit::{AuditOp, DiffEmit, RowDiffWrite};
-    let mut outcome = InlineApplyOutcome::default();
     let mut after_commit = Vec::new();
     // The rows written, for `admin_post_*` after the commit.
     let mut written_rows = Vec::new();
@@ -1970,7 +1969,6 @@ pub(crate) async fn apply_plan_tx(
             ..SelectQuery::new(child)
         };
         let mut entries: Vec<crate::audit::PendingEntry> = Vec::new();
-        let mut deleted = 0usize;
         for write in target.existing {
             match write {
                 InlineWrite::Update {
@@ -2004,7 +2002,6 @@ pub(crate) async fn apply_plan_tx(
                             change: true,
                         });
                     }
-                    outcome.updated += 1;
                 }
                 // 0 rows: deleted or moved since the plan was checked.
                 InlineWrite::Delete { query, pk } => {
@@ -2015,7 +2012,6 @@ pub(crate) async fn apply_plan_tx(
                     if query.run(tx).await.map_err(refused)? == 0 {
                         continue;
                     }
-                    deleted += 1;
                     if let Some(row) = before {
                         entries.push(super::audit::admin_row_snapshot_entry(
                             child,
@@ -2029,7 +2025,6 @@ pub(crate) async fn apply_plan_tx(
                 }
             }
         }
-        outcome.deleted += deleted;
         // Recount in `tx`, after the deletes: a delete that removed nothing
         // frees no room, and a racing save's rows count. MySQL needs a locking
         // pk read to see the latest commit; elsewhere a plain COUNT does.
@@ -2078,7 +2073,6 @@ pub(crate) async fn apply_plan_tx(
                 pk: key,
                 change: false,
             });
-            outcome.inserted += 1;
         }
         // As on the child's own page: in `tx` for an `audit(...)` child,
         // else best-effort after the commit.
@@ -2093,7 +2087,6 @@ pub(crate) async fn apply_plan_tx(
         }
     }
     Ok(InlineApplied {
-        outcome,
         signals: written_rows,
         audit: after_commit,
     })
@@ -2102,8 +2095,6 @@ pub(crate) async fn apply_plan_tx(
 /// What a committed inline save still owes: its `admin_post_*` signals and
 /// the best-effort audit entries of children without `audit(...)`.
 pub(crate) struct InlineApplied {
-    #[allow(dead_code)]
-    pub(crate) outcome: InlineApplyOutcome,
     pub(crate) signals: Vec<ChildSignal>,
     pub(crate) audit: Vec<crate::audit::PendingEntry>,
 }

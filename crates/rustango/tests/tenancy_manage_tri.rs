@@ -1358,6 +1358,33 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
     };
     patient.insert_pool(&tenant).await.expect("insert patient");
     let id = *patient.id.get().expect("pk");
+    // More rows than one page, then one sealed under a key nobody has.
+    let sealed = |key: &str, text: &str| {
+        use rustango::casts::CastValue as _;
+        std::env::set_var("RUSTANGO_SECRET_KEY", key);
+        let v = rustango::casts::EncryptedString::to_db(&text.to_owned());
+        std::env::set_var("RUSTANGO_SECRET_KEY", OLD);
+        rustango::core::SqlValue::String(v)
+    };
+    let rows = (0..600)
+        .map(|i| vec![sealed(OLD, &format!("p{i}"))])
+        .collect();
+    let bulk = rustango::core::BulkInsertQuery::new(
+        <Patient as rustango::core::Model>::SCHEMA,
+        vec!["ssn"],
+        rows,
+    );
+    rustango::sql::bulk_insert_pool(&tenant, &bulk)
+        .await
+        .expect("bulk insert patients");
+    let lost = rustango::core::BulkInsertQuery::new(
+        <Patient as rustango::core::Model>::SCHEMA,
+        vec!["ssn"],
+        vec![vec![sealed("a-key-nobody-has-0123456789abcdef", "lost")]],
+    );
+    rustango::sql::bulk_insert_pool(&tenant, &lost)
+        .await
+        .expect("insert a lost row");
     let vault = Vault {
         name: "main".into(),
         token: Some(Cast::new("tok".into())),
@@ -1383,16 +1410,28 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
         dry.contains(&format!("{vault_line}: would re-seal")),
         "{dry}"
     );
+    assert!(dry.contains("undecryptable, left alone"), "{dry}");
+    assert!(dry.contains("602 to change, 1 left alone"), "{dry}");
     let out = env
         .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
         .await
         .expect("apply");
     assert!(out.contains(&format!("{patient_line}: re-sealed")), "{out}");
     assert!(out.contains(&format!("{vault_line}: re-sealed")), "{out}");
+    let resealed = out
+        .lines()
+        .filter(|l| l.contains("rmt_patient.ssn") && l.ends_with(": re-sealed"))
+        .count();
+    assert_eq!(resealed, 601, "every page: {out}");
+    assert!(out.contains("0 failed, 1 left alone"), "{out}");
 
     // The old key can go: both rows open under the new one alone.
     std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
-    let patients: Vec<Patient> = Patient::objects().fetch(&tenant).await.expect("read");
+    let patients: Vec<Patient> = Patient::objects()
+        .filter("id", id)
+        .fetch(&tenant)
+        .await
+        .expect("read");
     assert_eq!(&*patients[0].ssn, "123-45-6789");
     let vaults: Vec<Vault> = Vault::objects().fetch(&env.registry).await.expect("read");
     assert_eq!(vaults[0].token.as_deref().map(String::as_str), Some("tok"));
@@ -1401,7 +1440,7 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
         .await
         .expect("re-run");
     assert!(
-        !again.contains("cast "),
+        !again.contains("re-sealed") && again.contains("0 done"),
         "a re-run re-sealed again: {again}"
     );
     with_secret_key();

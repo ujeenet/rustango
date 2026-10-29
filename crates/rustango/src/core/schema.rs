@@ -161,6 +161,22 @@ pub struct FieldSchema {
 }
 
 /// How a `Cast<C>` field stores its value.
+///
+/// The derive reads it from the field type as written, so it accepts only
+/// `Cast<C>` or `Option<Cast<C>>`: an alias would hide the cast, and is refused.
+///
+/// ```compile_fail
+/// use rustango::casts::{Cast, EncryptedString};
+/// type Secret = Cast<EncryptedString>;
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_secret")]
+/// pub struct Doc {
+///     #[rustango(primary_key)]
+///     pub id: i64,
+///     pub token: Secret,
+/// }
+/// # fn main() {}
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum FieldCast {

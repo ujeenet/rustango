@@ -246,84 +246,71 @@ where
         }
     }
     // Every other model's sealed `Cast` columns: registry models on the
-    // registry, tenant models in each tenant.
+    // registry, tenant models in each tenant, one tenant pool open at a time.
     #[cfg(feature = "casts")]
-    {
+    let left_alone = {
         use crate::core::ModelScope;
-        let mut targets = vec![(
-            "registry".to_owned(),
-            registry.clone(),
-            sealed_cast_columns(ModelScope::Registry),
-        )];
-        let tenant_columns = sealed_cast_columns(ModelScope::Tenant);
+        let mut tally = CastTally::default();
+        let (registry_columns, refused) = sealed_cast_columns(ModelScope::Registry);
+        let (tenant_columns, refused_tenant) = sealed_cast_columns(ModelScope::Tenant);
+        for line in refused.iter().chain(&refused_tenant) {
+            tally.failed += 1;
+            writeln!(w, "  {line}")?;
+        }
+        reseal_columns(
+            "registry",
+            &registry,
+            &registry_columns,
+            apply,
+            w,
+            &mut tally,
+        )
+        .await?;
         // No such column: no tenant needs opening.
         if !tenant_columns.is_empty() {
             let mut orgs: Vec<Org> = Org::objects().fetch(&registry).await?;
             orgs.sort_by(|a, b| a.slug.cmp(&b.slug));
             for org in orgs {
-                match pools.scoped_pool_dyn(&org).await {
-                    Ok(pool) => targets.push((org.slug, pool, tenant_columns.clone())),
+                let (pool, own) = match pools.existing_pool_dyn(&org).await {
+                    Ok(p) => p,
                     Err(_) => {
-                        failed += 1;
+                        tally.failed += 1;
                         writeln!(w, "  cast {}: cannot reach the tenant", org.slug)?;
-                    }
-                }
-            }
-        }
-        for (owner, pool, columns) in targets {
-            for (model, pk, column) in columns {
-                let table = model.table;
-                let cells = match SealedCell::list(model, pk, column, &pool).await {
-                    Ok(c) => c,
-                    // A tenant made before the table existed has nothing to reseal.
-                    Err(e) if missing_table(&e) => continue,
-                    Err(e) => {
-                        failed += 1;
-                        writeln!(w, "  cast {owner}/{table}.{column}: cannot open: {e}")?;
                         continue;
                     }
                 };
-                for cell in cells {
-                    let what = format!(
-                        "cast {owner}/{table}.{column} {}",
-                        cell.pk.1.to_display_string()
-                    );
-                    // Already under the current key: nothing to do, so a re-run is a no-op.
-                    if cell.opens_under_current_key() {
-                        continue;
-                    }
-                    todo += 1;
-                    if !apply {
-                        writeln!(w, "  {what}: would re-seal")?;
-                        continue;
-                    }
-                    match cell.reseal(&pool).await {
-                        Ok(true) => {
-                            done += 1;
-                            writeln!(w, "  {what}: re-sealed")?;
-                        }
-                        Ok(false) => {
-                            skipped += 1;
-                            writeln!(w, "  {what}: skipped, changed meanwhile")?;
-                        }
-                        Err(e) => {
-                            failed += 1;
-                            writeln!(w, "  {what}: failed: {e}")?;
-                        }
-                    }
+                let run =
+                    reseal_columns(&org.slug, &pool, &tenant_columns, apply, w, &mut tally).await;
+                if own {
+                    pool.close().await;
+                } else {
+                    pools.invalidate(&org.slug).await;
                 }
+                run?;
             }
         }
-    }
+        todo += tally.todo;
+        done += tally.done;
+        skipped += tally.skipped;
+        failed += tally.failed;
+        tally.left_alone
+    };
+    #[cfg(not(feature = "casts"))]
+    let left_alone = 0usize;
+    let left_alone = if left_alone > 0 {
+        format!(", {left_alone} left alone (cannot be opened)")
+    } else {
+        String::new()
+    };
     if apply {
         writeln!(
             w,
-            "reseal-tenant-secrets: {done} done, {skipped} skipped, {failed} failed"
+            "reseal-tenant-secrets: {done} done, {skipped} skipped, {failed} failed{left_alone}"
         )?;
     } else {
         writeln!(
             w,
-            "reseal-tenant-secrets: {todo} to change (dry run; pass --apply)"
+            "reseal-tenant-secrets: {todo} to change{left_alone} (dry run; pass --apply)"
         )?;
     }
     if failed > 0 {
@@ -334,17 +321,20 @@ where
     Ok(())
 }
 
-/// Every `Cast` column sealed under the framework key, of `scope`'s models,
-/// as `(model, primary key, column)`. The SSO provider tables have their
-/// own pass above.
+/// One sealed `Cast` column: its model, single-column key and column.
 #[cfg(feature = "casts")]
-fn sealed_cast_columns(
-    scope: crate::core::ModelScope,
-) -> Vec<(
+type SealedColumn = (
     &'static crate::core::ModelSchema,
     &'static crate::core::FieldSchema,
     &'static str,
-)> {
+);
+
+/// Every `Cast` column sealed under the framework key, of `scope`'s models,
+/// and one line per model refused because it has no single-column primary
+/// key (the compare-and-set needs one). The SSO provider tables have their
+/// own pass above.
+#[cfg(feature = "casts")]
+fn sealed_cast_columns(scope: crate::core::ModelScope) -> (Vec<SealedColumn>, Vec<String>) {
     use crate::core::{FieldCast, ModelEntry};
     let own_pass: &[&str] = &[
         #[cfg(feature = "sso")]
@@ -352,30 +342,174 @@ fn sealed_cast_columns(
         #[cfg(feature = "admin-sso")]
         <crate::tenancy::sso::SharedSsoProvider as crate::core::Model>::SCHEMA.table,
     ];
-    let mut out: Vec<_> = Vec::new();
+    let mut out: Vec<SealedColumn> = Vec::new();
+    let mut refused: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
     for entry in inventory::iter::<ModelEntry> {
         let model = entry.schema;
         if model.scope != scope
             || model.is_view
             || model.proxy
             || own_pass.contains(&model.table)
-            || out
-                .iter()
-                .any(|(m, _, _): &(&crate::core::ModelSchema, _, _)| m.table == model.table)
+            || seen.contains(&model.table)
         {
             continue;
         }
-        let Some(pk) = model.primary_key() else {
+        let sealed: Vec<&str> = model
+            .fields
+            .iter()
+            .filter(|f| f.cast == Some(FieldCast::Sealed))
+            .map(|f| f.column)
+            .collect();
+        if sealed.is_empty() {
             continue;
-        };
-        for f in model.fields {
-            if f.cast == Some(FieldCast::Sealed) {
-                out.push((model, pk, f.column));
-            }
+        }
+        seen.push(model.table);
+        match single_key(model) {
+            Ok(pk) => out.extend(sealed.into_iter().map(|c| (model, pk, c))),
+            Err(why) => refused.push(format!("cast {}: {why}", model.table)),
         }
     }
     out.sort_by_key(|(m, _, c)| (m.table, *c));
-    out
+    refused.sort();
+    (out, refused)
+}
+
+/// The one primary-key column the compare-and-set writes through.
+#[cfg(feature = "casts")]
+fn single_key(
+    model: &'static crate::core::ModelSchema,
+) -> Result<&'static crate::core::FieldSchema, &'static str> {
+    let mut keys = model.fields.iter().filter(|f| f.primary_key);
+    match (keys.next(), keys.next()) {
+        (Some(pk), None) => Ok(pk),
+        (None, _) => Err("no primary key"),
+        (Some(_), Some(_)) => Err("composite primary key"),
+    }
+}
+
+/// Counts of the sealed-cast pass.
+#[cfg(feature = "casts")]
+#[derive(Default)]
+struct CastTally {
+    todo: usize,
+    done: usize,
+    skipped: usize,
+    failed: usize,
+    /// Cells neither key opens, or that are not text: reported, never failed,
+    /// since no re-run can fix them.
+    left_alone: usize,
+}
+
+/// Rows read per page of a sealed column, in primary-key order.
+#[cfg(feature = "casts")]
+const CAST_PAGE: i64 = 500;
+
+/// Re-seal `columns` on `pool`, one page of rows at a time.
+#[cfg(feature = "casts")]
+async fn reseal_columns<W: Write + Send>(
+    owner: &str,
+    pool: &crate::sql::Pool,
+    columns: &[SealedColumn],
+    apply: bool,
+    w: &mut W,
+    tally: &mut CastTally,
+) -> std::io::Result<()> {
+    for &(model, pk, column) in columns {
+        let table = model.table;
+        let mut after: Option<SqlValue> = None;
+        loop {
+            let page = match SealedCell::page(model, pk, column, after.take(), pool).await {
+                Ok(p) => p,
+                // A tenant made before the table existed has nothing to reseal.
+                Err(e) if missing_table(&e) => break,
+                Err(e) => {
+                    tally.failed += 1;
+                    writeln!(w, "  cast {owner}/{table}.{column}: cannot open: {e}")?;
+                    break;
+                }
+            };
+            let Some(last) = page.last.clone() else {
+                break;
+            };
+            for cell in page.cells {
+                let what = format!(
+                    "cast {owner}/{table}.{column} {}",
+                    cell.key().to_display_string()
+                );
+                let cell = match cell {
+                    PageCell::Text(cell) => cell,
+                    PageCell::NotText(_) => {
+                        tally.left_alone += 1;
+                        writeln!(w, "  {what}: not text, left alone")?;
+                        continue;
+                    }
+                };
+                // Already under the current key: a re-run is a no-op.
+                if cell.opens_under_current_key() {
+                    continue;
+                }
+                if !cell.opens() {
+                    tally.left_alone += 1;
+                    writeln!(w, "  {what}: undecryptable, left alone")?;
+                    continue;
+                }
+                tally.todo += 1;
+                if !apply {
+                    writeln!(w, "  {what}: would re-seal")?;
+                    continue;
+                }
+                match cell.reseal(pool).await {
+                    Ok(true) => {
+                        tally.done += 1;
+                        writeln!(w, "  {what}: re-sealed")?;
+                    }
+                    Ok(false) => {
+                        tally.skipped += 1;
+                        writeln!(w, "  {what}: skipped, changed meanwhile")?;
+                    }
+                    Err(e) => {
+                        tally.failed += 1;
+                        writeln!(w, "  {what}: failed: {e}")?;
+                    }
+                }
+            }
+            if page.full {
+                after = Some(last);
+            } else {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One page of a sealed column.
+#[cfg(feature = "casts")]
+struct CastPage {
+    cells: Vec<PageCell>,
+    /// The page's last key, where the next page starts.
+    last: Option<SqlValue>,
+    /// `true` when the page was full, so another may follow.
+    full: bool,
+}
+
+/// A non-null cell of a sealed column.
+#[cfg(feature = "casts")]
+enum PageCell {
+    Text(SealedCell),
+    /// Its key; the value is not text, so it cannot be a sealed value.
+    NotText(SqlValue),
+}
+
+#[cfg(feature = "casts")]
+impl PageCell {
+    fn key(&self) -> &SqlValue {
+        match self {
+            Self::Text(c) => &c.pk.1,
+            Self::NotText(k) => k,
+        }
+    }
 }
 
 /// A driver error for a table that is not there, on any backend.
@@ -411,29 +545,53 @@ struct SealedCell {
 
 #[cfg(feature = "casts")]
 impl SealedCell {
-    /// The non-null `column` cells of `model`, raw.
-    async fn list(
+    /// The non-null `column` cells of `model` with a key above `after`, raw,
+    /// at most [`CAST_PAGE`] rows in key order.
+    async fn page(
         model: &'static crate::core::ModelSchema,
         pk: &'static crate::core::FieldSchema,
         column: &'static str,
+        after: Option<SqlValue>,
         pool: &crate::sql::Pool,
-    ) -> Result<Vec<Self>, String> {
-        let query = crate::core::SelectQuery::new(model).projection(vec![pk.column, column]);
+    ) -> Result<CastPage, String> {
+        use crate::core::{Filter, Op, OrderItem, WhereExpr};
+        let mut query = crate::core::SelectQuery::new(model).projection(vec![pk.column, column]);
+        if let Some(after) = after {
+            query.where_clause = WhereExpr::Predicate(Filter::new(pk.column, Op::Gt, after));
+        }
+        query.order_by = vec![OrderItem::column(pk.column, false)];
+        query.limit = Some(CAST_PAGE);
         let rows = crate::sql::fetch_values_list_on(pool, &query)
             .await
             .map_err(|e| e.to_string())?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| match <[SqlValue; 2]>::try_from(row) {
-                Ok([key, SqlValue::String(stored)]) => Some(Self {
+        let full = i64::try_from(rows.len()).unwrap_or(i64::MAX) >= CAST_PAGE;
+        let mut page = CastPage {
+            cells: Vec::new(),
+            last: None,
+            full,
+        };
+        for row in rows {
+            let Ok([key, value]) = <[SqlValue; 2]>::try_from(row) else {
+                return Err("a row of an unexpected shape".into());
+            };
+            page.last = Some(key.clone());
+            match value {
+                SqlValue::Null => {}
+                SqlValue::String(stored) => page.cells.push(PageCell::Text(Self {
                     model,
                     pk: (pk.column, key),
                     column,
                     stored,
-                }),
-                _ => None,
-            })
-            .collect())
+                })),
+                _ => page.cells.push(PageCell::NotText(key)),
+            }
+        }
+        Ok(page)
+    }
+
+    /// Either key opens it.
+    fn opens(&self) -> bool {
+        crate::aead::decrypt(&self.stored, b"").is_ok()
     }
 
     fn opens_under_current_key(&self) -> bool {
@@ -533,6 +691,39 @@ impl SsoSecret {
             stored: self.stored.clone(),
         };
         cell.write(pool, sealed).await
+    }
+}
+
+#[cfg(all(test, feature = "casts"))]
+mod cast_tests {
+    use crate::core::{FieldSchema, FieldType, ModelSchema};
+
+    const fn key(name: &'static str) -> FieldSchema {
+        let mut f = FieldSchema::new(name, name, FieldType::I64);
+        f.primary_key = true;
+        f
+    }
+
+    /// A model without one key column is refused, not written by half a key.
+    #[test]
+    fn only_a_single_column_key_is_used() {
+        static ONE: [FieldSchema; 1] = [key("id")];
+        static NONE: [FieldSchema; 1] = [FieldSchema::new("v", "v", FieldType::String)];
+        static TWO: [FieldSchema; 2] = [key("a"), key("b")];
+        let model = |fields: &'static [FieldSchema]| -> &'static ModelSchema {
+            let mut m = ModelSchema::new("m", "m");
+            m.fields = fields;
+            Box::leak(Box::new(m))
+        };
+        assert_eq!(super::single_key(model(&ONE)).map(|f| f.column), Ok("id"));
+        assert_eq!(
+            super::single_key(model(&NONE)).map(|f| f.column),
+            Err("no primary key")
+        );
+        assert_eq!(
+            super::single_key(model(&TWO)).map(|f| f.column),
+            Err("composite primary key")
+        );
     }
 }
 

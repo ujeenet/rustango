@@ -166,7 +166,11 @@ untouched.
 
 ### Sealed casts and reseal
 
-`FieldSchema` has a new `cast: Option<FieldCast>` field; the derive fills it, and `FieldSchema::new` sets `None`. `reseal-tenant-secrets` now also re-seals every model's `Cast<EncryptedString>` columns, on the registry and in each tenant, and reports them as `cast <owner>/<table>.<column> <pk>`. It opens tenants for this only when a tenant model has such a column.
+`FieldSchema` has a new `cast: Option<FieldCast>` field; the derive fills it, and `FieldSchema::new` sets `None`. `reseal-tenant-secrets` now also re-seals every model's `Cast<EncryptedString>` columns, on the registry and in each tenant, and reports them as `cast <owner>/<table>.<column> <pk>`. It opens tenants for this only when a tenant model has such a column, one tenant at a time, and reads each column in pages of 500 rows by primary key.
+
+- A hand-written `FieldSchema { .. }` literal inside the crate, or a `FieldSchemaParts` literal, must add `cast`; outside the crate use `FieldSchema::new`. `FieldCast` (`Sealed`, `Other`; `#[non_exhaustive]`) is a new public type in `rustango::core`. `CastValue::KIND` is doc-hidden: leave it at its default in your own casts.
+- The derive sees a cast only as `Cast<C>` or `Option<Cast<C>>` written out; a type alias for a cast is refused at compile time.
+- A model with a sealed cast but no single-column primary key is reported as `cast <table>: no primary key` (or `composite primary key`) and fails the run. A value neither key opens, or a non-text cell, is reported as `left alone` and does not fail the run; the summary counts them.
 
 ### Admin inline history
 
@@ -178,7 +182,7 @@ An inline add, edit or delete of a child without `audit(...)` now writes an audi
 
 ### Cache counters and NUL values
 
-`Cache::incr` counts a stored value only in the exact form `incr` writes. `"007"` and `"+7"` were read as 7 by the memory, file, PG and MySQL backends and now count as 0, as on SQLite. `RedisCache::incr` on a non-integer value now restarts the counter at `by` instead of returning an error. `set`, `add` and `set_forever` with a NUL character now fail with `CacheError::Serialization` on every backend; use `set_bytes`.
+`Cache::incr` counts a stored value only in the exact form `incr` writes. `"007"` and `"+7"` were read as 7 by the memory, file, PG and MySQL backends and now count as 0, as on SQLite. `RedisCache::incr` on a non-integer value now restarts the counter at `by` instead of returning an error. A value with a trailing line break (`"5\n"`) also counts as 0; MySQL read it as 5. `set`, `add` and `set_forever` with a NUL character now fail with `CacheError::Serialization` on every backend; use `set_bytes`.
 
 
 ## 0.61.11

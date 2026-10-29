@@ -253,6 +253,13 @@ Um den Schlüssel zu wechseln:
    dem neuen Schlüssel.
 4. Entferne `RUSTANGO_SECRET_KEY_PREVIOUS` und starte neu.
 
+Der Befehl erkennt eine versiegelte Spalte am Feldtyp, den das Model-Derive
+sieht: ausgeschrieben `Cast<EncryptedString>` oder
+`Option<Cast<EncryptedString>>`. Jede andere Schreibweise, etwa ein Typalias,
+lehnt das Derive ab, also wird keine Spalte übersehen. Jedes Model braucht einen
+einspaltigen Primärschlüssel; eines ohne wird als Fehler gemeldet. Ein Wert, den
+kein Schlüssel öffnet, wird gemeldet und bleibt unverändert.
+
 Werte, die mit einem leeren Schlüssel versiegelt wurden, bevor leere
 Schlüssel abgelehnt wurden, öffnen sich weiterhin, wenn
 `RUSTANGO_SECRET_KEY_PREVIOUS` gesetzt und leer ist; versiegle sie auf

@@ -251,6 +251,13 @@ Para cambiar la clave:
    `Cast<EncryptedString>` de los modelos (registro y tenants).
 4. Quita `RUSTANGO_SECRET_KEY_PREVIOUS` y reinicia.
 
+El comando reconoce una columna sellada por el tipo de campo que ve el derive
+del modelo: `Cast<EncryptedString>` u `Option<Cast<EncryptedString>>`, escrito
+completo. El derive rechaza cualquier otra forma, como un alias de tipo, así que
+no se pierde ninguna columna. Cada modelo necesita una clave primaria de una sola
+columna; uno sin ella se informa como fallo. Un valor que ninguna clave abre se
+informa y se deja como está.
+
 Los valores sellados con una clave en blanco, de antes de que se rechazaran
 las claves en blanco, siguen abriéndose cuando `RUSTANGO_SECRET_KEY_PREVIOUS`
 está definida y vacía; vuelve a sellarlos del mismo modo.

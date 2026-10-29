@@ -144,6 +144,7 @@ rustango::register_admin_inline!(
     fk = "order_id",
     fields = &["qty"],
     extra = 1,
+    max_num = Some(2),
 );
 
 rustango::register_admin_inline!(
@@ -371,6 +372,47 @@ async fn inline_writes_of_an_unaudited_child_are_logged(pool: &Pool) {
             .await
             .expect("audit table");
     }
+}
+
+/// A refused inline save (past `max_num`) rolls back and leaves no history,
+/// even for a child without `audit(...)`, whose rows are written after the commit.
+async fn a_rolled_back_inline_save_leaves_no_history(pool: &Pool) {
+    let o = seed_order(pool).await;
+    let mut ids = Vec::new();
+    for qty in [1, 2] {
+        let mut item = Item {
+            id: Auto::default(),
+            order_id: o,
+            qty,
+        };
+        item.insert_pool(pool).await.expect("insert item");
+        ids.push(item.id.get().expect("pk").to_string());
+    }
+    AuditLog::delete_where("entity_table", "aaw_item", pool)
+        .await
+        .expect("clear seed audit rows");
+    let (i1, i2) = (&ids[0], &ids[1]);
+    let form = format!(
+        "name=o&aaw_item-TOTAL_FORMS=3&aaw_item-INITIAL_FORMS=2\
+         &aaw_item-0-id={i1}&aaw_item-0-qty=5\
+         &aaw_item-1-id={i2}&aaw_item-1-qty=2\
+         &aaw_item-2-qty=3"
+    );
+    let (status, body) = post(pool, &format!("/aaw_order/{o}"), &form).await;
+    assert!(
+        !status.is_redirection(),
+        "a third row passed max_num: {body}"
+    );
+    let qty: Vec<i32> = Item::objects()
+        .filter("order_id", o)
+        .fetch(pool)
+        .await
+        .expect("fetch items")
+        .iter()
+        .map(|i| i.qty)
+        .collect();
+    assert!(qty.contains(&1) && !qty.contains(&5), "{qty:?}");
+    assert_eq!(audit_rows(pool, "aaw_item").await, []);
 }
 
 /// An inline DELETE or UPDATE whose audit row cannot be written saves
@@ -696,6 +738,7 @@ tri_dialect_test! {
     scenarios: [
         inline_child_writes_are_audited,
         inline_writes_of_an_unaudited_child_are_logged,
+        a_rolled_back_inline_save_leaves_no_history,
         inline_child_audit_failure_saves_nothing,
         inline_delete_and_update_audit_failure_save_nothing,
         deletes_and_bulk_actions_are_audited,

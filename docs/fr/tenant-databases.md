@@ -251,6 +251,13 @@ Pour changer la clé :
    et tenants) avec la nouvelle clé.
 4. Retirez `RUSTANGO_SECRET_KEY_PREVIOUS` et redémarrez.
 
+La commande repère une colonne scellée par le type de champ que voit le derive
+du modèle : `Cast<EncryptedString>` ou `Option<Cast<EncryptedString>>`, écrit en
+entier. Le derive refuse toute autre écriture, comme un alias de type, donc
+aucune colonne n'est oubliée. Chaque modèle doit avoir une clé primaire sur une
+seule colonne ; un modèle sans elle est signalé en échec. Une valeur qu'aucune
+clé n'ouvre est signalée et laissée telle quelle.
+
 Les valeurs scellées sous une clé vide, avant que les clés vides ne soient
 refusées, s'ouvrent encore quand `RUSTANGO_SECRET_KEY_PREVIOUS` est défini et
 vide ; rescellez-les de la même façon.

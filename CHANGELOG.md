@@ -17,6 +17,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `reseal-tenant-secrets` re-seals every model's `Cast<EncryptedString>` columns too, on the registry and in each tenant, so the previous key can go after a rotation; a value already under the current key is left alone. `FieldSchema::cast` records which cast a field uses.
 - SSO sign-in finds a link by subject through a new `(provider_source, provider_id, subject)` index on `rustango_sso_links` instead of reading every link of the provider.
 - The auth signals (`user_logged_in`, `user_logged_out`, `user_login_failed`) and the admin save and delete signals carry the tenant's slug (`tenant`), so a receiver can tell user ids and keys of different tenants apart.
+- `reseal-tenant-secrets` opens one tenant at a time and pages each sealed column by primary key; a model without a single-column primary key is reported and fails the run instead of being skipped silently, and a value neither key opens is reported as left alone instead of failing every run.
+- `DatabaseCache::incr` on MySQL counts `"5\n"` as 0, as the other backends do, instead of reading it as 5.
 - The cache backends agree on `incr`: only the exact `i64` text counts as a number (`"+7"`, `"007"`, `" 5"` count as 0, as `"abc"` does), Redis restarts such a counter at `by` instead of failing, and every backend refuses a text value with a NUL character.
 
 ## [0.61.11] — 2026-10-29

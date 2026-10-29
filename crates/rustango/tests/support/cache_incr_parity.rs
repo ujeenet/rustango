@@ -5,8 +5,9 @@ use rustango::cache::{Cache, CacheError};
 /// `cache` follows the `Cache::incr` and `Cache::set` rules; `name` labels failures.
 pub async fn assert_incr_rules(cache: &dyn Cache, name: &str) {
     // (stored, by, result): only the exact `i64` text is a counter.
-    let cases: [(&str, i64, i64); 10] = [
+    let cases: [(&str, i64, i64); 11] = [
         ("7", 1, 8),
+        ("5\n", 1, 1),
         ("-5", 1, -4),
         ("0", 2, 2),
         ("+7", 1, 1),
