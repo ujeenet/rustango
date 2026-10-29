@@ -427,6 +427,95 @@ async fn tenant_flag_opens_the_tenant_pool(backend: &Pool) {
     }
 }
 
+/// Run a cache verb on `table`; its output.
+async fn cache_verb(pool: &Pool, verb: &str, table: &str) -> String {
+    let dir = tempfile::tempdir().unwrap();
+    let mut out = Vec::new();
+    rustango::migrate::manage::run_with_writer(
+        pool,
+        dir.path(),
+        args(&[verb, "--table", table]),
+        &mut out,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{verb}: {e}"));
+    String::from_utf8(out).unwrap()
+}
+
+/// One cache row of `table` that expired long ago.
+async fn seed_expired(pool: &Pool, table: &str) {
+    let sql = format!(
+        "INSERT INTO {} (cache_key, value, expires) VALUES ('old', 'v', 1)",
+        pool.dialect().quote_ident(table)
+    );
+    rustango::sql::raw_execute_pool(pool, &sql, Vec::new())
+        .await
+        .unwrap();
+}
+
+fn cache_table(prefix: &str) -> String {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    format!("{prefix}_{n}")
+}
+
+/// `clearsessions` before `createcachetable` has nothing to clear, and says so.
+async fn clearsessions_without_a_cache_table_has_nothing_to_clear(pool: &Pool) {
+    let table = cache_table("cc_missing");
+    let out = cache_verb(pool, "clearsessions", &table).await;
+    assert!(
+        out.contains("nothing to clear") && out.contains("createcachetable"),
+        "{out}"
+    );
+    cache_verb(pool, "createcachetable", &table).await;
+    seed_expired(pool, &table).await;
+    let out = cache_verb(pool, "clearsessions", &table).await;
+    assert!(
+        out.contains("clearsessions: purged 1 expired row(s)"),
+        "{out}"
+    );
+    rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .unwrap();
+}
+
+/// On a PG pool whose search path ends in `public`, a cache table in `public`
+/// is purged, as the cache itself finds it there. Other backends have no search path.
+async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = pool {
+        use rustango::sql::sqlx;
+        let table = cache_table("cc_public");
+        let schema = cache_table("cc_tenant");
+        cache_verb(pool, "createcachetable", &table).await;
+        seed_expired(pool, &table).await;
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(pg)
+            .await
+            .unwrap();
+        let opts = (*pg.connect_options())
+            .clone()
+            .options([("search_path", format!("{schema},public"))]);
+        let scoped = Pool::Postgres(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with(opts)
+                .await
+                .unwrap(),
+        );
+        let out = cache_verb(&scoped, "clearsessions", &table).await;
+        assert!(out.contains("purged 1 expired row(s)"), "{out}");
+        for sql in [
+            format!("DROP SCHEMA {schema}"),
+            format!("DROP TABLE {table}"),
+        ] {
+            sqlx::query(&sql).execute(pg).await.unwrap();
+        }
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -434,5 +523,7 @@ tri_dialect_test! {
         tenant_flag_opens_the_tenant_pool,
         check_reports_unapplied_and_unmade_migrations,
         migrate_target_names_each_direction,
+        clearsessions_without_a_cache_table_has_nothing_to_clear,
+        clearsessions_finds_the_cache_table_through_the_search_path,
     ],
 }

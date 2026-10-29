@@ -961,7 +961,7 @@ async fn a_short_new_password_is_refused_by_the_tenant_admin() {
         .unwrap_or_default()
         .to_owned();
     assert!(
-        location.contains("error=") && location.contains("8"),
+        location.contains("error=") && location.contains("12"),
         "got {location}"
     );
     let stored: Vec<User> = User::objects().fetch(&env.tenant).await.unwrap();

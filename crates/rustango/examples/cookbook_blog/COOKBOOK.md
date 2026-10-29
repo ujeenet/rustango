@@ -209,7 +209,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **API**: [`tenancy::manage::run`](../../src/tenancy/manage/mod.rs) `create-operator` / `create-user` arms (forwarded by `Cli::tenancy().run()`).
 
-**Recipe**: `cargo run -- create-operator admin --password letmein` then `cargo run -- create-user acme alice --password hunter2 --superuser`.
+**Recipe**: `cargo run -- create-operator admin --password Letmein-admin-1` then `cargo run -- create-user acme alice --password Hunter2-alice-pw --superuser`.
 
 **First-user auto-superuser**: when `create-user <slug> <name>` runs and a tenant has no users yet, the new row is forced to `is_superuser = true` regardless of `--superuser`. This avoids the cold-start trap where the first user lands on an admin with an empty sidebar (no permissions or roles assigned yet). A `note: auto-promoted because first user of tenant` line is printed so onboarding scripts can detect it.
 
@@ -1742,7 +1742,7 @@ Plus a **Roles & permissions panel** rendered on the user detail page (`/{admin_
 
 ```sh
 # Bootstrap the perm tables on a fresh tenant (idempotent):
-cargo run -- create-user acme alice --password hunter2
+cargo run -- create-user acme alice --password Hunter2-alice-pw
 
 # Then visit the user detail page; the panel is automatically there.
 # Edit role memberships at /admin/rustango_user_roles
@@ -2003,7 +2003,7 @@ test comes to a real browser session without playwright in the loop.
 
 * `admin_form_creates_then_viewset_isolates_per_tenant`:
   - migrate registry → create operator → create acme + globex →
-    create alice/tenantpw on acme.
+    create alice/Tenant-pw-2026 on acme.
   - spawn `cookbook_blog` on `127.0.0.1:8867`.
   - `POST /login` as alice (acme tenant).
   - `POST /admin/cookbook_author` with `name=ada lovelace` etc.
@@ -2039,21 +2039,21 @@ cargo run -- migrate
 # `migrate` generates the framework's `system/migrations/` from the
 # compiled models on first run and applies them (no `init-tenancy`
 # step — the framework ships no hardcoded bootstrap migrations).
-# (then `create-operator admin --password letmein`,
+# (then `create-operator admin --password Letmein-admin-1`,
 #  `create-tenant acme --display-name "Acme Inc" --host-pattern acme.localhost`,
-#  `create-user acme alice --password tenantpw --superuser`,
+#  `create-user acme alice --password Tenant-pw-2026 --superuser`,
 #  finally `cargo run`)
 ```
 
 Verified browser-side via playwright MCP:
 
 * §8.0 `http://localhost:8765/login` — operator login form renders
-  with username/password/Sign in. Logging in as `admin / letmein`
+  with username/password/Sign in. Logging in as `admin / Letmein-admin-1`
   lands on the operator console (sidebar nav: Home, Operators,
   Organizations).
 * §8.0 `http://acme.localhost:8765/login` — tenant login form
   renders titled "Sign in to **acme**". Logging in as `alice /
-  tenantpw` lands on the tenant admin index showing every registered
+  Tenant-pw-2026` lands on the tenant admin index showing every registered
   model split by app group: `apps` (the cookbook's blog/auth/etc.
   models), `contenttypes` (rustango_content_types), `tenancy`
   (rustango_users + friends).
@@ -3035,7 +3035,7 @@ Initialize tenancy? [Y/n]
 Apply registry migrations now? [Y/n]
 Create an operator account? [Y/n]
   Operator username (default: admin): admin
-  Operator password: hunter2
+  Operator password: Hunter2-op-pw
 Create a tenant? [Y/n]
   Tenant slug (default: acme): acme
   ...

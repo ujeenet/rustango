@@ -691,6 +691,19 @@ async fn a_set_password_link_holds_up_over_http() {
     let origin = browser_origin(&page, &host);
     let cookie = set_cookie(&page, "rustango_csrf").expect("a CSRF cookie");
     let html = body_of(page).await;
+    // The tenant password form hints the policy's exact length.
+    let min = format!(
+        r#"minlength="{}""#,
+        rustango::password_validators::BUILTIN_FORM_MIN_LENGTH
+    );
+    let inputs: Vec<&str> = html
+        .split("<input")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap_or(t.len())])
+        .filter(|t| t.contains(r#"autocomplete="new-password""#))
+        .collect();
+    assert_eq!(inputs.len(), 2, "{html}");
+    assert!(inputs.iter().all(|t| t.contains(&min)), "{inputs:?}");
     let token = html
         .split("name=\"_csrf\" value=\"")
         .nth(1)

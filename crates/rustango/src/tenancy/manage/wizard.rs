@@ -194,10 +194,11 @@ fn write_intro<W: Write>(w: &mut W) -> std::io::Result<()> {
 }
 
 fn write_outro<W: Write>(w: &mut W) -> std::io::Result<()> {
+    let login = crate::tenancy::RouteConfig::default().login_url;
     writeln!(
         w,
         "\nWizard complete. Next:\n  • cargo run                   (boot the server)\n  \
-         • visit /__login              (operator console)\n  \
+         • visit {login:<22}(operator console)\n  \
          • visit <slug>.localhost      (tenant admin)"
     )
 }
@@ -351,5 +352,16 @@ mod tests {
         prompt_value(&mut r, &mut w, "Password", None).unwrap();
         let out = String::from_utf8(w).unwrap();
         assert!(!out.contains("default:"), "got: {out}");
+    }
+
+    /// The outro sends people to the login the console really serves.
+    #[test]
+    fn outro_names_the_real_login_path() {
+        let mut w: Vec<u8> = Vec::new();
+        write_outro(&mut w).unwrap();
+        let out = String::from_utf8(w).unwrap();
+        let login = crate::tenancy::RouteConfig::default().login_url;
+        assert!(!out.contains("/__login"), "{out}");
+        assert!(out.contains(&format!("visit {login} ")), "{out}");
     }
 }

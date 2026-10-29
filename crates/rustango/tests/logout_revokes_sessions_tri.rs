@@ -213,6 +213,41 @@ async fn a_bare_admin_logout_ends_a_cookie_from_a_faster_clock(pool: &Pool) {
     assert!(env.status(&cookie).await.is_redirection());
 }
 
+/// The admin form holds an admin user's new password to the built-in policy.
+async fn a_bare_admin_password_edit_applies_the_policy(pool: &Pool) {
+    let env = bare(pool).await;
+    let editor = env.login().await;
+    let mut other = AdminUser::new_with_password(&unique("pw"), ADMIN_PASSWORD, true).unwrap();
+    other.insert_pool(pool).await.expect("seed admin");
+    let uri = format!("/rustango_admin_users/{}", other.id.get().copied().unwrap());
+    let edit = |pw: &str| {
+        format!(
+            "username={}&password_hash={pw}&is_superuser=true&active=true&created_at=2026-01-01T00:00:00&_csrf=t",
+            other.username
+        )
+    };
+    let res = send(&env.app, "POST", &uri, "admin.test", edit("a"), &editor).await;
+    assert!(!res.status().is_redirection(), "{}", res.status());
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Password rejected"), "{html}");
+    let res = send(
+        &env.app,
+        "POST",
+        &uri,
+        "admin.test",
+        edit("pw-policy-strong"),
+        &editor,
+    )
+    .await;
+    assert!(res.status().is_redirection(), "{}", res.status());
+}
+
 /// Deactivating an admin user in the admin stamps the logout cut-off, so
 /// reactivating never brings an old cookie back.
 async fn deactivating_a_bare_admin_ends_their_sessions(pool: &Pool) {
@@ -829,6 +864,93 @@ async fn deactivating_an_operator_ends_their_console_sessions(pool: &Pool) {
     assert_eq!(env.console_status(&fresh).await, StatusCode::OK);
 }
 
+// ---- change password ----------------------------------------------------
+
+const NEW_PASSWORD: &str = "N3w-passw0rd-strong";
+
+fn change_form(current: &str, new: &str) -> String {
+    format!("current_password={current}&new_password={new}&confirm_password={new}&_csrf=t")
+}
+
+async fn body_text(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn location(res: &axum::response::Response) -> String {
+    res.headers()[header::LOCATION].to_str().unwrap().to_owned()
+}
+
+/// A tenant password change keeps the session that made it, shows the
+/// success flash, and ends the user's other sessions.
+async fn a_tenant_password_change_ends_only_the_other_sessions(pool: &Pool) {
+    let env = tenancy(pool).await;
+    let user = env.user().await;
+    let this = env.login(&user).await;
+    let other = env.login(&user).await;
+    let res = env
+        .admin_req(
+            "POST",
+            "/__change-password",
+            change_form(TENANT_PASSWORD, NEW_PASSWORD),
+            &this,
+        )
+        .await;
+    assert!(res.status().is_redirection(), "{:?}", res.status());
+    let (to, this) = (
+        location(&res),
+        set_cookie(&res, tenant_console::COOKIE_NAME),
+    );
+    let page = env.admin_req("GET", &to, String::new(), &this).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(body_text(page).await.contains("Password updated"));
+    assert_eq!(env.tenant_status(&this).await, StatusCode::OK);
+    assert_eq!(env.tenant_status(&other).await, StatusCode::SEE_OTHER);
+}
+
+/// The tenant change-password form applies the set-password link's policy.
+async fn a_tenant_password_change_refuses_a_weak_password(pool: &Pool) {
+    let env = tenancy(pool).await;
+    let user = env.user().await;
+    let cookie = env.login(&user).await;
+    let res = env
+        .admin_req(
+            "POST",
+            "/__change-password",
+            change_form(TENANT_PASSWORD, "password1"),
+            &cookie,
+        )
+        .await;
+    assert!(location(&res).contains("error="), "{}", location(&res));
+    let row = env.user_row(&user).await;
+    assert!(rustango::tenancy::password::verify(TENANT_PASSWORD, &row.password_hash).unwrap());
+}
+
+/// The same on the operator console.
+async fn a_console_password_change_ends_only_the_other_sessions(pool: &Pool) {
+    let env = tenancy(pool).await;
+    let op = env.operator().await;
+    let this = env.console_login(&op).await;
+    let other = env.console_login(&op).await;
+    let res = env
+        .console_req(
+            "POST",
+            "/change-password",
+            change_form(OPERATOR_PASSWORD, NEW_PASSWORD),
+            &this,
+        )
+        .await;
+    assert!(res.status().is_redirection(), "{:?}", res.status());
+    let (to, this) = (location(&res), set_cookie(&res, OP_COOKIE));
+    let page = env.console_req("GET", &to, String::new(), &this).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(body_text(page).await.contains("Password updated"));
+    assert_eq!(env.console_status(&this).await, StatusCode::OK);
+    assert_eq!(env.console_status(&other).await, StatusCode::SEE_OTHER);
+}
+
 // ---- member -------------------------------------------------------------
 
 /// The tenant user's cut-off: stored whole-second, never moved back, and
@@ -888,6 +1010,7 @@ tri_dialect_test! {
         a_bare_admin_logout_ends_a_cookie_from_a_faster_clock,
         a_stale_bare_admin_cookie_cannot_revoke,
         deactivating_a_bare_admin_ends_their_sessions,
+        a_bare_admin_password_edit_applies_the_policy,
         the_deactivate_helper_ends_sessions,
         a_bare_admin_logout_that_cannot_read_fails,
         a_bare_admin_login_db_error_is_503_and_not_a_failure,
@@ -905,5 +1028,8 @@ tri_dialect_test! {
         a_console_logout_that_cannot_read_fails,
         deactivating_an_operator_ends_their_console_sessions,
         a_member_logout_cutoff_round_trips,
+        a_tenant_password_change_ends_only_the_other_sessions,
+        a_tenant_password_change_refuses_a_weak_password,
+        a_console_password_change_ends_only_the_other_sessions,
     ],
 }

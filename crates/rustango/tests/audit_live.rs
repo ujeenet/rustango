@@ -732,7 +732,7 @@ async fn ensure_round(url: &str, round: u32) {
             "create-admin",
             &format!("u{round}"),
             "--password",
-            "pw-1642-x",
+            "pw-1642-x-strong",
         ];
         let dir = std::env::temp_dir().join(format!("rustango_1642_{}", std::process::id()));
         let mut out = Vec::new();

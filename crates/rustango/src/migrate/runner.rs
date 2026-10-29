@@ -1359,7 +1359,7 @@ async fn migrate_to_with_ledger(
 
         let mut applied = applied;
         let mut touched = Vec::new();
-        for mig in backward_from(&all, &applied, target) {
+        for mig in Rollback::After(target).plan(&all, &applied) {
             unapply_locked(pool, dir, &mig.name, ledger).await?;
             applied.remove(&mig.name);
             touched.push(mig);
@@ -1471,17 +1471,7 @@ async fn downgrade_with_ledger(
     with_migrate_lock(pool, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_for(pool, ledger).await?;
-
-        let applied_in_order: Vec<Migration> = all
-            .into_iter()
-            .filter(|m| applied.contains(&m.name))
-            .collect();
-        if applied_in_order.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let n = steps.min(applied_in_order.len());
-        let to_unapply: Vec<Migration> = applied_in_order.into_iter().rev().take(n).collect();
+        let to_unapply = Rollback::Steps(steps).plan(&all, &applied);
 
         let mut touched = Vec::with_capacity(to_unapply.len());
         for mig in to_unapply {
@@ -2884,10 +2874,12 @@ pub(crate) async fn try_table_resolves(
         }
         #[cfg(feature = "mysql")]
         crate::sql::Pool::Mysql(_) => try_table_exists_here(pool, table).await?,
+        // SQLite resolves names case-insensitively; MySQL's catalog already follows the server.
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
             sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') \
+                 AND name = ? COLLATE NOCASE",
             )
             .bind(table)
             .fetch_one(sq)
@@ -5017,7 +5009,7 @@ pub(crate) async fn migrate_to_locked(
         unapplied: Vec::new(),
         applied: Vec::new(),
     };
-    for mig in backward_from(&all, &applied, target) {
+    for mig in Rollback::After(target).plan(&all, &applied) {
         unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
         applied.remove(&mig.name);
         moved.unapplied.push(mig);
@@ -5057,23 +5049,46 @@ pub async fn downgrade_pool_with_ledger(
     if steps == 0 {
         return Ok(Vec::new());
     }
+    rollback_pool(pool, dir, Rollback::Steps(steps), ledger).await
+}
+
+/// What a rollback unapplies from a ledger.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Rollback<'a> {
+    /// The last N applied.
+    Steps(usize),
+    /// Everything applied after this migration, which stays.
+    After(&'a str),
+}
+
+impl Rollback<'_> {
+    /// The applied files of `all` this unapplies, newest first.
+    pub(crate) fn plan(self, all: &[Migration], applied: &HashSet<String>) -> Vec<Migration> {
+        match self {
+            Rollback::Steps(n) => all
+                .iter()
+                .rev()
+                .filter(|m| applied.contains(&m.name))
+                .take(n)
+                .cloned()
+                .collect(),
+            Rollback::After(target) => backward_from(all, applied, target),
+        }
+    }
+}
+
+/// Unapply `rollback`'s plan, read and run under one migrate lock.
+pub(crate) async fn rollback_pool(
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    rollback: Rollback<'_>,
+    ledger: &str,
+) -> Result<Vec<Migration>, MigrateError> {
     with_migrate_lock_pool(pool, ledger, async {
         let all = file::list_dir(dir)?;
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-
-        let applied_in_order: Vec<Migration> = all
-            .into_iter()
-            .filter(|m| applied.contains(&m.name))
-            .collect();
-        if applied_in_order.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let n = steps.min(applied_in_order.len());
-        let to_unapply: Vec<Migration> = applied_in_order.into_iter().rev().take(n).collect();
-
-        let mut touched = Vec::with_capacity(to_unapply.len());
-        for mig in to_unapply {
+        let mut touched = Vec::new();
+        for mig in rollback.plan(&all, &applied) {
             unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
             touched.push(mig);
         }
@@ -5537,6 +5552,18 @@ mod tests {
         assert!(super::mysql_lock_taken(Some(1)).unwrap());
         assert!(!super::mysql_lock_taken(Some(0)).unwrap());
         assert!(super::mysql_lock_taken(None).is_err());
+    }
+
+    /// SQLite finds `CaseT` under any case, so the check must too.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn sqlite_table_resolves_in_any_case() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::sql::raw_execute_pool(&pool, "CREATE TABLE CaseT (id INTEGER)", Vec::new())
+            .await
+            .unwrap();
+        assert!(super::try_table_resolves(&pool, "caset").await.unwrap());
+        assert!(!super::try_table_resolves(&pool, "other").await.unwrap());
     }
 
     /// #2026 — MySQL refuses to drop an FK column (1828); its FK goes first.

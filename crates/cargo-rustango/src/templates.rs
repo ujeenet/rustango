@@ -152,6 +152,13 @@ pub fn env_example(name: &str, template: Template, backend: Backend) -> String {
     } else {
         ("", "\n# Rotation: old key here, new one above.")
     };
+    let bind_note = if template.reads_settings() {
+        "# Bind address. Unset, the tier's `[server] bind` applies (127.0.0.1 in
+# dev); docker-compose.yml sets 0.0.0.0 for the container only."
+    } else {
+        "# Bind address. Unset, 127.0.0.1:8080 (0.0.0.0:8080 when RUSTANGO_ENV is
+# staging or prod); docker-compose.yml sets 0.0.0.0 for the container only."
+    };
     // SQLite is a file in the bind mount, so there is no host to swap.
     let host_note = match backend.service() {
         Some(svc) => format!(
@@ -167,8 +174,7 @@ pub fn env_example(name: &str, template: Template, backend: Backend) -> String {
         "# Copy to .env and edit for your environment; src/main.rs loads it at startup.
 {host_note}
 DATABASE_URL={url}
-# Bind address. Unset, the tier's `[server] bind` applies (127.0.0.1 in
-# dev); docker-compose.yml sets 0.0.0.0 for the container only.
+{bind_note}
 # RUSTANGO_BIND=127.0.0.1:8080
 {apex}
 # Session signing key — base64 of at least 32 bytes. Outside prod a bad
@@ -427,7 +433,13 @@ pub fn dockerfile_dev() -> &'static str {
 /// `--locked` is deliberate once `Cargo.lock` exists: a deploy image is
 /// exactly where an unnoticed dependency bump should fail the build rather
 /// than ship. A fresh project has no lock yet, so the first build resolves.
-pub fn dockerfile_prod(name: &str) -> String {
+pub fn dockerfile_prod(name: &str, template: Template) -> String {
+    // Only a template that reads `config/` writes one for the image to copy.
+    let config = if template.reads_settings() {
+        "COPY config /app/config\n"
+    } else {
+        ""
+    };
     format!(
         r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
 # docker-compose.yml uses; this one is for shipping.
@@ -467,8 +479,7 @@ COPY --from=builder /out/{name} /usr/local/bin/{name}
 # own migrations: without it `migrate` skips framework schema changes.
 COPY migrations /app/migrations
 COPY system /app/system
-COPY config /app/config
-# Never root. The numeric id keeps the ownership stable if the image is
+{config}# Never root. The numeric id keeps the ownership stable if the image is
 # rebuilt on a host whose useradd picks a different one.
 RUN useradd --uid 10001 --create-home app && chown -R 10001 /app
 USER 10001
@@ -545,11 +556,9 @@ pub fn readme(name: &str, template: Template, backend: Backend) -> String {
             ),
         ),
     };
-    let docker_admin = match template {
-        Template::Fullstack => {
-            format!("docker compose run --rm rust cargo run -- {CREATE_ADMIN}\n")
-        }
-        _ => String::new(),
+    let docker_admin = match first_account(template) {
+        Some((verb, _)) => format!("docker compose run --rm rust cargo run -- {verb}\n"),
+        None => String::new(),
     };
     let tenant_note = match template {
         Template::Tenant => tenant_dev_note(backend),
@@ -606,8 +615,16 @@ feature list.
     )
 }
 
-/// The first-admin verb: the bare admin lets only superusers in.
-const CREATE_ADMIN: &str = "create-admin <username> --superuser";
+/// The verb that makes the first account a template's login accepts, and
+/// what it signs into. The bare admin lets only superusers in; the tenant
+/// console only operators.
+fn first_account(template: Template) -> Option<(&'static str, &'static str)> {
+    match template {
+        Template::Fullstack => Some(("create-admin <username> --superuser", "the admin login")),
+        Template::Tenant => Some(("create-operator <username>", "the operator console login")),
+        Template::Api => None,
+    }
+}
 
 /// Getting a fresh project running with cargo on the host: the README's
 /// path B and the scaffolder's "next:" list, so the two cannot drift.
@@ -638,8 +655,8 @@ fn host_steps(template: Template, backend: Backend) -> String {
             _ => "apply pending migrations",
         },
     );
-    if template == Template::Fullstack {
-        step(&format!("cargo run -- {CREATE_ADMIN}"), "the admin login");
+    if let Some((verb, note)) = first_account(template) {
+        step(&format!("cargo run -- {verb}"), note);
     }
     step("cargo run", "boot the HTTP server");
     step("cargo run -- --help", "full verb list");
@@ -807,17 +824,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_health() // /health + /ready; the Dockerfile HEALTHCHECK probes /health
         // Behind a load balancer, name its addresses so per-IP limits see clients:
         // .with_trusted_proxies([\"10.0.0.0/8\"])?
-        // NOTE: no .with_settings_from_env() here. It is gated on the
-        // config feature, and this template is deliberately bare: ORM +
-        // axum + the manage dispatcher. Adding config alone does not
-        // help either — the settings layers it switches on also need
-        // session, signals, access_log, allowed_hosts and body_limit,
-        // which together are batteries, which is the fullstack template.
-        //
-        // So the config/*.toml this scaffolder writes are inert in an api
-        // project. Pre-existing, and worth fixing properly — either stop
-        // writing them here, or give the template the features to read
-        // them — but not by making a minimal template heavy.
+        // No config/*.toml here: loading them needs the settings layers,
+        // i.e. batteries, i.e. the fullstack template. RUSTANGO_BIND and
+        // RUSTANGO_ENV still apply.
         .run()
         .await
 }

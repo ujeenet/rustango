@@ -61,6 +61,10 @@ pub struct StartAppReport {
     pub manual_steps: Vec<String>,
 }
 
+/// What to run after `startapp`: it registers the module itself, or lists
+/// that edit as a manual step.
+pub(crate) const STARTAPP_NEXT: &str = "cargo run -- makemigrations && cargo run -- migrate";
+
 /// Write an app module into `project_root/src/<app>/`.
 ///
 /// `project_root` is usually the directory holding `Cargo.toml`. This
@@ -155,6 +159,12 @@ pub fn startapp(
                 ));
             }
         }
+    } else {
+        // Nothing to patch, but the module still has to be compiled in.
+        report.manual_steps.push(format!(
+            "{base_label}/lib.rs: add `pub mod {};` so its models register",
+            opts.app_name
+        ));
     }
 
     let urls_path = project_root.join(&base_dir).join("urls.rs");
@@ -448,9 +458,9 @@ fn render_mod_template(app_name: &str) -> String {
     format!(
         "//! `{app_name}` — app module.\n\
          //!\n\
-         //! Add `mod {app_name};` (or `pub mod {app_name};`) to your\n\
-         //! `src/main.rs` / `src/lib.rs` so these submodules are\n\
-         //! pulled into the binary's `inventory` registry.\n\
+         //! Its models register in the `inventory` registry once\n\
+         //! `src/lib.rs` (or `main.rs`) declares this module; `startapp`\n\
+         //! adds that line when it finds one of those files.\n\
          \n\
          pub mod models;\n\
          pub mod urls;\n\
@@ -1191,6 +1201,33 @@ mod tests {
         assert_eq!(report2.patched.len(), 0, "second run should not patch");
         let body2 = std::fs::read_to_string(&main).unwrap();
         assert_eq!(body2.matches("mod shop;").count(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// With no entry file to patch, the `mod` step is a manual one; the
+    /// written `mod.rs` repeats no stale "add `mod`" advice either.
+    #[test]
+    fn no_entry_file_leaves_a_manual_mod_step() {
+        let root = fresh_root("automount_no_entry");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let report = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "shop".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            report
+                .manual_steps
+                .iter()
+                .any(|s| s.contains("`pub mod shop;`")),
+            "{:?}",
+            report.manual_steps
+        );
+        let mod_rs = std::fs::read_to_string(root.join("src/shop/mod.rs")).unwrap();
+        assert!(!mod_rs.contains("Add `mod shop;`"), "{mod_rs}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -135,7 +135,6 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 
 | Feature | What it adds |
 |---|---|
-| `tenancy` | Multi-tenancy: tenant registry, per-tenant databases, operator console |
 | `csrf` | CSRF protection middleware for form POSTs |
 | `sso` / `admin-sso` | OIDC single sign-on, for application users / for the admin site |
 | `passkey` | WebAuthn / passkey authentication |
@@ -147,7 +146,7 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `http2` | Serve cleartext HTTP/2 (h2c) next to HTTP/1 |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
-`cargo rustango new --help` prints this list. Backends are **not** valid here — pass `--backend` instead; naming one as a feature is refused, because it would pin the framework's backend while the project's own feature stayed off, and `#[derive(Model)]` gates its emissions on the project's features.
+`--features tenancy` alone picks `--template tenant`; with another template it is refused, because only the tenant `main.rs` serves tenancy. `cargo rustango new --help` prints this list. Backends are **not** valid here — pass `--backend` instead; naming one as a feature is refused, because it would pin the framework's backend while the project's own feature stayed off, and `#[derive(Model)]` gates its emissions on the project's features.
 
 ### A shorter name: `rgo`
 

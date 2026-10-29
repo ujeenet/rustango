@@ -172,7 +172,9 @@ pub async fn run_with_writer<W: Write + Send>(
         // table written by `cache::DatabaseCache`, including the
         // sessions-backend table.
         #[cfg(feature = "cache")]
-        "clear-cache" | "clearsessions" => clear_cache_cmd(pool, &args[1..], writer).await,
+        verb @ ("clear-cache" | "clearsessions") => {
+            clear_cache_cmd(pool, verb, &args[1..], writer).await
+        }
         // Idempotent `CREATE TABLE IF NOT EXISTS` for DatabaseCache.
         #[cfg(feature = "cache")]
         "createcachetable" | "create-cache-table" => {
@@ -2063,7 +2065,6 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
             }
         }
     }
-    let base_label = into.clone().unwrap_or_else(|| "src".into());
     let opts = super::scaffold::StartAppOptions {
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(super::scaffold::SINGLE_TENANT_MANAGE_BIN),
@@ -2076,13 +2077,12 @@ fn startapp<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     // help string so non-default invocations are an explicit `cd`.
     let cwd = std::env::current_dir()?;
     let report = super::scaffold::startapp(&cwd, &opts)?;
-    write_startapp_report(w, &app_name, &base_label, &report)
+    write_startapp_report(w, &app_name, &report)
 }
 
 fn write_startapp_report<W: Write>(
     w: &mut W,
     app_name: &str,
-    base_label: &str,
     report: &super::scaffold::StartAppReport,
 ) -> Result<(), MigrateError> {
     if report.written.is_empty() && report.skipped.is_empty() {
@@ -2104,14 +2104,7 @@ fn write_startapp_report<W: Write>(
     }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
-        writeln!(
-            w,
-            "  add `mod {app_name};` to {base_label}/main.rs (or {base_label}/lib.rs)"
-        )?;
-        writeln!(
-            w,
-            "  so the derive macros' `inventory` registrations are pulled in."
-        )?;
+        writeln!(w, "  {}", super::scaffold::STARTAPP_NEXT)?;
     }
     Ok(())
 }
@@ -2984,8 +2977,11 @@ fn viewset_template_tenant(name: &str, model: &ModelRef, snake: &str, crate_root
 //! builder chain — filter_fields / search_fields / ordering /
 //! page_size / permissions_for_model all work in tenant mode too.
 
+use std::sync::Arc;
+
 use axum::Router;
 use {crate_root}::core::Model as _;
+use {crate_root}::tenancy::{{ModelBackend, RouterAuthExt as _}};
 use {crate_root}::viewset::ViewSet;
 
 use {model_path};
@@ -3001,6 +2997,10 @@ pub fn router() -> Router<()> {{
         .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
         .tenant_router("/api/{snake}")
+        // The permission check needs a tenant user. `ModelBackend` is HTTP
+        // Basic only; a browser session from `/login` is not read here (401).
+        // Token clients: add `ApiKeyBackend` or a `JwtBackend` to the list.
+        .require_auth(vec![Arc::new(ModelBackend)])
 }}
 
 // Mount in your urls.rs:
@@ -3214,14 +3214,19 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     };
     write_source(&path, &body)?;
     writeln!(w, "wrote {}", path.display())?;
-    writeln!(
-        w,
-        "  add `pub mod api_routes;` to src/{app}/mod.rs (or `mod ...;`),"
-    )?;
-    writeln!(
-        w,
-        "  then `.merge({app}::api_routes::api())` from your top-level urls.rs."
-    )?;
+    writeln!(w, "  add `pub mod api_routes;` to src/{app}/mod.rs,")?;
+    if tenant_aware {
+        writeln!(w, "  then in src/urls.rs, inside `api()`:")?;
+        writeln!(w, "    .merge(crate::{app}::api_routes::api())")?;
+    } else {
+        // `urls::api()` has no pool; `nest_with` hands over the server's.
+        let app_crate = project_crate_name();
+        writeln!(w, "  then in src/main.rs, after `.api(urls::api())`:")?;
+        writeln!(
+            w,
+            "    .nest_with(\"/api\", |pool| {app_crate}::{app}::api_routes::api(pool))"
+        )?;
+    }
     Ok(())
 }
 
@@ -3241,21 +3246,18 @@ fn api_routes_template_tenant(app: &str) -> String {
     format!(
         r#"//! Auto-scaffolded by `manage make:api_routes {app} --tenant`.
 //!
-//! API routing for the `{app}` app. Per-model viewsets live under
-//! `viewsets/` and each exposes a `pub fn viewset() -> ViewSet`;
-//! this file composes them into a single `Router<()>`.
+//! API routing for the `{app}` app: composes tenant viewsets into a
+//! single `Router<()>`.
 //!
 //! Adding a resource:
-//!   1. Drop a new file under `viewsets/` exposing
-//!      `pub fn viewset() -> ViewSet`.
-//!   2. Declare it in `viewsets/mod.rs`.
-//!   3. Add one `.merge(...)` line below.
+//!   1. Run `manage make:viewset <Name> --model <Model> --tenant`.
+//!   2. Add one `.merge(...)` line below.
 
 use axum::Router;
 
 pub fn api() -> Router<()> {{
     Router::new()
-        // .merge(super::viewsets::<model>::viewset().tenant_router("/api/<model>"))
+        // .merge(crate::<snake>::router())
 }}
 "#
     )
@@ -3287,7 +3289,8 @@ use {crate_root}::sql::Pool;
 pub fn api(pool: Pool) -> Router<()> {{
     let _pool = pool;
     Router::new()
-        // .merge(super::viewsets::<snake>::router("/api/<snake>", _pool.clone()))
+        // `main.rs` nests this under `/api`.
+        // .merge(crate::<snake>::<Name>::router("/<snake>", _pool.clone()))
 }}
 "#
     )
@@ -3349,7 +3352,6 @@ fn make_form_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErro
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:form {name}`.
 
-use {crate_root}::forms::Form;
 use {crate_root}::Form as DeriveForm;
 
 #[derive(DeriveForm)]
@@ -3441,6 +3443,7 @@ impl Job for {name} {{
 fn make_scheduled_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let (name, _, crate_root) = parse_name_and_model(args)?;
     let snake = pascal_to_snake(&name);
+    let app_crate = project_crate_name();
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:scheduled {name}`.
 //!
@@ -3465,15 +3468,17 @@ impl {name} {{
     }}
 }}
 
-// Wire up in main.rs:
+// Start it from a worker binary (`manage make:worker`), not main.rs:
+// main.rs has no pool, and code before `Cli::run()` runs for every CLI
+// verb. In the worker, after `let pool = ...;`:
 //
 //   let scheduler = {crate_root}::scheduler::Scheduler::new();
-//   let task = Arc::new({name} {{ pool: pool.clone() }});
+//   let task = Arc::new({app_crate}::{snake}::{name} {{ pool: pool.clone() }});
 //   scheduler.every("{snake}", std::time::Duration::from_secs(60), move || {{
 //       let task = Arc::clone(&task);
 //       async move {{ task.run().await }}
 //   }});
-//   let handle = scheduler.start();
+//   let _schedule = scheduler.start(); // ticks until dropped
 //
 // The first run happens after one full interval, not immediately.
 "#
@@ -3518,7 +3523,6 @@ use {crate_root}::sql::Pool;
 
 #[{crate_root}::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {{
-    {crate_root}::logging::setup();
     // A worker never runs main.rs, so it loads `.env` itself.
     let _ = dotenvy::dotenv();
     // DATABASE_URL, or DB_USER + DB_NAME; the error names both.
@@ -4736,8 +4740,10 @@ pub(crate) async fn loaddata_cmd<W: Write>(
     }
 
     // Parents first: fixtures come in registration order, and a child
-    // inserted before its parent fails its FK (#1911).
-    let entries = in_fk_order(entries, &schemas);
+    // inserted before its parent fails its FK (#1911). A nullable link in a
+    // cycle goes in as NULL and is set once every row is in.
+    let LoadPlan { order, deferred } = load_plan(&entries, &schemas);
+    let entries = in_fk_order(entries, &schemas, &order);
     let mut named: Vec<&'static crate::core::ModelSchema> = Vec::new();
     for s in entries
         .iter()
@@ -4763,6 +4769,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         String,
         Vec<RowLinks>,
     )> = Vec::new();
+    let mut relinks: Vec<(String, crate::core::UpdateQuery)> = Vec::new();
     for (idx, entry) in entries.into_iter().enumerate() {
         let line = idx + 1;
         let model_name = entry.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -4806,8 +4813,11 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
         for f in schema.scalar_fields() {
-            // An absent key takes the column default, not NULL.
-            let Some(raw) = fields_obj.get(f.name) else {
+            // An absent key takes the column default, not NULL; a null pk is absent.
+            let Some(raw) = fields_obj
+                .get(f.name)
+                .filter(|v| !(f.primary_key && v.is_null()))
+            else {
                 continue;
             };
             match loaddata_value(raw, f) {
@@ -4847,17 +4857,78 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             continue;
         }
 
+        // A row without its pk is relinked through the one the insert returns.
+        let pk_field = schema.primary_key();
+        let relink = match pk_field {
+            Some(_) => take_deferred(schema, &columns, &mut values, &deferred),
+            None => Vec::new(),
+        };
+        let returning = match pk_field {
+            Some(pk) if !relink.is_empty() && !columns.contains(&pk.column) => vec![pk.column],
+            _ => vec![],
+        };
+        // MySQL hands back only an AUTO_INCREMENT id; refuse before the write.
+        if let Some(pk) = pk_field.filter(|pk| {
+            pool.dialect().name() == "mysql" && !returning.is_empty() && !pk.is_serial()
+        }) {
+            let msg = format!(
+                "loaddata: entry #{line} (`{model_name}`): MySQL cannot return the \
+                 database-generated `{}`, so this row's cycle link can't be set; give it a `pk`",
+                pk.name
+            );
+            if parsed.fail_fast {
+                abort = Some(msg);
+                break;
+            }
+            tracing::warn!("{msg}");
+            skipped += 1;
+            continue;
+        }
         let query = crate::core::InsertQuery {
             model: schema,
             columns,
             values,
-            returning: vec![],
+            returning,
             on_conflict: None,
             generated: vec![],
         };
-        match crate::sql::insert_pool(pool, &query).await {
-            Ok(()) => {
+        let inserted = match pk_field.filter(|_| !relink.is_empty()) {
+            None => crate::sql::insert_pool(pool, &query).await.map(|()| None),
+            Some(pk) => {
+                async {
+                    let returned = if query.returning.is_empty() {
+                        crate::sql::insert_pool(pool, &query).await?;
+                        None
+                    } else {
+                        Some(crate::sql::insert_returning_pool(pool, &query).await?)
+                    };
+                    let value = match &returned {
+                        Some(r) => crate::sql::inserted_pk(&query, r, pk)?,
+                        None => {
+                            let i = query.columns.iter().position(|c| *c == pk.column);
+                            i.map(|i| query.values[i].clone())
+                                .unwrap_or(crate::core::SqlValue::Null)
+                        }
+                    };
+                    Ok(Some(crate::core::UpdateQuery {
+                        model: schema,
+                        set: relink,
+                        where_clause: crate::core::WhereExpr::Predicate(crate::core::Filter {
+                            column: pk.column,
+                            op: crate::core::Op::Eq,
+                            value,
+                        }),
+                    }))
+                }
+                .await
+            }
+        };
+        match inserted {
+            Ok(relink) => {
                 loaded += 1;
+                if let Some(update) = relink {
+                    relinks.push((format!("entry #{line} (`{model_name}`)"), update));
+                }
                 if !touched.iter().any(|t| t.table == schema.table) {
                     touched.push(schema);
                 }
@@ -4884,6 +4955,22 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         }
     }
 
+    // Even after a `--fail-fast` stop: the rows already in get their links.
+    for (what, update) in relinks {
+        let res = match crate::sql::update_pool(pool, &update).await {
+            Ok(0) => Err("no row has the inserted pk".to_owned()),
+            r => r.map(drop).map_err(|e| e.to_string()),
+        };
+        if let Err(e) = res {
+            let msg = format!("loaddata: {what} link: {e}");
+            tracing::warn!("{msg}");
+            loaded -= 1;
+            skipped += 1;
+            if parsed.fail_fast && abort.is_none() {
+                abort = Some(msg);
+            }
+        }
+    }
     if abort.is_none() {
         'rels: for (schema, rel, model_name, rows) in links {
             let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.fail_fast).await
@@ -4931,47 +5018,100 @@ fn dumpable(ty: crate::core::FieldType) -> bool {
     )
 }
 
-/// Stable-sort fixture entries so each model's FK targets load before it,
-/// and a self-FK parent before its child. Best effort: rows in a cycle keep
-/// their fixture order.
+/// The order `loaddata` inserts the fixture's tables in, parents first, and
+/// the nullable links it sets after every row is in.
+struct LoadPlan {
+    order: Vec<&'static crate::core::ModelSchema>,
+    deferred: DeferredLinks,
+}
+
+/// Plan over the fixture's own tables and the links its rows set: a
+/// nullable link no row fills never orders. A link is deferred only when
+/// the tables still form a cycle, and then only one that points against
+/// the order the NOT NULL links give (as `flush_plan` breaks cycles).
+/// Self-links are left to [`self_parents_first`].
+fn load_plan(
+    entries: &[serde_json::Value],
+    schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+) -> LoadPlan {
+    let schema_of = |e: &serde_json::Value| {
+        schemas
+            .get(e.get("model").and_then(|v| v.as_str()).unwrap_or(""))
+            .copied()
+    };
+    let mut nodes: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    for s in entries.iter().filter_map(schema_of) {
+        if !nodes.iter().any(|n| n.table == s.table) {
+            nodes.push(s);
+        }
+    }
+    // Every (table, column) some fixture row sets, in one pass.
+    let mut set_by_a_row: std::collections::HashSet<(&str, &str)> =
+        std::collections::HashSet::new();
+    for e in entries {
+        let (Some(s), Some(fields)) = (schema_of(e), e.get("fields")) else {
+            continue;
+        };
+        set_by_a_row.extend(
+            s.fields
+                .iter()
+                .filter(|f| fields.get(f.name).is_some_and(|v| !v.is_null()))
+                .map(|f| (s.table, f.column)),
+        );
+    }
+    // Is `col` of `s` set by any of the fixture's `s` rows?
+    let filled = |s: &crate::core::ModelSchema, col: &str| {
+        !s.fields.iter().any(|f| f.column == col) || set_by_a_row.contains(&(s.table, col))
+    };
+    let used =
+        |s: &crate::core::ModelSchema, col: Option<&'static str>| col.is_none_or(|c| filled(s, c));
+    let (mut children_first_order, cyclic) = children_first(&nodes, used);
+    let (rest, stuck) = children_first(&cyclic, |_, col| col.is_none());
+    children_first_order.extend(rest);
+    children_first_order.extend(stuck);
+    let order: Vec<_> = children_first_order.into_iter().rev().collect();
+    let at = |t: &str| order.iter().position(|s| s.table == t);
+    let in_cycle = |t: &str| cyclic.iter().any(|c| c.table == t);
+    let deferred = cyclic
+        .iter()
+        .flat_map(|s| {
+            fk_edges(s)
+                .filter(|(to, col)| {
+                    *to != s.table && in_cycle(to) && used(s, *col) && at(to) > at(s.table)
+                })
+                .filter_map(|(_, col)| col.map(|c| (s.table, c)))
+        })
+        .collect();
+    LoadPlan { order, deferred }
+}
+
+/// Nullable links [`loaddata_cmd`] inserts as NULL and sets afterwards.
+type DeferredLinks = std::collections::HashSet<(&'static str, &'static str)>;
+
+/// Swap this row's [`DeferredLinks`] values for NULL, returning them.
+fn take_deferred(
+    schema: &'static crate::core::ModelSchema,
+    columns: &[&'static str],
+    values: &mut [crate::core::SqlValue],
+    deferred: &DeferredLinks,
+) -> Vec<crate::core::Assignment> {
+    use crate::core::{Assignment, SqlValue};
+    columns
+        .iter()
+        .zip(values.iter_mut())
+        .filter(|(c, v)| deferred.contains(&(schema.table, **c)) && !matches!(v, SqlValue::Null))
+        .map(|(c, v)| Assignment::new(c, std::mem::replace(v, SqlValue::Null)))
+        .collect()
+}
+
+/// Stable-sort fixture entries into `order`'s table order, and a self-FK
+/// parent before its child. Best effort: tables in a cycle of NOT NULL
+/// links keep their fixture order.
 fn in_fk_order(
     entries: Vec<serde_json::Value>,
     schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
+    order: &[&'static crate::core::ModelSchema],
 ) -> Vec<serde_json::Value> {
-    use std::collections::HashMap;
-    fn depth(
-        table: &'static str,
-        by_table: &HashMap<&'static str, &'static crate::core::ModelSchema>,
-        memo: &mut HashMap<&'static str, usize>,
-        visiting: &mut Vec<&'static str>,
-    ) -> usize {
-        if let Some(d) = memo.get(table) {
-            return *d;
-        }
-        if visiting.contains(&table) {
-            return 0;
-        }
-        let Some(schema) = by_table.get(table) else {
-            return 0;
-        };
-        visiting.push(table);
-        let d = schema
-            .scalar_fields()
-            .filter_map(|f| match f.relation {
-                Some(
-                    crate::core::Relation::Fk { to, .. } | crate::core::Relation::O2O { to, .. },
-                ) if to != table => Some(1 + depth(to, by_table, memo, visiting)),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(0);
-        visiting.pop();
-        memo.insert(table, d);
-        d
-    }
-    let by_table: HashMap<&'static str, &'static crate::core::ModelSchema> =
-        schemas.values().map(|s| (s.table, *s)).collect();
-    let mut memo = HashMap::new();
     let mut keyed: Vec<(usize, serde_json::Value)> = entries
         .into_iter()
         .map(|e| {
@@ -4979,7 +5119,8 @@ fn in_fk_order(
                 .get("model")
                 .and_then(|v| v.as_str())
                 .and_then(|m| schemas.get(m))
-                .map_or(0, |s| depth(s.table, &by_table, &mut memo, &mut Vec::new()));
+                .and_then(|s| order.iter().position(|o| o.table == s.table))
+                .map_or(0, |i| i + 1);
             (rank, e)
         })
         .collect();
@@ -5646,13 +5787,13 @@ fn fk_edges(
 /// nodes left in a cycle.
 fn children_first(
     nodes: &[&'static crate::core::ModelSchema],
-    binds: impl Fn(Option<&'static str>) -> bool,
+    binds: impl Fn(&crate::core::ModelSchema, Option<&'static str>) -> bool,
 ) -> (
     Vec<&'static crate::core::ModelSchema>,
     Vec<&'static crate::core::ModelSchema>,
 ) {
     let links = |from: &crate::core::ModelSchema, to: &str| {
-        from.table != to && fk_edges(from).any(|(t, col)| t == to && binds(col))
+        from.table != to && fk_edges(from).any(|(t, col)| t == to && binds(from, col))
     };
     let mut done = vec![false; nodes.len()];
     let mut order = Vec::with_capacity(nodes.len());
@@ -5680,9 +5821,9 @@ struct FlushPlan {
 }
 
 fn flush_plan(targets: &[&'static crate::core::ModelSchema]) -> FlushPlan {
-    let (mut order, cyclic) = children_first(targets, |_| true);
+    let (mut order, cyclic) = children_first(targets, |_, _| true);
     // Inside a cycle only NOT NULL links bind; nullable ones are cleared first.
-    let (rest, stuck) = children_first(&cyclic, |col| col.is_none());
+    let (rest, stuck) = children_first(&cyclic, |_, col| col.is_none());
     order.extend(rest);
     order.extend(&stuck);
     let in_cycle = |t: &str| cyclic.iter().any(|c| c.table == t);
@@ -6187,6 +6328,7 @@ fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateErro
 #[cfg(feature = "cache")]
 async fn clear_cache_cmd<W: Write>(
     pool: &Pool,
+    verb: &str,
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
@@ -6201,12 +6343,24 @@ async fn clear_cache_cmd<W: Write>(
         return Ok(());
     }
     let table = parsed.table.unwrap_or_else(|| "rustango_cache".to_owned());
+    // No table, nothing cached: `migrate` does not create it. Resolved like
+    // the purge's own query, through the search path.
+    let exists = super::runner::try_table_resolves(pool, &table)
+        .await
+        .map_err(|e| MigrateError::Validation(format!("{verb}: {e}")))?;
+    if !exists {
+        writeln!(
+            w,
+            "nothing to clear: no {table} table (run createcachetable if you use DatabaseCache)"
+        )?;
+        return Ok(());
+    }
     let cache = crate::cache::DatabaseCache::new(pool.clone(), &table);
     let rows = cache
         .purge_expired()
         .await
-        .map_err(|e| MigrateError::Validation(format!("clear-cache: {e}")))?;
-    writeln!(w, "clear-cache: purged {rows} expired row(s) from {table}")?;
+        .map_err(|e| MigrateError::Validation(format!("{verb}: {e}")))?;
+    writeln!(w, "{verb}: purged {rows} expired row(s) from {table}")?;
     Ok(())
 }
 
@@ -6447,6 +6601,13 @@ const APEX_UNSET: &str = "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenanc
     the public-facing apex (e.g. `app.example.com`) so subdomain resolution + cookie scoping \
     work in production.";
 
+/// What `RUSTANGO_SESSION_SECRET` signs in this build.
+#[cfg(feature = "tenancy")]
+const SIGNED_BY_SESSION_SECRET: &str =
+    "session cookies (operator and tenant ones included) and JWTs";
+#[cfg(not(feature = "tenancy"))]
+const SIGNED_BY_SESSION_SECRET: &str = "session cookies and JWTs";
+
 /// Run the `manage check --deploy` audit checks against `env`.
 /// Pure function so callers can test it with arbitrary env
 /// snapshots without poking actual process env vars.
@@ -6491,12 +6652,11 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
     // value as the HMAC key, so length matters.
     match env.session_secret.as_deref() {
         None => {
-            out.errors.push(
-                "RUSTANGO_SESSION_SECRET is unset — operator + tenant cookies + JWTs would use \
-                 an ephemeral random secret that's regenerated on every restart, signing every \
-                 user out. Set via `openssl rand -base64 32`."
-                    .into(),
-            );
+            out.errors.push(format!(
+                "RUSTANGO_SESSION_SECRET is unset — on the prod tier the server will not \
+                 start; off prod, {SIGNED_BY_SESSION_SECRET} use the dev key in ./var/, which \
+                 a redeploy loses. Set via `openssl rand -base64 32`."
+            ));
         }
         Some(s) if s.contains("change-me") || s.contains("placeholder") => {
             out.errors.push(
@@ -7358,6 +7518,131 @@ mod gen_tests {
             dotenv < body.find("database_url_from_env").unwrap(),
             "{body}"
         );
+    }
+
+    /// `#[rustango::main]` already installs logging; a second setup only warns.
+    #[test]
+    fn worker_leaves_logging_to_the_main_macro() {
+        let body = worker_template("Mailer", "mailer", "rustango", "my_app");
+        assert!(!body.contains("logging::setup"), "{body}");
+    }
+
+    /// Run `make:*` in a fresh project named `shop`; returns (output, files).
+    fn run_make(cmd: &str, args: &[&str], dirs: &[&str], read: &[&str]) -> (String, Vec<String>) {
+        let _guard = cwd_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"shop\"\n\n[dependencies]\nrustango = \"0.61\"\n",
+        )
+        .unwrap();
+        for d in dirs {
+            std::fs::create_dir_all(dir.path().join(d)).unwrap();
+        }
+        std::fs::write(dir.path().join("src/lib.rs"), "pub mod urls;\n").unwrap();
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let mut out = Vec::new();
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        let run = make_cmd(cmd, &args, &mut out, |_| true);
+        let files: Vec<String> = read
+            .iter()
+            .map(|f| std::fs::read_to_string(f).unwrap_or_default())
+            .collect();
+        let _ = std::env::set_current_dir(&prev);
+        run.unwrap();
+        (String::from_utf8(out).unwrap(), files)
+    }
+
+    /// The pool `api()` takes the server's pool, so only `main.rs` can mount it.
+    #[test]
+    fn api_routes_hints_name_a_mount_that_compiles() {
+        let (out, files) = run_make(
+            "make:api_routes",
+            &["blog"],
+            &["src/blog"],
+            &["src/blog/api_routes.rs"],
+        );
+        assert!(
+            out.contains(r#".nest_with("/api", |pool| shop::blog::api_routes::api(pool))"#),
+            "{out}"
+        );
+        assert!(!out.contains(".merge("), "{out}");
+        let body = &files[0];
+        assert!(!body.contains("viewsets::"), "{body}");
+        assert!(body.contains("crate::<snake>::<Name>::router("), "{body}");
+
+        let (out, files) = run_make(
+            "make:api_routes",
+            &["blog", "--tenant"],
+            &["src/blog"],
+            &["src/blog/api_routes.rs"],
+        );
+        assert!(
+            out.contains(".merge(crate::blog::api_routes::api())"),
+            "{out}"
+        );
+        assert!(!files[0].contains("viewsets::"), "{}", files[0]);
+        assert!(
+            files[0].contains("crate::<snake>::router()"),
+            "{}",
+            files[0]
+        );
+    }
+
+    /// The derive needs no trait import; an unused one warns on first build.
+    #[test]
+    fn make_form_imports_only_what_it_uses() {
+        let (_, files) = run_make("make:form", &["PostForm"], &["src"], &["src/post_form.rs"]);
+        assert!(
+            !files[0].contains("use rustango::forms::Form;"),
+            "{}",
+            files[0]
+        );
+    }
+
+    /// `main.rs` has no `pool`; a worker binary has one and runs no CLI verb.
+    #[test]
+    fn make_scheduled_wires_into_a_worker() {
+        let (_, files) = run_make("make:scheduled", &["Tick"], &["src"], &["src/tick.rs"]);
+        let body = &files[0];
+        assert!(body.contains("make:worker"), "{body}");
+        assert!(!body.contains("in main.rs"), "{body}");
+        assert!(
+            body.contains("Arc::new(shop::tick::Tick { pool: pool.clone() })"),
+            "{body}"
+        );
+    }
+
+    /// The tenant viewset checks permissions, so it needs a user: mount auth.
+    #[test]
+    fn tenant_viewset_mounts_an_auth_layer() {
+        let body = viewset_template_tenant(
+            "PostViewSet",
+            &ModelRef::bare("Post"),
+            "post_view_set",
+            "rustango",
+        );
+        assert!(
+            body.contains(".require_auth(vec![Arc::new(ModelBackend)])"),
+            "{body}"
+        );
+        assert!(body.contains("use rustango::tenancy::{ModelBackend, RouterAuthExt as _};"));
+    }
+
+    /// `startapp` already registered the module; the next step is migrations.
+    #[test]
+    fn startapp_report_does_not_ask_for_the_mod_it_added() {
+        let report = super::super::scaffold::StartAppReport {
+            written: vec!["src/shop/mod.rs".into()],
+            patched: vec!["src/lib.rs".into(), "src/urls.rs".into()],
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        write_startapp_report(&mut out, "shop", &report).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("add `mod"), "{out}");
+        assert!(out.contains("makemigrations"), "{out}");
     }
 
     // -------- dumpdata --------
@@ -8306,8 +8591,8 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "expected no-arg `pub fn api()`, got: {body}"
         );
         assert!(
-            body.contains("tenant_router("),
-            "expected tenant_router hint comment, got: {body}"
+            body.contains(".merge(crate::<snake>::router())"),
+            "expected a make:viewset --tenant mount hint, got: {body}"
         );
         assert!(
             !body.contains("PgPool"),
@@ -8991,6 +9276,25 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "expected error for unset RUSTANGO_SESSION_SECRET, got: {:?}",
             r.errors
         );
+    }
+
+    /// The unset-secret error says what the runtime does: no start on prod,
+    /// the dev key in `./var/` off prod. Tenant cookies only in tenancy builds.
+    #[test]
+    fn deploy_audit_unset_session_secret_says_what_happens() {
+        let env = DeployAuditEnv {
+            session_secret: None,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.contains("RUSTANGO_SESSION_SECRET is unset"))
+            .expect("unset error");
+        assert!(e.contains("will not start") && e.contains("./var/"), "{e}");
+        assert!(!e.contains("ephemeral"), "{e}");
+        assert_eq!(e.contains("tenant"), cfg!(feature = "tenancy"), "{e}");
     }
 
     /// Gated: without `admin`/`tenancy` the audit cannot decode, and

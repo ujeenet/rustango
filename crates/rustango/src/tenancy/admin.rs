@@ -765,8 +765,17 @@ where
                         &parts.extensions,
                         &parts.headers,
                     );
-                    change_password_submit(&org, &cfg.secret, &pool, routes, user_id, &ip, body)
-                        .await
+                    change_password_submit(
+                        &org,
+                        cfg,
+                        &pool,
+                        routes,
+                        cookie_path,
+                        user_id,
+                        &ip,
+                        body,
+                    )
+                    .await
                 }
                 _ => (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response(),
             };
@@ -1303,28 +1312,10 @@ async fn login_submit(
         &user.password_hash,
     )
     .await;
-    let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
-        .unwrap_or(tenant_console::SESSION_TTL_SECS);
-    let mut payload = TenantSessionPayload::new(
-        uid,
-        &org.slug,
-        ttl_secs,
-        super::session::PasswordFingerprint::of(&cfg.secret, &user.password_hash),
-    );
-    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
-    let cookie_value = tenant_console::encode(&cfg.secret, &payload);
-    let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
-        .path(cookie_path.to_owned())
-        .http_only(true)
-        .same_site(SameSite::Lax)
-        // Secure in production; off in dev so plain-HTTP login works.
-        .secure(crate::session::secure_cookies())
-        .max_age(CookieDuration::seconds(ttl_secs))
-        .build();
     let mut resp = Redirect::to(&next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii"),
+        user_session_cookie(&cfg.secret, routes, &org.slug, cookie_path, &user),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
@@ -1335,6 +1326,35 @@ async fn login_submit(
     })
     .await;
     resp
+}
+
+/// A new tenant session cookie for the saved `user`, bound to its current hash.
+fn user_session_cookie(
+    secret: &tenant_console::SessionSecret,
+    routes: &super::routes::RouteConfig,
+    slug: &str,
+    cookie_path: &str,
+    user: &super::auth::User,
+) -> HeaderValue {
+    let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
+        .unwrap_or(tenant_console::SESSION_TTL_SECS);
+    let mut payload = TenantSessionPayload::new(
+        user.id.get().copied().unwrap_or_default(),
+        slug,
+        ttl_secs,
+        super::session::PasswordFingerprint::of(secret, &user.password_hash),
+    );
+    payload.iat = crate::session::issued_at(user.sessions_revoked_at);
+    let cookie_value = tenant_console::encode(secret, &payload);
+    let cookie = Cookie::build((tenant_console::COOKIE_NAME, cookie_value))
+        .path(cookie_path.to_owned())
+        .http_only(true)
+        .same_site(SameSite::Lax)
+        // Secure in production; off in dev so plain-HTTP login works.
+        .secure(crate::session::secure_cookies())
+        .max_age(CookieDuration::seconds(ttl_secs))
+        .build();
+    HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii")
 }
 
 fn logout_response(routes: &super::routes::RouteConfig, cookie_path: &str) -> Response {
@@ -1614,6 +1634,10 @@ fn password_page_ctx(
     ctx.insert("login_url", &routes.login_url);
     ctx.insert("static_url", &routes.static_url);
     ctx.insert(
+        "password_min_length",
+        &crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
+    );
+    ctx.insert(
         "csp_nonce",
         &crate::csp_nonce::current().unwrap_or_default(),
     );
@@ -1642,11 +1666,13 @@ fn render_password_page(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn change_password_submit(
     org: &Org,
-    secret: &tenant_console::SessionSecret,
+    cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
+    cookie_path: &str,
     user_id: i64,
     ip: &crate::login_throttle::ClientIp,
     body: Body,
@@ -1654,6 +1680,7 @@ async fn change_password_submit(
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
+    let secret = &cfg.secret;
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(b) => b.to_bytes(),
         Err(_) => return (StatusCode::BAD_REQUEST, "could not read body").into_response(),
@@ -1698,7 +1725,7 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "lookup failed").into_response();
         }
     };
-    let Some(user) = users.into_iter().next() else {
+    let Some(mut user) = users.into_iter().next() else {
         return redir_err("Your account no longer exists; please log in again.");
     };
     let verify = async {
@@ -1750,11 +1777,19 @@ async fn change_password_submit(
             return (StatusCode::INTERNAL_SERVER_ERROR, "update failed").into_response();
         }
     }
-    flash::signed_redirect(
+    // The old cookie no longer matches the hash: re-issue this one, so only
+    // the other sessions end.
+    user.password_hash = new_hash;
+    let mut resp = flash::signed_redirect(
         secret,
         &routes.change_password_url,
         flash::Flash::Ok("Password updated"),
-    )
+    );
+    resp.headers_mut().append(
+        header::SET_COOKIE,
+        user_session_cookie(secret, routes, &org.slug, cookie_path, &user),
+    );
+    resp
 }
 
 #[derive(serde::Deserialize)]

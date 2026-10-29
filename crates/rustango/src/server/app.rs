@@ -129,7 +129,8 @@ impl AppBuilder {
             if let Some(rest) = sql.strip_prefix("CREATE TABLE ") {
                 sql = format!("CREATE TABLE IF NOT EXISTS {rest}");
             }
-            raw_execute_pool(&self.pool, &sql, vec![]).await?;
+            // Two processes booting at once race on PG's catalog rows.
+            crate::migrate::ensure::run_statements(&self.pool, std::slice::from_ref(&sql)).await?;
         }
         // PG / MySQL: post-hoc `ALTER TABLE ADD CONSTRAINT` statements.
         // Wrap each in a best-effort `let _ = …` so a redundant

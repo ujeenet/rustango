@@ -511,18 +511,38 @@ pub async fn create_role_pool(
     Ok(role.id.get().copied().unwrap_or(0))
 }
 
-/// v0.38 — tri-dialect counterpart of [`get_or_create_role`]. Two
-/// round-trips on a fresh insert (SELECT-by-name, then INSERT on miss)
-/// vs. the single-CTE PG variant; the bound surface is small and
-/// idempotency is preserved by the unique constraint on `name`.
+/// Get an existing role by name or create one, on any backend. Returns the id.
+///
+/// Safe under concurrent callers: insert-or-ignore on the unique `name`,
+/// then a separate read, so the loser sees the winner's committed row.
+/// The insert skips `Role` save hooks.
 ///
 /// # Errors
-/// As [`get_or_create_role`].
+/// * [`TenancyError::Exec`] on a failed read or insert.
+/// * [`TenancyError::Validation`] when the insert was ignored yet no role has
+///   the name, e.g. a unique-key clash on another column.
 pub async fn get_or_create_role_pool(
     name: &str,
     description: &str,
     pool: &crate::sql::Pool,
 ) -> Result<i64, TenancyError> {
+    if let Some(id) = role_id_by_name(name, pool).await? {
+        return Ok(id);
+    }
+    let mut role = Role {
+        id: Auto::default(),
+        name: name.to_owned(),
+        description: description.to_owned(),
+        data: serde_json::Value::Object(serde_json::Map::new()),
+    };
+    role.insert_or_ignore(pool).await?;
+    // A new statement, so a fresh snapshot sees a racing winner's row.
+    role_id_by_name(name, pool).await?.ok_or_else(|| {
+        TenancyError::Validation(format!("role `{name}` was not created and is not there"))
+    })
+}
+
+async fn role_id_by_name(name: &str, pool: &crate::sql::Pool) -> Result<Option<i64>, TenancyError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
     let existing: Vec<Role> = Role::objects()
@@ -530,10 +550,10 @@ pub async fn get_or_create_role_pool(
         .limit(1)
         .fetch(pool)
         .await?;
-    if let Some(r) = existing.into_iter().next() {
-        return Ok(r.id.get().copied().unwrap_or(0));
-    }
-    create_role_pool(name, description, pool).await
+    Ok(existing
+        .into_iter()
+        .next()
+        .and_then(|r| r.id.get().copied()))
 }
 
 /// v0.38 — tri-dialect counterpart of [`has_any_perm`]. Issues one
@@ -592,32 +612,15 @@ pub async fn user_roles_pool(
 }
 
 /// Get an existing role by name or create one. Returns the id.
+///
+/// Delegates to [`get_or_create_role_pool`].
 #[cfg(feature = "postgres")]
 pub async fn get_or_create_role(
     name: &str,
     description: &str,
     pool: &PgPool,
 ) -> Result<i64, TenancyError> {
-    // Single round-trip: insert if absent, then union-select the id.
-    let row = sqlx::query(
-        r#"
-        WITH ins AS (
-            INSERT INTO "rustango_roles" (name, description, data)
-            VALUES ($1, $2, '{}')
-            ON CONFLICT (name) DO NOTHING
-            RETURNING id
-        )
-        SELECT id FROM ins
-        UNION ALL
-        SELECT id FROM "rustango_roles" WHERE name = $1
-        LIMIT 1
-        "#,
-    )
-    .bind(name)
-    .bind(description)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.try_get::<i64, _>("id").unwrap_or(0))
+    get_or_create_role_pool(name, description, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// Grant a codename to a role. No-op if already granted.

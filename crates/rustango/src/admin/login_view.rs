@@ -645,6 +645,7 @@ fn render_change_password_form(
         "action": format!("{admin_prefix}/account/password"),
         "success": success,
         "error": error,
+        "password_min_length": crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
     });
     super::templates::render_with_chrome(
         "change_password.html",
@@ -681,6 +682,7 @@ fn render_totp_enroll(
         "action": format!("{admin_prefix}/account/totp"),
         "admin_title": state.config.title.as_deref().unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
+        "admin_home": super::helpers::admin_home(admin_prefix),
         "already_enabled": already_enabled,
         "secret_base32": secret_base32,
         "otpauth_url": otpauth_url,
