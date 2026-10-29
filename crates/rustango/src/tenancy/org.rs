@@ -87,8 +87,8 @@ pub struct Org {
     /// URL path prefix (e.g. `"/acme"`). Opt-in, null by default —
     /// the headline routing mode is subdomain. Operators set this
     /// per-tenant when they need both modes (subdomain in prod,
-    /// path in dev).
-    #[rustango(max_length = 255)]
+    /// path in dev). Indexed: the apex looks it up per new first segment.
+    #[rustango(max_length = 255, index)]
     pub path_prefix: Option<String>,
 
     /// Soft-disable. Inactive orgs return 404 from the resolver

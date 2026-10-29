@@ -317,8 +317,10 @@ connection can deadlock a single-connection SQLite pool.
 
 Add `audit(track = "field1, field2")` to a model and every create, update and
 delete is recorded to the `rustango_audit_log` table (created for you when you
-run `migrate`). Only models with an `audit(...)` attribute are logged; `track`
-selects which fields are captured in the diff (omit it to track all scalars).
+run `migrate`). `track` selects which fields are captured in the diff (omit it
+to track all scalars). Admin writes, inline rows included, are logged for every
+model: for an `audit(...)` model in the write's transaction, so a failed entry
+undoes the write; for any other model best-effort, after the commit.
 
 ```rust
 #[rustango(table = "posts", audit(track = "title, body, status"))]

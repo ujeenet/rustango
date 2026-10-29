@@ -5202,6 +5202,7 @@ mod lookup_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 
@@ -5230,6 +5231,7 @@ mod lookup_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 

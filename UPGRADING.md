@@ -148,6 +148,47 @@ untouched.
 
 ---
 
+## 0.61.12
+
+### Tenancy
+
+- `rustango_orgs.path_prefix` gets an index. In a tenancy project run `cargo run -- makemigrations` to write the system migration, commit `system/migrations/`, then `migrate`.
+- Tenancy `check` reports tenants behind on tenant-scoped migrations and reads every active tenant's ledger to do so (eight at once, 5 s each); an unreachable tenant is a warning. `check --no-tenants` skips them.
+- That report includes the framework's tenant-scoped system migrations, listed as `system/<name>`.
+- Off the prod tier, `run-server` now uses the same key files as `server::Builder`: `./var/.rustango_tenant_session.key` and `./var/.rustango_operator_session.key` instead of `./var/.rustango_session.key`. Dev sessions signed by `run-server` end once; with `RUSTANGO_SESSION_SECRET` set nothing changes.
+
+### Tenancy CLI
+
+- Off the prod tier, `create-tenant --admin-email` and `set-password-link` create `./var/.rustango_tenant_session.key` when it is missing, as the server does on first boot. `create-api-key` still only loads it.
+- Flags a verb used to ignore are now errors: `--schema-name` with database mode (`create-tenant`, `migrate-tenant-storage --to database`), `--database-url` with `migrate-tenant-storage --to schema`, `edit-tenant --database-url` on a schema-mode tenant, and any argument to `list-tenants`.
+- The operator console's tenant edit form also refuses a database URL on a schema-mode tenant.
+
+### Signals name the tenant (breaking)
+
+`UserLoggedInContext`, `UserLoggedOutContext`, `UserLoginFailedContext`, `AdminSaveContext` and `AdminDeleteContext` have a new `tenant: Option<String>` (the tenant's slug; `None` outside a tenant) and are now `#[non_exhaustive]`. Code that builds one with a struct literal uses `::new(...)`, then `.with_tenant(...)` if needed. An exhaustive pattern on one, such as `let AdminSaveContext { table, pk, change } = ctx`, breaks too: add `..`.
+
+### Sealed casts and reseal
+
+`FieldSchema` has a new `cast: Option<FieldCast>` field; the derive fills it, and `FieldSchema::new` sets `None`. `reseal-tenant-secrets` now also re-seals every model's `Cast<EncryptedString>` columns, on the registry and in each tenant, and reports them as `cast <owner>/<table>.<column> <pk>`. It opens tenants for this only when a tenant model has such a column, one tenant at a time, and reads each column in pages of 500 rows by primary key.
+
+- A hand-written `FieldSchema { .. }` literal inside the crate, or a `FieldSchemaParts` literal, must add `cast`; outside the crate use `FieldSchema::new`. `FieldCast` (`Sealed`, `Other`; `#[non_exhaustive]`) is a new public type in `rustango::core`. `CastValue::KIND` is doc-hidden: leave it at its default in your own casts.
+- The derive sees a cast only as `Cast<C>` or `Option<Cast<C>>` written out; a type alias for a cast is refused at compile time.
+- A model with a sealed cast but no single-column primary key is reported as `cast <table>: no primary key` (or `composite primary key`) and fails the run. A value neither key opens, or a non-text cell, is reported as `left alone` and does not fail the run; the summary counts them.
+- A schema-mode tenant that still stores a database URL is reported as `<slug>: schema mode reads no URL, left alone`. The summary now reads `N left alone` without `(cannot be opened)`.
+
+### Admin inline history
+
+An inline add, edit or delete of a child without `audit(...)` now writes an audit row, after the commit and best-effort, as the child's own page does. `admin::InlineApplyOutcome` is deprecated: no API returns it.
+
+### SSO link index
+
+`SsoLink` has a new index on `(provider_source, provider_id, subject)`. Run `makemigrations`, then `migrate`, to add it to `rustango_sso_links`.
+
+### Cache counters and NUL values
+
+`Cache::incr` counts a stored value only in the exact form `incr` writes. `"007"` and `"+7"` were read as 7 by the memory, file, PG and MySQL backends and now count as 0, as on SQLite. `RedisCache::incr` on a non-integer value now restarts the counter at `by` instead of returning an error. A value with a trailing line break (`"5\n"`) also counts as 0; MySQL read it as 5. `set`, `add` and `set_forever` with a NUL character now fail with `CacheError::Serialization` on every backend; use `set_bytes`.
+
+
 ## 0.61.11
 
 ### Migrations and data

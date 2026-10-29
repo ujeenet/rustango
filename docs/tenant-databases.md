@@ -245,8 +245,15 @@ To change the key:
    old key still opens what it sealed.
 2. `cargo run -- reseal-tenant-secrets` lists what would change.
 3. `cargo run -- reseal-tenant-secrets --apply` re-seals tenant URLs, server
-   passwords, operator TOTP secrets and SSO client secrets with the new key.
+   passwords, operator TOTP secrets, SSO client secrets and every model's
+   `Cast<EncryptedString>` column (registry and tenants) with the new key.
 4. Remove `RUSTANGO_SECRET_KEY_PREVIOUS` and restart.
+
+The verb finds a sealed column from the field type the model derive saw:
+`Cast<EncryptedString>` or `Option<Cast<EncryptedString>>`, written out. The
+derive refuses any other spelling, such as a type alias, so no column is missed.
+Each model needs a single-column primary key; a model without one is reported
+as failed. A value neither key opens is reported and left alone.
 
 Values sealed under a blank key before blank keys were refused still open
 when `RUSTANGO_SECRET_KEY_PREVIOUS` is set and empty; re-seal them the same way.

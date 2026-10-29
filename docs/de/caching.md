@@ -284,6 +284,10 @@ beides unter einer Sperre pro Eintrag, die nur auf einem Host gilt. Ein
 `DistributedLock` oder ein exakter Zähler funktioniert über Replikate hinweg also
 mit Redis oder der Datenbank. Jedes Backend zählt über den ganzen `i64`-Bereich;
 ein Überlauf ist ein Fehler und lässt den Zähler unverändert.
+Ein gespeicherter Wert zählt nur in der exakten Form, die `incr` schreibt
+(`"7"`, `"-3"`); `"+7"`, `"007"`, `" 5"` oder `"abc"` zählen überall als 0. Ein
+Textwert mit NUL-Zeichen wird von jedem Backend abgelehnt; solche Daten mit
+`set_bytes` speichern.
 
 Zwei Dinge, die man wissen sollte:
 

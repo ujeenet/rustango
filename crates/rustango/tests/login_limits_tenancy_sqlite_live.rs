@@ -374,6 +374,127 @@ async fn tenant_admin_login_locks_with_429() {
     assert!(is_429(&env.admin_login(&next_ip(), &name, PASS).await));
 }
 
+/// The auth signals for user `name` (id `id`) while `run` runs, as
+/// `"{kind}:{tenant:?}"`.
+async fn auth_signals<F: std::future::Future<Output = ()>>(
+    name: &str,
+    id: i64,
+    run: impl FnOnce() -> F,
+) -> Vec<String> {
+    use rustango::signals::auth as sig;
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+    let (s1, s2, s3) = (seen.clone(), seen.clone(), seen.clone());
+    let (n1, n2) = (name.to_owned(), name.to_owned());
+    let ok = sig::connect_user_logged_in(move |c| {
+        if c.username == n1 {
+            s1.lock().unwrap().push(format!("in:{:?}", c.tenant));
+        }
+        async {}
+    });
+    let bad = sig::connect_user_login_failed(move |c| {
+        if c.attempted_username.as_deref() == Some(n2.as_str()) {
+            s2.lock().unwrap().push(format!("failed:{:?}", c.tenant));
+        }
+        async {}
+    });
+    let out = sig::connect_user_logged_out(move |c| {
+        if c.user_id == Some(id) {
+            s3.lock().unwrap().push(format!("out:{:?}", c.tenant));
+        }
+        async {}
+    });
+    run().await;
+    sig::disconnect_user_logged_in(ok);
+    sig::disconnect_user_login_failed(bad);
+    sig::disconnect_user_logged_out(out);
+    let seen = seen.lock().unwrap().clone();
+    seen
+}
+
+/// A tenant admin sign-in, a refused one and a logout name the tenant.
+#[tokio::test]
+async fn tenant_admin_login_signals_name_the_tenant() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("ts");
+    let id = env.user(&name).await;
+    let seen = auth_signals(&name, id, || async {
+        env.admin_login(&next_ip(), &name, "wrong").await;
+        let r = env.admin_login(&next_ip(), &name, PASS).await;
+        assert_eq!(r.status(), StatusCode::SEE_OTHER);
+        let session = r
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok()?.split(';').next())
+            .filter(|c| !c.starts_with("rustango_csrf="))
+            .collect::<Vec<_>>()
+            .join("; ");
+        let req = Request::builder()
+            .method("POST")
+            .uri("/__logout")
+            .header(header::HOST, &env.host)
+            .header(header::COOKIE, format!("{session}; rustango_csrf=t"))
+            .header("x-csrf-token", "t")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("_csrf=t"))
+            .unwrap();
+        let r = send(&env.admin, &next_ip(), req).await;
+        assert!(r.status().is_redirection(), "logout: {}", r.status());
+    })
+    .await;
+    let want = Some(env.slug.clone());
+    assert_eq!(
+        seen,
+        [
+            format!("failed:{want:?}"),
+            format!("in:{want:?}"),
+            format!("out:{want:?}")
+        ]
+    );
+}
+
+/// A member's password sign-in, a refused one and a logout through
+/// `/api/auth/*` name the tenant.
+#[tokio::test]
+async fn member_login_signals_name_the_tenant() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let name = unique("ms");
+    let id = env.user(&name).await;
+    let seen = auth_signals(&name, id, || async {
+        let r = env.jwt_login(&next_ip(), &name, "wrong").await;
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+        let r = env.jwt_login(&next_ip(), &name, PASS).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        let tokens = json_body(r).await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/logout")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}", tokens["access"].as_str().unwrap()),
+            )
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "refresh": tokens["refresh"] }).to_string(),
+            ))
+            .unwrap();
+        let r = send(&env.api, &next_ip(), req).await;
+        assert_eq!(r.status(), StatusCode::NO_CONTENT, "logout");
+    })
+    .await;
+    let want = Some(env.slug.clone());
+    assert_eq!(
+        seen,
+        [
+            format!("failed:{want:?}"),
+            format!("in:{want:?}"),
+            format!("out:{want:?}")
+        ]
+    );
+}
+
 /// Through `server::Builder`, failures from one IP get 429 once the
 /// per-IP limit is reached: the client address must reach the gate.
 fn change_password_req(uri: &str, cookie: &str, current: &str) -> Request<Body> {

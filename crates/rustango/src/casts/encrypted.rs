@@ -18,6 +18,7 @@ pub enum EncryptedString {}
 impl CastValue for EncryptedString {
     type Value = String;
     const SECRET: bool = true;
+    const KIND: crate::core::FieldCast = crate::core::FieldCast::Sealed;
 
     fn to_db(value: &String) -> String {
         // Infallible by contract; a missing key is a deploy-time

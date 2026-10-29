@@ -615,6 +615,7 @@ async fn login_in(
             attempted_username: Some(body.username.clone()),
             reason,
             request: meta.clone(),
+            tenant: Some(t.org.slug.clone()),
         }
     };
 
@@ -695,6 +696,7 @@ async fn login_in(
         username: user.username.clone(),
         is_superuser: user.is_superuser,
         request: meta,
+        tenant: Some(t.org.slug.clone()),
     })
     .await;
     // Bake the resolved tenant's slug into the token so a JWT
@@ -915,6 +917,7 @@ async fn logout_in(
         user_id,
         username: None,
         request: meta,
+        tenant: Some(t.org.slug.clone()),
     })
     .await;
     Ok(StatusCode::NO_CONTENT)

@@ -169,7 +169,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.61.11`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.61.12`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -416,15 +416,13 @@ cargo run -- makemigrations
 You'll see something like:
 
 ```
-wrote ./migrations/0001_create_item_and_posts_and_rustango_admin_users_etc.json
+wrote ./migrations/0001_create_item_and_posts.json
     + CreateTable("item")
     + CreateTable("posts")
-    + CreateTable("rustango_admin_users")
-    + CreateTable("rustango_content_types")
-    + CreateIndex { table: "posts", columns: ["status", "published_at"], ... }
+    + CreateIndex { name: "posts_status_published_at_idx", table: "posts", columns: ["status", "published_at"], ... }
 ```
 
-This first migration creates your models — `posts`, plus the starter `item` model the scaffold shipped in `src/models.rs` — alongside the framework's own admin and content-type tables. Open the JSON if you like: it carries the operations plus a full schema snapshot.
+This first migration creates your models — `posts`, plus the starter `item` model the scaffold shipped in `src/models.rs`. The framework's own tables (admin users, content types, audit log, …) are not in it: they have their own chain in `system/migrations/`, which the first `migrate` writes and applies before yours. Open the JSON if you like: it carries the operations plus a full schema snapshot.
 
 Apply it to the database:
 

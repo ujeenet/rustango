@@ -73,6 +73,7 @@ pub struct AuthRequestMeta {
 
 /// What a `user_logged_in` receiver gets.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UserLoggedInContext {
     /// Which login surface this was: `"admin"`, `"tenant_admin"`,
     /// `"operator"`, `"jwt"`, the SSO ones `"admin_sso"`,
@@ -87,6 +88,37 @@ pub struct UserLoggedInContext {
     pub is_superuser: bool,
     /// See [`AuthRequestMeta`].
     pub request: AuthRequestMeta,
+    /// The tenant's slug; `None` outside a tenant (single-database apps,
+    /// the operator console). User ids are only unique within it.
+    pub tenant: Option<String>,
+}
+
+impl UserLoggedInContext {
+    /// A context with no tenant; see [`Self::with_tenant`].
+    #[must_use]
+    pub fn new(
+        source: &'static str,
+        user_id: i64,
+        username: impl Into<String>,
+        is_superuser: bool,
+        request: AuthRequestMeta,
+    ) -> Self {
+        Self {
+            source,
+            user_id,
+            username: username.into(),
+            is_superuser,
+            request,
+            tenant: None,
+        }
+    }
+
+    /// Set the tenant's slug.
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
+    }
 }
 
 /// What a `user_logged_out` receiver gets.
@@ -95,11 +127,41 @@ pub struct UserLoggedInContext {
 /// can run with no session, for example on a stale-cookie probe.
 /// Filter on `user_id.is_some()` for real logouts only.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UserLoggedOutContext {
     pub source: &'static str,
     pub user_id: Option<i64>,
     pub username: Option<String>,
     pub request: AuthRequestMeta,
+    /// The tenant's slug; `None` outside a tenant (single-database apps,
+    /// the operator console). User ids are only unique within it.
+    pub tenant: Option<String>,
+}
+
+impl UserLoggedOutContext {
+    /// A context with no tenant; see [`Self::with_tenant`].
+    #[must_use]
+    pub fn new(
+        source: &'static str,
+        user_id: Option<i64>,
+        username: Option<String>,
+        request: AuthRequestMeta,
+    ) -> Self {
+        Self {
+            source,
+            user_id,
+            username,
+            request,
+            tenant: None,
+        }
+    }
+
+    /// Set the tenant's slug.
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
+    }
 }
 
 /// Why a login attempt was rejected. Receivers use it to separate a
@@ -122,6 +184,7 @@ pub enum AuthFailureReason {
 
 /// What a `user_login_failed` receiver gets.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct UserLoginFailedContext {
     pub source: &'static str,
     /// The username submitted. `None` when the form was too
@@ -129,6 +192,35 @@ pub struct UserLoginFailedContext {
     pub attempted_username: Option<String>,
     pub reason: AuthFailureReason,
     pub request: AuthRequestMeta,
+    /// The tenant's slug; `None` outside a tenant (single-database apps,
+    /// the operator console). User ids are only unique within it.
+    pub tenant: Option<String>,
+}
+
+impl UserLoginFailedContext {
+    /// A context with no tenant; see [`Self::with_tenant`].
+    #[must_use]
+    pub fn new(
+        source: &'static str,
+        attempted_username: Option<String>,
+        reason: AuthFailureReason,
+        request: AuthRequestMeta,
+    ) -> Self {
+        Self {
+            source,
+            attempted_username,
+            reason,
+            request,
+            tenant: None,
+        }
+    }
+
+    /// Set the tenant's slug.
+    #[must_use]
+    pub fn with_tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant;
+        self
+    }
 }
 
 // ---------------------------------------------------------------- Internal storage

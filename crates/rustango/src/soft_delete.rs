@@ -232,6 +232,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         },
         FieldSchema {
             name: "title",
@@ -257,6 +258,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         },
         FieldSchema {
             name: "deleted_at",
@@ -282,6 +284,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         },
     ];
 

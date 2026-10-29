@@ -286,6 +286,10 @@ seul upsert. `FileCache` fait les deux sous un verrou par entrée, valable sur u
 seul hôte. Un `DistributedLock` ou un compteur exact entre réplicas fonctionne
 donc avec Redis ou la base de données. Chaque backend compte sur toute la plage
 `i64` ; un dépassement est une erreur et laisse le compteur inchangé.
+Une valeur stockée ne compte que sous la forme exacte écrite par `incr`
+(`"7"`, `"-3"`) ; `"+7"`, `"007"`, `" 5"` ou `"abc"` valent 0 partout. Une
+valeur texte contenant un caractère NUL est refusée par tous les backends ;
+stockez ces données avec `set_bytes`.
 
 Deux choses à savoir :
 

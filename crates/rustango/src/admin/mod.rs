@@ -84,9 +84,9 @@ pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRende
 pub use custom_views::{AdminCustomView, CustomViewFuture, CustomViewHandler};
 pub use errors::AdminError;
 pub(crate) use helpers::current_csrf_input;
-pub use inlines::{
-    InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
-};
+#[allow(deprecated)]
+pub use inlines::InlineApplyOutcome;
+pub use inlines::{InlineAdmin, InlineAdminGeneric, InlineFormPanel, InlineKind, InlinePanel};
 #[cfg(feature = "totp")]
 pub use manage_admin::reset_admin_totp_cmd;
 pub use manage_admin::{

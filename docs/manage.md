@@ -157,7 +157,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Saved database servers |
 | `test-tenant-connection` | Verify a tenant's database is reachable |
-| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs, server passwords, operator TOTP and SSO secrets with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
+| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs, server passwords, operator TOTP, SSO secrets and `Cast<EncryptedString>` columns with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
@@ -168,7 +168,9 @@ fails, the run rolls back. The admin gets no password. The verb prints a
 set-password link once: it works once, expires in 72 hours, and only on this
 tenant. Give it to the admin. It is signed with the server's tenant session key
 (`RUSTANGO_SESSION_SECRET`, or the dev key file), so run the CLI with the same
-key as the server. `set-password-link <slug> <username>` prints a fresh one.
+key as the server. Off the prod tier, a missing `./var/.rustango_tenant_session.key`
+is created the way the server creates it, so this works before the first server
+run. `set-password-link <slug> <username>` prints a fresh one.
 
 ### Audit **T**
 
@@ -782,7 +784,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.11
+rustango 0.61.12
 ```
 
 ### `about`
@@ -794,7 +796,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.11
+  version:        0.61.12
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -811,6 +813,7 @@ production-readiness checks.
 - ≥ 1 model registered via `inventory`
 - DB reachable (`SELECT 1`)
 - Models registered but **no** migrations on disk (it does not compare counts — an existing `migrations/` directory is reported as info, whatever the number)
+- Migrations the ledger has not applied. In a tenancy project: registry-scoped files against the registry, tenant-scoped ones against each active tenant's ledger (the tenants behind are named, ten in full), `<app>/migrations/` folders included. Eight tenants are read at once, each for at most 5 s; a slower one is reported as unreadable. `check --no-tenants` skips the tenant ledgers
 
 **With `--deploy`:**
 - `RUSTANGO_ENV` is `prod` or `production`

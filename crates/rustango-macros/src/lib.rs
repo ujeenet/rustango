@@ -11902,6 +11902,10 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         }
     };
     let auto_now_flag = attrs.auto_now;
+    let cast = match cast_type(&field.ty) {
+        Some(ty) => quote!(::core::option::Option::Some(<#ty>::FIELD_CAST)),
+        None => quote!(::core::option::Option::None),
+    };
     let schema = quote! {{
         #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
             name: #name,
@@ -11927,6 +11931,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             case_insensitive: #case_insensitive,
             fk_on_delete: #fk_on_delete,
             validators: &[ #(#validators_lits),* ],
+            cast: #cast,
         })
     }};
 
@@ -12360,6 +12365,27 @@ fn auto_inner_type(ty: &syn::Type) -> Option<&syn::Type> {
         syn::GenericArgument::Type(t) => Some(t),
         _ => None,
     })
+}
+
+/// The `Cast<C>` inside `ty` (bare or in an `Option`), for its schema record.
+fn cast_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let Type::Path(TypePath { path, qself: None }) = ty else {
+        return None;
+    };
+    let last = path.segments.last()?;
+    if last.ident == "Cast" {
+        return Some(ty);
+    }
+    if last.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    match args.args.first()? {
+        syn::GenericArgument::Type(inner) => cast_type(inner).filter(|_| args.args.len() == 1),
+        _ => None,
+    }
 }
 
 fn detect_type(ty: &syn::Type) -> syn::Result<DetectedType<'_>> {

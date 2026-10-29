@@ -65,6 +65,10 @@ pub trait CastValue {
     fn from_db(stored: &str) -> Result<Self::Value, CastError>;
     /// `true` hides the value from `Debug`, for casts that hold secrets.
     const SECRET: bool = false;
+    /// What the model schema records for a field of this cast. Leave it:
+    /// only the framework's own sealed form may say `Sealed`.
+    #[doc(hidden)]
+    const KIND: crate::core::FieldCast = crate::core::FieldCast::Other;
 }
 
 /// A model field stored through the [`CastValue`] impl `C`. See the
@@ -75,6 +79,10 @@ pub struct Cast<C: CastValue> {
 }
 
 impl<C: CastValue> Cast<C> {
+    /// The schema's record of this cast; the derive reads it.
+    #[doc(hidden)]
+    pub const FIELD_CAST: crate::core::FieldCast = C::KIND;
+
     /// Wrap a value.
     pub fn new(value: C::Value) -> Self {
         Self {

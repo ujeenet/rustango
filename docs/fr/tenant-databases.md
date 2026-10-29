@@ -246,9 +246,17 @@ Pour changer la clé :
    L'ancienne clé ouvre encore ce qu'elle a scellé.
 2. `cargo run -- reseal-tenant-secrets` liste ce qui changerait.
 3. `cargo run -- reseal-tenant-secrets --apply` rescelle les URL de tenant, les
-   mots de passe des serveurs, les secrets TOTP des opérateurs et les secrets
-   client SSO avec la nouvelle clé.
+   mots de passe des serveurs, les secrets TOTP des opérateurs, les secrets
+   client SSO et chaque colonne `Cast<EncryptedString>` des modèles (registre
+   et tenants) avec la nouvelle clé.
 4. Retirez `RUSTANGO_SECRET_KEY_PREVIOUS` et redémarrez.
+
+La commande repère une colonne scellée par le type de champ que voit le derive
+du modèle : `Cast<EncryptedString>` ou `Option<Cast<EncryptedString>>`, écrit en
+entier. Le derive refuse toute autre écriture, comme un alias de type, donc
+aucune colonne n'est oubliée. Chaque modèle doit avoir une clé primaire sur une
+seule colonne ; un modèle sans elle est signalé en échec. Une valeur qu'aucune
+clé n'ouvre est signalée et laissée telle quelle.
 
 Les valeurs scellées sous une clé vide, avant que les clés vides ne soient
 refusées, s'ouvrent encore quand `RUSTANGO_SECRET_KEY_PREVIOUS` est défini et

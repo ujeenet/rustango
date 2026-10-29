@@ -248,9 +248,17 @@ Um den Schlüssel zu wechseln:
    alte Schlüssel öffnet weiterhin, was er versiegelt hat.
 2. `cargo run -- reseal-tenant-secrets` listet, was sich ändern würde.
 3. `cargo run -- reseal-tenant-secrets --apply` versiegelt Tenant-URLs,
-   Server-Passwörter, Operator-TOTP-Secrets und SSO-Client-Secrets neu mit
+   Server-Passwörter, Operator-TOTP-Secrets, SSO-Client-Secrets und jede
+   `Cast<EncryptedString>`-Spalte der Modelle (Registry und Tenants) neu mit
    dem neuen Schlüssel.
 4. Entferne `RUSTANGO_SECRET_KEY_PREVIOUS` und starte neu.
+
+Der Befehl erkennt eine versiegelte Spalte am Feldtyp, den das Model-Derive
+sieht: ausgeschrieben `Cast<EncryptedString>` oder
+`Option<Cast<EncryptedString>>`. Jede andere Schreibweise, etwa ein Typalias,
+lehnt das Derive ab, also wird keine Spalte übersehen. Jedes Model braucht einen
+einspaltigen Primärschlüssel; eines ohne wird als Fehler gemeldet. Ein Wert, den
+kein Schlüssel öffnet, wird gemeldet und bleibt unverändert.
 
 Werte, die mit einem leeren Schlüssel versiegelt wurden, bevor leere
 Schlüssel abgelehnt wurden, öffnen sich weiterhin, wenn

@@ -196,25 +196,95 @@ where
         .await?;
     let mut out: [TenantLedger; N] = std::array::from_fn(|_| Vec::with_capacity(orgs.len()));
     for org in orgs {
-        let (pool, own) = pools
-            .existing_pool_dyn(&org)
+        let read = org_ledgers(pools, &org, ledgers)
             .await
             .map_err(|e| unreadable(&org.slug, &e))?;
-        let mut read = Ok(());
-        for (ledger, out) in ledgers.iter().zip(&mut out) {
-            match rustango::migrate::applied_or_empty(&pool, ledger).await {
-                Ok(applied) => out.push((org.slug.clone(), applied)),
-                Err(e) => {
-                    read = Err(e);
-                    break;
-                }
+        for (applied, out) in read.into_iter().zip(&mut out) {
+            out.push((org.slug.clone(), applied));
+        }
+    }
+    Ok(out)
+}
+
+/// `org`'s names in each of `ledgers`, through a pool closed or uncached after.
+async fn org_ledgers<DB: Database, const N: usize>(
+    pools: &TenantPools<DB>,
+    org: &crate::tenancy::org::Org,
+    ledgers: [&str; N],
+) -> Result<[std::collections::HashSet<String>; N], String>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    let (pool, own) = pools
+        .existing_pool_dyn(org)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out: [std::collections::HashSet<String>; N] =
+        std::array::from_fn(|_| Default::default());
+    let mut read = Ok(());
+    for (ledger, out) in ledgers.iter().zip(&mut out) {
+        match rustango::migrate::applied_or_empty(&pool, ledger).await {
+            Ok(applied) => *out = applied,
+            Err(e) => {
+                read = Err(e.to_string());
+                break;
             }
         }
-        if own {
-            pool.close().await;
-        }
-        read.map_err(|e| unreadable(&org.slug, &e))?;
     }
+    if own {
+        pool.close().await;
+    } else {
+        // A cached pool per tenant would stay open for the whole command.
+        pools.invalidate(&org.slug).await;
+    }
+    read.map(|()| out)
+}
+
+/// Tenant ledgers `check` reads at once.
+const CHECK_CONCURRENCY: usize = 8;
+/// A tenant whose ledger takes longer is reported as unreadable, so an
+/// unreachable database costs this, not the pool's acquire timeout.
+const CHECK_TENANT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Every active tenant's project and system ledgers, or why they could not be
+/// read: what `check` compares the tenant-scoped files with. One bad tenant spoils no other.
+pub(super) async fn active_tenant_ledgers<DB: Database>(
+    pools: &TenantPools<DB>,
+) -> Result<rustango::migrate::manage::TenantApplied, String>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    use crate::tenancy::org::Org;
+    use futures_util::StreamExt as _;
+    let orgs: Vec<Org> = Org::objects()
+        .where_(Org::active.eq(true))
+        .fetch(&pools.registry_pool())
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut out: rustango::migrate::manage::TenantApplied = futures_util::stream::iter(orgs)
+        .map(|org| async move {
+            use rustango::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
+            let read = org_ledgers(pools, &org, [LEDGER_TABLE, SYSTEM_LEDGER_TABLE]);
+            let read = tokio::time::timeout(CHECK_TENANT_TIMEOUT, read)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(format!(
+                        "timed out after {}s",
+                        CHECK_TENANT_TIMEOUT.as_secs()
+                    ))
+                });
+            let read = read.map(|[project, system]| rustango::migrate::manage::TenantNames {
+                project,
+                system,
+            });
+            (org.slug, read)
+        })
+        .buffer_unordered(CHECK_CONCURRENCY)
+        .collect()
+        .await;
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
 

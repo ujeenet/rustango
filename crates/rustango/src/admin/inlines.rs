@@ -1087,6 +1087,7 @@ fn render_prefixed_input(
 // ============================================================ POST processing (slice 2)
 
 /// Row counts from applying the inline FormSets of one parent edit POST.
+#[deprecated(since = "0.61.12", note = "no API returns it any more")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct InlineApplyOutcome {
     /// Existing rows successfully updated.
@@ -1095,9 +1096,9 @@ pub struct InlineApplyOutcome {
     pub deleted: usize,
     /// New rows successfully inserted (extra/empty slots with content).
     pub inserted: usize,
-    /// Always 0: a row that fails to parse or write now refuses the
-    /// whole POST and rolls the edit back (#2339).
-    #[deprecated(since = "0.60.4", note = "always 0 since #2339; removed in 0.61.0")]
+    /// Always 0: a row that fails to parse or write refuses the whole
+    /// POST and rolls the edit back.
+    #[deprecated(since = "0.60.4", note = "always 0")]
     pub failed: usize,
 }
 
@@ -1405,13 +1406,13 @@ struct TargetPlan {
     cap: Option<(usize, WhereExpr)>,
 }
 
-/// Each `audit` is `Some` only for an `audit(...)` child (#2389).
+/// Every child row is audited, as on its own page.
 enum InlineWrite {
     Update {
         query: crate::core::UpdateQuery,
         /// Re-read after the write to check the row is still in scope.
         pk: SqlValue,
-        audit: Option<ChildAudit>,
+        audit: ChildAudit,
         /// An extra host's claim, as on its own page.
         #[cfg(feature = "tenancy")]
         claims: crate::tenancy::org_host::AdminClaims,
@@ -1419,7 +1420,6 @@ enum InlineWrite {
     Delete {
         query: InlineRemove,
         /// The entity PK the snapshot is filed under.
-        audit: Option<String>,
         pk: String,
     },
 }
@@ -1439,20 +1439,25 @@ pub(crate) enum ChildSignal {
 
 impl ChildSignal {
     /// `admin_pre_*` when `pre`, else `admin_post_*`.
-    pub(crate) async fn send(self, pre: bool) {
+    pub(crate) async fn send(self, pre: bool, state: &AppState) {
         use crate::signals::admin::{self as sig, AdminDeleteContext, AdminSaveContext};
-        match (self, pre) {
-            (Self::Save { table, pk, change }, true) => {
-                sig::send_admin_pre_save(AdminSaveContext { table, pk, change }).await;
+        let tenant = state.config.tenant.clone();
+        match self {
+            Self::Save { table, pk, change } => {
+                let ctx = AdminSaveContext::new(table, pk, change).with_tenant(tenant);
+                if pre {
+                    sig::send_admin_pre_save(ctx).await;
+                } else {
+                    sig::send_admin_post_save(ctx).await;
+                }
             }
-            (Self::Save { table, pk, change }, false) => {
-                sig::send_admin_post_save(AdminSaveContext { table, pk, change }).await;
-            }
-            (Self::Delete { table, pk }, true) => {
-                sig::send_admin_pre_delete(AdminDeleteContext { table, pk }).await;
-            }
-            (Self::Delete { table, pk }, false) => {
-                sig::send_admin_post_delete(AdminDeleteContext { table, pk }).await;
+            Self::Delete { table, pk } => {
+                let ctx = AdminDeleteContext::new(table, pk).with_tenant(tenant);
+                if pre {
+                    sig::send_admin_pre_delete(ctx).await;
+                } else {
+                    sig::send_admin_post_delete(ctx).await;
+                }
             }
         }
     }
@@ -1528,13 +1533,13 @@ impl InlineRemove {
 
 struct InlineInsert {
     query: crate::core::InsertQuery,
-    /// The audit form of an `audit(...)` child.
-    audit: Option<HashMap<String, String>>,
+    /// The audit form of the new row.
+    audit: HashMap<String, String>,
     #[cfg(feature = "tenancy")]
     claims: crate::tenancy::org_host::AdminClaims,
 }
 
-/// What an audited child UPDATE diffs its locked row against.
+/// What a child UPDATE's audit entry diffs its locked row against.
 struct ChildAudit {
     pk: String,
     form: HashMap<String, String>,
@@ -1674,7 +1679,6 @@ async fn plan_target(
     let initial = crate::forms::formset::initial_forms(form, table);
     let natural_pk = (!target.pk.auto).then_some(target.pk);
     let cfg = admin_config_or_default(target.child);
-    let audited = target.child.audit_track.is_some();
     let mut out = TargetPlan {
         child: target.child,
         pk: target.pk,
@@ -1759,7 +1763,7 @@ async fn plan_target(
                     sql_values.push(SqlValue::Uuid(uuid::Uuid::now_v7()));
                 }
             }
-            let audit = audited.then(|| {
+            let audit = {
                 let written: Vec<(&'static str, SqlValue)> = columns
                     .iter()
                     .copied()
@@ -1773,7 +1777,7 @@ async fn plan_target(
                     }
                 }
                 super::audit::audit_form(target.child, &cfg, &row, &written)
-            });
+            };
             // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
             let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
             query.returning = vec![target.pk.column];
@@ -1808,7 +1812,6 @@ async fn plan_target(
                 return Err(refused("delete").into());
             }
             // `row_where` holds the live-rows scope, so a stamp lands once.
-            let audit = audited.then(|| pk.to_display_string());
             let pk_text = pk.to_display_string();
             let query = match target.child.soft_delete_column {
                 Some(col) => {
@@ -1825,11 +1828,8 @@ async fn plan_target(
                     target.row_where(pk),
                 )),
             };
-            out.existing.push(InlineWrite::Delete {
-                query,
-                audit,
-                pk: pk_text,
-            });
+            out.existing
+                .push(InlineWrite::Delete { query, pk: pk_text });
             continue;
         }
 
@@ -1855,10 +1855,10 @@ async fn plan_target(
         if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before)) {
             return Err(refused("change").into());
         }
-        let audit = audited.then(|| ChildAudit {
+        let audit = ChildAudit {
             pk: pk.to_display_string(),
             form: super::audit::audit_form(target.child, &cfg, &row, &values),
-        });
+        };
         let set = values
             .into_iter()
             .map(|(column, value)| crate::core::Assignment::new(column, value))
@@ -1925,15 +1925,15 @@ pub(crate) enum InlineApplyError {
 }
 
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
-/// An `audit(...)` child's entries go in `tx` too, one batch per inline (#2389).
+/// Audit entries go in `tx` for an `audit(...)` child, else to the caller for after the commit.
 pub(crate) async fn apply_plan_tx(
     tx: &mut crate::audit::PoolBoundTx<'_>,
     parts: &Parts,
     plan: InlinePlan,
-) -> Result<(InlineApplyOutcome, Vec<ChildSignal>), InlineApplyError> {
+) -> Result<InlineApplied, InlineApplyError> {
     use super::views::Written;
     use crate::audit::{AuditOp, DiffEmit, RowDiffWrite};
-    let mut outcome = InlineApplyOutcome::default();
+    let mut after_commit = Vec::new();
     // The rows written, for `admin_post_*` after the commit.
     let mut written_rows = Vec::new();
     // Concurrent saves of this parent queue here, so each recount sees the last commit.
@@ -1970,33 +1970,12 @@ pub(crate) async fn apply_plan_tx(
             ..SelectQuery::new(child)
         };
         let mut entries: Vec<crate::audit::PendingEntry> = Vec::new();
-        let mut deleted = 0usize;
         for write in target.existing {
             match write {
                 InlineWrite::Update {
                     query,
                     pk,
-                    audit: None,
-                    #[cfg(feature = "tenancy")]
-                    claims,
-                } => {
-                    if crate::sql::update_tx(tx, &query).await.map_err(refused)? > 0 {
-                        let key = pk.to_display_string();
-                        #[cfg(feature = "tenancy")]
-                        claim_written(tx, child, &claims, &pk).await?;
-                        admit_written(tx, parts, child, target.pk, pk, Written::Edited).await?;
-                        written_rows.push(ChildSignal::Save {
-                            table,
-                            pk: key,
-                            change: true,
-                        });
-                    }
-                    outcome.updated += 1;
-                }
-                InlineWrite::Update {
-                    query,
-                    pk,
-                    audit: Some(audit),
+                    audit,
                     #[cfg(feature = "tenancy")]
                     claims,
                 } => {
@@ -2024,38 +2003,29 @@ pub(crate) async fn apply_plan_tx(
                             change: true,
                         });
                     }
-                    outcome.updated += 1;
                 }
                 // 0 rows: deleted or moved since the plan was checked.
-                InlineWrite::Delete { query, audit, pk } => {
-                    let before = match &audit {
-                        Some(_) => {
-                            let select = locked(query.where_clause());
-                            crate::sql::select_one_row_as_json_tx(tx, &select, &fields)
-                                .await
-                                .map_err(refused)?
-                        }
-                        None => None,
-                    };
+                InlineWrite::Delete { query, pk } => {
+                    let select = locked(query.where_clause());
+                    let before = crate::sql::select_one_row_as_json_tx(tx, &select, &fields)
+                        .await
+                        .map_err(refused)?;
                     if query.run(tx).await.map_err(refused)? == 0 {
                         continue;
                     }
-                    deleted += 1;
-                    written_rows.push(ChildSignal::Delete { table, pk });
-                    if let (Some(pk), Some(row)) = (audit, before) {
-                        let entry = super::audit::admin_row_snapshot_entry(
+                    if let Some(row) = before {
+                        entries.push(super::audit::admin_row_snapshot_entry(
                             child,
-                            pk,
+                            pk.clone(),
                             query.op(),
                             &row,
                             None,
-                        );
-                        entries.push(entry);
+                        ));
                     }
+                    written_rows.push(ChildSignal::Delete { table, pk });
                 }
             }
         }
-        outcome.deleted += deleted;
         // Recount in `tx`, after the deletes: a delete that removed nothing
         // frees no room, and a racing save's rows count. MySQL needs a locking
         // pk read to see the latest commit; elsewhere a plain COUNT does.
@@ -2082,31 +2052,19 @@ pub(crate) async fn apply_plan_tx(
             }
         }
         for insert in &target.inserts {
-            let pk = match &insert.audit {
-                None => {
-                    let returning = crate::sql::insert_returning_tx(tx, &insert.query)
-                        .await
-                        .map_err(refused)?;
-                    crate::sql::inserted_pk(&insert.query, &returning, target.pk)
-                        .map_err(refused)?
-                }
-                Some(form) => {
-                    let (pk, entry) = crate::audit::insert_one_with_entry_tx(
-                        tx,
-                        &insert.query,
-                        target.pk,
-                        |pk| {
-                            let pk = pk.to_display_string();
-                            super::audit::admin_audit_entry(child, &pk, AuditOp::Create, form)
-                        },
-                        DiffEmit::Deferred,
-                    )
-                    .await
-                    .map_err(refused)?;
-                    entries.extend(entry);
-                    pk
-                }
-            };
+            let (pk, entry) = crate::audit::insert_one_with_entry_tx(
+                tx,
+                &insert.query,
+                target.pk,
+                |pk| {
+                    let pk = pk.to_display_string();
+                    super::audit::admin_audit_entry(child, &pk, AuditOp::Create, &insert.audit)
+                },
+                DiffEmit::Deferred,
+            )
+            .await
+            .map_err(refused)?;
+            entries.extend(entry);
             let key = pk.to_display_string();
             #[cfg(feature = "tenancy")]
             claim_written(tx, child, &insert.claims, &pk).await?;
@@ -2116,15 +2074,30 @@ pub(crate) async fn apply_plan_tx(
                 pk: key,
                 change: false,
             });
-            outcome.inserted += 1;
         }
-        if !entries.is_empty() {
-            crate::audit::emit_in_tx(tx, &entries)
-                .await
-                .map_err(refused)?;
+        // As on the child's own page: in `tx` for an `audit(...)` child,
+        // else best-effort after the commit.
+        match DiffEmit::for_model(child) {
+            DiffEmit::InTx if !entries.is_empty() => {
+                crate::audit::emit_in_tx(tx, &entries)
+                    .await
+                    .map_err(refused)?;
+            }
+            DiffEmit::InTx => {}
+            DiffEmit::Deferred => after_commit.extend(entries),
         }
     }
-    Ok((outcome, written_rows))
+    Ok(InlineApplied {
+        signals: written_rows,
+        audit: after_commit,
+    })
+}
+
+/// What a committed inline save still owes: its `admin_post_*` signals and
+/// the best-effort audit entries of children without `audit(...)`.
+pub(crate) struct InlineApplied {
+    pub(crate) signals: Vec<ChildSignal>,
+    pub(crate) audit: Vec<crate::audit::PendingEntry>,
 }
 
 /// An extra host written inline is checked as on its own page.
@@ -2409,6 +2382,7 @@ mod tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         };
         let cfg = crate::core::AdminConfig::DEFAULT;
         let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update));

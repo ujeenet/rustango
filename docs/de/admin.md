@@ -321,9 +321,11 @@ Verbindung blockieren.
 
 Füge `audit(track = "field1, field2")` zu einem Modell hinzu, und jedes Erstellen,
 Aktualisieren und Löschen wird in der Tabelle `rustango_audit_log` erfasst (für dich
-erstellt, wenn du `migrate` ausführst). Nur Modelle mit einem `audit(...)`-Attribut
-werden protokolliert; `track` wählt aus, welche Felder im Diff erfasst werden (lasse es
-weg, um alle Skalare zu verfolgen).
+erstellt, wenn du `migrate` ausführst). `track` wählt aus, welche Felder im Diff
+erfasst werden (lasse es weg, um alle Skalare zu verfolgen). Admin-Schreibvorgänge,
+Inline-Zeilen eingeschlossen, werden für jedes Modell protokolliert: bei einem
+`audit(...)`-Modell in der Transaktion des Schreibvorgangs, sodass ein fehlgeschlagener
+Eintrag ihn rückgängig macht; bei jedem anderen Modell nach bestem Bemühen nach dem Commit.
 
 ```rust
 #[rustango(table = "posts", audit(track = "title, body, status"))]
