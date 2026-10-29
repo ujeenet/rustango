@@ -570,7 +570,7 @@ impl OrgResolver for PathPrefixResolver {
 }
 
 /// Whether `candidate` (`/<segment>`) was looked up and cached, hit or miss.
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub(crate) fn prefix_looked_up(registry: &Pool, candidate: &str) -> bool {
     !matches!(state(registry).prefix_cache.get(candidate), Cached::Absent)
 }

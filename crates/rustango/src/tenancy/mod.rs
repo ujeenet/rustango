@@ -226,7 +226,7 @@ pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,
 };
-#[cfg(test)]
+#[cfg(all(test, feature = "sqlite"))]
 pub(crate) use resolver::prefix_looked_up;
 pub(crate) use resolver::{host_is_apex, ApexPathPrefixResolver};
 pub use resolver::{
