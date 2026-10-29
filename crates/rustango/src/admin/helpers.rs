@@ -82,6 +82,15 @@ pub(crate) fn current_csrf_input() -> String {
 /// As [`chrome_context`] but takes an explicit `Option<&AdminSession>`.
 /// Used by tests and any path that has the session in hand directly
 /// (without going through the task-local). #253 slice B.
+/// The admin index URL. A nested router's `/` answers `<prefix>`, not
+/// `<prefix>/`, so the link carries no trailing slash; `/` at the root.
+pub(crate) fn admin_home(prefix: &str) -> &str {
+    match prefix.trim_end_matches('/') {
+        "" => "/",
+        home => home,
+    }
+}
+
 pub(crate) fn chrome_context_with_session(
     state: &AppState,
     active_table: Option<&str>,
@@ -127,6 +136,7 @@ pub(crate) fn chrome_context_with_session(
         // under. Templates use `{{ admin_prefix }}{{ audit_url }}` etc.
         // so hrefs resolve correctly regardless of mount path.
         "admin_prefix": &state.config.admin_prefix,
+        "admin_home": admin_home(&state.config.admin_prefix),
         // v0.30.19 — URL prefix for embedded static assets
         // (logo + favicon). Templates use {{ static_url }}/icon.png
         // for favicons.

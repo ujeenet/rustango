@@ -135,8 +135,9 @@ enum CsrfMount {
 
 #[cfg(feature = "csrf")]
 impl CsrfMount {
-    /// `trusted` (`[security] csrf_trusted_origins`) adds to the config's own list.
-    fn layer(self, trusted: &[String]) -> crate::forms::csrf::CsrfLayer {
+    /// `trusted` (`[security] csrf_trusted_origins`) adds to the config's own
+    /// list; `exempt` prefixes to its exemptions.
+    fn layer(self, trusted: &[String], exempt: &[String]) -> crate::forms::csrf::CsrfLayer {
         let mut cfg = match &self {
             Self::SessionPolicy => crate::forms::csrf::CsrfConfig::default(),
             Self::Explicit(cfg) => cfg.clone(),
@@ -144,6 +145,11 @@ impl CsrfMount {
         for origin in trusted {
             if !cfg.trusted_origins.contains(origin) {
                 cfg.trusted_origins.push(origin.clone());
+            }
+        }
+        for prefix in exempt {
+            if !cfg.exempt_prefixes.contains(prefix) {
+                cfg.exempt_prefixes.push(prefix.clone());
             }
         }
         match self {
@@ -1368,7 +1374,17 @@ impl Cli {
             .map_or(&[][..], |s| s.security.csrf_trusted_origins.as_slice());
         #[cfg(not(feature = "config"))]
         let trusted: &[String] = &[];
-        self.csrf.clone().map(|mount| mount.layer(trusted))
+        // MCP clients send a bearer token and no CSRF cookie or header.
+        #[cfg(all(feature = "mcp", feature = "config"))]
+        let exempt = [self.settings_for_layers.as_ref().map_or_else(
+            || crate::config::McpSettings::default().prefix().to_owned(),
+            |s| s.mcp.prefix().to_owned(),
+        )];
+        #[cfg(all(feature = "mcp", not(feature = "config")))]
+        let exempt = ["/mcp".to_owned()];
+        #[cfg(not(feature = "mcp"))]
+        let exempt: [String; 0] = [];
+        self.csrf.clone().map(|mount| mount.layer(trusted, &exempt))
     }
 
     fn assemble_app<P>(&mut self, pool: P) -> Router
@@ -3198,7 +3214,7 @@ mod tests {
         let _ = crate::session::set_secure_cookies(false);
         let mount = Cli::new().with_csrf().csrf.expect("set");
         assert!(matches!(mount, CsrfMount::SessionPolicy));
-        assert!(mount.layer(&[]).follows_session_policy());
+        assert!(mount.layer(&[], &[]).follows_session_policy());
         let cookie = csrf_cookie(CsrfMount::SessionPolicy).await;
         assert_eq!(
             cookie.contains("Secure"),
@@ -3217,7 +3233,7 @@ mod tests {
                 ..Default::default()
             };
             assert!(!CsrfMount::Explicit(cfg.clone())
-                .layer(&[])
+                .layer(&[], &[])
                 .follows_session_policy());
             let cookie = csrf_cookie(CsrfMount::Explicit(cfg)).await;
             assert_eq!(cookie.contains("Secure"), secure, "{cookie}");
@@ -3229,7 +3245,7 @@ mod tests {
         use tower::ServiceExt as _;
         let app = axum::Router::new()
             .route("/", axum::routing::get(|| async { "ok" }))
-            .layer(mount.layer(&[]));
+            .layer(mount.layer(&[], &[]));
         let req = axum::http::Request::get("/")
             .body(axum::body::Body::empty())
             .unwrap();
@@ -3631,6 +3647,36 @@ mod assemble_app_tests {
             assert_eq!(ok.status(), StatusCode::OK, "trusted origin refused");
             let bad = post("https://evil.example").await.expect("request");
             assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    /// MCP clients authenticate with a token and send no CSRF cookie, so the
+    /// `[mcp] prefix` is exempt; every other POST still needs the token.
+    #[cfg(all(feature = "config", feature = "csrf", feature = "mcp"))]
+    #[tokio::test]
+    async fn csrf_mount_exempts_the_mcp_prefix() {
+        let _serial = serialized();
+        let mut moved = crate::config::Settings::default();
+        moved.mcp.prefix = Some("/agents".into());
+        for (settings, mcp) in [(None, "/mcp"), (Some(moved), "/agents")] {
+            let pool = crate::sql::Pool::connect("sqlite::memory:")
+                .await
+                .expect("sqlite");
+            let ok = || Router::new().route("/", axum::routing::post(|| async { "ok" }));
+            let mut cli = Cli::new()
+                .with_csrf()
+                .api(Router::new().route("/p", axum::routing::post(|| async { "ok" })))
+                .nest_with(mcp, move |_| ok());
+            cli.settings_for_layers = settings;
+            let app = cli.assemble_app(pool);
+            let post = |path: &str| {
+                let req = Request::post(path).header("host", "localhost");
+                app.clone().oneshot(req.body(Body::empty()).unwrap())
+            };
+            let r = post(mcp).await.expect("request");
+            assert_eq!(r.status(), StatusCode::OK, "{mcp} is CSRF-checked");
+            let r = post("/p").await.expect("request");
+            assert_eq!(r.status(), StatusCode::FORBIDDEN, "/p lost its CSRF check");
         }
     }
 

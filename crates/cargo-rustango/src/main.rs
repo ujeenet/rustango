@@ -277,11 +277,8 @@ impl Backend {
 /// no template reaches, which is the whole reason the flag exists.
 /// `tests/templates_name_real_features.rs` asserts the list stays both real
 /// and complete.
+/// `tenancy` is not here: it is the `tenant` template, whose `main.rs` serves it.
 pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
-    (
-        "tenancy",
-        "multi-tenancy: tenant registry, per-tenant databases, operator console",
-    ),
     ("csrf", "CSRF protection middleware for form POSTs"),
     ("sso", "OIDC single sign-on for application users"),
     ("admin-sso", "OIDC single sign-on for the admin site"),
@@ -330,6 +327,12 @@ impl Template {
             Self::Fullstack => "fullstack",
             Self::Tenant => "tenant",
         }
+    }
+
+    /// Whether its `main.rs` loads `config/*.toml`; the bare api one does not,
+    /// so it gets no tier files to mislead.
+    pub fn reads_settings(self) -> bool {
+        !matches!(self, Self::Api)
     }
 
     /// rustango features this template needs, before `--features` extras.
@@ -421,6 +424,13 @@ fn validate_features(extras: &[String], template: Template) -> Result<(), String
         }
         if template.base_features().contains(&f.as_str()) {
             continue;
+        }
+        if f == "tenancy" {
+            return Err(format!(
+                "`tenancy` needs the tenant `main.rs` (tenant routing, operator console) — \
+                 pass `--template tenant` instead of `--template {}`",
+                template.name()
+            ));
         }
         if !OPTIONAL_FEATURES.iter().any(|(n, _)| n == f) {
             let known: Vec<&str> = OPTIONAL_FEATURES.iter().map(|(n, _)| *n).collect();
@@ -654,6 +664,10 @@ fn parse_new_flags(args: &[String], interactive: bool) -> Result<NewFlags, Strin
         seen.push(f.clone());
         fresh
     });
+    // Only the tenant template's `main.rs` serves tenancy.
+    if template.is_none() && features.iter().any(|f| f == "tenancy") {
+        template = Some(Template::Tenant);
+    }
     // Early when the template is known; the wizard's pick is checked in
     // `cmd_new`.
     if template.is_some() || !interactive {
@@ -831,7 +845,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     // Two images, because they answer different questions: `Dockerfile`
     // is the one you deploy (multi-stage, release, non-root),
     // `Dockerfile.dev` is the cargo-watch one docker-compose.yml builds.
-    write(root, "Dockerfile", &templates::dockerfile_prod(name))?;
+    write(
+        root,
+        "Dockerfile",
+        &templates::dockerfile_prod(name, template),
+    )?;
     write(root, "Dockerfile.dev", templates::dockerfile_dev())?;
     write(root, ".dockerignore", templates::DOCKERIGNORE)?;
     write(
@@ -844,26 +862,28 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
     // one <env>_settings.toml per tier. Runtime picks the tier from
     // RUSTANGO_ENV (default `dev`), so a fresh `cargo run` works
     // without any TOML edits.
-    write(
-        root,
-        "config/default.toml",
-        &templates::config_default_toml(name, backend),
-    )?;
-    write(
-        root,
-        "config/dev_settings.toml",
-        &templates::config_dev_settings_toml(name, backend),
-    )?;
-    write(
-        root,
-        "config/staging_settings.toml",
-        &templates::config_staging_settings_toml(name, backend),
-    )?;
-    write(
-        root,
-        "config/prod_settings.toml",
-        &templates::config_prod_settings_toml(name),
-    )?;
+    if template.reads_settings() {
+        write(
+            root,
+            "config/default.toml",
+            &templates::config_default_toml(name, backend),
+        )?;
+        write(
+            root,
+            "config/dev_settings.toml",
+            &templates::config_dev_settings_toml(name, backend),
+        )?;
+        write(
+            root,
+            "config/staging_settings.toml",
+            &templates::config_staging_settings_toml(name, backend),
+        )?;
+        write(
+            root,
+            "config/prod_settings.toml",
+            &templates::config_prod_settings_toml(name),
+        )?;
+    }
 
     // git drops an empty dir, and the image copies it (#2396).
     write(root, "migrations/.gitkeep", "")?;
@@ -948,8 +968,27 @@ mod tests {
         // `Secure`; the release image must not fall back to the dev tier.
         let dev = templates::config_dev_settings_toml("demo", Backend::Postgres);
         assert!(dev.contains("secure_cookies    = false"), "{dev}");
-        let image = templates::dockerfile_prod("demo");
+        let image = templates::dockerfile_prod("demo", Template::Fullstack);
         assert!(image.contains("ENV RUSTANGO_ENV=prod"), "{image}");
+    }
+
+    /// The api `main.rs` loads no settings, so it gets no `config/` and no
+    /// text claiming a tier's `[server] bind` applies.
+    #[test]
+    fn api_template_writes_no_inert_config() {
+        let root =
+            std::env::temp_dir().join(format!("cargo_rustango_api_cfg_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let args = parse(&["demo", "--template", "api"]).expect("args");
+        write_project(&root, &args).expect("scaffold");
+        assert!(
+            !root.join("config").exists(),
+            "api project got an unread config/"
+        );
+        let env = fs::read_to_string(root.join(".env.example")).expect(".env.example");
+        assert!(!env.contains("[server] bind"), "{env}");
+        assert!(env.contains("127.0.0.1:8080"), "{env}");
+        let _ = fs::remove_dir_all(&root);
     }
 
     /// Regression guard for #79: every scaffold template must pin
@@ -1065,7 +1104,7 @@ mod tests {
                         "docker-compose.yml",
                         templates::docker_compose(&name, backend),
                     ),
-                    ("Dockerfile", templates::dockerfile_prod(&name)),
+                    ("Dockerfile", templates::dockerfile_prod(&name, template)),
                     ("Dockerfile.dev", templates::dockerfile_dev().to_owned()),
                     (".dockerignore", templates::DOCKERIGNORE.to_owned()),
                     (".gitignore", templates::GITIGNORE.to_owned()),
@@ -1093,7 +1132,7 @@ mod tests {
             let template = if manifest.contains("tenancy") {
                 Template::Tenant
             } else {
-                Template::Api
+                Template::Fullstack
             };
             let closest = [Backend::Postgres, Backend::Sqlite, Backend::Mysql]
                 .into_iter()
@@ -1298,7 +1337,7 @@ mod tests {
     /// The deploy image probes `/health`, so every template must mount it.
     #[test]
     fn every_template_mounts_the_dockerfile_health_path() {
-        assert!(templates::dockerfile_prod("myapp").contains("8080/health "));
+        assert!(templates::dockerfile_prod("myapp", Template::Fullstack).contains("8080/health "));
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
             let main = templates::main_rs(template, "myapp");
             assert!(main.contains(".with_health()"), "{template:?}: {main}");
@@ -1307,7 +1346,7 @@ mod tests {
 
     #[test]
     fn dockerfile_builds_a_release_binary_and_drops_root() {
-        let body = templates::dockerfile_prod("myapp");
+        let body = templates::dockerfile_prod("myapp", Template::Fullstack);
         assert!(
             body.contains("AS builder") && body.matches("FROM ").count() >= 2,
             "the deploy image must be multi-stage, or the toolchain ships with it: {body}"
@@ -1526,6 +1565,25 @@ mod tests {
             dep.contains(r#"features = ["batteries", "tenancy", "csrf"]"#),
             "extras must append to the template's own: {dep}"
         );
+    }
+
+    /// `--features tenancy` alone gets the tenant `main.rs`, which serves it.
+    #[test]
+    fn tenancy_feature_picks_the_tenant_template() {
+        let args = parse(&["app", "--features", "tenancy"]).expect("parse");
+        assert_eq!(args.template, Template::Tenant);
+        let main = templates::main_rs_for(args.template, "app", &args.features);
+        assert!(main.contains(".tenancy()"), "{main}");
+    }
+
+    /// Another template's `main.rs` never calls `.tenancy()`: refuse, name the fix.
+    #[test]
+    fn tenancy_feature_refuses_other_templates() {
+        for template in ["fullstack", "api"] {
+            let err = parse(&["app", "-t", template, "--features", "tenancy"]).expect_err(template);
+            assert!(err.contains("--template tenant"), "{template}: {err}");
+        }
+        parse(&["app", "-t", "tenant", "--features", "tenancy"]).expect("tenant has it");
     }
 
     /// A backend named in `--features` would pin `rustango/<backend>` while
@@ -1957,13 +2015,34 @@ mod tests {
         }
     }
 
+    /// The tenant console lets only operators in: both paths make one.
+    #[test]
+    fn tenant_template_steps_create_an_operator() {
+        for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
+            let steps = templates::next_steps("myapp", Template::Tenant, backend);
+            assert!(
+                steps.contains("cargo run -- create-operator <username>"),
+                "{steps}"
+            );
+            let readme = templates::readme("myapp", Template::Tenant, backend);
+            assert!(
+                readme.contains("docker compose run --rm rust cargo run -- create-operator"),
+                "{readme}"
+            );
+            assert!(
+                readme.contains("cargo run -- create-operator <username>"),
+                "{readme}"
+            );
+        }
+    }
+
     /// `rust-toolchain.toml` names `stable`, which the `rust:1` images do not
     /// install under that name; pin both images to their own toolchain.
     #[test]
     fn images_use_their_own_toolchain() {
         for body in [
             templates::dockerfile_dev().to_owned(),
-            templates::dockerfile_prod("myapp"),
+            templates::dockerfile_prod("myapp", Template::Fullstack),
         ] {
             assert!(
                 body.contains("ENV RUSTUP_TOOLCHAIN=$RUST_VERSION"),
@@ -1975,7 +2054,7 @@ mod tests {
     /// A fresh project has no `Cargo.lock` until cargo runs once.
     #[test]
     fn dockerfile_locks_only_when_a_lockfile_exists() {
-        let body = templates::dockerfile_prod("myapp");
+        let body = templates::dockerfile_prod("myapp", Template::Fullstack);
         assert!(!body.contains("flags=\"--release --locked\""), "{body}");
         assert!(
             body.contains("if [ -f Cargo.lock ]; then flags=\"$flags --locked\"; fi"),

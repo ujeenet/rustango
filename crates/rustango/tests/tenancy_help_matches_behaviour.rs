@@ -106,6 +106,16 @@ fn create_user_key_help_shows_flags_not_a_third_positional() {
     );
 }
 
+/// The login form lives at the route config's `login_url`; `/__login` is 404.
+#[cfg(all(feature = "tenancy", feature = "manage"))]
+#[test]
+fn create_user_help_names_the_real_login_path() {
+    let h = help();
+    let login = rustango::tenancy::RouteConfig::default().login_url;
+    assert!(!h.contains("/__login"), "{h}");
+    assert!(h.contains(&format!("<apex>{login}")), "{h}");
+}
+
 // A third test tried to assert that every verb in the help text has a
 // dispatcher arm. Dropped: the help block mixes verb entries, wrapped
 // prose and `cargo run --` examples at the same indent, so a scanner

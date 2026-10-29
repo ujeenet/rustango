@@ -119,6 +119,10 @@ async fn cache_ensure_table_survives_a_concurrent_boot(backend: &Pool) {
 #[cfg(not(feature = "cache"))]
 async fn cache_ensure_table_survives_a_concurrent_boot(_: &Pool) {}
 
+#[cfg(not(feature = "runserver"))]
+async fn bootstrap_survives_a_concurrent_boot(_: &Pool) {}
+
+#[cfg(feature = "runserver")]
 async fn bootstrap_survives_a_concurrent_boot(backend: &Pool) {
     let (pool, _guard) = private(backend).await;
     let reset = [drop_sql(&pool, BootRow::SCHEMA.table)];

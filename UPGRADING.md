@@ -164,6 +164,11 @@ The CLI password verbs (`create-user`, `create-operator`, `create-admin`, `reset
 
 A tenant or operator password change now ends only the other sessions; the response re-issues the current cookie.
 
+- Tenancy `downgrade` runs over the registry-scoped files only and prints `registry: …`; add `--tenant <slug>` or `--all-tenants` to roll back tenant-scoped migrations.
+- `get_or_create_role` (PG) now runs two statements, an insert-or-ignore then a read, like `get_or_create_role_pool`.
+- `cargo rustango new --template api|fullstack --features tenancy` is refused; use `--template tenant` (or `--features tenancy` alone).
+- With the `mcp` feature, `Cli::with_csrf()` / `with_csrf_config()` skip CSRF under the `[mcp] prefix` (default `/mcp`); don't serve cookie-authenticated forms there.
+
 ---
 
 ## 0.61.10

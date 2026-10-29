@@ -296,7 +296,7 @@ mod tests {
         let cases = [
             (Template::Tenant, Backend::Sqlite, vec!["sso", "cache-page"]),
             (Template::Api, Backend::Mysql, vec![]),
-            (Template::Fullstack, Backend::Postgres, vec!["tenancy"]),
+            (Template::Fullstack, Backend::Postgres, vec!["mcp"]),
         ];
         for (template, backend, features) in cases {
             let features: Vec<String> = features.iter().map(|s| (*s).to_owned()).collect();

@@ -253,19 +253,6 @@ fn selected_features_compile() {
     );
 }
 
-/// `--features tenancy` on a non-tenant template: the feature is additive, so
-/// it must not break a project whose `main.rs` never calls into it.
-#[test]
-#[ignore = "compiles rustango; run with --ignored"]
-fn tenancy_feature_on_fullstack_compiles() {
-    assert_compiles_with(
-        "fullstack",
-        &["--features", "tenancy"],
-        &[],
-        "features-tenancy",
-    );
-}
-
 /// `--features mcp` mounts the MCP router, on both template shapes.
 #[test]
 #[ignore = "compiles rustango; run with --ignored"]

@@ -3,7 +3,7 @@
 {% block body %}
 <nav class="breadcrumb" aria-label="breadcrumb">
   <ol>
-    <li><a href="{{ admin_prefix }}/">{{ admin_title }}</a></li>
+    <li><a href="{{ admin_home }}">{{ admin_title }}</a></li>
     <li><strong>{{ model.label_plural | default(value=model.name) }}</strong></li>
   </ol>
 </nav>

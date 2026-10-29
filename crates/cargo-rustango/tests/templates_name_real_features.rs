@@ -258,6 +258,8 @@ fn the_features_menu_covers_every_opt_in() {
         // own flag; the rest are reached through a template.
         if feat.starts_with('_')
             || matches!(feat.as_str(), "default" | "batteries" | "runtime")
+            // `--template tenant`: only its `main.rs` serves tenancy.
+            || feat == "tenancy"
             || ["postgres", "sqlite", "mysql"].contains(&feat.as_str())
             || batteries.contains(&feat)
         {

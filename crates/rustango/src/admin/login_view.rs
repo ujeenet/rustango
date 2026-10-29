@@ -681,6 +681,7 @@ fn render_totp_enroll(
         "action": format!("{admin_prefix}/account/totp"),
         "admin_title": state.config.title.as_deref().unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
+        "admin_home": super::helpers::admin_home(admin_prefix),
         "already_enabled": already_enabled,
         "secret_base32": secret_base32,
         "otpauth_url": otpauth_url,

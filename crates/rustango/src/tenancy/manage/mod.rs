@@ -729,7 +729,8 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "                       Tenant-scoped user; signs into <slug>.<apex>/__login."
+        "                       Tenant-scoped user; signs into <slug>.<apex>{}.",
+        crate::tenancy::RouteConfig::default().login_url
     )?;
     writeln!(w, "  create-superuser <slug> <username> [--password <p>]")?;
     writeln!(
