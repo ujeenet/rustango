@@ -79,10 +79,10 @@ use crate::tenancy::pools::TenantPools;
 struct MigrateStorageArgs {
     slug: String,
     target: StorageMode,
-    /// Required when `target = Database`, ignored otherwise.
+    /// `Some` exactly when `target = Database`; [`parse_args`] refuses the rest.
     database_url: Option<String>,
     /// Optional override for the target schema name (database → schema).
-    /// Defaults to the slug.
+    /// Defaults to the slug. `None` when `target = Database`.
     schema_name: Option<String>,
     /// Untrusted extensions the move may create (`--allow-extension`).
     allow_extensions: Vec<String>,
@@ -122,12 +122,6 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             parsed.slug, parsed.target
         )));
     }
-    if parsed.target == StorageMode::Database && parsed.database_url.is_none() {
-        return Err(TenancyError::Validation(
-            "--to database requires --database-url <conninfo>".into(),
-        ));
-    }
-
     // Secret references (`env://…`) resolve to connect; only the
     // reference is printed and stored (#2384).
     let (source_ref, source_url) = match current {
@@ -694,6 +688,23 @@ fn parse_args(args: &[String]) -> Result<MigrateStorageArgs, TenancyError> {
     let target = target.ok_or_else(|| {
         TenancyError::Validation("migrate-tenant-storage: --to schema|database is required".into())
     })?;
+    let refuse = |m: &str| {
+        Err(TenancyError::Validation(format!(
+            "migrate-tenant-storage: {m}"
+        )))
+    };
+    match target {
+        StorageMode::Database if database_url.is_none() => {
+            return refuse("--to database requires --database-url <conninfo>")
+        }
+        StorageMode::Database if schema_name.is_some() => {
+            return refuse("--schema-name applies to `--to schema` only")
+        }
+        StorageMode::Schema if database_url.is_some() => {
+            return refuse("--database-url applies to `--to database` only")
+        }
+        _ => {}
+    }
     Ok(MigrateStorageArgs {
         slug,
         target,
@@ -1320,6 +1331,36 @@ mod tests {
         let parsed = parse_args(&s(&["acme", "--to", "schema", "--drain-secs", "5"])).unwrap();
         assert_eq!(parsed.drain_secs, 5);
         assert!(parse_args(&s(&["acme", "--to", "schema", "--drain-secs", "x"])).is_err());
+    }
+
+    /// A flag the target never reads is refused, not dropped.
+    #[test]
+    fn parse_args_refuses_flags_the_target_ignores() {
+        let url = "postgres://x:y@h/d";
+        let err = parse_args(&s(&[
+            "acme",
+            "--to",
+            "database",
+            "--database-url",
+            url,
+            "--schema-name",
+            "x",
+        ]))
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("--schema-name applies to `--to schema`"),
+            "{err}"
+        );
+        let err = parse_args(&s(&["acme", "--to", "schema", "--database-url", url])).unwrap_err();
+        assert!(
+            format!("{err}").contains("--database-url applies to `--to database`"),
+            "{err}"
+        );
+        let err = parse_args(&s(&["acme", "--to", "database"])).unwrap_err();
+        assert!(
+            format!("{err}").contains("requires --database-url"),
+            "{err}"
+        );
     }
 
     #[test]

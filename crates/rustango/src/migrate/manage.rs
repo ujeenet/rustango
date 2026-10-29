@@ -2240,15 +2240,77 @@ async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     }
 }
 
-/// Model changes no file holds yet, and files `pool`'s ledger has not applied.
-async fn pending_migration_audit(
+/// Each tenant's applied project migrations, or why its ledger could not be read.
+pub(crate) type TenantApplied = Vec<(String, Result<std::collections::HashSet<String>, String>)>;
+
+/// What a tenancy project adds to `check`: its deploy findings, awaited only
+/// under `--deploy`, and the tenant ledgers, read only for tenant-scoped files.
+pub(crate) struct TenancyCheck<D, L> {
+    pub(crate) deploy: D,
+    pub(crate) ledgers: L,
+}
+
+/// Tenants named in full before the rest are only counted.
+const TENANTS_NAMED: usize = 10;
+
+/// The project's migration dirs, labelled for messages: `dir`, plus each
+/// `<app>/migrations/` beside it when `apps` (tenancy applies those too).
+fn check_dirs(dir: &Path, apps: bool) -> Vec<(String, std::path::PathBuf)> {
+    let root = dir
+        .parent()
+        .filter(|_| apps && dir.file_name().is_some_and(|n| n == "migrations"));
+    let Some(root) = root else {
+        return if dir.exists() {
+            vec![(String::new(), dir.to_path_buf())]
+        } else {
+            Vec::new()
+        };
+    };
+    file::discover_migration_dirs(root)
+        .into_iter()
+        .map(|d| {
+            let app = d
+                .parent()
+                .filter(|p| *p != root)
+                .and_then(|p| p.file_name())
+                .map(|n| format!("{}/", n.to_string_lossy()))
+                .unwrap_or_default();
+            (app, d)
+        })
+        .collect()
+}
+
+/// `files`' names in `scope` (any when `None`) that `applied` lacks.
+fn pending_names(
+    files: &[(String, Vec<super::Migration>)],
+    applied: &std::collections::HashSet<String>,
+    scope: Option<super::MigrationScope>,
+) -> Vec<String> {
+    files
+        .iter()
+        .flat_map(|(app, migs)| {
+            runner::migration_states(migs, applied)
+                .filter(|(m, s)| {
+                    *s == runner::MigrationState::Pending && scope.is_none_or(|sc| m.scope == sc)
+                })
+                .map(move |(m, _)| format!("{app}{}", m.name))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Model changes no file holds yet, and files the registry's or a tenant's
+/// ledger has not applied.
+async fn pending_migration_audit<L>(
     pool: &Pool,
     dir: &Path,
-    prior: &[super::Migration],
-    scope: Option<super::MigrationScope>,
+    files: &[(String, Vec<super::Migration>)],
+    ledgers: Option<L>,
     warnings: &mut Vec<String>,
     errors: &mut Vec<String>,
-) {
+) where
+    L: std::future::Future<Output = Result<TenantApplied, String>>,
+{
     match super::make::planned_migrations(dir, has_registry_models()) {
         Ok(planned) if !planned.is_empty() => {
             let ops: Vec<String> = planned
@@ -2263,14 +2325,11 @@ async fn pending_migration_audit(
         Ok(_) => {}
         Err(e) => errors.push(format!("makemigrations would fail: {e}")),
     }
+    // In tenancy the registry ledger records registry-scoped files only.
+    let scope = ledgers.is_some().then_some(super::MigrationScope::Registry);
     match runner::applied_or_empty(pool, runner::LEDGER_TABLE).await {
         Ok(applied) => {
-            let pending: Vec<&str> = runner::migration_states(prior, &applied)
-                .filter(|(m, s)| {
-                    *s == runner::MigrationState::Pending && scope.is_none_or(|sc| m.scope == sc)
-                })
-                .map(|(m, _)| m.name.as_str())
-                .collect();
+            let pending = pending_names(files, &applied, scope);
             if !pending.is_empty() {
                 warnings.push(format!(
                     "{} migration(s) not applied — run `manage migrate`: {}",
@@ -2281,6 +2340,66 @@ async fn pending_migration_audit(
         }
         Err(e) => errors.push(format!("cannot read the migration ledger: {e}")),
     }
+    let tenant_files = files
+        .iter()
+        .flat_map(|(_, m)| m)
+        .any(|m| m.scope == super::MigrationScope::Tenant);
+    let Some(ledgers) = ledgers.filter(|_| tenant_files) else {
+        return;
+    };
+    match ledgers.await {
+        Ok(tenants) => tenant_pending_audit(files, &tenants, warnings),
+        Err(e) => errors.push(format!("cannot list the tenants: {e}")),
+    }
+}
+
+/// One warning naming the tenants behind on tenant-scoped files, one for
+/// those whose ledger could not be read.
+fn tenant_pending_audit(
+    files: &[(String, Vec<super::Migration>)],
+    tenants: &TenantApplied,
+    warnings: &mut Vec<String>,
+) {
+    let mut behind = Vec::new();
+    let mut unreadable = Vec::new();
+    for (slug, applied) in tenants {
+        match applied {
+            Ok(applied) => {
+                let pending = pending_names(files, applied, Some(super::MigrationScope::Tenant));
+                if !pending.is_empty() {
+                    behind.push(format!("{slug}: {}", pending.join(", ")));
+                }
+            }
+            Err(e) => unreadable.push(format!("{slug}: {e}")),
+        }
+    }
+    let list = |lines: &[String]| {
+        let mut shown: Vec<&str> = lines
+            .iter()
+            .take(TENANTS_NAMED)
+            .map(String::as_str)
+            .collect();
+        let more = lines.len().saturating_sub(TENANTS_NAMED);
+        let tail = format!("… and {more} more");
+        if more > 0 {
+            shown.push(&tail);
+        }
+        shown.join("\n            ")
+    };
+    if !behind.is_empty() {
+        warnings.push(format!(
+            "{} tenant(s) behind on tenant migrations — run `manage migrate-tenants`:\n            {}",
+            behind.len(),
+            list(&behind)
+        ));
+    }
+    if !unreadable.is_empty() {
+        warnings.push(format!(
+            "could not read {} tenant ledger(s):\n            {}",
+            unreadable.len(),
+            list(&unreadable)
+        ));
+    }
 }
 
 /// `manage check [--deploy]` — run system audits.
@@ -2290,26 +2409,40 @@ async fn check_cmd<W: Write>(
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    check_cmd_with(pool, dir, None, args, w, None::<std::future::Ready<_>>).await
+    type Never<T> = std::future::Ready<T>;
+    check_cmd_with(
+        pool,
+        dir,
+        args,
+        w,
+        None::<TenancyCheck<Never<DeployAuditFindings>, Never<Result<TenantApplied, String>>>>,
+    )
+    .await
 }
 
-/// [`check_cmd`] for the tenancy dispatcher: `tenancy` carries its per-tenant
-/// deploy findings, awaited only under `--deploy`, and turns on the apex row.
-/// `scope` limits the unapplied count to the files `pool`'s ledger records.
-pub(crate) async fn check_cmd_with<W: Write>(
+/// [`check_cmd`] for the tenancy dispatcher: `tenancy` adds its deploy
+/// findings and the tenant ledgers, scans app dirs and turns on the apex row.
+pub(crate) async fn check_cmd_with<W: Write, D, L>(
     pool: &Pool,
     dir: &Path,
-    scope: Option<super::MigrationScope>,
     args: &[String],
     w: &mut W,
-    tenancy: Option<impl std::future::Future<Output = DeployAuditFindings>>,
-) -> Result<(), MigrateError> {
+    tenancy: Option<TenancyCheck<D, L>>,
+) -> Result<(), MigrateError>
+where
+    D: std::future::Future<Output = DeployAuditFindings>,
+    L: std::future::Future<Output = Result<TenantApplied, String>>,
+{
     // `--deplyo` once ran the plain check and reported all clear.
     if let Some(other) = args.iter().find(|a| *a != "--deploy") {
         return Err(MigrateError::Validation(format!(
             "check: unknown argument `{other}` (usage: check [--deploy])"
         )));
     }
+    let (deploy_findings, ledgers) = match tenancy {
+        Some(t) => (Some(t.deploy), Some(t.ledgers)),
+        None => (None, None),
+    };
     let deploy = args.iter().any(|a| a == "--deploy");
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
@@ -2342,22 +2475,27 @@ pub(crate) async fn check_cmd_with<W: Write>(
     }
 
     // Pending migrations
-    if dir.exists() {
-        let prior = file::list_dir(dir)?;
-        if prior.is_empty() && model_count > 0 {
+    let dirs = check_dirs(dir, ledgers.is_some());
+    if !dirs.is_empty() {
+        let mut files = Vec::with_capacity(dirs.len());
+        for (app, d) in dirs {
+            files.push((app, file::list_dir(&d)?));
+        }
+        let count: usize = files.iter().map(|(_, m)| m.len()).sum();
+        if count == 0 && model_count > 0 {
             warnings.push(
                 "models registered but no migrations on disk — run `manage makemigrations`".into(),
             );
         } else {
-            info.push(format!("{} migration(s) on disk", prior.len()));
-            pending_migration_audit(pool, dir, &prior, scope, &mut warnings, &mut errors).await;
+            info.push(format!("{count} migration(s) on disk"));
+            pending_migration_audit(pool, dir, &files, ledgers, &mut warnings, &mut errors).await;
         }
     }
 
     // Deploy checks
     if deploy {
         let mut audit = DeployAuditFindings::default();
-        run_deploy_audit(&deploy_audit_env(tenancy.is_some()), &mut audit);
+        run_deploy_audit(&deploy_audit_env(deploy_findings.is_some()), &mut audit);
         // Settings audit (#87 slice 4) — flags dev-defaults left in
         // prod (e.g. `headers_preset = "dev"` in `prod_settings.toml`).
         // Gated by the `config` feature; no-op without it.
@@ -2369,7 +2507,7 @@ pub(crate) async fn check_cmd_with<W: Write>(
         time_zone_audit(pool, &mut audit).await;
         #[cfg(feature = "admin-sso")]
         sso_link_audit(pool, &mut audit).await;
-        if let Some(extra) = tenancy {
+        if let Some(extra) = deploy_findings {
             let extra = extra.await;
             audit.info.extend(extra.info);
             audit.warnings.extend(extra.warnings);

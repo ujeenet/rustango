@@ -569,6 +569,12 @@ impl OrgResolver for PathPrefixResolver {
     }
 }
 
+/// Whether `candidate` (`/<segment>`) was looked up and cached, hit or miss.
+#[cfg(test)]
+pub(crate) fn prefix_looked_up(registry: &Pool, candidate: &str) -> bool {
+    !matches!(state(registry).prefix_cache.get(candidate), Cached::Absent)
+}
+
 /// [`PathPrefixResolver`] on the apex host only, where a path-prefix
 /// tenant lives: another host's path never picks a tenant.
 pub(crate) struct ApexPathPrefixResolver {

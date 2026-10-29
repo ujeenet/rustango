@@ -71,14 +71,26 @@ pub(crate) enum KeySource {
     DevFile,
 }
 
-/// The tenant session key, only if one exists: never generated or written,
-/// so a CLI cannot sign with a key no server holds.
-pub(crate) fn existing_tenant_secret() -> Result<(SessionSecret, KeySource), super::TenancyError> {
+/// What a CLI does when the dev key file is missing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DevKeyFile {
+    /// Refuse: API keys minted now must verify on a server already running.
+    LoadOnly,
+    /// Write it as a server's first boot does, so a fresh dev project works.
+    LoadOrCreate,
+}
+
+/// The tenant session key the server loads: the env var, or off prod the dev
+/// key file. Never a key only this process holds.
+pub(crate) fn existing_tenant_secret(
+    dev_key: DevKeyFile,
+) -> Result<(SessionSecret, KeySource), super::TenancyError> {
     use crate::session::{is_prod_tier, tier_from_env};
     existing_tenant_secret_at(
         std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
         is_prod_tier(&tier_from_env()),
         std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
+        dev_key,
     )
 }
 
@@ -86,6 +98,7 @@ fn existing_tenant_secret_at(
     env: Option<&str>,
     prod: bool,
     dev_file: &std::path::Path,
+    dev_key: DevKeyFile,
 ) -> Result<(SessionSecret, KeySource), super::TenancyError> {
     let invalid =
         |e: crate::session::SessionSecretError| super::TenancyError::Validation(e.to_string());
@@ -103,12 +116,29 @@ fn existing_tenant_secret_at(
             Err(e) => crate::session::warn_unusable_secret(&e.to_string()),
         }
     }
-    match std::fs::read(dev_file) {
-        Ok(bytes) if bytes.len() >= 32 => Ok((SessionSecret::from_bytes(bytes), KeySource::DevFile)),
-        _ => Err(super::TenancyError::Validation(format!(
-            "no tenant session key: set RUSTANGO_SESSION_SECRET, or start the server once so it writes {}",
-            dev_file.display()
-        ))),
+    let missing = |fix: String| {
+        super::TenancyError::Validation(format!(
+            "no tenant session key: set RUSTANGO_SESSION_SECRET, or {fix}"
+        ))
+    };
+    match dev_key {
+        DevKeyFile::LoadOnly => match std::fs::read(dev_file) {
+            Ok(bytes) if bytes.len() >= 32 => {
+                Ok((SessionSecret::from_bytes(bytes), KeySource::DevFile))
+            }
+            _ => Err(missing(format!(
+                "start the server once so it writes {}",
+                dev_file.display()
+            ))),
+        },
+        // A failed write is an error: a random fallback is a key no server holds.
+        DevKeyFile::LoadOrCreate => crate::session::load_or_create_key_file(
+            dev_file,
+            "session secret",
+            "RUSTANGO_SESSION_SECRET",
+        )
+        .map(|bytes| (SessionSecret::from_bytes(bytes), KeySource::DevFile))
+        .map_err(|e| missing(format!("make {} writable ({e})", dev_file.display()))),
     }
 }
 
@@ -227,16 +257,27 @@ mod tests {
         PasswordFingerprint::default()
     }
 
-    /// The CLI loads a key; it never makes one that no server holds.
+    /// Off prod a fresh project gets the dev key file the server would write,
+    /// and keeps it; on prod nothing is written.
     #[test]
-    fn an_existing_key_is_loaded_never_created() {
+    fn off_prod_the_dev_key_file_is_created_once() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("tenant.key");
-        assert!(existing_tenant_secret_at(None, false, &path).is_err());
-        assert!(!path.exists(), "a key file was written");
-        std::fs::write(&path, [7u8; 32]).unwrap();
-        let (_, source) = existing_tenant_secret_at(None, false, &path).unwrap();
+        let path = dir.path().join("var").join("tenant.key");
+        assert!(existing_tenant_secret_at(None, true, &path, DevKeyFile::LoadOrCreate).is_err());
+        assert!(!path.exists(), "prod wrote a key file");
+        let (first, source) =
+            existing_tenant_secret_at(None, false, &path, DevKeyFile::LoadOrCreate).unwrap();
         assert_eq!(source, KeySource::DevFile);
+        assert_eq!(std::fs::read(&path).unwrap(), first.key());
+        let server = crate::session::load_session_secret_for_tier("dev", &path);
+        assert_eq!(
+            server.key(),
+            first.key(),
+            "the server must load the same key"
+        );
+        let (again, _) =
+            existing_tenant_secret_at(None, false, &path, DevKeyFile::LoadOrCreate).unwrap();
+        assert_eq!(again.key(), first.key());
     }
 
     /// Off prod an unusable env secret falls back to the dev file, as the server does.
@@ -245,11 +286,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tenant.key");
         std::fs::write(&path, [7u8; 32]).unwrap();
-        let (_, source) = existing_tenant_secret_at(Some("not-base64!"), false, &path).unwrap();
+        let (_, source) =
+            existing_tenant_secret_at(Some("not-base64!"), false, &path, DevKeyFile::LoadOnly)
+                .unwrap();
         assert_eq!(source, KeySource::DevFile);
-        assert!(existing_tenant_secret_at(Some("not-base64!"), true, &path).is_err());
+        assert!(
+            existing_tenant_secret_at(Some("not-base64!"), true, &path, DevKeyFile::LoadOnly)
+                .is_err()
+        );
         let good = "A".repeat(44);
-        let (_, source) = existing_tenant_secret_at(Some(&good), false, &path).unwrap();
+        let (_, source) =
+            existing_tenant_secret_at(Some(&good), false, &path, DevKeyFile::LoadOnly).unwrap();
         assert_eq!(source, KeySource::Env);
     }
 

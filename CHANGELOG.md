@@ -22,6 +22,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it with HTTP Basic (a browser session still gets 401); `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
 - `Cli::with_csrf*()` exempts the MCP endpoints (`{prefix}`, `{prefix}/token`, `{prefix}/oauth/token`), so MCP clients are not refused with 403; the rest of the prefix keeps CSRF, and a `/` prefix exempts nothing. New `CsrfConfig::exempt_paths` / `exempt_path` for exact-path exemptions.
 - Admin Home links and breadcrumbs point at `<prefix>`, not `<prefix>/`, which a nested admin answers with 404; tenancy help texts name `/login`, not `/__login`.
+- Tenancy `check` names the active tenants whose ledger lacks a tenant-scoped migration (ten in full, then a count), and scans `<app>/migrations/` folders too.
+- Tenancy `create-tenant --admin-email` and `set-password-link` work before the first server run: off the prod tier they write `./var/.rustango_tenant_session.key` as the server does.
+- Tenancy: `create-tenant --mode database … --schema-name`, `migrate-tenant-storage --to database … --schema-name`, `--to schema … --database-url`, `edit-tenant <schema-mode tenant> --database-url` and `list-tenants <args>` are refused instead of ignoring the flag.
+- `Org.path_prefix` is indexed, and the apex looks a tenant up only for paths the operator console does not serve (run-server and `server::Builder`).
+- Getting started, Step 9: the sample `makemigrations` output lists only the app tables; the framework tables go to `system/migrations/`.
 
 ## [0.61.10] — 2026-10-29
 

@@ -196,10 +196,10 @@ impl<W: Write + Send> provision::ProvisionObserver for CreateTenantProgress<'_, 
     }
 }
 
-/// The CLI signs links with the server's tenant session key, loaded only.
+/// The CLI signs links with the server's tenant session key.
 fn cli_handover<W: Write>(w: &mut W) -> Result<crate::tenancy::FirstAdminHandover, TenancyError> {
-    use crate::tenancy::session::{existing_tenant_secret, KeySource};
-    let (secret, source) = existing_tenant_secret()?;
+    use crate::tenancy::session::{existing_tenant_secret, DevKeyFile, KeySource};
+    let (secret, source) = existing_tenant_secret(DevKeyFile::LoadOrCreate)?;
     if source == KeySource::DevFile {
         writeln!(
             w,
@@ -415,6 +415,11 @@ fn parse_create_tenant_args(
         (None, Some(_)) => return bad("--admin-username needs --admin-email"),
         (None, None) => None,
     };
+    if mode == StorageMode::Database && schema_name.is_some() {
+        return bad(
+            "--schema-name needs --mode schema; a database-mode tenant uses its own database",
+        );
+    }
     out.storage = match (mode, database_url, server) {
         (StorageMode::Schema, None, None) => TenantStorage::Schema(schema_name),
         (StorageMode::Schema, _, _) => {

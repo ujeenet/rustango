@@ -156,6 +156,13 @@ untouched.
 - `loaddata` inserts a nullable FK as NULL and sets it after every row only when the fixture's rows form a table cycle; a row in a cycle may then briefly hold NULL. `"pk": null` now means "no pk". On MySQL a cycle row whose key the database generates (not AUTO_INCREMENT) is refused until it has a `pk`.
 - Idempotent DDL no longer treats a SQLite "duplicate column name" in `CREATE TABLE`, or a PG `CREATE TABLE` that clashes with a type name (42710), as "already exists".
 - `is_pg_dup_object_error` now also treats a racing `CREATE EXTENSION` (`pg_extension_name_index`) as "already exists".
+- `rustango_orgs.path_prefix` gets an index. In a tenancy project run `cargo run -- makemigrations` to write the system migration, commit `system/migrations/`, then `migrate`.
+- Tenancy `check` reports tenants behind on tenant-scoped migrations and reads every active tenant's ledger to do so; an unreachable tenant is a warning.
+
+### Tenancy CLI
+
+- Off the prod tier, `create-tenant --admin-email` and `set-password-link` create `./var/.rustango_tenant_session.key` when it is missing, as the server does on first boot. `create-api-key` still only loads it.
+- Flags a verb used to ignore are now errors: `--schema-name` with database mode (`create-tenant`, `migrate-tenant-storage --to database`), `--database-url` with `migrate-tenant-storage --to schema`, `edit-tenant --database-url` on a schema-mode tenant, and any argument to `list-tenants`.
 
 ### Roles
 

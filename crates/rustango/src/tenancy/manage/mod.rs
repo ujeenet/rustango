@@ -280,7 +280,10 @@ where
         "rotate-tenant-password" => {
             tenants::rotate_tenant_password(pools, &args[1..], writer).await
         }
-        "list-tenants" => tenants::list_tenants(pools, writer).await,
+        "list-tenants" => {
+            args::no_args(&args[1..], "list-tenants")?;
+            tenants::list_tenants(pools, writer).await
+        }
         // #1344 — routing and display config were console-only to change.
         "edit-tenant" => edit::edit_tenant(pools, &args[1..], writer).await,
         "reseal-tenant-secrets" => reseal::reseal_tenant_secrets(pools, &args[1..], writer).await,
@@ -462,13 +465,16 @@ where
             agents::unmap_skill_permission_cmd(pools, registry_url, &args[1..], writer).await
         }
         // The SSO providers live per tenant, which the registry pool can't see (#2359).
+        // Tenant-scoped files are compared with each tenant's ledger.
         "check" => rustango::migrate::manage::check_cmd_with(
             &pools.registry_pool(),
             dir,
-            Some(rustango::migrate::MigrationScope::Registry),
             &args[1..],
             writer,
-            Some(tenancy_deploy_findings(pools, facts)),
+            Some(rustango::migrate::manage::TenancyCheck {
+                deploy: tenancy_deploy_findings(pools, facts),
+                ledgers: migrations::active_tenant_ledgers(pools),
+            }),
         )
         .await
         .map_err(TenancyError::Migrate),

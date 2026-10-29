@@ -171,8 +171,10 @@ Das Verb gibt einmal einen Link zum Setzen des Passworts aus: Er funktioniert
 einmal, läuft nach 72 Stunden ab und gilt nur für diesen Tenant. Gib ihn dem
 Admin. Er ist mit dem Tenant-Session-Schlüssel des Servers signiert
 (`RUSTANGO_SESSION_SECRET` oder die Dev-Schlüsseldatei), also starte die CLI mit
-demselben Schlüssel wie den Server. `set-password-link <slug> <username>` gibt
-einen neuen aus.
+demselben Schlüssel wie den Server. Außerhalb der Prod-Stufe legt die CLI eine
+fehlende `./var/.rustango_tenant_session.key` so an, wie der Server es tut; das
+klappt also schon vor dem ersten Serverstart. `set-password-link <slug> <username>`
+gibt einen neuen aus.
 
 ### Audit **T**
 
@@ -833,6 +835,7 @@ Sie `--deploy` für die strengeren Produktionsreife-Prüfungen hinzu.
 - ≥ 1 Modell via `inventory` registriert
 - DB erreichbar (`SELECT 1`)
 - Modelle registriert, aber **keine** Migrationen auf der Platte (es vergleicht keine Zahlen — ein vorhandenes `migrations/`-Verzeichnis wird unabhängig von der Anzahl als Info gemeldet)
+- Migrationen, die das Ledger noch nicht angewendet hat. Im Tenancy-Projekt: Registry-Dateien gegen die Registry, Tenant-Dateien gegen das Ledger jedes aktiven Tenants (die zurückliegenden Tenants werden genannt, zehn vollständig), `<app>/migrations/`-Ordner eingeschlossen
 
 **Mit `--deploy`:**
 - `RUSTANGO_ENV` ist `prod` oder `production`
