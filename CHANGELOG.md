@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.11] — 2026-10-29
+
 **Breaking:** `CsrfConfig` has a new public field; `check_builtin_form_password` needs the `passwords` feature and reports `password_too_weak`; roles made by `get_or_create_role` / `get_or_create_role_pool` skip save hooks and signals. See UPGRADING.
 
 ### Fixed
