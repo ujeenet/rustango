@@ -210,6 +210,7 @@ pub struct Note {
     pub name: String,
     #[rustango(max_length = 32)]
     pub memo: Option<String>,
+    pub score: Option<f64>,
 }
 
 async fn setup(pool: &Pool) {
@@ -591,6 +592,7 @@ async fn untouched_empty_string_is_kept(pool: &Pool) {
             id: Auto::default(),
             name: "a".into(),
             memo: memo.clone(),
+            score: None,
         };
         n.insert_pool(pool).await.expect("insert");
         let id = *n.id.get().expect("pk");
@@ -610,6 +612,26 @@ async fn untouched_empty_string_is_kept(pool: &Pool) {
         );
         row.delete_pool(pool).await.expect("delete");
     }
+}
+
+/// NaN and infinity re-show the form; the row keeps its value.
+async fn non_finite_float_is_refused(pool: &Pool) {
+    let mut n = Note {
+        id: Auto::default(),
+        name: "a".into(),
+        memo: None,
+        score: Some(1.5),
+    };
+    n.insert_pool(pool).await.expect("insert");
+    let id = *n.id.get().expect("pk");
+    for bad in ["NaN", "inf", "-infinity"] {
+        let form = encode(&[("name", "a".to_owned()), ("score", bad.to_owned())]);
+        let (status, body) = send(pool, "POST", &format!("/aed_note/{id}"), &form).await;
+        assert!(!status.is_redirection(), "{bad} saved: {status} {body}");
+        let row = Note::objects().fetch(pool).await.expect("fetch").remove(0);
+        assert_eq!(row.score, Some(1.5), "{bad}");
+    }
+    n.delete_pool(pool).await.expect("delete");
 }
 
 /// A stored value outside `choices` survives a rename.
@@ -1082,6 +1104,7 @@ tri_dialect_test! {
         inline_rows_read_renamed_columns,
         untouched_nullable_json_object_is_kept,
         untouched_empty_string_is_kept,
+        non_finite_float_is_refused,
         untouched_unknown_choice_is_kept,
         stale_form_still_wins,
         inline_rows_take_no_auto_or_generated_input,

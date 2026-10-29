@@ -1615,18 +1615,6 @@ pub fn validate_decimal(
             ));
         }
     }
-    // NUMERIC(p,s) keeps p-s digits before the point.
-    if let (Some(total), Some(places)) = (max_digits, decimal_places) {
-        let whole = total.saturating_sub(places);
-        if int_digits > whole {
-            return Err(ValidationError::new(
-                "max_whole_digits",
-                format!(
-                    "Ensure there are no more than {whole} digits before the decimal point (got {int_digits})."
-                ),
-            ));
-        }
-    }
     if let Some(total) = max_digits {
         let total_digits = int_digits + frac_digits;
         if total_digits > total {
@@ -1634,6 +1622,19 @@ pub fn validate_decimal(
                 "max_digits",
                 format!(
                     "Ensure there are no more than {total} digits in total (got {total_digits})."
+                ),
+            ));
+        }
+    }
+    // NUMERIC(p,s) keeps p-s digits before the point. Checked last, so
+    // a value over `max_digits` keeps that code.
+    if let (Some(total), Some(places)) = (max_digits, decimal_places) {
+        let whole = total.saturating_sub(places);
+        if int_digits > whole {
+            return Err(ValidationError::new(
+                "max_whole_digits",
+                format!(
+                    "Ensure there are no more than {whole} digits before the decimal point (got {int_digits})."
                 ),
             ));
         }
@@ -2592,6 +2593,13 @@ mod tests {
         assert!(validate_decimal("1234.5", Some(5), Some(2)).is_err());
         assert!(validate_decimal("123.45", Some(5), Some(2)).is_ok());
         assert!(validate_decimal("-999", Some(5), Some(2)).is_ok());
+    }
+
+    /// Too many digits in total still reports `max_digits` first.
+    #[test]
+    fn decimal_reports_max_digits_before_whole_digits() {
+        let e = validate_decimal("12345.67", Some(5), Some(2)).unwrap_err();
+        assert_eq!(e.code, "max_digits");
     }
 
     /// A trailing fraction zero adds no digit the column must hold.
