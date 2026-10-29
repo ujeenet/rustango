@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.10] — 2026-10-29
+
 ### Fixed — auth review, round two
 
 - A right Basic or API-key credential no longer clears the account's failed logins; only a sign-in does, so polling clients cannot wipe a guesser's misses.

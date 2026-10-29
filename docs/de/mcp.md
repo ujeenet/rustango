@@ -177,7 +177,7 @@ und `ping`; ein Aufruf ohne Token erhält `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.9" },
+    "serverInfo": { "name": "rustango", "version": "0.61.10" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }
