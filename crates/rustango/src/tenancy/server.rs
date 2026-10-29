@@ -513,10 +513,10 @@ mod app_tests {
             let _ = app.clone().oneshot(req).await.unwrap();
         }
         assert!(
-            !crate::tenancy::resolver::prefix_looked_up(&registry, "/login"),
+            !crate::tenancy::prefix_looked_up(&registry, "/login"),
             "a console path was resolved"
         );
-        assert!(crate::tenancy::resolver::prefix_looked_up(
+        assert!(crate::tenancy::prefix_looked_up(
             &registry,
             "/no-such-tenant"
         ));

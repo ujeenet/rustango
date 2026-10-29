@@ -1653,6 +1653,30 @@ pub(crate) mod resolver_tests {
         assert_eq!(get(&app, "acme.localhost", "/page").await.0, 301);
     }
 
+    /// The apex serves a console route without a tenant lookup per request;
+    /// a path the console does not serve is still looked up.
+    #[tokio::test]
+    async fn console_paths_skip_the_tenant_lookup() {
+        use crate::tenancy::prefix_looked_up;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let registry = crate::sql::Pool::Sqlite(sq.clone());
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .into_router()
+            .await
+            .unwrap();
+        let _ = get(&app, "localhost", "/login").await;
+        // The once-per-segment shadow check may have looked it up; drop that.
+        crate::tenancy::invalidate_org_cache();
+        let _ = get(&app, "localhost", "/login").await;
+        assert!(
+            !prefix_looked_up(&registry, "/login"),
+            "a console path was resolved"
+        );
+        let _ = get(&app, "localhost", "/no-such-tenant").await;
+        assert!(prefix_looked_up(&registry, "/no-such-tenant"));
+    }
+
     /// #1856 — without `.header_resolver()` a client `X-Org` picks no tenant.
     #[tokio::test]
     async fn x_org_is_ignored_unless_opted_in() {
