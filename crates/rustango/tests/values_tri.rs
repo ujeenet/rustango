@@ -609,9 +609,7 @@ async fn aggregate_expression_keeps_column_type(pool: &Pool) {
     assert_eq!(got, expect, "{}", pool.dialect().name());
 }
 
-/// `NUMERIC` / `DECIMAL` reads as `Decimal`. A `Decimal` model does not
-/// build with the `sqlite` feature, so SQLite is covered in-crate.
-#[cfg(not(feature = "sqlite"))]
+/// `NUMERIC` / `DECIMAL` reads as `Decimal`, a model row included.
 mod decimal {
     use super::*;
     use rust_decimal::Decimal;
@@ -642,6 +640,16 @@ mod decimal {
             .await
             .expect("list");
         assert_eq!(list, want);
+        use rustango::sql::FetcherPool as _;
+        let rows = qs().fetch(pool).await.expect("rows");
+        let amounts: Vec<_> = rows.iter().map(|m| m.amount).collect();
+        assert_eq!(amounts, [Some(v), None]);
+        let flat = qs()
+            .values_list_flat("amount")
+            .fetch::<Option<Decimal>>(pool)
+            .await
+            .expect("flat");
+        assert_eq!(flat, [Some(v), None]);
         let dict = qs()
             .values_dict(&["id", "amount"])
             .fetch(pool)
@@ -656,7 +664,12 @@ mod decimal {
             .fetch(pool)
             .await
             .expect("sum");
-        assert_eq!(sum[0]["s"], SqlValue::Decimal(v));
+        let want_sum = rustango::by_dialect! { pool,
+            postgres => SqlValue::Decimal(v), because "SUM over NUMERIC is NUMERIC",
+            mysql => SqlValue::Decimal(v), because "SUM over DECIMAL is DECIMAL",
+            sqlite => SqlValue::F64(12.34), because "SQLite's SUM over NUMERIC is REAL",
+        };
+        assert_eq!(sum[0]["s"], want_sum.value, "{}", want_sum.why);
 
         // The executor path decodes NUMERIC too.
         #[cfg(feature = "postgres")]

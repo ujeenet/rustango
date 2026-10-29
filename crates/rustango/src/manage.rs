@@ -61,7 +61,7 @@ fn is_help_verb(args: &[String]) -> bool {
     )
 }
 
-/// `runserver`'s auto-migrate: the same chains as `manage migrate` (#2056).
+/// `runserver`'s auto-migrate: the same chains and signals as `manage migrate`.
 async fn auto_migrate(
     pool: &crate::sql::Pool,
     dir: &std::path::Path,
@@ -70,10 +70,49 @@ async fn auto_migrate(
         pool,
         dir,
         &mut std::io::stderr(),
-        crate::migrate::Signals::Skip,
+        crate::migrate::Signals::Fire { tenant: None },
         |held| crate::migrate::migrate_pool_locked(held, pool, dir, None),
     )
     .await
+}
+
+/// How long a booting single-database server waits for another run's migrate lock.
+const BOOT_MIGRATE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether single-database `runserver` migrates before it binds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BootMigrate {
+    Skip,
+    Run { lock_timeout: std::time::Duration },
+}
+
+impl BootMigrate {
+    /// [`Cli::migrate_on_boot`] beats `[server] migrate_on_boot`; on by default.
+    fn resolve(code: Option<bool>, setting: Option<bool>, lock_timeout_secs: Option<u64>) -> Self {
+        if !code.or(setting).unwrap_or(true) {
+            return Self::Skip;
+        }
+        Self::Run {
+            lock_timeout: lock_timeout_secs
+                .map_or(BOOT_MIGRATE_LOCK_TIMEOUT, std::time::Duration::from_secs),
+        }
+    }
+
+    /// Run `migrate` under the lock timeout, or log that boot skips it.
+    async fn run<F>(self, migrate: F) -> Result<(), crate::migrate::MigrateError>
+    where
+        F: Future<Output = Result<(), crate::migrate::MigrateError>>,
+    {
+        match self {
+            Self::Skip => {
+                tracing::info!(target: "rustango::migrate", "migrate on boot is off; not migrating");
+                Ok(())
+            }
+            Self::Run { lock_timeout } => {
+                crate::migrate::with_lock_timeout(lock_timeout, migrate).await
+            }
+        }
+    }
 }
 
 /// Run the [`Cli::on_shutdown`] hook, if one was registered.
@@ -131,6 +170,8 @@ pub struct Cli {
     #[cfg(feature = "tenancy")]
     apex: Option<String>,
     migrations_dir: PathBuf,
+    /// See [`Cli::migrate_on_boot`]; `None` defers to `[server] migrate_on_boot`.
+    migrate_on_boot: Option<bool>,
     tenancy: bool,
     /// Optional override for the framework's reserved URL prefixes
     /// (`/__login`, `/__admin`, `/__audit`, …). Plumbed through to
@@ -176,6 +217,9 @@ pub struct Cli {
     /// `None` = `ChainSecretsResolver::standard()`. Set via [`Cli::with_secrets`].
     #[cfg(feature = "tenancy")]
     secrets: Option<std::sync::Arc<dyn crate::tenancy::SecretsResolver>>,
+    /// See [`Cli::brand_storage`].
+    #[cfg(feature = "tenancy")]
+    brand_storage: Option<crate::storage::BoxedStorage>,
     /// Set via [`Cli::require_sealed_secrets`].
     #[cfg(feature = "tenancy")]
     require_sealed_secrets: bool,
@@ -232,6 +276,7 @@ impl Cli {
             #[cfg(feature = "tenancy")]
             apex: None,
             migrations_dir: PathBuf::from("./migrations"),
+            migrate_on_boot: None,
             tenancy: false,
             #[cfg(feature = "tenancy")]
             routes: None,
@@ -251,6 +296,8 @@ impl Cli {
             tenant_pools: None,
             #[cfg(feature = "tenancy")]
             secrets: None,
+            #[cfg(feature = "tenancy")]
+            brand_storage: None,
             #[cfg(feature = "tenancy")]
             require_sealed_secrets: false,
             #[cfg(feature = "_http_layers")]
@@ -418,6 +465,15 @@ impl Cli {
         self
     }
 
+    /// Whether single-database `runserver` applies migrations before it
+    /// binds. Beats `[server] migrate_on_boot`; on by default. Turn it off
+    /// when a deploy step runs `migrate` once instead of every replica.
+    #[must_use]
+    pub fn migrate_on_boot(mut self, on: bool) -> Self {
+        self.migrate_on_boot = Some(on);
+        self
+    }
+
     /// Auto-mount `/health` (liveness) and `/ready` (readiness +
     /// `SELECT 1`) endpoints on the API router at `runserver` time.
     /// Default off — operators sometimes ship custom health JSON
@@ -481,6 +537,15 @@ impl Cli {
     #[must_use]
     pub fn with_tenant_pools(mut self, config: crate::tenancy::TenantPoolsConfig) -> Self {
         self.tenant_pools = Some(config);
+        self
+    }
+
+    /// Store tenant logos and favicons in `storage` instead of the per-pod
+    /// local dir; see [`crate::server::Builder::brand_storage`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn brand_storage(mut self, storage: crate::storage::BoxedStorage) -> Self {
+        self.brand_storage = Some(storage);
         self
     }
 
@@ -1030,6 +1095,7 @@ impl Cli {
             self.init_tenancy_fn,
             crate::tenancy::manage::CliFacts {
                 provisioning: self.provisioning_dir.is_some(),
+                brand_storage: self.brand_storage.clone(),
             },
         )
         .await?;
@@ -1251,6 +1317,19 @@ impl Cli {
         }
     }
 
+    /// `[server] migrate_on_boot` / `migrate_lock_timeout_secs`, under [`Cli::migrate_on_boot`].
+    fn boot_migrate(&self) -> BootMigrate {
+        #[cfg(feature = "config")]
+        if let Some(s) = &self.settings_for_layers {
+            return BootMigrate::resolve(
+                self.migrate_on_boot,
+                s.server.migrate_on_boot,
+                s.server.migrate_lock_timeout_secs,
+            );
+        }
+        BootMigrate::resolve(self.migrate_on_boot, None, None)
+    }
+
     /// Everything between "the pool is open" and "bind the socket":
     /// welcome page, health endpoints, static dirs, CSRF, the settings
     /// layers, and the pool extension.
@@ -1360,6 +1439,9 @@ impl Cli {
         }
         if let Some(r) = &self.unresolved_tenant {
             builder = builder.unresolved_tenant(r.clone());
+        }
+        if let Some(s) = &self.brand_storage {
+            builder = builder.brand_storage(s.clone());
         }
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
@@ -1529,7 +1611,9 @@ impl Cli {
         {
             let url = crate::env::database_url_or_advice()?;
             let pool = crate::sql::Pool::connect(&url).await?;
-            auto_migrate(&pool, &self.migrations_dir).await?;
+            self.boot_migrate()
+                .run(auto_migrate(&pool, &self.migrations_dir))
+                .await?;
             if let Some(seed) = self.seed.take() {
                 // The seed hook's error is now `Send + Sync` (so a seed can
                 // hold an error across an `.await` without the future losing
@@ -1564,7 +1648,9 @@ impl Cli {
                 // necessary setup here rather than restructure the
                 // `#[cfg]` blocks at the top of the fn.
                 let pool = crate::sql::Pool::connect(&url).await?;
-                auto_migrate(&pool, &self.migrations_dir).await?;
+                self.boot_migrate()
+                    .run(auto_migrate(&pool, &self.migrations_dir))
+                    .await?;
                 if let Some(seed) = self.seed.take() {
                     seed(&pool)
                         .await
@@ -1578,16 +1664,17 @@ impl Cli {
                 return Ok(());
             }
             let pool = crate::sql::Pool::connect_postgres(&url).await?;
-            // The PG runner fires the migrate signals; keep it for the project chain.
             let dir = &self.migrations_dir;
-            crate::migrate::manage::migrate_with_framework(
-                &crate::sql::Pool::from(pool.clone()),
-                dir,
-                &mut std::io::stderr(),
-                crate::migrate::Signals::Fire { tenant: None },
-                |held| crate::migrate::migrate_locked(held, &pool, dir, None),
-            )
-            .await?;
+            let enum_pool = crate::sql::Pool::from(pool.clone());
+            self.boot_migrate()
+                .run(crate::migrate::manage::migrate_with_framework(
+                    &enum_pool,
+                    dir,
+                    &mut std::io::stderr(),
+                    crate::migrate::Signals::Fire { tenant: None },
+                    |held| crate::migrate::migrate_locked(held, &pool, dir, None),
+                ))
+                .await?;
             if let Some(seed) = self.seed.take() {
                 seed(&crate::sql::Pool::from(pool.clone()))
                     .await
@@ -1723,23 +1810,14 @@ impl Cli {
         let apex = apex_flag
             .clone()
             .unwrap_or_else(crate::tenancy::server::apex_domain);
-        let registry_url =
-            crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
-                format!(
-                    "{e} — sqlite/mysql tenancy projects need an explicit registry URL \
-                     (e.g. `sqlite:./var/registry.db` or `mysql://…`), or build the \
-                     server manually via `server::Builder::from_pool`."
-                )
-                .into()
-            })?;
-        let registry =
-            sqlx::Pool::<crate::tenancy::DefaultTenantDb>::connect(&registry_url).await?;
+        let (registry, registry_url) = env_registry().await?;
         let mut builder = crate::server::Builder::<crate::tenancy::DefaultTenantDb>::from_pool(
             registry,
             registry_url,
             apex,
         )
-        .api(api);
+        .api(api)
+        .drain_timeout(self.drain_timeout());
         if let Some(apex) = apex_flag {
             builder = builder.with_apex(apex);
         }
@@ -1779,6 +1857,24 @@ impl Cli {
         run_shutdown_hook(on_shutdown).await;
         Ok(())
     }
+}
+
+/// The registry pool for a SQLite/MySQL tenancy `runserver`, from the
+/// environment's database URL, with the framework's connect setup.
+#[cfg(all(feature = "tenancy", not(feature = "postgres")))]
+async fn env_registry(
+) -> Result<(sqlx::Pool<crate::tenancy::DefaultTenantDb>, String), Box<dyn std::error::Error>> {
+    use crate::tenancy::RegistryConnect as _;
+    let url = crate::env::database_url_from_env().map_err(|e| -> Box<dyn std::error::Error> {
+        format!(
+            "{e} — sqlite/mysql tenancy projects need an explicit registry URL \
+             (e.g. `sqlite:./var/registry.db` or `mysql://…`), or build the \
+             server yourself with `Builder::from_pool`."
+        )
+        .into()
+    })?;
+    let registry = crate::tenancy::DefaultTenantDb::connect_registry(&url).await?;
+    Ok((registry, url))
 }
 
 impl Default for Cli {
@@ -2285,6 +2381,40 @@ fn routes_from_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Code beats the setting; on by default, with a bounded lock wait.
+    #[test]
+    fn boot_migrate_can_be_turned_off_and_waits_bounded() {
+        use std::time::Duration;
+        let run = |secs| BootMigrate::Run {
+            lock_timeout: Duration::from_secs(secs),
+        };
+        assert_eq!(BootMigrate::resolve(None, None, None), run(300));
+        assert_eq!(
+            BootMigrate::resolve(None, Some(false), None),
+            BootMigrate::Skip
+        );
+        assert_eq!(
+            BootMigrate::resolve(Some(true), Some(false), Some(5)),
+            run(5)
+        );
+        assert_eq!(
+            BootMigrate::resolve(Some(false), Some(true), None),
+            BootMigrate::Skip
+        );
+    }
+
+    /// Skip never runs the migrate.
+    #[tokio::test]
+    async fn boot_migrate_skip_does_not_migrate() {
+        let ran = std::sync::atomic::AtomicBool::new(false);
+        let migrate = async {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        };
+        BootMigrate::Skip.run(migrate).await.expect("skip");
+        assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
 
     /// `runserver`'s auto-migrate applies the system chain, like `manage migrate` (#2056).
     #[cfg(feature = "sqlite")]

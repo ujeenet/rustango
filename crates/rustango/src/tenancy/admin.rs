@@ -501,7 +501,7 @@ where
         // wraps a non-square image and renders poorly.
         let static_icon_png_url = format!("{}/icon.png", routes.static_url);
         if path == static_icon_png_url {
-            return rustango_icon_png_response();
+            return crate::welcome::icon_png_response();
         }
         // Impersonation handoff. Redeem the console's signed token,
         // set a host-scoped cookie, and redirect to the admin index.
@@ -1892,19 +1892,6 @@ fn rustango_png_response() -> Response {
         .header(header::CONTENT_TYPE, "image/png")
         .header(header::CACHE_CONTROL, "public, max-age=86400")
         .body(Body::from(tenant_console::RUSTANGO_PNG))
-        .expect("response builds")
-}
-
-/// Serve the embedded square `icon.png` favicon at
-/// `/__static__/icon.png`. v0.30.19. Cached aggressively (24h)
-/// like the .png logo — both are framework-managed assets users
-/// don't override per-tenant.
-fn rustango_icon_png_response() -> Response {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "image/png")
-        .header(header::CACHE_CONTROL, "public, max-age=86400")
-        .body(Body::from(tenant_console::RUSTANGO_ICON_PNG))
         .expect("response builds")
 }
 

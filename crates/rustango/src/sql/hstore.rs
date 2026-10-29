@@ -164,7 +164,7 @@ impl<'r> sqlx::Decode<'r, sqlx::MySql> for HStore {
     fn decode(
         _value: <sqlx::MySql as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Err("`HStore` columns are PostgreSQL-only; cannot decode on MySQL (issue #342)".into())
+        Err("`HStore` columns are PostgreSQL-only; cannot decode on MySQL".into())
     }
 }
 
@@ -180,7 +180,7 @@ impl<'r> sqlx::Decode<'r, sqlx::Sqlite> for HStore {
     fn decode(
         _value: <sqlx::Sqlite as sqlx::Database>::ValueRef<'r>,
     ) -> Result<Self, sqlx::error::BoxDynError> {
-        Err("`HStore` columns are PostgreSQL-only; cannot decode on SQLite (issue #342)".into())
+        Err("`HStore` columns are PostgreSQL-only; cannot decode on SQLite".into())
     }
 }
 

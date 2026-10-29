@@ -228,3 +228,31 @@ async fn a_max_ttl_is_accepted() {
         .expect("touch with Duration::MAX"));
     assert_eq!(redis.get("huge").await.unwrap().as_deref(), Some("v"));
 }
+
+/// Past 2^53 `incr` returns the exact stored value, not a rounded double;
+/// an i64 overflow is an error.
+#[tokio::test]
+async fn incr_returns_exact_values_past_2_pow_53() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+
+    redis.set("big", "9007199254740993", None).await.unwrap();
+    assert_eq!(
+        redis.incr("big", 2, None).await.unwrap(),
+        9_007_199_254_740_995
+    );
+    redis.set("n", "999999999999999999", None).await.unwrap();
+    assert_eq!(redis.incr("n", 1, None).await.unwrap(), 10i64.pow(18));
+    assert_eq!(redis.incr("n", 1, None).await.unwrap(), 10i64.pow(18) + 1);
+
+    redis
+        .set("max", &(i64::MAX - 1).to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(redis.incr("max", 1, None).await.unwrap(), i64::MAX);
+    let err = redis.incr("max", 1, None).await.unwrap_err();
+    assert!(err.to_string().contains("overflow"), "{err}");
+}

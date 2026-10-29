@@ -86,3 +86,17 @@ fn fully_specified_flags_never_prompt() {
     assert!(work.join("probe").join("Cargo.toml").is_file());
     let _ = std::fs::remove_dir_all(&work);
 }
+
+/// `cargo rgo` is the same command: cargo runs `cargo-rgo rgo …`.
+#[test]
+fn cargo_rgo_runs_the_scaffolder() {
+    let out = Command::new(env!("CARGO_BIN_EXE_cargo-rgo"))
+        .args(["rgo", "new"])
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .output()
+        .expect("run cargo-rgo");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("missing project name"), "{err}");
+}

@@ -151,7 +151,7 @@ Once it is on, the password alone only opens the code step (`/login/totp`); no c
 
 It is optional per operator. Set `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` to require it: an operator without a device then sets one up at the code step before the first session. Read at start-up.
 
-The secrets live in `rustango_operator_totp` in the registry, sealed under `RUSTANGO_SECRET_KEY`, which must be set to enroll. `migrate` creates the table, or the console does on the first sign-in. If the table is missing (a registry role without CREATE, before `migrate`), sign-in uses the password alone unless TOTP is required; if it exists but cannot be read, sign-in is refused. There are no recovery codes yet: an operator who loses the device needs a shell on the registry to delete their row.
+The secrets live in `rustango_operator_totp` in the registry, sealed under `RUSTANGO_SECRET_KEY`, which must be set to enroll. `migrate` creates the table, or the console does on the first sign-in. If the table is missing (a registry role without CREATE, before `migrate`), sign-in uses the password alone unless TOTP is required; if it exists but cannot be read, sign-in is refused. There are no recovery codes yet: for an operator who loses the device, run `cargo run -- reset-operator-totp <username>`.
 
 ---
 
@@ -363,7 +363,10 @@ Each tenant has its own brand on its `Org` row, set on
 `theme_mode`. The **Branding assets** form on the same page uploads a logo
 (PNG, JPEG or WebP) and a favicon (PNG or ICO), up to 1 MB each
 (`RUSTANGO_BRAND_MAX_BYTES`). Files are stored under
-`RUSTANGO_BRAND_STORAGE_DIR`, default `./var/brand`.
+`RUSTANGO_BRAND_STORAGE_DIR`, default `./var/brand`. That dir is local to
+each pod and lost on redeploy; with several replicas pass a shared disk with
+`Cli::brand_storage` or `server::Builder::brand_storage` (for example a
+`StorageRegistry` disk).
 
 The tenant admin and its sign-in page use these; `[brand]` does not reach
 them. Without `brand_name` the tenant's display name is shown, and without an

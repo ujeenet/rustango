@@ -26,7 +26,7 @@
 cargo install cargo-rustango
 ```
 
-Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors comme `cargo rustango` — une commande globale disponible partout, même en dehors d'un projet.
+Cela place un binaire `cargo-rustango` sur votre `PATH` ; Cargo l'expose alors comme `cargo rustango` — une commande globale disponible partout, même en dehors d'un projet. La même installation ajoute `cargo-rgo` : `cargo rgo …` est une façon plus courte de taper toute commande `cargo rustango …`.
 
 ### La version du générateur est celle que votre projet obtient
 
@@ -56,6 +56,7 @@ cargo rustango new <name> [--template api|fullstack|tenant]
 - **`--template` / `-t`** — quel template utiliser pour l'échafaudage (par défaut : **fullstack**).
 - **`--backend` / `-b`** — sur quelle base de données le projet tourne (par défaut : **postgres**).
 - **`--features` / `-F`** — fonctionnalités **Rustango** supplémentaires, séparées par des virgules ou des espaces.
+- **`--alias rgo`** — nommer la dépendance `rgo` au lieu de `rustango` (voir [Un nom plus court](#un-nom-plus-court--rgo)).
 - **`--interactive` / `-i`** — choisir dans des menus à la place. Un `cargo rustango new` nu sur un terminal fait de même.
 - **`--help` / `-h`**, **`--version`** — usage et version.
 
@@ -147,6 +148,37 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
 
 `cargo rustango new --help` affiche cette liste. Les backends ne sont **pas** valides ici — passez par `--backend`. En nommer un comme fonctionnalité est refusé : cela figerait le backend du framework alors que la fonctionnalité propre au projet resterait éteinte, et `#[derive(Model)]` aligne ses émissions sur les fonctionnalités du projet.
+
+### Un nom plus court : `rgo`
+
+```sh
+cargo rgo new shop --alias rgo
+```
+
+`--alias rgo` déclare la dépendance sous le nom `rgo`, et le code généré utilise des chemins `rgo::` et des attributs `#[rgo(...)]`. La crate `rgo` sur crates.io appartient à quelqu'un d'autre ; il s'agit donc d'un renommage du paquet `rustango` :
+
+```toml
+[dependencies]
+rgo = { package = "rustango", version = "0.61", default-features = false, features = ["batteries"] }
+
+[features]
+postgres = ["rgo/postgres"]
+```
+
+```rust
+use rgo::prelude::*;
+
+#[derive(Model, Debug, Clone)]
+#[rgo(table = "item", display = "name")]
+pub struct Item {
+    #[rgo(primary_key)]
+    pub id: Auto<i64>,
+    #[rgo(max_length = 64)]
+    pub name: String,
+}
+```
+
+`#[rgo(...)]` signifie exactement la même chose que `#[rustango(...)]`, quel que soit le nom donné à la dépendance. Une struct ou un champ utilise un seul nom : mélanger `#[rustango(...)]` et `#[rgo(...)]` sur le même élément est une erreur de compilation. `manage startapp` et les générateurs `make:*` lisent le Cargo.toml et écrivent eux aussi des chemins `rgo::` et `#[rgo(...)]`.
 
 ---
 

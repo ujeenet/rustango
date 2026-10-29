@@ -4,8 +4,9 @@
 //! decodes to the configured credentials. Otherwise it gets a 401 with
 //! `WWW-Authenticate: Basic realm="Rustango Admin"`.
 //!
-//! Each attempt goes through [`crate::login_throttle`] (admin scope),
-//! and both fields are compared in constant time.
+//! Each request is admitted by [`crate::login_throttle`] (admin scope)
+//! before the compare, and only a miss is counted; both fields are
+//! compared in constant time.
 
 use std::sync::Arc;
 
@@ -46,8 +47,9 @@ async fn basic_auth_middleware(
         return challenge();
     };
     let ip = ClientIp::from_parts(request.extensions(), request.headers());
+    // Admitted before the compare; a right one from a known client writes nothing.
     let attempt = match crate::login_throttle::shared()
-        .begin(&LoginScope::Admin, &ip, &user)
+        .begin_per_request(&LoginScope::Admin, &ip, &user)
         .await
     {
         Ok(attempt) => attempt,
@@ -56,11 +58,11 @@ async fn basic_auth_middleware(
     // Both compares always run, so the timing does not say which field is wrong.
     let user_ok = crate::crypto::constant_time_compare(user.as_bytes(), creds.username.as_bytes());
     let pass_ok = crate::crypto::constant_time_compare(pass.as_bytes(), creds.password.as_bytes());
-    if user_ok & pass_ok {
-        attempt.succeeded().await;
+    let right = user_ok & pass_ok;
+    attempt.settle(right).await;
+    if right {
         return next.run(request).await;
     }
-    attempt.failed().await;
     challenge()
 }
 
@@ -106,6 +108,131 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// [`call`] from one client address.
+    async fn call_from(app: &Router, user_pass: &str) -> StatusCode {
+        let creds = base64::engine::general_purpose::STANDARD.encode(user_pass);
+        let req = Request::builder()
+            .uri("/")
+            .header(header::AUTHORIZATION, format!("Basic {creds}"))
+            .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [10, 65, 0, 1],
+                1,
+            ))))
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap().status()
+    }
+
+    /// Parallel guesses through a slow shared cache, from a client that
+    /// signed in before: the account lock still bounds the burst, and once
+    /// it locks the right password is refused.
+    #[tokio::test]
+    async fn a_parallel_burst_of_basic_guesses_is_bounded_by_the_lock() {
+        let slow = std::sync::Arc::new(
+            crate::login_throttle::counting::CountingWrites::with_read_delay(
+                std::time::Duration::from_millis(100),
+            ),
+        );
+        let installed = crate::login_throttle::configure_shared(
+            crate::login_throttle::LoginThrottle::with_cache(
+                crate::login_throttle::LoginLimits::default(),
+                slow,
+            ),
+        );
+        // nextest runs each test in its own process; another gate won here.
+        if !installed {
+            return;
+        }
+        let app = protect_with_basic_auth(
+            Router::new().route("/", get(|| async { "ok" })),
+            "burst-admin",
+            "s3cret",
+        );
+        assert_eq!(call_from(&app, "burst-admin:s3cret").await, StatusCode::OK);
+        let mut guesses: Vec<_> = (0..99)
+            .map(|i| {
+                let app = app.clone();
+                tokio::spawn(async move { call_from(&app, &format!("burst-admin:guess{i}")).await })
+            })
+            .collect();
+        // The right one arrives while the wrong ones are in flight.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        let right = {
+            let app = app.clone();
+            tokio::spawn(async move { call_from(&app, "burst-admin:s3cret").await })
+        };
+        let mut misses = 0;
+        for g in guesses.drain(..) {
+            let status = g.await.unwrap();
+            assert_ne!(status, StatusCode::OK);
+            misses += usize::from(status == StatusCode::UNAUTHORIZED);
+        }
+        let max = crate::account_lockout::DEFAULT_MAX_ATTEMPTS as usize;
+        assert!(misses <= max, "{misses} wrong guesses were checked");
+        // In flight, the right one may pass before the lock; it clears nothing.
+        let status = right.await.unwrap();
+        assert!(
+            [
+                StatusCode::OK,
+                StatusCode::TOO_MANY_REQUESTS,
+                StatusCode::SERVICE_UNAVAILABLE
+            ]
+            .contains(&status),
+            "{status}"
+        );
+        let mut more = 0;
+        while call_from(&app, "burst-admin:late").await == StatusCode::UNAUTHORIZED {
+            more += 1;
+            assert!(misses + more <= max, "the failures were cleared");
+        }
+        assert_eq!(
+            call_from(&app, "burst-admin:s3cret").await,
+            StatusCode::TOO_MANY_REQUESTS
+        );
+    }
+
+    /// A right Basic header is sent on every request: a repeat writes
+    /// nothing to the login gate's cache; a wrong one is still counted.
+    #[tokio::test]
+    async fn right_basic_credentials_write_nothing_to_the_login_gate() {
+        let counting =
+            std::sync::Arc::new(crate::login_throttle::counting::CountingWrites::default());
+        let cache: crate::cache::BoxedCache = counting.clone();
+        let installed = crate::login_throttle::configure_shared(
+            crate::login_throttle::LoginThrottle::with_cache(
+                crate::login_throttle::LoginLimits::default(),
+                cache,
+            ),
+        );
+        // nextest runs each test in its own process; another gate won here.
+        if !installed {
+            return;
+        }
+        let app = protect_with_basic_auth(
+            Router::new().route("/", get(|| async { "ok" })),
+            "basic-quiet-admin",
+            "right",
+        );
+        let writes = || counting.writes();
+        assert_eq!(
+            call_from(&app, "basic-quiet-admin:right").await,
+            StatusCode::OK
+        );
+        let first = writes();
+        for _ in 0..3 {
+            assert_eq!(
+                call_from(&app, "basic-quiet-admin:right").await,
+                StatusCode::OK
+            );
+        }
+        assert_eq!(writes(), first, "a repeat success wrote to the login gate");
+        assert_eq!(
+            call_from(&app, "basic-quiet-admin:wrong").await,
+            StatusCode::UNAUTHORIZED
+        );
+        assert!(writes() > 0, "a miss was not counted");
     }
 
     /// Wrong passwords lock the account, so the right one is refused after.

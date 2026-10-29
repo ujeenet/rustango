@@ -3,11 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>{% block title %}{{ brand_name | default(value='Rustango Admin') }}{% endblock title %}</title>
-{# v0.30.19 — admin favicon. Defaults to the framework's embedded
-   `icon.png` (served at `<static_url>/icon.png` by the tenancy
-   admin route, where static_url comes from RouteConfig — `/_static`
-   under friendly, `/__static__` under default). Per-tenant overrides
-   via `brand_favicon_url`. #}
+{# Admin favicon: the embedded `icon.png` at `<static_url>/icon.png`,
+   served by the bare admin router or the tenancy admin route.
+   Overridden via `brand_favicon_url`. #}
 {% if brand_favicon_url %}<link rel="icon" href="{{ brand_favicon_url }}">
 {% else %}<link rel="icon" type="image/png" href="{{ static_url }}/icon.png">{% endif %}
 <script nonce="{{ csp_nonce }}">

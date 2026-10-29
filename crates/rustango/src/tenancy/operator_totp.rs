@@ -78,6 +78,16 @@ impl DeviceTable for OperatorTotp {
     }
 }
 
+/// `stored` opened (the previous key too) and sealed again under the
+/// current key, for `reseal-tenant-secrets`.
+pub(crate) fn reseal(operator_id: i64, stored: &str) -> Result<String, String> {
+    let b64 = stored.strip_prefix(SEALED_V1).ok_or("not a sealed value")?;
+    let plain = crate::aead::decrypt(b64, &aad(operator_id)).map_err(|e| format!("{e:?}"))?;
+    crate::aead::encrypt(&plain, &aad(operator_id))
+        .map(|b64| format!("{SEALED_V1}{b64}"))
+        .map_err(|e| format!("cannot seal: {e:?}"))
+}
+
 /// Create `rustango_operator_totp` for the registry's backend. Idempotent.
 ///
 /// # Errors
@@ -140,4 +150,22 @@ pub(crate) async fn remove(
     secret: &Stored,
 ) -> Result<bool, ExecError> {
     store::remove_in::<OperatorTotp>(pool, operator_id, secret).await
+}
+
+/// End `operator`'s sessions and drop their device, for a lost one, so a
+/// session opened with it does not outlive it. The number of devices dropped.
+pub(crate) async fn reset(
+    pool: &Pool,
+    operator: &crate::tenancy::auth::Operator,
+) -> Result<u64, ExecError> {
+    let id = operator.id.get().copied().unwrap_or_default();
+    // Sessions end first, so a retry after a failed write still ends them.
+    crate::session::revoke_sessions::<crate::tenancy::auth::Operator>(
+        pool,
+        id,
+        operator.sessions_revoked_at,
+        0,
+    )
+    .await?;
+    store::reset_in::<OperatorTotp>(pool, id).await
 }

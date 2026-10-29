@@ -1,6 +1,6 @@
 //! Commerce routes, multi-tenant.
 //!
-//! **Near-twin** of `platform_commerce/src/commerce/urls.rs`. Two
+//! **Near-twin** of `platform_commerce/src/commerce/urls.rs`. Three
 //! differences, and they are the whole difference between a
 //! single-tenant and a multi-tenant rustango app:
 //!
@@ -10,12 +10,13 @@
 //! 2. The hand-written handlers take `Tenant<DefaultTenantDb>` and read
 //!    `t.pool()` / `t.org.slug` rather than carrying a pool and a fixed
 //!    slug in state.
+//! 3. The ViewSets and hand-written writes need a Bearer token from
+//!    `/api/auth/login`, and each checks its model's codenames. The single-tenant twin has no API
+//!    sign-in yet, so its ViewSets stay open.
 //!
 //! Everything else — models, serializers, jobs, the URL map — is byte
-//! for byte the same file as the single-tenant app.
-//!
-//! The ViewSets take anonymous writes because the soak driver sends no
-//! login; a real app sets `.permissions_for_model::<T>()` instead.
+//! for byte the same file as the single-tenant app. `/shop` stays
+//! anonymous: it is the page-cached storefront.
 //!
 //! On a tenant host the framework claims `/admin`, `/login`, `/logout`,
 //! `/change-password`, `/_static/*` and `/_brand/*` ahead of this
@@ -24,7 +25,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::{get, post};
@@ -37,8 +38,8 @@ use rustango::jobs::JobQueue as _;
 use rustango::real_ip::RealIpRouterExt as _;
 use rustango::sql::UpdaterPool as _;
 use rustango::template_views::{CreateView, DeleteView, DetailView, ListView, UpdateView};
-use rustango::tenancy::auth_routes::{Config as JwtConfig, JwtAuth};
-use rustango::tenancy::{DefaultTenantDb, Org};
+use rustango::tenancy::auth_routes::{require_bearer, Config as JwtConfig, JwtAuth};
+use rustango::tenancy::{AuthenticatedUser, DefaultTenantDb, Org};
 use rustango::viewset::ViewSet;
 
 use super::jobs::{self, FlakyPaymentCapture, OrderConfirmation};
@@ -81,18 +82,12 @@ pub fn api(
         registry,
     };
 
+    let auth = jwt_auth();
     Router::new()
-        .merge(products())
-        .merge(orders())
-        .merge(orders_raw())
-        .merge(order_lines())
-        .merge(customers())
-        .merge(inventory())
-        .merge(promotions())
-        .merge(gift_cards())
+        .merge(rest_api(&auth).with_state(()))
         .merge(promotion_pages())
-        .route("/api/v1/orders/{id}/confirm", post(confirm_order))
-        .merge(payments(cache.clone()))
+        .merge(order_actions(&auth))
+        .merge(payments(&auth, cache.clone()))
         .merge(account())
         .merge(storefront(cache))
         .route("/_soak/info", get(soak_info))
@@ -101,7 +96,7 @@ pub fn api(
         .merge(probe_routes())
         .with_state(state)
         // Login, refresh, logout and `me` over JWT, on every tenant.
-        .merge(jwt_auth().router())
+        .merge(auth.router())
         .real_ip(real_ip_layer())
 }
 
@@ -111,24 +106,47 @@ fn jwt_auth() -> JwtAuth {
     JwtAuth::new(JwtConfig::default())
 }
 
+/// The ViewSets: a Bearer token from `auth`'s login first (401 without
+/// one), then the model's codenames (403 without them).
+#[must_use]
+pub fn rest_api(auth: &JwtAuth) -> Router<()> {
+    Router::new()
+        .merge(products())
+        .merge(orders())
+        .merge(orders_raw())
+        .merge(order_lines())
+        .merge(customers())
+        .merge(inventory())
+        .merge(promotions())
+        .merge(gift_cards())
+        .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
+}
+
+/// Hand-written order writes: a Bearer token, as the ViewSets, and the
+/// order change codename, checked in the handler.
+#[must_use]
+pub fn order_actions(auth: &JwtAuth) -> Router<AppState> {
+    Router::new()
+        .route("/api/v1/orders/{id}/confirm", post(confirm_order))
+        .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
+}
+
 /// Promotions over the API. The global scope hides `visible = false`
 /// rows from list, detail, update and delete (#1746).
-fn promotions() -> Router<AppState> {
+fn promotions() -> Router {
     ViewSet::for_model(Promotion::SCHEMA, &["id", "code", "label", "amount_cents", "visible", "deleted_at"])
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<Promotion>()
         .filter_fields(&["code", "visible"])
         .search_fields(&["code"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/promotions")
-        .with_state(())
 }
 
 /// The card code is the primary key, and a create keeps it (#1671).
-fn gift_cards() -> Router<AppState> {
+fn gift_cards() -> Router {
     ViewSet::for_model(GiftCard::SCHEMA, &["code", "balance_cents"])
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<GiftCard>()
         .tenant_router("/api/v1/gift-cards")
-        .with_state(())
 }
 
 /// The only columns the promotion form renders and writes.
@@ -181,12 +199,40 @@ fn account() -> Router<AppState> {
 }
 
 /// A retried payment POST must not charge twice, and must not replay
-/// another caller's or another tenant's answer (#1668).
-fn payments(cache: rustango::cache::BoxedCache) -> Router<AppState> {
+/// another caller's or another tenant's answer. A Bearer token and the
+/// order change codename, as `confirm`.
+#[must_use]
+pub fn payments(auth: &JwtAuth, cache: rustango::cache::BoxedCache) -> Router<AppState> {
     Router::new()
-        .route("/api/v1/payments", post(probes::payment))
-        .route("/api/v1/refunds", post(probes::payment))
+        .route("/api/v1/payments", post(payment))
+        .route("/api/v1/refunds", post(payment))
         .idempotency(IdempotencyLayer::new(cache).scope(format!("{}.payments", cache_namespace())))
+        .layer(axum::middleware::from_fn_with_state(auth.clone(), require_bearer))
+}
+
+async fn payment(
+    t: Tenant<DefaultTenantDb>,
+    Extension(user): Extension<AuthenticatedUser>,
+    body: Json<serde_json::Value>,
+) -> Result<axum::response::Response, (StatusCode, String)> {
+    may_change_orders(&t, &user).await?;
+    probes::payment(body).await
+}
+
+/// 403 unless `user` holds the order change codename on this tenant.
+async fn may_change_orders(
+    t: &Tenant<DefaultTenantDb>,
+    user: &AuthenticatedUser,
+) -> Result<(), (StatusCode, String)> {
+    let codename = rustango::permissions::codename_for::<Order>("change");
+    let allowed = rustango::tenancy::permissions::has_perm_pool(user.id, &codename, t.pool())
+        .await
+        .map_err(rustango::server_error)?;
+    if allowed {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, format!("needs `{codename}`")))
+    }
 }
 
 fn probe_routes() -> Router<AppState> {
@@ -373,9 +419,9 @@ fn cache_namespace() -> String {
     format!("{}.{instance}.storefront", env!("CARGO_PKG_NAME"))
 }
 
-fn products() -> Router<AppState> {
+fn products() -> Router {
     ViewSet::for_model(Product::SCHEMA, &["id", "sku", "name", "description", "price_cents", "active", "created_at"])
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<Product>()
         .serializer::<ProductSerializer>()
         .filter_fields(&["active", "sku"])
         .search_fields(&["sku", "name"])
@@ -384,7 +430,6 @@ fn products() -> Router<AppState> {
         .page_size(25)
         .max_page_size(200)
         .tenant_router("/api/v1/products")
-        .with_state(())
 }
 
 /// What the two order APIs render and write.
@@ -401,15 +446,14 @@ const ORDER_FIELDS: &[&str] = &[
 
 /// Cursor pagination — deliberately the *other* style, so both
 /// paginators are exercised by the same soak.
-fn orders() -> Router<AppState> {
+fn orders() -> Router {
     ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<Order>()
         .serializer::<OrderSerializer>()
         .filter_fields(&["status", "customer_id"])
         .cursor_pagination_desc("placed_at")
         .page_size(25)
         .tenant_router("/api/v1/orders")
-        .with_state(())
 }
 
 /// The same model with **no serializer** — the control for `/orders`.
@@ -420,43 +464,39 @@ fn orders() -> Router<AppState> {
 /// HTTP. It is kept now that `OrderSerializer` carries the FK, because
 /// the two together are what distinguish "the binder works" from "the
 /// serializer happens to hide the column".
-fn orders_raw() -> Router<AppState> {
+fn orders_raw() -> Router {
     ViewSet::for_model(Order::SCHEMA, ORDER_FIELDS)
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<Order>()
         .filter_fields(&["status", "customer_id"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/orders-raw")
-        .with_state(())
 }
 
 /// The bulk-create endpoint (#1403).
-fn order_lines() -> Router<AppState> {
+fn order_lines() -> Router {
     ViewSet::for_model(OrderLine::SCHEMA, &["id", "order_id", "product_id", "quantity", "unit_price_cents"])
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<OrderLine>()
         .filter_fields(&["order_id", "product_id"])
         .page_size(50)
         .tenant_router("/api/v1/order-lines")
-        .with_state(())
 }
 
-fn customers() -> Router<AppState> {
+fn customers() -> Router {
     ViewSet::for_model(Customer::SCHEMA, &["id", "email", "full_name", "loyalty_tier", "created_at"])
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<Customer>()
         .serializer::<CustomerSerializer>()
         .filter_fields(&["loyalty_tier"])
         .search_fields(&["email", "full_name"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/customers")
-        .with_state(())
 }
 
-fn inventory() -> Router<AppState> {
+fn inventory() -> Router {
     ViewSet::for_model(InventoryItem::SCHEMA, &["id", "product_id", "location", "on_hand", "updated_at"])
-        .allow_anonymous() // the soak driver writes without a login
+        .permissions_for_model::<InventoryItem>()
         .filter_fields(&["product_id", "location"])
         .limit_offset_pagination()
         .tenant_router("/api/v1/inventory")
-        .with_state(())
 }
 
 /// Dispatch onto **this tenant's** queue.
@@ -470,8 +510,10 @@ fn inventory() -> Router<AppState> {
 async fn confirm_order(
     State(st): State<AppState>,
     t: Tenant<DefaultTenantDb>,
+    Extension(user): Extension<AuthenticatedUser>,
     Path(id): Path<i64>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), (StatusCode, String)> {
+    may_change_orders(&t, &user).await?;
     let slug = t.org.slug.clone();
     let queue = st.queues.get(&slug).ok_or((
         StatusCode::SERVICE_UNAVAILABLE,

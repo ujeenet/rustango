@@ -37,12 +37,11 @@ pub struct StartAppOptions {
     /// in-tree example or a workspace member with no `src/` parent.
     pub base_dir: Option<PathBuf>,
     /// Crate name to write into the generated `use ...` lines.
-    /// `None` means `"rustango"`. Set it when the project depends on
-    /// a renamed crate, so the generated app still compiles.
+    /// `None` reads Cargo.toml: a dependency renamed from `rustango`
+    /// (`rgo = { package = "rustango", .. }`) moves every path to it,
+    /// and `rgo` the `#[rustango(...)]` attributes too.
     ///
-    /// Only `use` paths change. The `#[rustango(...)]` attribute name
-    /// stays as it is, because the proc-macro expects that token
-    /// whatever the crate is called.
+    /// When set, only `use` paths change.
     pub crate_root: Option<String>,
 }
 
@@ -91,6 +90,15 @@ pub fn startapp(
     let singular = singularize(&opts.app_name);
     // Crate root for the generated `use ...` paths.
     let crate_root = opts.crate_root.as_deref().unwrap_or("rustango");
+    // Unset, a renamed dependency in Cargo.toml moves every file to its name.
+    let alias = match opts.crate_root {
+        Some(_) => None,
+        None => renamed_dep(project_root),
+    };
+    let fit = |body: String| match alias.as_deref() {
+        Some(to) => rename_dep(&body, to),
+        None => body,
+    };
     let entries: [(&str, String); 5] = [
         ("mod.rs", mod_body),
         (
@@ -104,7 +112,7 @@ pub fn startapp(
     for (filename, body) in entries {
         let path = app_dir.join(filename);
         let rel = format!("{base_label}/{}/{}", opts.app_name, filename);
-        write_or_skip(&path, &rel, &body, &mut report)?;
+        write_or_skip(&path, &rel, &fit(body), &mut report)?;
     }
 
     // Register the new app in the project's entry file. If the file
@@ -175,10 +183,110 @@ pub fn startapp(
         }
         let path = bin_dir.join("manage.rs");
         let rel = format!("{base_label}/bin/manage.rs");
-        write_or_skip(&path, &rel, template, &mut report)?;
+        write_or_skip(&path, &rel, &fit(template.to_owned()), &mut report)?;
     }
 
     Ok(report)
+}
+
+/// The name `root`'s Cargo.toml gives a renamed rustango dependency
+/// (`rgo = { package = "rustango", .. }`), as a path segment.
+/// A member's `rgo = { workspace = true }` takes the rename from the
+/// workspace root's `[workspace.dependencies]`.
+pub(crate) fn renamed_dep(root: &Path) -> Option<String> {
+    let toml = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    renamed_dep_in(&toml)
+        .or_else(|| {
+            let ws = root
+                .ancestors()
+                .skip(1)
+                .filter_map(|d| std::fs::read_to_string(d.join("Cargo.toml")).ok())
+                .find(|t| t.lines().any(|l| l.trim() == "[workspace]"))?;
+            renamed_dep_in(&ws).filter(|k| inherits_dep(&toml, k))
+        })
+        .map(|k| k.replace('-', "_"))
+}
+
+/// Whether `toml` declares dependency `key` with `workspace = true`.
+fn inherits_dep(toml: &str, key: &str) -> bool {
+    let mut in_table = false;
+    for line in toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            in_table = t
+                .trim_matches(|c| c == '[' || c == ']')
+                .rsplit_once('.')
+                .is_some_and(|(head, k)| head.ends_with("dependencies") && k.trim() == key);
+            continue;
+        }
+        let Some((k, value)) = t.split_once('=') else {
+            continue;
+        };
+        let k = k.trim().trim_matches('"');
+        let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+        if (in_table && k == "workspace" && value == "true")
+            || (k == key && value.starts_with('{') && value.contains("workspace=true"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn renamed_dep_in(toml: &str) -> Option<String> {
+    // The key of the `[...dependencies.<key>]` table being read.
+    let mut table: Option<&str> = None;
+    for line in toml.lines() {
+        let t = line.trim();
+        if t.starts_with('[') {
+            table = t
+                .trim_matches(|c| c == '[' || c == ']')
+                .rsplit_once('.')
+                .filter(|(head, _)| head.ends_with("dependencies"))
+                .map(|(_, key)| key.trim());
+            continue;
+        }
+        let Some((key, value)) = t.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().trim_matches('"');
+        let value: String = value.chars().filter(|c| !c.is_whitespace()).collect();
+        if key == "package" && value == "\"rustango\"" {
+            if let Some(k) = table {
+                return Some(k.to_owned());
+            }
+        }
+        if value.starts_with('{') && value.contains("package=\"rustango\"") {
+            return Some(key.to_owned());
+        }
+    }
+    None
+}
+
+/// Generated source moved to a renamed dependency: `rustango::` paths, and
+/// for `rgo` the `#[rustango(` attributes. `cargo-rustango` keeps a copy.
+pub(crate) fn rename_dep(src: &str, to: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut rest = src;
+    while let Some(at) = rest.find("rustango") {
+        let (before, tail) = rest.split_at(at);
+        let after = &tail["rustango".len()..];
+        let starts_word = !before
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || "_-.".contains(c));
+        let is_path = after.starts_with("::");
+        let is_attr = to == "rgo" && before.ends_with("#[") && after.starts_with('(');
+        out.push_str(before);
+        out.push_str(if starts_word && (is_path || is_attr) {
+            to
+        } else {
+            "rustango"
+        });
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn write_or_skip(
@@ -699,6 +807,95 @@ mod tests {
             assert!(p.exists(), "{}", p.display());
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A project whose Cargo.toml renames the dependency to `rgo` gets
+    /// `rgo::` paths and `#[rgo(...)]` in every file, the manage bin too.
+    #[test]
+    fn renamed_dependency_reaches_every_file() {
+        let root = fresh_root("alias");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"short\"\n\n[dependencies]\n\
+             rgo = { package = \"rustango\", version = \"0.61\" }\n",
+        )
+        .unwrap();
+        startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "blog".into(),
+                manage_bin: Some(SINGLE_TENANT_MANAGE_BIN),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let blog = root.join("src").join("blog");
+        let files = ["mod.rs", "models.rs", "views.rs", "urls.rs", "tests.rs"]
+            .map(|f| blog.join(f))
+            .into_iter()
+            .chain([root.join("src").join("bin").join("manage.rs")]);
+        for p in files {
+            let body = std::fs::read_to_string(&p).unwrap();
+            assert!(!body.contains("rustango::"), "{}: {body}", p.display());
+            assert!(!body.contains("#[rustango("), "{}: {body}", p.display());
+        }
+        let models = std::fs::read_to_string(blog.join("models.rs")).unwrap();
+        assert!(
+            models.contains("use rgo::Model;") && models.contains("#[rgo("),
+            "{models}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `rgo = { workspace = true }` reads the rename from the workspace root.
+    #[test]
+    fn renamed_dep_follows_a_workspace_dependency() {
+        let ws = fresh_root("alias_ws");
+        let member = ws.join("crates").join("app");
+        std::fs::create_dir_all(&member).unwrap();
+        std::fs::write(
+            ws.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/app\"]\n\n[workspace.dependencies]\n\
+             rgo = { package = \"rustango\", version = \"0.61\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\nrgo = { workspace = true }\n",
+        )
+        .unwrap();
+        assert_eq!(renamed_dep(&member).as_deref(), Some("rgo"));
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies.rgo]\nworkspace = true\n",
+        )
+        .unwrap();
+        assert_eq!(renamed_dep(&member).as_deref(), Some("rgo"));
+        std::fs::write(
+            member.join("Cargo.toml"),
+            "[package]\nname = \"app\"\n\n[dependencies]\nrustango = \"0.61\"\n",
+        )
+        .unwrap();
+        assert_eq!(renamed_dep(&member), None);
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn renamed_dep_reads_both_cargo_shapes() {
+        let inline = "[dependencies]\nrgo = { package = \"rustango\", path = \"..\" }\n";
+        assert_eq!(renamed_dep_in(inline).as_deref(), Some("rgo"));
+        let table = "[dependencies.rgo]\nversion = \"0.61\"\npackage = \"rustango\"\n";
+        assert_eq!(renamed_dep_in(table).as_deref(), Some("rgo"));
+        let plain = "[dependencies]\nrustango = { version = \"0.61\" }\n";
+        assert_eq!(renamed_dep_in(plain), None);
+        assert_eq!(
+            rename_dep(
+                "use rustango::Model;\n#[rustango(table = \"t\")]\nrustango_orm::x",
+                "rgo"
+            ),
+            "use rgo::Model;\n#[rgo(table = \"t\")]\nrustango_orm::x"
+        );
     }
 
     #[test]

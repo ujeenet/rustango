@@ -65,6 +65,23 @@ pub struct Translation {
 const LOCALE_LEN: u32 = 16;
 const KEY_LEN: u32 = 200;
 
+/// `true` when `(locale, key)` fits the table; a longer catalog key stays
+/// file-only rather than failing the rows beside it.
+pub(crate) fn storable(locale: &str, key: &str) -> bool {
+    let fits = |s: &str, max: u32| u32::try_from(s.chars().count()).is_ok_and(|n| n <= max);
+    let ok = fits(locale, LOCALE_LEN) && fits(key, KEY_LEN);
+    if !ok {
+        tracing::warn!(
+            target: "rustango::i18n",
+            locale,
+            key_chars = key.chars().count(),
+            "translation key longer than {KEY_LEN} chars (or locale over {LOCALE_LEN}) \
+             is not stored in the database; it keeps its file value"
+        );
+    }
+    ok
+}
+
 /// The `CREATE TABLE` for this dialect.
 ///
 /// Both timestamp columns take type *and* `DEFAULT` from
@@ -207,7 +224,9 @@ pub async fn all_pool(pool: &Pool) -> Result<Vec<Translation>, ExecError> {
 /// change (operator id / username); pass `""` if not tracked.
 ///
 /// # Errors
-/// As the ORM upsert path ([`ExecError`]).
+/// As the ORM upsert path ([`ExecError`]). A `key` over 200 chars or a
+/// `locale` over 16 fails validation with `MaxLengthExceeded` before
+/// any SQL runs; the seed and the editor skip those keys instead.
 pub async fn upsert_pool(
     pool: &Pool,
     locale: &str,
@@ -240,7 +259,8 @@ pub async fn upsert_pool(
 /// `(locale, key)` rows are left untouched (`ON CONFLICT DO NOTHING`),
 /// so files stay the source of truth for shipped defaults and only
 /// previously-unknown keys are added. Idempotent — safe to run on every
-/// boot. Returns the number of file entries processed.
+/// boot. Returns the number of file entries processed. A key longer than
+/// the `key` column is skipped with a warning and keeps its file value.
 ///
 /// The on-disk path is the caller's: load with
 /// `Translator::from_directory(dir, default)?` then hand the result here
@@ -255,6 +275,7 @@ pub async fn seed_from_translator_pool(
     let rows: Vec<Translation> = translator
         .entries()
         .into_iter()
+        .filter(|(locale, key, _)| storable(locale, key))
         .map(|(locale, key, value)| Translation {
             id: Auto::Unset,
             locale,
@@ -323,6 +344,38 @@ pub async fn delete_override(pool: &Pool, locale: &str, key: &str) -> Result<u64
         },
     )
     .await
+}
+
+/// Translators the admin translations editor refreshes after each save.
+static LIVE_TRANSLATORS: std::sync::Mutex<Vec<std::sync::Weak<Translator>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Let the admin translations editor refresh `translator` after each save.
+/// Only this process is refreshed: other replicas still need their own
+/// [`refresh_overrides_pool`] (on a timer or a signal).
+pub fn register_live_translator(translator: &std::sync::Arc<Translator>) {
+    let mut live = LIVE_TRANSLATORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    live.retain(|w| w.strong_count() > 0);
+    live.push(std::sync::Arc::downgrade(translator));
+}
+
+/// [`refresh_overrides_pool`] for every [`register_live_translator`] one.
+///
+/// # Errors
+/// The first failed reload.
+pub async fn refresh_live_translators(pool: &Pool) -> Result<(), ExecError> {
+    let live: Vec<std::sync::Arc<Translator>> = LIVE_TRANSLATORS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter_map(std::sync::Weak::upgrade)
+        .collect();
+    for t in live {
+        refresh_overrides_pool(&t, pool).await?;
+    }
+    Ok(())
 }
 
 /// Reload `translator`'s override layer from the DB so subsequent

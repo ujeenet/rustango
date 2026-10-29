@@ -1448,9 +1448,15 @@ impl Chain {
         forward: Vec<SchemaChange>,
         data: Option<&str>,
     ) -> Result<String, String> {
-        let mut mig = make_migrations_from(self.dir.path(), &snap(after), None)
-            .map_err(|e| e.to_string())?
-            .expect("the snapshot changed");
+        // Only the scaffold is used: its ops are replaced below.
+        let mut mig = rustango::migrate::make_migrations_from_with(
+            self.dir.path(),
+            &snap(after),
+            None,
+            rustango::migrate::DropAndAdd::Allow,
+        )
+        .map_err(|e| e.to_string())?
+        .expect("the snapshot changed");
         mig.forward = forward.into_iter().map(Operation::Schema).collect();
         if let Some(sql) = data {
             mig.forward.push(Operation::Data(rustango::migrate::DataOp {
@@ -3767,6 +3773,75 @@ async fn empty_migration_renames_reach_the_snapshot(pool: &Pool) {
     );
 }
 
+/// A renamed field is never written as a silent drop + add: makemigrations
+/// refuses and names the route; `--empty` + `RenameColumn` keeps every row;
+/// `DropAndAdd::Allow` still writes the drop + add on purpose.
+async fn renamed_field_is_refused_and_keeps_its_rows(pool: &Pool) {
+    let t = "mad_rf_post";
+    let chain = Chain::new(pool, "rf", &[t]).await;
+    let with = |c: &str| json!({"tables": [table(t, vec![id(), col(c, "string", json!({"max_length": 100}))])]});
+    chain.step(pool, with("subtitle")).await.expect("initial");
+    for (n, v) in [(1, "sub1"), (2, "sub2")] {
+        let sql = format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({n}, '{v}')");
+        exec(pool, &sql, &[t, "id", "subtitle"]).await.unwrap();
+    }
+
+    let err = make_migrations_from(chain.dir.path(), &snap(with("tagline")), None)
+        .expect_err("a drop beside a same-type add is refused")
+        .to_string();
+    for part in [
+        "`mad_rf_post.subtitle` dropped, `mad_rf_post.tagline` added",
+        "makemigrations --empty",
+        "RenameColumn",
+        "--drop-and-add",
+    ] {
+        assert!(err.contains(part), "{part}: {err}");
+    }
+    assert_eq!(chain.head().name, "0001_initial", "nothing was written");
+
+    let mut mig = rustango::migrate::manage::make_empty(chain.dir.path(), "rename_subtitle")
+        .expect("--empty");
+    mig.forward = vec![Operation::Schema(SchemaChange::RenameColumn {
+        table: t.into(),
+        old_column: "subtitle".into(),
+        new_column: "tagline".into(),
+    })];
+    chain.write(&mig);
+    let next = make_migrations_from(chain.dir.path(), &snap(with("tagline")), None).expect("diff");
+    assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+    chain.migrate(pool).await.expect("RenameColumn");
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        &q(pool, "SELECT {} FROM {} ORDER BY {}", &["tagline", t, "id"]),
+        Vec::new(),
+        pool,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("sub1".to_owned(),), ("sub2".to_owned(),)]);
+
+    let mig = rustango::migrate::make_migrations_from_with(
+        chain.dir.path(),
+        &snap(with("summary")),
+        None,
+        rustango::migrate::DropAndAdd::Allow,
+    )
+    .expect("allowed")
+    .expect("written");
+    assert_eq!(
+        mig.forward,
+        vec![
+            Operation::Schema(SchemaChange::AddColumn {
+                table: t.into(),
+                column: "summary".into(),
+            }),
+            Operation::Schema(SchemaChange::DropColumn {
+                table: t.into(),
+                column: "tagline".into(),
+            }),
+        ]
+    );
+}
+
 // ---------------------------------------------------------------- #2574
 
 /// Two branches' `0002`s: makemigrations refuses until `--merge`, and the
@@ -4387,6 +4462,75 @@ async fn data_op_keeps_its_scope(pool: &Pool) {
     chain.migrate(pool).await.expect("add b");
 }
 
+async fn manage(pool: &Pool, chain: &Chain, args: &[&str]) -> Result<(), String> {
+    let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+    rustango::migrate::manage::run_with_writer(pool, chain.dir.path(), args, &mut Vec::new())
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// A data op of two statements applies on every backend, not just SQLite.
+async fn data_op_runs_several_statements(pool: &Pool) {
+    let t = "mad_ms_item";
+    let chain = Chain::new(pool, "ms", &[t]).await;
+    let v = json!({"tables": [table(t, vec![id(), col("n", "i64", json!({}))])]});
+    chain.step(pool, v).await.expect("create");
+    let sql = q(
+        pool,
+        "INSERT INTO {} ({}, {}) VALUES (1, 1); UPDATE {} SET {} = 2",
+        &[t, "id", "n", t, "n"],
+    );
+    manage(
+        pool,
+        &chain,
+        &["add-data-op", "--sql", &sql, "--name", "mad_ms_two"],
+    )
+    .await
+    .expect("add-data-op");
+    chain.migrate(pool).await.expect("both statements apply");
+    let sql = q(pool, "SELECT {} FROM {}", &["n", t]);
+    let rows: Vec<(i64,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, vec![(2,)]);
+}
+
+/// `forget-pending` refuses a migration a later one builds on, and names it.
+async fn forget_pending_keeps_the_chain(pool: &Pool) {
+    let t = "mad_fp_item";
+    let chain = Chain::new(pool, "fp", &[t]).await;
+    let v = json!({"tables": [table(t, vec![id()])]});
+    chain.step(pool, v).await.expect("create");
+    manage(
+        pool,
+        &chain,
+        &["add-data-op", "--sql", "SELECT 1", "--name", "mad_fp_two"],
+    )
+    .await
+    .expect("0002");
+    let two = chain.head().name;
+    manage(
+        pool,
+        &chain,
+        &["add-data-op", "--sql", "SELECT 1", "--name", "mad_fp_three"],
+    )
+    .await
+    .expect("0003");
+    let three = chain.head().name;
+    let err = manage(pool, &chain, &["forget-pending", &two])
+        .await
+        .expect_err("0003 builds on 0002");
+    assert!(err.contains(&three), "{err}");
+    rustango::migrate::file::list_dir(chain.dir.path()).expect("the chain is whole");
+    manage(pool, &chain, &["forget-pending", &three])
+        .await
+        .expect("a leaf goes");
+    manage(pool, &chain, &["forget-pending", &two])
+        .await
+        .expect("then its parent");
+    chain.migrate(pool).await.expect("migrate after");
+}
+
 fn junction(through: &str, post: &str, tag: &str) -> Value {
     json!({"through": through, "src_table": post, "src_col": "post_id",
            "dst_table": tag, "dst_col": "tag_id"})
@@ -4647,6 +4791,7 @@ tri_dialect_test!(
         migrate_to_applies_an_earlier_pending_file,
         unmanaged_model_keeps_its_table,
         empty_migration_renames_reach_the_snapshot,
+        renamed_field_is_refused_and_keeps_its_rows,
         branched_chain_needs_a_merge,
         type_change_with_a_default,
         dropped_exclude_unapplies,
@@ -4733,5 +4878,7 @@ tri_dialect_test!(
         proxy_model_creates_no_table,
         composite_fk_needs_a_unique_target,
         generated_column_adds_to_a_filled_table,
+        data_op_runs_several_statements,
+        forget_pending_keeps_the_chain,
     ]
 );

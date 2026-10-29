@@ -274,6 +274,15 @@ fn mcp_feature_compiles() {
     assert_compiles_with("fullstack", &["--features", "mcp"], &[], "mcp-fullstack");
 }
 
+/// `--alias rgo`: the dependency is renamed and the code says `rgo::` and
+/// `#[rgo(...)]`, so the derive must resolve through the rename.
+#[test]
+#[ignore = "compiles rustango; run with --ignored"]
+fn rgo_alias_compiles() {
+    assert_compiles_with("tenant", &["--alias", "rgo"], &[], "alias-tenant");
+    assert_compiles_with("fullstack", &["--alias", "rgo"], &[], "alias-fullstack");
+}
+
 // ------------------------------------------------------------ run it
 
 /// Status line and headers of a signed-out `GET path` on the apex.

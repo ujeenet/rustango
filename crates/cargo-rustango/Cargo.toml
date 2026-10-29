@@ -18,6 +18,14 @@ workspace = true
 name = "cargo-rustango"
 path = "src/main.rs"
 
+# `cargo rgo …`: the same scaffolder under a short name. Its tests run once,
+# in `cargo-rustango`.
+[[bin]]
+name = "cargo-rgo"
+path = "src/bin/cargo-rgo.rs"
+test = false
+doc = false
+
 [dependencies]
 # Standalone — does not depend on the `rustango` library crate. The
 # scaffolder writes user-project source files; it doesn't link to

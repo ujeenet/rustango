@@ -871,6 +871,47 @@ impl Schema {
         self
     }
 
+    /// Add the limits a write enforces: `field`'s choices and bounds,
+    /// each overridden by a given value. Used by the ViewSet and the
+    /// `Serializer` derive.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn field_limits(
+        mut self,
+        field: Option<&crate::core::FieldSchema>,
+        max_length: Option<u64>,
+        min_length: Option<u64>,
+        min: Option<i64>,
+        max: Option<i64>,
+    ) -> Self {
+        if let Some(choices) = field.and_then(|f| f.choices) {
+            self.enum_ = choices
+                .iter()
+                .map(|(v, _)| serde_json::Value::from(*v))
+                .collect();
+            if self
+                .type_
+                .as_ref()
+                .is_some_and(|t| t.0.iter().any(|n| n == "null"))
+            {
+                self.enum_.push(serde_json::Value::Null);
+            }
+        }
+        if let Some(n) = max_length.or_else(|| field.and_then(|f| f.max_length).map(u64::from)) {
+            self.max_length = Some(n);
+        }
+        if let Some(n) = min_length {
+            self.min_length = Some(n);
+        }
+        if let Some(n) = min.or_else(|| field.and_then(|f| f.min)) {
+            self.minimum = Some(n as f64);
+        }
+        if let Some(n) = max.or_else(|| field.and_then(|f| f.max)) {
+            self.maximum = Some(n as f64);
+        }
+        self
+    }
+
     #[must_use]
     pub fn enum_<I, V>(mut self, values: I) -> Self
     where

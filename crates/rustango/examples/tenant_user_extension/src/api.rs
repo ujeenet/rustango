@@ -3,7 +3,7 @@
 //! `GET /users/:username` (signed-in tenant users only) resolves a tenant from the request, fetches
 //! the matching `AppUser` via the ORM, and returns the typed extras
 //! (`display_name`, `timezone`) inline. The framework's auth path
-//! still operates against the seven core columns of `rustango_users`
+//! still operates against the core columns of `rustango_users`
 //! — extras are pure application data.
 
 use axum::extract::Path;

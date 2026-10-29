@@ -45,6 +45,26 @@ use axum::http::{Method, Request, Response, StatusCode};
 use axum::middleware::Next;
 use axum::Router;
 
+/// Request headers the framework reads: bodies, auth, HMAC, idempotency, preconditions.
+#[cfg(feature = "config")]
+const FRAMEWORK_REQUEST_HEADERS: [&str; 6] = [
+    "Content-Type",
+    "Authorization",
+    "X-Date",
+    "Idempotency-Key",
+    "If-Match",
+    "If-None-Match",
+];
+
+/// Response headers the framework sets that a browser client needs to read.
+const FRAMEWORK_RESPONSE_HEADERS: [&str; 5] = [
+    "Retry-After",
+    "Idempotent-Replayed",
+    "ETag",
+    "Location",
+    "Link",
+];
+
 /// Origin matching policy.
 #[derive(Clone, Debug)]
 pub enum AllowOrigin {
@@ -105,7 +125,7 @@ impl CorsLayer {
                 "QUERY".into(),
             ],
             allow_headers: vec!["*".into()],
-            expose_headers: Vec::new(),
+            expose_headers: FRAMEWORK_RESPONSE_HEADERS.map(Into::into).to_vec(),
             allow_credentials: false,
             max_age: Some(Duration::from_secs(3600)),
         }
@@ -125,18 +145,14 @@ impl CorsLayer {
 
     /// Allow any origin.
     ///
-    /// This warns if credentials are already on. Browsers reject `*`
+    /// This logs an error if credentials are already on. Browsers reject `*`
     /// together with credentials. For credentialed CORS, list the
     /// origins with `.allow_origins([...])` instead.
     #[must_use]
     pub fn allow_any_origin(mut self) -> Self {
         self.allow_origin = AllowOrigin::Any;
         if self.allow_credentials {
-            tracing::warn!(
-                target: "rustango::cors",
-                "CorsLayer.allow_any_origin() called with allow_credentials=true — \
-                 use .allow_origins([...]) with an explicit allowlist for credentialed CORS"
-            );
+            log_credentials_with_any_origin();
         }
         self
     }
@@ -151,6 +167,8 @@ impl CorsLayer {
     /// - Named origins give an allowlist plus the methods and
     ///   headers most APIs need. For tighter control, build the
     ///   layer yourself.
+    /// - `cors_allowed_headers` / `cors_expose_headers` add to the
+    ///   framework's lists; `cors_allow_credentials` sets credentials.
     ///
     /// ```no_run
     /// # use rustango::cors::{CorsLayer, CorsRouterExt};
@@ -167,17 +185,50 @@ impl CorsLayer {
         if s.cors_allowed_origins.is_empty() {
             return None;
         }
-        if s.cors_allowed_origins.iter().any(|o| o == "*") {
-            return Some(Self::permissive());
+        let any_origin = s.cors_allowed_origins.iter().any(|o| o == "*");
+        let mut credentials = s.cors_allow_credentials.unwrap_or(false);
+        if credentials && any_origin {
+            // Browsers refuse `*` with credentials, so they could never work.
+            log_credentials_with_any_origin();
+            credentials = false;
         }
-        Some(
+        let layer = if any_origin {
+            Self::permissive()
+        } else {
             Self::new()
                 .allow_origins(s.cors_allowed_origins.iter().cloned())
                 .allow_methods([
                     "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "QUERY",
                 ])
-                .allow_headers(["Content-Type", "Authorization"])
-                .max_age(Duration::from_secs(3600)),
+                .allow_headers(FRAMEWORK_REQUEST_HEADERS)
+                .expose_headers(FRAMEWORK_RESPONSE_HEADERS)
+                .max_age(Duration::from_secs(3600))
+        };
+        let merge = |base: Vec<String>, extra: &[String]| -> Vec<String> {
+            let mut out = base;
+            for h in extra {
+                // With credentials a browser reads `*` as a header named `*`.
+                if credentials && h == "*" {
+                    tracing::warn!(
+                        target: "rustango::cors",
+                        "`*` in cors_allowed_headers / cors_expose_headers is not a wildcard \
+                         with cors_allow_credentials; it is ignored, so list the headers"
+                    );
+                    continue;
+                }
+                if !out.iter().any(|b| b == "*" || b.eq_ignore_ascii_case(h)) {
+                    out.push(h.clone());
+                }
+            }
+            out
+        };
+        let allow = merge(layer.allow_headers.clone(), &s.cors_allowed_headers);
+        let expose = merge(layer.expose_headers.clone(), &s.cors_expose_headers);
+        Some(
+            layer
+                .allow_headers(allow)
+                .expose_headers(expose)
+                .allow_credentials(credentials),
         )
     }
 
@@ -218,20 +269,14 @@ impl CorsLayer {
     ///
     /// **Do not combine this with `allow_any_origin()`.** Browsers
     /// reject `*` together with credentials, so those requests fail.
-    /// List your origins instead. This method warns at build time if
-    /// the layer already allows any origin, so the mistake shows up
-    /// in the logs and not only as a broken preflight.
+    /// List your origins instead. This method logs an error if the
+    /// layer already allows any origin, so the mistake shows up in the
+    /// logs and not only as a failed request.
     #[must_use]
     pub fn allow_credentials(mut self, yes: bool) -> Self {
         self.allow_credentials = yes;
         if yes && matches!(self.allow_origin, AllowOrigin::Any) {
-            tracing::warn!(
-                target: "rustango::cors",
-                "CorsLayer.allow_credentials(true) combined with allow_any_origin() — \
-                 the framework echoes the request Origin back per request, but preflights \
-                 that omit `Origin` will fail in browsers. Use .allow_origins([...]) with \
-                 an explicit allowlist for credentialed CORS."
-            );
+            log_credentials_with_any_origin();
         }
         self
     }
@@ -271,6 +316,15 @@ impl CorsLayer {
             (AllowOrigin::List(_), None) => None,
         }
     }
+}
+
+/// Any origin with credentials answers `*`, which browsers refuse.
+fn log_credentials_with_any_origin() {
+    tracing::error!(
+        target: "rustango::cors",
+        "CORS allows any origin with credentials: the layer answers `*`, which browsers \
+         refuse for credentialed requests, so they all fail; list the origins instead"
+    );
 }
 
 /// Extension trait that adds `.layer(CorsLayer)` ergonomics to `Router`.
@@ -602,5 +656,98 @@ mod tests {
         assert!(layer
             .resolve_origin(Some("https://other.example.com"))
             .is_none());
+    }
+
+    /// `[security]` CORS headers and credentials add to the framework's lists.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_merges_configured_headers_and_credentials() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["https://app.example.com".into()];
+        s.cors_allowed_headers = vec!["X-Tenant".into(), "authorization".into()];
+        s.cors_expose_headers = vec!["X-Total-Count".into()];
+        s.cors_allow_credentials = Some(true);
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        let mut resp = Response::new(Body::empty());
+        attach_cors_headers(&layer, Some("https://app.example.com"), None, &mut resp);
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase()
+        };
+        let allowed = header(ACCESS_CONTROL_ALLOW_HEADERS);
+        assert!(
+            allowed.contains("x-tenant") && allowed.contains("idempotency-key"),
+            "{allowed}"
+        );
+        assert_eq!(allowed.matches("authorization").count(), 1, "{allowed}");
+        let exposed = header(ACCESS_CONTROL_EXPOSE_HEADERS);
+        assert!(
+            exposed.contains("x-total-count") && exposed.contains("etag"),
+            "{exposed}"
+        );
+        assert_eq!(header(ACCESS_CONTROL_ALLOW_CREDENTIALS), "true");
+    }
+
+    /// `*` origins never turn credentials on: browsers refuse that pair.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_refuses_credentials_with_any_origin() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["*".into()];
+        s.cors_allow_credentials = Some(true);
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        assert!(!layer.allow_credentials);
+    }
+
+    /// With credentials a configured `*` header is dropped, not sent as a
+    /// header named `*`, and the headers after it still count.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_drops_a_star_header_with_credentials() {
+        let mut s = crate::config::SecuritySettings::default();
+        s.cors_allowed_origins = vec!["https://app.example.com".into()];
+        s.cors_allowed_headers = vec!["*".into(), "X-Tenant".into()];
+        s.cors_expose_headers = vec!["*".into(), "X-Total-Count".into()];
+        s.cors_allow_credentials = Some(true);
+        let layer = CorsLayer::from_settings(&s).expect("Some");
+        for list in [&layer.allow_headers, &layer.expose_headers] {
+            assert!(!list.iter().any(|h| h == "*"), "{list:?}");
+        }
+        assert!(layer.allow_headers.iter().any(|h| h == "X-Tenant"));
+        assert!(layer.expose_headers.iter().any(|h| h == "X-Total-Count"));
+    }
+
+    /// A browser client can send the idempotency and HMAC headers, and
+    /// read the headers the framework answers with.
+    #[cfg(feature = "config")]
+    #[test]
+    fn from_settings_covers_the_framework_headers() {
+        for origin in ["https://app.example.com", "*"] {
+            let mut s = crate::config::SecuritySettings::default();
+            s.cors_allowed_origins = vec![origin.into()];
+            let layer = CorsLayer::from_settings(&s).expect("Some");
+            let mut resp = Response::new(Body::empty());
+            attach_cors_headers(&layer, Some("https://app.example.com"), None, &mut resp);
+            let header = |name| {
+                resp.headers()
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+            };
+            let exposed = header(ACCESS_CONTROL_EXPOSE_HEADERS);
+            for h in ["retry-after", "idempotent-replayed", "etag", "location"] {
+                assert!(exposed.contains(h), "{origin}: {h} not exposed: {exposed}");
+            }
+            if origin != "*" {
+                let allowed = header(ACCESS_CONTROL_ALLOW_HEADERS);
+                for h in ["idempotency-key", "if-match", "x-date", "authorization"] {
+                    assert!(allowed.contains(h), "{h} not allowed: {allowed}");
+                }
+            }
+        }
     }
 }

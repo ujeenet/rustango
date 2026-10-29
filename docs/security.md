@@ -131,7 +131,7 @@ let layer = CorsLayer::new()
 let layer = CorsLayer::permissive();              // any origin, common methods
 ```
 
-`CorsLayer::new()` allows no origin until you add some. `CorsLayer::from_settings(&settings.security)` reads `[security] cors_allowed_origins`: an empty list gives `None` (mount nothing), `"*"` gives `permissive()`, and named origins give an allowlist with the common methods (QUERY included) and the `Content-Type` and `Authorization` headers.
+`CorsLayer::new()` allows no origin until you add some. `CorsLayer::from_settings(&settings.security)` reads `[security] cors_allowed_origins`: an empty list gives `None` (mount nothing), `"*"` gives `permissive()`, and named origins give an allowlist with the common methods (QUERY included) and the `Content-Type`, `Authorization`, `X-Date`, `Idempotency-Key`, `If-Match`, `If-None-Match` request headers. Both expose `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location`, `Link` to scripts. `cors_allowed_headers` and `cors_expose_headers` add to those lists, and `cors_allow_credentials = true` sends `Access-Control-Allow-Credentials` with named origins; with `"*"` it is refused with a logged error, and a `"*"` header entry is dropped.
 
 **Security note:** with credentials you MUST list explicit origins. `allow_credentials(true)` combined with `allow_any_origin()` does not give you credentialed wildcard CORS — there is no such thing, and asking for it gets you neither half.
 
@@ -365,7 +365,7 @@ let app = Router::new()
 // authenticate on another's — fixed in 0.57.11.
 ```
 
-The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain. `require_perm` answers `401` without a user and `403` without the codename. `optional_auth(backends)` resolves the user the same way but lets anonymous requests through. All three need the tenancy layer mounted outside them; without a `TenantContext` they fail closed with `500`.
+The middleware tries each backend in order. The first one that succeeds wins; the first one that returns a hard error stops the chain. `require_perm` answers `401` without a user, `403` without the codename and `503` when the permission read fails. `optional_auth(backends)` resolves the user the same way but lets anonymous requests through. All three need the tenancy layer mounted outside them; without a `TenantContext` they fail closed with `500`.
 
 ### Writing your own backend
 
@@ -537,7 +537,7 @@ Works with Google Authenticator, Authy, 1Password, Bitwarden, and other standard
 
 `verify` accepts the same code again until it expires. To make codes single use, call `matched_step` instead, store the step it returns, and accept a code only when its step is later than the stored one. The built-in admin login does this.
 
-With the `totp` feature the bare admin has two-factor sign-in too. Each user enrolls at `<admin>/account/totp`, and a confirmed device is asked for at every login, SSO included.
+With the `totp` feature the bare admin has two-factor sign-in too. Each user enrolls at `<admin>/account/totp`, and a confirmed device is asked for at every login, SSO included. Turning it off takes a current code; for a lost device run `manage reset-admin-totp <username>` (`reset-operator-totp` for an operator). Enrolling, turning off and failed codes write audit rows.
 
 The operator console has the same second factor, optional per operator or required for all; see [Two-factor sign-in](operator-console.md#two-factor-sign-in).
 

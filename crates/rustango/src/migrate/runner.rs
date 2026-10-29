@@ -585,15 +585,10 @@ pub(crate) async fn migrate_locked(
 /// the migrate lock, so a handler may migrate again.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Signals<'a> {
-    /// The PG `migrate` runner's and every tenant run's contract; `tenant`
-    /// names the run's tenant.
-    #[cfg_attr(
-        not(any(feature = "tenancy", all(feature = "postgres", feature = "manage"))),
-        allow(dead_code)
-    )]
-    Fire {
-        tenant: Option<&'a str>,
-    },
+    /// Every `migrate` run's contract; `tenant` names the run's tenant.
+    Fire { tenant: Option<&'a str> },
+    /// The registry's own run only.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     Skip,
 }
 
@@ -936,10 +931,10 @@ fn unregistered(name: &str) -> MigrateError {
 }
 
 /// The atomic runners' callback arm. `file::parse` already refuses this
-/// shape; running it would hang on the tx's own locks (#1626).
+/// shape; running it would hang on the tx's own locks.
 fn callback_in_atomic(mig: &str, op: &crate::migrate::file::CallbackOp) -> MigrateError {
     MigrateError::Validation(format!(
-        "{mig}: callback `{}` needs `\"atomic\": false` (#1626)",
+        "{mig}: callback `{}` needs `\"atomic\": false`",
         op.name,
     ))
 }
@@ -1290,7 +1285,7 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
-                sqlx::query(&d.sql).execute(&mut *tx).await?;
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
             }
             Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
         }
@@ -1708,7 +1703,7 @@ async fn unapply_atomic(
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
-                sqlx::query(&d.sql).execute(&mut *tx).await?;
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
             }
             Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
         }
@@ -1755,7 +1750,7 @@ async fn unapply_loose(
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
-                sqlx::query(&d.sql).execute(pool).await?;
+                sqlx::Executor::execute(pool, sqlx::raw_sql(&d.sql)).await?;
             }
             Operation::Callback(c) => {
                 callbacks.run(c, pool.clone().into()).await?;
@@ -1797,7 +1792,7 @@ async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(),
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
-                sqlx::query(&d.sql).execute(pool).await?;
+                sqlx::Executor::execute(pool, sqlx::raw_sql(&d.sql)).await?;
             }
             Operation::Callback(c) => {
                 callbacks.run(c, pool.clone().into()).await?;
@@ -4527,8 +4522,7 @@ async fn atomic_mysql(
                 deferred_fks.extend(step.batch.deferred_fks);
             }
             Operation::Data(d) => {
-                sqlx::query(&d.sql)
-                    .execute(&mut *tx)
+                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql))
                     .await
                     .map_err(|e| stuck!(e))?;
             }
@@ -4702,7 +4696,7 @@ async fn atomic_sqlite_segment(
                     deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                 }
                 Operation::Data(d) => {
-                    sqlx::query(&d.sql).execute(&mut *tx).await?;
+                    sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
                 }
                 Operation::Callback(c) => return Err(callback_in_atomic(name, c)),
             }
@@ -4827,7 +4821,7 @@ async fn apply_atomic_pool(
                         deferred_fks.extend(step.batch.deferred_fks);
                     }
                     Operation::Data(d) => {
-                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                        sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
                     }
                     Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
                 }
@@ -4905,7 +4899,7 @@ async fn apply_nonatomic_pool(
                 deferred_fks.extend(run_step_pool(pool, steps.next_step(), &mut dropped).await?);
             }
             Operation::Data(d) => {
-                crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
+                crate::sql::execute_unprepared_pool(pool, &d.sql).await?;
             }
             Operation::Callback(c) => {
                 callbacks.run(c, pool.clone()).await?;
@@ -4969,37 +4963,72 @@ pub async fn migrate_to_pool_with_ledger(
     target: &str,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_lock_pool(pool, ledger, async {
-        let all = file::list_dir(dir)?;
-        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-
-        if target == "zero" {
-            return unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await;
-        }
-
-        if !all.iter().any(|m| m.name == target) {
-            return Err(MigrateError::Validation(format!(
-                "target migration `{target}` not found in {}",
-                dir.display()
-            )));
-        }
-
-        let mut applied = applied;
-        let mut touched = Vec::new();
-        for mig in backward_from(&all, &applied, target) {
-            unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
-            applied.remove(&mig.name);
-            touched.push(mig);
-        }
-        let mut done = applied.clone();
-        for mig in forward_to(&all, &applied, target) {
-            reconcile_and_apply(pool, &all, &done, &mig, &applied, ledger, false).await?;
-            done.insert(mig.name.clone());
-            touched.push(mig);
-        }
-        Ok(touched)
+    let moved = with_migrate_lock_held(pool, |held| {
+        migrate_to_locked(held, pool, dir, target, ledger)
     })
-    .await
+    .await?;
+    Ok(moved.unapplied.into_iter().chain(moved.applied).collect())
+}
+
+/// What [`migrate_to_locked`] did, in order: rolled back, then applied.
+pub(crate) struct Moved {
+    pub(crate) unapplied: Vec<Migration>,
+    pub(crate) applied: Vec<Migration>,
+}
+
+/// `Err` unless `target` is one of `all`, the files in `dir`.
+pub(crate) fn target_on_disk(
+    all: &[Migration],
+    dir: &Path,
+    target: &str,
+) -> Result<(), MigrateError> {
+    if all.iter().any(|m| m.name == target) {
+        return Ok(());
+    }
+    Err(MigrateError::Validation(format!(
+        "target migration `{target}` not found in {}",
+        dir.display()
+    )))
+}
+
+/// [`migrate_to_pool_with_ledger`] for a caller already holding the lock.
+pub(crate) async fn migrate_to_locked(
+    held: LockHeld,
+    pool: &crate::sql::Pool,
+    dir: &Path,
+    target: &str,
+    ledger: &str,
+) -> Result<Moved, MigrateError> {
+    let all = file::list_dir(dir)?;
+    let applied = ledger_names(held, pool, ledger).await?;
+
+    if target == "zero" {
+        let unapplied = unapply_all_in_order_pool(pool, dir, &all, &applied, ledger).await?;
+        return Ok(Moved {
+            unapplied,
+            applied: Vec::new(),
+        });
+    }
+
+    target_on_disk(&all, dir, target)?;
+
+    let mut applied = applied;
+    let mut moved = Moved {
+        unapplied: Vec::new(),
+        applied: Vec::new(),
+    };
+    for mig in backward_from(&all, &applied, target) {
+        unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
+        applied.remove(&mig.name);
+        moved.unapplied.push(mig);
+    }
+    let mut done = applied.clone();
+    for mig in forward_to(&all, &applied, target) {
+        reconcile_and_apply(pool, &all, &done, &mig, &applied, ledger, false).await?;
+        done.insert(mig.name.clone());
+        moved.applied.push(mig);
+    }
+    Ok(moved)
 }
 
 /// Step back `steps` applied migrations against either backend.
@@ -5341,7 +5370,7 @@ async fn unapply_atomic_pool(
                         deferred_fks.extend(step.batch.deferred_fks);
                     }
                     Operation::Data(d) => {
-                        sqlx::query(&d.sql).execute(&mut *tx).await?;
+                        sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
                     }
                     Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
                 }
@@ -5475,7 +5504,7 @@ async fn unapply_nonatomic_pool(
                 deferred_fks.extend(run_step_pool(pool, steps.next_step(), &mut dropped).await?);
             }
             Operation::Data(d) => {
-                crate::sql::raw_execute_pool(pool, &d.sql, ::std::vec::Vec::new()).await?;
+                crate::sql::execute_unprepared_pool(pool, &d.sql).await?;
             }
             Operation::Callback(c) => {
                 callbacks.run(c, pool.clone()).await?;

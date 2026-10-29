@@ -152,7 +152,7 @@ Después, la contraseña sola solo abre el paso del código (`/login/totp`); nin
 
 Es opcional por operador. `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` lo hace obligatorio: un operador sin dispositivo configura uno en el paso del código antes de su primera sesión. Se lee al arrancar.
 
-Los secretos están en `rustango_operator_totp` en el registro, sellados con `RUSTANGO_SECRET_KEY`, que debe estar definido para activarlo. `migrate` crea la tabla, o la consola en el primer inicio de sesión. Si la tabla no existe (un rol del registro sin CREATE, antes de `migrate`), basta la contraseña salvo que TOTP sea obligatorio; si existe pero no se puede leer, el inicio de sesión se rechaza. Aún no hay códigos de recuperación: un operador que pierde el dispositivo necesita una shell en el registro para borrar su fila.
+Los secretos están en `rustango_operator_totp` en el registro, sellados con `RUSTANGO_SECRET_KEY`, que debe estar definido para activarlo. `migrate` crea la tabla, o la consola en el primer inicio de sesión. Si la tabla no existe (un rol del registro sin CREATE, antes de `migrate`), basta la contraseña salvo que TOTP sea obligatorio; si existe pero no se puede leer, el inicio de sesión se rechaza. Aún no hay códigos de recuperación: si un operador pierde el dispositivo, ejecuta `cargo run -- reset-operator-totp <username>`.
 
 ---
 
@@ -377,7 +377,10 @@ Cada tenant tiene su propia marca en su fila `Org`, que se define en
 `theme_mode`. El formulario **Branding assets** de la misma página sube un
 logo (PNG, JPEG o WebP) y un favicon (PNG o ICO), de hasta 1 MB cada uno
 (`RUSTANGO_BRAND_MAX_BYTES`). Los archivos se guardan en
-`RUSTANGO_BRAND_STORAGE_DIR`, por defecto `./var/brand`.
+`RUSTANGO_BRAND_STORAGE_DIR`, por defecto `./var/brand`. Ese directorio es
+local a cada pod y se pierde al redesplegar; con varias réplicas pase un disco
+compartido con `Cli::brand_storage` o `server::Builder::brand_storage` (por
+ejemplo un disco de `StorageRegistry`).
 
 El admin del tenant y su página de inicio de sesión usan estos valores;
 `[brand]` no les llega. Sin `brand_name` se muestra el nombre visible del

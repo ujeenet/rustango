@@ -59,17 +59,27 @@
           </thead>
           <tbody>
             {% for row in panel.rows %}
+              {% if row.error %}
+              <tr class="inline-form-gone"><td colspan="{{ panel.field_labels | length }}" class="error">{{ row.error }}</td></tr>
+              {% else %}
               <tr>
                 {% for cell in row.cells %}<td>{{ cell.input_html | safe }}</td>{% endfor %}
                 {% if row.pk %}<td>{{ row.delete_input_html | safe }}{{ row.hidden_pk | safe }}</td>{% endif %}
                 {% if not row.pk and panel.initial_forms > 0 %}<td></td>{% endif %}
               </tr>
+              {% endif %}
             {% endfor %}
           </tbody>
         </table>
       {% else %}
         {# stacked #}
         {% for row in panel.rows %}
+          {% if row.error %}
+          <fieldset class="inline-form-stacked inline-form-gone">
+            <legend>#{{ row.pk }}</legend>
+            <p class="error">{{ row.error }}</p>
+          </fieldset>
+          {% else %}
           <fieldset class="inline-form-stacked">
             {% if row.pk %}
               <legend>#{{ row.pk }}</legend>
@@ -88,6 +98,7 @@
               {% endif %}
             </dl>
           </fieldset>
+          {% endif %}
         {% endfor %}
       {% endif %}
     </section>

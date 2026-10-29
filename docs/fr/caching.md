@@ -284,7 +284,8 @@ verrous de ligne, de sorte qu'une course se résout en exactement un gagnant.
 `Cache::incr` est atomique sur les trois aussi : `DatabaseCache` le fait en un
 seul upsert. `FileCache` fait les deux sous un verrou par entrée, valable sur un
 seul hôte. Un `DistributedLock` ou un compteur exact entre réplicas fonctionne
-donc avec Redis ou la base de données.
+donc avec Redis ou la base de données. Chaque backend compte sur toute la plage
+`i64` ; un dépassement est une erreur et laisse le compteur inchangé.
 
 Deux choses à savoir :
 

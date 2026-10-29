@@ -295,8 +295,9 @@ mod class_based_views {
             )
         };
         assert_eq!(get(view(), "/contact").await, "0|extra|test-build");
+        // An invalid form re-renders as a 422.
         let (status, body) = send(view(), "POST", "/contact", "").await;
-        assert!(status.is_success(), "{status}: {body}");
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
         assert_eq!(body, "1|extra|test-build");
     }
 }

@@ -125,6 +125,12 @@ impl Lockout {
         self
     }
 
+    /// Attempts counted per window before the account locks.
+    #[cfg(test)]
+    pub(crate) fn attempt_limit(&self) -> u32 {
+        self.max_attempts
+    }
+
     /// How long a lock lasts once set.
     #[must_use]
     pub fn lock_duration(&self) -> Duration {
@@ -249,6 +255,25 @@ impl Lockout {
         Reservation::Counted(ReservedSlot { window: Some(id) })
     }
 
+    /// Count an attempt only when it is the window's first and the account
+    /// is not locked; `None`, counting nothing, otherwise or on a cache error.
+    #[cfg(feature = "admin")]
+    pub(crate) async fn reserve_sole(&self, account: &str) -> Option<ReservedSlot> {
+        let id = self.window(account, true).await.ok().flatten()?;
+        let key = self.window_counter_key(account, &id);
+        let n = self
+            .cache
+            .incr(&key, 1, Some(self.window_left(&id)))
+            .await
+            .ok()?;
+        // Checked after the count: a lock is set before its window clears.
+        if n != 1 || self.is_locked(account).await {
+            self.decrement(&key, &id).await;
+            return None;
+        }
+        Some(ReservedSlot { window: Some(id) })
+    }
+
     /// A reserved attempt failed. Only failures lock: at `max_attempts`
     /// failures in the window, however many attempts are in flight.
     pub async fn reserved_failed(&self, account: &str, slot: ReservedSlot) {
@@ -295,13 +320,9 @@ impl Lockout {
         }
     }
 
-    /// Take one off `key`, never below 0: an evicted or cleared counter
+    /// Take one off `key`, undone below 0: an evicted or cleared counter
     /// would otherwise hand out an extra attempt.
     async fn decrement(&self, key: &str, window_id: &str) {
-        let current = self.cache.get(key).await;
-        if !matches!(&current, Ok(Some(v)) if v.parse::<i64>().is_ok_and(|n| n > 0)) {
-            return;
-        }
         let ttl = Some(self.window_left(window_id));
         if let Ok(n) = self.cache.decr(key, 1, ttl).await {
             if n < 0 {
@@ -427,22 +448,21 @@ impl Lockout {
     /// The id (start time in µs) of the account's current window.
     async fn window(&self, account: &str, open: bool) -> Result<Option<String>, CacheError> {
         let window_key = self.window_key(account);
+        // Read first: the window is usually open already.
         for _ in 0..2 {
-            if open {
-                let id = chrono::Utc::now().timestamp_micros().to_string();
-                if self
-                    .cache
-                    .add(&window_key, &id, Some(self.counter_ttl))
-                    .await?
-                {
-                    return Ok(Some(id));
-                }
-            }
             if let Some(id) = self.cache.get(&window_key).await? {
                 return Ok(Some(id));
             }
             if !open {
                 break;
+            }
+            let id = chrono::Utc::now().timestamp_micros().to_string();
+            if self
+                .cache
+                .add(&window_key, &id, Some(self.counter_ttl))
+                .await?
+            {
+                return Ok(Some(id));
             }
         }
         Ok(None)

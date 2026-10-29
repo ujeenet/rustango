@@ -90,7 +90,7 @@ where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     query.validate()?;
-    let stmt = Postgres.compile_bulk_insert(query)?;
+    let stmt = Postgres.compile_bulk_insert(&query.last_per_conflict_key())?;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);

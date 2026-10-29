@@ -249,6 +249,46 @@ pub type DefaultTenantDb = sqlx::Sqlite;
 #[cfg(all(not(feature = "postgres"), not(feature = "sqlite"), feature = "mysql"))]
 pub type DefaultTenantDb = sqlx::MySql;
 
+/// A registry backend opened with the framework's pool setup: `[database]`
+/// tuning, the checkout ping and, on SQLite, WAL and a created file.
+// Without postgres, only `manage`'s tenancy runserver opens one.
+#[cfg_attr(not(any(feature = "postgres", feature = "manage")), allow(dead_code))]
+pub(crate) trait RegistryConnect: Database {
+    fn connect_registry(
+        url: &str,
+    ) -> impl std::future::Future<Output = Result<sqlx::Pool<Self>, crate::sql::PoolError>> + Send;
+}
+
+#[cfg(feature = "postgres")]
+impl RegistryConnect for sqlx::Postgres {
+    fn connect_registry(
+        url: &str,
+    ) -> impl std::future::Future<Output = Result<sqlx::Pool<Self>, crate::sql::PoolError>> + Send
+    {
+        crate::sql::Pool::connect_postgres(url)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+impl RegistryConnect for sqlx::Sqlite {
+    fn connect_registry(
+        url: &str,
+    ) -> impl std::future::Future<Output = Result<sqlx::Pool<Self>, crate::sql::PoolError>> + Send
+    {
+        crate::sql::Pool::connect_sqlite(url)
+    }
+}
+
+#[cfg(feature = "mysql")]
+impl RegistryConnect for sqlx::MySql {
+    fn connect_registry(
+        url: &str,
+    ) -> impl std::future::Future<Output = Result<sqlx::Pool<Self>, crate::sql::PoolError>> + Send
+    {
+        crate::sql::Pool::connect_mysql(url)
+    }
+}
+
 #[derive(Debug)]
 pub enum TenantPool<DB: Database = DefaultTenantDb> {
     /// Tenant data is in a schema in the (Postgres) registry DB. The
@@ -1936,6 +1976,35 @@ fn search_path_option(schema: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A SQLite registry opens through the framework: a missing file is
+    /// created, the journal is WAL and the pool takes `[database]` tuning.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_sqlite_registry_gets_the_framework_setup() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("registry.db");
+        let url = format!("sqlite:{}", file.display());
+        // First call wins; nextest runs each test in its own process.
+        let mut tuning = crate::sql::PoolTuning::default();
+        tuning.max_connections = Some(3);
+        crate::sql::configure_pools(tuning);
+        let pool = <sqlx::Sqlite as RegistryConnect>::connect_registry(&url)
+            .await
+            .expect("a missing registry file is created");
+        assert!(file.exists());
+        let (mode,): (String,) = sqlx::query_as("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
+        let want = crate::sql::pool_tuning().max_connections.expect("tuned");
+        assert_eq!(
+            pool.options().get_max_connections(),
+            want,
+            "[database] pool size"
+        );
+    }
 
     /// Counts lookups and parks each one briefly, so concurrent misses overlap.
     #[cfg(feature = "sqlite")]

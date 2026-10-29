@@ -239,7 +239,8 @@ use rustango::openapi::SecurityScheme;
 
 let spec = OpenApiSpec::new("API", "1.0")
     .add_security_scheme("bearerAuth", SecurityScheme::bearer("JWT"))
-    .add_security_scheme("apiKey", SecurityScheme::api_key_header("X-API-Key"))
+    // Framework API keys arrive as `Authorization: Bearer <prefix>.<secret>`.
+    .add_security_scheme("apiKey", SecurityScheme::bearer("ApiKey"))
     .require_security("bearerAuth", []);     // default for every operation
 ```
 
@@ -249,7 +250,8 @@ An einer `Operation` markiert `.no_security()` einen öffentlichen Endpunkt und
 `.require_security(scheme, scopes)` überschreibt den globalen Default. Diese
 passen zu **Rustango**s eigener Auth (siehe den
 [Security-Leitfaden](security.md#benutzer-authentifizieren)): JWT → `bearer`,
-API-Keys → `apiKey`, OAuth2 → `oauth2`.
+API-Keys → `bearer` (gesendet als `Authorization: Bearer`, nicht `X-API-Key`),
+OAuth2 → `oauth2`.
 
 ---
 

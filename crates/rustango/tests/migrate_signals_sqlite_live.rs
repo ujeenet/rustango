@@ -192,3 +192,39 @@ async fn target_receivers_get_the_migrated_pool() {
     assert!(rustango::signals::migrate::disconnect_post_migrate(id));
     assert_eq!(receiver_count(), 0);
 }
+
+/// The single-database `migrate` verb fires both, with no tenant.
+#[tokio::test]
+async fn migrate_verb_fires_pre_and_post_migrate() {
+    let _g = suite_lock().lock().await;
+    clear_all();
+    let trace: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let trace = trace.clone();
+        rustango::signals::migrate::connect_pre_migrate_with_target(move |_, target| {
+            let trace = trace.clone();
+            async move { trace.lock().await.push(("pre", target.tenant.is_none())) }
+        });
+    }
+    {
+        let trace = trace.clone();
+        rustango::signals::migrate::connect_post_migrate_with_target(move |_, target| {
+            let trace = trace.clone();
+            async move { trace.lock().await.push(("post", target.tenant.is_none())) }
+        });
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "rustango_migrate_verb_signals_{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let pool = fresh_pool().await;
+    let mut out = Vec::new();
+    rustango::migrate::manage::run_with_writer(&pool, &dir, ["migrate".to_owned()], &mut out)
+        .await
+        .expect("migrate");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(*trace.lock().await, vec![("pre", true), ("post", true)]);
+    clear_all();
+}

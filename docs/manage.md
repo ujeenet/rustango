@@ -82,7 +82,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `downgrade [N]` | Roll back the last N migrations |
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
-| `forget-pending <name>` | Delete an un-applied migration JSON |
+| `forget-pending <name>` | Delete an un-applied migration JSON no later file builds on |
 | `add-data-op --sql <SQL> [--reverse-sql <SQL>] [--scope <s>]` | Append a hand-written data operation |
 | `inspectdb [--schema <s>] [--table <t>]` | Read a live schema and emit `#[derive(Model)]` source |
 
@@ -90,7 +90,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 
 | Verb | What it does |
 |---|---|
-| `dumpdata` | Export rows as JSON fixtures |
+| `dumpdata` | Export rows as JSON fixtures. Floats keep every bit; a JSON column holding JSON `null` is written `{"$json": null}`, apart from SQL NULL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Load JSON fixtures back in. A failed or partial load is not rolled back |
 | `flush [--yes] [--app <label>] [--model <name>]` | Wipe every model table; the flags limit the set. Unmanaged models and views are skipped. Postgres uses `TRUNCATE … RESTART IDENTITY` and fails if a table outside the filter references a target (an `ON DELETE CASCADE` link from it still empties it on MySQL / SQLite); MySQL / SQLite delete rows in one transaction, children first, and keep id counters. A tenancy project needs `--tenant <slug>` and clears only that tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Streaming bulk delete; `--pretend` reports without deleting |
@@ -120,8 +120,11 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `showmodels [--format plain\|json] [--app <label>]` | Every registered model, sorted for deterministic output |
 | `showurls [--format plain\|json]` | Every named route, sorted |
-| `check [--deploy]` | Health checks; `--deploy` adds the production audits |
+| `check [--deploy]` | Health checks, model changes no migration holds, and migrations not yet applied; `--deploy` adds the production audits |
 | `create-admin` | Bootstrap an `AdminUser` row for projects using `admin::Builder::with_session_auth`. **Not** tenancy-gated — it takes a plain `&Pool` and writes `rustango_admin_users`, creating the table if absent. The only way to get a first admin login on a non-tenancy project |
+| `reset-password <username>` / `change-password <username>` | Set a single-database admin user's password; `change-password` checks the current one first. Same password flags as `create-admin` |
+| `set-admin-active <username> --on\|--off` | Turn an admin user off (their sessions end) or back on |
+| `reset-admin-totp <username>` | Remove an admin user's two-factor device after a lost phone. Audited with source `cli` |
 | `about` / `version` / `--version` | Build and version information |
 | `docs` | Open the documentation |
 
@@ -135,6 +138,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `set-password-link <slug> <username>` | Print a single-use link for the user to set their own password |
 | `reset-operator-password` / `change-operator-password` | Operator password recovery; `change-operator-password` reads the current password like `change-password` |
 | `set-operator-active` | Enable or disable an operator |
+| `reset-operator-totp <username>` | Remove an operator's two-factor device after a lost phone. Audited on the registry with source `cli` |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Roles |
 | `grant-perm` / `revoke-perm` | Permissions by codename |
 | `seed-permissions [--slug <s>]` | Seed the default permission rows |
@@ -153,7 +157,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Host routing |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Saved database servers |
 | `test-tenant-connection` | Verify a tenant's database is reachable |
-| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs and server passwords with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
+| `reseal-tenant-secrets [--apply]` | Re-seal stored tenant URLs, server passwords, operator TOTP and SSO secrets with the current `RUSTANGO_SECRET_KEY`; a dry run without `--apply` |
 | `prewarm-pools` | Open tenant pools ahead of first request |
 | `run-server` / `runserver` | Run the multi-tenant server |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Setup and interactive entry points |
@@ -213,6 +217,12 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 - `RenameTable`, `RenameColumn` — use `--empty` and edit the JSON. One
   exception: a changed M2M `src_col` / `dst_col` with the same `through` is
   written as `RenameColumn`, so the junction keeps its rows.
+
+A column dropped beside a new column of the same type on one table looks like
+a renamed field, and a drop + add would delete its data. `makemigrations`
+refuses it and names the columns; write the `RenameColumn` as below, or pass
+`--drop-and-add` to drop and add on purpose. Every other `DropColumn` prints a
+warning that its data goes.
 
 ### `makemigrations --app <app>`
 
@@ -752,7 +762,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.9
+rustango 0.61.10
 ```
 
 ### `about`
@@ -764,7 +774,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.9
+  version:        0.61.10
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -941,6 +951,15 @@ On SIGTERM it stops accepting and gives open connections
 SSE and long-poll never finish by themselves. Provisioning and migration runs
 left `running` by a stopped process for over an hour are marked failed at the
 next boot, and a webhook retry with the same `event_id` runs again.
+
+A single-database `runserver` applies pending migrations before it binds, firing
+`pre_migrate` / `post_migrate` like `migrate`. It waits up to
+`[server] migrate_lock_timeout_secs` (default 300) for another run's lock, then
+exits. Turn it off with `[server] migrate_on_boot = false`
+(`RUSTANGO__SERVER__MIGRATE_ON_BOOT=false`) or `Cli::migrate_on_boot(false)`.
+For a rolling deploy with several replicas, turn it off and run `migrate` once as
+a pre-deploy job, so a pod never migrates while old pods still serve. The tenancy
+server never migrates on boot; run `migrate` yourself.
 
 ### `create-tenant <slug> [options]`
 
@@ -1172,7 +1191,7 @@ cross-tenant console. Operators live in the shared registry, not inside
 any one tenant.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # print a random one instead
 ```
 
@@ -1313,6 +1332,9 @@ tenant's. The registry log is where the operator console records what
 operators did, so it grows with console use. Naming one tenant
 (`--tenant`) asks for that tenant and leaves the registry alone. One
 broken tenant is reported and counted rather than ending the sweep.
+
+A single-database project has the same verb with `--days`, `--keep-last` and
+`--yes`; it trims the one audit log.
 
 ### Inspecting what happened
 
@@ -1570,8 +1592,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser

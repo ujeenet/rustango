@@ -1403,6 +1403,31 @@ pub use axum as __axum;
 /// `#[derive(Model)]` — populates the `inventory` registry the admin
 /// walks, generates `objects()` / typed columns / `insert` / `delete`
 /// / `save`.
+///
+/// `#[rgo(...)]` is a short alias of `#[rustango(...)]`:
+///
+/// ```
+/// #[derive(rustango::Model)]
+/// #[rgo(table = "rgo_doc_note")]
+/// pub struct Note {
+///     #[rgo(primary_key)]
+///     pub id: rustango::Auto<i64>,
+/// }
+/// # fn main() {}
+/// ```
+///
+/// One item or field uses one name; a mix does not compile:
+///
+/// ```compile_fail
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "rgo_doc_note")]
+/// #[rgo(display = "id")]
+/// pub struct Note {
+///     #[rgo(primary_key)]
+///     pub id: rustango::Auto<i64>,
+/// }
+/// # fn main() {}
+/// ```
 pub use rustango_macros::Model;
 
 /// Re-exported for `register_admin_computed!` and any user code that

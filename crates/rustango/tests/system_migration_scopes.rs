@@ -119,3 +119,37 @@ fn a_non_empty_snapshot_does_not_mean_the_scope_is_in_use() {
         assert!(!scope_owns_system_tables(ModelScope::Registry));
     }
 }
+
+/// The rename guard's way out is public on every entry point, not only
+/// `make_migrations_from_with`.
+#[test]
+fn every_make_migrations_entry_point_takes_drop_and_add() {
+    use rustango::migrate::{make_migrations_scoped_with, DropAndAdd, MigrationScope};
+    let dir = tempfile::tempdir().unwrap();
+    let posts = |c: &str| -> rustango::migrate::snapshot::SchemaSnapshot {
+        serde_json::from_value(serde_json::json!({"tables": [{
+        "name": "sms_post", "model": "sms_post", "fields": [
+            {"name": "id", "column": "id", "ty": "i64", "nullable": false,
+             "primary_key": true, "auto": true},
+            {"name": c, "column": c, "ty": "string", "nullable": true,
+             "primary_key": false, "max_length": 100},
+        ]}]}))
+        .unwrap()
+    };
+    let make = |c: &str, drops| {
+        make_migrations_scoped_with(
+            dir.path(),
+            &posts(c),
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+            drops,
+        )
+    };
+    make("subtitle", DropAndAdd::Refuse).unwrap().expect("0001");
+    make("tagline", DropAndAdd::Refuse).expect_err("a likely rename");
+    make("tagline", DropAndAdd::Allow)
+        .unwrap()
+        .expect("the drop + add, on purpose");
+    // The registry-reading entry points: `migrate_drop_and_add_cli.rs`.
+}

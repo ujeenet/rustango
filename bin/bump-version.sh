@@ -16,8 +16,8 @@
 #
 #   1. MANIFESTS — the root `[workspace.package] version`, the three
 #      `[workspace.dependencies]` pins, the `rustango-macros` pin in
-#      crates/rustango, and the `orm = { package = "rustango", … }` pin in
-#      rustango-renamed-smoke. Rewritten in place.
+#      crates/rustango, and the `orm = { package = "rustango", … }` and
+#      `rgo = …` pins in the two smoke crates. Rewritten in place.
 #   2. PROSE — sample `manage version` / `manage about` transcripts, the MCP
 #      `serverInfo`, the `cargo install cargo-rustango --version …` line, in
 #      all four doc languages; on a series bump also `docs/index.toml` and
@@ -295,9 +295,9 @@ fi
 # picking the workspace's own out of that without jq is more fragile than
 # reading four `[package] name =` lines.
 #
-# Only members that actually inherit it: `rustango-renamed-smoke` pins its own
-# `0.0.0` (it is `publish = false` and never ships), so asserting the workspace
-# version on it would fail every bump.
+# Only members that actually inherit it: the two smoke crates pin their own
+# `0.0.0` (they are `publish = false` and never ship), so asserting the
+# workspace version on them would fail every bump.
 OURS=""
 for manifest in crates/*/Cargo.toml; do
   grep -q '^version\.workspace[[:space:]]*=[[:space:]]*true' "$manifest" || continue

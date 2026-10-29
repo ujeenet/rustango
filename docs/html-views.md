@@ -189,15 +189,19 @@ inserts the row and `303`s to `success_url`:
 ```rust
 use rustango::template_views::CreateView;
 
-let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])  // the only fields a POST can set
+let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])  // the only fields a POST can set
     .success_url("/posts")         // where to send the browser after a save
     .router("/posts", Arc::new(tera), pool);
 ```
 
 The field list is required. It is the write allow-list: the form renders only
-these fields, and any other posted key (say `author_id=1`) is ignored. On
+these fields, and any other posted key (say `id=1`) is ignored. On
 create, a listed field with a column default that the POST leaves out gets
 that default.
+
+**Every listed field is user input.** Here the browser posts `author_id`, so any
+user can post as anyone. CreateView cannot set a field on the server yet: for a
+field the server owns (the signed-in author), write your own handler.
 
 The form template (`posts_form.html`) is shared with UpdateView. `is_update`
 tells the two apart, and **`form`** carries both the fields and any validation
@@ -206,6 +210,7 @@ messages:
 ```html
 <form method="post">
   {{ csrf_input | safe }}
+  {% if form.errors.__all__ %}<p class="error">{{ form.errors.__all__ }}</p>{% endif %}
   {% for field in form.fields %}
     <label for="{{ field.name }}">{{ field.name }}</label>
     <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
@@ -218,6 +223,8 @@ messages:
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+A write the database refuses (a NOT NULL column the form leaves out, a CHECK) is a form-wide error under `form.errors.__all__`, not under a field; show it, or the page comes back with no message.
 
 Two things are easy to get wrong here. `form.errors` maps a field name to **one
 string**, not a list — `join` on it is an error. And there is no top-level
@@ -234,7 +241,7 @@ re-renders with the messages and a `422` status instead of saving:
 ```rust
 use rustango::forms::FormErrors;
 
-CreateView::for_model(Post::SCHEMA, &["title", "body"])
+CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .validator(|data| {
         let mut errs = FormErrors::default();
         if data.get("title").map_or(true, |t| t.len() < 5) {
@@ -280,7 +287,7 @@ Mount all five at the same prefix and you have full HTML CRUD:
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
 ```
@@ -307,6 +314,9 @@ Each entry in `form.fields` carries `name`, `column`, `ty`, `required`,
 `max_length` and `value`. `form.errors` is keyed by field name and holds one
 message per field, not a list. Every view also stamps `csrf_token` and
 `csrf_input`, and every view router rejects a POST without a matching token.
+
+A checkbox and a `blank` string are never `required`, nor is a field with a
+`default` on a create form: sent empty, it takes the column default.
 
 `CreateView` stamps no `object`, so `{{ object.title }}` on a create form is
 undefined rather than empty — use `{{ field.value }}` from `form.fields`, which
@@ -342,7 +352,8 @@ It answers `302 Found`; `.permanent()` makes it `301`.
 **FormView** — a form with no model. `FormView::<ContactForm>::for_form(handler)`
 renders a `#[derive(Form)]` form on GET (template `form.html` by default). On POST
 it validates and calls your async handler; `Ok(())` redirects with `303`, and
-`Err(msg)` re-renders the form. Its context is `errors` (a list per field) and
+`Err(msg)` re-renders the form. Invalid input re-renders it with a `422`. Its
+context is `errors` (a list per field; form-wide errors under `__all__`) and
 `values`. Like every view here, `.success_url` defaults to `/`.
 
 ---

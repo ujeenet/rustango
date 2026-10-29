@@ -553,7 +553,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `title(s)` / `subtitle(s)` | Sidebar header / subheader. |
 | `admin_prefix(p)` | URL prefix — **must match the nest path**. Default `/__admin`. |
 | `audit_url(u)` | Path of the activity/audit view. Default `/__audit`. |
-| `static_url(u)` | Prefix for embedded assets (favicon, logo). Default `/__static__`. |
+| `static_url(u)` | Prefix for embedded assets (favicon, logo). Default `/__static__`. The bare admin serves a path prefix under its mount. |
 | `change_password_url(u)` | Path of the self-serve password-change page (adds the sidebar link). |
 | `show_only([tables])` | Whitelist which tables appear; others 404 and are hidden. |
 | `read_only([tables])` | Render those tables but forbid create/edit/delete. |
@@ -599,6 +599,7 @@ All paths are relative to `admin_prefix`:
 | `/__audit` (or `audit_url`) | GET | Activity feed + cleanup. |
 | `/login`, `/logout` | GET/POST | Session auth (when enabled). |
 | `/account/password`, `/account/totp` | GET/POST | Self-serve password change / TOTP enrollment. |
+| `/account/totp/disable` | POST | Turn TOTP off with a current code. |
 
 Custom routes registered with `register_admin_view!` mount at
 `/<table>/<suffix>`.

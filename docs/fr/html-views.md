@@ -188,16 +188,21 @@ insère la ligne et fait un `303` vers `success_url` :
 ```rust
 use rustango::template_views::CreateView;
 
-let app = CreateView::for_model(Post::SCHEMA, &["title", "body"])
+let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .success_url("/posts")         // where to send the browser after a save
     .router("/posts", Arc::new(tera), pool);
 ```
 
 La liste des champs est obligatoire. C'est la liste blanche d'écriture : le
 formulaire n'affiche que ces champs et toute autre clé envoyée (par exemple
-`author_id=1`) est ignorée. Avec UpdateView, un champ listé mais absent garde sa
+`id=1`) est ignorée. Avec UpdateView, un champ listé mais absent garde sa
 valeur ; seul un `bool` passe à `false`, car une case décochée n'envoie rien. Avec
 CreateView, un champ listé absent qui a un défaut de colonne reçoit ce défaut.
+
+**Chaque champ listé est une saisie de l'utilisateur.** Ici le navigateur envoie
+`author_id`, donc n'importe qui peut publier au nom d'un autre. CreateView ne sait
+pas encore fixer un champ côté serveur : pour un champ que le serveur décide
+(l'auteur connecté), écrivez votre propre handler.
 
 Le template de formulaire (`posts_form.html`) est partagé avec UpdateView. `is_update`
 distingue les deux, et **`form`** porte à la fois les champs et les éventuels messages de
@@ -206,6 +211,7 @@ validation :
 ```html
 <form method="post">
   {{ csrf_input | safe }}
+  {% if form.errors.__all__ %}<p class="error">{{ form.errors.__all__ }}</p>{% endif %}
   {% for field in form.fields %}
     <label for="{{ field.name }}">{{ field.name }}</label>
     <input id="{{ field.name }}" name="{{ field.name }}" value="{{ field.value }}"
@@ -218,6 +224,8 @@ validation :
   <button>{% if is_update %}Save{% else %}Create{% endif %}</button>
 </form>
 ```
+
+Une écriture que la base refuse (une colonne NOT NULL que le formulaire omet, un CHECK) est une erreur de tout le formulaire sous `form.errors.__all__`, pas sous un champ ; affichez-la, sinon la page revient sans message.
 
 Deux choses sont faciles à se tromper ici. `form.errors` associe un nom de champ à **une
 seule chaîne**, pas à une liste — lui appliquer `join` est une erreur. Et il n'existe pas de
@@ -234,7 +242,7 @@ est re-rendu avec les messages et un statut `422` au lieu d'être enregistré :
 ```rust
 use rustango::forms::FormErrors;
 
-CreateView::for_model(Post::SCHEMA, &["title", "body"])
+CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .validator(|data| {
         let mut errs = FormErrors::default();
         if data.get("title").map_or(true, |t| t.len() < 5) {
@@ -277,7 +285,7 @@ Montez les cinq au même préfixe et vous avez un CRUD HTML complet :
 let app = axum::Router::new()
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
     .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
 ```
@@ -305,6 +313,9 @@ Chaque entrée de `form.fields` porte `name`, `column`, `ty`, `required`, `max_l
 `value`. `form.errors` est indexé par nom de champ et contient un message par champ, pas une
 liste. Chaque vue estampille aussi `csrf_token` et `csrf_input`, et chaque routeur de vue
 rejette un POST sans jeton correspondant.
+
+Une case à cocher et une chaîne `blank` ne sont jamais `required`, ni un champ avec
+`default` dans un formulaire de création : envoyé vide, il prend la valeur par défaut de la colonne.
 
 `CreateView` n'estampille aucun `object`, donc `{{ object.title }}` dans un formulaire de
 création est indéfini plutôt que vide — utilisez `{{ field.value }}` depuis `form.fields`, qui
@@ -340,8 +351,9 @@ Elle répond `302 Found` ; `.permanent()` en fait un `301`.
 **FormView** — un formulaire sans modèle. `FormView::<ContactForm>::for_form(handler)`
 rend un formulaire `#[derive(Form)]` en GET (template `form.html` par défaut). En
 POST, il valide et appelle votre handler async ; `Ok(())` redirige en `303`, et
-`Err(msg)` ré-affiche le formulaire. Son contexte est `errors` (une liste par
-champ) et `values`. Comme pour toutes les vues ici, `.success_url` vaut `/` par
+`Err(msg)` ré-affiche le formulaire. Une saisie invalide le ré-affiche avec un
+`422`. Son contexte est `errors` (une liste par champ ; les erreurs globales sous
+`__all__`) et `values`. Comme pour toutes les vues ici, `.success_url` vaut `/` par
 défaut.
 
 ---

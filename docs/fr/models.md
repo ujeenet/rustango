@@ -124,7 +124,10 @@ pub struct Gadget {
 
 > **Précision décimale.** Le `NUMERIC` de PostgreSQL est à précision arbitraire ; MySQL utilise
 > `DECIMAL(65,28)` (toute valeur `rust_decimal` y tient) ; SQLite
-> utilise l'affinité `NUMERIC`. Utilisez `rust_decimal::Decimal` pour l'argent, jamais `f64`.
+> utilise l'affinité `NUMERIC`, qui garde environ 15 chiffres significatifs : une valeur
+> plus longue (`12345678901234567.89`) est arrondie à l'écriture, sans erreur. Les zéros
+> finaux sont aussi perdus : `12.50` est relu comme `12.5`, `100.00` comme `100`. Pour des
+> valeurs plus larges, utilisez PostgreSQL ou MySQL. Utilisez `rust_decimal::Decimal` pour l'argent, jamais `f64`.
 
 ### Types spécifiques à PostgreSQL
 
@@ -281,7 +284,7 @@ type différent, précisez-le : `ForeignKey<User, String>`. Le un-à-un utilise
 |---|---|---|
 | `primary_key` | `#[rustango(primary_key)]` | marque la PK |
 | `max_length = N` | `#[rustango(max_length = 200)]` | `VARCHAR(N)` + vérification de longueur à l'écriture |
-| `default = "…"` | `#[rustango(default = "'draft'")]` | valeur par défaut de la colonne en base (littéral SQL) |
+| `default = "…"` | `#[rustango(default = "'draft'")]` | valeur par défaut de la colonne en base (SQL brut : texte entre apostrophes, `'draft'` ; un mot nu ou une non-valeur numérique sur un champ numérique est une erreur de compilation) |
 | `unique` | `#[rustango(unique)]` | contrainte d'unicité sur la colonne |
 | `choices = "…"` | `#[rustango(choices = "draft:Draft, published:Published")]` | valeurs énumérées (`value:Label`) ; `<select>` de l'admin + validation |
 | `auto_now_add` | `#[rustango(auto_now_add)]` | réglé à l'heure actuelle à l'**insertion** (sur un `Auto<DateTime<Utc>>`) |

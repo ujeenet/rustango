@@ -457,7 +457,7 @@ nouveaux layers sur l'un ou l'autre.
 
 - [Guide de sécurité](security.md) — la pile complète de défense en profondeur
   et une checklist au moment du déploiement (`manage check --deploy`).
-- [Authentification](auth-sessions.md) — les backends d'auth et le middleware
+- [Authentification](auth-backends.md) — les backends d'auth et le middleware
   `CurrentUser` s'appuient sur le même mécanisme de layer.
 - [URLs & routage](urls.md) — où les layers s'attachent aux routeurs et
   sous-routeurs.

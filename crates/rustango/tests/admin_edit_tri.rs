@@ -168,6 +168,37 @@ rustango::register_admin_inline!(
     fields = &["qty", "status", "at"],
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_rparent")]
+#[allow(dead_code)]
+pub struct RParent {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    pub rank: i64,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_rline")]
+#[allow(dead_code)]
+pub struct RLine {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_rparent", on = "id")]
+    pub parent_id: i64,
+    pub qty: i64,
+    pub done: bool,
+}
+
+rustango::register_admin_inline!(
+    parent = "aed_rparent",
+    child = "aed_rline",
+    fk = "parent_id",
+    fields = &["qty", "done"],
+    extra = 1,
+);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, "aed_slugref").await;
@@ -186,6 +217,9 @@ async fn setup(pool: &Pool) {
     drop_table(pool, "aed_dline").await;
     fresh_table::<DParent>(pool).await;
     fresh_table::<DLine>(pool).await;
+    drop_table(pool, "aed_rline").await;
+    fresh_table::<RParent>(pool).await;
+    fresh_table::<RLine>(pool).await;
 }
 
 /// The detail page lists the first 100 inline rows and 20 audit entries,
@@ -774,6 +808,198 @@ async fn inline_edit_keeps_microseconds(pool: &Pool) {
     assert_eq!((after.qty, after.at), (2, Some(at)));
 }
 
+/// A refused save shows the form again with the typed inline rows.
+async fn refused_edit_keeps_the_typed_inline_rows(pool: &Pool) {
+    let mut p = RParent {
+        id: Auto::default(),
+        name: "p".into(),
+        rank: 1,
+    };
+    p.insert_pool(pool).await.expect("parent");
+    let pid = *p.id.get().expect("pk");
+    let mut l = RLine {
+        id: Auto::default(),
+        parent_id: pid,
+        qty: 1,
+        done: false,
+    };
+    l.insert_pool(pool).await.expect("line");
+    let lid = *l.id.get().expect("pk");
+    let form = |rank: &str, new_qty: &str| {
+        format!(
+            "name=p&rank={rank}&aed_rline-TOTAL_FORMS=2&aed_rline-INITIAL_FORMS=1\
+             &aed_rline-0-id={lid}&aed_rline-0-qty=77&aed_rline-0-done=true\
+             &aed_rline-0-DELETE=on&aed_rline-1-qty={new_qty}"
+        )
+    };
+    // A parent field error, then an inline row error.
+    for (rank, new_qty) in [("abc", "5"), ("2", "abc")] {
+        let (status, html) = send(
+            pool,
+            "POST",
+            &format!("/aed_rparent/{pid}"),
+            &form(rank, new_qty),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        assert_eq!(shown(&html, "aed_rline-TOTAL_FORMS"), "2", "{html}");
+        assert_eq!(shown(&html, "aed_rline-0-qty"), "77", "typed edit lost");
+        assert_eq!(
+            shown(&html, "aed_rline-1-qty"),
+            new_qty,
+            "typed new row lost"
+        );
+        for (name, what) in [
+            ("aed_rline-0-done", "box"),
+            ("aed_rline-0-DELETE", "delete box"),
+        ] {
+            let at = html.find(&format!(r#"name="{name}""#)).expect(name);
+            let tag = &html[html[..at].rfind('<').unwrap()..];
+            assert!(
+                tag[..tag.find('>').unwrap()].contains(" checked"),
+                "{what} unchecked"
+            );
+        }
+        assert!(
+            html.replace("&#x2F;", "/")
+                .contains(&format!(r#"action="/aed_rparent/{pid}""#)),
+            "form action"
+        );
+    }
+    let stored = RLine::objects().fetch(pool).await.expect("lines");
+    assert_eq!(stored.len(), 1, "a refused save wrote rows");
+    assert_eq!(stored[0].qty, 1, "a refused save wrote the row");
+}
+
+/// A refused save keys the typed inline rows by PK: a row deleted meanwhile
+/// shows as an error, and the others keep their own values.
+async fn refused_edit_keys_typed_rows_by_pk(pool: &Pool) {
+    let mut p = RParent {
+        id: Auto::default(),
+        name: "p".into(),
+        rank: 1,
+    };
+    p.insert_pool(pool).await.expect("parent");
+    let pid = *p.id.get().expect("pk");
+    let mut lines = Vec::new();
+    for qty in [1, 2, 3] {
+        let mut l = RLine {
+            id: Auto::default(),
+            parent_id: pid,
+            qty,
+            done: false,
+        };
+        l.insert_pool(pool).await.expect("line");
+        lines.push(l);
+    }
+    let [a, b, c] = [0, 1, 2].map(|i| *lines[i].id.get().expect("pk"));
+    // Another user deletes b after the page loaded.
+    lines[1].delete_pool(pool).await.expect("delete b");
+    let form = format!(
+        "name=p&rank=abc&aed_rline-TOTAL_FORMS=4&aed_rline-INITIAL_FORMS=3\
+         &aed_rline-0-id={a}&aed_rline-0-qty=10\
+         &aed_rline-1-id={b}&aed_rline-1-qty=20\
+         &aed_rline-2-id={c}&aed_rline-2-qty=30\
+         &aed_rline-3-qty=40"
+    );
+    let (status, html) = send(pool, "POST", &format!("/aed_rparent/{pid}"), &form).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert_eq!(shown(&html, "aed_rline-INITIAL_FORMS"), "2", "{html}");
+    assert_eq!(shown(&html, "aed_rline-TOTAL_FORMS"), "3", "{html}");
+    let rows = [
+        (
+            shown(&html, "aed_rline-0-id"),
+            shown(&html, "aed_rline-0-qty"),
+        ),
+        (
+            shown(&html, "aed_rline-1-id"),
+            shown(&html, "aed_rline-1-qty"),
+        ),
+    ];
+    assert_eq!(
+        rows,
+        [(a.to_string(), "10".into()), (c.to_string(), "30".into())],
+        "typed values moved to another row"
+    );
+    assert_eq!(shown(&html, "aed_rline-2-qty"), "40", "typed new row lost");
+    assert!(!html.contains("aed_rline-3-"), "an extra slot: {html}");
+    assert!(
+        html.contains(&format!("Row {b} is not in this list")),
+        "the gone row is not flagged: {html}"
+    );
+
+    // Save the form as shown, parent fixed: each row keeps its own data.
+    let resubmit = encode(&[
+        ("name", "p".into()),
+        ("rank", "2".into()),
+        ("aed_rline-TOTAL_FORMS", "3".into()),
+        ("aed_rline-INITIAL_FORMS", "2".into()),
+        ("aed_rline-0-id", rows[0].0.clone()),
+        ("aed_rline-0-qty", rows[0].1.clone()),
+        ("aed_rline-1-id", rows[1].0.clone()),
+        ("aed_rline-1-qty", rows[1].1.clone()),
+        ("aed_rline-2-qty", "40".into()),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_rparent/{pid}"), &resubmit).await;
+    assert!(status.is_redirection(), "save: {status} {body}");
+    let mut stored: Vec<(i64, i64)> = RLine::objects()
+        .fetch(pool)
+        .await
+        .expect("lines")
+        .into_iter()
+        .map(|l| (*l.id.get().expect("pk"), l.qty))
+        .collect();
+    stored.sort_unstable();
+    assert_eq!(&stored[..2], [(a, 10), (c, 30)]);
+    assert_eq!((stored.len(), stored[2].1), (3, 40));
+}
+
+/// The bare admin serves the favicon its pages link, outside the session gate.
+async fn bare_admin_serves_the_favicon_it_links(pool: &Pool) {
+    let admin = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("/admin")
+        .build();
+    let app = axum::Router::new().nest("/admin", admin);
+    let get = |uri: String| {
+        let app = app.clone();
+        async move {
+            let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+            let res = app.oneshot(req).await.unwrap();
+            let status = res.status();
+            let kind = res
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_owned());
+            let bytes = res.into_body().collect().await.unwrap().to_bytes();
+            (status, kind, String::from_utf8_lossy(&bytes).into_owned())
+        }
+    };
+    let (status, _, html) = get("/admin/aed_doc".into()).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let at = html.find(r#"rel="icon""#).expect("a favicon link");
+    let href = &html[at..];
+    let href = &href[href.find("href=\"").unwrap() + 6..];
+    let href = href[..href.find('"').unwrap()].replace("&#x2F;", "/");
+    assert_eq!(href, "/admin/__static__/icon.png");
+    let (status, kind, _) = get(href).await;
+    assert_eq!(status, StatusCode::OK, "favicon");
+    assert_eq!(kind.as_deref(), Some("image/png"));
+    // Served before the session gate.
+    let gated = rustango::admin::Builder::new(pool.clone())
+        .with_session_auth(rustango::session::SessionSecret::from_bytes(vec![7u8; 32]))
+        .build();
+    let req = Request::builder()
+        .uri("/__admin/__static__/icon.png")
+        .body(Body::empty())
+        .unwrap();
+    let res = axum::Router::new()
+        .nest("/__admin", gated)
+        .oneshot(req)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "gated favicon");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -790,6 +1016,9 @@ tri_dialect_test! {
         inline_child_writes_send_admin_signals,
         detail_page_bounds_inline_rows_and_history,
         inline_save_reads_children_in_one_select,
+        refused_edit_keeps_the_typed_inline_rows,
+        refused_edit_keys_typed_rows_by_pk,
+        bare_admin_serves_the_favicon_it_links,
     ],
 }
 

@@ -158,6 +158,38 @@ async fn a_refused_upgrade_only_warns(pool: &Pool) {
         .expect("drop user");
 }
 
+/// A catalog key longer than the column is skipped: the rest still seed,
+/// and an editor save with it writes its other rows.
+async fn a_long_key_does_not_fail_the_rest(pool: &Pool) {
+    use rustango::i18n::db::{all_pool, seed_from_translator_pool};
+    use rustango::i18n::{Locale, Translator};
+    let long = "x".repeat(366);
+    let t = Translator::new(Locale::new("en"));
+    let catalog = [("short", "court"), (long.as_str(), "long fr")]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+    t.insert_locale(Locale::new("fr"), catalog);
+    seed_from_translator_pool(pool, &t).await.expect("seed");
+    let keys: Vec<String> = all_pool(pool)
+        .await
+        .expect("rows")
+        .into_iter()
+        .map(|r| r.key)
+        .collect();
+    assert_eq!(keys, ["short"]);
+    let form: Vec<_> = [
+        cell("fr", "short", "bref", "court"),
+        cell("fr", &long, "autre", "long fr"),
+    ]
+    .concat();
+    apply_form(pool, &form, "bob").await.expect("save");
+    assert_eq!(
+        editor_rows(pool).await.expect("rows"),
+        [edit("fr", "short", "bref")]
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -166,5 +198,6 @@ tri_dialect_test! {
         keys_compare_case_sensitively,
         an_older_case_insensitive_table_is_upgraded,
         a_refused_upgrade_only_warns,
+        a_long_key_does_not_fail_the_rest,
     ],
 }

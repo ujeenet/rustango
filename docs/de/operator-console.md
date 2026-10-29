@@ -153,7 +153,7 @@ Danach öffnet das Passwort allein nur den Code-Schritt (`/login/totp`); keine K
 
 Pro Operator ist es freiwillig. Mit `RUSTANGO_OPERATOR_REQUIRE_TOTP=1` wird es Pflicht: Ein Operator ohne Gerät richtet dann beim Code-Schritt eines ein, bevor die erste Sitzung beginnt. Wird beim Start gelesen.
 
-Die Geheimnisse liegen in `rustango_operator_totp` in der Registry, versiegelt unter `RUSTANGO_SECRET_KEY`, der zum Einrichten gesetzt sein muss. `migrate` legt die Tabelle an, sonst die Konsole bei der ersten Anmeldung. Fehlt die Tabelle (eine Registry-Rolle ohne CREATE, vor `migrate`), reicht das Passwort, sofern TOTP nicht Pflicht ist; existiert sie, ist aber nicht lesbar, wird die Anmeldung abgelehnt. Wiederherstellungscodes gibt es noch nicht: Wer das Gerät verliert, braucht eine Shell auf der Registry, um seine Zeile zu löschen.
+Die Geheimnisse liegen in `rustango_operator_totp` in der Registry, versiegelt unter `RUSTANGO_SECRET_KEY`, der zum Einrichten gesetzt sein muss. `migrate` legt die Tabelle an, sonst die Konsole bei der ersten Anmeldung. Fehlt die Tabelle (eine Registry-Rolle ohne CREATE, vor `migrate`), reicht das Passwort, sofern TOTP nicht Pflicht ist; existiert sie, ist aber nicht lesbar, wird die Anmeldung abgelehnt. Wiederherstellungscodes gibt es noch nicht: Verliert ein Operator das Gerät, führen Sie `cargo run -- reset-operator-totp <username>` aus.
 
 ---
 
@@ -374,7 +374,10 @@ Jeder Tenant hat seine eigene Marke in seiner `Org`-Zeile, gesetzt unter
 `theme_mode`. Das Formular **Branding assets** auf derselben Seite lädt ein
 Logo (PNG, JPEG oder WebP) und ein Favicon (PNG oder ICO) hoch, je bis 1 MB
 (`RUSTANGO_BRAND_MAX_BYTES`). Die Dateien liegen unter
-`RUSTANGO_BRAND_STORAGE_DIR`, Standard `./var/brand`.
+`RUSTANGO_BRAND_STORAGE_DIR`, Standard `./var/brand`. Dieses Verzeichnis ist
+lokal je Pod und geht beim Redeploy verloren; bei mehreren Replikas eine
+gemeinsame Disk mit `Cli::brand_storage` oder `server::Builder::brand_storage`
+übergeben (etwa eine `StorageRegistry`-Disk).
 
 Der Tenant-Admin und seine Anmeldeseite nutzen diese Werte; `[brand]` erreicht
 sie nicht. Ohne `brand_name` wird der Anzeigename des Tenants gezeigt, ohne

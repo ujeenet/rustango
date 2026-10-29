@@ -838,31 +838,15 @@ async fn handle_list(
         resolve_fk_displays_pool(state.vs.schema, &state.pool, &mut object_list).await;
     }
 
-    let total_pages = ((total - 1).max(0) / page_size) + 1;
-    let mut ctx = Context::new();
-    // `1 … 7 8 9 … 42` rather than one link per page, from the
-    // framework's own paginator. The scalar keys above predate it and
-    // stay as they are; this only adds the range.
-    ctx.insert("page_marks", &page_marks(total, page_size, page));
-    ctx.insert("object_list", &object_list);
-    // `context_object_name` adds a second
-    // binding so templates can read `{{ posts }}` instead of
-    // `{{ object_list }}`. Empty (the default) skips the rename.
-    if !state.vs.context_object_name.is_empty() {
-        ctx.insert(&state.vs.context_object_name, &object_list);
-    }
-    ctx.insert("page", &page);
-    ctx.insert("page_size", &page_size);
-    ctx.insert("total", &total);
-    ctx.insert("total_pages", &total_pages);
-    let has_next = page < total_pages;
-    let has_prev = page > 1;
-    ctx.insert("has_next", &has_next);
-    ctx.insert("has_prev", &has_prev);
-    ctx.insert("ordering", &active_ordering);
-    insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
-    insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
-    insert_bulk_actions_context(&mut ctx, &state.vs);
+    let mut ctx = list_context(
+        &state.vs,
+        &object_list,
+        total,
+        page,
+        page_size,
+        &active_ordering,
+        &params,
+    );
 
     // v0.30.17 — stamp the CSRF token into the context AND set the
     // cookie on the response. ListView's bulk-action POST is gated
@@ -872,6 +856,40 @@ async fn handle_list(
     let mut resp = render(&state.tera, &state.vs.template, ctx, &parts);
     apply_csrf_cookie(&mut resp, set_cookie);
     resp
+}
+
+/// The list page context; both the static and the tenant handler build it here.
+fn list_context(
+    vs: &ListView,
+    object_list: &[Value],
+    total: i64,
+    page: i64,
+    page_size: i64,
+    active_ordering: &str,
+    params: &HashMap<String, String>,
+) -> Context {
+    let total_pages = ((total - 1).max(0) / page_size) + 1;
+    let mut ctx = Context::new();
+    // `1 … 7 8 9 … 42` rather than one link per page.
+    ctx.insert("page_marks", &page_marks(total, page_size, page));
+    ctx.insert("object_list", object_list);
+    // `context_object_name` adds a second binding, `{{ posts }}`.
+    if !vs.context_object_name.is_empty() {
+        ctx.insert(&vs.context_object_name, object_list);
+    }
+    ctx.insert("page", &page);
+    ctx.insert("page_size", &page_size);
+    ctx.insert("total", &total);
+    ctx.insert("total_pages", &total_pages);
+    let has_next = page < total_pages;
+    let has_prev = page > 1;
+    ctx.insert("has_next", &has_next);
+    ctx.insert("has_prev", &has_prev);
+    ctx.insert("ordering", active_ordering);
+    insert_filter_context(&mut ctx, &vs.filter_fields, params);
+    insert_pagination_urls(&mut ctx, page, has_next, has_prev, params);
+    insert_bulk_actions_context(&mut ctx, vs);
+    ctx
 }
 
 /// `POST <prefix>` — bulk-action dispatcher. Mounted only when
@@ -1130,7 +1148,7 @@ async fn handle_detail(
         ctx.insert(&state.vs.context_object_name, &object);
     }
 
-    render(&state.tera, &state.vs.template, ctx, &parts)
+    render_with_csrf(&state.tera, &state.vs.template, ctx, &parts)
 }
 
 /// Resolve the DetailView lookup column (#379). Returns the PK
@@ -1602,6 +1620,17 @@ struct FormViewState {
     validator: Option<Validator>,
 }
 
+impl FormViewState {
+    fn page(&self) -> FormPage<'_> {
+        FormPage {
+            schema: self.schema,
+            fields: &self.fields,
+            tera: &self.tera,
+            template: &self.template,
+        }
+    }
+}
+
 /// Field metadata stamped into the Tera context for `{% for field
 /// in form.fields %}` iteration. Mirrors the relevant subset of
 /// [`crate::core::FieldSchema`] in a serde-friendly shape so
@@ -1640,19 +1669,38 @@ fn form_fields(
         .fields
         .iter()
         .filter(|f| takes_input(schema, f, kind) && is_listed(allowed, f))
-        .map(|f| FormField {
-            name: f.name,
-            column: f.column,
-            ty: field_type_label(f.ty),
-            required: !f.nullable,
-            max_length: f.max_length,
-            value: values
-                .get(f.name)
-                .or_else(|| values.get(f.column))
-                .cloned()
-                .unwrap_or_default(),
+        .map(|f| {
+            let value = values.get(f.name).or_else(|| values.get(f.column));
+            let value = match f.ty {
+                // `on` from a POST, `true` from a row: one spelling for the template.
+                crate::core::FieldType::Bool => {
+                    let raw = value.map_or("", String::as_str);
+                    crate::forms::checkbox(raw).map_or_else(|| raw.to_owned(), |b| b.to_string())
+                }
+                _ => value.cloned().unwrap_or_default(),
+            };
+            FormField {
+                name: f.name,
+                column: f.column,
+                ty: field_type_label(f.ty),
+                required: input_required(f, kind),
+                max_length: f.max_length,
+                value,
+            }
         })
         .collect()
+}
+
+/// Whether the input must be filled. An unticked checkbox is `false`, a
+/// `blank` string may be empty, and on create an empty defaulted field
+/// takes its column default, so none of those is `required`.
+fn input_required(f: &FieldSchema, kind: crate::core::WriteKind) -> bool {
+    use crate::core::FieldType as T;
+    !f.nullable
+        && f.ty != T::Bool
+        && !(f.blank && f.ty == T::String)
+        && !(kind == crate::core::WriteKind::Insert
+            && crate::forms::absent_takes_default(f, crate::forms::Encoding::Form))
 }
 
 fn field_type_label(ty: crate::core::FieldType) -> &'static str {
@@ -1845,23 +1893,13 @@ async fn handle_create_get(
     parts: Parts,
     csrf: CsrfCookie,
 ) -> Response {
-    let mut ctx = Context::new();
-    let fields = form_fields(
-        state.schema,
-        &state.fields,
+    state.page().render(
+        &FormMode::Create,
         &HashMap::new(),
-        crate::core::WriteKind::Insert,
-    );
-    ctx.insert(
-        "form",
-        &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
-    );
-    ctx.insert("is_create", &true);
-    ctx.insert("is_update", &false);
-    let set_cookie = stamp_csrf(&csrf, &mut ctx);
-    let mut resp = render(&state.tera, &state.template, ctx, &parts);
-    apply_csrf_cookie(&mut resp, set_cookie);
-    resp
+        &HashMap::new(),
+        &csrf,
+        &parts,
+    )
 }
 
 async fn handle_create_post(
@@ -1877,7 +1915,13 @@ async fn handle_create_post(
     );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ false, &parts);
+        return state.page().render(
+            &FormMode::Create,
+            &form,
+            &errors,
+            &CsrfCookie::of(&parts),
+            &parts,
+        );
     }
     // Schema-driven INSERT: nothing else supplies these (#1464).
     crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
@@ -1891,9 +1935,13 @@ async fn handle_create_post(
     .await
     {
         Ok(url) => axum::response::Redirect::to(&url).into_response(),
-        Err(WriteFailed::Refused(errors)) => {
-            rerender_form(&state, &form, &errors, /*is_update=*/ false, &parts)
-        }
+        Err(WriteFailed::Refused(errors)) => state.page().render(
+            &FormMode::Create,
+            &form,
+            &errors,
+            &CsrfCookie::of(&parts),
+            &parts,
+        ),
         Err(WriteFailed::Error(resp)) => resp,
     }
 }
@@ -2086,57 +2134,14 @@ async fn handle_update_get(
     Path(pk): Path<String>,
     csrf: CsrfCookie,
 ) -> Response {
-    let Some(pk_field) = state.schema.primary_key() else {
-        return template_error(&format!(
-            "model `{}` has no primary key — UpdateView can't probe by PK",
-            state.schema.table
-        ));
+    let page = state.page();
+    let object = match page.object(&state.pool, &pk).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
     };
-    // #562 — `SelectQuery::by_pk` replaces the 11-field struct
-    // literal.
-    let select_q = SelectQuery::by_pk(
-        state.schema,
-        pk_field.column,
-        pk_or_404!(&state.pool, state.schema, pk_field, &pk),
-    )
-    .visible();
-    let scalars = context_scalars(state.schema, &state.fields);
-    let row_json = match select_one_row_as_json(&state.pool, &select_q, &scalars).await {
-        Ok(Some(r)) => r,
-        Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => return template_error(&format!("query row: {e}")),
-    };
-    // Convert the row's JSON object into a string-keyed string-valued
-    // HashMap so `form_fields` can pick up the existing values.
-    let row_obj = row_json.as_object().cloned().unwrap_or_default();
-    let mut values: HashMap<String, String> = HashMap::with_capacity(row_obj.len());
-    for (k, v) in row_obj {
-        let s = match v {
-            serde_json::Value::Null => String::new(),
-            serde_json::Value::String(s) => s,
-            other => other.to_string(),
-        };
-        values.insert(k, s);
-    }
-    let fields = form_fields(
-        state.schema,
-        &state.fields,
-        &values,
-        crate::core::WriteKind::Update,
-    );
-    let mut ctx = Context::new();
-    ctx.insert(
-        "form",
-        &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
-    );
-    ctx.insert("object", &row_json);
-    ctx.insert("pk", &pk);
-    ctx.insert("is_create", &false);
-    ctx.insert("is_update", &true);
-    let set_cookie = stamp_csrf(&csrf, &mut ctx);
-    let mut resp = render(&state.tera, &state.template, ctx, &parts);
-    apply_csrf_cookie(&mut resp, set_cookie);
-    resp
+    let values = input_values(state.schema, &object);
+    let mode = FormMode::Update { pk: &pk, object };
+    page.render(&mode, &values, &HashMap::new(), &csrf, &parts)
 }
 
 async fn handle_update_post(
@@ -2159,7 +2164,10 @@ async fn handle_update_post(
     );
     merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
     if !errors.is_empty() {
-        return rerender_form(&state, &form, &errors, /*is_update=*/ true, &parts);
+        return state
+            .page()
+            .rerender_update(&state.pool, &pk, &form, &errors, &parts)
+            .await;
     }
     let pk_match = WhereExpr::Predicate(Filter {
         column: pk_field.column,
@@ -2173,7 +2181,10 @@ async fn handle_update_post(
             axum::response::Redirect::to(&target).into_response()
         }
         Err(WriteFailed::Refused(errors)) => {
-            rerender_form(&state, &form, &errors, /*is_update=*/ true, &parts)
+            state
+                .page()
+                .rerender_update(&state.pool, &pk, &form, &errors, &parts)
+                .await
         }
         Err(WriteFailed::Error(resp)) => resp,
     }
@@ -2223,10 +2234,16 @@ fn parse_form(
             continue;
         }
         let raw = raw.cloned().unwrap_or_default();
-        if raw.is_empty() && !f.nullable && !matches!(f.ty, crate::core::FieldType::Bool) {
-            // Bool checkboxes legitimately submit nothing when
-            // unchecked — treat that as `false` rather than
-            // "required missing".
+        // Sent empty where empty is no value: a defaulted field's create takes the default.
+        if raw.is_empty()
+            && kind == crate::core::WriteKind::Insert
+            && !f.nullable
+            && !(f.blank && f.ty == crate::core::FieldType::String)
+            && crate::forms::absent_takes_default(f, crate::forms::Encoding::Form)
+        {
+            continue;
+        }
+        if raw.is_empty() && input_required(f, kind) {
             errors.insert(f.name.to_owned(), "this field is required".to_owned());
             continue;
         }
@@ -2312,36 +2329,103 @@ fn write_kind(is_update: bool) -> crate::core::WriteKind {
     }
 }
 
-fn rerender_form(
-    state: &FormViewState,
-    submitted: &HashMap<String, String>,
-    errors: &HashMap<String, String>,
-    is_update: bool,
-    parts: &Parts,
-) -> Response {
-    let fields = form_fields(
-        state.schema,
-        &state.fields,
-        submitted,
-        write_kind(is_update),
-    );
-    let mut ctx = Context::new();
-    ctx.insert(
-        "form",
-        &serde_json::json!({"fields": fields, "errors": errors}),
-    );
-    ctx.insert("is_create", &!is_update);
-    ctx.insert("is_update", &is_update);
-    // The user POST'd here from an earlier GET, so the CSRF cookie
-    // is almost always already present. Stamp the same token back
-    // into the context so the re-rendered form's hidden input
-    // matches what the browser will send on the next attempt.
-    let set_cookie = stamp_csrf(&CsrfCookie::of(parts), &mut ctx);
-    let mut resp = render(&state.tera, &state.template, ctx, parts);
-    *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
-    crate::errors::keep_own_page(&mut resp);
-    apply_csrf_cookie(&mut resp, set_cookie);
-    resp
+/// What a form page is for. An update page always carries its row.
+enum FormMode<'a> {
+    Create,
+    Update { pk: &'a str, object: Value },
+}
+
+/// The parts of a Create/UpdateView a form page needs, from either router.
+struct FormPage<'a> {
+    schema: &'static ModelSchema,
+    fields: &'a [String],
+    tera: &'a Tera,
+    template: &'a str,
+}
+
+impl FormPage<'_> {
+    /// The row an update page shows, or the 404 / error response.
+    async fn object(&self, pool: &Pool, pk: &str) -> Result<Value, Response> {
+        let Some(pk_field) = self.schema.primary_key() else {
+            return Err(template_error(&format!(
+                "model `{}` has no primary key — UpdateView can't probe by PK",
+                self.schema.table
+            )));
+        };
+        let key = match stored_pk(pool, self.schema, pk_field, pk).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return Err((StatusCode::NOT_FOUND, "not found").into_response()),
+            Err(e) => return Err(template_error(&format!("read key: {e}"))),
+        };
+        let select_q = SelectQuery::by_pk(self.schema, pk_field.column, key).visible();
+        let scalars = context_scalars(self.schema, self.fields);
+        match select_one_row_as_json(pool, &select_q, &scalars).await {
+            Ok(Some(r)) => Ok(r),
+            Ok(None) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
+            Err(e) => Err(template_error(&format!("query row: {e}"))),
+        }
+    }
+
+    /// An update form refused: the submitted values over the stored row.
+    async fn rerender_update(
+        &self,
+        pool: &Pool,
+        pk: &str,
+        submitted: &HashMap<String, String>,
+        errors: &HashMap<String, String>,
+        parts: &Parts,
+    ) -> Response {
+        let object = match self.object(pool, pk).await {
+            Ok(o) => o,
+            Err(resp) => return resp,
+        };
+        let mode = FormMode::Update { pk, object };
+        self.render(&mode, submitted, errors, &CsrfCookie::of(parts), parts)
+    }
+
+    /// Render the form; with errors it is a `422` that keeps its own page.
+    fn render(
+        &self,
+        mode: &FormMode<'_>,
+        values: &HashMap<String, String>,
+        errors: &HashMap<String, String>,
+        csrf: &CsrfCookie,
+        parts: &Parts,
+    ) -> Response {
+        let is_update = matches!(mode, FormMode::Update { .. });
+        let fields = form_fields(self.schema, self.fields, values, write_kind(is_update));
+        let mut ctx = Context::new();
+        ctx.insert(
+            "form",
+            &serde_json::json!({"fields": fields, "errors": errors}),
+        );
+        if let FormMode::Update { pk, object } = mode {
+            ctx.insert("object", object);
+            ctx.insert("pk", pk);
+        }
+        ctx.insert("is_create", &!is_update);
+        ctx.insert("is_update", &is_update);
+        let set_cookie = stamp_csrf(csrf, &mut ctx);
+        let mut resp = render(self.tera, self.template, ctx, parts);
+        if !errors.is_empty() {
+            *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            crate::errors::keep_own_page(&mut resp);
+        }
+        apply_csrf_cookie(&mut resp, set_cookie);
+        resp
+    }
+}
+
+/// A stored row as form input values, each in the shape its input expects.
+fn input_values(schema: &'static ModelSchema, row: &Value) -> HashMap<String, String> {
+    schema
+        .fields
+        .iter()
+        .map(|f| {
+            let v = crate::forms::input_value::render_value_for_input_json(row, f);
+            (f.name.to_owned(), v)
+        })
+        .collect()
 }
 
 // ============================================================== shared helpers
@@ -2589,6 +2673,15 @@ impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CsrfCookie {
 /// Stamp `csrf_token` and `csrf_input` into the context (issue #15).
 fn stamp_csrf(csrf: &CsrfCookie, ctx: &mut Context) -> Option<String> {
     crate::forms::csrf::stamp_cookie_into_context(&csrf.headers, &csrf.spec, ctx)
+}
+
+/// [`render`] with `csrf_token` and `csrf_input`, for a GET-only page
+/// that may still hold a form posting elsewhere.
+fn render_with_csrf(tera: &Tera, name: &str, mut ctx: Context, parts: &Parts) -> Response {
+    let set_cookie = stamp_csrf(&CsrfCookie::of(parts), &mut ctx);
+    let mut resp = render(tera, name, ctx, parts);
+    apply_csrf_cookie(&mut resp, set_cookie);
+    resp
 }
 
 /// Every CBV router with a POST route goes through here, so each
@@ -3352,7 +3445,7 @@ async fn handle_template_view(
     for (k, v) in &state.vs.context {
         ctx.insert(k, v);
     }
-    render(&state.tera, &state.vs.template, ctx, &parts)
+    render_with_csrf(&state.tera, &state.vs.template, ctx, &parts)
 }
 
 // ============================================================== RedirectView
@@ -3547,16 +3640,13 @@ where
 /// Render the form template with the CSRF token stamped in (#2234).
 fn render_standalone_form<F>(
     state: &StandaloneFormViewState<F>,
-    mut ctx: Context,
+    ctx: Context,
     parts: &Parts,
 ) -> Response
 where
     F: crate::forms::Form,
 {
-    let set_cookie = stamp_csrf(&CsrfCookie::of(parts), &mut ctx);
-    let mut resp = render(&state.tera, &state.vs.template, ctx, parts);
-    apply_csrf_cookie(&mut resp, set_cookie);
-    resp
+    render_with_csrf(&state.tera, &state.vs.template, ctx, parts)
 }
 
 async fn handle_form_view_get<F>(
@@ -3606,10 +3696,18 @@ where
             }
         },
         Err(form_errors) => {
+            // Form-wide errors go under `__all__`, as on the handler-error path.
+            let mut errors = form_errors.fields().clone();
+            if !form_errors.non_field().is_empty() {
+                errors.insert("__all__".into(), form_errors.non_field().to_vec());
+            }
             let mut ctx = Context::new();
-            ctx.insert("errors", form_errors.fields());
+            ctx.insert("errors", &errors);
             ctx.insert("values", &payload);
-            render_standalone_form(&state, ctx, &parts)
+            let mut resp = render_standalone_form(&state, ctx, &parts);
+            *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
+            crate::errors::keep_own_page(&mut resp);
+            resp
         }
     }
 }
@@ -3696,26 +3794,15 @@ mod tenant {
             super::resolve_fk_displays_pool(state.vs.schema, &pool, &mut object_list).await;
         }
 
-        let total_pages = ((total - 1).max(0) / page_size) + 1;
-        let mut ctx = Context::new();
-        ctx.insert("object_list", &object_list);
-        // #379 — context_object_name (see non-tenant variant for
-        // semantics).
-        if !state.vs.context_object_name.is_empty() {
-            ctx.insert(&state.vs.context_object_name, &object_list);
-        }
-        ctx.insert("page", &page);
-        ctx.insert("page_size", &page_size);
-        ctx.insert("total", &total);
-        ctx.insert("total_pages", &total_pages);
-        let has_next = page < total_pages;
-        let has_prev = page > 1;
-        ctx.insert("has_next", &has_next);
-        ctx.insert("has_prev", &has_prev);
-        ctx.insert("ordering", &active_ordering);
-        super::insert_filter_context(&mut ctx, &state.vs.filter_fields, &params);
-        super::insert_pagination_urls(&mut ctx, page, has_next, has_prev, &params);
-        super::insert_bulk_actions_context(&mut ctx, &state.vs);
+        let mut ctx = super::list_context(
+            &state.vs,
+            &object_list,
+            total,
+            page,
+            page_size,
+            &active_ordering,
+            &params,
+        );
 
         // v0.30.17 — same CSRF stamping as the static-pool variant
         // (handle_list above). Without it, ListView with bulk_actions
@@ -3892,7 +3979,7 @@ mod tenant {
         if !state.vs.context_object_name.is_empty() {
             ctx.insert(&state.vs.context_object_name, &object);
         }
-        render(&state.tera, &state.vs.template, ctx, &parts)
+        super::render_with_csrf(&state.tera, &state.vs.template, ctx, &parts)
     }
 
     // ---------- DeleteView ----------
@@ -3977,28 +4064,24 @@ mod tenant {
         pub(super) validator: Option<super::Validator>,
     }
 
+    impl TenantFormViewState {
+        fn page(&self) -> super::FormPage<'_> {
+            super::FormPage {
+                schema: self.schema,
+                fields: &self.fields,
+                tera: &self.tera,
+                template: &self.template,
+            }
+        }
+    }
+
     pub(super) async fn handle_create_get_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         parts: Parts,
         csrf: CsrfCookie,
     ) -> Response {
-        let mut ctx = Context::new();
-        let fields = form_fields(
-            state.schema,
-            &state.fields,
-            &HashMap::new(),
-            crate::core::WriteKind::Insert,
-        );
-        ctx.insert(
-            "form",
-            &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
-        );
-        ctx.insert("is_create", &true);
-        ctx.insert("is_update", &false);
-        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
-        let mut resp = render(&state.tera, &state.template, ctx, &parts);
-        super::apply_csrf_cookie(&mut resp, set_cookie);
-        resp
+        let (create, none) = (super::FormMode::Create, HashMap::new());
+        state.page().render(&create, &none, &none, &csrf, &parts)
     }
 
     pub(super) async fn handle_create_post_tenant(
@@ -4015,7 +4098,10 @@ mod tenant {
         );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
-            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &parts);
+            let csrf = CsrfCookie::of(&parts);
+            return state
+                .page()
+                .render(&super::FormMode::Create, &form, &errors, &csrf, &parts);
         }
         // Schema-driven INSERT: nothing else supplies these (#1464).
         crate::forms::stamp_auto_timestamps(state.schema, &mut columns, &mut values);
@@ -4024,7 +4110,10 @@ mod tenant {
         match insert.await {
             Ok(url) => axum::response::Redirect::to(&url).into_response(),
             Err(super::WriteFailed::Refused(errors)) => {
-                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ false, &parts)
+                let csrf = CsrfCookie::of(&parts);
+                state
+                    .page()
+                    .render(&super::FormMode::Create, &form, &errors, &csrf, &parts)
             }
             Err(super::WriteFailed::Error(resp)) => resp,
         }
@@ -4037,55 +4126,14 @@ mod tenant {
         csrf: CsrfCookie,
         t: Tenant,
     ) -> Response {
-        let Some(pk_field) = state.schema.primary_key() else {
-            return template_error(&format!(
-                "model `{}` has no primary key — UpdateView can't probe by PK",
-                state.schema.table
-            ));
+        let page = state.page();
+        let object = match page.object(t.pool(), &pk).await {
+            Ok(o) => o,
+            Err(resp) => return resp,
         };
-        // #562 — by_pk constructor for single-PK-lookup shape.
-        let select_q = SelectQuery::by_pk(
-            state.schema,
-            pk_field.column,
-            pk_or_404!(t.pool(), state.schema, pk_field, &pk),
-        )
-        .visible();
-        let scalars = super::context_scalars(state.schema, &state.fields);
-        let row_json = match crate::sql::select_one_row_as_json(t.pool(), &select_q, &scalars).await
-        {
-            Ok(Some(r)) => r,
-            Ok(None) => return (StatusCode::NOT_FOUND, "not found").into_response(),
-            Err(e) => return template_error(&format!("query row: {e}")),
-        };
-        let row_obj = row_json.as_object().cloned().unwrap_or_default();
-        let mut values: HashMap<String, String> = HashMap::with_capacity(row_obj.len());
-        for (k, v) in row_obj {
-            let s = match v {
-                serde_json::Value::Null => String::new(),
-                serde_json::Value::String(s) => s,
-                other => other.to_string(),
-            };
-            values.insert(k, s);
-        }
-        let fields = form_fields(
-            state.schema,
-            &state.fields,
-            &values,
-            crate::core::WriteKind::Update,
-        );
-        let mut ctx = Context::new();
-        ctx.insert(
-            "form",
-            &serde_json::json!({"fields": fields, "errors": serde_json::Map::new()}),
-        );
-        ctx.insert("object", &row_json);
-        ctx.insert("pk", &pk);
-        ctx.insert("is_create", &false);
-        ctx.insert("is_update", &true);
-        let set_cookie = super::stamp_csrf(&csrf, &mut ctx);
-        let mut resp = render(&state.tera, &state.template, ctx, &parts);
-        super::apply_csrf_cookie(&mut resp, set_cookie);
-        resp
+        let values = super::input_values(state.schema, &object);
+        let mode = super::FormMode::Update { pk: &pk, object };
+        page.render(&mode, &values, &HashMap::new(), &csrf, &parts)
     }
 
     pub(super) async fn handle_update_post_tenant(
@@ -4109,7 +4157,10 @@ mod tenant {
         );
         super::merge_validator_errors(state.validator.as_ref(), &form, &mut errors);
         if !errors.is_empty() {
-            return rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &parts);
+            let page = state.page();
+            return page
+                .rerender_update(t.pool(), &pk, &form, &errors, &parts)
+                .await;
         }
         let pk_match = WhereExpr::Predicate(Filter {
             column: pk_field.column,
@@ -4123,38 +4174,12 @@ mod tenant {
                 axum::response::Redirect::to(&target).into_response()
             }
             Err(super::WriteFailed::Refused(errors)) => {
-                rerender_form_tenant(&state, &form, &errors, /*is_update=*/ true, &parts)
+                let page = state.page();
+                page.rerender_update(t.pool(), &pk, &form, &errors, &parts)
+                    .await
             }
             Err(super::WriteFailed::Error(resp)) => resp,
         }
-    }
-
-    fn rerender_form_tenant(
-        state: &TenantFormViewState,
-        submitted: &HashMap<String, String>,
-        errors: &HashMap<String, String>,
-        is_update: bool,
-        parts: &Parts,
-    ) -> Response {
-        let fields = form_fields(
-            state.schema,
-            &state.fields,
-            submitted,
-            write_kind(is_update),
-        );
-        let mut ctx = Context::new();
-        ctx.insert(
-            "form",
-            &serde_json::json!({"fields": fields, "errors": errors}),
-        );
-        ctx.insert("is_create", &!is_update);
-        ctx.insert("is_update", &is_update);
-        let set_cookie = super::stamp_csrf(&super::CsrfCookie::of(parts), &mut ctx);
-        let mut resp = render(&state.tera, &state.template, ctx, parts);
-        *resp.status_mut() = StatusCode::UNPROCESSABLE_ENTITY;
-        crate::errors::keep_own_page(&mut resp);
-        super::apply_csrf_cookie(&mut resp, set_cookie);
-        resp
     }
 }
 
@@ -4883,7 +4908,7 @@ mod tests {
         pub name: String,
     }
 
-    /// CreateView renders and parses a natural PK; UpdateView does not (#1725).
+    /// CreateView renders and parses a natural PK; UpdateView does not.
     #[test]
     fn create_view_keeps_a_natural_pk() {
         use crate::core::WriteKind;
@@ -4913,6 +4938,92 @@ mod tests {
         values.insert("title".to_owned(), "Hello".to_owned());
         let ff = form_fields(s, &every(s), &values, crate::core::WriteKind::Insert);
         assert_eq!(ff[0].value, "Hello");
+    }
+
+    #[derive(crate::Model, Debug)]
+    #[rustango(table = "tv_flags")]
+    #[allow(dead_code)]
+    pub struct Flagged {
+        #[rustango(primary_key)]
+        pub id: crate::sql::Auto<i64>,
+        pub live: bool,
+        #[rustango(blank, max_length = 64)]
+        pub note: String,
+        #[rustango(max_length = 64)]
+        pub title: String,
+        pub at: Option<chrono::DateTime<chrono::Utc>>,
+        pub meta: serde_json::Value,
+        #[rustango(default = "3")]
+        pub rank: i32,
+    }
+
+    fn submitted(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
+
+    /// An unticked box is `false` and a `blank` string may be empty, so
+    /// neither input is `required`; a box reads `true`/`false`.
+    #[test]
+    fn checkboxes_and_blank_strings_are_not_required() {
+        use crate::core::WriteKind;
+        let s = <Flagged as crate::core::Model>::SCHEMA;
+        let ff = form_fields(
+            s,
+            &every(s),
+            &submitted(&[("live", "on")]),
+            WriteKind::Insert,
+        );
+        let field = |n: &str| ff.iter().find(|f| f.name == n).unwrap();
+        assert!(!field("live").required);
+        assert_eq!(field("live").value, "true");
+        assert!(!field("note").required);
+        assert!(field("title").required);
+        let form = submitted(&[("note", ""), ("title", "t"), ("meta", "{}")]);
+        let (cols, _, errors) = parse_form(s, &every(s), &form, WriteKind::Insert);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(cols.contains(&"note"), "{cols:?}");
+    }
+
+    /// On create a defaulted field is not `required`, and sent empty it
+    /// takes the column default; on update it stays required.
+    #[test]
+    fn a_defaulted_field_is_optional_on_create() {
+        use crate::core::WriteKind;
+        let s = <Flagged as crate::core::Model>::SCHEMA;
+        let required = |kind| {
+            form_fields(s, &every(s), &HashMap::new(), kind)
+                .into_iter()
+                .find(|f| f.name == "rank")
+                .unwrap()
+                .required
+        };
+        assert!(!required(WriteKind::Insert));
+        assert!(required(WriteKind::Update));
+        let form = submitted(&[("title", "t"), ("meta", "{}"), ("rank", "")]);
+        let (cols, _, errors) = parse_form(s, &every(s), &form, WriteKind::Insert);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(!cols.contains(&"rank"), "{cols:?}");
+        let (_, _, errors) = parse_form(s, &every(s), &form, WriteKind::Update);
+        assert!(errors.contains_key("rank"), "{errors:?}");
+    }
+
+    /// Stored values fit their inputs: no offset on a datetime, a JSON
+    /// string keeps its quotes.
+    #[test]
+    fn update_values_fit_their_inputs() {
+        let s = <Flagged as crate::core::Model>::SCHEMA;
+        let row = serde_json::json!({
+            "at": "2026-10-28T12:00:00+00:00",
+            "meta": "abc",
+            "live": 1,
+        });
+        let values = input_values(s, &row);
+        assert_eq!(values["at"], "2026-10-28T12:00:00");
+        assert_eq!(values["meta"], "\"abc\"");
+        assert_eq!(values["live"], "true");
     }
 
     /// Pull the backticked names out of the "each entry in `form.fields`
@@ -6176,7 +6287,7 @@ mod tests {
             .router("/", Arc::new(tera));
 
         let res = app.oneshot(csrf_form_post("/", "name=")).await.unwrap();
-        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(std::str::from_utf8(&body).unwrap(), "name:1");
     }

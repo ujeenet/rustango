@@ -196,7 +196,7 @@ fn decode_ewkb_point(bytes: &[u8]) -> Result<Point, sqlx::error::BoxDynError> {
     let type_word = rd_u32(&bytes[1..5]);
     if type_word & 0x0000_00ff != WKB_POINT {
         return Err(format!(
-            "EWKB: expected a Point geometry, got type word {type_word:#x} (only Point is supported, issue #443)"
+            "EWKB: expected a Point geometry, got type word {type_word:#x} (only Point is supported)"
         )
         .into());
     }
@@ -284,10 +284,7 @@ impl sqlx::Type<sqlx::MySql> for Point {
 #[cfg(feature = "mysql")]
 impl sqlx::Decode<'_, sqlx::MySql> for Point {
     fn decode(_value: sqlx::mysql::MySqlValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
-        Err(
-            "`Point` columns are PostgreSQL/PostGIS-only; cannot decode on MySQL (issue #443)"
-                .into(),
-        )
+        Err("`Point` columns are PostgreSQL/PostGIS-only; cannot decode on MySQL".into())
     }
 }
 
@@ -301,10 +298,7 @@ impl sqlx::Type<sqlx::Sqlite> for Point {
 #[cfg(feature = "sqlite")]
 impl sqlx::Decode<'_, sqlx::Sqlite> for Point {
     fn decode(_value: sqlx::sqlite::SqliteValueRef<'_>) -> Result<Self, sqlx::error::BoxDynError> {
-        Err(
-            "`Point` columns are PostgreSQL/PostGIS-only; cannot decode on SQLite (issue #443)"
-                .into(),
-        )
+        Err("`Point` columns are PostgreSQL/PostGIS-only; cannot decode on SQLite".into())
     }
 }
 

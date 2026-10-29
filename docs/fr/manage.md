@@ -85,7 +85,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `downgrade [N]` | Annule les N dernières migrations |
 | `showmigrations` / `status` | Liste les migrations et leur état d'application |
 | `sqlmigrate <name>` | Affiche le SQL qu'une migration exécuterait, sans l'exécuter |
-| `forget-pending <name>` | Supprime un JSON de migration non appliquée |
+| `forget-pending <name>` | Supprime un JSON de migration non appliquée dont aucune migration suivante ne dépend |
 | `add-data-op --sql <SQL> [--reverse-sql <SQL>]` | Ajoute une opération de données écrite à la main |
 | `inspectdb [--schema <s>] [--table <t>]` | Lit un schéma existant et produit du source `#[derive(Model)]` |
 
@@ -93,7 +93,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 
 | Verbe | Ce qu'il fait |
 |---|---|
-| `dumpdata` | Exporte des lignes en fixtures JSON |
+| `dumpdata` | Exporte des lignes en fixtures JSON. Les flottants gardent chaque bit ; une colonne JSON contenant le `null` JSON est écrite `{"$json": null}`, distincte du NULL SQL (`null`) |
 | `loaddata <fixture.json> [--fail-fast]` | Recharge des fixtures JSON. Un chargement échoué ou partiel n'est pas annulé |
 | `flush [--yes] [--app <label>] [--model <name>]` | Vide chaque table de modèle ; les drapeaux restreignent l'ensemble. Les modèles non gérés et les vues sont ignorés. Postgres utilise `TRUNCATE … RESTART IDENTITY` et échoue si une table hors du filtre référence une cible (un lien `ON DELETE CASCADE` depuis celle-ci la vide quand même sur MySQL / SQLite) ; MySQL / SQLite suppriment les lignes dans une transaction, enfants d'abord, et gardent les compteurs d'id. Un projet multi-tenant exige `--tenant <slug>` et ne vide que ce tenant |
 | `prune [--model <name>] [--except <name>] [--pretend]` | Suppression en masse en flux ; `--pretend` signale sans supprimer |
@@ -123,8 +123,11 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `showmodels [--format plain\|json] [--app <label>]` | Chaque modèle enregistré, trié pour une sortie déterministe |
 | `showurls [--format plain\|json]` | Chaque route nommée, triée |
-| `check [--deploy]` | Contrôles de santé ; `--deploy` ajoute les audits de production |
+| `check [--deploy]` | Contrôles de santé, changements de modèles sans migration et migrations non appliquées ; `--deploy` ajoute les audits de production |
 | `create-admin` | Crée une ligne `AdminUser` pour les projets utilisant `admin::Builder::with_session_auth`. **Pas** conditionné à `tenancy` — prend un simple `&Pool` et écrit dans `rustango_admin_users`, en créant la table si besoin. Le seul moyen d'obtenir un premier login admin sur un projet non-tenancy |
+| `reset-password <username>` / `change-password <username>` | Définit le mot de passe d'un utilisateur admin (base unique) ; `change-password` vérifie d'abord l'actuel. Mêmes options de mot de passe que `create-admin` |
+| `set-admin-active <username> --on\|--off` | Désactive un utilisateur admin (ses sessions prennent fin) ou le réactive |
+| `reset-admin-totp <username>` | Supprime l'appareil à deux facteurs d'un utilisateur admin après la perte du téléphone. Audité avec la source `cli` |
 | `about` / `version` / `--version` | Informations de build et de version |
 | `docs` | Ouvre la documentation |
 
@@ -138,6 +141,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `set-password-link <slug> <username>` | Affiche un lien à usage unique pour que l'utilisateur définisse son propre mot de passe |
 | `reset-operator-password` / `change-operator-password` | Récupération du mot de passe d'un opérateur ; `change-operator-password` lit le mot de passe actuel comme `change-password` |
 | `set-operator-active` | Active ou désactive un opérateur |
+| `reset-operator-totp <username>` | Supprime l'appareil à deux facteurs d'un opérateur après la perte du téléphone. Audité dans le registry avec la source `cli` |
 | `create-role` / `assign-role` / `revoke-role` / `list-roles` | Rôles |
 | `grant-perm` / `revoke-perm` | Permissions par codename |
 | `seed-permissions [--slug <s>]` | Initialise les lignes de permission par défaut |
@@ -156,7 +160,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Routage par hôte |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Serveurs de bases de données enregistrés |
 | `test-tenant-connection` | Vérifie que la base d'un tenant est joignable |
-| `reseal-tenant-secrets [--apply]` | Rescelle les URL de tenant et les mots de passe de serveur stockés avec la `RUSTANGO_SECRET_KEY` actuelle ; sans `--apply`, une simulation |
+| `reseal-tenant-secrets [--apply]` | Rescelle les URL de tenant, les mots de passe de serveur, les secrets TOTP des opérateurs et les secrets SSO stockés avec la `RUSTANGO_SECRET_KEY` actuelle ; sans `--apply`, une simulation |
 | `prewarm-pools` | Ouvre les pools de tenants avant la première requête |
 | `run-server` / `runserver` | Lance le serveur multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Points d'entrée de configuration et interactifs |
@@ -219,6 +223,12 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 - `RenameTable`, `RenameColumn` — utilisez `--empty` et modifiez le JSON. Une
   exception : un `src_col` / `dst_col` M2M modifié avec le même `through` est
   écrit comme `RenameColumn`, pour que la table de jonction garde ses lignes.
+
+Une colonne supprimée à côté d'une nouvelle colonne du même type dans une table
+ressemble à un champ renommé, et suppression+ajout effacerait ses données.
+`makemigrations` le refuse et nomme les colonnes ; écrivez le `RenameColumn`
+comme ci-dessous, ou passez `--drop-and-add` pour supprimer et ajouter
+volontairement. Tout autre `DropColumn` avertit que ses données disparaissent.
 
 ### `makemigrations --app <app>`
 
@@ -790,7 +800,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.9
+rustango 0.61.10
 ```
 
 ### `about`
@@ -803,7 +813,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.9
+  version:        0.61.10
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -993,6 +1003,16 @@ SSE et long-poll ne finissent jamais seuls. Les exécutions de provisionnement e
 de migration laissées en `running` plus d'une heure par un processus arrêté sont
 marquées en échec au démarrage suivant, et une relance du webhook avec le même
 `event_id` s'exécute à nouveau.
+
+Un `runserver` à base unique applique les migrations en attente avant d'écouter et
+déclenche `pre_migrate` / `post_migrate` comme `migrate`. Il attend au plus
+`[server] migrate_lock_timeout_secs` (300 par défaut) le verrou d'une autre
+exécution, puis s'arrête. Désactivez-le avec `[server] migrate_on_boot = false`
+(`RUSTANGO__SERVER__MIGRATE_ON_BOOT=false`) ou `Cli::migrate_on_boot(false)`.
+Pour un déploiement progressif à plusieurs réplicas, désactivez-le et lancez
+`migrate` une fois dans un job avant le déploiement : aucun pod ne migre pendant
+que les anciens servent encore. Le serveur tenancy ne migre jamais au démarrage ;
+lancez `migrate` vous-même.
 
 ### `create-tenant <slug> [options]`
 
@@ -1238,7 +1258,7 @@ tenant depuis une console inter-tenant. Les opérateurs vivent dans le
 registry partagé, pas dans un tenant en particulier.
 
 ```bash
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-operator admin --generate     # en afficher un aléatoire à la place
 ```
 
@@ -1382,6 +1402,9 @@ consigne ce qu'ont fait les opérateurs : il grossit donc avec l'usage de
 la console. Nommer un tenant (`--tenant`) demande ce tenant-là et laisse
 le registry tranquille. Un tenant cassé est signalé et compté plutôt que
 de mettre fin au balayage.
+
+Un projet à base unique a le même verbe avec `--days`, `--keep-last` et `--yes` ;
+il réduit l'unique journal d'audit.
 
 ### Voir ce qui s'est passé
 
@@ -1655,8 +1678,9 @@ cargo rustango new myapp --template tenant
 cd myapp
 cp .env.example .env             # edit DATABASE_URL + RUSTANGO_APEX_DOMAIN
 docker compose up -d
+cargo run -- makemigrations                               # files for your models
 cargo run -- migrate                                      # registry + tenants
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
 cargo run -- create-user acme alice --password tenantpw --superuser

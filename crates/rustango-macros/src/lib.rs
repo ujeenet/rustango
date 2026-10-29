@@ -47,7 +47,7 @@ fn rustango_root() -> TokenStream2 {
 }
 
 /// Derive a `Model` impl. See crate docs for the supported attributes.
-#[proc_macro_derive(Model, attributes(rustango))]
+#[proc_macro_derive(Model, attributes(rustango, rgo))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     expand(&input)
@@ -4355,9 +4355,14 @@ fn inherent_impl_tokens(
 
     // Bulk writers on audited models write one audit row per affected
     // row, in the write's transaction (#1747).
-    let (bulk_delete_run, bulk_update_run, truncate_run) = if audited_fields.is_some() {
+    let (bulk_delete_run, destroy_run, bulk_update_run, truncate_run) = if audited_fields.is_some()
+    {
         (
             quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
+            })
+            .await),
+            quote!(#root::audit::delete_each_with_audit::<Self>(pool, &_queries, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
             })
             .await),
@@ -4374,6 +4379,7 @@ fn inherent_impl_tokens(
     } else {
         (
             quote!(#root::sql::delete_pool(pool, &_query).await),
+            quote!(#root::sql::__rustango_delete_all_or_none(pool, _queries).await),
             quote!(#root::sql::update_pool(pool, &_query).await),
             quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
         )
@@ -4987,8 +4993,9 @@ fn inherent_impl_tokens(
                 >,
             {
                 use #root::sql::FetcherPool as _;
-                let pk_col = match Self::primary_key_column() {
-                    ::core::option::Option::Some(c) => c,
+                // The field name: `filter` / `order_by` take fields, not columns.
+                let pk_col = match <Self as #root::core::Model>::SCHEMA.primary_key() {
+                    ::core::option::Option::Some(f) => f.name,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(());
                     }
@@ -5020,13 +5027,8 @@ fn inherent_impl_tokens(
             /// instead of OFFSET. O(N) total scan vs OFFSET's O(N²)
             /// — the right choice for multi-million-row sweeps.
             ///
-            /// Requires the primary key to be a signed integer type
-            /// (`i64` / `i32`); the keyset comparison rides on
-            /// `__rustango_pk_value()` lowering through
-            /// `SqlValue::I64` / `SqlValue::I32`. Skipped on
-            /// non-integer PKs (UUID, String) — those should use
-            /// the OFFSET-shaped [`Self::chunk`] or a hand-rolled
-            /// keyset loop.
+            /// The keyset compares the primary key in its own type,
+            /// so any orderable PK works (`i32`, `i64`, UUID, string).
             ///
             /// Callback errors abort iteration; the error bubbles up
             /// unchanged. Empty table → callback invoked zero times.
@@ -5042,50 +5044,41 @@ fn inherent_impl_tokens(
                 >,
             {
                 use #root::sql::FetcherPool as _;
-                let pk_col = match Self::primary_key_column() {
-                    ::core::option::Option::Some(c) => c,
+                // The field name: `filter` / `order_by` take fields, not columns.
+                let pk_col = match <Self as #root::core::Model>::SCHEMA.primary_key() {
+                    ::core::option::Option::Some(f) => f.name,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(());
                     }
                 };
-                // Track the largest PK seen so the next batch picks
-                // up from there. `i64::MIN` as the sentinel — the
-                // very first iteration's `> MIN` matches every row,
-                // so the loop entry is uniform with subsequent
-                // iterations.
-                let mut last_seen: i64 = i64::MIN;
+                // The largest PK seen, in the PK's own type; none before
+                // the first batch.
+                let key = ::std::format!("{}__gt", pk_col);
+                let mut last_seen: ::core::option::Option<#root::core::SqlValue> =
+                    ::core::option::Option::None;
                 loop {
-                    let key = ::std::format!("{}__gt", pk_col);
-                    let rows: ::std::vec::Vec<Self> =
-                        #root::query::QuerySet::<Self>::default()
-                            .filter(key.as_str(), last_seen)
-                            .order_by(&[(pk_col, false)])
-                            .limit(n)
-                            .fetch(pool)
-                            .await?;
-                    if rows.is_empty() {
-                        return ::core::result::Result::Ok(());
+                    let mut qs = #root::query::QuerySet::<Self>::default();
+                    if let ::core::option::Option::Some(v) = last_seen.take() {
+                        qs = qs.filter(key.as_str(), v);
                     }
+                    let rows: ::std::vec::Vec<Self> = qs
+                        .order_by(&[(pk_col, false)])
+                        .limit(n)
+                        .fetch(pool)
+                        .await?;
                     let len = rows.len() as i64;
                     // Capture the last row's PK BEFORE moving rows
                     // into the callback.
-                    let max_pk = match rows
-                        .last()
-                        .map(|r| r.__rustango_pk_value())
-                    {
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I64(v),
-                        ) => v,
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I32(v),
-                        ) => i64::from(v),
-                        _ => return ::core::result::Result::Ok(()),
+                    let ::core::option::Option::Some(max_pk) =
+                        rows.last().map(|r| r.__rustango_pk_value())
+                    else {
+                        return ::core::result::Result::Ok(());
                     };
                     cb(rows).await?;
                     if len < n {
                         return ::core::result::Result::Ok(());
                     }
-                    last_seen = max_pk;
+                    last_seen = ::core::option::Option::Some(max_pk);
                 }
             }
 
@@ -5095,8 +5088,7 @@ fn inherent_impl_tokens(
             /// `batch` size, calling `cb` once per row.
             ///
             /// Inherits the keyset-paginated scan of
-            /// [`Self::chunk_by_id`] (O(N) total, integer PK only —
-            /// non-integer PKs are silently a no-op).
+            /// [`Self::chunk_by_id`] (O(N) total).
             ///
             /// ```ignore
             /// Post::each(500, &pool, |p| async move {
@@ -5119,37 +5111,31 @@ fn inherent_impl_tokens(
                 >,
             {
                 use #root::sql::FetcherPool as _;
-                let pk_col = match Self::primary_key_column() {
-                    ::core::option::Option::Some(c) => c,
+                // The field name: `filter` / `order_by` take fields, not columns.
+                let pk_col = match <Self as #root::core::Model>::SCHEMA.primary_key() {
+                    ::core::option::Option::Some(f) => f.name,
                     ::core::option::Option::None => {
                         return ::core::result::Result::Ok(());
                     }
                 };
-                let mut last_seen: i64 = i64::MIN;
+                let key = ::std::format!("{}__gt", pk_col);
+                let mut last_seen: ::core::option::Option<#root::core::SqlValue> =
+                    ::core::option::Option::None;
                 loop {
-                    let key = ::std::format!("{}__gt", pk_col);
-                    let rows: ::std::vec::Vec<Self> =
-                        #root::query::QuerySet::<Self>::default()
-                            .filter(key.as_str(), last_seen)
-                            .order_by(&[(pk_col, false)])
-                            .limit(batch)
-                            .fetch(pool)
-                            .await?;
-                    if rows.is_empty() {
-                        return ::core::result::Result::Ok(());
+                    let mut qs = #root::query::QuerySet::<Self>::default();
+                    if let ::core::option::Option::Some(v) = last_seen.take() {
+                        qs = qs.filter(key.as_str(), v);
                     }
+                    let rows: ::std::vec::Vec<Self> = qs
+                        .order_by(&[(pk_col, false)])
+                        .limit(batch)
+                        .fetch(pool)
+                        .await?;
                     let len = rows.len() as i64;
-                    let max_pk = match rows
-                        .last()
-                        .map(|r| r.__rustango_pk_value())
-                    {
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I64(v),
-                        ) => v,
-                        ::core::option::Option::Some(
-                            #root::core::SqlValue::I32(v),
-                        ) => i64::from(v),
-                        _ => return ::core::result::Result::Ok(()),
+                    let ::core::option::Option::Some(max_pk) =
+                        rows.last().map(|r| r.__rustango_pk_value())
+                    else {
+                        return ::core::result::Result::Ok(());
                     };
                     for row in rows {
                         cb(row).await?;
@@ -5157,7 +5143,7 @@ fn inherent_impl_tokens(
                     if len < batch {
                         return ::core::result::Result::Ok(());
                     }
-                    last_seen = max_pk;
+                    last_seen = ::core::option::Option::Some(max_pk);
                 }
             }
 
@@ -5190,7 +5176,8 @@ fn inherent_impl_tokens(
             /// Returns the affected row count.
             ///
             /// Eloquent `Model::destroy([1, 2, 3])` parity.
-            /// Empty `pks` is a no-op (returns 0).
+            /// Empty `pks` is a no-op (returns 0). All or none: past
+            /// the bind cap the batches share one transaction.
             ///
             /// Accepts any iterable whose elements are
             /// `Into<SqlValue>` — `Vec<i64>`, `&[i64]`,
@@ -5215,14 +5202,20 @@ fn inherent_impl_tokens(
                     .ok_or_else(|| {
                         #root::sql::ExecError::Sql(#root::sql::SqlError::MissingPrimaryKey)
                     })?;
-                let _query = #root::query::QuerySet::<Self>::default()
-                    .filter_op(
-                        _pk.name,
-                        #root::core::Op::In,
-                        #root::core::SqlValue::List(_values),
-                    )
-                    .compile_delete()?;
-                #bulk_delete_run
+                // One statement per `IN` list the dialect can bind, all or none.
+                let mut _queries = ::std::vec::Vec::new();
+                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                    _queries.push(
+                        #root::query::QuerySet::<Self>::default()
+                            .filter_op(
+                                _pk.name,
+                                #root::core::Op::In,
+                                #root::core::SqlValue::List(_keys),
+                            )
+                            .compile_delete()?,
+                    );
+                }
+                #destroy_run
             }
 
             /// Fetch every row where `<col> = <val>`. Eloquent
@@ -5288,10 +5281,16 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", col);
-                #root::query::QuerySet::<Self>::default()
-                    .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch(pool)
-                    .await
+                let mut _rows = ::std::vec::Vec::new();
+                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                    _rows.extend(
+                        #root::query::QuerySet::<Self>::default()
+                            .filter(&_key, #root::core::SqlValue::List(_keys))
+                            .fetch(pool)
+                            .await?,
+                    );
+                }
+                ::core::result::Result::Ok(_rows)
             }
 
             /// Fetch every row where `<col> NOT IN (vals)`. Eloquent
@@ -6212,12 +6211,10 @@ fn inherent_impl_tokens(
 
             #value_method
 
-            /// Fetch the row with the largest `field` value —
-            /// `SELECT … ORDER BY <field> DESC LIMIT 1`. Returns
-            /// `Ok(None)` for an empty table. Eloquent
-            /// `Model::latest($field)->first()` parity.
-            /// Thin wrapper over `QuerySet::<Self>::default()
-            /// .latest(field, pool)`.
+            /// Fetch the row with the largest non-NULL `field` value.
+            /// Returns `Ok(None)` when the table is empty or every
+            /// `field` is NULL. Thin wrapper over
+            /// `QuerySet::<Self>::default().latest(field, pool)`.
             ///
             /// **Field name** is the Rust field ident as a string
             /// (not the SQL column). It is a runtime `&str`, so an
@@ -6239,10 +6236,8 @@ fn inherent_impl_tokens(
                     .await
             }
 
-            /// Sibling of [`Self::latest`] — fetches the row
-            /// with the smallest `field` value (`ORDER BY <field>
-            /// ASC LIMIT 1`). Eloquent `Model::oldest($field)
-            /// ->first()` parity.
+            /// Sibling of [`Self::latest`]: fetches the row with the
+            /// smallest non-NULL `field` value.
             ///
             /// # Errors
             /// As [`Self::latest`].
@@ -6381,10 +6376,16 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
-                #root::query::QuerySet::<Self>::default()
-                    .filter(&_key, #root::core::SqlValue::List(_values))
-                    .fetch(pool)
-                    .await
+                let mut _rows = ::std::vec::Vec::new();
+                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                    _rows.extend(
+                        #root::query::QuerySet::<Self>::default()
+                            .filter(&_key, #root::core::SqlValue::List(_keys))
+                            .fetch(pool)
+                            .await?,
+                    );
+                }
+                ::core::result::Result::Ok(_rows)
             }
 
             /// Look up the row whose primary key equals `pk`. Returns
@@ -7833,6 +7834,7 @@ fn inherent_impl_tokens(
             /// Auto-PK rows must all have `Auto::Unset` (the sequence
             /// picks the PK on insert; the update path never touches
             /// the Auto column). Auto-set rows trigger a hard error.
+            /// Rows repeating a `target` key: the last one wins.
             /// Empty slice is a no-op. On an audited model each written
             /// row gets a `create` or `update` audit row; MySQL refuses it.
             ///
@@ -9040,6 +9042,62 @@ struct AdminAttrs {
     formfield_overrides: Option<(Vec<(String, String)>, proc_macro2::Span)>,
 }
 
+/// The names `#[derive(Model)]` reads its attributes under: `rgo` is a
+/// short alias of `rustango` with the same meaning.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ModelAttrName {
+    Rustango,
+    Rgo,
+}
+
+impl ModelAttrName {
+    fn of(attr: &syn::Attribute) -> Option<Self> {
+        let path = attr.path();
+        if path.is_ident("rustango") {
+            Some(Self::Rustango)
+        } else if path.is_ident("rgo") {
+            Some(Self::Rgo)
+        } else {
+            None
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Rustango => "rustango",
+            Self::Rgo => "rgo",
+        }
+    }
+}
+
+/// The model attributes in `attrs`, under either name. One item or field
+/// uses one name, so a mix reads as a mistake rather than a merge.
+fn model_attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<&syn::Attribute>> {
+    let mut first: Option<ModelAttrName> = None;
+    let mut out = Vec::new();
+    for attr in attrs {
+        let Some(name) = ModelAttrName::of(attr) else {
+            continue;
+        };
+        match first {
+            Some(seen) if seen != name => {
+                return Err(syn::Error::new_spanned(
+                    attr.path(),
+                    format!(
+                        "`#[{}(...)]` and `#[{}(...)]` are the same attribute; \
+                         use one name on an item or field",
+                        seen.as_str(),
+                        name.as_str(),
+                    ),
+                ));
+            }
+            _ => first = Some(name),
+        }
+        out.push(attr);
+    }
+    Ok(out)
+}
+
 fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
     let mut out = ContainerAttrs {
         table: None,
@@ -9085,10 +9143,9 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         reverse_has_relations: Vec::new(),
         generic_has_relations: Vec::new(),
     };
-    for attr in &input.attrs {
-        if !attr.path().is_ident("rustango") {
-            continue;
-        }
+    for attr in model_attrs(&input.attrs)? {
+        // The name the user wrote, for hints that quote the attribute.
+        let written = ModelAttrName::of(attr).map_or("rustango", ModelAttrName::as_str);
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
                 let s: LitStr = meta.value()?.parse()?;
@@ -10103,7 +10160,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 // Both produce `CREATE UNIQUE INDEX <name> ON <table>
                 // (col1, col2)`, where <name> defaults to
                 // `<table>_<col1>_<col2>_uq` when not supplied.
-                let (columns, name) = parse_together_attr(&meta, "unique_together")?;
+                let (columns, name) = parse_together_attr(&meta, "unique_together", written)?;
                 out.indexes.push(IndexAttr {
                     span: meta.path.span(),
                     name,
@@ -10121,7 +10178,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 //
                 //   #[rustango(index_together = "created_at, status")]
                 //   #[rustango(index_together(columns = "created_at, status", name = "x"))]
-                let (columns, name) = parse_together_attr(&meta, "index_together")?;
+                let (columns, name) = parse_together_attr(&meta, "index_together", written)?;
                 out.indexes.push(IndexAttr {
                     span: meta.path.span(),
                     name,
@@ -10671,7 +10728,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 out.generic_m2m.push(gm);
                 return Ok(());
             }
-            Err(meta.error("unknown rustango container attribute"))
+            Err(unknown_key_error(&meta, "container", CONTAINER_ATTR_KEYS))
         })?;
     }
     Ok(out)
@@ -10698,13 +10755,14 @@ fn split_field_list(raw: &str) -> Vec<String> {
 fn parse_together_attr(
     meta: &syn::meta::ParseNestedMeta<'_>,
     attr: &str,
+    written: &str,
 ) -> syn::Result<(Vec<String>, Option<String>)> {
     // Disambiguate by whether the next token is `=` (key-value) or
     // `(` (parenthesized).
     if meta.input.peek(syn::Token![=]) {
         let cols_lit: LitStr = meta.value()?.parse()?;
         let columns = split_field_list(&cols_lit.value());
-        check_together_columns(meta, attr, &columns)?;
+        check_together_columns(meta, attr, written, &columns)?;
         return Ok((columns, None));
     }
     let mut columns: Option<Vec<String>> = None;
@@ -10727,21 +10785,23 @@ fn parse_together_attr(
             "{attr}(...) requires a `columns = \"col1, col2\"` argument",
         ))
     })?;
-    check_together_columns(meta, attr, &columns)?;
+    check_together_columns(meta, attr, written, &columns)?;
     Ok((columns, name))
 }
 
 fn check_together_columns(
     meta: &syn::meta::ParseNestedMeta<'_>,
     attr: &str,
+    written: &str,
     columns: &[String],
 ) -> syn::Result<()> {
     if columns.len() < 2 {
-        let single = if attr == "unique_together" {
-            "#[rustango(unique)] on the field"
+        let flag = if attr == "unique_together" {
+            "unique"
         } else {
-            "#[rustango(index)] on the field"
+            "index"
         };
+        let single = format!("#[{written}({flag})] on the field");
         return Err(meta.error(format!(
             "{attr} expects two or more columns; for a single-column equivalent use {single}",
         )));
@@ -10971,6 +11031,136 @@ struct FieldAttrs {
     validators: Vec<String>,
 }
 
+/// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
+const FIELD_ATTR_KEYS: &[&str] = &[
+    "column",
+    "primary_key",
+    "fk",
+    "o2o",
+    "on",
+    "on_delete",
+    "related_name",
+    "max_length",
+    "vector",
+    "geometry",
+    "min",
+    "max",
+    "default",
+    "generated_as",
+    "help_text",
+    "choices",
+    "db_comment",
+    "verbose_name",
+    "editable",
+    "blank",
+    "citext",
+    "validators",
+    "auto_uuid",
+    "default_uuid_v7",
+    "auto_now_add",
+    "auto_now",
+    "soft_delete",
+    "unique",
+    "index",
+];
+
+/// Keys `parse_container_attrs` accepts, listed in its unknown-key error.
+const CONTAINER_ATTR_KEYS: &[&str] = &[
+    "table",
+    "display",
+    "app",
+    "scope",
+    "admin",
+    "manager",
+    "manager_fn",
+    "default_order",
+    "global_scope",
+    "through",
+    "reverse_has",
+    "generic_has",
+    "audit",
+    "permissions",
+    "view",
+    "managed",
+    "verbose_name",
+    "verbose_name_plural",
+    "db_table_comment",
+    "proxy",
+    "order_with_respect_to",
+    "required_db_features",
+    "required_db_vendor",
+    "base_manager_name",
+    "default_related_name",
+    "extra_permissions",
+    "default_permissions",
+    "get_latest_by",
+    "unique_together",
+    "index_together",
+    "unique_when",
+    "index_when",
+    "index",
+    "check",
+    "exclude",
+    "generic_fk",
+    "fk_composite",
+    "m2m",
+    "generic_m2m",
+];
+
+/// A flag attribute: `#[rustango(key)]` or `#[rustango(key = true)]`.
+/// `= false` is refused: off is the default, so the attribute is a no-op.
+fn parse_flag(meta: &syn::meta::ParseNestedMeta<'_>, key: &str) -> syn::Result<()> {
+    if meta.input.peek(syn::Token![=]) {
+        let lit: syn::LitBool = meta.value()?.parse()?;
+        if !lit.value {
+            return Err(syn::Error::new(
+                lit.span(),
+                format!("`{key} = false` is the default; remove the attribute"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// "unknown rustango <what> attribute `key`", with the nearest key and the full list.
+fn unknown_key_error(
+    meta: &syn::meta::ParseNestedMeta<'_>,
+    what: &str,
+    keys: &[&str],
+) -> syn::Error {
+    let path = &meta.path;
+    let got = path
+        .get_ident()
+        .map_or_else(|| quote!(#path).to_string(), ToString::to_string);
+    let mut msg = format!("unknown rustango {what} attribute `{got}`");
+    if let Some(near) = keys
+        .iter()
+        .map(|k| (edit_distance(&got, k), *k))
+        .filter(|(d, k)| *d <= 2.max(k.len() / 4))
+        .min_by_key(|(d, _)| *d)
+        .map(|(_, k)| k)
+    {
+        msg.push_str(&format!("; did you mean `{near}`?"));
+    }
+    msg.push_str(&format!(" Supported: {}", keys.join(", ")));
+    meta.error(msg)
+}
+
+/// Levenshtein distance, for "did you mean" hints.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev[j] + usize::from(ca != *cb);
+            cur.push(sub.min(prev[j + 1] + 1).min(cur[j] + 1));
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
 fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
     let mut out = FieldAttrs {
         column: None,
@@ -11006,10 +11196,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         case_insensitive: false,
         validators: Vec::new(),
     };
-    for attr in &field.attrs {
-        if !attr.path().is_ident("rustango") {
-            continue;
-        }
+    for attr in model_attrs(&field.attrs)? {
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("column") {
                 let s: LitStr = meta.value()?.parse()?;
@@ -11019,6 +11206,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("primary_key") {
+                parse_flag(&meta, "primary_key")?;
                 out.primary_key = true;
                 return Ok(());
             }
@@ -11240,6 +11428,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("auto_uuid") {
+                parse_flag(&meta, "auto_uuid")?;
                 out.auto_uuid = true;
                 // Implied: PK + auto + DEFAULT gen_random_uuid().
                 // Each is also explicitly settable; the explicit
@@ -11251,6 +11440,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("default_uuid_v7") {
+                parse_flag(&meta, "default_uuid_v7")?;
                 // Backend-neutral counterpart of `auto_uuid` — issue #823.
                 // No SQL DEFAULT (the macro fills the value Rust-side
                 // before binding); just mark the field as PK + Auto
@@ -11261,6 +11451,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("auto_now_add") {
+                parse_flag(&meta, "auto_now_add")?;
                 out.auto_now_add = true;
                 if out.default.is_none() {
                     out.default = Some("now()".into());
@@ -11268,6 +11459,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("auto_now") {
+                parse_flag(&meta, "auto_now")?;
                 out.auto_now = true;
                 if out.default.is_none() {
                     out.default = Some("now()".into());
@@ -11275,14 +11467,17 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 return Ok(());
             }
             if meta.path.is_ident("soft_delete") {
+                parse_flag(&meta, "soft_delete")?;
                 out.soft_delete = true;
                 return Ok(());
             }
             if meta.path.is_ident("unique") {
+                parse_flag(&meta, "unique")?;
                 out.unique = true;
                 return Ok(());
             }
             if meta.path.is_ident("index") {
+                parse_flag(&meta, "index")?;
                 out.index = true;
                 // Optional sub-attrs: #[rustango(index(unique, name = "…", method = "gin"))]
                 if meta.input.peek(syn::token::Paren) {
@@ -11318,7 +11513,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                 }
                 return Ok(());
             }
-            Err(meta.error("unknown rustango field attribute"))
+            Err(unknown_key_error(&meta, "field", FIELD_ATTR_KEYS))
         })?;
     }
     Ok(out)
@@ -11735,14 +11930,28 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         })
     }};
 
-    let from_row_init = quote! {
-        #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)?
-    };
-    let from_aliased_row_init = quote! {
-        #ident: #root::sql::sqlx::Row::try_get(
-            row,
-            #root::core::joins::joined_label(prefix, #column_lit).as_str(),
-        )?
+    // sqlx-sqlite has no `Decimal` decode: it goes through `FlatScalar`'s cell.
+    let decimal_column = kind == DetectedKind::Decimal && !detected_auto && fk_inner.is_none();
+    let (from_row_init, from_aliased_row_init) = if decimal_column {
+        (
+            quote! { #ident: #root::sql::try_get_flat(row, #column_lit)? },
+            quote! {
+                #ident: #root::sql::try_get_flat(
+                    row,
+                    #root::core::joins::joined_label(prefix, #column_lit).as_str(),
+                )?
+            },
+        )
+    } else {
+        (
+            quote! { #ident: #root::sql::sqlx::Row::try_get(row, #column_lit)? },
+            quote! {
+                #ident: #root::sql::sqlx::Row::try_get(
+                    row,
+                    #root::core::joins::joined_label(prefix, #column_lit).as_str(),
+                )?
+            },
+        )
     };
     // `Auto<Uuid>` and `ForeignKey<_, Uuid>` decode through their own
     // MySQL impls; a bare or optional `Uuid` needs `FlatScalar`'s cell.
@@ -11835,6 +12044,71 @@ fn check_bound_compatibility(
             return Err(syn::Error::new_spanned(
                 field,
                 format!("`min` ({min}) is greater than `max` ({max})"),
+            ));
+        }
+    }
+    if let Some(default) = &attrs.default {
+        check_default_expr(default, kind).map_err(|msg| syn::Error::new_spanned(field, msg))?;
+    }
+    Ok(())
+}
+
+/// SQL words a `default` may be on its own; any other bare word is a
+/// column reference, which Postgres and MySQL refuse in a DEFAULT.
+const DEFAULT_KEYWORDS: &[&str] = &[
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "CURRENT_TIMESTAMP",
+    "CURRENT_DATE",
+    "CURRENT_TIME",
+    "LOCALTIMESTAMP",
+    "LOCALTIME",
+];
+
+/// `default` is raw SQL. Refuse the shapes only SQLite accepts: a bare
+/// word (read as a column on PG/MySQL) and a non-numeric literal on a
+/// numeric field.
+fn check_default_expr(default: &str, kind: DetectedKind) -> Result<(), String> {
+    let expr = default.trim();
+    let is_word = expr.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && expr
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ');
+    let upper = expr.to_ascii_uppercase();
+    if is_word && ["CURRENT_USER", "SESSION_USER", "USER"].contains(&upper.as_str()) {
+        return Err(format!(
+            "`default = \"{expr}\"` works on Postgres only: MySQL refuses it as a default \
+             and SQLite stores the text `{expr}`; set the value in code instead"
+        ));
+    }
+    if is_word && !DEFAULT_KEYWORDS.contains(&upper.as_str()) {
+        return Err(format!(
+            "`default = \"{expr}\"` is raw SQL, so `{expr}` is read as a column name; \
+             for the text '{expr}' write `default = \"'{expr}'\"`"
+        ));
+    }
+    let numeric = kind.is_integer()
+        || matches!(
+            kind,
+            DetectedKind::F32 | DetectedKind::F64 | DetectedKind::Decimal
+        );
+    if numeric {
+        let unquoted = expr
+            .strip_prefix('\'')
+            .and_then(|e| e.strip_suffix('\''))
+            .unwrap_or(expr);
+        let is_number = if kind.is_integer() {
+            unquoted.parse::<i64>().is_ok()
+        } else {
+            unquoted.parse::<f64>().is_ok_and(f64::is_finite)
+        };
+        // Keep expressions (`(1 + 2)`, `abs(-1)`) and NULL; refuse a
+        // literal that is no number. `""` renders as `''`.
+        let is_literal = is_word || expr.is_empty() || expr.starts_with('\'');
+        if is_literal && !is_number && upper != "NULL" {
+            return Err(format!(
+                "`default = \"{expr}\"` is not a number, but the field is numeric"
             ));
         }
     }
@@ -13758,6 +14032,11 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
         None => quote!(::core::option::Option::None),
     };
+    #[cfg(feature = "openapi")]
+    let opt_u64 = |v: Option<u64>| match v {
+        Some(n) => quote!(::core::option::Option::Some(#n)),
+        None => quote!(::core::option::Option::None),
+    };
     let opt_i64 = |v: Option<i64>| match v {
         Some(n) => quote!(::core::option::Option::Some(#n)),
         None => quote!(::core::option::Option::None),
@@ -14009,7 +14288,7 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
     // `readable_source_fields`: model columns the JSON output copies
     // straight from the model, so `?ordering=` cannot sort on a column
     // the API never shows (#1845).
-    let readable_source_lits: Vec<String> = fields_info
+    let readable: Vec<&FieldInfo> = fields_info
         .iter()
         .filter(|fi| {
             !fi.attrs.write_only
@@ -14020,6 +14299,9 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 && fi.attrs.many.is_none()
                 && fi.attrs.slug.is_none()
         })
+        .collect();
+    let readable_source_lits: Vec<String> = readable
+        .iter()
         .map(|fi| {
             fi.attrs
                 .source
@@ -14027,6 +14309,8 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 .unwrap_or_else(|| ident_name(&fi.ident))
         })
         .collect();
+    // Their JSON keys, so the ViewSet finds a renamed cursor column.
+    let readable_lits: Vec<String> = readable.iter().map(|fi| fi.ser_name.clone()).collect();
 
     // `from_writable_json`: build a partial instance for input
     // validation. Writable fields are parsed from the JSON body (keyed
@@ -14117,10 +14401,31 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 } else {
                     quote! {}
                 };
+                // The bounds `validate()` enforces on a written field.
+                let limits_call = is_writable(fi).then(|| {
+                    let mname = fi
+                        .attrs
+                        .source
+                        .clone()
+                        .unwrap_or_else(|| ident_name(&fi.ident));
+                    let (a, b, c, d) = (
+                        opt_u64(fi.attrs.max_length),
+                        opt_u64(fi.attrs.min_length),
+                        opt_i64(fi.attrs.min),
+                        opt_i64(fi.attrs.max),
+                    );
+                    quote! {
+                        .field_limits(
+                            <#model_path as #root::core::Model>::SCHEMA.field(#mname),
+                            #a, #b, #c, #d,
+                        )
+                    }
+                });
                 quote! {
                     .property(
                         #name_lit,
                         <#ty as #root::openapi::OpenApiSchema>::openapi_schema()
+                            #limits_call
                             #nullable_call,
                     )
                 }
@@ -14166,6 +14471,10 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
 
             fn readable_source_fields() -> &'static [&'static str] {
                 &[ #( #readable_source_lits ),* ]
+            }
+
+            fn readable_fields() -> &'static [&'static str] {
+                &[ #( #readable_lits ),* ]
             }
 
             fn from_writable_json(
@@ -14520,11 +14829,194 @@ mod field_attr_tests {
         assert!(!out.contains("impl other :: Account {"), "{out}");
     }
 
+    fn field_error(src: &str) -> Option<String> {
+        let f: syn::FieldsNamed = syn::parse_str(&format!("{{ {src} }}")).unwrap();
+        let field = f.named.into_iter().next().unwrap();
+        match parse_field_attrs(&field) {
+            Err(e) => Some(e.to_string()),
+            Ok(_) => error_for(field),
+        }
+    }
+
+    /// Flag attrs take `= true` like `blank`; `= false` is refused by name.
+    #[test]
+    fn flag_attrs_accept_eq_true() {
+        for key in [
+            "primary_key",
+            "unique",
+            "soft_delete",
+            "index",
+            "auto_now",
+            "auto_now_add",
+        ] {
+            let f: syn::FieldsNamed =
+                syn::parse_str(&format!("{{ #[rustango({key} = true)] a: i64 }}")).unwrap();
+            let field = f.named.into_iter().next().unwrap();
+            assert!(parse_field_attrs(&field).is_ok(), "{key} = true");
+            let err = field_error(&format!("#[rustango({key} = false)] a: i64")).unwrap();
+            assert!(err.contains(&format!("`{key} = false`")), "{err}");
+        }
+        let f: syn::Field =
+            syn::parse_quote!(#[rustango(primary_key = true, unique = true)] a: i64);
+        let attrs = parse_field_attrs(&f).unwrap();
+        assert!(attrs.primary_key && attrs.unique);
+    }
+
+    /// An unknown key is named, the nearest key suggested and the list shown.
+    #[test]
+    fn unknown_key_is_named_with_a_suggestion() {
+        let err = field_error("#[rustango(max_lenght = 5)] a: String").unwrap();
+        assert!(err.contains("`max_lenght`"), "{err}");
+        assert!(err.contains("did you mean `max_length`"), "{err}");
+        assert!(err.contains("Supported: column"), "{err}");
+        let input: DeriveInput = syn::parse_quote! {
+            #[rustango(tabel = "p")]
+            struct P { id: i64 }
+        };
+        let err = parse_container_attrs(&input).err().unwrap().to_string();
+        assert!(
+            err.contains("`tabel`") && err.contains("did you mean `table`"),
+            "{err}"
+        );
+        let err = field_error("#[rustango(zzzzzz)] a: i64").unwrap();
+        assert!(!err.contains("did you mean"), "{err}");
+    }
+
+    /// The listed keys are the parsed keys; a stale list would mislead.
+    #[test]
+    fn listed_keys_are_all_known() {
+        for key in FIELD_ATTR_KEYS {
+            let err = field_error(&format!("#[rustango({key})] a: i64")).unwrap_or_default();
+            assert!(!err.contains("unknown rustango field"), "{key}: {err}");
+        }
+        for key in CONTAINER_ATTR_KEYS {
+            let input: DeriveInput =
+                syn::parse_str(&format!("#[rustango({key})] struct P {{ id: i64 }}")).unwrap();
+            let err = parse_container_attrs(&input)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(!err.contains("unknown rustango container"), "{key}: {err}");
+        }
+    }
+
+    /// `default` is raw SQL: a bare word or a non-number on a numeric field is refused.
+    #[test]
+    fn default_shapes_only_sqlite_takes_are_refused() {
+        for bad in [
+            r#"#[rustango(default = "draft")] s: String"#,
+            r#"#[rustango(default = "draft")] s: Option<String>"#,
+            r#"#[rustango(default = "abc")] n: i32"#,
+            r#"#[rustango(default = "'abc'")] n: i64"#,
+            r#"#[rustango(default = "true")] n: i32"#,
+            r#"#[rustango(default = "")] n: i32"#,
+            r#"#[rustango(default = "'x'")] n: f64"#,
+        ] {
+            assert!(field_error(bad).is_some(), "{bad} must be refused");
+        }
+        let err = field_error(r#"#[rustango(default = "draft")] s: String"#).unwrap();
+        assert!(err.contains(r#"default = "'draft'""#), "{err}");
+        // Valid on Postgres alone, so the message says that, not "a column".
+        let err = field_error(r#"#[rustango(default = "current_user")] s: String"#).unwrap();
+        assert!(
+            err.contains("Postgres only") && !err.contains("column"),
+            "{err}"
+        );
+        for good in [
+            r#"#[rustango(default = "'draft'")] s: String"#,
+            r#"#[rustango(default = "")] s: String"#,
+            r#"#[rustango(default = "now()")] s: String"#,
+            r#"#[rustango(default = "CURRENT_TIMESTAMP")] s: String"#,
+            r#"#[rustango(default = "NULL")] s: Option<String>"#,
+            r#"#[rustango(default = "0")] n: i32"#,
+            r#"#[rustango(default = "-1")] n: i64"#,
+            r#"#[rustango(default = "'5'")] n: i64"#,
+            r#"#[rustango(default = "(1 + 2)")] n: i64"#,
+            r#"#[rustango(default = "1.5")] n: f64"#,
+            r#"#[rustango(default = "true")] b: bool"#,
+        ] {
+            assert_eq!(field_error(good), None, "{good}");
+        }
+    }
+
     /// A raw ident derives names without `r#`; this used to panic (#1937).
     #[test]
     fn raw_idents_derive_plain_names() {
         let ident: syn::Ident = syn::parse_quote!(r#type);
         assert_eq!(column_type_ident(&ident).to_string(), "type_col");
         assert_eq!(ident_from_name("type", ident.span()).to_string(), "r#type");
+    }
+}
+
+#[cfg(test)]
+mod model_attr_name_tests {
+    use super::*;
+
+    fn container_error(item: proc_macro2::TokenStream) -> Option<String> {
+        let input: DeriveInput = syn::parse2(item).unwrap();
+        parse_container_attrs(&input).err().map(|e| e.to_string())
+    }
+
+    fn field_error(field: proc_macro2::TokenStream) -> Option<String> {
+        let f: syn::FieldsNamed = syn::parse2(quote!({ #field })).unwrap();
+        let field = f.named.into_iter().next().unwrap();
+        parse_field_attrs(&field).err().map(|e| e.to_string())
+    }
+
+    /// `#[rgo(...)]` reads exactly as `#[rustango(...)]`.
+    #[test]
+    fn rgo_is_read_like_rustango() {
+        let long: DeriveInput = syn::parse_quote! {
+            #[rustango(table = "t", display = "name")] struct S;
+        };
+        let short: DeriveInput = syn::parse_quote! {
+            #[rgo(table = "t", display = "name")] struct S;
+        };
+        let (long, short) = (
+            parse_container_attrs(&long).unwrap(),
+            parse_container_attrs(&short).unwrap(),
+        );
+        assert_eq!(long.table, short.table);
+        assert_eq!(short.table.as_deref(), Some("t"));
+        assert_eq!(long.display.map(|d| d.0), short.display.map(|d| d.0));
+    }
+
+    #[test]
+    fn mixing_names_on_one_item_or_field_is_refused() {
+        let err = container_error(quote! {
+            #[rustango(table = "t")] #[rgo(display = "name")] struct S;
+        })
+        .expect("a mix on an item must fail");
+        assert!(
+            err.contains("`#[rustango(...)]` and `#[rgo(...)]`"),
+            "{err}"
+        );
+        let err = field_error(quote! { #[rgo(primary_key)] #[rustango(column = "c")] a: i64 })
+            .expect("a mix on a field must fail");
+        assert!(
+            err.contains("`#[rgo(...)]` and `#[rustango(...)]`"),
+            "{err}"
+        );
+        // Either name repeated alone is fine.
+        assert_eq!(
+            container_error(quote! { #[rgo(table = "t")] #[rgo(display = "name")] struct S; }),
+            None
+        );
+        assert_eq!(
+            field_error(quote! { #[rustango(primary_key)] #[rustango(column = "c")] a: i64 }),
+            None
+        );
+    }
+
+    /// A hint quotes the attribute under the name the user wrote.
+    #[test]
+    fn hints_use_the_written_name() {
+        let err = container_error(quote! { #[rgo(table = "t", unique_together = "a")] struct S; })
+            .expect("one column must fail");
+        assert!(err.contains("#[rgo(unique)]"), "{err}");
+        let err =
+            container_error(quote! { #[rustango(table = "t", index_together = "a")] struct S; })
+                .expect("one column must fail");
+        assert!(err.contains("#[rustango(index)]"), "{err}");
     }
 }

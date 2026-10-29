@@ -599,7 +599,7 @@ sauf indication contraire) :
 | `title(s)` / `subtitle(s)` | En-tête / sous-en-tête de la barre latérale. |
 | `admin_prefix(p)` | Préfixe d'URL — **doit correspondre au chemin de nesting**. Par défaut `/__admin`. |
 | `audit_url(u)` | Chemin de la vue activité/audit. Par défaut `/__audit`. |
-| `static_url(u)` | Préfixe pour les ressources embarquées (favicon, logo). Par défaut `/__static__`. |
+| `static_url(u)` | Préfixe pour les ressources embarquées (favicon, logo). Par défaut `/__static__`. L’admin simple sert un préfixe de chemin sous son montage. |
 | `change_password_url(u)` | Chemin de la page libre-service de changement de mot de passe (ajoute le lien dans la barre latérale). |
 | `show_only([tables])` | Liste blanche des tables qui apparaissent ; les autres renvoient une 404 et sont masquées. |
 | `read_only([tables])` | Affiche ces tables mais interdit la création/édition/suppression. |
@@ -645,6 +645,7 @@ Tous les chemins sont relatifs à `admin_prefix` :
 | `/__audit` (ou `audit_url`) | GET | Flux d'activité + nettoyage. |
 | `/login`, `/logout` | GET/POST | Authentification par session (si activée). |
 | `/account/password`, `/account/totp` | GET/POST | Changement de mot de passe libre-service / inscription TOTP. |
+| `/account/totp/disable` | POST | Désactiver le TOTP avec un code actuel. |
 
 Les routes personnalisées enregistrées avec `register_admin_view!` se
 montent à `/<table>/<suffix>`.

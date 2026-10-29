@@ -23,10 +23,13 @@ requête suivante.
 > **Un terme vous est inconnu ici ?** *session*, *identifiant opaque*, *cookie*,
 > *cache* — voir le [glossaire](glossary.md).
 
-> Compagnon d'approfondissement du [guide de sécurité](security.md). Le
-> verrouillage des routes derrière une session connectée est traité dans
-> [Décorateurs d'authentification](auth-decorators.md) ; pour des jetons d'API
-> sans état à la place, voir [JWT](auth-jwt.md).
+> Compagnon d'approfondissement du [guide de sécurité](security.md). Les
+> [Décorateurs d'authentification](auth-decorators.md) ne lisent **pas** ces
+> sessions : ils lisent le cookie de connexion tenancy. Pour verrouiller des
+> routes sur une session `SessionStore`, écrivez un petit middleware qui charge
+> la session et appelle `redirect_to_login` — voir
+> [Applications mono-base](auth-decorators.md#applications-mono-base). Pour des
+> jetons d'API sans état à la place, voir [JWT](auth-jwt.md).
 
 ---
 

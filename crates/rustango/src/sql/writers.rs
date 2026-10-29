@@ -50,6 +50,9 @@ pub(super) struct Sql<'d> {
     pub total: Option<CountQuery>,
     /// Children the next SELECT body counts as `__annotated_count`.
     pub child_count: Option<ChildCount>,
+    /// The next SELECT body labels its qualified model columns with their
+    /// bare names: SQLite matches a set operation's ORDER BY only to those.
+    pub label_model_cols: bool,
     /// A MySQL `GROUP_CONCAT` was written: lift its 1024-byte cap.
     pub group_concat: bool,
     /// The UPDATE/DELETE target being written, if any.
@@ -135,6 +138,7 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             child_count: None,
+            label_model_cols: false,
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
@@ -155,6 +159,7 @@ impl<'d> Sql<'d> {
             join_types: Vec::new(),
             total: None,
             child_count: None,
+            label_model_cols: false,
             group_concat: false,
             dml_target: None,
             read_dml_target: false,
@@ -482,6 +487,10 @@ pub(super) fn write_compound_with_total(
         lock_mode: None,
         ..query.clone()
     };
+    let extra = order_cols_outside_projection(query);
+    if !extra.is_empty() {
+        return write_compound_ordered_outside(b, query, &extra, true);
+    }
     b.sql.push_str("SELECT ");
     b.write_ident("__rustango_page");
     b.sql.push_str(".*, COUNT(*) OVER () AS ");
@@ -533,7 +542,15 @@ pub(super) fn write_distinct_with_total(
 ///
 /// The outer query is itself the first branch, so its `where_clause`,
 /// `joins` and `search` apply only to that branch.
+///
+/// The chain reads left to right on every backend: PG and MySQL bind
+/// INTERSECT tighter, so the chain before an INTERSECT that follows
+/// another operator is wrapped as `SELECT * FROM (…) AS __rustango_lN`.
 fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
+    let extra = order_cols_outside_projection(query);
+    if !extra.is_empty() {
+        return write_compound_ordered_outside(b, query, &extra, false);
+    }
     // The first branch is the outer query itself. Its order_by /
     // limit / offset were set before the first `.union()`, so they
     // belong to this branch; the merged-result versions live in
@@ -577,7 +594,24 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
         distinct: distinct.clone(),
         ..SelectQuery::new(model)
     };
+    // An INTERSECT after a UNION / EXCEPT since the last wrap closes one.
+    let mut mixed = false;
+    let wraps: Vec<bool> = query
+        .compound
+        .iter()
+        .map(|branch| {
+            let intersect = branch.op == crate::core::SetOp::Intersection;
+            let wrap = intersect && mixed;
+            mixed = (mixed && !wrap) || !intersect;
+            wrap
+        })
+        .collect();
+    for _ in wraps.iter().filter(|w| **w) {
+        b.sql.push_str("SELECT * FROM (");
+    }
     let head_scoped = !head.order_by.is_empty() || head.limit.is_some() || head.offset.is_some();
+    // The head names the merged columns.
+    b.label_model_cols = true;
     if head_scoped {
         b.sql.push_str("SELECT * FROM (");
         write_select_inner(b, &head, false)?;
@@ -589,6 +623,10 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     }
 
     for (i, branch) in query.compound.iter().enumerate() {
+        if wraps[i] {
+            b.sql.push_str(") AS ");
+            b.write_ident(&format!("__rustango_l{i}"));
+        }
         b.sql.push(' ');
         b.sql.push_str(branch.op.keyword());
         b.sql.push(' ');
@@ -647,6 +685,105 @@ fn write_compound_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), Sql
     Ok(())
 }
 
+/// Model columns the merged ORDER BY names but the projection leaves out.
+fn order_cols_outside_projection(query: &SelectQuery) -> Vec<&'static str> {
+    let Some(projection) = &query.projection else {
+        return Vec::new();
+    };
+    let mut extra = Vec::new();
+    for item in &query.compound_order_by {
+        if let crate::core::OrderItem::Column { column, .. } = item {
+            if !projection.contains(column)
+                && !extra.contains(column)
+                && query.model.field_by_column(column).is_some()
+            {
+                extra.push(*column);
+            }
+        }
+    }
+    extra
+}
+
+/// A set operation ordered by `extra` columns its projection drops: every
+/// branch also selects them, and an outer SELECT keeps the projected ones
+/// (plus `__rustango_total` when `with_total`). Only for UNION ALL without
+/// DISTINCT: a wider row would change what counts as a duplicate.
+fn write_compound_ordered_outside(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    extra: &[&'static str],
+    with_total: bool,
+) -> Result<(), SqlError> {
+    fn dedupes(q: &SelectQuery) -> bool {
+        matches!(q.distinct, Some(crate::core::DistinctMode::All))
+            || q.compound
+                .iter()
+                .any(|branch| branch.op != crate::core::SetOp::UnionAll || dedupes(&branch.query))
+    }
+    if dedupes(query) {
+        return Err(SqlError::SetOpOrderOutsideProjection { column: extra[0] });
+    }
+    fn widen(q: &mut SelectQuery, extra: &[&'static str]) {
+        if let Some(projection) = &mut q.projection {
+            for col in extra {
+                if !projection.contains(col) {
+                    projection.push(col);
+                }
+            }
+        }
+        for branch in &mut q.compound {
+            widen(&mut branch.query, extra);
+        }
+    }
+    let mut merged = SelectQuery {
+        compound_order_by: Vec::new(),
+        compound_limit: None,
+        compound_offset: None,
+        lock_mode: None,
+        ..query.clone()
+    };
+    widen(&mut merged, extra);
+    b.sql.push_str("SELECT ");
+    let labels = query
+        .projection
+        .iter()
+        .flatten()
+        .map(|col| match col.split_once('.') {
+            Some((alias, c)) => crate::core::joins::joined_label(alias, c),
+            None => (*col).to_owned(),
+        })
+        .chain(query.joins.iter().flat_map(|j| {
+            j.project
+                .iter()
+                .map(|c| crate::core::joins::joined_label(j.alias, c))
+        }));
+    for (i, label) in labels.enumerate() {
+        if i > 0 {
+            b.sql.push_str(", ");
+        }
+        b.write_ident(&label);
+    }
+    if with_total {
+        b.sql.push_str(", COUNT(*) OVER () AS ");
+        b.write_ident("__rustango_total");
+    }
+    b.sql.push_str(" FROM (");
+    write_compound_select(b, &merged)?;
+    b.sql.push_str(") AS ");
+    b.write_ident("__rustango_set");
+    write_order_limit_offset(
+        b,
+        &query.compound_order_by,
+        query.compound_limit,
+        query.compound_offset,
+    )?;
+    // The paginated form drops the lock, as `write_compound_with_total` does.
+    if let Some(lock) = query.lock_mode.as_ref().filter(|_| !with_total) {
+        write_lock_clause(b, lock);
+    }
+    Ok(())
+}
+
 /// Write a projected `alias.col` as `"alias"."col" AS "alias__col"`, like a
 /// join's own columns; `false` for a bare model column.
 fn write_joined_projection(b: &mut Sql<'_>, col: &str) -> bool {
@@ -659,20 +796,6 @@ fn write_joined_projection(b: &mut Sql<'_>, col: &str) -> bool {
     b.sql.push_str(" AS ");
     b.write_ident(&crate::core::joins::joined_label(alias, c));
     true
-}
-
-/// Write a model column for the distinct-on fallback's inner SELECT.
-/// With joins present it is qualified, so it cannot clash with a
-/// joined column of the same name. The outer SELECT reads from the
-/// derived table, so it keeps the bare name.
-fn write_distinct_inner_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bool) {
-    if qualify {
-        b.write_ident(table);
-        b.sql.push('.');
-        b.write_ident(col);
-    } else {
-        b.write_ident(col);
-    }
 }
 
 /// Portable stand-in for PG's `SELECT DISTINCT ON (cols)` on MySQL
@@ -746,7 +869,7 @@ fn write_distinct_on_via_window(
             }
             inner_first = false;
             if !write_joined_projection(b, col) {
-                write_distinct_inner_col(b, scope.name, col, qualify);
+                write_model_col(b, scope.name, col, qualify, false);
             }
         }
     } else {
@@ -755,7 +878,7 @@ fn write_distinct_on_via_window(
                 b.sql.push_str(", ");
             }
             inner_first = false;
-            write_distinct_inner_col(b, scope.name, field.column, qualify);
+            write_model_col(b, scope.name, field.column, qualify, false);
         }
     }
     for join in &query.joins {
@@ -783,12 +906,12 @@ fn write_distinct_on_via_window(
         if i > 0 {
             b.sql.push_str(", ");
         }
-        write_distinct_inner_col(b, scope.name, col, qualify);
+        write_model_col(b, scope.name, col, qualify, false);
     }
     // The outer ORDER BY's writer, so the ranking keeps its NULLS order.
     write_order_limit_offset_with(b, &query.order_by, None, None, |b, _, item| {
         if let crate::core::OrderItem::Column { column, .. } = item {
-            write_distinct_inner_col(b, scope.name, column, qualify);
+            write_model_col(b, scope.name, column, qualify, false);
             Ok(())
         } else {
             write_order_target(b, item)
@@ -950,6 +1073,7 @@ fn write_select_body_qualified(
     qualify: bool,
     order_helpers: bool,
 ) -> Result<(), SqlError> {
+    let label = std::mem::take(&mut b.label_model_cols) && qualify;
     // `.distinct_on(cols)` is native on PG. Elsewhere the window
     // fallback emits the whole statement, so return early.
     if let Some(crate::core::DistinctMode::On(cols)) = &query.distinct {
@@ -989,11 +1113,7 @@ fn write_select_body_qualified(
             if write_joined_projection(b, col) {
                 continue;
             }
-            if qualify {
-                b.write_ident(scope.name);
-                b.sql.push('.');
-            }
-            b.write_ident(col);
+            write_model_col(b, scope.name, col, qualify, label);
         }
     } else {
         for field in query.model.scalar_fields() {
@@ -1001,11 +1121,7 @@ fn write_select_body_qualified(
                 b.sql.push_str(", ");
             }
             first_col = false;
-            if qualify {
-                b.write_ident(scope.name);
-                b.sql.push('.');
-            }
-            b.write_ident(field.column);
+            write_model_col(b, scope.name, field.column, qualify, label);
         }
     }
     for join in &query.joins {
@@ -1062,6 +1178,20 @@ fn write_select_body_qualified(
     }
 
     Ok(())
+}
+
+/// A model column in a select list, `"t"."col"` under joins so it cannot
+/// clash with a joined one; `label` adds `AS "col"`.
+fn write_model_col(b: &mut Sql<'_>, table: &str, col: &str, qualify: bool, label: bool) {
+    if qualify {
+        b.write_ident(table);
+        b.sql.push('.');
+    }
+    b.write_ident(col);
+    if label {
+        b.sql.push_str(" AS ");
+        b.write_ident(col);
+    }
 }
 
 /// PG and MySQL want a DISTINCT query's ORDER BY terms in the select
@@ -5466,8 +5596,8 @@ pub(crate) enum DateBucket {
     DateTime(crate::query::DateTimeKind),
 }
 
-/// `SELECT DISTINCT <bucket(column)> FROM (<select>) ORDER BY 1`, the
-/// statement behind `.dates()` / `.datetimes()`.
+/// `SELECT DISTINCT <bucket(column)> FROM (<select>) WHERE column IS NOT
+/// NULL ORDER BY 1`, the statement behind `.dates()` / `.datetimes()`.
 pub(crate) fn compile_date_buckets(
     d: &dyn Dialect,
     select: &SelectQuery,
@@ -5495,6 +5625,10 @@ pub(crate) fn compile_date_buckets(
     write_select(&mut b, select)?;
     b.sql.push_str(") AS ");
     b.write_ident("rs_bucket_sub");
+    // A NULL value has no bucket, and the typed decode cannot take one.
+    b.sql.push_str(" WHERE ");
+    b.sql.push_str(&col);
+    b.sql.push_str(" IS NOT NULL");
     b.sql.push_str(" ORDER BY ");
     b.write_ident("rs_bucket");
     b.sql.push_str(if descending { " DESC" } else { " ASC" });

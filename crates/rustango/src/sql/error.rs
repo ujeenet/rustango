@@ -231,6 +231,15 @@ pub enum SqlError {
         "`JOIN LATERAL` is not supported by the `{dialect}` dialect (PostgreSQL / MySQL only)"
     )]
     LateralJoinNotSupported { dialect: &'static str },
+
+    /// A deduplicating set operation (`UNION`, `INTERSECT`, `EXCEPT`) or a
+    /// `DISTINCT` branch ordered by a column its projection leaves out:
+    /// carrying the column through would change which rows count as equal.
+    #[error(
+        "ORDER BY `{column}` on a set operation that removes duplicates needs `{column}` \
+         in the projection; select it, or combine with UNION ALL and no DISTINCT"
+    )]
+    SetOpOrderOutsideProjection { column: &'static str },
 }
 
 /// Raised while compiling, writing, or executing a query end-to-end.

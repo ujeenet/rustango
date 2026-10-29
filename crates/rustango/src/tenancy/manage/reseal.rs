@@ -1,4 +1,5 @@
-//! `reseal-tenant-secrets` — re-seal stored tenant URLs with the current
+//! `reseal-tenant-secrets` — re-seal stored tenant URLs, server passwords,
+//! operator TOTP and SSO secrets with the current
 //! `RUSTANGO_SECRET_KEY`, after a rotation (old key in
 //! `RUSTANGO_SECRET_KEY_PREVIOUS`) or to seal URLs stored before a key was set.
 //! Dry run by default; `--apply` writes.
@@ -113,6 +114,69 @@ where
             }
         }
     }
+    // Operator TOTP secrets, bound to their operator: without them a
+    // rotation locks every enrolled operator out of the console.
+    #[cfg(feature = "totp")]
+    {
+        use crate::tenancy::operator_totp::{self, OperatorTotp};
+        let rows = OperatorTotp::objects()
+            .values_list(&["operator_id", "secret", "pending_secret"])
+            .fetch(&registry)
+            .await
+            .map_err(|e| e.to_string());
+        match rows {
+            // Created on the first enrollment: none yet, nothing to reseal.
+            Err(e) if missing_table(&e) => {}
+            Err(e) => {
+                failed += 1;
+                writeln!(w, "  operator totp: cannot open: {e}")?;
+            }
+            Ok(rows) => {
+                for row in rows {
+                    let Some((id, cells)) = totp_cells(&row) else {
+                        todo += 1;
+                        failed += 1;
+                        writeln!(w, "  operator totp: failed: a row of an unexpected shape")?;
+                        continue;
+                    };
+                    for (column, stored) in cells {
+                        todo += 1;
+                        let what = format!("operator totp {id}/{column}");
+                        if !apply {
+                            writeln!(w, "  {what}: would re-seal")?;
+                            continue;
+                        }
+                        let outcome = match operator_totp::reseal(id, stored) {
+                            Ok(sealed) => {
+                                let cell = SealedCell {
+                                    model: <OperatorTotp as crate::core::Model>::SCHEMA,
+                                    pk: ("operator_id", id),
+                                    column,
+                                    stored: stored.to_owned(),
+                                };
+                                cell.write(&registry, sealed).await
+                            }
+                            Err(e) => Err(format!("cannot open: {e}")),
+                        };
+                        match outcome {
+                            Ok(true) => {
+                                done += 1;
+                                writeln!(w, "  {what}: re-sealed")?;
+                            }
+                            Ok(false) => {
+                                skipped += 1;
+                                writeln!(w, "  {what}: skipped, changed meanwhile")?;
+                            }
+                            Err(e) => {
+                                failed += 1;
+                                writeln!(w, "  {what}: failed: {e}")?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     // SSO client secrets: the shared set, then each tenant's own.
     #[cfg(feature = "sso")]
     {
@@ -150,13 +214,7 @@ where
             let rows = match rows {
                 Ok(r) => r,
                 // A tenant made before the table existed has nothing to reseal.
-                Err(e)
-                    if e.contains("does not exist")
-                        || e.contains("no such table")
-                        || e.contains("doesn't exist") =>
-                {
-                    continue
-                }
+                Err(e) if missing_table(&e) => continue,
                 Err(e) => {
                     failed += 1;
                     writeln!(w, "  sso {owner}: cannot open: {e}")?;
@@ -206,6 +264,69 @@ where
     Ok(())
 }
 
+/// A driver error for a table that is not there, on any backend.
+#[cfg(any(feature = "sso", feature = "totp"))]
+fn missing_table(e: &str) -> bool {
+    e.contains("does not exist") || e.contains("no such table") || e.contains("doesn't exist")
+}
+
+/// The operator id and sealed cells of one operator TOTP row; `None` for a
+/// row of another shape, which must count as failed, not pass unseen.
+#[cfg(feature = "totp")]
+fn totp_cells(row: &[SqlValue]) -> Option<(i64, Vec<(&'static str, &str)>)> {
+    let [SqlValue::I64(id), SqlValue::String(secret), pending] = row else {
+        return None;
+    };
+    let mut cells = vec![("secret", secret.as_str())];
+    match pending {
+        SqlValue::String(p) => cells.push(("pending_secret", p.as_str())),
+        SqlValue::Null => {}
+        _ => return None,
+    }
+    Some((*id, cells))
+}
+
+/// One sealed value as stored, keyed by an integer primary key.
+#[cfg(any(feature = "sso", feature = "totp"))]
+struct SealedCell {
+    model: &'static crate::core::ModelSchema,
+    pk: (&'static str, i64),
+    column: &'static str,
+    stored: String,
+}
+
+#[cfg(any(feature = "sso", feature = "totp"))]
+impl SealedCell {
+    /// Write `sealed` only while the cell still holds what was read.
+    /// `Ok(false)`: it changed meanwhile.
+    async fn write(&self, pool: &crate::sql::Pool, sealed: String) -> Result<bool, String> {
+        use crate::core::{Assignment, Filter, Op, UpdateQuery, WhereExpr};
+        let query = UpdateQuery {
+            model: self.model,
+            set: vec![Assignment {
+                column: self.column,
+                value: SqlValue::String(sealed).into(),
+            }],
+            where_clause: WhereExpr::and_predicates(vec![
+                Filter {
+                    column: self.pk.0,
+                    op: Op::Eq,
+                    value: SqlValue::I64(self.pk.1),
+                },
+                Filter {
+                    column: self.column,
+                    op: Op::Eq,
+                    value: SqlValue::String(self.stored.clone()),
+                },
+            ]),
+        };
+        crate::sql::update_pool(pool, &query)
+            .await
+            .map(|n| n > 0)
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// One SSO provider's client secret as stored, sealed.
 #[cfg(feature = "sso")]
 struct SsoSecret {
@@ -245,34 +366,38 @@ impl SsoSecret {
     /// Write it sealed under the current key, only while the stored value
     /// is the one read. `Ok(false)`: it changed meanwhile.
     async fn reseal(&self, pool: &crate::sql::Pool) -> Result<bool, String> {
-        use crate::core::{Assignment, Filter, Op, UpdateQuery, WhereExpr};
         let plain =
             crate::aead::decrypt(&self.stored, b"").map_err(|e| format!("cannot open: {e:?}"))?;
         let sealed =
             crate::aead::encrypt(&plain, b"").map_err(|e| format!("cannot seal: {e:?}"))?;
-        let seen = Filter {
-            column: "client_secret",
-            op: Op::Eq,
-            value: SqlValue::String(self.stored.clone()),
-        };
-        let query = UpdateQuery {
+        let cell = SealedCell {
             model: self.model,
-            set: vec![Assignment {
-                column: "client_secret",
-                value: SqlValue::String(sealed).into(),
-            }],
-            where_clause: WhereExpr::and_predicates(vec![
-                Filter {
-                    column: "id",
-                    op: Op::Eq,
-                    value: SqlValue::I64(self.id),
-                },
-                seen,
-            ]),
+            pk: ("id", self.id),
+            column: "client_secret",
+            stored: self.stored.clone(),
         };
-        crate::sql::update_pool(pool, &query)
-            .await
-            .map(|n| n > 0)
-            .map_err(|e| e.to_string())
+        cell.write(pool, sealed).await
+    }
+}
+
+#[cfg(all(test, feature = "totp"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_odd_totp_row_is_refused() {
+        let s = |v: &str| SqlValue::String(v.into());
+        let ok = [SqlValue::I64(1), s("a"), SqlValue::Null];
+        assert_eq!(totp_cells(&ok), Some((1, vec![("secret", "a")])));
+        let both = [SqlValue::I64(1), s("a"), s("b")];
+        assert_eq!(totp_cells(&both).map(|(_, c)| c.len()), Some(2));
+        for odd in [
+            vec![SqlValue::I64(1), s("a")],
+            vec![s("1"), s("a"), SqlValue::Null],
+            vec![SqlValue::I64(1), SqlValue::Null, SqlValue::Null],
+            vec![SqlValue::I64(1), s("a"), SqlValue::I64(2)],
+        ] {
+            assert_eq!(totp_cells(&odd), None, "{odd:?}");
+        }
     }
 }

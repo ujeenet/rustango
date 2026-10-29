@@ -451,7 +451,7 @@ Modela los nuevos layers sobre uno u otro.
 
 - [Guía de seguridad](security.md) — la pila completa de defensa en profundidad y
   una checklist para el momento del despliegue (`manage check --deploy`).
-- [Autenticación](auth-sessions.md) — los backends de auth y el middleware
+- [Autenticación](auth-backends.md) — los backends de auth y el middleware
   `CurrentUser` se apoyan en el mismo mecanismo de layer.
 - [URLs y enrutamiento](urls.md) — dónde se adjuntan los layers a los routers y
   sub-routers.

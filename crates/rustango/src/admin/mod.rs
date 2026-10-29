@@ -87,7 +87,11 @@ pub(crate) use helpers::current_csrf_input;
 pub use inlines::{
     InlineAdmin, InlineAdminGeneric, InlineApplyOutcome, InlineFormPanel, InlineKind, InlinePanel,
 };
-pub use manage_admin::create_admin_cmd;
+#[cfg(feature = "totp")]
+pub use manage_admin::reset_admin_totp_cmd;
+pub use manage_admin::{
+    change_password_cmd, create_admin_cmd, reset_password_cmd, set_admin_active_cmd,
+};
 pub use object_permissions::{
     AdminObjectPermission, AdminSuperuserFields, AdminWrite, ObjectPermissionFn,
 };

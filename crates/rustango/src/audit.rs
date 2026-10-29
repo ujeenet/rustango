@@ -1358,6 +1358,48 @@ pub async fn cleanup_keep_last_n_pool(
         })
 }
 
+/// One `audit-cleanup` rule, shared by the single-database and tenancy verbs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Retention {
+    OlderThanDays(i64),
+    KeepLast(i64),
+}
+
+impl Retention {
+    /// Exactly one of `--days` / `--keep-last`; 0 or less deletes everything, so needs `yes`.
+    pub(crate) fn from_flags(
+        days: Option<i64>,
+        keep_last: Option<i64>,
+        yes: bool,
+    ) -> Result<Self, String> {
+        let rule = match (days, keep_last) {
+            (Some(n), None) => Self::OlderThanDays(n),
+            (None, Some(n)) => Self::KeepLast(n),
+            (None, None) => {
+                return Err("audit-cleanup requires --days <N> or --keep-last <N>".into())
+            }
+            (Some(_), Some(_)) => {
+                return Err("--days and --keep-last are mutually exclusive".into())
+            }
+        };
+        let (Self::OlderThanDays(n) | Self::KeepLast(n)) = rule;
+        if n <= 0 && !yes {
+            return Err(
+                "a retention of 0 or less deletes every audit entry; pass --yes to confirm".into(),
+            );
+        }
+        Ok(rule)
+    }
+
+    /// Apply the rule to the audit log `pool` points at.
+    pub(crate) async fn prune(self, pool: &crate::sql::Pool) -> Result<u64, sqlx::Error> {
+        match self {
+            Self::OlderThanDays(n) => cleanup_older_than_pool(pool, n).await,
+            Self::KeepLast(n) => cleanup_keep_last_n_pool(pool, n).await,
+        }
+    }
+}
+
 /// Run a `DeleteQuery` and emit its audit entry in one transaction, so
 /// the row and its audit record commit together. No row is written when
 /// nothing was deleted. Used by the generated `Model::delete_pool`.
@@ -1786,22 +1828,49 @@ where
         + Send
         + Unpin,
 {
+    delete_each_with_audit(pool, std::slice::from_ref(query), entry).await
+}
+
+/// [`delete_many_with_audit`] over several queries in one transaction:
+/// the generated `destroy` past the bind cap.
+///
+/// # Errors
+/// As [`delete_many_with_audit`].
+#[doc(hidden)]
+pub async fn delete_each_with_audit<M>(
+    pool: &crate::sql::Pool,
+    queries: &[crate::core::DeleteQuery],
+    entry: impl Fn(&M) -> PendingEntry,
+) -> Result<u64, crate::sql::ExecError>
+where
+    M: crate::sql::HasPkValue
+        + crate::sql::MaybePgFromRow
+        + crate::sql::MaybeMyFromRow
+        + crate::sql::MaybeSqliteFromRow
+        + crate::sql::LoadRelated
+        + crate::sql::MaybeMyLoadRelated
+        + crate::sql::MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
     let mut affected = 0;
-    loop {
-        let chunk = pages.next(&mut tx, query.model).await?;
-        if chunk.is_empty() {
-            break;
+    for query in queries {
+        let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
+        loop {
+            let chunk = pages.next(&mut tx, query.model).await?;
+            if chunk.is_empty() {
+                break;
+            }
+            let pks = chunk.iter().map(M::__rustango_pk_value_impl).collect();
+            let delete = crate::core::DeleteQuery {
+                model: query.model,
+                where_clause: pk_in(query.model, pks)?,
+            };
+            affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
+            let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
+            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
         }
-        let pks = chunk.iter().map(M::__rustango_pk_value_impl).collect();
-        let delete = crate::core::DeleteQuery {
-            model: query.model,
-            where_clause: pk_in(query.model, pks)?,
-        };
-        affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
-        let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
-        emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
     }
     tx.commit().await?;
     Ok(affected)

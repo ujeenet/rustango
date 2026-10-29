@@ -148,6 +148,83 @@ untouched.
 
 ---
 
+## 0.61.10
+
+### ORM set operations and writes
+
+- On PG and MySQL, `a.union(b).intersection(c)` now returns `(a ∪ b) ∩ c`, not `a ∪ (b ∩ c)`; write `a.union(b.intersection(c))` for the old rows.
+- `bulk_upsert_pool` drops earlier rows that repeat a key in the batch; `dates()` / `datetimes()` leave out NULLs.
+- M2M `add` fires `Add` only when a row went in, so another unique key on the through table that skips the insert fires nothing. On a through model with no unique `(src, dst)` key it checks for the link first, in a transaction; two concurrent adds of one link can still both insert on PG and MySQL.
+- A `union`, `intersection`, `difference` or `distinct()` branch ordered by a column outside a `values_*` projection now fails with `SqlError::SetOpOrderOutsideProjection`; select the column, or use `union_all`.
+
+### Model attributes, check and MCP
+
+`default = "…"` is raw SQL: a bare word such as `"draft"` and a non-number on a numeric field (`"abc"`, `"true"`, `""`) now fail to compile; write `"'draft'"`. `primary_key = false` and the like are refused as no-ops. `makemigrations` now refuses an `fk` / `o2o` that names a model instead of its table, or a column its registered table lacks; a table no model registers only logs a warning. `manage check` warns on unmade or unapplied migrations; in tenancy it counts registry migrations only. MCP tool results that are not objects lose `structuredContent` and keep the text block. The translations editor reloads only translators passed to `i18n::db::register_live_translator`.
+
+### Single-database admin and boot migrate
+
+Bare-admin audit rows now carry `user:<id>` instead of `system`. Single-database `migrate` and `runserver` now fire `pre_migrate` / `post_migrate` with `tenant = None`; a receiver that assumed a tenant run must check. `runserver` gives up after 300 s waiting for another run's migrate lock; raise `[server] migrate_lock_timeout_secs`, or set `[server] migrate_on_boot = false` and run `migrate` as a deploy step. `ServerSettings` has two new fields, so a struct literal needs `..Default::default()`. `set-admin-active`, `reset-admin-totp` and `reset-operator-totp` are now built-in verbs, so a command registered under one of those names is refused. The bare change-password form refuses the current password as the new one.
+
+### REST API and template views
+
+- `ViewSet::for_model`, `filter_fields`, `search_fields`, `ordering_fields`, `ordering` and `related_filter` panic on a name the model lacks; `#[derive(ViewSet)]` hits it at `router()`. Fix the typo the message names.
+- Cursor pagination with a `#[derive(Serializer)]` that does not render the cursor field or the primary key panics at mount, where it used to 500 per request.
+- `require_auth` / `require_perm` bodies are JSON (`{"error","message","status"}`) instead of plain text, and a database error during the credential lookup is a `503`, not a `401`.
+- `FormView` answers invalid input with `422` (was `200`); a bool checkbox and a `blank` string field have `required: false` in `form.fields`, as does a defaulted field on a create form.
+- DetailView and TemplateView now set the CSRF cookie on a first GET, so a CDN that skips responses with `Set-Cookie` no longer caches those pages.
+- `CorsLayer::permissive()` now exposes `Retry-After`, `Idempotent-Replayed`, `ETag`, `Location` and `Link`.
+- `SecuritySettings` has three new fields (`cors_allowed_headers`, `cors_expose_headers`, `cors_allow_credentials`), so a struct literal needs `..Default::default()`.
+- A ViewSet and `permission_required(_or_403)` return `503` when the permission read fails (was `403`).
+
+### Admin, auth and run-server
+
+- The bare admin's `static_url` is now under its mount: the favicon is `<admin_prefix>/__static__/icon.png`. Sessions are no longer waived for `/__static__` paths.
+- Basic-auth (admin and tenancy) and API-key credentials take one slot on a shared counter before the compare: the account lock for a known client, else the per-IP limit (the global one without a client IP). A right credential gives it back but never clears the account's failures; only a login does. That costs about six cache calls per request (four reads, an `incr`, a `decr`). A wrong one keeps it. When the lockout cache errors, the attempt is admitted uncounted (logged as a warning) but still takes a per-IP and global slot, so an outage disables the account lock rather than every login. Unknown clients reserve a full login slot, as before. Parallel right requests from one Basic account past `max_attempts` wait for a slot, at most one `hash_wait`.
+- `require_perm` returns `503` when the permission read fails (was `403`).
+- Resetting a TOTP device (operator console, `reset-operator-totp`, `reset-admin-totp`) now signs that account out everywhere, even when it has no device.
+- `[security] cors_allow_credentials = true` with `cors_allowed_origins = ["*"]` is now off, with a logged error; it never worked in browsers. With credentials, a `"*"` in `cors_allowed_headers` / `cors_expose_headers` is dropped: list the headers.
+- `default = "current_user"`, `"session_user"` and `"user"` still fail to compile, now with a message that names Postgres as the only backend that takes them.
+- `check --deploy` on a single-database Cli no longer warns about `RUSTANGO_APEX_DOMAIN`.
+
+### Migrations, links, i18n, admin and REST
+
+- `migrate <target>` forward now applies pending framework system migrations and the bootstrap tables first, as plain `migrate` does, and fires `pre_migrate` / `post_migrate`. Its output is the plain `migrate` one (`applied …` / `nothing to migrate`), not `touched …` / `already at …`; a backward target keeps the old lines. An unknown target now fails before anything runs.
+- `forget-pending` refuses a migration another file builds on; forget the newest first.
+- Data-op SQL runs unprepared, so it can hold several statements on every backend.
+- `signed_url::sign` / `verify` ignore a `#fragment` and `sign` keeps it after the query; a link signed over a fragment before this no longer verifies.
+- A catalog key over 200 chars is no longer stored in `rustango_translations`; it keeps its file value.
+- Admin list facets for a field named like a list param (`page`, `year`, ...) link `?<field>__exact=`; `?<field>__exact=` works for any field.
+- A `BodyLimitLayer` now sets a ViewSet's create/update cap, so one below 4 MiB lowers it and one above raises it.
+- `manage startapp` and `make:*` read Cargo.toml: a dependency renamed from `rustango` gets its name in the generated code.
+
+### `rgo` short name
+
+`#[derive(Model)]` now also claims the `#[rgo(...)]` attribute; a model that put another macro's `#[rgo]` on itself must drop or rename it. `rgo` on crates.io is a different crate, so use it as a rename: `rgo = { package = "rustango", … }`. `cargo install cargo-rustango` now installs a second binary, `cargo-rgo`.
+
+### ORM shortcuts
+
+- `latest(field)` / `earliest(field)` (and the `_default` forms) skip rows where `field` is NULL; they return `None` when every row is NULL.
+- `last()` on a queryset with `limit` / `offset` reads the slice and returns its last row.
+- `update().set()` on one field twice sends only the last assignment; on MySQL a later `set_expr` now reads the old value, not the earlier `set`.
+- `find_many`, `where_in` and `destroy` past the bind cap run one statement per batch; `destroy` runs its batches in one transaction.
+
+### Migrations, secrets and auth
+
+- `makemigrations` (and `make_migrations*`) refuse a column dropped beside a same-type new column on one table. For a rename, write a `RenameColumn` in a `makemigrations --empty` file; for a real drop + add, pass `--drop-and-add` or call the matching `make_migrations*_with(.., DropAndAdd::Allow)` (`make_migrations_with`, `_for_scope_with`, `_for_app_with`, `_scoped_with`, `_from_with`).
+- `MigrateError::Validation` displays its message alone; code matching the `invalid migration:` text must drop the prefix.
+- `migrate <target>` on a pending target prints `unapplied` for the later files it rolls back and leaves them out of `post_migrate`'s `applied` list.
+- `jwt::decode` refuses a present `exp` / `nbf` that is not a non-negative number (it was read as absent), and honours a fractional one.
+- Run `reseal-tenant-secrets --apply` once more after a key rotation done on an earlier release, before removing `RUSTANGO_SECRET_KEY_PREVIOUS`, so operator TOTP secrets are re-sealed.
+
+### Cache counters, dumps and admin inlines
+
+- `InMemoryCache`, `FileCache` and the default `Cache::incr` return an error on i64 overflow instead of saturating, as `DatabaseCache` and `RedisCache` do. `decr(key, i64::MIN)` is an error on every backend, `RedisCache` and `DatabaseCache` included (they used to saturate).
+- `dumpdata` writes a JSON column holding JSON `null` as `{"$json": null}`, and a value that is itself a one-key `{"$json": …}` object wrapped once more. `loaddata` unwraps it; plain `null` still loads as SQL NULL (JSON `null` on a NOT NULL column). An older dump whose JSON column holds a one-key `{"$json": …}` object loads its inner value. Seed fixtures loaded through `rustango::fixtures` are not dumps: they keep the tag literal and `null` as SQL NULL.
+- serde_json is built with `float_roundtrip`, so JSON floats parse exactly across the app. Cargo unifies the feature, so every crate in an app that depends on rustango gets it too, with slightly slower float parsing.
+- An inline row error in a re-shown admin form is a row with `error` set in `InlineFormPanel::rows`; a custom `form.html` should render it.
+
+---
+
 ## 0.61.9
 
 ### ORM results that change
