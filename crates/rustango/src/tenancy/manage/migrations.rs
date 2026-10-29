@@ -499,11 +499,45 @@ where
 // ---------- downgrade (scope-aware) ----------
 
 const DOWNGRADE_USAGE: &str =
-    "downgrade [N] [--tenant <slug> | --all-tenants]   roll back the last N \
-     (default 1) migrations: registry-scoped, or tenant-scoped in one tenant / every active tenant";
+    "downgrade [N | <target>] [--tenant <slug> | --all-tenants [--yes]]   roll back the last N \
+     (default 1) migrations, or those after <target>: registry-scoped, or tenant-scoped in one \
+     tenant / every active tenant. --all-tenants prints each tenant's plan; --yes runs it";
+
+/// What `downgrade` rolls back in each ledger.
+enum Rollback<'a> {
+    Steps(usize),
+    /// Everything applied after this migration, which stays.
+    After(&'a str),
+}
+
+impl Rollback<'_> {
+    /// The applied `files` this rolls back, newest first, as `downgrade_pool` picks them.
+    fn plan<'f>(
+        &self,
+        files: &'f [rustango::migrate::Migration],
+        applied: &std::collections::HashSet<String>,
+    ) -> Vec<&'f str> {
+        let after = match self {
+            Rollback::Steps(_) => 0,
+            Rollback::After(t) => files.iter().position(|m| m.name == *t).map_or(0, |i| i + 1),
+        };
+        let mut plan: Vec<&str> = files[after..]
+            .iter()
+            .filter(|m| applied.contains(&m.name))
+            .map(|m| m.name.as_str())
+            .rev()
+            .collect();
+        if let Rollback::Steps(n) = self {
+            plan.truncate(*n);
+        }
+        plan
+    }
+}
 
 /// `downgrade [N]` on the registry ledger, or with `--tenant <slug>` /
 /// `--all-tenants` on the tenant ledgers, over that scope's files only.
+/// Tenants can sit at different versions, so `--all-tenants` shows each
+/// one's plan and runs it only with `--yes`.
 pub(super) async fn downgrade_cmd<W: Write, DB: Database>(
     pools: &TenantPools<DB>,
     dir: &Path,
@@ -523,21 +557,26 @@ where
         &super::args::Spec {
             verb: "downgrade",
             usage: DOWNGRADE_USAGE,
-            switches: &["--all-tenants"],
+            switches: &["--all-tenants", "--yes"],
             valued: &["--tenant"],
             max_positionals: 1,
         },
     )?;
-    let steps = match parsed.positional(0) {
-        Some(n) => n.parse::<usize>().map_err(|_| {
-            TenancyError::Validation(format!(
-                "invalid step count: {n} (expected a non-negative integer)"
-            ))
-        })?,
-        None => 1,
+    let rollback = match parsed.positional(0) {
+        Some(n) if n.chars().all(|c| c.is_ascii_digit()) => Rollback::Steps(
+            n.parse::<usize>()
+                .map_err(|_| TenancyError::Validation(format!("invalid step count: {n}")))?,
+        ),
+        Some(target) => Rollback::After(target.as_str()),
+        None => Rollback::Steps(1),
     };
     let slug = parsed.value("--tenant")?;
     let all = parsed.has("--all-tenants");
+    if parsed.has("--yes") && !all {
+        return Err(TenancyError::Validation(
+            "--yes only applies to `--all-tenants`".into(),
+        ));
+    }
     let orgs: Vec<Org> = match (slug, all) {
         (Some(_), true) => {
             return Err(TenancyError::Validation(
@@ -545,6 +584,13 @@ where
             ))
         }
         (None, false) => {
+            let Rollback::Steps(steps) = rollback else {
+                return Err(TenancyError::Validation(
+                    "a registry rollback to a target is `migrate <target>`; \
+                     `downgrade <target>` needs `--tenant <slug>` or `--all-tenants`"
+                        .into(),
+                ));
+            };
             let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
             let touched = downgrade_pool(&pools.registry_pool(), scoped.path(dir), steps).await?;
             for m in &touched {
@@ -587,29 +633,61 @@ where
         return Ok(());
     }
     let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Tenant).await?;
+    let files = rustango::migrate::file::list_dir(scoped.path(dir))?;
+    if let Rollback::After(target) = rollback {
+        if !files.iter().any(|m| m.name == target) {
+            return Err(TenancyError::Validation(format!(
+                "`{target}` is not a tenant-scoped migration"
+            )));
+        }
+    }
+    let run = !all || parsed.has("--yes");
     let mut failed = 0;
     for org in &orgs {
-        let run = async {
+        let step = async {
             let (pool, own) = pools.existing_pool_dyn(org).await?;
-            let touched = downgrade_pool(&pool, scoped.path(dir), steps).await;
+            let result = async {
+                let applied =
+                    rustango::migrate::applied_or_empty(&pool, rustango::migrate::LEDGER_TABLE)
+                        .await?;
+                let plan: Vec<String> = rollback
+                    .plan(&files, &applied)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                if !run || plan.is_empty() {
+                    return Ok(plan);
+                }
+                let touched = downgrade_pool(&pool, scoped.path(dir), plan.len()).await?;
+                Ok(touched.into_iter().map(|m| m.name).collect())
+            }
+            .await;
             if own {
                 pool.close().await;
             }
-            Ok::<_, TenancyError>(touched?)
+            result.map_err(TenancyError::Migrate)
         };
-        match run.await {
-            Ok(touched) if touched.is_empty() => {
+        match step.await {
+            Ok(names) if names.is_empty() => {
                 writeln!(w, "  · {}: nothing to downgrade", org.slug)?;
             }
-            Ok(touched) => {
-                let names: Vec<&str> = touched.iter().map(|m| m.name.as_str()).collect();
+            Ok(names) if run => {
                 writeln!(w, "  ✓ {}: rolled back {}", org.slug, names.join(", "))?;
+            }
+            Ok(names) => {
+                writeln!(w, "  · {}: would roll back {}", org.slug, names.join(", "))?;
             }
             Err(e) => {
                 failed += 1;
                 writeln!(w, "  ✗ {}: {e}", org.slug)?;
             }
         }
+    }
+    if !run {
+        writeln!(
+            w,
+            "dry run: nothing rolled back; add --yes to run this plan"
+        )?;
     }
     tenant_failures(failed, orgs.len())
 }

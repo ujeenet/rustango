@@ -150,8 +150,11 @@ untouched.
 
 ## Unreleased
 
-- Tenancy `downgrade` runs over the registry-scoped files only and prints `registry: …`; add `--tenant <slug>` or `--all-tenants` to roll back tenant-scoped migrations.
-- `get_or_create_role` (PG) now runs two statements, an insert-or-ignore then a read, like `get_or_create_role_pool`.
+- Tenancy `downgrade` runs over the registry-scoped files only and prints `registry: …`; add `--tenant <slug>` or `--all-tenants` to roll back tenant-scoped migrations. `--all-tenants` only prints each tenant's plan until you add `--yes`; `downgrade <target>` rolls back what was applied after `<target>`.
+- `get_or_create_role` (PG) and `get_or_create_role_pool` now insert-or-ignore, then read. A role that is still missing after that is a `TenancyError::Validation`, not id `0`. A new role is no longer written through `save_pool`, so model save hooks and signals do not fire for it.
+- `is_pg_dup_object_error` now also treats a racing `CREATE EXTENSION` (`pg_extension_name_index`) as "already exists".
+- `loaddata` inserts a nullable FK as NULL and sets it after every row only when the fixture's rows form a table cycle; a row in a cycle may then briefly hold NULL.
+- Idempotent DDL no longer treats a SQLite "duplicate column name" in `CREATE TABLE`, or a PG `CREATE TABLE` that clashes with a type name (42710), as "already exists".
 
 ### One password policy
 

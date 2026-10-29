@@ -418,6 +418,15 @@ cargo run -- downgrade --tenant acme    # one tenant
 cargo run -- downgrade 2 --all-tenants  # every active tenant, two steps each
 ```
 
+Tenants can sit at different versions. `--all-tenants` prints each
+tenant's plan and changes nothing; add `--yes` to run it. Name a
+migration instead of N to roll back everything applied after it:
+
+```bash
+cargo run -- downgrade 0001_initial --all-tenants        # the plan
+cargo run -- downgrade 0001_initial --all-tenants --yes  # run it
+```
+
 ### `showmigrations` / `status`
 
 Lists every migration and whether it's been applied. `[X]` means
