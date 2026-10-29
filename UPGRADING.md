@@ -163,7 +163,7 @@ untouched.
 
 ### One password policy
 
-The CLI password verbs (`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the rest), the change-password pages and the set-password links now share one rule: at least 12 characters, a digit or a symbol, and not a well-known weak password. Scripts that set weaker passwords add `--skip-validation`. `BUILTIN_FORM_MIN_LENGTH` is now 12 and sets the length rule in `passwords::strength_score`. `check_builtin_form_password` needs the `passwords` feature, and its error code is now `password_too_weak` instead of `password_too_short`. The password fields' `minlength` is 12.
+The CLI password verbs (`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the rest), the change-password pages and the set-password links now share one rule: at least 12 characters, a digit or a symbol, and not a well-known weak password. Scripts that set weaker passwords add `--skip-validation`. `BUILTIN_FORM_MIN_LENGTH` is now 12 and sets the length rule in `passwords::strength_score`. `check_builtin_form_password` needs the `passwords` feature, and its error code is now `password_too_weak` instead of `password_too_short`. The password fields' `minlength` is 12. The admin forms for tenant users, operators and admin users apply the same policy to a new password and show its error on the form.
 
 ### Change password keeps this session
 
@@ -171,7 +171,7 @@ A tenant or operator password change now ends only the other sessions; the respo
 
 ### CSRF and MCP
 
-- With the `mcp` feature, `Cli::with_csrf()` / `with_csrf_config()` skip CSRF on the MCP endpoints only: `{prefix}`, `{prefix}/token`, `{prefix}/oauth/token` (`[mcp] prefix`, default `/mcp`). MCP clients send no CSRF cookie; the single-database `mcp::router(pool)` checks no token, so guard it yourself. A `/` prefix exempts nothing.
+- With the `mcp` feature, `Cli::with_csrf()` / `with_csrf_config()` skip CSRF on the MCP endpoints only: `{prefix}`, `{prefix}/token`, `{prefix}/oauth/token` (`[mcp] prefix`, default `/mcp`). MCP clients send no CSRF cookie; the single-database `mcp::router(pool)` checks no token, so guard it yourself. A `/` prefix exempts nothing. The paths are exempt whether or not an MCP router is mounted; keep cookie-auth routes off them. Boot logs a warning naming them.
 - `CsrfConfig` has a new public field, `exempt_paths` (exact paths); a struct literal without `..Default::default()` must add it.
 
 ### Scaffolder

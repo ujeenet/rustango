@@ -95,3 +95,24 @@ pub(crate) fn take_secret(
         _ => None,
     }
 }
+
+/// The new plaintext password in `column`, held to the built-in policy.
+/// `None` when the form sets none or echoes the stored hash.
+///
+/// # Errors
+/// The policy's message, shown on the form.
+pub(crate) fn take_new_password(
+    values: &mut Vec<(&'static str, SqlValue)>,
+    before: Option<&serde_json::Value>,
+    column: &str,
+) -> Result<Option<String>, String> {
+    let Some(plain) = take_secret(values, column) else {
+        return Ok(None);
+    };
+    // A model on this table without the password widget echoes the hash.
+    if before.and_then(|r| r.get(column)?.as_str()) == Some(plain.as_str()) {
+        return Ok(None);
+    }
+    crate::password_validators::check_builtin_form_password(&plain).map_err(|e| e.message)?;
+    Ok(Some(plain))
+}

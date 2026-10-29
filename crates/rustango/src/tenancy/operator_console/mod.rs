@@ -1245,8 +1245,9 @@ async fn require_session(
             }
             req.extensions_mut().insert(op);
             let mut resp = next.run(req).await;
-            // Activity slides the idle deadline.
-            if let Some(renewed) = payload.renewed() {
+            // Activity slides the idle deadline, unless the handler set
+            // its own cookie (a password change): the last one wins.
+            if let Some(renewed) = payload.renewed().filter(|_| !sets_session_cookie(&resp)) {
                 resp.headers_mut().append(
                     header::SET_COOKIE,
                     session_cookie(&state.session_secret, &renewed),
@@ -1606,6 +1607,18 @@ fn session_cookie(secret: &SessionSecret, payload: &SessionPayload) -> HeaderVal
     HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii")
 }
 
+/// Whether `resp` already carries a console session `Set-Cookie`.
+fn sets_session_cookie(resp: &Response<Body>) -> bool {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|v| {
+            v.split_once('=')
+                .is_some_and(|(name, _)| name.trim() == COOKIE_NAME)
+        })
+}
+
 /// The signed-in, active operator: the check every console request and
 /// each poll of a long-lived stream runs.
 async fn active_session(
@@ -1671,6 +1684,10 @@ async fn change_password_form(
     inject_op_brand(&mut ctx, &state.op_brand);
     ctx.insert("section", "change_password");
     ctx.insert("operator_username", &op.username);
+    ctx.insert(
+        "password_min_length",
+        &crate::password_validators::BUILTIN_FORM_MIN_LENGTH,
+    );
     ctx.insert("error", &messages.error);
     ctx.insert("success", &messages.ok);
     render(&state, "op_change_password.html", &ctx)

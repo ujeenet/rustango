@@ -70,13 +70,11 @@ fn admin_hash_password<'a>(
     before: Option<&'a serde_json::Value>,
 ) -> super::derived_fields::DeriveFuture<'a> {
     Box::pin(async move {
-        let Some(plain) = super::derived_fields::take_secret(values, "password_hash") else {
+        let Some(plain) =
+            super::derived_fields::take_new_password(values, before, "password_hash")?
+        else {
             return Ok(());
         };
-        // A model on this table without the password widget echoes the hash.
-        if before.and_then(|r| r.get("password_hash")?.as_str()) == Some(plain.as_str()) {
-            return Ok(());
-        }
         let hash = crate::passwords::hash_async(&plain)
             .await
             .map_err(|e| e.to_string())?;

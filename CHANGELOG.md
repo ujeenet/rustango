@@ -16,11 +16,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The CLI password verbs, the change-password pages and the set-password links use one policy (12 characters, a digit or symbol, not on the weak list); the CLI and the tenant and operator change-password pages used to accept `password1`.
 - Tenant and operator change-password keep the current session and end the others, so "Password updated" shows.
 - A login form request cancelled while its slot is refunded still gives the slot back.
+- An operator who changes their password on a session due for renewal stays signed in; the renewal cookie no longer replaces the new one.
+- The admin edit forms for tenant users, operators and admin users hold a new password to the shared policy instead of storing any password.
 - `clearsessions` / `clear-cache` with no cache table says nothing needs clearing instead of failing, and its messages name the verb that ran.
 - `check --deploy` describes a missing `RUSTANGO_SESSION_SECRET` correctly: no start on prod, the dev key in `./var/` off prod; tenant cookies are named only in tenancy builds.
 - Scaffolder: `new --features tenancy` picks the tenant template and is refused with another one; the tenant README and next steps add `create-operator`; the api template writes no unread `config/*.toml`.
 - `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it with HTTP Basic (a browser session still gets 401); `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
-- `Cli::with_csrf*()` exempts the MCP endpoints (`{prefix}`, `{prefix}/token`, `{prefix}/oauth/token`), so MCP clients are not refused with 403; the rest of the prefix keeps CSRF, and a `/` prefix exempts nothing. New `CsrfConfig::exempt_paths` / `exempt_path` for exact-path exemptions.
+- `Cli::with_csrf*()` exempts the MCP endpoints (`{prefix}`, `{prefix}/token`, `{prefix}/oauth/token`), so MCP clients are not refused with 403; the rest of the prefix keeps CSRF, and a `/` prefix exempts nothing. New `CsrfConfig::exempt_paths` / `exempt_path` for exact-path exemptions. Boot logs a warning naming the exempt paths, as they apply even without a mounted MCP router.
 - Admin Home links and breadcrumbs point at `<prefix>`, not `<prefix>/`, which a nested admin answers with 404; tenancy help texts name `/login`, not `/__login`.
 
 ## [0.61.10] — 2026-10-29

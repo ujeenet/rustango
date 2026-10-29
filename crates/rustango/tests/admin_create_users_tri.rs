@@ -198,7 +198,7 @@ async fn a_login_upgrades_a_weak_hash(pool: &Pool) {
 
 async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
     let name = unique("edt");
-    create_user(pool, &name, "pw-1763-old").await;
+    create_user(pool, &name, "pw-1763-older").await;
     let pk = user_named(pool, &name).await.id.get().copied().unwrap();
     let uri = format!("/rustango_users/{pk}");
 
@@ -213,14 +213,14 @@ async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
     };
     let (status, body) = send(pool, Method::POST, &uri, edit("")).await;
     assert!(status.is_redirection(), "{status}: {body}");
-    assert!(logs_in(pool, &name, "pw-1763-old").await);
+    assert!(logs_in(pool, &name, "pw-1763-older").await);
     assert!(user_named(pool, &name).await.password_changed_at.is_none());
 
     // A new one replaces it and ends older sessions.
-    let (status, body) = send(pool, Method::POST, &uri, edit("pw-1763-new")).await;
+    let (status, body) = send(pool, Method::POST, &uri, edit("pw-1763-newer")).await;
     assert!(status.is_redirection(), "{status}: {body}");
-    assert!(logs_in(pool, &name, "pw-1763-new").await);
-    assert!(!logs_in(pool, &name, "pw-1763-old").await);
+    assert!(logs_in(pool, &name, "pw-1763-newer").await);
+    assert!(!logs_in(pool, &name, "pw-1763-older").await);
     assert!(user_named(pool, &name).await.password_changed_at.is_some());
 
     // The audit log records the change, never the hash.
@@ -241,7 +241,7 @@ async fn editing_a_user_keeps_or_rotates_the_password(pool: &Pool) {
 /// Deactivating a user in the admin ends its sessions and JWT refresh.
 async fn deactivating_a_user_ends_its_sessions(pool: &Pool) {
     let name = unique("off");
-    create_user(pool, &name, "pw-1412").await;
+    create_user(pool, &name, "pw-1412-strong").await;
     let pk = user_named(pool, &name).await.id.get().copied().unwrap();
     let uri = format!("/rustango_users/{pk}");
     // An unchecked checkbox is absent from the form.
@@ -375,8 +375,8 @@ async fn user_pk(pool: &Pool, name: &str) -> i64 {
 async fn api_key_owner_is_superuser_only(pool: &Pool) {
     use rustango::tenancy::auth_backends::ApiKey;
     let (owner, other) = (unique("kown"), unique("koth"));
-    create_user(pool, &owner, "pw-2520-a").await;
-    create_user(pool, &other, "pw-2520-b").await;
+    create_user(pool, &owner, "pw-2520-owner-a").await;
+    create_user(pool, &other, "pw-2520-owner-b").await;
     let (owner_pk, other_pk) = (user_pk(pool, &owner).await, user_pk(pool, &other).await);
     rustango::tenancy::create_api_key(owner_pk, "k2520", None, pool)
         .await
@@ -458,7 +458,7 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
         "/rustango_users",
         form(&[
             ("username", name.as_str()),
-            ("password_hash", "pw-2521-own"),
+            ("password_hash", "pw-2521-owner"),
             ("email", email.as_str()),
             ("is_superuser", "true"),
             ("active", "true"),
@@ -470,7 +470,7 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
     let user = user_named(pool, &name).await;
     assert!(!user.is_superuser, "a non-superuser created a superuser");
     assert!(user.email.is_none(), "a non-superuser set an email on add");
-    assert!(logs_in(pool, &name, "pw-2521-own").await);
+    assert!(logs_in(pool, &name, "pw-2521-owner").await);
 
     let pk = user.id.get().copied().unwrap();
     let uri = format!("/rustango_users/{pk}");
@@ -508,7 +508,7 @@ async fn user_superuser_fields_are_superuser_only(pool: &Pool) {
     let user = user_named(pool, &renamed).await;
     assert!(!user.is_superuser, "a non-superuser granted superuser");
     assert!(user.email.is_none(), "a non-superuser set the email");
-    assert!(logs_in(pool, &renamed, "pw-2521-own").await);
+    assert!(logs_in(pool, &renamed, "pw-2521-owner").await);
     assert!(!logs_in(pool, &renamed, "pw-2521-taken").await);
 }
 
@@ -555,6 +555,47 @@ async fn superuser_rows_are_superuser_only(pool: &Pool) {
         user_named(pool, &name).await.active,
         "the superuser row changed"
     );
+}
+
+/// The admin form holds every account password to the built-in policy.
+async fn admin_password_fields_apply_the_policy(pool: &Pool) {
+    const WEAK: &str = "a";
+    let refused = |status: StatusCode, html: &str| {
+        assert!(!status.is_redirection(), "{status}: {html}");
+        assert!(html.contains("Password rejected"), "{html}");
+    };
+    // Tenant user: create and edit.
+    let name = unique("weak");
+    let (status, html) = create_user(pool, &name, WEAK).await;
+    refused(status, &html);
+    create_user(pool, &name, "pw-policy-strong").await;
+    let pk = user_pk(pool, &name).await;
+    let edit = form(&[
+        ("username", name.as_str()),
+        ("password_hash", WEAK),
+        ("active", "true"),
+        ("data", ""),
+    ]);
+    let (status, html) = send(pool, Method::POST, &format!("/rustango_users/{pk}"), edit).await;
+    refused(status, &html);
+    assert!(logs_in(pool, &name, "pw-policy-strong").await);
+
+    // Operator, through the registry admin.
+    let op = unique("weakop");
+    let op_id = seed_operator(pool, &op).await;
+    let (status, html) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_operators/{op_id}"),
+        form(&[
+            ("username", op.as_str()),
+            ("password_hash", WEAK),
+            ("created_at", "2024-01-01T00:00"),
+            ("active", "true"),
+        ]),
+    )
+    .await;
+    refused(status, &html);
 }
 
 async fn seed_operator(pool: &Pool, name: &str) -> i64 {
@@ -720,5 +761,6 @@ tri_dialect_test! {
         api_key_owner_is_superuser_only,
         user_superuser_fields_are_superuser_only,
         superuser_rows_are_superuser_only,
+        admin_password_fields_apply_the_policy,
     ],
 }

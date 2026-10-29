@@ -37,7 +37,7 @@ pub mod pagination;
 pub mod progress;
 pub mod resources;
 mod router;
-pub(crate) use router::post_endpoints;
+pub(crate) use router::{post_endpoints, DEFAULT_PREFIX};
 pub mod tools;
 mod transport;
 mod types;

@@ -1377,12 +1377,15 @@ impl Cli {
         // MCP clients send no CSRF cookie or header: exempt their endpoints,
         // not the rest of the prefix.
         #[cfg(all(feature = "mcp", feature = "config"))]
-        let prefix = self.settings_for_layers.as_ref().map_or_else(
-            || crate::config::McpSettings::default().prefix().to_owned(),
-            |s| s.mcp.prefix().to_owned(),
-        );
+        let prefix = self
+            .settings_for_layers
+            .as_ref()
+            .map_or(crate::mcp::DEFAULT_PREFIX, |s| s.mcp.prefix())
+            .to_owned();
         #[cfg(all(feature = "mcp", not(feature = "config")))]
-        let prefix = "/mcp".to_owned();
+        let prefix = crate::mcp::DEFAULT_PREFIX.to_owned();
+        // Cli cannot see whether an MCP router is mounted, so the paths are
+        // exempt either way: say so, a cookie route there has no CSRF check.
         #[cfg(feature = "mcp")]
         let exempt = crate::mcp::post_endpoints(&prefix).map_or_else(
             || {
@@ -1392,7 +1395,13 @@ impl Cli {
                 );
                 Vec::new()
             },
-            Vec::from,
+            |paths| {
+                tracing::warn!(
+                    paths = ?paths,
+                    "CSRF is off for the MCP endpoints; keep cookie-auth routes off these paths"
+                );
+                Vec::from(paths)
+            },
         );
         #[cfg(not(feature = "mcp"))]
         let exempt: Vec<String> = Vec::new();
@@ -3717,6 +3726,14 @@ mod assemble_app_tests {
                 assert_eq!(status, StatusCode::FORBIDDEN, "{path} lost its CSRF check");
             }
         }
+    }
+
+    /// The settings default and the no-settings default are one prefix.
+    #[cfg(all(feature = "config", feature = "mcp"))]
+    #[test]
+    fn mcp_default_prefix_matches_the_settings_default() {
+        let unset = crate::config::McpSettings::default();
+        assert_eq!(unset.prefix(), crate::mcp::DEFAULT_PREFIX);
     }
 
     /// A root `[mcp] prefix` would exempt `/` and `/token`: exempt nothing.

@@ -213,6 +213,41 @@ async fn a_bare_admin_logout_ends_a_cookie_from_a_faster_clock(pool: &Pool) {
     assert!(env.status(&cookie).await.is_redirection());
 }
 
+/// The admin form holds an admin user's new password to the built-in policy.
+async fn a_bare_admin_password_edit_applies_the_policy(pool: &Pool) {
+    let env = bare(pool).await;
+    let editor = env.login().await;
+    let mut other = AdminUser::new_with_password(&unique("pw"), ADMIN_PASSWORD, true).unwrap();
+    other.insert_pool(pool).await.expect("seed admin");
+    let uri = format!("/rustango_admin_users/{}", other.id.get().copied().unwrap());
+    let edit = |pw: &str| {
+        format!(
+            "username={}&password_hash={pw}&is_superuser=true&active=true&created_at=2026-01-01T00:00:00&_csrf=t",
+            other.username
+        )
+    };
+    let res = send(&env.app, "POST", &uri, "admin.test", edit("a"), &editor).await;
+    assert!(!res.status().is_redirection(), "{}", res.status());
+    let html = String::from_utf8(
+        axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("Password rejected"), "{html}");
+    let res = send(
+        &env.app,
+        "POST",
+        &uri,
+        "admin.test",
+        edit("pw-policy-strong"),
+        &editor,
+    )
+    .await;
+    assert!(res.status().is_redirection(), "{}", res.status());
+}
+
 /// Deactivating an admin user in the admin stamps the logout cut-off, so
 /// reactivating never brings an old cookie back.
 async fn deactivating_a_bare_admin_ends_their_sessions(pool: &Pool) {
@@ -975,6 +1010,7 @@ tri_dialect_test! {
         a_bare_admin_logout_ends_a_cookie_from_a_faster_clock,
         a_stale_bare_admin_cookie_cannot_revoke,
         deactivating_a_bare_admin_ends_their_sessions,
+        a_bare_admin_password_edit_applies_the_policy,
         the_deactivate_helper_ends_sessions,
         a_bare_admin_logout_that_cannot_read_fails,
         a_bare_admin_login_db_error_is_503_and_not_a_failure,

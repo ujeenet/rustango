@@ -1160,6 +1160,7 @@ pub(crate) mod counting {
         inner: crate::cache::InMemoryCache,
         writes: std::sync::atomic::AtomicUsize,
         read_delay: std::time::Duration,
+        write_delay: std::time::Duration,
     }
 
     impl CountingWrites {
@@ -1171,13 +1172,24 @@ pub(crate) mod counting {
             }
         }
 
+        /// Every write waits `delay` first.
+        pub(crate) fn with_write_delay(delay: std::time::Duration) -> Self {
+            Self {
+                write_delay: delay,
+                ..Self::default()
+            }
+        }
+
         async fn read(&self) {
             if !self.read_delay.is_zero() {
                 tokio::time::sleep(self.read_delay).await;
             }
         }
 
-        fn wrote(&self) {
+        async fn wrote(&self) {
+            if !self.write_delay.is_zero() {
+                tokio::time::sleep(self.write_delay).await;
+            }
             self.writes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
@@ -1200,11 +1212,11 @@ pub(crate) mod counting {
             v: &str,
             ttl: Option<std::time::Duration>,
         ) -> Result<(), crate::cache::CacheError> {
-            self.wrote();
+            self.wrote().await;
             self.inner.set(k, v, ttl).await
         }
         async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
-            self.wrote();
+            self.wrote().await;
             self.inner.delete(k).await
         }
         async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
@@ -1220,7 +1232,7 @@ pub(crate) mod counting {
             by: i64,
             ttl: Option<std::time::Duration>,
         ) -> Result<i64, crate::cache::CacheError> {
-            self.wrote();
+            self.wrote().await;
             self.inner.incr(k, by, ttl).await
         }
         async fn decr(
@@ -1229,7 +1241,7 @@ pub(crate) mod counting {
             by: i64,
             ttl: Option<std::time::Duration>,
         ) -> Result<i64, crate::cache::CacheError> {
-            self.wrote();
+            self.wrote().await;
             self.inner.decr(k, by, ttl).await
         }
     }
@@ -2035,6 +2047,28 @@ mod tests {
                 "the slot leaked (prompted: {prompt})"
             );
         }
+    }
+
+    /// A login form request cancelled while its wrong password is counted
+    /// still counts it, so cancelling cannot dodge the account lock.
+    #[tokio::test]
+    async fn a_cancelled_login_failure_is_still_counted() {
+        let mut t = LoginThrottle::new(LoginLimits::default());
+        let slow: BoxedCache = Arc::new(counting::CountingWrites::with_write_delay(
+            Duration::from_millis(100),
+        ));
+        let lockout: &'static _ = Box::leak(Box::new(
+            crate::account_lockout::Lockout::new(slow).max_attempts(1),
+        ));
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(lockout);
+        let s = tenant("t-cancel-failed");
+        let a = t.begin(&s, &ip("10.9.70.9"), "gil").await.unwrap();
+        let _ = tokio::time::timeout(Duration::from_millis(30), a.failed()).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            lockout.is_locked(&account_key(&s.key(), "gil")).await,
+            "the failure was dropped"
+        );
     }
 
     /// Counts every call; with `fail`, every call errors.

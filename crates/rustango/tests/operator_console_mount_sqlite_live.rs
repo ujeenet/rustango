@@ -255,8 +255,14 @@ async fn every_page_links_under_the_prefix() {
         format!("/orgs/{slug}/hosts"),
     ] {
         let html = page(&b, &cookie, &path).await;
-        if html.contains("new-password") && html.contains(r#"minlength="8""#) {
-            bad.push(format!("{path}: hints the old 8-character rule"));
+        let inputs = new_password_inputs(&html);
+        if matches!(path.as_str(), "/operators" | "/change-password") && inputs.len() < 2 {
+            bad.push(format!("{path}: new-password fields not found"));
+        }
+        for tag in inputs {
+            if !tag.contains(&min_length_attr()) {
+                bad.push(format!("{path}: {tag}"));
+            }
         }
         // Scripts build their fetch URLs from this.
         if !html.contains(r#"<meta name="console-prefix" content="/ops">"#) {
@@ -292,4 +298,28 @@ async fn a_form_redirect_stays_under_the_prefix() {
         loc.starts_with(&format!("/ops/orgs/{}/hosts", b.slug)),
         "{loc}"
     );
+}
+
+/// Every `<input>` tag in `html` that takes a new account password.
+fn new_password_inputs(html: &str) -> Vec<&str> {
+    html.split("<input")
+        .skip(1)
+        .map(|t| &t[..t.find('>').unwrap_or(t.len())])
+        .filter(|t| t.contains(r#"autocomplete="new-password""#))
+        // A login password, not e.g. a database URL field.
+        .filter(|t| {
+            t.split(r#"name=""#)
+                .nth(1)
+                .and_then(|n| n.split('"').next())
+                .is_some_and(|n| n.ends_with("password"))
+        })
+        .collect()
+}
+
+/// The `minlength` every new-password field must carry.
+fn min_length_attr() -> String {
+    format!(
+        r#"minlength="{}""#,
+        rustango::password_validators::BUILTIN_FORM_MIN_LENGTH
+    )
 }
