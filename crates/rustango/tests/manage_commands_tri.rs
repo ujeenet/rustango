@@ -427,6 +427,43 @@ async fn tenant_flag_opens_the_tenant_pool(backend: &Pool) {
     }
 }
 
+/// `clearsessions` before `createcachetable` has nothing to clear, and says so.
+async fn clearsessions_without_a_cache_table_has_nothing_to_clear(pool: &Pool) {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let table = format!("cc_missing_{n}");
+    let dir = tempfile::tempdir().unwrap();
+    let run = |verb: &'static str| {
+        let table = table.clone();
+        let dir = dir.path().to_owned();
+        async move {
+            let mut out = Vec::new();
+            rustango::migrate::manage::run_with_writer(
+                pool,
+                &dir,
+                args(&[verb, "--table", &table]),
+                &mut out,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{verb}: {e}"));
+            String::from_utf8(out).unwrap()
+        }
+    };
+    let out = run("clearsessions").await;
+    assert!(
+        out.contains("nothing to clear") && out.contains("createcachetable"),
+        "{out}"
+    );
+    run("createcachetable").await;
+    let out = run("clearsessions").await;
+    assert!(out.contains("purged 0 expired row(s)"), "{out}");
+    rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .unwrap();
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -434,5 +471,6 @@ tri_dialect_test! {
         tenant_flag_opens_the_tenant_pool,
         check_reports_unapplied_and_unmade_migrations,
         migrate_target_names_each_direction,
+        clearsessions_without_a_cache_table_has_nothing_to_clear,
     ],
 }

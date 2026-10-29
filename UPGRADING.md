@@ -148,6 +148,18 @@ untouched.
 
 ---
 
+## Unreleased
+
+### One password policy
+
+The CLI password verbs (`create-user`, `create-operator`, `create-admin`, `reset-password`, `change-password` and the rest), the change-password pages and the set-password links now share one rule: at least 12 characters, a digit or a symbol, and not a well-known weak password. Scripts that set weaker passwords add `--skip-validation`. `BUILTIN_FORM_MIN_LENGTH` is now 12, and `check_builtin_form_password` needs the `passwords` feature.
+
+### Change password keeps this session
+
+A tenant or operator password change now ends only the other sessions; the response re-issues the current cookie.
+
+---
+
 ## 0.61.10
 
 ### ORM set operations and writes

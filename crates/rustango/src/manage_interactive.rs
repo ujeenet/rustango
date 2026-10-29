@@ -507,6 +507,35 @@ mod tests {
         assert_eq!(read(&mut Script::default(), short(), true).unwrap(), "pw");
     }
 
+    /// The CLI applies the set-password link's policy: length, weak list, variety.
+    #[test]
+    fn the_cli_refuses_what_the_set_password_link_refuses() {
+        for weak in ["password", "password1", "12345678", "longbutonlylowercase"] {
+            assert!(
+                matches!(
+                    read(
+                        &mut Script::default(),
+                        PasswordInput::Argv(weak.into()),
+                        false
+                    ),
+                    Err(NewPasswordError::Invalid(_))
+                ),
+                "{weak} was accepted"
+            );
+            assert!(!crate::passwords::strength_score(weak).is_empty());
+        }
+        let strong = "Tr0ub4dor&3-Battery";
+        assert_eq!(
+            read(
+                &mut Script::default(),
+                PasswordInput::Argv(strong.into()),
+                false
+            )
+            .unwrap(),
+            strong
+        );
+    }
+
     #[test]
     fn the_prompt_asks_twice_and_offers_a_bypass() {
         let mut c = Script {
@@ -553,12 +582,12 @@ mod tests {
             "from-env-123"
         );
         let mut c = Script {
-            stdin: " spaced pass \r\n".into(),
+            stdin: " spaced pass 1 \r\n".into(),
             ..Script::default()
         };
         assert_eq!(
             read(&mut c, PasswordInput::Stdin, false).unwrap(),
-            " spaced pass "
+            " spaced pass 1 "
         );
         assert!(matches!(
             PasswordInput::from_flags(Some("x".into()), true),

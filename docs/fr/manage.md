@@ -114,7 +114,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | Verbe | Ce qu'il fait |
 |---|---|
 | `createcachetable` / `create-cache-table` `[--table <name>]` | Crée la table de cache (et la table de sessions quand les sessions vont en base) |
-| `clear-cache [--table <name>]` / `clearsessions` | La vide ; renvoie le nombre de lignes supprimées |
+| `clear-cache [--table <name>]` / `clearsessions` | La vide ; renvoie le nombre de lignes supprimées. Sans table, indique qu'il n'y a rien à vider |
 | `sendtestemail --to <addr>` | Envoie un courriel de test fixe via le backend configuré |
 
 ### Introspection
@@ -1304,11 +1304,12 @@ Crée un utilisateur au sein d'un tenant — avec `--superuser`, un
 administrateur, mais toujours limité à un seul tenant. Au lieu de
 `--password`, vous pouvez passer `--password-stdin` ou `--generate` (affiche un
 mot de passe aléatoire) ; omettez les trois dans un terminal et la commande le
-demande. `--skip-validation` ignore les règles de mot de passe. Il n'y a pas
-de flag `--staff`.
+demande. Le mot de passe doit suivre les mêmes règles que les formulaires
+web : au moins 12 caractères, un chiffre ou un symbole, pas un mot de passe
+faible connu. `--skip-validation` les ignore. Il n'y a pas de flag `--staff`.
 
 ```bash
-cargo run -- create-user acme alice --password hunter2 --superuser
+cargo run -- create-user acme alice --password Hunter2-alice-pw --superuser
 ```
 
 `--superuser` règle `is_superuser = true` pour cet utilisateur au sein
@@ -1683,7 +1684,7 @@ cargo run -- migrate                                      # registry + tenants
 cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 cargo run                        # serve at :8080
 ```
 
@@ -1714,7 +1715,7 @@ cargo run -- migrate
 #    the new tenant arrives at the same schema state as existing ones.
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 ```
 
 Pourquoi c'est sûr :

@@ -111,7 +111,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | Verb | What it does |
 |---|---|
 | `createcachetable` / `create-cache-table` `[--table <name>]` | Create the cache table (and the session table when sessions go to the DB) |
-| `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted |
+| `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted. With no table yet, reports that nothing needs clearing |
 | `sendtestemail --to <addr>` | Send a fixed test email through the configured backend |
 
 ### Introspection
@@ -1236,11 +1236,12 @@ does not go red.
 Creates a user inside one tenant. The account exists only in that
 tenant. Instead of `--password` you can pass `--password-stdin` or
 `--generate` (prints a random one); omit all three on a terminal and it
-prompts. `--skip-validation` skips the password rules. There is no
-`--staff` flag.
+prompts. The password must pass the same rules as the web forms: at
+least 12 characters, a digit or a symbol, not a well-known weak password.
+`--skip-validation` skips them. There is no `--staff` flag.
 
 ```bash
-cargo run -- create-user acme alice --password hunter2 --superuser
+cargo run -- create-user acme alice --password Hunter2-alice-pw --superuser
 ```
 
 `--superuser` sets `is_superuser = true` for that user inside the
@@ -1597,7 +1598,7 @@ cargo run -- migrate                                      # registry + tenants
 cargo run -- create-operator admin --password correct-horse-42
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 cargo run                        # serve at :8080
 ```
 
@@ -1628,7 +1629,7 @@ cargo run -- migrate
 #    the new tenant arrives at the same schema state as existing ones.
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 ```
 
 Why this is safe:

@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- The CLI password verbs, the change-password pages and the set-password links use one policy (12 characters, a digit or symbol, not on the weak list); the CLI and the tenant and operator change-password pages used to accept `password1`.
+- Tenant and operator change-password keep the current session and end the others, so "Password updated" shows.
+- A login form request cancelled while its slot is refunded still gives the slot back.
+- `clearsessions` / `clear-cache` with no cache table says nothing needs clearing instead of failing.
+- `check --deploy` describes a missing `RUSTANGO_SESSION_SECRET` correctly: no start on prod, the dev key in `./var/` off prod; tenant cookies are named only in tenancy builds.
+
 ## [0.61.10] — 2026-10-29
 
 ### Fixed — auth review, round two

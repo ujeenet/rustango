@@ -46,10 +46,10 @@ export DATABASE_URL=postgres://rustango:rustango@localhost:5432/rustango_demo
 cargo run -- migrate
 
 # Provision a tenant + user
-cargo run -- create-operator admin --password letmein
+cargo run -- create-operator admin --password Letmein-admin-1
 cargo run -- create-tenant acme --display-name "ACME Inc" \
                   --host-pattern acme.localhost
-cargo run -- create-user acme alice --password tenantpw --superuser
+cargo run -- create-user acme alice --password Tenant-pw-2026 --superuser
 
 # Serve. Requests to acme.localhost:8080 land in the `acme` tenant.
 cargo run
@@ -59,7 +59,7 @@ cargo run
 CSRF=$(curl -sc /tmp/c.txt -H "Host: acme.localhost" http://127.0.0.1:8080/login \
        | sed -n 's/.*name="_csrf" value="\([^"]*\)".*/\1/p' | head -1)
 curl -sb /tmp/c.txt -c /tmp/c.txt -H "Host: acme.localhost" \
-     -d "username=alice&password=tenantpw&_csrf=$CSRF" \
+     -d "username=alice&password=Tenant-pw-2026&_csrf=$CSRF" \
      http://127.0.0.1:8080/login >/dev/null
 curl -sb /tmp/c.txt -H "Host: acme.localhost" http://127.0.0.1:8080/users/alice
 # → {"id":1,"username":"alice","display_name":"","timezone":"UTC","is_superuser":true}

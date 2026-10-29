@@ -1511,17 +1511,9 @@ async fn start_session(
 ) -> Response<Body> {
     use crate::signals::auth::{send_user_logged_in, UserLoggedInContext};
     let oid = op.id.get().copied().unwrap_or_default();
-    let mut payload = SessionPayload::new(
-        oid,
-        SESSION_IDLE_SECS,
-        session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
-    );
-    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let mut resp = Redirect::to(next).into_response();
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookie(&state.session_secret, &payload),
-    );
+    resp.headers_mut()
+        .append(header::SET_COOKIE, new_session_cookie(state, op));
     send_user_logged_in(UserLoggedInContext {
         source: "operator",
         user_id: oid,
@@ -1586,6 +1578,17 @@ async fn logout(
     })
     .await;
     resp
+}
+
+/// A new session cookie for `op`, bound to its current hash.
+fn new_session_cookie(state: &ConsoleState, op: &auth::Operator) -> HeaderValue {
+    let mut payload = SessionPayload::new(
+        op.id.get().copied().unwrap_or_default(),
+        SESSION_IDLE_SECS,
+        session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
+    );
+    payload.iat = crate::session::issued_at(op.sessions_revoked_at);
+    session_cookie(&state.session_secret, &payload)
 }
 
 /// The `Set-Cookie` for `payload`; the browser drops it at the idle deadline.
@@ -1682,11 +1685,8 @@ struct OpChangePasswordForm {
 }
 
 /// `POST /change-password`: check the current password, hash the new
-/// one, save it and bump `password_changed_at`.
-///
-/// `require_session` rejects cookies minted under the old password,
-/// so this request is the last one the current cookie can serve; the
-/// next click goes to login.
+/// one, save it and bump `password_changed_at`. Other sessions end; this
+/// one gets a cookie bound to the new hash.
 async fn change_password_submit(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
@@ -1718,7 +1718,7 @@ async fn change_password_submit(
 
     // `op` from the extension is a snapshot taken in `require_session`;
     // verify against the live hash.
-    let op_row: auth::Operator = match auth::Operator::objects()
+    let mut op_row: auth::Operator = match auth::Operator::objects()
         .where_(auth::Operator::id.eq(op_id))
         .fetch(&state.registry)
         .await
@@ -1795,7 +1795,11 @@ async fn change_password_submit(
         serde_json::Map::new(),
     )
     .await;
-    redir(flash::Flash::Ok("Password updated"))
+    op_row.password_hash = new_hash;
+    let mut resp = redir(flash::Flash::Ok("Password updated"));
+    resp.headers_mut()
+        .append(header::SET_COOKIE, new_session_cookie(&state, &op_row));
+    resp
 }
 
 async fn welcome(

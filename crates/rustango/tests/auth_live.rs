@@ -377,7 +377,7 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
             &slug,
             &user,
             "--password",
-            "topsecret",
+            "Top-secret-pw-1",
             "--superuser",
         ],
     )
@@ -386,7 +386,7 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
 
     // The tenant user (even superuser) must NOT authenticate as an
     // operator — the username doesn't exist in rustango_operators.
-    let op = authenticate_operator(&pool, &user, "topsecret")
+    let op = authenticate_operator(&pool, &user, "Top-secret-pw-1")
         .await
         .unwrap();
     assert!(

@@ -488,29 +488,11 @@ pub async fn confirm_password_reset_single_use_into(
     .await
 }
 
-/// The framework's documented password policy, applied where the reset
-/// path used to check only `len() < 8` (#1399).
+/// The framework's one password policy, shared with the CLI and the forms.
 #[cfg(feature = "passwords")]
 fn check_password_strength(new_password: &str) -> Result<(), AuthFlowError> {
-    use crate::passwords::StrengthIssue;
-
-    let issues = crate::passwords::strength_score(new_password);
-    if issues.is_empty() {
-        return Ok(());
-    }
-    let reasons: Vec<&str> = issues
-        .iter()
-        .map(|i| match i {
-            StrengthIssue::TooShort => "it must be at least 12 characters",
-            StrengthIssue::NoDigitsOrSymbols => "it needs a digit or a symbol",
-            StrengthIssue::NoVariety => "it needs more than lowercase letters",
-            StrengthIssue::KnownWeak => "it is a well-known weak password",
-        })
-        .collect();
-    Err(AuthFlowError::WeakPassword(format!(
-        "Password rejected: {}.",
-        reasons.join("; ")
-    )))
+    crate::password_validators::check_builtin_form_password(new_password)
+        .map_err(|e| AuthFlowError::WeakPassword(e.message))
 }
 
 /// `password_changed_at`, stamped by a reset and compared with the link's

@@ -562,7 +562,7 @@ mod tests {
     fn a_typed_password_must_be_confirmed_and_long_enough() {
         assert!(chosen_password(false, "", "").is_err(), "empty");
         assert!(
-            chosen_password(false, "longenough", "different").is_err(),
+            chosen_password(false, "long-enough-1", "different").is_err(),
             "mismatched confirmation"
         );
         assert!(
@@ -570,8 +570,8 @@ mod tests {
             "too short"
         );
         assert_eq!(
-            chosen_password(false, "longenough", "longenough").as_deref(),
-            Ok("longenough")
+            chosen_password(false, "long-enough-1", "long-enough-1").as_deref(),
+            Ok("long-enough-1")
         );
     }
 }
