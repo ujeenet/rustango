@@ -141,7 +141,7 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
     }
     let m = manage(
         "create-user",
-        &["acme", "alice", "--password", "tenantpw", "--superuser"],
+        &["acme", "alice", "--password", "tenant-pw-Correct-7", "--superuser"],
         &db,
     );
     assert!(
@@ -181,7 +181,7 @@ async fn admin_form_creates_then_viewset_isolates_per_tenant() {
     };
     let login_body = [
         ("username", "alice"),
-        ("password", "tenantpw"),
+        ("password", "tenant-pw-Correct-7"),
         ("_csrf", csrf.as_str()),
     ];
     let resp = client

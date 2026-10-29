@@ -4,22 +4,20 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `CsrfConfig` has a new public field; `check_builtin_form_password` needs the `passwords` feature and reports `password_too_weak`; roles made by `get_or_create_role` / `get_or_create_role_pool` skip save hooks and signals. See UPGRADING.
+
 ### Fixed
 
-- `DatabaseCache::ensure_table`, `AppBuilder::bootstrap` and the testkit table helpers no longer fail on Postgres when two processes create the same table at once.
+- `DatabaseCache::ensure_table`, `AppBuilder::bootstrap` and the testkit table helpers no longer fail on Postgres when two processes create the same table at once, including when the loser sees the winner's row type first.
 - `contenttypes::ensure_seeded` and `get_or_create_role` / `get_or_create_role_pool` succeed for every concurrent caller; the PG `get_or_create_role` no longer returns `RowNotFound` to the loser.
-- `loaddata` reloads tables that reference each other: a nullable link in the cycle is inserted as NULL and set after every row is in.
-- Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade". `--all-tenants` prints each tenant's plan and runs it with `--yes`; a migration name rolls back to it.
-- `loaddata` defers a link only when the fixture's rows really form a cycle, relinks rows that have no `pk` through the inserted one, and sets the links of rows already in after a `--fail-fast` stop.
+- `loaddata` reloads tables that reference each other: when the fixture's rows really form a cycle, a nullable link is inserted as NULL and set after every row is in. Rows with no `pk` (or `"pk": null`) are relinked through the inserted one, a relink that matches no row is a failure, and the rows already in keep their links after a `--fail-fast` stop. On MySQL a cycle row whose key the database generates (not AUTO_INCREMENT) needs its `pk`, and says so.
+- Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade". `--all-tenants` prints each tenant's plan and runs it with `--yes`; a migration name rolls back to it, chosen under the migrate lock.
 - Idempotent DDL (`bootstrap`, testkit, ensure helpers) reports a SQLite duplicate column in `CREATE TABLE` and a PG table/type name clash instead of treating them as "already there".
-
 - The CLI password verbs, the change-password pages and the set-password links use one policy (12 characters, a digit or symbol, not on the weak list); the CLI and the tenant and operator change-password pages used to accept `password1`.
 - Tenant and operator change-password keep the current session and end the others, so "Password updated" shows.
 - A login form request cancelled while its slot is refunded still gives the slot back.
 - `clearsessions` / `clear-cache` with no cache table says nothing needs clearing instead of failing, and its messages name the verb that ran.
 - `check --deploy` describes a missing `RUSTANGO_SESSION_SECRET` correctly: no start on prod, the dev key in `./var/` off prod; tenant cookies are named only in tenancy builds.
-
-- Tenancy: `downgrade --tenant <slug>` / `downgrade --all-tenants` roll back tenant-scoped migrations; plain `downgrade` now names them instead of only saying "nothing to downgrade".
 - Scaffolder: `new --features tenancy` picks the tenant template and is refused with another one; the tenant README and next steps add `create-operator`; the api template writes no unread `config/*.toml`.
 - `make:viewset --tenant` mounts `require_auth(ModelBackend)`, so tenant users reach it with HTTP Basic (a browser session still gets 401); `make:api_routes`, `make:form`, `make:worker` and `make:scheduled` output and hints compile without warnings; `startapp` no longer asks for the `mod` line it added.
 - `Cli::with_csrf*()` exempts the MCP endpoints (`{prefix}`, `{prefix}/token`, `{prefix}/oauth/token`), so MCP clients are not refused with 403; the rest of the prefix keeps CSRF, and a `/` prefix exempts nothing. New `CsrfConfig::exempt_paths` / `exempt_path` for exact-path exemptions.

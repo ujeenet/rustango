@@ -511,13 +511,16 @@ pub async fn create_role_pool(
     Ok(role.id.get().copied().unwrap_or(0))
 }
 
-/// v0.38 — tri-dialect counterpart of [`get_or_create_role`].
+/// Get an existing role by name or create one, on any backend. Returns the id.
 ///
 /// Safe under concurrent callers: insert-or-ignore on the unique `name`,
 /// then a separate read, so the loser sees the winner's committed row.
+/// The insert skips `Role` save hooks.
 ///
 /// # Errors
-/// As [`get_or_create_role`].
+/// * [`TenancyError::Exec`] on a failed read or insert.
+/// * [`TenancyError::Validation`] when the insert was ignored yet no role has
+///   the name, e.g. a unique-key clash on another column.
 pub async fn get_or_create_role_pool(
     name: &str,
     description: &str,

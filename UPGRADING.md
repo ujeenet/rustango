@@ -150,11 +150,16 @@ untouched.
 
 ## Unreleased
 
+### Migrations and data
+
 - Tenancy `downgrade` runs over the registry-scoped files only and prints `registry: …`; add `--tenant <slug>` or `--all-tenants` to roll back tenant-scoped migrations. `--all-tenants` only prints each tenant's plan until you add `--yes`; `downgrade <target>` rolls back what was applied after `<target>`.
-- `get_or_create_role` (PG) and `get_or_create_role_pool` now insert-or-ignore, then read. A role that is still missing after that is a `TenancyError::Validation`, not id `0`. A new role is no longer written through `save_pool`, so model save hooks and signals do not fire for it.
-- `is_pg_dup_object_error` now also treats a racing `CREATE EXTENSION` (`pg_extension_name_index`) as "already exists".
-- `loaddata` inserts a nullable FK as NULL and sets it after every row only when the fixture's rows form a table cycle; a row in a cycle may then briefly hold NULL.
+- `loaddata` inserts a nullable FK as NULL and sets it after every row only when the fixture's rows form a table cycle; a row in a cycle may then briefly hold NULL. `"pk": null` now means "no pk". On MySQL a cycle row whose key the database generates (not AUTO_INCREMENT) is refused until it has a `pk`.
 - Idempotent DDL no longer treats a SQLite "duplicate column name" in `CREATE TABLE`, or a PG `CREATE TABLE` that clashes with a type name (42710), as "already exists".
+- `is_pg_dup_object_error` now also treats a racing `CREATE EXTENSION` (`pg_extension_name_index`) as "already exists".
+
+### Roles
+
+- `get_or_create_role` (PG) and `get_or_create_role_pool` now insert-or-ignore, then read. A role that is still missing after that is a `TenancyError::Validation`, not id `0`. A new role is no longer written through `save_pool`, so model save hooks and signals do not fire for it.
 
 ### One password policy
 
@@ -164,11 +169,14 @@ The CLI password verbs (`create-user`, `create-operator`, `create-admin`, `reset
 
 A tenant or operator password change now ends only the other sessions; the response re-issues the current cookie.
 
-- Tenancy `downgrade` runs over the registry-scoped files only and prints `registry: …`; add `--tenant <slug>` or `--all-tenants` to roll back tenant-scoped migrations.
-- `get_or_create_role` (PG) now runs two statements, an insert-or-ignore then a read, like `get_or_create_role_pool`.
-- `cargo rustango new --template api|fullstack --features tenancy` is refused; use `--template tenant` (or `--features tenancy` alone).
+### CSRF and MCP
+
 - With the `mcp` feature, `Cli::with_csrf()` / `with_csrf_config()` skip CSRF on the MCP endpoints only: `{prefix}`, `{prefix}/token`, `{prefix}/oauth/token` (`[mcp] prefix`, default `/mcp`). MCP clients send no CSRF cookie; the single-database `mcp::router(pool)` checks no token, so guard it yourself. A `/` prefix exempts nothing.
 - `CsrfConfig` has a new public field, `exempt_paths` (exact paths); a struct literal without `..Default::default()` must add it.
+
+### Scaffolder
+
+- `cargo rustango new --template api|fullstack --features tenancy` is refused; use `--template tenant` (or `--features tenancy` alone).
 - `startapp` (plain and tenancy) now ends with `next: cargo run -- makemigrations && cargo run -- migrate`. It no longer prints the `mod <app>;` step it already did, the `init-tenancy` step or the `--with-bootstrap-migration` advice; with no `lib.rs`/`main.rs` the `pub mod` line is a `! manual:` step.
 - `make:viewset --tenant` output authenticates with HTTP Basic (`ModelBackend`) only; a signed-in browser session gets 401. Add `ApiKeyBackend` or a `JwtBackend` for token clients.
 

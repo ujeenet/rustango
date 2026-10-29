@@ -698,19 +698,45 @@ async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
     assert_eq!(CycMember::objects().count(pool).await.expect("members"), 2);
 }
 
-/// A cycle row without a `pk` is relinked through the pk the insert returned.
-async fn loaddata_relinks_cycle_rows_without_a_pk(pool: &Pool) {
+/// Load two cycle orgs whose `pk` is `pk`, after an org already in, so
+/// their ids (2, 3) differ from their fixture positions.
+async fn load_pk_less_orgs(pool: &Pool, pk: Option<serde_json::Value>) {
     fresh_cycle(pool).await;
+    let mut first = CycOrg {
+        id: Auto::default(),
+        owner_id: None,
+    };
+    first.insert_pool(pool).await.expect("org already in");
+    let org = |owner: i64| {
+        let mut row = serde_json::json!({"model": "mdv.CycOrg", "fields": {"owner_id": owner}});
+        if let Some(pk) = &pk {
+            row["pk"] = pk.clone();
+        }
+        row
+    };
     let rows = serde_json::json!([
-        {"model": "mdv.CycMember", "pk": 1, "fields": {"org": 1}},
-        {"model": "mdv.CycMember", "pk": 2, "fields": {"org": 2}},
-        {"model": "mdv.CycOrg", "fields": {"owner_id": 1}},
-        {"model": "mdv.CycOrg", "fields": {"owner_id": 2}},
+        {"model": "mdv.CycMember", "pk": 1, "fields": {"org": 2}},
+        {"model": "mdv.CycMember", "pk": 2, "fields": {"org": 3}},
+        org(2),
+        org(1),
     ]);
     let dir = tempfile::tempdir().expect("tempdir");
     let out = manage(pool, &["loaddata", &write_fixture(&dir, &rows)]).await;
     assert!(out.is_ok(), "loaddata: {out:?}");
-    assert_eq!(org_owners(pool).await, [(1, Some(1)), (2, Some(2))]);
+    assert_eq!(
+        org_owners(pool).await,
+        [(1, None), (2, Some(2)), (3, Some(1))]
+    );
+}
+
+/// A cycle row without a `pk` is relinked through the pk the insert returned.
+async fn loaddata_relinks_cycle_rows_without_a_pk(pool: &Pool) {
+    load_pk_less_orgs(pool, None).await;
+}
+
+/// `"pk": null` is no pk: it went in as NULL and its relink matched no row.
+async fn loaddata_relinks_cycle_rows_with_a_null_pk(pool: &Pool) {
+    load_pk_less_orgs(pool, Some(serde_json::Value::Null)).await;
 }
 
 /// `--fail-fast` still sets the links of the rows that went in.
@@ -1169,6 +1195,7 @@ tri_dialect_test! {
         dump_and_load_keeps_floats_and_json_null,
         loaddata_breaks_a_nullable_cycle,
         loaddata_relinks_cycle_rows_without_a_pk,
+        loaddata_relinks_cycle_rows_with_a_null_pk,
         loaddata_fail_fast_relinks_the_rows_in,
         loaddata_keeps_an_orderable_fixture_inline,
     ],

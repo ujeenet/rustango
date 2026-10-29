@@ -62,14 +62,32 @@ where
     F: Fn(Pool, usize) -> Fut,
     Fut: std::future::Future<Output = Result<T, String>>,
 {
+    race_n(what, pool, reset, (ROUNDS, RACERS), |p, round, _| {
+        call(p, round)
+    })
+    .await
+}
+
+/// [`race`] with `(rounds, racers)` given; `call` also gets the racer's index.
+async fn race_n<F, Fut, T>(
+    what: &str,
+    pool: &Pool,
+    reset: &[String],
+    (rounds, racers): (usize, usize),
+    call: F,
+) -> Vec<Vec<T>>
+where
+    F: Fn(Pool, usize, usize) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
     let mut failed_rounds = 0;
     let mut first = None;
     let mut results = Vec::new();
-    for round in 0..ROUNDS {
+    for round in 0..rounds {
         for sql in reset {
             exec(pool, sql).await;
         }
-        let calls = (0..RACERS).map(|_| call(pool.clone(), round));
+        let calls = (0..racers).map(|i| call(pool.clone(), round, i));
         let outs = futures_util::future::join_all(calls).await;
         let mut oks = Vec::new();
         let mut failed = false;
@@ -88,7 +106,7 @@ where
     assert_eq!(
         failed_rounds,
         0,
-        "{what}: {failed_rounds}/{ROUNDS} rounds had a failed call; first: {}",
+        "{what}: {failed_rounds}/{rounds} rounds had a failed call; first: {}",
         first.unwrap_or_default()
     );
     results
@@ -133,6 +151,26 @@ async fn bootstrap_survives_a_concurrent_boot(backend: &Pool) {
             .map(drop)
             .map_err(|e| e.to_string())
     })
+    .await;
+}
+
+/// Staggered racers make a PG `CREATE TABLE IF NOT EXISTS` lose on the row
+/// type with 42710, which reads like a type holding the name.
+async fn create_tables_survives_staggered_racers(backend: &Pool) {
+    let (pool, _guard) = private(backend).await;
+    let reset = [drop_sql(&pool, BootRow::SCHEMA.table)];
+    race_n(
+        "testkit::create_tables",
+        &pool,
+        &reset,
+        (60, 8),
+        |p, _, i| async move {
+            tokio::time::sleep(std::time::Duration::from_millis(i as u64 % 4)).await;
+            rustango::testkit::create_tables(&p, &[BootRow::SCHEMA])
+                .await
+                .map_err(|e| e.to_string())
+        },
+    )
     .await;
 }
 
@@ -227,6 +265,7 @@ rustango::tri_dialect_test! {
     scenarios: [
         cache_ensure_table_survives_a_concurrent_boot,
         bootstrap_survives_a_concurrent_boot,
+        create_tables_survives_staggered_racers,
         content_types_seed_survives_a_concurrent_run,
         get_or_create_role_survives_concurrent_callers,
         pg_get_or_create_role_survives_concurrent_callers,

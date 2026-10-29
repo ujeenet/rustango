@@ -73,11 +73,7 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
     };
     match dialect {
         // 42710 on CREATE TABLE is a type of that name: the table is not there.
-        "postgres" => {
-            crate::sql::is_pg_dup_object_error(err)
-                && !(is_create_table(stmt)
-                    && err.as_database_error().and_then(|d| d.code()).as_deref() == Some("42710"))
-        }
+        "postgres" => crate::sql::is_pg_dup_object_error(err) && !is_type_clash(err, stmt),
         #[cfg(feature = "mysql")]
         "mysql" => err
             .as_database_error()
@@ -94,6 +90,12 @@ pub(crate) fn is_already_exists(e: &crate::sql::ExecError, dialect: &str, stmt: 
 
 fn is_create_table(stmt: &str) -> bool {
     stmt.starts_with("CREATE TABLE ")
+}
+
+/// PG 42710 on a CREATE TABLE: a type holds the name, a racer's or a user's.
+fn is_type_clash(err: &sqlx::Error, stmt: &str) -> bool {
+    is_create_table(stmt)
+        && err.as_database_error().and_then(|d| d.code()).as_deref() == Some("42710")
 }
 
 /// `CREATE TABLE x` -> `CREATE TABLE IF NOT EXISTS x`, on Postgres only.
@@ -522,7 +524,14 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
     let dialect = pool.dialect().name();
     for stmt in stmts {
         let stmt = idempotent(stmt, dialect);
-        if let Err(e) = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await {
+        let mut res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
+        // A racer's committed row type also says 42710; once in, the retry sees its table.
+        if dialect == "postgres"
+            && matches!(&res, Err(crate::sql::ExecError::Driver(e)) if is_type_clash(e, &stmt))
+        {
+            res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
+        }
+        if let Err(e) = res {
             if is_already_exists(&e, dialect, &stmt) {
                 continue;
             }

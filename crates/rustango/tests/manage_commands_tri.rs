@@ -442,6 +442,17 @@ async fn cache_verb(pool: &Pool, verb: &str, table: &str) -> String {
     String::from_utf8(out).unwrap()
 }
 
+/// One cache row of `table` that expired long ago.
+async fn seed_expired(pool: &Pool, table: &str) {
+    let sql = format!(
+        "INSERT INTO {} (cache_key, value, expires) VALUES ('old', 'v', 1)",
+        pool.dialect().quote_ident(table)
+    );
+    rustango::sql::raw_execute_pool(pool, &sql, Vec::new())
+        .await
+        .unwrap();
+}
+
 fn cache_table(prefix: &str) -> String {
     let n = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -459,9 +470,10 @@ async fn clearsessions_without_a_cache_table_has_nothing_to_clear(pool: &Pool) {
         "{out}"
     );
     cache_verb(pool, "createcachetable", &table).await;
+    seed_expired(pool, &table).await;
     let out = cache_verb(pool, "clearsessions", &table).await;
     assert!(
-        out.contains("clearsessions: purged 0 expired row(s)"),
+        out.contains("clearsessions: purged 1 expired row(s)"),
         "{out}"
     );
     rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
@@ -478,6 +490,7 @@ async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool
         let table = cache_table("cc_public");
         let schema = cache_table("cc_tenant");
         cache_verb(pool, "createcachetable", &table).await;
+        seed_expired(pool, &table).await;
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(pg)
             .await
@@ -493,7 +506,7 @@ async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool
                 .unwrap(),
         );
         let out = cache_verb(&scoped, "clearsessions", &table).await;
-        assert!(out.contains("purged 0 expired row(s)"), "{out}");
+        assert!(out.contains("purged 1 expired row(s)"), "{out}");
         for sql in [
             format!("DROP SCHEMA {schema}"),
             format!("DROP TABLE {table}"),

@@ -458,9 +458,9 @@ fn render_mod_template(app_name: &str) -> String {
     format!(
         "//! `{app_name}` — app module.\n\
          //!\n\
-         //! `startapp` registered this module in `src/lib.rs` (or\n\
-         //! `main.rs`), which compiles its models into the `inventory`\n\
-         //! registry.\n\
+         //! Its models register in the `inventory` registry once\n\
+         //! `src/lib.rs` (or `main.rs`) declares this module; `startapp`\n\
+         //! adds that line when it finds one of those files.\n\
          \n\
          pub mod models;\n\
          pub mod urls;\n\

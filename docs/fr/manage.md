@@ -82,7 +82,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Génère une migration à partir du diff des modèles |
 | `migrate [target]` / `--dry-run` / `--squash` | Applique les migrations en attente |
-| `downgrade [N]` | Annule les N dernières migrations |
+| `downgrade [N \| <target>]` | Annule les N dernières migrations, ou celles après `<target>` (portée tenant) |
 | `showmigrations` / `status` | Liste les migrations et leur état d'application |
 | `sqlmigrate <name>` | Affiche le SQL qu'une migration exécuterait, sans l'exécuter |
 | `forget-pending <name>` | Supprime un JSON de migration non appliquée dont aucune migration suivante ne dépend |
@@ -421,7 +421,7 @@ idempotent.
 rapportant chacun et en continuant malgré les échecs — les tables du
 framework vivent par tenant, donc les réparer est une tâche par tenant.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Annule les N dernières migrations appliquées (par défaut 1). Chaque migration doit être réversible :
 les changements de schéma s'annulent automatiquement, mais les

@@ -79,7 +79,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Generate a migration from the model diff |
 | `migrate [target]` / `--dry-run` / `--squash` | Apply pending migrations |
-| `downgrade [N]` | Roll back the last N migrations |
+| `downgrade [N \| <target>]` | Roll back the last N migrations, or those after `<target>` (tenant scope) |
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
 | `forget-pending <name>` | Delete an un-applied migration JSON no later file builds on |
@@ -399,7 +399,7 @@ every active tenant, reporting each one and continuing past failures —
 the framework's tables live per tenant, so repairing them is a per-tenant
 job.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Rolls back the last N applied migrations (default 1). Each migration must be reversible: schema changes
 reverse automatically, but data operations need a `reverse_sql` defined

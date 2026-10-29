@@ -80,7 +80,7 @@ alcanzan mediante `Cli::tenancy()`.
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Genera una migración a partir del diff de modelos |
 | `migrate [target]` / `--dry-run` / `--squash` | Aplica las migraciones pendientes |
-| `downgrade [N]` | Revierte las últimas N migraciones |
+| `downgrade [N \| <target>]` | Revierte las últimas N migraciones, o las posteriores a `<target>` (ámbito tenant) |
 | `showmigrations` / `status` | Lista las migraciones y su estado de aplicación |
 | `sqlmigrate <name>` | Imprime el SQL que ejecutaría una migración, sin ejecutarlo |
 | `forget-pending <name>` | Borra un JSON de migración no aplicada del que no depende ninguna posterior |
@@ -402,7 +402,7 @@ de la de tu proyecto. `--all-tenants` extiende la marca a través de cada tenant
 activo, informando de cada uno y continuando más allá de los fallos — las tablas
 del framework viven por tenant, así que repararlas es un trabajo por tenant.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Revierte las últimas N migraciones aplicadas (por defecto 1). Cada migración debe ser reversible: los cambios
 de esquema se revierten automáticamente, pero las operaciones de datos necesitan

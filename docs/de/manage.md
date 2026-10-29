@@ -81,7 +81,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
 | `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
-| `downgrade [N]` | Rollt die letzten N Migrationen zurück |
+| `downgrade [N \| <target>]` | Rollt die letzten N Migrationen zurück, oder die nach `<target>` (Tenant-Scope) |
 | `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
 | `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
 | `forget-pending <name>` | Löscht eine noch nicht angewendete Migrations-JSON, auf der keine spätere aufbaut |
@@ -410,7 +410,7 @@ Tenant auf, berichtet über jeden einzelnen und fährt über Fehler hinweg fort 
 die Tabellen des Frameworks leben pro Tenant, ihre Reparatur ist also eine
 Per-Tenant-Aufgabe.
 
-### `downgrade [N]`
+### `downgrade [N | <target>]`
 
 Rollt die letzten N angewendeten Migrationen zurück (Standard 1). Jede Migration muss reversibel sein: Schemaänderungen
 kehren sich automatisch um, aber Datenoperationen brauchen ein definiertes

@@ -4813,8 +4813,11 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
         for f in schema.scalar_fields() {
-            // An absent key takes the column default, not NULL.
-            let Some(raw) = fields_obj.get(f.name) else {
+            // An absent key takes the column default, not NULL; a null pk is absent.
+            let Some(raw) = fields_obj
+                .get(f.name)
+                .filter(|v| !(f.primary_key && v.is_null()))
+            else {
                 continue;
             };
             match loaddata_value(raw, f) {
@@ -4864,6 +4867,23 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             Some(pk) if !relink.is_empty() && !columns.contains(&pk.column) => vec![pk.column],
             _ => vec![],
         };
+        // MySQL hands back only an AUTO_INCREMENT id; refuse before the write.
+        if let Some(pk) = pk_field.filter(|pk| {
+            pool.dialect().name() == "mysql" && !returning.is_empty() && !pk.is_serial()
+        }) {
+            let msg = format!(
+                "loaddata: entry #{line} (`{model_name}`): MySQL cannot return the \
+                 database-generated `{}`, so this row's cycle link can't be set; give it a `pk`",
+                pk.name
+            );
+            if parsed.fail_fast {
+                abort = Some(msg);
+                break;
+            }
+            tracing::warn!("{msg}");
+            skipped += 1;
+            continue;
+        }
         let query = crate::core::InsertQuery {
             model: schema,
             columns,
@@ -4937,7 +4957,11 @@ pub(crate) async fn loaddata_cmd<W: Write>(
 
     // Even after a `--fail-fast` stop: the rows already in get their links.
     for (what, update) in relinks {
-        if let Err(e) = crate::sql::update_pool(pool, &update).await {
+        let res = match crate::sql::update_pool(pool, &update).await {
+            Ok(0) => Err("no row has the inserted pk".to_owned()),
+            r => r.map(drop).map_err(|e| e.to_string()),
+        };
+        if let Err(e) = res {
             let msg = format!("loaddata: {what} link: {e}");
             tracing::warn!("{msg}");
             loaded -= 1;
@@ -5021,17 +5045,23 @@ fn load_plan(
             nodes.push(s);
         }
     }
+    // Every (table, column) some fixture row sets, in one pass.
+    let mut set_by_a_row: std::collections::HashSet<(&str, &str)> =
+        std::collections::HashSet::new();
+    for e in entries {
+        let (Some(s), Some(fields)) = (schema_of(e), e.get("fields")) else {
+            continue;
+        };
+        set_by_a_row.extend(
+            s.fields
+                .iter()
+                .filter(|f| fields.get(f.name).is_some_and(|v| !v.is_null()))
+                .map(|f| (s.table, f.column)),
+        );
+    }
     // Is `col` of `s` set by any of the fixture's `s` rows?
     let filled = |s: &crate::core::ModelSchema, col: &str| {
-        let Some(f) = s.fields.iter().find(|f| f.column == col) else {
-            return true;
-        };
-        entries.iter().any(|e| {
-            schema_of(e).is_some_and(|x| x.table == s.table)
-                && e.get("fields")
-                    .and_then(|v| v.get(f.name))
-                    .is_some_and(|v| !v.is_null())
-        })
+        !s.fields.iter().any(|f| f.column == col) || set_by_a_row.contains(&(s.table, col))
     };
     let used =
         |s: &crate::core::ModelSchema, col: Option<&'static str>| col.is_none_or(|c| filled(s, c));

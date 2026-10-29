@@ -503,37 +503,6 @@ const DOWNGRADE_USAGE: &str =
      (default 1) migrations, or those after <target>: registry-scoped, or tenant-scoped in one \
      tenant / every active tenant. --all-tenants prints each tenant's plan; --yes runs it";
 
-/// What `downgrade` rolls back in each ledger.
-enum Rollback<'a> {
-    Steps(usize),
-    /// Everything applied after this migration, which stays.
-    After(&'a str),
-}
-
-impl Rollback<'_> {
-    /// The applied `files` this rolls back, newest first, as `downgrade_pool` picks them.
-    fn plan<'f>(
-        &self,
-        files: &'f [rustango::migrate::Migration],
-        applied: &std::collections::HashSet<String>,
-    ) -> Vec<&'f str> {
-        let after = match self {
-            Rollback::Steps(_) => 0,
-            Rollback::After(t) => files.iter().position(|m| m.name == *t).map_or(0, |i| i + 1),
-        };
-        let mut plan: Vec<&str> = files[after..]
-            .iter()
-            .filter(|m| applied.contains(&m.name))
-            .map(|m| m.name.as_str())
-            .rev()
-            .collect();
-        if let Rollback::Steps(n) = self {
-            plan.truncate(*n);
-        }
-        plan
-    }
-}
-
 /// `downgrade [N]` on the registry ledger, or with `--tenant <slug>` /
 /// `--all-tenants` on the tenant ledgers, over that scope's files only.
 /// Tenants can sit at different versions, so `--all-tenants` shows each
@@ -548,6 +517,7 @@ where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     use crate::core::Column as _;
+    use crate::migrate::Rollback;
     use crate::sql::FetcherPool as _;
     use crate::tenancy::org::Org;
     use rustango::migrate::{downgrade_pool, MigrationScope};
@@ -650,16 +620,15 @@ where
                 let applied =
                     rustango::migrate::applied_or_empty(&pool, rustango::migrate::LEDGER_TABLE)
                         .await?;
-                let plan: Vec<String> = rollback
-                    .plan(&files, &applied)
-                    .into_iter()
-                    .map(str::to_owned)
-                    .collect();
-                if !run || plan.is_empty() {
-                    return Ok(plan);
-                }
-                let touched = downgrade_pool(&pool, scoped.path(dir), plan.len()).await?;
-                Ok(touched.into_iter().map(|m| m.name).collect())
+                let plan = rollback.plan(&files, &applied);
+                // Chosen again under the lock: a migrate in between moves the plan.
+                let done = if !run || plan.is_empty() {
+                    plan
+                } else {
+                    let ledger = rustango::migrate::LEDGER_TABLE;
+                    crate::migrate::rollback_pool(&pool, scoped.path(dir), rollback, ledger).await?
+                };
+                Ok(done.into_iter().map(|m| m.name).collect::<Vec<_>>())
             }
             .await;
             if own {
