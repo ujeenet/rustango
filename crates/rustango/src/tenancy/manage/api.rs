@@ -27,9 +27,10 @@ use crate::tenancy::provision::{self, DatabaseSource, TenantStorage};
 /// Inputs for [`create_tenant`] / [`create_tenant_if_missing`].
 ///
 /// Defaults: `mode = Schema`, all `Option`s `None`, `no_migrate =
-/// false`. When `host_pattern` is `None`, the default is
-/// `"{slug}.{RUSTANGO_APEX_DOMAIN}"` (read from env at provisioning
-/// time) — same convention the CLI verb uses.
+/// false`. When `host_pattern` is `None` and no `path_prefix` is set, the
+/// default is `"{slug}.{RUSTANGO_APEX_DOMAIN}"` (read from env at
+/// provisioning time); with a `path_prefix` the tenant gets no host and is
+/// served at `<apex>/<prefix>/` — same convention the CLI verb uses.
 pub struct CreateTenantOpts {
     pub mode: StorageMode,
     /// `None` takes the registry's; anything else must equal it.

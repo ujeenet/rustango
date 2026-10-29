@@ -152,8 +152,8 @@ untouched.
 
 ### Tenancy
 
-- A path-prefix tenant's login only redirects inside its own prefix: a `next` of `/`, another tenant's prefix, or a path with `..` segments goes to the tenant root (`/t1/`) instead.
-- `create-tenant --path-prefix` without `--host-pattern` (and the console form) no longer fills in `<slug>.<apex>`. A tenant created that way earlier keeps that host and its links still use it: clear it with `edit-tenant <slug> --host-pattern ''`.
+- A path-prefix tenant's login only redirects inside its own prefix: a `next` of `/`, another tenant's prefix, or a path with `..` segments goes to the tenant root (`/t1/`) instead. This also applies to a tenant with both a host and a prefix when it is reached under its prefix.
+- `create-tenant --path-prefix` without `--host-pattern` (and the console form, `manage::api::create_tenant` and `Provisioner::provision`) no longer fills in `<slug>.<apex>`; such a tenant is reached at `<apex>/<prefix>/`. A tenant created that way earlier keeps that host and its links still use it: clear it with `edit-tenant <slug> --host-pattern ''`.
 - A path prefix equal to an operator console segment (`/orgs`, `/login`, `/audit`, `/__static__`, …) or `/health` / `/ready` is refused. Such a tenant was already unreachable on the apex; give it another prefix before its next console edit.
 
 ---
