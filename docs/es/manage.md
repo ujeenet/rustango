@@ -158,7 +158,7 @@ alcanzan mediante `Cli::tenancy()`.
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Enrutado por host |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Servidores de bases de datos guardados |
 | `test-tenant-connection` | Verifica que la base de un tenant es alcanzable |
-| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant, las contraseñas de servidor y los secretos TOTP de operador y SSO guardados con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
+| `reseal-tenant-secrets [--apply]` | Vuelve a sellar las URL de tenant, las contraseñas de servidor y los secretos TOTP de operador y SSO y las columnas `Cast<EncryptedString>` guardados con la `RUSTANGO_SECRET_KEY` actual; sin `--apply` es una prueba en seco |
 | `prewarm-pools` | Abre los pools de tenants antes de la primera petición |
 | `run-server` / `runserver` | Ejecuta el servidor multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Puntos de entrada de configuración e interactivos |

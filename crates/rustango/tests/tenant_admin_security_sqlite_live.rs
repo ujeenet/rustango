@@ -559,6 +559,52 @@ async fn an_edit_writes_only_rendered_fields() {
     assert_eq!(got.note.as_deref(), Some("keep"), "outside fieldsets");
 }
 
+/// A tenant admin's save and delete signals name the tenant.
+#[tokio::test]
+async fn admin_signals_name_the_tenant() {
+    use rustango::signals::admin as sig;
+    let env = boot().await;
+    let cookie = env.login(true, &[]).await;
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let (s1, s2) = (seen.clone(), seen.clone());
+    let save = sig::connect_admin_post_save(move |c: sig::AdminSaveContext| {
+        if c.table == "sec_form" {
+            s1.lock().unwrap().push(format!("save:{:?}", c.tenant));
+        }
+        async {}
+    });
+    let delete = sig::connect_admin_post_delete(move |c: sig::AdminDeleteContext| {
+        if c.table == "sec_form" {
+            s2.lock().unwrap().push(format!("delete:{:?}", c.tenant));
+        }
+        async {}
+    });
+    let mut row = SecForm {
+        id: rustango::Auto::default(),
+        title: "old".into(),
+        owner_id: 5,
+        is_verified: true,
+        note: None,
+    };
+    row.insert_pool(&env.tenant).await.expect("seed sec_form");
+    let pk = row.id.get().copied().unwrap();
+    let (status, body) = env
+        .post(&format!("/__admin/sec_form/{pk}"), &cookie, "title=new")
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    let (status, body) = env
+        .post(&format!("/__admin/sec_form/{pk}/delete"), &cookie, "")
+        .await;
+    assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+    sig::disconnect_admin_post_save(save);
+    sig::disconnect_admin_post_delete(delete);
+    let want = Some(env.slug.clone());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [format!("save:{want:?}"), format!("delete:{want:?}")]
+    );
+}
+
 /// #1860: a create POST cannot set fields the form hides.
 #[tokio::test]
 async fn a_create_writes_only_rendered_fields() {

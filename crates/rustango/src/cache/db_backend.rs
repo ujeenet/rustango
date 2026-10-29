@@ -321,6 +321,7 @@ impl Cache for DatabaseCache {
     }
 
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
+        super::check_text(value)?;
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
@@ -367,6 +368,7 @@ impl Cache for DatabaseCache {
     /// one racer wins: once the winner moves `expires` forward, the
     /// loser's `WHERE` no longer matches.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
+        super::check_text(value)?;
         let dialect = self.pool.dialect();
         let table = dialect.quote_ident(&self.table);
         let p1 = dialect.placeholder(1);
@@ -487,9 +489,11 @@ impl Cache for DatabaseCache {
         let expired = |p: &str| format!("{table}.expires <> 0 AND {table}.expires < {p}");
         // A strict-mode MySQL CAST of a non-integer is an error, not 0, so
         // only text inside the i64 range is cast; CASE fixes the order.
+        // Only the exact `i64` text counts, as `counter_value` and SQLite's
+        // round-trip check below.
         let in_i64 = |matches: &str, wide: &str| {
             format!(
-                "NOT (CASE WHEN {table}.value {matches} '^-?[0-9]{{1,19}}$' \
+                "NOT (CASE WHEN {table}.value {matches} '^(0|-?[1-9][0-9]{{0,18}})$' \
                  THEN CAST({table}.value AS {wide}) BETWEEN {} AND {} ELSE FALSE END)",
                 i64::MIN,
                 i64::MAX

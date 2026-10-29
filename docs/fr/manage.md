@@ -160,7 +160,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `add-host` / `remove-host` / `list-hosts` / `set-host-enabled` | Routage par hôte |
 | `add-db-server` / `edit-db-server` / `list-db-servers` / `test-db-server` / `remove-db-server` | Serveurs de bases de données enregistrés |
 | `test-tenant-connection` | Vérifie que la base d'un tenant est joignable |
-| `reseal-tenant-secrets [--apply]` | Rescelle les URL de tenant, les mots de passe de serveur, les secrets TOTP des opérateurs et les secrets SSO stockés avec la `RUSTANGO_SECRET_KEY` actuelle ; sans `--apply`, une simulation |
+| `reseal-tenant-secrets [--apply]` | Rescelle les URL de tenant, les mots de passe de serveur, les secrets TOTP des opérateurs, les secrets SSO et les colonnes `Cast<EncryptedString>` stockés avec la `RUSTANGO_SECRET_KEY` actuelle ; sans `--apply`, une simulation |
 | `prewarm-pools` | Ouvre les pools de tenants avant la première requête |
 | `run-server` / `runserver` | Lance le serveur multi-tenant |
 | `init` / `init-tenancy` / `wizard` / `menu` / `actions` | Points d'entrée de configuration et interactifs |

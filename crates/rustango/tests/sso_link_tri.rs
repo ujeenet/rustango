@@ -690,9 +690,55 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
     }
 }
 
+/// Sign-in finds a link by subject through an index, not a scan of every
+/// link of the provider.
+async fn subject_lookup_has_an_index(pool: &Pool) {
+    use rustango::core::SqlValue;
+    const NAME: &str = "rustango_sso_links_provider_source_provider_id_subject_idx";
+    let sql = match pool.backend_name() {
+        "postgres" => "SELECT indexdef FROM pg_indexes WHERE indexname = $1",
+        "mysql" => {
+            "SELECT CAST(GROUP_CONCAT(column_name ORDER BY seq_in_index) AS CHAR) \
+             FROM information_schema.statistics \
+             WHERE table_schema = DATABASE() AND index_name = ?"
+        }
+        _ => "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+    };
+    let rows: Vec<(Option<String>,)> =
+        rustango::sql::raw_query_pool(sql, vec![SqlValue::String(NAME.into())], pool)
+            .await
+            .expect("read the index");
+    let def = rows
+        .into_iter()
+        .next()
+        .and_then(|r| r.0)
+        .unwrap_or_default();
+    let at: Vec<Option<usize>> = ["provider_source", "provider_id", "subject"]
+        .iter()
+        .map(|c| def.find(c))
+        .collect();
+    assert!(
+        at.iter().all(Option::is_some) && at.windows(2).all(|w| w[0] < w[1]),
+        "no (provider_source, provider_id, subject) index: {def:?}"
+    );
+    if pool.backend_name() == "sqlite" {
+        let query = SsoLink::objects()
+            .filter("provider_source", "admin")
+            .filter("provider_id", 1_i64)
+            .filter("subject", "sub-1".to_owned())
+            .compile()
+            .expect("compile");
+        let plan = rustango::sql::explain_pool(pool, &query, Default::default())
+            .await
+            .expect("explain");
+        assert!(plan.contains("subject=?"), "{plan}");
+    }
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        subject_lookup_has_an_index,
         key_matches_every_part,
         subject_match_is_exact,
         email_match_is_exact,

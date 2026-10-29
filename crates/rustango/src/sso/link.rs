@@ -96,6 +96,8 @@ impl ProviderKey {
 #[rustango(
     table = "rustango_sso_links",
     unique_together = "provider_source, provider_id, key_sha256",
+    // Sign-in looks a link up by subject.
+    index("provider_source, provider_id, subject"),
     admin(
         list_display = "provider_source, provider_id, subject, user_id, created_at",
         search_fields = "subject",
@@ -512,6 +514,7 @@ pub(crate) async fn signal_refused(
     profile: &NormalizedUser,
     reason: crate::signals::auth::AuthFailureReason,
     request: crate::signals::auth::AuthRequestMeta,
+    tenant: Option<String>,
 ) {
     let attempted = super::verified_email(profile)
         .ok()
@@ -523,6 +526,7 @@ pub(crate) async fn signal_refused(
         attempted_username: attempted,
         reason,
         request,
+        tenant,
     })
     .await;
 }

@@ -680,6 +680,7 @@ where
                 user_id: uid,
                 username: uname,
                 request: meta,
+                tenant: Some(org.slug.clone()),
             })
             .await;
             return logout_response(routes, cookie_path);
@@ -1261,6 +1262,7 @@ async fn login_submit(
             attempted_username: Some(form.username.clone()),
             reason,
             request: meta.clone(),
+            tenant: Some(org.slug.clone()),
         };
         async move { send_user_login_failed(ctx).await }
     };
@@ -1323,6 +1325,7 @@ async fn login_submit(
         username: form.username.clone(),
         is_superuser: user.is_superuser,
         request: meta,
+        tenant: Some(org.slug.clone()),
     })
     .await;
     resp
@@ -1985,6 +1988,7 @@ fn inner_admin_state(
     // admin can't surface cross-tenant data.
     let mut builder = crate::admin::Builder::new(pool)
         .tenant_mode()
+        .tenant(&org.slug)
         // The tenancy session layer gates every route of this admin.
         .gated_upstream()
         // v0.28.0 (#74) — pass the configurable admin prefix

@@ -396,6 +396,8 @@ pub(super) async fn code_submit(
                 attempted_username: Some(op.username.clone()),
                 reason: AuthFailureReason::InvalidCredentials,
                 request: meta,
+                // Operators live in the registry, outside any tenant.
+                tenant: None,
             })
             .await;
         }

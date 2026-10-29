@@ -266,6 +266,9 @@ does the test-and-set under row locks so a race resolves to exactly one winner.
 So a `DistributedLock` or an exact counter works across replicas on Redis or
 the database. Every backend counts over the full `i64` range; an overflow is
 an error and leaves the counter as it was.
+A stored value counts only in the exact form `incr` writes (`"7"`, `"-3"`);
+`"+7"`, `"007"`, `" 5"` or `"abc"` count as 0 everywhere. A text value with a
+NUL character is refused on every backend; store such data with `set_bytes`.
 
 Two things worth knowing:
 

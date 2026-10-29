@@ -7911,6 +7911,7 @@ mod gen_tests {
             case_insensitive: false,
             fk_on_delete: None,
             validators: &[],
+            cast: None,
         }
     }
 

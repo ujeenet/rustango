@@ -1639,7 +1639,8 @@ async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
     );
 }
 
-/// #2559 — every SSO surface fires `user_logged_in` and `user_login_failed`.
+/// #2559 — every SSO surface fires `user_logged_in` and `user_login_failed`,
+/// naming the tenant (`-` for none).
 #[tokio::test]
 async fn sso_sign_ins_fire_the_auth_signals() {
     use rustango::extractors::TenantContext;
@@ -1649,17 +1650,21 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     let seen: Arc<Mutex<Vec<String>>> = Arc::default();
     let (s1, s2) = (seen.clone(), seen.clone());
     let in_id = sig::connect_user_logged_in(move |c| {
-        s1.lock()
-            .unwrap()
-            .push(format!("in:{}:{}", c.source, c.username));
+        s1.lock().unwrap().push(format!(
+            "in:{}:{}:{}",
+            c.source,
+            c.username,
+            c.tenant.as_deref().unwrap_or("-")
+        ));
         async {}
     });
     let fail_id = sig::connect_user_login_failed(move |c| {
         s2.lock().unwrap().push(format!(
-            "failed:{}:{:?}:{}",
+            "failed:{}:{:?}:{}:{}",
             c.source,
             c.reason,
-            c.attempted_username.unwrap_or_default()
+            c.attempted_username.unwrap_or_default(),
+            c.tenant.as_deref().unwrap_or("-")
         ));
         async {}
     });
@@ -1671,7 +1676,7 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     handshake(&app, "admin.test", "/login", "corp").await;
     assert_eq!(
         take(),
-        ["failed:admin_sso:InvalidCredentials:root@example.com"]
+        ["failed:admin_sso:InvalidCredentials:root@example.com:-"]
     );
     let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
         .await
@@ -1688,7 +1693,7 @@ async fn sso_sign_ins_fire_the_auth_signals() {
         .await
         .unwrap();
     handshake(&app, "admin.test", "/login", "corp").await;
-    assert_eq!(take(), ["in:admin_sso:root"]);
+    assert_eq!(take(), ["in:admin_sso:root:-"]);
 
     // Tenant console.
     let env = boot().await;
@@ -1697,19 +1702,25 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     assert!(env.sso("corp", "sub-ann", "ann@example.com").await.is_err());
     assert_eq!(
         take(),
-        ["failed:tenant_admin_sso:InvalidCredentials:ann@example.com"]
+        ["failed:tenant_admin_sso:InvalidCredentials:ann@example.com:acme"]
     );
     env.tenant_provider("open", true).await;
     assert!(env.sso("open", "sub-ann", "ann@example.com").await.is_ok());
-    assert_eq!(take(), ["in:tenant_admin_sso:ann"]);
+    assert_eq!(take(), ["in:tenant_admin_sso:ann:acme"]);
     // An unverified email is never named; the subject is.
     *env.idp.claims.lock().unwrap() =
         serde_json::json!({"sub": "sub-x", "email": "x@example.com", "email_verified": false});
     handshake(&env.admin, &env.tenants[0].host, "/__login", "open").await;
-    assert_eq!(take(), ["failed:tenant_admin_sso:InvalidCredentials:sub-x"]);
+    assert_eq!(
+        take(),
+        ["failed:tenant_admin_sso:InvalidCredentials:sub-x:acme"]
+    );
     env.deactivate(ann).await;
     assert!(env.sso("open", "sub-ann", "ann@example.com").await.is_err());
-    assert_eq!(take(), ["failed:tenant_admin_sso:Inactive:ann@example.com"]);
+    assert_eq!(
+        take(),
+        ["failed:tenant_admin_sso:Inactive:ann@example.com:acme"]
+    );
 
     // Member SSO: the default refuses a stranger; provisioning signs in.
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
@@ -1725,7 +1736,7 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     handshake(&strict, &host, "/auth", "corp").await;
     assert_eq!(
         take(),
-        ["failed:member_sso:InvalidCredentials:new@example.com"]
+        ["failed:member_sso:InvalidCredentials:new@example.com:acme"]
     );
     let open = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
         auto_provision: true,
@@ -1733,7 +1744,7 @@ async fn sso_sign_ins_fire_the_auth_signals() {
     })
     .layer(axum::Extension(ctx));
     handshake(&open, &host, "/auth", "corp").await;
-    assert_eq!(take(), ["in:member_sso:new"]);
+    assert_eq!(take(), ["in:member_sso:new:acme"]);
 
     sig::disconnect_user_logged_in(in_id);
     sig::disconnect_user_login_failed(fail_id);

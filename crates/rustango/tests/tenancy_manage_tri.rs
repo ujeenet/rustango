@@ -1313,6 +1313,103 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     assert_eq!(opened, url);
 }
 
+/// A tenant model with a sealed cast, for `reseal-tenant-secrets`. Unmanaged:
+/// only that scenario makes the table, and the dump verbs skip it elsewhere.
+#[cfg(feature = "casts")]
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "rmt_patient", managed = false)]
+pub struct Patient {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    pub ssn: rustango::casts::Cast<rustango::casts::EncryptedString>,
+}
+
+/// A registry model with a sealed cast.
+#[cfg(feature = "casts")]
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "rmt_vault", scope = "registry", managed = false)]
+pub struct Vault {
+    #[rustango(primary_key, max_length = 16)]
+    pub name: String,
+    pub token: Option<rustango::casts::Cast<rustango::casts::EncryptedString>>,
+}
+
+/// After a key rotation, app models' sealed casts are re-sealed under the
+/// new key, on the registry and in each tenant; a re-run changes nothing.
+#[cfg(feature = "casts")]
+async fn reseal_covers_sealed_casts(pool: &Pool) {
+    use rustango::casts::Cast;
+    use rustango::sql::Auto;
+    use rustango::testkit::matrix::fresh_table;
+    const OLD: &str = "reseal-cast-old-key-0123456789abcdef";
+    const NEW: &str = "reseal-cast-new-key-0123456789abcdef";
+    std::env::set_var("RUSTANGO_SECRET_KEY", OLD);
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let opts = env.tenant_opts("cast").await;
+    env.create(&dir, "mt-cast", opts).await.expect("tenant");
+    let org = env.org("mt-cast").await.expect("org");
+    let tenant = typed!(env.registry, p => p.scoped_pool_dyn(&org).await.expect("tenant pool"));
+    fresh_table::<Patient>(&tenant).await;
+    fresh_table::<Vault>(&env.registry).await;
+    let mut patient = Patient {
+        id: Auto::default(),
+        ssn: Cast::new("123-45-6789".into()),
+    };
+    patient.insert_pool(&tenant).await.expect("insert patient");
+    let id = *patient.id.get().expect("pk");
+    let vault = Vault {
+        name: "main".into(),
+        token: Some(Cast::new("tok".into())),
+    };
+    vault
+        .insert_pool(&env.registry)
+        .await
+        .expect("insert vault");
+
+    std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", OLD);
+    std::env::set_var("RUSTANGO_SECRET_KEY", NEW);
+    let patient_line = format!("cast mt-cast/rmt_patient.ssn {id}");
+    let vault_line = "cast registry/rmt_vault.token main";
+    let dry = env
+        .run_out(&dir, &["reseal-tenant-secrets"])
+        .await
+        .expect("dry run");
+    assert!(
+        dry.contains(&format!("{patient_line}: would re-seal")),
+        "{dry}"
+    );
+    assert!(
+        dry.contains(&format!("{vault_line}: would re-seal")),
+        "{dry}"
+    );
+    let out = env
+        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("apply");
+    assert!(out.contains(&format!("{patient_line}: re-sealed")), "{out}");
+    assert!(out.contains(&format!("{vault_line}: re-sealed")), "{out}");
+
+    // The old key can go: both rows open under the new one alone.
+    std::env::remove_var("RUSTANGO_SECRET_KEY_PREVIOUS");
+    let patients: Vec<Patient> = Patient::objects().fetch(&tenant).await.expect("read");
+    assert_eq!(&*patients[0].ssn, "123-45-6789");
+    let vaults: Vec<Vault> = Vault::objects().fetch(&env.registry).await.expect("read");
+    assert_eq!(vaults[0].token.as_deref().map(String::as_str), Some("tok"));
+    let again = env
+        .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
+        .await
+        .expect("re-run");
+    assert!(
+        !again.contains("cast "),
+        "a re-run re-sealed again: {again}"
+    );
+    with_secret_key();
+}
+
+#[cfg(not(feature = "casts"))]
+async fn reseal_covers_sealed_casts(_: &Pool) {}
+
 /// `--apply` leaves a sealed URL without a password as it is, not unsealed.
 async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     with_secret_key();
@@ -1464,6 +1561,7 @@ tri_dialect_test! {
         a_resolved_secret_is_never_echoed,
         migrate_storage_checks_the_target_url,
         reseal_seals_a_plain_password_url,
+        reseal_covers_sealed_casts,
         provision_resolves_an_env_reference,
         create_tenant_probes_before_writing,
         a_url_of_another_backend_is_refused,

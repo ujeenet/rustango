@@ -160,6 +160,27 @@ untouched.
 - Off the prod tier, `create-tenant --admin-email` and `set-password-link` create `./var/.rustango_tenant_session.key` when it is missing, as the server does on first boot. `create-api-key` still only loads it.
 - Flags a verb used to ignore are now errors: `--schema-name` with database mode (`create-tenant`, `migrate-tenant-storage --to database`), `--database-url` with `migrate-tenant-storage --to schema`, `edit-tenant --database-url` on a schema-mode tenant, and any argument to `list-tenants`.
 
+### Signals name the tenant
+
+`UserLoggedInContext`, `UserLoggedOutContext`, `UserLoginFailedContext`, `AdminSaveContext` and `AdminDeleteContext` have a new `tenant: Option<String>` (the tenant's slug; `None` outside a tenant) and are now `#[non_exhaustive]`. Code that builds one with a struct literal uses `::new(...)`, then `.with_tenant(...)` if needed.
+
+### Sealed casts and reseal
+
+`FieldSchema` has a new `cast: Option<FieldCast>` field; the derive fills it, and `FieldSchema::new` sets `None`. `reseal-tenant-secrets` now also re-seals every model's `Cast<EncryptedString>` columns, on the registry and in each tenant, and reports them as `cast <owner>/<table>.<column> <pk>`. It opens tenants for this only when a tenant model has such a column.
+
+### Admin inline history
+
+An inline add, edit or delete of a child without `audit(...)` now writes an audit row, after the commit and best-effort, as the child's own page does.
+
+### SSO link index
+
+`SsoLink` has a new index on `(provider_source, provider_id, subject)`. Run `makemigrations`, then `migrate`, to add it to `rustango_sso_links`.
+
+### Cache counters and NUL values
+
+`Cache::incr` counts a stored value only in the exact form `incr` writes. `"007"` and `"+7"` were read as 7 by the memory, file, PG and MySQL backends and now count as 0, as on SQLite. `RedisCache::incr` on a non-integer value now restarts the counter at `by` instead of returning an error. `set`, `add` and `set_forever` with a NUL character now fail with `CacheError::Serialization` on every backend; use `set_bytes`.
+
+
 ## 0.61.11
 
 ### Migrations and data
