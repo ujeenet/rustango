@@ -1402,17 +1402,25 @@ async fn check_names_tenants_behind_on_tenant_migrations(pool: &Pool) {
 /// pool's acquire timeout, and is named as unreadable.
 async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
     let env = Env::new(pool).await;
-    // TEST-NET-1 drops packets, so a connect hangs rather than failing.
+    // Accepts every connection and never answers, so a connect hangs.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _silent = tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((socket, _)) = listener.accept().await {
+            held.push(socket);
+        }
+    });
     let url = match env.backend() {
-        BackendKind::Postgres => "postgres://u:pw@192.0.2.1:5432/x",
-        BackendKind::MySql => "mysql://u:pw@192.0.2.1:3306/x",
+        BackendKind::Postgres => format!("postgres://u:pw@127.0.0.1:{port}/x"),
+        BackendKind::MySql => format!("mysql://u:pw@127.0.0.1:{port}/x"),
         BackendKind::Sqlite => return,
     };
     let mut org = Org {
         slug: "blackhole".into(),
         display_name: "blackhole".into(),
         backend_kind: env.backend().as_str().into(),
-        database_url: Some(url.into()),
+        database_url: Some(url),
         ..rustango::testkit::org()
     };
     org.save_pool(&env.registry).await.expect("insert org");
