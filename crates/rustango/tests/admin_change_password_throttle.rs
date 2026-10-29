@@ -96,11 +96,11 @@ async fn change_password_misses_lock_the_account() {
     assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "login");
 }
 
-/// Five two-byte characters are ten bytes but still too short.
+/// Ten two-byte characters are twenty bytes but still too short.
 #[tokio::test]
 async fn new_password_length_counts_characters_not_bytes() {
     let (app, session) = boot("cpwlen").await;
-    let short = "%C3%A9".repeat(5);
+    let short = "%C3%A9".repeat(10);
     let body =
         format!("current_password=correct-horse&new_password={short}&new_password_confirm={short}");
     let r = post(&app, "/account/password", &session, body).await;
@@ -112,7 +112,7 @@ async fn new_password_length_counts_characters_not_bytes() {
     )
     .unwrap();
     assert!(
-        html.contains("at least 8"),
+        html.contains("at least 12"),
         "short password accepted: {html}"
     );
 }

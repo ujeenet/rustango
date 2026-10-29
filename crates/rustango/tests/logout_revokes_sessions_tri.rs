@@ -829,6 +829,93 @@ async fn deactivating_an_operator_ends_their_console_sessions(pool: &Pool) {
     assert_eq!(env.console_status(&fresh).await, StatusCode::OK);
 }
 
+// ---- change password ----------------------------------------------------
+
+const NEW_PASSWORD: &str = "N3w-passw0rd-strong";
+
+fn change_form(current: &str, new: &str) -> String {
+    format!("current_password={current}&new_password={new}&confirm_password={new}&_csrf=t")
+}
+
+async fn body_text(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn location(res: &axum::response::Response) -> String {
+    res.headers()[header::LOCATION].to_str().unwrap().to_owned()
+}
+
+/// A tenant password change keeps the session that made it, shows the
+/// success flash, and ends the user's other sessions.
+async fn a_tenant_password_change_ends_only_the_other_sessions(pool: &Pool) {
+    let env = tenancy(pool).await;
+    let user = env.user().await;
+    let this = env.login(&user).await;
+    let other = env.login(&user).await;
+    let res = env
+        .admin_req(
+            "POST",
+            "/__change-password",
+            change_form(TENANT_PASSWORD, NEW_PASSWORD),
+            &this,
+        )
+        .await;
+    assert!(res.status().is_redirection(), "{:?}", res.status());
+    let (to, this) = (
+        location(&res),
+        set_cookie(&res, tenant_console::COOKIE_NAME),
+    );
+    let page = env.admin_req("GET", &to, String::new(), &this).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(body_text(page).await.contains("Password updated"));
+    assert_eq!(env.tenant_status(&this).await, StatusCode::OK);
+    assert_eq!(env.tenant_status(&other).await, StatusCode::SEE_OTHER);
+}
+
+/// The tenant change-password form applies the set-password link's policy.
+async fn a_tenant_password_change_refuses_a_weak_password(pool: &Pool) {
+    let env = tenancy(pool).await;
+    let user = env.user().await;
+    let cookie = env.login(&user).await;
+    let res = env
+        .admin_req(
+            "POST",
+            "/__change-password",
+            change_form(TENANT_PASSWORD, "password1"),
+            &cookie,
+        )
+        .await;
+    assert!(location(&res).contains("error="), "{}", location(&res));
+    let row = env.user_row(&user).await;
+    assert!(rustango::tenancy::password::verify(TENANT_PASSWORD, &row.password_hash).unwrap());
+}
+
+/// The same on the operator console.
+async fn a_console_password_change_ends_only_the_other_sessions(pool: &Pool) {
+    let env = tenancy(pool).await;
+    let op = env.operator().await;
+    let this = env.console_login(&op).await;
+    let other = env.console_login(&op).await;
+    let res = env
+        .console_req(
+            "POST",
+            "/change-password",
+            change_form(OPERATOR_PASSWORD, NEW_PASSWORD),
+            &this,
+        )
+        .await;
+    assert!(res.status().is_redirection(), "{:?}", res.status());
+    let (to, this) = (location(&res), set_cookie(&res, OP_COOKIE));
+    let page = env.console_req("GET", &to, String::new(), &this).await;
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(body_text(page).await.contains("Password updated"));
+    assert_eq!(env.console_status(&this).await, StatusCode::OK);
+    assert_eq!(env.console_status(&other).await, StatusCode::SEE_OTHER);
+}
+
 // ---- member -------------------------------------------------------------
 
 /// The tenant user's cut-off: stored whole-second, never moved back, and
@@ -905,5 +992,8 @@ tri_dialect_test! {
         a_console_logout_that_cannot_read_fails,
         deactivating_an_operator_ends_their_console_sessions,
         a_member_logout_cutoff_round_trips,
+        a_tenant_password_change_ends_only_the_other_sessions,
+        a_tenant_password_change_refuses_a_weak_password,
+        a_console_password_change_ends_only_the_other_sessions,
     ],
 }

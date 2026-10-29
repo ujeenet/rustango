@@ -80,7 +80,7 @@ Die Konsole antwortet auf der **Apex**-Domain (`RUSTANGO_APEX_DOMAIN`), nicht au
 | **Audit log** | Jede Änderung, die über diese Konsole lief |
 | **Runs** | Provisioning- und Migrationsläufe, live gestreamt |
 | **Database servers** | Server, auf denen Tenant-Datenbanken angelegt werden, mit ihrem Admin-Login |
-| **Change password** | Das eigene Passwort |
+| **Change password** | Das eigene Passwort; andere Sitzungen enden, diese bleibt angemeldet |
 | **Two-factor sign-in** | Die eigene Authenticator-App (Feature `totp`) |
 | **Shared SSO** | Anmelde-Provider, die jedem Tenant angeboten werden, mit der zu registrierenden Callback-URL (Feature `admin-sso`; siehe [SSO](sso.md)) |
 

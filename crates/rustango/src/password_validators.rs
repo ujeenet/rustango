@@ -268,12 +268,36 @@ impl PasswordValidator for MinimumLengthValidator {
     }
 }
 
-/// Shortest password the built-in change-password and operator forms accept.
-pub const BUILTIN_FORM_MIN_LENGTH: usize = 8;
+/// Shortest password (in characters) the built-in password policy accepts.
+pub const BUILTIN_FORM_MIN_LENGTH: usize = 12;
 
-/// The one length rule (in characters) for every built-in password form (#1874).
+/// The one password policy for every built-in CLI verb, set-password link
+/// and change-password form: [`crate::passwords::strength_score`] must find nothing.
+///
+/// # Errors
+/// `password_too_weak`, naming every rule the password breaks.
+#[cfg(feature = "passwords")]
 pub fn check_builtin_form_password(password: &str) -> Result<(), ValidationError> {
-    MinimumLengthValidator::new(BUILTIN_FORM_MIN_LENGTH).validate(password, &UserAttributes::new())
+    use crate::passwords::StrengthIssue;
+    let issues = crate::passwords::strength_score(password);
+    if issues.is_empty() {
+        return Ok(());
+    }
+    let reasons: Vec<String> = issues
+        .iter()
+        .map(|i| match i {
+            StrengthIssue::TooShort => {
+                format!("it must be at least {BUILTIN_FORM_MIN_LENGTH} characters")
+            }
+            StrengthIssue::NoDigitsOrSymbols => "it needs a digit or a symbol".to_owned(),
+            StrengthIssue::NoVariety => "it needs more than lowercase letters".to_owned(),
+            StrengthIssue::KnownWeak => "it is a well-known weak password".to_owned(),
+        })
+        .collect();
+    Err(ValidationError::new(
+        "password_too_weak",
+        format!("Password rejected: {}.", reasons.join("; ")),
+    ))
 }
 
 // ------------------------------------------------------------------ MaximumLengthValidator

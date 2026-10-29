@@ -722,7 +722,7 @@ async fn the_form_refuses_what_it_should() {
         ),
         (
             "username=shorty&password=abc&confirm_password=abc".to_owned(),
-            "at least 8",
+            "at least 12",
         ),
         (
             "username=nomatch&password=hunter2hunter2&confirm_password=different0".to_owned(),

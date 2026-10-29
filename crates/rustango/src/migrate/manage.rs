@@ -6295,6 +6295,17 @@ async fn clear_cache_cmd<W: Write>(
         return Ok(());
     }
     let table = parsed.table.unwrap_or_else(|| "rustango_cache".to_owned());
+    // No table, nothing cached: `migrate` does not create it.
+    let exists = super::runner::try_table_exists_here(pool, &table)
+        .await
+        .map_err(|e| MigrateError::Validation(format!("clear-cache: {e}")))?;
+    if !exists {
+        writeln!(
+            w,
+            "nothing to clear: no {table} table (run createcachetable if you use DatabaseCache)"
+        )?;
+        return Ok(());
+    }
     let cache = crate::cache::DatabaseCache::new(pool.clone(), &table);
     let rows = cache
         .purge_expired()
@@ -6541,6 +6552,13 @@ const APEX_UNSET: &str = "RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenanc
     the public-facing apex (e.g. `app.example.com`) so subdomain resolution + cookie scoping \
     work in production.";
 
+/// What `RUSTANGO_SESSION_SECRET` signs in this build.
+#[cfg(feature = "tenancy")]
+const SIGNED_BY_SESSION_SECRET: &str =
+    "session cookies (operator and tenant ones included) and JWTs";
+#[cfg(not(feature = "tenancy"))]
+const SIGNED_BY_SESSION_SECRET: &str = "session cookies and JWTs";
+
 /// Run the `manage check --deploy` audit checks against `env`.
 /// Pure function so callers can test it with arbitrary env
 /// snapshots without poking actual process env vars.
@@ -6585,12 +6603,11 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
     // value as the HMAC key, so length matters.
     match env.session_secret.as_deref() {
         None => {
-            out.errors.push(
-                "RUSTANGO_SESSION_SECRET is unset — operator + tenant cookies + JWTs would use \
-                 an ephemeral random secret that's regenerated on every restart, signing every \
-                 user out. Set via `openssl rand -base64 32`."
-                    .into(),
-            );
+            out.errors.push(format!(
+                "RUSTANGO_SESSION_SECRET is unset — on the prod tier the server will not \
+                 start; off prod, {SIGNED_BY_SESSION_SECRET} use the dev key in ./var/, which \
+                 a redeploy loses. Set via `openssl rand -base64 32`."
+            ));
         }
         Some(s) if s.contains("change-me") || s.contains("placeholder") => {
             out.errors.push(
@@ -9085,6 +9102,25 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "expected error for unset RUSTANGO_SESSION_SECRET, got: {:?}",
             r.errors
         );
+    }
+
+    /// The unset-secret error says what the runtime does: no start on prod,
+    /// the dev key in `./var/` off prod. Tenant cookies only in tenancy builds.
+    #[test]
+    fn deploy_audit_unset_session_secret_says_what_happens() {
+        let env = DeployAuditEnv {
+            session_secret: None,
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        let e = r
+            .errors
+            .iter()
+            .find(|e| e.contains("RUSTANGO_SESSION_SECRET is unset"))
+            .expect("unset error");
+        assert!(e.contains("will not start") && e.contains("./var/"), "{e}");
+        assert!(!e.contains("ephemeral"), "{e}");
+        assert_eq!(e.contains("tenant"), cfg!(feature = "tenancy"), "{e}");
     }
 
     /// Gated: without `admin`/`tenancy` the audit cannot decode, and

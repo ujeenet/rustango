@@ -832,23 +832,30 @@ impl LoginAttempt {
     /// Count a failure against the username, known or not. `begin`
     /// already counted it; this keeps the tokens and may lock the account.
     pub async fn failed(mut self) {
-        let mut held = self.held();
-        let lockout = held.buckets.lockout();
-        for (key, slot) in held.locks.drain(..) {
-            lockout.reserved_failed(&key, slot).await;
-        }
+        detached(self.held().failed()).await;
     }
 
     /// Clear the username's failures, remember it as known from this IP,
     /// and give back the limit tokens.
     pub async fn succeeded(mut self) {
-        self.held().right(true).await;
+        detached(self.held().right(true)).await;
     }
 
     /// The password was right and the form now asks for a second
     /// factor: give back the limit tokens, keep the username's failures.
     pub async fn prompted(mut self) {
-        self.held().release().await;
+        detached(self.held().release()).await;
+    }
+}
+
+/// Run a report on its own task and wait for it, so a request cancelled
+/// half-way still finishes it (as [`QuietSlot::give_back`]).
+async fn detached(report: impl std::future::Future<Output = ()> + Send + 'static) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            let _ = rt.spawn(report).await;
+        }
+        Err(_) => report.await,
     }
 }
 
@@ -988,13 +995,23 @@ impl PerRequestAttempt {
                     Counted::Global(..) => {}
                 }
             }
-            PerRequestHeld::Reserved(mut attempt) if right => attempt.held().right(false).await,
+            PerRequestHeld::Reserved(mut attempt) if right => {
+                detached(attempt.held().right(false)).await;
+            }
             PerRequestHeld::Reserved(attempt) => attempt.failed().await,
         }
     }
 }
 
 impl Held {
+    /// A wrong password: count it on every account lock held.
+    async fn failed(mut self) {
+        let lockout = self.buckets.lockout();
+        for (key, slot) in self.locks.drain(..) {
+            lockout.reserved_failed(&key, slot).await;
+        }
+    }
+
     /// Count the attempt against the account before the password check.
     async fn reserve_lock(&mut self, key: String) -> Result<(), Blocked> {
         let lockout = self.buckets.lockout();
@@ -1981,6 +1998,43 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
         let bucket = s.ip_bucket("10.9.70.6");
         assert!(t.0.ip.peek(&bucket).await.is_ok(), "the slot leaked");
+    }
+
+    /// A login form request cancelled while a right password's or a second-factor
+    /// prompt's tokens are refunded still gives them back.
+    #[tokio::test]
+    async fn a_cancelled_login_refund_still_gives_the_slot_back() {
+        for (n, prompt) in [(7, false), (8, true)] {
+            let cache: BoxedCache = Arc::new(counting::CountingWrites::with_read_delay(
+                Duration::from_millis(100),
+            ));
+            let t = on_cache(
+                &cache,
+                LoginLimits {
+                    ip_limit: 1,
+                    ..LoginLimits::default()
+                },
+            );
+            let (s, addr) = (
+                tenant(&format!("t-cancel-login-{n}")),
+                format!("10.9.70.{n}"),
+            );
+            let a = t.begin(&s, &ip(&addr), "dana").await.unwrap();
+            let report = async move {
+                if prompt {
+                    a.prompted().await;
+                } else {
+                    a.succeeded().await;
+                }
+            };
+            let _ = tokio::time::timeout(Duration::from_millis(30), report).await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let bucket = s.ip_bucket(&addr);
+            assert!(
+                t.0.ip.peek(&bucket).await.is_ok(),
+                "the slot leaked (prompted: {prompt})"
+            );
+        }
     }
 
     /// Counts every call; with `fail`, every call errors.
