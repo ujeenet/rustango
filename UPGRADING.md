@@ -161,6 +161,7 @@ untouched.
 - Boot, provisioning and `manage migrate` apply the project's one `system/migrations/` chain once per database, then each app folder's own files. App folders no longer get a `<app>/system/` dir: delete any that earlier runs wrote, and don't commit them.
 - `migrate_registry`, `migrate_tenants*` and `migrate_one_tenant` given a `migrations` dir or a project root now apply its `<app>/migrations/` folders too.
 - The tenancy CLI picks the registry backend from the `DATABASE_URL` scheme on every build. `mariadb://` is refused; write `mysql://`.
+- A path-prefix tenant links its logo and favicon at `<prefix>/_brand/<slug>/<file>`, not `/_brand/…`. Host tenants and direct storage (S3/CDN) URLs are unchanged.
 
 ---
 

@@ -17,6 +17,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `migrate-tenant-storage` deletes the record of a database rustango made with the move, so a later purge or `create-tenant` never drops it; the final message names the old database, login and server, and says to check first when rustango may not have made them.
 - The tenancy CLI on a build without `postgres` opens the registry by the URL's scheme: a `mysql://` URL on a `sqlite,mysql` build no longer opens as a SQLite file.
 - Tenancy's scoped-migration copies go to a new randomly named, owner-only temp dir, so a leftover or planted dir is never applied.
+- A path-prefix tenant's admin logo and favicon load on the apex: their URL is `<prefix><brand_url>/…`, which the tenant admin serves (run-server and `server::Builder`); before it was the prefix-less `<brand_url>/…`, a 404 there.
 
 ## [0.61.12] — 2026-10-29
 

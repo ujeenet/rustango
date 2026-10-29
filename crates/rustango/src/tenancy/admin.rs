@@ -439,12 +439,8 @@ where
     // Served before the resolver runs so the assets are reachable
     // even when the requesting host doesn't match a known tenant
     // (the slug in the path is validated by the branding module).
-    let brand_prefix = format!("{}/", routes.brand_prefix());
-    if let Some(rest) = req.uri().path().strip_prefix(&brand_prefix) {
-        if let Some((slug, filename)) = rest.split_once('/') {
-            return serve_brand_asset(slug, filename, brand_storage).await;
-        }
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    if let Some(resp) = brand_response(req.uri().path(), routes, brand_storage).await {
+        return resp;
     }
 
     let (mut parts, body) = req.into_parts();
@@ -466,6 +462,10 @@ where
         routes
     } else {
         prefixed = routes.under_prefix(cookie_path);
+        // On the apex only the prefix reaches the tenant, so its brand URL carries it.
+        if let Some(resp) = brand_response(parts.uri.path(), &prefixed, brand_storage).await {
+            return resp;
+        }
         &prefixed
     };
 
@@ -2105,6 +2105,19 @@ fn inner_admin_state(
         );
     }
     builder.into_request_state()
+}
+
+/// The brand asset at `path` when it is under `routes.brand_url`, else `None`.
+async fn brand_response(
+    path: &str,
+    routes: &super::routes::RouteConfig,
+    brand_storage: &BoxedStorage,
+) -> Option<Response> {
+    let rest = path.strip_prefix(&format!("{}/", routes.brand_prefix()))?;
+    Some(match rest.split_once('/') {
+        Some((slug, filename)) => serve_brand_asset(slug, filename, brand_storage).await,
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    })
 }
 
 /// Serve a per-tenant brand asset from the shared brand storage.

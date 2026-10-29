@@ -212,7 +212,7 @@ impl RouteConfig {
 
     /// The tenant-admin URLs as seen under a path-prefix tenant's
     /// `prefix`, so routes match and links keep the prefix.
-    /// `brand_url` is served before the tenant resolves, so it stays.
+    /// `brand_url` too: on the apex only the prefix reaches the tenant.
     #[must_use]
     pub(crate) fn under_prefix(&self, prefix: &str) -> Self {
         let p = prefix.trim_end_matches('/');
@@ -224,6 +224,7 @@ impl RouteConfig {
             static_url: join(&self.static_url),
             change_password_url: join(&self.change_password_url),
             impersonation_handoff_url: join(&self.impersonation_handoff_url),
+            brand_url: join(self.brand_prefix()),
             ..self.clone()
         }
     }
@@ -293,7 +294,28 @@ mod tests {
         let r = RouteConfig::default().under_prefix("/acme");
         assert_eq!(r.admin_url, "/acme/admin");
         assert_eq!(r.impersonation_handoff_url, "/acme/_impersonation_handoff");
-        assert_eq!(r.brand_url, "/_brand");
+        assert_eq!(r.brand_url, "/acme/_brand");
+    }
+
+    /// Under a prefix the brand URL keeps it; a direct storage URL still wins.
+    #[test]
+    fn prefixed_brand_asset_url() {
+        let r = RouteConfig::default().under_prefix("/acme");
+        let local: crate::storage::BoxedStorage =
+            std::sync::Arc::new(crate::storage::InMemoryStorage::new());
+        assert_eq!(
+            r.brand_asset_url("acme", Some("logo.png"), &local)
+                .as_deref(),
+            Some("/acme/_brand/acme/logo.png")
+        );
+        let cdn: crate::storage::BoxedStorage = std::sync::Arc::new(
+            crate::storage::LocalStorage::new(std::env::temp_dir())
+                .with_base_url("https://cdn.example.com/b"),
+        );
+        assert_eq!(
+            r.brand_asset_url("acme", Some("logo.png"), &cdn).as_deref(),
+            Some("https://cdn.example.com/b/acme/logo.png")
+        );
     }
 
     /// Since v0.29, `Default::default()` returns the
