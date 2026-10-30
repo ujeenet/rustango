@@ -89,7 +89,7 @@ pub struct SitemapEntry {
     pub lastmod: Option<DateTime<Utc>>,
     pub changefreq: Option<ChangeFreq>,
     /// `<priority>` from 0.0 to 1.0. Other values are clamped when
-    /// rendered.
+    /// rendered; NaN is left out.
     pub priority: Option<f64>,
 }
 
@@ -118,7 +118,8 @@ impl SitemapEntry {
         self
     }
 
-    /// Any `f64` is fine; rendering clamps it to 0.0..=1.0.
+    /// Any `f64` is fine; rendering clamps it to 0.0..=1.0 and leaves
+    /// out NaN.
     #[must_use]
     pub fn with_priority(mut self, p: f64) -> Self {
         self.priority = Some(p);
@@ -187,7 +188,8 @@ pub fn render_sitemap<S: Sitemap + ?Sized>(s: &S) -> String {
         if let Some(cf) = e.changefreq {
             push_text_element(&mut out, "changefreq", cf.as_str(), 4);
         }
-        if let Some(p) = e.priority {
+        // NaN has no place in 0.0..=1.0; omitting it means the default.
+        if let Some(p) = e.priority.filter(|p| !p.is_nan()) {
             let clamped = p.clamp(0.0, 1.0);
             push_text_element(&mut out, "priority", &format!("{clamped:.1}"), 4);
         }
@@ -309,6 +311,13 @@ mod tests {
         assert!(xml.contains("<priority>1.0</priority>"));
         assert!(xml.contains("<priority>0.0</priority>"));
         assert!(xml.contains("<priority>0.5</priority>"));
+    }
+
+    #[test]
+    fn render_omits_a_nan_priority() {
+        let entries = vec![SitemapEntry::new("https://example.com/a").with_priority(f64::NAN)];
+        let xml = render_sitemap(&entries);
+        assert!(!xml.contains("<priority>"), "{xml}");
     }
 
     #[test]

@@ -100,3 +100,47 @@ fn cargo_rgo_runs_the_scaffolder() {
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("missing project name"), "{err}");
 }
+
+/// `--rustango-path` is typed from the shell, so a relative path is read
+/// from the caller's directory, not the new project's; a path with no
+/// `Cargo.toml` is refused before anything is written.
+#[test]
+fn a_relative_rustango_path_is_read_from_the_callers_directory() {
+    let work = std::env::temp_dir().join(format!("rustango-path-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(work.join("checkout")).expect("scratch");
+    std::fs::write(work.join("checkout").join("Cargo.toml"), "").expect("manifest");
+    let new = |name: &str, path: &str| {
+        Command::new(env!("CARGO_BIN_EXE_cargo-rustango"))
+            .args(["rustango", "new", name, "--backend", "sqlite"])
+            .args(["--rustango-path", path])
+            .current_dir(&work)
+            .stdin(Stdio::null())
+            .output()
+            .expect("run")
+    };
+
+    let out = new("demo", "checkout");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let manifest = std::fs::read_to_string(work.join("demo").join("Cargo.toml")).expect("read");
+    let doc: toml::Table = toml::from_str(&manifest).expect("parses");
+    let dep = doc["dependencies"]["rustango"]["path"]
+        .as_str()
+        .expect("path dep");
+    // Cargo reads a relative path from the project folder.
+    assert!(
+        work.join("demo").join(dep).join("Cargo.toml").is_file(),
+        "{dep} does not reach the checkout"
+    );
+
+    let out = new("other", "missing");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("Cargo.toml"), "{err}");
+    assert!(!work.join("other").exists(), "scaffolded anyway");
+    let _ = std::fs::remove_dir_all(&work);
+}

@@ -160,6 +160,7 @@ untouched.
 - A Decimal form value may use scientific notation (`1e3`).
 - `validate_decimal` with both bounds refuses values a `NUMERIC(p,s)` column cannot hold and accepts trailing fraction zeros. It checks `max_decimal_places`, then `max_digits`, then the new `max_whole_digits`, so a value that broke `max_digits` keeps that code.
 - The admin edit form keeps a stored `""` in a nullable text field left empty; it can no longer turn that `""` into NULL. Clearing a non-empty value still stores NULL.
+- Pagination links keep every value of a repeated query key; they used to keep only the last.
 - The workspace `serde_json` now enables `raw_value`. Through feature unification your app's `serde_json` gets it too; the feature only adds API.
 
 ### Admin
@@ -185,6 +186,9 @@ untouched.
 - `/ready` skips its `SELECT 1` and reports the database ok while every pool connection is checked out, but only within 30 seconds of its last passed ping; after that it pings, and a hung database is 503.
 - At the bucket cap, `RateLimitLayer` also drops partly spent buckets (fullest first) down to 7/8 of the cap, even when the sweep freed room.
 - Activating a tenant left inactive by a failed create run (console edit, `edit-tenant --activate`, `org_edit::apply`) now fails with a validation error; resume the run instead.
+- Console impersonation of a missing or inactive tenant redirects with an error message (303) instead of a 404 or 409 text page.
+- `cargo rustango new --rustango-path` resolves a relative path from where you run it, not from the new project, and fails when the folder has no `Cargo.toml`. The new project's `Cargo.toml` gets the absolute path; make it relative before you commit it.
+- `manage db:info` prints a `sqlite feature:` line and no longer the old MySQL notes; without the `cache` feature, `clear-cache` and `createcachetable` are hidden from `--help` and say which feature they need.
 
 ### Migrations
 

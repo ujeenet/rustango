@@ -117,6 +117,8 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | `clear-cache [--table <name>]` / `clearsessions` | La vide ; renvoie le nombre de lignes supprimées. Sans table, indique qu'il n'y a rien à vider |
 | `sendtestemail --to <addr>` | Envoie un courriel de test fixe via le backend configuré |
 
+Les deux verbes de cache demandent la fonctionnalité `cache` ; sans elle, ils sont absents de `--help` et le disent quand on les lance.
+
 ### Introspection
 
 | Verbe | Ce qu'il fait |
@@ -766,7 +768,7 @@ cargo run -- make:test post_smoke
 
 Affiche à quelle base de données cette build est configurée pour parler,
 sans se connecter. Elle imprime la version du framework, les pilotes de
-base de données compilés (fonctionnalités Cargo `postgres`/`mysql`),
+base de données compilés (fonctionnalités Cargo `postgres`/`mysql`/`sqlite`),
 l'URL de connexion avec le mot de passe masqué, et le backend détecté.
 Comme elle n'ouvre jamais de connexion, elle est pratique en CI ou dans
 des conteneurs où la base de données n'est pas encore prête mais où vous

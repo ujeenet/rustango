@@ -38,16 +38,11 @@
 {% endif %}
 
 {% if provisioning_enabled %}
-<p>Tenants the registry knows about. Create one here, or from the CLI
-with <code>cargo run -- create-tenant</code>; removal is
-<code>cargo run -- purge-tenant</code>.</p>
+<p>Tenants the registry knows about. Click <strong>+ New tenant</strong> to
+add one; open a tenant's <strong>Edit</strong> page to deactivate or purge it.</p>
 {% else %}
-<p>Tenants the registry knows about. Mutations go through
-<code>cargo run -- create-tenant</code> / <code>cargo run -- purge-tenant</code>
-(or whatever your project binary is — runs through
-<code>rustango::manage::Cli</code>). To create tenants from here, add
-<code>.with_tenant_provisioning("migrations")</code> to the
-<code>Cli</code> builder.</p>
+<p>Tenants the registry knows about. This console was set up without tenant
+creation, so new tenants cannot be added here.</p>
 {% endif %}
 
 {% if orgs | length == 0 %}
@@ -55,8 +50,7 @@ with <code>cargo run -- create-tenant</code>; removal is
   <div class="empty">No tenants yet —
   <a href="{{ console_prefix }}/orgs/new">create the first one</a>.</div>
   {% else %}
-  <div class="empty">No tenants yet — provision one with
-  <code>cargo run -- create-tenant &lt;slug&gt;</code>.</div>
+  <div class="empty">No tenants yet.</div>
   {% endif %}
 {% else %}
 <table>

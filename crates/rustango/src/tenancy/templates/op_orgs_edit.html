@@ -12,12 +12,8 @@
 
 <h1>Edit <code>{{ slug }}</code></h1>
 <p class="lead">
-  Adjust the live config for this tenant. Locked fields stay where they
-  are — re-provisioning needs <code>cargo run -- purge-tenant</code> and
-  <code>create-tenant</code>. Inputs are generated from
-  <code>Org::SCHEMA</code> via
-  <code>rustango::admin::render::render_input</code>, so new columns
-  added to <code>Org</code> show up here without template edits.
+  Adjust the live config for this tenant. Locked fields cannot change;
+  to start over, purge the tenant below and create it again.
 </p>
 
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
@@ -134,7 +130,8 @@
    to the tenant admin's /__admin/. Banner + audit entries make
    the session visible + traceable. Hidden if impersonation
    wasn't enabled at boot (the operator console route only
-   mounts when the tenant session secret is shared). #}
+   mounts when the tenant session secret is shared), and for an
+   inactive tenant, which refuses it. #}
 {% if impersonate_enabled %}
 <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/impersonate" class="edit-form">
   {{ csrf_input | default(value='') | safe }}

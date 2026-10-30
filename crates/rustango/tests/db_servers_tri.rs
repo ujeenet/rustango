@@ -770,7 +770,7 @@ async fn a_console_without_pools_does_not_delete(pool: &Pool) {
     let resp = c.post("/db-servers/kept/delete", "").await;
     assert_eq!(resp.status().as_u16(), 303);
     let location = resp.headers()["location"].to_str().unwrap().to_owned();
-    assert!(location.contains("remove-db-server"), "{location}");
+    assert!(location.contains("cannot%20remove%20it"), "{location}");
     assert!(db_server::get(&env.registry, "kept").await.is_ok());
 }
 

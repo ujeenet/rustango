@@ -2106,9 +2106,10 @@ async fn org_edit_form(
     // v0.27.8 — show the "Open admin as superuser →"
     // form only when the operator console was wired with a
     // tenant session secret (i.e. via `router_with_impersonation`).
+    // An inactive tenant refuses impersonation, so no button for it.
     ctx.insert(
         "impersonate_enabled",
-        &state.tenant_session_secret.is_some(),
+        &(state.tenant_session_secret.is_some() && org_row.active),
     );
     render(&state, "op_orgs_edit.html", &ctx)
 }
@@ -2535,18 +2536,17 @@ async fn org_impersonate(
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(target: "rustango::tenancy::operator_console", error = %e, "org lookup failed");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "registry lookup failed").into_response();
+            return redirect_with_error(&slug, "could not read the tenant; try again");
         }
     };
     let Some(org) = orgs.into_iter().next() else {
-        return (StatusCode::NOT_FOUND, format!("no tenant `{slug}`")).into_response();
+        return flash::redirect("/orgs", flash::Flash::Error(&format!("no tenant `{slug}`")));
     };
     if !org.active {
-        return (
-            StatusCode::CONFLICT,
-            format!("tenant `{slug}` is inactive — refusing impersonation"),
-        )
-            .into_response();
+        return redirect_with_error(
+            &slug,
+            "this tenant is inactive; activate it before opening its admin",
+        );
     }
     let operator_id = op.id.get().copied().unwrap_or(0);
 

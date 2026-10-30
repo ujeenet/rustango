@@ -114,6 +114,8 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | `clear-cache [--table <name>]` / `clearsessions` | Empty it; returns the number of rows deleted. With no table yet, reports that nothing needs clearing |
 | `sendtestemail --to <addr>` | Send a fixed test email through the configured backend |
 
+The two cache verbs need the `cache` feature; without it they are left out of `--help` and say so when run.
+
 ### Introspection
 
 | Verb | What it does |
@@ -731,7 +733,7 @@ cargo run -- make:test post_smoke
 
 Shows which database this build is configured to talk to, without
 connecting. It prints the framework version, which database drivers
-(`postgres`/`mysql` Cargo features) are compiled in, the connection URL
+(`postgres`/`mysql`/`sqlite` Cargo features) are compiled in, the connection URL
 with the password hidden, and the detected backend. Because it never
 opens a connection, it's handy in CI or containers where the database
 isn't up yet but you want to confirm the settings are right.
