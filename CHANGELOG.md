@@ -33,6 +33,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `find_many` and `where_in` split past the bind cap return each row once, even when MySQL's collation matches it from keys in two batches.
 - `DatabaseCache` and `clearsessions --table` accept a `schema.table` name: each part is quoted, so the table is found.
 - Two concurrent media `set_tags` on one row on Postgres leave one caller's set, not both merged: the media row is locked first.
+- With `cache_query(true)`, a QUERY that skips the cache (credential header, unknown tenant) is no longer buffered; a body over 1 MiB reaches the handler uncached instead of a 413, and a body read error is a 400.
+- `LocalStorage::url` and `StorageRegistry::cdn_url` percent-encode the key, as the S3 and Azure disks do: `#`, `?` and spaces no longer break the link.
+- On `LocalStorage` a directory key is not an object: `exists` is false, `load` is `NotFound`, `delete` is a no-op, and a save to it says the key names a directory.
+- A webhook subscription header replaces the default `Content-Type` or `User-Agent` instead of sending a second one; `X-Webhook-Id`, `-Event` and `-Signature` set by a subscription are ignored.
 
 ## [0.61.13] — 2026-10-30
 
