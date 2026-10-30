@@ -39,8 +39,12 @@
 //! with `default-features = false` to use the ORM without `toml`.
 
 mod loader;
+pub(crate) mod registry;
 mod sections;
 
+#[cfg(test)]
+pub(crate) use loader::report_from;
+pub(crate) use loader::{report, Loaded};
 pub use loader::{ConfigError, TomlSyntaxError};
 pub use sections::{
     AdminSettings, AuditSettings, AuthSettings, BrandSettings, CacheSettings, DatabaseSettings,

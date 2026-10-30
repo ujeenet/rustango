@@ -799,6 +799,8 @@ impl Cli {
     ///   [`Cli::bind`] call wins over both.
     /// - `Settings.tenancy.apex_domain` → the tenancy apex host.
     ///   `RUSTANGO_APEX_DOMAIN` still wins.
+    /// - `Settings.database.url` → the database URL when no env var
+    ///   names one (`DATABASE_URL`, `DB_*`, `RUSTANGO__DATABASE__URL`).
     ///
     /// Future fields land here as the wiring catches up — the method
     /// is forward-compatible because every Settings field is
@@ -826,6 +828,11 @@ impl Cli {
             if let Some(bind) = s.server.bind.as_deref() {
                 self.bind = bind.to_owned();
             }
+        }
+
+        // Below every env var in the one URL resolver; first call wins.
+        if let Some(url) = s.database.url.as_deref() {
+            crate::env::set_settings_database_url(url);
         }
 
         // `[tenancy] apex_domain` was parsed and dropped (#1379).
@@ -2035,18 +2042,17 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     inert
 }
 
-/// Say which set keys nothing reads yet (#1379). Falls back to stderr
-/// when no tracing subscriber is installed, so the warning is never lost.
+/// One warning per set key that nothing reads, naming what to use
+/// instead. Stderr when no subscriber is installed, so it is never lost.
 #[cfg(feature = "config")]
-fn warn_unread_settings(keys: &[&str]) {
-    if keys.is_empty() {
-        return;
-    }
-    let keys = keys.join(", ");
-    if tracing::dispatcher::has_been_set() {
-        tracing::warn!(target: "rustango::manage", keys = %keys, "these settings have no effect yet; see the config docs");
-    } else {
-        eprintln!("warning: these settings have no effect yet: {keys}");
+fn warn_unread_settings(keys: &[&crate::config::registry::Key]) {
+    for k in keys {
+        let msg = k.unread_message();
+        if tracing::dispatcher::has_been_set() {
+            tracing::warn!(target: "rustango::manage", key = k.path, "{msg}");
+        } else {
+            eprintln!("warning: {msg}");
+        }
     }
 }
 

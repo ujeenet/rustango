@@ -492,10 +492,48 @@ const DB_PART_VARS: &[&str] = &[
     "DB_PARAMS",
 ];
 
-/// What to tell an operator who set neither connection style.
+/// What to tell an operator who set no connection style.
 const DB_UNSET_HINT: &str = "set DATABASE_URL, or DB_USER + DB_NAME \
      (with DB_HOST, DB_PORT, DB_PASSWORD or DB_PASSWORD_FILE, DB_DRIVER); \
-     for SQLite, DB_DRIVER=sqlite + DB_NAME=<file path>";
+     for SQLite, DB_DRIVER=sqlite + DB_NAME=<file path>; \
+     or RUSTANGO__DATABASE__URL, or [database] url in the settings file";
+
+/// The settings-file `[database] url` override var.
+const DATABASE_URL_OVERRIDE: &str = "RUSTANGO__DATABASE__URL";
+
+/// Where a setting's value came from, highest precedence first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SettingSource {
+    /// A bare environment variable, such as `DATABASE_URL`.
+    Env(&'static str),
+    /// A `RUSTANGO__SECTION__KEY` variable.
+    Override(String),
+    /// A settings file.
+    File(String),
+    /// Set nowhere.
+    Default,
+}
+
+impl std::fmt::Display for SettingSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Env(var) => write!(f, "env {var}"),
+            Self::Override(var) => write!(f, "env {var}"),
+            Self::File(file) => f.write_str(file),
+            Self::Default => f.write_str("default"),
+        }
+    }
+}
+
+/// `[database] url` as `Cli::with_settings` loaded it; first call wins.
+static SETTINGS_DATABASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Hand the settings' `[database] url` to the resolver, below every env var.
+pub(crate) fn set_settings_database_url(url: &str) {
+    if !url.trim().is_empty() {
+        let _ = SETTINGS_DATABASE_URL.set(url.to_owned());
+    }
+}
 
 /// Resolve a database URL from environment variables.
 ///
@@ -513,9 +551,13 @@ const DB_UNSET_HINT: &str = "set DATABASE_URL, or DB_USER + DB_NAME \
 ///    - `DB_NAME` (**required** when assembling; the file path for SQLite)
 ///    - `DB_PARAMS` (optional raw query string)
 ///
+/// 3. `RUSTANGO__DATABASE__URL`.
+/// 4. `[database] url` from the settings file, once `Cli::with_settings`
+///    has loaded it. The environment always wins over the file.
+///
 /// A blank value counts as unset, so `DATABASE_URL=` falls through.
 ///
-/// When both styles are set, `DATABASE_URL` wins and one warning per
+/// When both env styles are set, `DATABASE_URL` wins and one warning per
 /// process says so. 0.62.0 flips this: the separate vars will win.
 ///
 /// # Errors
@@ -525,11 +567,16 @@ const DB_UNSET_HINT: &str = "set DATABASE_URL, or DB_USER + DB_NAME \
 /// - [`EnvError::Parse`] when `DB_PORT` is not a number, or
 ///   `DB_PASSWORD_FILE` can't be read or is set with `DB_PASSWORD`.
 pub fn database_url_from_env() -> Result<String, EnvError> {
-    let url = resolve_database_url(&lookup)?;
+    let (url, _) = database_url_with_source()?;
     if let Some(msg) = database_style_conflict_with(&lookup) {
         warn_style_conflict_once(&msg);
     }
     Ok(url)
+}
+
+/// [`database_url_from_env`] plus where the URL came from.
+pub(crate) fn database_url_with_source() -> Result<(String, SettingSource), EnvError> {
+    resolve_database_url_from(&lookup, SETTINGS_DATABASE_URL.get().map(String::as_str))
 }
 
 /// [`database_url_from_env`] with the CLI's advice on where to set it.
@@ -583,21 +630,49 @@ fn non_blank(get: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<String>
     get(name).filter(|v| !v.trim().is_empty())
 }
 
+#[cfg(test)]
 fn resolve_database_url(get: &dyn Fn(&str) -> Option<String>) -> Result<String, EnvError> {
+    resolve_database_url_from(get, None).map(|(url, _)| url)
+}
+
+/// The one database URL resolver: bare env vars, then
+/// `RUSTANGO__DATABASE__URL`, then the settings file's `url`.
+pub(crate) fn resolve_database_url_from(
+    get: &dyn Fn(&str) -> Option<String>,
+    settings_url: Option<&str>,
+) -> Result<(String, SettingSource), EnvError> {
     let get = &|name: &str| non_blank(get, name);
+    // One scheme downstream, so callers match on `postgres://`.
+    let normal = |url: String| match url.strip_prefix("postgresql://") {
+        Some(rest) => format!("postgres://{rest}"),
+        None => url,
+    };
     if let Some(url) = get("DATABASE_URL") {
-        // One scheme downstream, so callers match on `postgres://`.
-        if let Some(rest) = url.strip_prefix("postgresql://") {
-            return Ok(format!("postgres://{rest}"));
-        }
-        return Ok(url);
+        return Ok((normal(url), SettingSource::Env("DATABASE_URL")));
     }
-    if DB_PART_VARS.iter().all(|n| get(n).is_none()) {
-        return Err(EnvError::MissingRequired {
-            name: "DATABASE_URL".into(),
-            hint: DB_UNSET_HINT.into(),
-        });
+    if let Some(var) = DB_PART_VARS.iter().copied().find(|n| get(n).is_some()) {
+        return assemble_database_url(get).map(|url| (url, SettingSource::Env(var)));
     }
+    if let Some(url) = get(DATABASE_URL_OVERRIDE) {
+        return Ok((
+            normal(url),
+            SettingSource::Override(DATABASE_URL_OVERRIDE.into()),
+        ));
+    }
+    if let Some(url) = settings_url.filter(|u| !u.trim().is_empty()) {
+        return Ok((
+            normal(url.to_owned()),
+            SettingSource::File("[database] url".into()),
+        ));
+    }
+    Err(EnvError::MissingRequired {
+        name: "DATABASE_URL".into(),
+        hint: DB_UNSET_HINT.into(),
+    })
+}
+
+/// The URL from the separate `DB_*` vars; at least one is set.
+fn assemble_database_url(get: &dyn Fn(&str) -> Option<String>) -> Result<String, EnvError> {
     let name = |var: &str| {
         get(var).ok_or_else(|| EnvError::MissingRequired {
             name: var.into(),
@@ -1011,6 +1086,7 @@ mod tests {
         "DB_PASSWORD_FILE",
         "DB_NAME",
         "DB_PARAMS",
+        "RUSTANGO__DATABASE__URL",
     ];
 
     #[test]
@@ -1176,7 +1252,14 @@ mod tests {
     #[test]
     fn database_url_unset_error_names_both_styles() {
         let err = resolve_database_url(&vars(&[])).unwrap_err().to_string();
-        for needle in ["DATABASE_URL", "DB_USER", "DB_NAME", "DB_PASSWORD_FILE"] {
+        for needle in [
+            "DATABASE_URL",
+            "DB_USER",
+            "DB_NAME",
+            "DB_PASSWORD_FILE",
+            "RUSTANGO__DATABASE__URL",
+            "[database] url",
+        ] {
             assert!(err.contains(needle), "{needle} missing from: {err}");
         }
     }
@@ -1204,6 +1287,48 @@ mod tests {
             database_style_conflict_with(&vars(&[("DATABASE_URL", "sqlite::memory:")])).is_none()
         );
         assert!(database_style_conflict_with(&vars(&[("DB_USER", "u")])).is_none());
+    }
+
+    /// Bare env, then `RUSTANGO__DATABASE__URL`, then the settings file.
+    #[test]
+    fn database_url_precedence_puts_the_environment_over_the_file() {
+        let file = Some("postgres://from-file/dev");
+        let resolve = |pairs: &[(&str, &str)]| resolve_database_url_from(&vars(pairs), file);
+        assert_eq!(
+            resolve(&[]).unwrap(),
+            (
+                "postgres://from-file/dev".to_owned(),
+                SettingSource::File("[database] url".into())
+            )
+        );
+        let over = [("RUSTANGO__DATABASE__URL", "postgresql://over/x")];
+        assert_eq!(
+            resolve(&over).unwrap(),
+            (
+                "postgres://over/x".to_owned(),
+                SettingSource::Override("RUSTANGO__DATABASE__URL".into())
+            )
+        );
+        let parts = [
+            ("RUSTANGO__DATABASE__URL", "postgres://over/x"),
+            ("DB_USER", "u"),
+            ("DB_NAME", "d"),
+        ];
+        assert_eq!(resolve(&parts).unwrap().1, SettingSource::Env("DB_USER"));
+        let bare = [
+            ("RUSTANGO__DATABASE__URL", "postgres://over/x"),
+            ("DATABASE_URL", "postgres://env/prod"),
+        ];
+        assert_eq!(
+            resolve(&bare).unwrap(),
+            (
+                "postgres://env/prod".to_owned(),
+                SettingSource::Env("DATABASE_URL")
+            )
+        );
+        // A blank override and a blank file value count as unset.
+        let blank = resolve_database_url_from(&vars(&[("RUSTANGO__DATABASE__URL", " ")]), Some(""));
+        assert!(matches!(blank, Err(EnvError::MissingRequired { .. })));
     }
 
     #[test]
