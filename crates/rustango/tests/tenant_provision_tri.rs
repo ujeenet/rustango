@@ -1663,6 +1663,8 @@ async fn the_engine_migrates_every_app_dir(pool: &Pool) {
     .expect("created");
     let url = assert_provisioned(&env, &a).await;
     assert_app_migrated(&url).await;
+    // The project's one system chain; the app folder gets none.
+    assert!(!env.dir("project").join("blog/system").exists());
     env.clean(&[&a]).await;
 }
 

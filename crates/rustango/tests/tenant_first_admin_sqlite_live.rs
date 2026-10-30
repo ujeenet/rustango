@@ -971,3 +971,119 @@ mod webhook {
         }
     }
 }
+
+/// A tenant created with only a path prefix lives on the apex: no
+/// `<slug>.<apex>` host, its link is `<apex>/<slug>/change-password?…`,
+/// and its first admin sets a password, signs in and lands in `/<slug>/`.
+#[tokio::test]
+async fn a_path_prefix_tenant_first_admin_signs_in_end_to_end() {
+    let _suite = SUITE.lock().await;
+    let env = Env::new().await;
+    let slug = unique("pre");
+    let prefix = format!("/{slug}");
+    let secret =
+        SessionSecret::from_env_or_disk(std::path::Path::new("./var/.rustango_tenant_session.key"));
+    // Read when the default host is filled in and when the link is built.
+    std::env::set_var("RUSTANGO_APEX_DOMAIN", "apex.test");
+    let out = env
+        .run(&[
+            "create-tenant",
+            &slug,
+            "--mode",
+            "database",
+            "--backend",
+            "sqlite",
+            "--database-url",
+            &env.tenant_url(&slug),
+            "--path-prefix",
+            &prefix,
+            "--admin-email",
+            "pat@acme.test",
+            "--admin-username",
+            "pat",
+        ])
+        .await;
+    std::env::remove_var("RUSTANGO_APEX_DOMAIN");
+    let out = out.expect("create-tenant");
+    let org = env.org(&slug).await.expect("the tenant exists");
+    assert_eq!(org.host_pattern, None, "a prefix tenant gets no host");
+    let link = link_in(&out[out.find("set-password link").expect("the link")..]);
+    let base = link.split('?').next().unwrap();
+    assert!(
+        base.ends_with(&format!("://apex.test{prefix}/change-password")),
+        "{link}"
+    );
+
+    // Set the password through the link, then sign in from `/<slug>/login`.
+    let admin = TenantAdminBuilder::new(
+        env.pools.clone(),
+        env.url.clone(),
+        ChainResolver::new().push(rustango::tenancy::PathPrefixResolver),
+    )
+    .with_session(secret)
+    .build();
+    let uri = path_and_query(&link);
+    let set = format!("new_password={NEW_PASSWORD}&confirm_password={NEW_PASSWORD}");
+    let done = body_of(tenant_req(&admin, "apex.test", "POST", &uri, &set).await).await;
+    assert!(done.contains("Password set"), "{done}");
+    let login_page =
+        body_of(tenant_req(&admin, "apex.test", "GET", &format!("{prefix}/login"), "").await).await;
+    let next = format!(r#"name="next" value="&#x2F;{slug}&#x2F;""#);
+    assert!(login_page.contains(&next), "{login_page}");
+    let login = tenant_req(
+        &admin,
+        "apex.test",
+        "POST",
+        &format!("{prefix}/login"),
+        &format!("username=pat&password={NEW_PASSWORD}&_csrf=t&next=%2F{slug}%2F"),
+    )
+    .await;
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        login.headers()[header::LOCATION],
+        format!("{prefix}/").as_str()
+    );
+}
+
+/// A prefix the operator console serves on the apex is refused on create
+/// and edit, naming the clash; an ordinary one is accepted.
+#[tokio::test]
+async fn a_prefix_shadowed_by_a_console_route_is_refused() {
+    let _suite = SUITE.lock().await;
+    let env = Env::new().await;
+    let create = |slug: String, prefix: &'static str| {
+        let env = &env;
+        async move {
+            env.run(&[
+                "create-tenant",
+                &slug,
+                "--mode",
+                "database",
+                "--backend",
+                "sqlite",
+                "--database-url",
+                &env.tenant_url(&slug),
+                "--path-prefix",
+                prefix,
+            ])
+            .await
+        }
+    };
+    let err = create(unique("sh"), "/orgs")
+        .await
+        .expect_err("a console route");
+    assert!(err.contains("/orgs") && err.contains("console"), "{err}");
+    let slug = unique("ok");
+    create(slug.clone(), "/t1")
+        .await
+        .expect("an ordinary prefix");
+    let err = env
+        .run(&["edit-tenant", &slug, "--path-prefix", "/login"])
+        .await
+        .expect_err("a console route");
+    assert!(err.contains("/login") && err.contains("console"), "{err}");
+    assert_eq!(
+        env.org(&slug).await.unwrap().path_prefix.as_deref(),
+        Some("/t1")
+    );
+}

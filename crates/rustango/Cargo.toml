@@ -498,6 +498,7 @@ tenancy = [
     "auth_flows",
     "dep:rpassword",
     "dep:serde_urlencoded",
+    "dep:tempfile",
     "_tower",
 ]
 
@@ -525,7 +526,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "=0.61.12", path = "../rustango-macros" }
+rustango-macros = { version = "=0.61.13", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -575,6 +576,9 @@ rpassword        = { workspace = true, optional = true }
 serde_urlencoded = { workspace = true, optional = true }
 sha1             = { workspace = true, optional = true }
 sha2             = { workspace = true, optional = true }
+# Scoped-migration copies go to a fresh, owner-only temp dir.
+# 3.10 added `Builder::permissions`.
+tempfile         = { version = "3.10", optional = true }
 # Non-optional as of #1535: `crypto::constant_time_compare` is
 # ungated and every credential comparison in the crate routes
 # through it, so the constant-time guarantee cannot be a feature

@@ -82,6 +82,11 @@ struct Tenant {
 
 /// A migrated registry with one org whose logo and favicon are stored.
 async fn tenant() -> Tenant {
+    tenant_at(false).await
+}
+
+/// [`tenant`], reached at `<apex>/<slug>` when `prefixed`, else on its host.
+async fn tenant_at(prefixed: bool) -> Tenant {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path().join("brand"));
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
@@ -129,9 +134,9 @@ async fn tenant() -> Tenant {
         backend_kind: "sqlite".into(),
         database_url: Some(tenant_url),
         schema_name: None,
-        host_pattern: Some(format!("{slug}.localhost")),
+        host_pattern: (!prefixed).then(|| format!("{slug}.localhost")),
         port: None,
-        path_prefix: None,
+        path_prefix: prefixed.then(|| format!("/{slug}")),
         active: true,
         created_at: chrono::Utc::now(),
         brand_name: None,
@@ -189,6 +194,61 @@ async fn tenant_login_brand_images_load_under_default_routes() {
     );
     assert_png(&app, &host, &logo).await;
     assert_png(&app, &host, &favicon).await;
+    std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+}
+
+/// A path-prefix tenant's sign-in page links a logo and favicon the apex
+/// serves, under the prefix; the console's own brand route still works.
+#[tokio::test]
+async fn prefix_tenant_brand_images_load_on_the_apex() {
+    let _g = SUITE.lock().await;
+    let t = tenant_at(true).await;
+    let app = rustango::server::Builder::from_pool(t.pool.clone(), t.url.clone(), "localhost")
+        .into_router()
+        .await
+        .expect("assemble");
+
+    let resp = send(&app, "localhost", &format!("/{}/login", t.slug)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = text(resp).await;
+    let logo = attr_after(&html, "class=\"brand-logo\"", "src").expect("logo img");
+    let favicon = attr_after(&html, "rel=\"icon\"", "href").expect("favicon link");
+    let under = format!("/{}/_brand/{}/", t.slug, t.slug);
+    assert!(logo.starts_with(&under), "logo under the prefix: {logo}");
+    assert!(
+        favicon.starts_with(&under),
+        "favicon under the prefix: {favicon}"
+    );
+    assert_png(&app, "localhost", &logo).await;
+    assert_png(&app, "localhost", &favicon).await;
+    // The console serves every tenant's assets at its own brand URL.
+    let console = logo.replacen(&format!("/{}/_brand/", t.slug), "/__brand__/", 1);
+    assert_png(&app, "localhost", &console).await;
+    std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+}
+
+/// The tenant admin on its own, as `run-server` mounts it on the apex:
+/// a prefix tenant's admin page links a favicon it serves.
+#[tokio::test]
+async fn prefix_tenant_admin_serves_its_favicon() {
+    let _g = SUITE.lock().await;
+    let t = tenant_at(true).await;
+    let app = TenantAdminBuilder::new(
+        t.pools.clone(),
+        t.url.clone(),
+        rustango::tenancy::PathPrefixResolver,
+    )
+    .build();
+
+    let resp = send(&app, "localhost", &format!("/{}/admin", t.slug)).await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    let html = text(resp).await;
+    let favicon = attr_after(&html, "rel=\"icon\"", "href").expect("favicon link");
+    assert!(
+        favicon.starts_with(&format!("/{}/_brand/", t.slug)),
+        "favicon under the prefix: {favicon}"
+    );
+    assert_png(&app, "localhost", &favicon).await;
     std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
 }
 

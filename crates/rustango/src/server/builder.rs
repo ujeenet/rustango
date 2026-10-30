@@ -735,14 +735,10 @@ impl<DB: Database> Builder<DB> {
         std::fs::create_dir_all(&flat)?;
         (self.init_tenancy_fn)(&flat)?;
 
-        // Re-discover after init_tenancy populated the flat dir.
-        let dirs = crate::migrate::discover_migration_dirs(root);
-        for dir in &dirs {
-            let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), dir).await?;
-            let _ =
-                crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), dir, &self.registry_url)
-                    .await?;
-        }
+        // Each runner walks the flat dir and every app dir, with one system chain.
+        let _ = crate::tenancy::migrate_registry(self.pools.as_ref(), root).await?;
+        let _ = crate::tenancy::migrate_tenants_dyn(self.pools.as_ref(), root, &self.registry_url)
+            .await?;
         Ok(self)
     }
 

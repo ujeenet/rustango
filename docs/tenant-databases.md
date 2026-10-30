@@ -232,6 +232,10 @@ A database the operator brought has no record and keeps the old behaviour:
 on Postgres it is dropped through its own URL; elsewhere it is left in place
 and the purge says so.
 
+`migrate-tenant-storage` away from a recorded database deletes its record
+with the move. The old database and its login stay on the server; the command
+names both, to drop by hand once the new location is healthy.
+
 ## The secret key: backup and rotation
 
 **Back up `RUSTANGO_SECRET_KEY` with the registry backup.** Without it no

@@ -853,7 +853,8 @@ async fn migrate<W: Write>(
                 "`migrate <target> --dry-run` is not supported — use plain `--dry-run` to preview pending forward migrations".into(),
             ));
         }
-        return migrate_dry_run_cmd(pool, dir, &SystemView::tenant(dir), w).await;
+        let dirs = [dir.to_path_buf()];
+        return migrate_dry_run_cmd(pool, &dirs, &SystemView::tenant(dir), w).await;
     }
 
     if let Some(target) = positional {
@@ -985,13 +986,14 @@ impl SystemView {
 const NOT_GENERATED: &str = "the framework's system migrations are not on disk yet; \
                              `migrate` generates and applies them";
 
-/// `migrate --dry-run`: what `migrate` runs from `system`, then from `dir`.
+/// `migrate --dry-run`: what `migrate` runs from `system`, then from each
+/// of `dirs` in order.
 ///
 /// # Errors
 /// As [`runner::preview_pending`].
 pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     pool: &Pool,
-    dir: &Path,
+    dirs: &[std::path::PathBuf],
     system: &SystemView,
     w: &mut W,
 ) -> Result<(), MigrateError> {
@@ -1000,7 +1002,7 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     let not_generated = system_files.is_none();
     let all = system.planned(system_files)?;
     let ledger = runner::SYSTEM_LEDGER_TABLE;
-    let owned = super::chains::project_owned(dir)?;
+    let owned = super::chains::project_owned(dirs)?;
     let steps = runner::preview_pending(
         pool,
         &system.dir,
@@ -1012,11 +1014,13 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     )
     .await?;
     previews.extend(steps.into_iter().map(|p| (p, "system, ")));
-    let project = runner::migrate_dry_run_pool(pool, dir).await?;
-    previews.extend(project.into_iter().map(|p| (p, "")));
+    for dir in dirs {
+        let project = runner::migrate_dry_run_pool(pool, dir).await?;
+        previews.extend(project.into_iter().map(|p| (p, "")));
+    }
     // What `migrate` runs after both chains.
     let mut after = Vec::new();
-    let converge = super::chains::converge_preview(pool, &all, system.scope, dir).await?;
+    let converge = super::chains::converge_preview(pool, &all, system.scope, dirs).await?;
     if !converge.is_empty() {
         after.push(("converge framework tables".to_owned(), converge));
     }
@@ -1024,7 +1028,7 @@ pub(crate) async fn migrate_dry_run_cmd<W: Write>(
     let bootstrap = shared_bootstrap()
         .into_iter()
         .chain(tenant.then(tenant_bootstrap).into_iter().flatten());
-    let created = super::chains::pending_creates(pool, &all, system.scope, dir).await?;
+    let created = super::chains::pending_creates(pool, &all, system.scope, dirs).await?;
     for b in bootstrap {
         if created.contains(b.table) || runner::try_table_exists_here(pool, b.table).await? {
             continue;
@@ -1096,7 +1100,7 @@ where
         pool,
         &chain,
         super::MigrationScope::Tenant,
-        dir,
+        &[dir.to_path_buf()],
         None,
         signals,
         project,
@@ -2261,30 +2265,21 @@ const TENANTS_NAMED: usize = 10;
 /// The project's migration dirs, labelled for messages: `dir`, plus each
 /// `<app>/migrations/` beside it when `apps` (tenancy applies those too).
 fn check_dirs(dir: &Path, apps: bool) -> Vec<(String, std::path::PathBuf)> {
-    // A bare `migrations` has the parent `""`, which `read_dir` refuses.
-    let root = dir
-        .parent()
-        .map(|p| {
-            if p.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                p
-            }
-        })
-        .filter(|_| apps && dir.file_name().is_some_and(|n| n == "migrations"));
-    let Some(root) = root else {
+    if !apps {
         return if dir.exists() {
             vec![(String::new(), dir.to_path_buf())]
         } else {
             Vec::new()
         };
-    };
-    file::discover_migration_dirs(root)
+    }
+    let root = file::project_root_of(dir);
+    file::project_migration_dirs(dir)
         .into_iter()
+        .filter(|d| d.exists())
         .map(|d| {
             let app = d
                 .parent()
-                .filter(|p| *p != root)
+                .filter(|p| *p != root && d != dir)
                 .and_then(|p| p.file_name())
                 .map(|n| format!("{}/", n.to_string_lossy()))
                 .unwrap_or_default();
@@ -2322,12 +2317,13 @@ enum Ledgers<L> {
 }
 
 /// Model changes no file holds yet, and files the registry's or a tenant's
-/// ledger has not applied. `system` is the framework chain, checked in tenants.
+/// ledger has not applied. `system` is the framework chain and the scope
+/// `pool` runs of it; tenants run its tenant steps.
 async fn pending_migration_audit<L>(
     pool: &Pool,
     dir: &Path,
     files: &[(String, Vec<super::Migration>)],
-    system: &[(String, Vec<super::Migration>)],
+    (system, system_scope): (&[(String, Vec<super::Migration>)], super::MigrationScope),
     ledgers: Ledgers<L>,
     findings: (&mut Vec<String>, &mut Vec<String>, &mut Vec<String>),
 ) where
@@ -2365,6 +2361,21 @@ async fn pending_migration_audit<L>(
             }
         }
         Err(e) => errors.push(format!("cannot read the migration ledger: {e}")),
+    }
+    if !system.is_empty() {
+        match runner::applied_or_empty(pool, runner::SYSTEM_LEDGER_TABLE).await {
+            Ok(applied) => {
+                let pending = pending_names(system, &applied, Some(system_scope));
+                if !pending.is_empty() {
+                    warnings.push(format!(
+                        "{} system migration(s) not applied — run `manage migrate`: {}",
+                        pending.len(),
+                        pending.join(", ")
+                    ));
+                }
+            }
+            Err(e) => errors.push(format!("cannot read the system migration ledger: {e}")),
+        }
     }
     let tenant_files = files
         .iter()
@@ -2528,14 +2539,16 @@ where
         for (app, d) in dirs {
             files.push((app, file::list_dir(&d)?));
         }
-        // The framework chain runs in each tenant too; its own ledger records it.
-        let system = match &ledgers {
-            Ledgers::Tenancy { .. } => SystemView::registry(dir)
-                .files()?
-                .map(|m| vec![("system/".to_owned(), m)])
-                .unwrap_or_default(),
-            Ledgers::Single => Vec::new(),
+        // The framework chain runs here and, in tenancy, in each tenant too;
+        // its own ledger records it.
+        let view = match &ledgers {
+            Ledgers::Tenancy { .. } => SystemView::registry(dir),
+            Ledgers::Single => SystemView::tenant(dir),
         };
+        let system = view
+            .files()?
+            .map(|m| vec![("system/".to_owned(), m)])
+            .unwrap_or_default();
         let count: usize = files.iter().map(|(_, m)| m.len()).sum();
         if count == 0 && model_count > 0 {
             warnings.push(
@@ -2544,7 +2557,8 @@ where
         } else {
             info.push(format!("{count} migration(s) on disk"));
             let findings = (&mut info, &mut warnings, &mut errors);
-            pending_migration_audit(pool, dir, &files, &system, ledgers, findings).await;
+            let system = (system.as_slice(), view.scope);
+            pending_migration_audit(pool, dir, &files, system, ledgers, findings).await;
         }
     }
 

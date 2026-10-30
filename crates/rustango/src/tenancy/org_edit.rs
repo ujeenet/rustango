@@ -268,7 +268,7 @@ pub(crate) async fn apply_values_if(
             }
             ("path_prefix", SqlValue::String(v)) => {
                 let v = v.trim().to_owned();
-                crate::tenancy::provision::validate_path_prefix(&v)
+                crate::tenancy::provision::validate_new_path_prefix(&v)
                     .map_err(TenancyError::Validation)?;
                 claims.push(ClaimKey::PathPrefix(v.clone()));
                 SqlValue::String(v)

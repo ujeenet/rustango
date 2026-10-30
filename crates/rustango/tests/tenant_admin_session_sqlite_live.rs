@@ -1149,3 +1149,91 @@ async fn an_impersonation_is_attributed_to_the_operator_id() {
     assert_eq!(session.actor().as_token(), token, "updated_by");
     assert!(session.username.is_empty(), "{}", session.username);
 }
+
+/// A path-prefix tenant's login sends the user home to its own prefix,
+/// never to the apex or another tenant's prefix.
+#[tokio::test]
+async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.path_prefix = Some("/t1".into());
+    org.save_pool(&env.registry).await.expect("set prefix");
+    rustango::tenancy::invalidate_org_cache();
+    let mut user = User {
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+
+    // Opened directly: the form's `next` is the tenant root.
+    let form = env.get("/t1/__login", "").await;
+    assert_eq!(form.status(), StatusCode::OK);
+    let html = axum::body::to_bytes(form.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(r#"name="next" value="&#x2F;t1&#x2F;""#),
+        "login form next: {html}"
+    );
+
+    let login_to = |next: &'static str| {
+        let env = &env;
+        async move {
+            let body = format!(
+                "username=alice&password=first-password&_csrf=t&next={}",
+                rustango::url_codec::url_encode(next)
+            );
+            let resp = env.post("/t1/__login", "", &body).await;
+            assert_eq!(resp.status(), StatusCode::SEE_OTHER, "next={next}");
+            resp.headers()["location"].to_str().unwrap().to_owned()
+        }
+    };
+    // The form's own default, and every `next` that would leave the tenant.
+    for next in ["/t1/", "/", "/t2/x", "/t1/__login", "/t1/../t2/x", "/t1x/y"] {
+        assert_eq!(login_to(next).await, "/t1/", "next={next}");
+    }
+    assert_eq!(login_to("/t1/p/abc").await, "/t1/p/abc");
+    // No `next` at all.
+    let resp = env
+        .post(
+            "/t1/__login",
+            "",
+            "username=alice&password=first-password&_csrf=t",
+        )
+        .await;
+    assert_eq!(resp.headers()["location"], "/t1/");
+}
+
+/// A host tenant's login still defaults to `/`.
+#[tokio::test]
+async fn a_host_tenant_login_defaults_to_the_root() {
+    let env = boot().await;
+    let form = env.get("/__login", "").await;
+    let html = axum::body::to_bytes(form.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&html);
+    assert!(
+        html.contains(r#"name="next" value="&#x2F;""#),
+        "login form next: {html}"
+    );
+    let mut user = User {
+        password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let resp = env
+        .post(
+            "/__login",
+            "",
+            "username=alice&password=first-password&_csrf=t&next=%2F__login",
+        )
+        .await;
+    assert_eq!(resp.headers()["location"], "/");
+}

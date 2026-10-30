@@ -439,12 +439,8 @@ where
     // Served before the resolver runs so the assets are reachable
     // even when the requesting host doesn't match a known tenant
     // (the slug in the path is validated by the branding module).
-    let brand_prefix = format!("{}/", routes.brand_prefix());
-    if let Some(rest) = req.uri().path().strip_prefix(&brand_prefix) {
-        if let Some((slug, filename)) = rest.split_once('/') {
-            return serve_brand_asset(slug, filename, brand_storage).await;
-        }
-        return (StatusCode::NOT_FOUND, "not found").into_response();
+    if let Some(resp) = brand_response(req.uri().path(), routes, brand_storage).await {
+        return resp;
     }
 
     let (mut parts, body) = req.into_parts();
@@ -466,6 +462,10 @@ where
         routes
     } else {
         prefixed = routes.under_prefix(cookie_path);
+        // On the apex only the prefix reaches the tenant, so its brand URL carries it.
+        if let Some(resp) = brand_response(parts.uri.path(), &prefixed, brand_storage).await {
+            return resp;
+        }
         &prefixed
     };
 
@@ -592,6 +592,7 @@ where
                             cfg,
                             brand_storage,
                             routes,
+                            cookie_path,
                             parts.uri.query(),
                             &parts.headers,
                             &parts.extensions,
@@ -607,6 +608,7 @@ where
                         cfg,
                         brand_storage,
                         routes,
+                        cookie_path,
                         parts.uri.query(),
                         &parts.headers,
                         &parts.extensions,
@@ -738,7 +740,7 @@ where
                 // Superuser: user_perms stays None → all operations allowed.
             }
             SessionCheck::Anonymous => {
-                return redirect_to_tenant_login(&path, routes).into_response();
+                return redirect_to_tenant_login(&path, routes, cookie_path).into_response();
             }
             SessionCheck::Error(msg) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response();
@@ -1041,9 +1043,13 @@ async fn validate_session(
     }
 }
 
-fn redirect_to_tenant_login(next_path: &str, routes: &super::routes::RouteConfig) -> Redirect {
+fn redirect_to_tenant_login(
+    next_path: &str,
+    routes: &super::routes::RouteConfig,
+    cookie_path: &str,
+) -> Redirect {
     let next = if next_path == routes.login_url || next_path.starts_with(&routes.logout_url) {
-        "/".to_string()
+        tenant_home(cookie_path)
     } else {
         next_path.to_string()
     };
@@ -1057,6 +1063,7 @@ async fn login_form(
     cfg: &TenantSessionConfig,
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
+    cookie_path: &str,
     query: Option<&str>,
     headers: &HeaderMap,
     extensions: &axum::http::Extensions,
@@ -1079,7 +1086,10 @@ async fn login_form(
     let mut ctx = Context::new();
     ctx.insert("tenant_slug", &org.slug);
     ctx.insert("tenant_name", &org.display_name);
-    ctx.insert("next", &next.unwrap_or_else(|| "/".into()));
+    ctx.insert(
+        "next",
+        &sanitize_next_with_routes(next.as_deref(), routes, cookie_path),
+    );
     ctx.insert("error", &error);
     // Per-tenant brand, so even the login page shows the org's logo,
     // favicon, color, theme and name.
@@ -1205,7 +1215,7 @@ async fn login_submit(
         Ok(f) => f,
         Err(_) => return (StatusCode::BAD_REQUEST, "malformed login form").into_response(),
     };
-    let next = sanitize_next(form.next.as_deref());
+    let next = sanitize_next_with_routes(form.next.as_deref(), routes, cookie_path);
 
     // Login CSRF (#1607): reject before the user lookup, so a forged
     // POST costs nothing and cannot probe usernames by timing.
@@ -1944,24 +1954,48 @@ use crate::url_codec::url_encode as urlencoding_lite;
 // behavior the local `url_decode_lite` had (lossy UTF-8 conversion).
 use crate::url_codec::url_decode as url_decode_lite;
 
-fn sanitize_next(next: Option<&str>) -> String {
-    sanitize_next_with_routes(next, &super::routes::RouteConfig::default())
+/// Where a login lands by default: a path-prefix tenant's root, else `/`.
+fn tenant_home(cookie_path: &str) -> String {
+    if cookie_path == "/" {
+        "/".to_owned()
+    } else {
+        format!("{cookie_path}/")
+    }
 }
 
-fn sanitize_next_with_routes(next: Option<&str>, routes: &super::routes::RouteConfig) -> String {
+/// The post-login target: a safe path inside this tenant's `cookie_path`,
+/// else [`tenant_home`].
+fn sanitize_next_with_routes(
+    next: Option<&str>,
+    routes: &super::routes::RouteConfig,
+    cookie_path: &str,
+) -> String {
     // `auth_decorators::safe_next` owns the shape check: it
     // percent-decodes, requires both the raw and decoded form to look
     // like a path, and rejects `/\`, which a browser rewrites into a
     // protocol-relative URL. Do not hand-roll it here.
     let Some(s) = next.and_then(crate::auth_decorators::safe_next) else {
-        return "/".to_owned();
+        return tenant_home(cookie_path);
     };
     // Bouncing back to login/logout would loop. Not a safety check —
     // that is `safe_next`'s job — so it stays here.
     if s.starts_with(&routes.login_url) || s.starts_with(&routes.logout_url) {
-        return "/".to_owned();
+        return tenant_home(cookie_path);
+    }
+    // A prefix tenant shares its host: `/` is the console, `/t2/` another tenant.
+    if cookie_path != "/" && !stays_under(&s, cookie_path) {
+        return tenant_home(cookie_path);
     }
     s
+}
+
+/// Is `next` under `prefix` once the browser resolves `\`, `%2e` and dot segments?
+fn stays_under(next: &str, prefix: &str) -> bool {
+    let raw = next.split(['?', '#']).next().unwrap_or_default();
+    let path = url_decode_lite(raw).replace('\\', "/");
+    super::routes::path_is_under(raw, prefix)
+        && super::routes::path_is_under(&path, prefix)
+        && !path.split('/').any(|seg| seg == "." || seg == "..")
 }
 
 /// This request's admin state: its pool, user perms and tenant branding.
@@ -2073,6 +2107,19 @@ fn inner_admin_state(
     builder.into_request_state()
 }
 
+/// The brand asset at `path` when it is under `routes.brand_url`, else `None`.
+async fn brand_response(
+    path: &str,
+    routes: &super::routes::RouteConfig,
+    brand_storage: &BoxedStorage,
+) -> Option<Response> {
+    let rest = path.strip_prefix(&format!("{}/", routes.brand_prefix()))?;
+    Some(match rest.split_once('/') {
+        Some((slug, filename)) => serve_brand_asset(slug, filename, brand_storage).await,
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    })
+}
+
 /// Serve a per-tenant brand asset from the shared brand storage.
 /// The slug + filename are validated by the branding module — any
 /// path-traversal attempt comes back as a 404.
@@ -2163,7 +2210,7 @@ mod sanitize_next_tests {
     use crate::tenancy::routes::RouteConfig;
 
     fn nxt(s: Option<&str>) -> String {
-        sanitize_next_with_routes(s, &RouteConfig::default())
+        sanitize_next_with_routes(s, &RouteConfig::default(), "/")
     }
 
     #[test]
@@ -2221,9 +2268,32 @@ mod sanitize_next_tests {
         // delegating must not drop it.
         let routes = RouteConfig::default();
         assert_eq!(
-            sanitize_next_with_routes(Some(&routes.login_url), &routes),
+            sanitize_next_with_routes(Some(&routes.login_url), &routes, "/"),
             "/",
         );
+    }
+
+    #[test]
+    fn a_prefix_tenant_stays_under_its_prefix() {
+        let routes = RouteConfig::default().under_prefix("/t1");
+        let nxt = |s| sanitize_next_with_routes(s, &routes, "/t1");
+        for away in [
+            None,
+            Some("/"),
+            Some("/t2/x"),
+            Some("/t1x/y"),
+            Some("/t1/login"),
+            Some("/t1/logout"),
+            Some("/t1/../t2/x"),
+            Some("/t1/%2e%2e/t2/x"),
+            Some("/t1/..\\t2/x"),
+            Some("//evil.example"),
+        ] {
+            assert_eq!(nxt(away), "/t1/", "{away:?}");
+        }
+        for ok in ["/t1", "/t1/", "/t1/p/abc", "/t1/admin?page=2"] {
+            assert_eq!(nxt(Some(ok)), ok, "{ok} should survive");
+        }
     }
 }
 

@@ -787,50 +787,56 @@ fn router_unlogged(
     // auth gate. Brand assets are public images and need to be
     // reachable from un-authenticated tenant pages.
     let public = Router::new()
-        .route("/login", get(login_form).post(login_submit))
-        .route("/logout", post(logout));
+        .route(at("/login"), get(login_form).post(login_submit))
+        .route(at("/logout"), post(logout));
     // The code step after the password; only the pending cookie reaches it.
     #[cfg(feature = "totp")]
-    let public = public.route("/login/totp", get(totp::code_form).post(totp::code_submit));
+    let public = public.route(
+        at("/login/totp"),
+        get(totp::code_form).post(totp::code_submit),
+    );
     // Cacheable GET-only assets stay outside the CSRF layers, so no
     // shared cache stores a `Set-Cookie` with them.
     let mut assets = Router::new()
-        .route("/__static__/rustango.png", get(static_rustango_png))
+        .route(at("/__static__/rustango.png"), get(static_rustango_png))
         .route(
-            &format!("{}/{{slug}}/{{filename}}", branding::CONSOLE_BRAND_URL),
+            at(&format!(
+                "{}/{{slug}}/{{filename}}",
+                branding::CONSOLE_BRAND_URL
+            )),
             get(serve_brand_asset),
         );
     if let OpLogo::File(logo) = &state.op_brand.logo {
         let served = logo.clone();
         assets = assets.route(
-            &logo.route,
+            at(&logo.route),
             get(move |h: HeaderMap| async move { served.response(&h) }),
         );
     }
 
     // Authenticated routes: the middleware injects an `Extension<auth::Operator>`.
     let mut private = Router::new()
-        .route("/", get(welcome))
-        .route("/operators", get(operators::operators_list))
-        .route("/orgs", get(orgs_list))
+        .route(at("/"), get(welcome))
+        .route(at("/operators"), get(operators::operators_list))
+        .route(at("/orgs"), get(orgs_list))
         // Read-only, so it is not behind the edit gate: a read-only
         // console is exactly where "what happened?" still needs
         // answering, and every operator can already see everything the
         // log describes.
-        .route("/audit", get(audit::audit_list))
+        .route(at("/audit"), get(audit::audit_list))
         .route(
-            "/change-password",
+            at("/change-password"),
             get(change_password_form).post(change_password_submit),
         );
     #[cfg(feature = "totp")]
     {
         private = private
             .route(
-                "/account/totp",
+                at("/account/totp"),
                 get(totp::account_form).post(totp::account_confirm),
             )
             .route(
-                "/account/totp/disable",
+                at("/account/totp/disable"),
                 get(totp_post_only_redirect).post(totp::account_disable),
             );
     }
@@ -838,17 +844,17 @@ fn router_unlogged(
     // the list; changing it needs an editable console.
     #[cfg(feature = "admin-sso")]
     {
-        private = private.route("/sso-shared", get(sso_shared::list));
+        private = private.route(at("/sso-shared"), get(sso_shared::list));
         if edit_enabled {
             private = private
-                .route("/sso-shared", post(sso_shared::create))
+                .route(at("/sso-shared"), post(sso_shared::create))
                 .route(
-                    "/sso-shared/{id}/edit",
+                    at("/sso-shared/{id}/edit"),
                     get(sso_shared::edit_form).post(sso_shared::edit_submit),
                 )
-                .route("/sso-shared/{id}/delete", post(sso_shared::delete))
+                .route(at("/sso-shared/{id}/delete"), post(sso_shared::delete))
                 .route(
-                    "/sso-shared/{id}/email-link",
+                    at("/sso-shared/{id}/email-link"),
                     post(sso_shared::set_email_link),
                 );
         }
@@ -856,7 +862,7 @@ fn router_unlogged(
     #[cfg(feature = "totp")]
     if edit_enabled {
         private = private.route(
-            "/operators/{id}/reset-totp",
+            at("/operators/{id}/reset-totp"),
             get(op_post_only_redirect).post(operators::operator_reset_totp),
         );
     }
@@ -865,64 +871,64 @@ fn router_unlogged(
             // Who can sign in to this console. `edit_enabled` is really
             // the switch between a read-only console and one that can
             // change things, and creating an operator is a change.
-            .route("/operators", post(operators::operator_create))
+            .route(at("/operators"), post(operators::operator_create))
             // Open every tenant pool up front, e.g. after a deploy or a
             // credential rotation. Gated on pools, not the provisioner:
             // warming needs no migrations directory.
             .route(
-                "/orgs/prewarm",
+                at("/orgs/prewarm"),
                 get(orgs_post_only_redirect).post(prewarm_pools),
             )
             .route(
-                "/operators/{id}/active",
+                at("/operators/{id}/active"),
                 get(op_post_only_redirect).post(operators::operator_set_active),
             )
             .route(
-                "/operators/{id}/reset-password",
+                at("/operators/{id}/reset-password"),
                 get(op_post_only_redirect).post(operators::operator_reset_password),
             )
             .route(
-                "/orgs/{slug}/edit",
+                at("/orgs/{slug}/edit"),
                 get(org_edit_form).post(org_edit_submit),
             )
             // POST takes the multipart upload; GET bounces back to the
             // edit form so a manual URL hit does not 405.
             .route(
-                "/orgs/{slug}/edit/branding",
+                at("/orgs/{slug}/edit/branding"),
                 get(org_post_only_redirect).post(org_edit_branding),
             )
             // Taking a tenant out of service. Behind the edit gate:
             // `purge` is the most destructive thing this console can
             // do, and a read-only console must not offer it.
             .route(
-                "/orgs/{slug}/deactivate",
+                at("/orgs/{slug}/deactivate"),
                 get(org_post_only_redirect).post(decommission::deactivate),
             )
             .route(
-                "/orgs/{slug}/purge",
+                at("/orgs/{slug}/purge"),
                 get(org_post_only_redirect).post(decommission::purge),
             )
             // Probing an existing tenant, as opposed to the create
             // form's probe of a URL being typed.
             .route(
-                "/orgs/{slug}/test-connection",
+                at("/orgs/{slug}/test-connection"),
                 post(provisioning::test_tenant_connection),
             )
             // Extra hostnames a tenant answers on. Binding a hostname
             // changes which tenant serves that traffic, so it sits
             // behind the edit gate too. Three routes, not one submit,
             // because each acts on a single row.
-            .route("/orgs/{slug}/hosts", get(hosts::org_hosts_view))
+            .route(at("/orgs/{slug}/hosts"), get(hosts::org_hosts_view))
             .route(
-                "/orgs/{slug}/hosts/add",
+                at("/orgs/{slug}/hosts/add"),
                 get(org_post_only_redirect).post(hosts::org_hosts_add),
             )
             .route(
-                "/orgs/{slug}/hosts/remove",
+                at("/orgs/{slug}/hosts/remove"),
                 get(org_post_only_redirect).post(hosts::org_hosts_remove),
             )
             .route(
-                "/orgs/{slug}/hosts/toggle",
+                at("/orgs/{slug}/hosts/toggle"),
                 get(org_post_only_redirect).post(hosts::org_hosts_toggle),
             );
     }
@@ -932,46 +938,52 @@ fn router_unlogged(
         // database URL and connects to it.
         private = private
             .route(
-                "/orgs/new",
+                at("/orgs/new"),
                 get(provisioning::org_new_form).post(provisioning::org_new_submit),
             )
-            .route("/orgs/test-connection", post(provisioning::test_connection))
+            .route(
+                at("/orgs/test-connection"),
+                post(provisioning::test_connection),
+            )
             // Servers tenant databases are made on: same capability.
             .route(
-                "/db-servers",
+                at("/db-servers"),
                 get(db_servers::list).post(db_servers::create),
             )
             .route(
-                "/db-servers/{name}/edit",
+                at("/db-servers/{name}/edit"),
                 get(db_servers::edit_form).post(db_servers::edit_submit),
             )
-            .route("/db-servers/{name}/delete", post(db_servers::delete))
-            .route("/db-servers/{name}/test", post(db_servers::test))
+            .route(at("/db-servers/{name}/delete"), post(db_servers::delete))
+            .route(at("/db-servers/{name}/test"), post(db_servers::test))
             // Migrations ride with provisioning: both need the
             // provisioner's migrations directory and its registry URL.
             .route(
-                "/orgs/migrate",
+                at("/orgs/migrate"),
                 get(op_post_only_redirect).post(migrate::migrate_all),
             )
             .route(
-                "/orgs/{slug}/migrate",
+                at("/orgs/{slug}/migrate"),
                 get(org_post_only_redirect).post(migrate::migrate_one),
             )
             // A new password for a login rustango made on a saved server.
             .route(
-                "/orgs/{slug}/rotate-password",
+                at("/orgs/{slug}/rotate-password"),
                 get(org_post_only_redirect).post(decommission::rotate_password),
             )
             // The index has to come before the `{run_id}` route it
             // shares a prefix with, and be a distinct path: a run id is
             // numeric, so `/orgs/provision` cannot be confused for one.
-            .route("/orgs/provision", get(provisioning::provision_runs_index))
             .route(
-                "/orgs/provision/{run_id}",
+                at("/orgs/provision"),
+                get(provisioning::provision_runs_index),
+            )
+            .route(
+                at("/orgs/provision/{run_id}"),
                 get(provisioning::provision_run_view),
             )
             .route(
-                "/orgs/provision/{run_id}/stream",
+                at("/orgs/provision/{run_id}/stream"),
                 get(provisioning::provision_run_stream),
             );
     }
@@ -981,7 +993,7 @@ fn router_unlogged(
         // audit row, so a session traces back to an operator id.
         // GET bounces back, as with branding above.
         private = private.route(
-            "/orgs/{slug}/impersonate",
+            at("/orgs/{slug}/impersonate"),
             get(org_post_only_redirect).post(org_impersonate),
         );
     }
@@ -1015,6 +1027,34 @@ fn router_unlogged(
         .with_state(state)
         .layer(middleware::from_fn(mount::layer));
     crate::errors::own_pages(console)
+}
+
+/// First path segments the console serves. Every console route is
+/// registered through [`at`], and a tenant prefix is checked against the
+/// same list, since the console wins that segment on the apex.
+pub(crate) const CONSOLE_SEGMENTS: &[&str] = &[
+    "",
+    "login",
+    "logout",
+    "__static__",
+    "__brand__",
+    "operators",
+    "orgs",
+    "audit",
+    "change-password",
+    "account",
+    "sso-shared",
+    "db-servers",
+];
+
+/// The console route at `path`, whose first segment must be in [`CONSOLE_SEGMENTS`].
+fn at(path: &str) -> &str {
+    let first = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    assert!(
+        CONSOLE_SEGMENTS.contains(&first),
+        "console route `{path}`: add `{first}` to CONSOLE_SEGMENTS"
+    );
+    path
 }
 
 /// Rows per page, for every list the console renders. One number for
