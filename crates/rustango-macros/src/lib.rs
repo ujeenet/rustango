@@ -6473,14 +6473,13 @@ fn inherent_impl_tokens(
             /// Differs from [`Self::find_many`] in that this method
             /// requires every PK to resolve. If even one is missing,
             /// the call surfaces `sqlx::Error::RowNotFound` (wrapped
-            /// in `ExecError::Driver`). Rows are deduped at the SQL
-            /// layer, so passing the same PK twice in `pks` counts as
-            /// one expected row.
+            /// in `ExecError::Driver`). A key counts as found when the
+            /// database matches it to a row, so repeats and keys its
+            /// collation folds together (`abc` / `ABC` on MySQL) pass.
             ///
             /// # Errors
-            /// As [`Self::find_many`], plus `RowNotFound` when the
-            /// returned row count is less than the count of distinct
-            /// requested PKs.
+            /// As [`Self::find_many`], plus `RowNotFound` when a
+            /// requested PK matches no row.
             pub async fn find_many_or_fail<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &#root::sql::Pool,
@@ -6496,23 +6495,39 @@ fn inherent_impl_tokens(
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
-                // Dedup the requested PK list before counting so
-                // duplicate-PK requests don't false-fail (the SQL
-                // `IN (...)` clause naturally dedups too).
+                use #root::sql::ExistsPool as _;
                 let mut _seen: ::std::collections::HashSet<
                     ::std::string::String,
                 > = ::std::collections::HashSet::new();
+                let mut _keys: ::std::vec::Vec<#root::core::SqlValue> =
+                    ::std::vec::Vec::new();
                 for v in &_values {
-                    _seen.insert(v.to_display_string());
+                    if _seen.insert(v.to_display_string()) {
+                        _keys.push(::core::clone::Clone::clone(v));
+                    }
                 }
-                let _expected = _seen.len();
                 let _rows = Self::find_many(_values, pool).await?;
-                if _rows.len() < _expected {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Driver(
-                            #root::sql::sqlx::Error::RowNotFound,
-                        ),
-                    );
+                let _found: ::std::collections::HashSet<::std::string::String> = _rows
+                    .iter()
+                    .map(|r| r.__rustango_pk_value().to_display_string())
+                    .collect();
+                // A key with no exact twin among the rows may still match one
+                // under the column's collation: the database decides.
+                for _key in _keys {
+                    if _found.contains(&_key.to_display_string()) {
+                        continue;
+                    }
+                    let _hit = #root::query::QuerySet::<Self>::default()
+                        .filter(::core::stringify!(#pk_ident), _key)
+                        .exists(pool)
+                        .await?;
+                    if !_hit {
+                        return ::core::result::Result::Err(
+                            #root::sql::ExecError::Driver(
+                                #root::sql::sqlx::Error::RowNotFound,
+                            ),
+                        );
+                    }
                 }
                 ::core::result::Result::Ok(_rows)
             }
