@@ -98,8 +98,11 @@
 //!     .router("/api/posts", pool.clone())
 //! ```
 
+pub(crate) mod fk_target;
 #[cfg(feature = "openapi")]
 mod openapi;
+
+use fk_target::FkTarget;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -1980,30 +1983,18 @@ struct WriteSet {
     fk_targets: Vec<FkTarget>,
 }
 
-/// The rows an FK field may point at: `on` of `model`, inside `scope`.
-struct FkTarget {
-    field: &'static crate::core::FieldSchema,
-    model: &'static ModelSchema,
-    on: &'static crate::core::FieldSchema,
-    scope: Vec<WhereExpr>,
-}
-
-impl FkTarget {
-    /// Every FK of `writable` whose target hides rows: its global scopes,
-    /// soft delete and the ViewSet's `related_filter`s. Others need no read.
-    fn for_fields(
-        state: &ViewSetState,
-        parts: &axum::http::request::Parts,
-        writable: &[&'static crate::core::FieldSchema],
-    ) -> Vec<Self> {
-        let no_params = HashMap::new();
-        writable
-            .iter()
-            .filter_map(|&field| {
-                let (crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on }) =
-                    field.relation?;
-                let model = crate::core::ModelEntry::for_table(to)?.schema;
-                let on = model.field_by_column(on)?;
+/// Every FK of `writable` whose target hides rows: its global scopes,
+/// soft delete and the ViewSet's `related_filter`s. Others need no read.
+fn fk_targets(
+    state: &ViewSetState,
+    parts: &axum::http::request::Parts,
+    writable: &[&'static crate::core::FieldSchema],
+) -> Vec<FkTarget> {
+    let no_params = HashMap::new();
+    writable
+        .iter()
+        .filter_map(|&field| {
+            FkTarget::of(field, |model| {
                 let mut scope = model.global_scope_exprs(&[]);
                 scope.extend(crate::soft_delete::active_filter(model));
                 for (name, backend) in &state.vs.related_filters {
@@ -2011,22 +2002,10 @@ impl FkTarget {
                         scope.extend(backend.filter_with(parts, &no_params, model));
                     }
                 }
-                (!scope.is_empty()).then_some(Self {
-                    field,
-                    model,
-                    on,
-                    scope,
-                })
+                (scope, false)
             })
-            .collect()
-    }
-
-    /// `SELECT` of the target row `value` names, inside the scope.
-    fn probe(&self, value: &SqlValue) -> SelectQuery {
-        let mut q = SelectQuery::by_pk(self.model, self.on.column, value.clone());
-        q.where_clause = narrow(q.where_clause, self.scope.clone());
-        q
-    }
+        })
+        .collect()
 }
 
 /// The admin's superuser-only fields of `table`, unless the principal is a superuser.
@@ -2109,7 +2088,7 @@ impl WriteSet {
             .filter(|f| schema.soft_delete_column != Some(f.column))
             .filter(|f| !superuser_only.contains(&f.name))
             .collect();
-        let fk_targets = FkTarget::for_fields(state, parts, &writable);
+        let fk_targets = fk_targets(state, parts, &writable);
         Ok(Self {
             schema,
             writable,
@@ -2125,52 +2104,27 @@ impl WriteSet {
     async fn check_fk_targets(
         &self,
         acq: &mut AcquiredConn,
-        mut tx: Option<&mut crate::sql::PoolTx<'_>>,
+        tx: Option<&mut crate::sql::PoolTx<'_>>,
         values: &[(&'static str, SqlValue)],
         stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
     ) -> Result<Result<(), Refusal>, crate::sql::ExecError> {
-        for (column, value) in values {
-            if matches!(value, SqlValue::Null) {
-                continue;
-            }
-            let Some(target) = self.fk_targets.iter().find(|t| t.field.column == *column) else {
-                continue;
-            };
-            let mut probes = Vec::with_capacity(2);
-            if let Some((pk_field, pk)) = stored {
-                // Unchanged: resending the stored parent is not a new link.
-                let mut q = SelectQuery::by_pk(self.schema, pk_field.column, pk.clone());
-                q.where_clause = narrow(
-                    q.where_clause,
-                    vec![WhereExpr::Predicate(Filter::new(
-                        *column,
-                        Op::Eq,
-                        value.clone(),
-                    ))],
-                );
-                probes.push((q, pk_field));
-            }
-            probes.push((target.probe(value), target.on));
-            let mut found = false;
-            for (q, field) in &probes {
-                let fields = [*field];
-                let row = match tx.as_deref_mut() {
-                    Some(tx) => crate::sql::select_one_row_as_json_tx(tx, q, &fields).await?,
-                    None => acq.select_one_as_json(q, &fields).await?,
-                };
-                if row.is_some() {
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                return Ok(Err(Refusal::Invalid {
-                    field: target.field.name,
-                    message: "no such object".to_owned(),
-                }));
-            }
-        }
-        Ok(Ok(()))
+        let hidden = fk_target::first_hidden(
+            &acq.pool,
+            tx,
+            self.schema,
+            &self.fk_targets,
+            values,
+            stored,
+            |_, _| true,
+        )
+        .await?;
+        Ok(match hidden {
+            None => Ok(()),
+            Some(field) => Err(Refusal::Invalid {
+                field: field.name,
+                message: "no such object".to_owned(),
+            }),
+        })
     }
 
     fn is_writable(&self, name: &str) -> bool {

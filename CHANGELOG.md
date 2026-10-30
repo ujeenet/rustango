@@ -13,6 +13,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A decimal sent as a JSON number to a ViewSet keeps all its digits and its scale instead of passing through an f64. New `ModelFormFor::from_json_slice` does the same for a raw body; `from_json(&Value)` cannot.
 - A Decimal form value accepts scientific notation (`1e3`). The workspace `serde_json` enables `raw_value` (additive).
 - `validate_decimal` refuses more than `max_digits - decimal_places` digits before the point (`max_whole_digits`, checked after `max_digits`) and no longer counts trailing fraction zeros.
+- Admin create, edit and inline rows refuse an FK that points at a target row the user cannot see (outside its queryset hooks, soft-deleted, or refused by its `view` hook) with "no such object"; a link the row already holds is kept.
+- Admin autocomplete works for a target whose primary key or display field has a `column` rename.
+- Admin edits and deletes are audited under the key's canonical text, so `/x/007` and `/x/7` share one history; the detail page reads it the same way.
+- An admin delete blocked by rows that still point at it shows a browser an admin page (409); other clients keep the JSON 409.
 
 ## [0.61.13] — 2026-10-30
 

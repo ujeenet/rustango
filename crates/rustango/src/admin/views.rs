@@ -1829,9 +1829,10 @@ pub(crate) async fn autocomplete_view(
                     )
                 })
                 .filter_map(|row| {
-                    let id = row.get(pk_field.column)?.clone();
-                    let text = row
-                        .get(display_field.column)
+                    // Rows are keyed by field name; a renamed column is not the key.
+                    let get = |f: &FieldSchema| row.get(f.name).or_else(|| row.get(f.column));
+                    let id = get(pk_field)?.clone();
+                    let text = get(display_field)
                         .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_else(|| id.to_string());
                     Some(serde_json::json!({ "id": id, "text": text }))
@@ -1859,6 +1860,8 @@ pub(crate) async fn detail_view(
     state: AppState,
 ) -> Result<Html<String>, AdminError> {
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
+    // Audit files the row under its key's canonical text, however the URL spelled it.
+    let pk_text = pk_value.to_display_string();
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     // Single PK lookup, plus LEFT JOINs that carry the FK display
@@ -1973,7 +1976,7 @@ pub(crate) async fn detail_view(
     let audit_entries = match state.audit_reader() {
         Some(reader) => {
             reader
-                .recent_for_entity(model.table, &pk_raw, super::audit::DETAIL_ROWS)
+                .recent_for_entity(model.table, &pk_text, super::audit::DETAIL_ROWS)
                 .await
         }
         None => Ok(Vec::new()),
@@ -2021,8 +2024,8 @@ pub(crate) async fn detail_view(
             "label_plural": model.display_label_plural(),
         },
         // Links carry the key as one encoded segment or query value.
-        "pk_path": crate::url_codec::url_encode(&pk_raw),
-        "pk": pk_raw,
+        "pk_path": crate::url_codec::url_encode(&pk_text),
+        "pk": pk_text,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
         "audit_entries": audit_entries_ctx,
@@ -2188,6 +2191,9 @@ pub(crate) async fn create_submit(
     super::object_permissions::default_locked_flags(model, &locked.superuser_only, &mut collected);
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
         return Ok(refused(e.as_str().to_owned()).await);
+    }
+    if let Some(msg) = hidden_fk_refusal(&state, &parts, model, &collected, None).await? {
+        return Ok(refused(msg).await);
     }
     // A tenant's host, path prefix and port, claimed as the console does.
     #[cfg(feature = "tenancy")]
@@ -2618,6 +2624,8 @@ pub(crate) async fn update_submit(
     }
     let pk_field = primary_key_or_internal(model)?;
     let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
+    // `/x/007` and `/x/7` are one row: audit and signals name it one way.
+    let pk_text = pk_value.to_display_string();
     // A refused save shows the form again with what was typed.
     let again_pk = (pk_value.clone(), pk_raw.clone());
     let (state_ref, parts_ref, form_ref, again_pk_ref) = (&state, &parts, &form, &again_pk);
@@ -2694,6 +2702,10 @@ pub(crate) async fn update_submit(
     {
         return Ok(refused(e.as_str().to_owned()).await);
     }
+    let stored = Some((pk_field, &pk_value));
+    if let Some(msg) = hidden_fk_refusal(&state, &parts, model, &collected, stored).await? {
+        return Ok(refused(msg).await);
+    }
     #[cfg(feature = "tenancy")]
     let claims = match crate::tenancy::org_host::AdminClaims::of(
         model.table,
@@ -2740,7 +2752,7 @@ pub(crate) async fn update_submit(
     };
     crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         change: true,
         tenant: state.config.tenant.clone(),
     })
@@ -2795,7 +2807,7 @@ pub(crate) async fn update_submit(
             &query,
             before_select.clone(),
             &pre_update_fields,
-            |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
+            |row| super::audit::admin_audit_diff_entry(model, &pk_text, row, &audit_form),
             emit,
         )
         .await;
@@ -2884,7 +2896,7 @@ pub(crate) async fn update_submit(
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         change: true,
         tenant: state.config.tenant.clone(),
     })
@@ -2944,6 +2956,19 @@ pub(super) async fn admits_written(
     }))
 }
 
+/// The form error when `values` link an FK to a row this request cannot see.
+pub(super) async fn hidden_fk_refusal(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    values: &[(&'static str, SqlValue)],
+    stored: Option<(&'static FieldSchema, &SqlValue)>,
+) -> Result<Option<String>, crate::sql::ExecError> {
+    let hidden =
+        super::queryset_hooks::hidden_fk_target(&state.pool, parts, model, values, stored).await?;
+    Ok(hidden.map(|f| format!("field `{}`: no such object", f.name)))
+}
+
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
 async fn rollback_quietly(tx: crate::audit::PoolBoundTx<'_>, table: &str) {
@@ -2967,6 +2992,7 @@ pub(crate) async fn delete_submit(
     }
     let pk_field = primary_key_or_internal(model)?;
     let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
+    let pk_text = pk_value.to_display_string();
 
     // Read the row before deleting it, so the audit entry records
     // what was removed. A row missing or outside the queryset hooks'
@@ -3004,13 +3030,13 @@ pub(crate) async fn delete_submit(
 
     crate::signals::admin::send_admin_pre_delete(crate::signals::admin::AdminDeleteContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         tenant: state.config.tenant.clone(),
     })
     .await;
     let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
     let entry =
-        super::audit::admin_row_snapshot_entry(model, pk_raw.clone(), audit_op, &before_row, None);
+        super::audit::admin_row_snapshot_entry(model, pk_text.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
@@ -3040,7 +3066,7 @@ pub(crate) async fn delete_submit(
         Ok(n) => n,
         Err(e) => {
             rollback_quietly(tx, model.table).await;
-            return refused_delete(&state, model, e);
+            return refused_delete(&state, &parts, model, e);
         }
     };
     // Deleted by someone else since the read: keep their stamp and audit row (#1929).
@@ -3067,7 +3093,7 @@ pub(crate) async fn delete_submit(
     // emit, in both soft and hard delete mode.
     crate::signals::admin::send_admin_post_delete(crate::signals::admin::AdminDeleteContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         tenant: state.config.tenant.clone(),
     })
     .await;
@@ -3075,9 +3101,11 @@ pub(crate) async fn delete_submit(
 }
 
 /// A failed hard delete: a 409 naming who still points at the row when
-/// the database refused on an FK (#2340), else the usual error.
+/// the database refused on an FK, else the usual error. A browser
+/// gets it as an admin page, other clients as JSON.
 fn refused_delete(
     state: &AppState,
+    parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
     e: crate::sql::ExecError,
 ) -> Result<Response, AdminError> {
@@ -3101,16 +3129,34 @@ fn refused_delete(
         (false, true) => format!("rows in {}", tables.join(", ")),
         (false, false) => format!("other rows, possibly in {}", tables.join(", ")),
     };
-    Ok(crate::api_errors::ApiError::conflict(format!(
+    let message = format!(
         "{} is still referenced by {by}; delete or change those first.",
         model.name
-    ))
-    .with_details(serde_json::json!({
-        "table": model.table,
-        "referenced_by": tables,
-        "correlation_id": id,
-    }))
-    .into_response())
+    );
+    if crate::errors::accepts_html(&parts.headers) && !parts.headers.contains_key("hx-request") {
+        let mut ctx = serde_json::json!({
+            "model": {
+                "name": model.name,
+                "table": model.table,
+                "label_plural": model.display_label_plural(),
+            },
+            "message": format!("{message} (error id {id})"),
+        });
+        let html = render_with_chrome(
+            "delete_refused.html",
+            &mut ctx,
+            chrome_context(state, Some(model.table)),
+        );
+        return Ok((axum::http::StatusCode::CONFLICT, Html(html)).into_response());
+    }
+    let body =
+        crate::api_errors::ApiError::conflict(message.clone()).with_details(serde_json::json!({
+            "table": model.table,
+            "referenced_by": tables,
+            "correlation_id": id,
+        }));
+    // The words let the error-pages layer dress it for htmx.
+    Ok((crate::errors::Message::new(message), body).into_response())
 }
 
 /// Tables whose FK onto `table` refuses a parent delete.
@@ -3350,7 +3396,7 @@ pub(crate) async fn action_submit(
         Err(e) => {
             rollback_quietly(tx, model.table).await;
             // Only a hard delete can hit an FK; else this is `Err(e.into())`.
-            return refused_delete(&state, model, e);
+            return refused_delete(&state, &parts, model, e);
         }
     };
     #[cfg(feature = "tenancy")]

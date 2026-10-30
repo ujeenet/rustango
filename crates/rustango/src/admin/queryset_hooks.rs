@@ -139,6 +139,34 @@ impl RowScope {
     }
 }
 
+/// The first FK among `values` naming a target row this request cannot see:
+/// outside its [`RowScope`] or refused by its "view" hook. Read on the pool;
+/// on update, `stored` is the owner row's pk, so a link it holds is kept.
+pub(crate) async fn hidden_fk_target(
+    pool: &crate::sql::Pool,
+    parts: &Parts,
+    owner: &'static ModelSchema,
+    values: &[(&'static str, SqlValue)],
+    stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
+) -> Result<Option<&'static crate::core::FieldSchema>, crate::sql::ExecError> {
+    use crate::admin::object_permissions::{has_hook, is_allowed};
+    use crate::viewset::fk_target::{first_hidden, FkTarget};
+    let targets: Vec<FkTarget> = owner
+        .scalar_fields()
+        .filter(|f| values.iter().any(|(c, _)| *c == f.column))
+        .filter_map(|f| {
+            FkTarget::of(f, |target| {
+                let scope = RowScope::of(target, parts).0;
+                let scope = scope.into_iter().map(WhereExpr::Predicate).collect();
+                (scope, has_hook(target.table, "view"))
+            })
+        })
+        .collect();
+    let admits =
+        |t: &FkTarget, row: &serde_json::Value| is_allowed(t.model.table, "view", parts, Some(row));
+    first_hidden(pool, None, owner, &targets, values, stored, admits).await
+}
+
 /// Register an admin queryset hook for one model.
 ///
 /// See the module docs for what it does. The hook must be a plain

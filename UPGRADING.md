@@ -162,6 +162,12 @@ untouched.
 - The admin edit form keeps a stored `""` in a nullable text field left empty; it can no longer turn that `""` into NULL. Clearing a non-empty value still stores NULL.
 - The workspace `serde_json` now enables `raw_value`. Through feature unification your app's `serde_json` gets it too; the feature only adds API.
 
+### Admin
+
+- Admin writes now refuse an FK to a target row the user's hooks hide; a form that relied on it gets "no such object".
+- Admin audit entries for edits and deletes are filed under the canonical key (`7`, not `007`); older entries keep the spelling they were filed under.
+- A blocked admin delete answers `Accept: text/html` with an HTML 409 page instead of JSON.
+
 ---
 
 ## 0.61.13
