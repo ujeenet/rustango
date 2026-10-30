@@ -1329,12 +1329,23 @@ mod tests {
     async fn naturalday_filter_reads_dates_in_the_active_offset() {
         use crate::i18n::timezone::with_offset;
         let tera = setup();
-        let east14 = chrono::FixedOffset::east_opt(14 * 3600).unwrap();
-        let local_today = Utc::now().with_timezone(&east14).date_naive();
-        let mut ctx = tera::Context::new();
-        ctx.insert("d", &local_today.to_string());
-        let out = with_offset(east14, async { render(&tera, "{{ d | naturalday }}", ctx) }).await;
-        assert_eq!(out, "today");
+        // At any hour one of these is on another date than UTC, so a
+        // UTC day count fails at least one of them.
+        let mut checked = 0;
+        for hours in [14, -12] {
+            let tz = chrono::FixedOffset::east_opt(hours * 3600).unwrap();
+            let now = Utc::now();
+            let local_today = now.with_timezone(&tz).date_naive();
+            if local_today == now.date_naive() {
+                continue;
+            }
+            checked += 1;
+            let mut ctx = tera::Context::new();
+            ctx.insert("d", &local_today.to_string());
+            let out = with_offset(tz, async { render(&tera, "{{ d | naturalday }}", ctx) }).await;
+            assert_eq!(out, "today", "offset {hours}h");
+        }
+        assert!(checked > 0);
     }
 
     // -------- register --------
