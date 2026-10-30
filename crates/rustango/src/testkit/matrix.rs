@@ -267,13 +267,13 @@ pub async fn drop_table(pool: &Pool, table: &str) {
 /// A database of one test's own on `pool`'s server, for a lib test whose
 /// table name is fixed: nextest runs each test in its own process, so
 /// [`live_lock`] cannot keep two of them off one table. Dropped with it.
-#[cfg(test)]
+#[cfg(all(test, feature = "tenancy", feature = "totp"))]
 pub(crate) struct OwnDatabase {
     pub(crate) pool: Pool,
     drop: Option<(String, String)>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tenancy", feature = "totp"))]
 impl OwnDatabase {
     /// SQLite's in-memory pool is already private, so it is used as is.
     pub(crate) async fn on(pool: &Pool) -> Self {
@@ -318,7 +318,7 @@ impl OwnDatabase {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tenancy", feature = "totp"))]
 impl Drop for OwnDatabase {
     fn drop(&mut self) {
         let Some((admin_url, sql)) = self.drop.take() else {
