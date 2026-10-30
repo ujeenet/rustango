@@ -904,7 +904,10 @@ mod tests {
         use crate::tenancy::{
             create_skill_pool, create_user_key_pool, map_skill_to_permission_pool,
         };
-        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        // A file, not `:memory:`: every pooled connection must see one database.
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("t.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.unwrap();
         crate::testkit::migrate_framework(&pool).await.unwrap();
         crate::sql::raw_execute_pool(
             &pool,
