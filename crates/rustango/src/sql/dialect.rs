@@ -71,6 +71,7 @@ pub(crate) fn split_qualified(name: &str) -> (Option<&str>, &str) {
 }
 
 /// `name` quoted part by part, so `schema.table` is not one identifier.
+#[cfg(any(feature = "cache", feature = "postgres"))]
 pub(crate) fn quote_qualified(d: &dyn Dialect, name: &str) -> String {
     match split_qualified(name) {
         (Some(schema), table) => format!("{}.{}", d.quote_ident(schema), d.quote_ident(table)),

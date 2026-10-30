@@ -48,12 +48,14 @@ pub use backend::{
 pub use compiled::CompiledStatement;
 pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
+#[cfg(any(feature = "cache", feature = "postgres"))]
+pub(crate) use dialect::quote_qualified;
 // Its callers are feature-gated (PG schemas, SQLite inspectdb).
 #[allow(unused_imports)]
 pub(crate) use dialect::quote_with;
 pub(crate) use dialect::refuse_unbindable_values;
+pub(crate) use dialect::split_qualified;
 pub use dialect::Dialect;
-pub(crate) use dialect::{quote_qualified, split_qualified};
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
 #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 pub(crate) use error::{Refusal, STILL_REFERENCED};
