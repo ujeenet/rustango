@@ -320,7 +320,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(
         w,
-        "      With --settings: where each setting comes from (no database)."
+        "      With --settings: where each setting comes from, reading config/\n      for the RUSTANGO_ENV tier (no database)."
     )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
     writeln!(w, "  flush [--yes] [--app <label>] [--model <name>]")?;
@@ -6756,11 +6756,12 @@ use crate::sql::connect_diagnosis::redact as redact_url;
 /// Lifted out so the audit logic is pure (testable without
 /// `unsafe { env::set_var }` race conditions across `cargo test`'s
 /// parallel runners). No `Debug`: it holds the session secret.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct DeployAuditEnv {
     pub rustango_env: Option<String>,
     pub session_secret: Option<String>,
-    pub database_url: Option<String>,
+    /// The resolver's URL, or its error text (never holds a URL).
+    pub database_url: Result<String, String>,
     /// `DATABASE_URL` and `DB_*` both set: the resolver's warning.
     pub database_style_conflict: Option<String>,
     pub apex_domain: ApexDomain,
@@ -6783,7 +6784,7 @@ fn deploy_audit_env(tenancy: bool) -> DeployAuditEnv {
     DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
-        database_url: crate::env::database_url_from_env().ok(),
+        database_url: crate::env::database_url_from_env().map_err(|e| e.to_string()),
         database_style_conflict: crate::env::database_style_conflict(),
         #[cfg(feature = "tenancy")]
         apex_domain: if tenancy {
@@ -6917,18 +6918,15 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
 
     // DATABASE_URL — required.
     match env.database_url.as_deref() {
-        None => out.errors.push(
-            "no database configured: DATABASE_URL, or DB_USER + DB_NAME, is required in production"
-                .into(),
-        ),
-        Some(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
+        Err(e) => out.errors.push(format!("no usable database URL: {e}")),
+        Ok(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
             out.warnings.push(
                 "DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in \
                  production (typically a managed service hostname)"
                     .into(),
             );
         }
-        Some(_) => out.info.push("DATABASE_URL set".into()),
+        Ok(_) => out.info.push("DATABASE_URL set".into()),
     }
     if let Some(conflict) = &env.database_style_conflict {
         out.warnings.push(conflict.clone());
@@ -7058,7 +7056,11 @@ fn write_settings_report<W: Write>(
                 Ok((_, SettingSource::File(_))) => file_source(key.path),
                 Ok((_, src)) => src,
                 Err(e) => {
-                    missing = Some(e.to_string());
+                    let kind = match e {
+                        crate::env::EnvError::MissingRequired { .. } => "MISSING (required)",
+                        _ => "INVALID",
+                    };
+                    missing = Some(format!("{kind}: {e}"));
                     SettingSource::Default
                 }
             }
@@ -7082,9 +7084,7 @@ fn write_settings_report<W: Write>(
                 .unwrap_or_default(),
         };
         let note = match (key.reader, set) {
-            (_, false) if missing.is_some() => {
-                format!("  MISSING (required): {}", missing.unwrap_or_default())
-            }
+            (_, false) if missing.is_some() => format!("  {}", missing.unwrap_or_default()),
             (Reader::Unread { instead, .. }, true) => format!("  (nothing reads it; {instead})"),
             (Reader::App(by), true) => format!("  (read only by {by})"),
             _ => String::new(),
@@ -9532,7 +9532,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         DeployAuditEnv {
             rustango_env: Some("prod".into()),
             session_secret: Some("a".repeat(48)),
-            database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
+            database_url: Ok("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             database_style_conflict: None,
             apex_domain: ApexDomain::Tenancy(Some("app.example.com".into())),
             bind: Some("0.0.0.0:8080".into()),
@@ -9788,13 +9788,33 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     #[test]
     fn deploy_audit_unset_database_url_errors() {
         let env = DeployAuditEnv {
-            database_url: None,
+            database_url: Err("environment variable `DATABASE_URL` is required".into()),
             ..good_prod_env()
         };
         let r = run(&env);
         assert!(
             r.errors.iter().any(|e| e.contains("DATABASE_URL")),
             "expected error for unset DATABASE_URL, got: {:?}",
+            r.errors
+        );
+    }
+
+    /// On prod a URL only a settings file names is a deploy error.
+    #[test]
+    fn deploy_audit_refuses_a_settings_file_database_url_on_prod() {
+        let get = |n: &str| (n == "RUSTANGO_ENV").then(|| "prod".to_owned());
+        let env = DeployAuditEnv {
+            database_url: crate::env::resolve_database_url_from(&get, Some("postgres://dev/x"))
+                .map(|(url, _)| url)
+                .map_err(|e| e.to_string()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("RUSTANGO__DATABASE__URL") && !e.contains("dev/x")),
+            "{:?}",
             r.errors
         );
     }
@@ -9816,7 +9836,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     #[test]
     fn deploy_audit_localhost_database_url_warns() {
         let env = DeployAuditEnv {
-            database_url: Some("postgres://app:p@localhost/db".into()),
+            database_url: Ok("postgres://app:p@localhost/db".into()),
             ..good_prod_env()
         };
         let r = run(&env);
@@ -9940,6 +9960,15 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             line(&text, "database.url").contains("MISSING (required)"),
             "{text}"
         );
+
+        // A bad DB_PORT is invalid, not missing.
+        let bad_port = |name: &str| match name {
+            "DB_USER" | "DB_NAME" => Some("x".to_owned()),
+            "DB_PORT" => Some("nope".to_owned()),
+            _ => None,
+        };
+        let db = line(&report(&bad_port), "database.url");
+        assert!(db.contains("INVALID") && db.contains("DB_PORT"), "{db}");
     }
 
     #[cfg(feature = "config")]

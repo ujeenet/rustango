@@ -871,7 +871,9 @@ scheitert. Warnungen allein verursachen kein Scheitern.
 Einstellungsschlüssel aus, mit der Herkunft seines Werts (eine eigene
 Umgebungsvariable, `RUSTANGO__SECTION__KEY`, eine Einstellungsdatei oder
 der Standard), dem Wert, außer bei Geheimnissen, Schlüsseln, die nichts
-liest, und einer fehlenden Datenbank-URL.
+liest, und einer fehlenden oder ungültigen Datenbank-URL. Es liest
+`config/` für die `RUSTANGO_ENV`-Stufe; das kann von den Einstellungen
+abweichen, die die App an `with_settings` übergibt.
 
 ### `docs`
 

@@ -15,7 +15,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
-- `[database] url` is read: after `DATABASE_URL` / `DB_*` and `RUSTANGO__DATABASE__URL`, every pool falls back to it.
+- `[database] url` is read: after `DATABASE_URL` / `DB_*` and `RUSTANGO__DATABASE__URL`, every pool falls back to it, except on the prod tier, where a URL from a settings file is refused. Boot logs the URL's source once.
 - Each set settings key that nothing reads (`[sso]`, `[auth.jwt] issuer`/`audience`, some `[admin]` keys) gets its own boot warning saying what to use instead; a test fails when a new settings field names no reader.
 - ViewSet JSON bodies and `ModelFormFor::from_json` keep `""` on a nullable `String` field as `""`; only `null` writes NULL.
 - The admin edit form keeps a stored `""` in a nullable text field when the operator leaves it alone, instead of writing NULL. Clearing a non-empty value still stores NULL.

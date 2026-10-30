@@ -275,7 +275,8 @@ impl SsoSettings {
 pub struct DatabaseSettings {
     /// Connection URL, used when no env var names one. Order:
     /// `DATABASE_URL` (or the `DB_*` vars), `RUSTANGO__DATABASE__URL`,
-    /// then this key once `Cli::with_settings` has loaded it.
+    /// then this key once `Cli::with_settings` has loaded it. The prod
+    /// tier refuses this key.
     pub url: Option<String>,
     /// Which backend this deploy expects: `"postgres"`, `"mysql"` or
     /// `"sqlite"`. Optional. When unset,
@@ -496,8 +497,6 @@ pub struct MailSettings {
     #[serde(default)]
     pub smtp_timeout_secs: Option<u64>,
     /// The `From:` address on normal outgoing mail.
-    /// `default_from_email` is the other name for this field and
-    /// wins when both are set.
     pub from_address: Option<String>,
     /// The `From:` address on mail the server generates, such as
     /// `mail_admins`. Falls back to

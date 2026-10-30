@@ -890,7 +890,9 @@ Se termine avec un code non nul si une vérification de niveau erreur
 clé de paramètre avec l'origine de sa valeur (une variable d'environnement
 propre, `RUSTANGO__SECTION__KEY`, un fichier de paramètres ou la valeur
 par défaut), la valeur sauf pour un secret, les clés que rien ne lit et
-une URL de base manquante.
+une URL de base manquante ou invalide. Il lit `config/` pour le niveau
+`RUSTANGO_ENV`, qui peut différer des paramètres que l'application passe
+à `with_settings`.
 
 ### `docs`
 

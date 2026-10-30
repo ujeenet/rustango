@@ -848,7 +848,9 @@ cause a failure.
 `check --settings` needs no database. It prints every settings key with
 where its value comes from (a bare env var, `RUSTANGO__SECTION__KEY`, a
 settings file, or the default), the value unless it is a secret, keys
-nothing reads, and a missing database URL.
+nothing reads, and a missing or invalid database URL. It reads `config/`
+for the `RUSTANGO_ENV` tier, which can differ from the settings the app
+passes to `with_settings`.
 
 ### `docs`
 

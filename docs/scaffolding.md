@@ -241,7 +241,7 @@ How the templates differ inside `main.rs` / `urls.rs`:
 
 Settings load `config/default.toml` first, then `config/<RUSTANGO_ENV>_settings.toml` on top. `RUSTANGO_ENV` defaults to `dev`, so a freshly scaffolded `cargo run` works with no edits; set `RUSTANGO_ENV=prod` in production to pick up `prod_settings.toml`.
 
-The environment always wins over the files. `RUSTANGO__SECTION__KEY` overrides `[section] key`, and a few keys also have a bare env var that wins over both: `DATABASE_URL` (or the `DB_*` vars) for `[database] url`, `RUSTANGO_BIND` for `[server] bind`, `RUSTANGO_APEX_DOMAIN` for `[tenancy] apex_domain`. So the database URL comes from `DATABASE_URL` / `DB_*`, then `RUSTANGO__DATABASE__URL`, then `[database] url`. `cargo run -- check --settings` lists every key and where its value comes from, with secrets hidden.
+The environment always wins over the files. `RUSTANGO__SECTION__KEY` overrides `[section] key`, and a few keys also have a bare env var that wins over both: `DATABASE_URL` (or the `DB_*` vars) for `[database] url`, `RUSTANGO_BIND` for `[server] bind`, `RUSTANGO_APEX_DOMAIN` for `[tenancy] apex_domain`. So the database URL comes from `DATABASE_URL` / `DB_*`, then `RUSTANGO__DATABASE__URL`, then `[database] url`; the prod tier refuses a URL from a settings file. `cargo run -- check --settings` lists every key and where its value comes from, with secrets hidden.
 
 The dev and staging files set a `[brand] tagline` of `dev` and `staging`. To change it, or to set your own name and logo, see [Branding](operator-console.md#branding) and the admin's [config keys](admin.md#config-admin-and-brand).
 

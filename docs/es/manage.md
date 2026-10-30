@@ -861,7 +861,9 @@ de error. Las advertencias por sí solas no provocan un fallo.
 ajustes con el origen de su valor (una variable de entorno propia,
 `RUSTANGO__SECTION__KEY`, un archivo de ajustes o el valor por defecto),
 el valor salvo si es un secreto, las claves que nada lee y una URL de base
-de datos que falte.
+de datos que falte o no sea válida. Lee `config/` para el nivel de
+`RUSTANGO_ENV`, que puede diferir de los ajustes que la app pasa a
+`with_settings`.
 
 ### `docs`
 

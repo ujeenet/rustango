@@ -1,7 +1,7 @@
 //! Every settings key, who reads it, and which env vars win over it.
 //!
 //! A test walks the [`Settings`] type and fails when a field has no row
-//! here, so a new key cannot ship without a named reader.
+//! here, so a new key needs a row. The reader a row names is not verified.
 
 use super::sections::Settings;
 

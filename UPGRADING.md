@@ -229,8 +229,10 @@ untouched.
 
 ### Settings
 
-- `[database] url` and `RUSTANGO__DATABASE__URL` now connect when no env var names a database. Order: `DATABASE_URL` (or the `DB_*` vars), then `RUSTANGO__DATABASE__URL`, then `[database] url`. The env still wins, so a URL committed in a settings tier is used only where `DATABASE_URL` is unset; check that before relying on a missing-URL error.
-- `Cli::with_settings` now warns once per key that nothing reads (every `[sso]` key, `[auth.jwt] issuer`/`audience`, three `[admin]` keys), naming what to use instead.
+- `[database] url` and `RUSTANGO__DATABASE__URL` now connect when no env var names a database. Order: `DATABASE_URL` (or the `DB_*` vars), then `RUSTANGO__DATABASE__URL`, then `[database] url`. The env still wins, so a URL committed in a settings tier is used only where `DATABASE_URL` is unset. Boot logs which source the URL came from (never the URL).
+- On the prod tier a database URL from a settings file is refused, from any file: the app does not start and `check --deploy` reports an error. Set `DATABASE_URL` or `RUSTANGO__DATABASE__URL` there.
+- Boot (`Cli::run` after `with_settings`) now warns once per key that nothing reads (every `[sso]` key, `[auth.jwt] issuer`/`audience`, three `[admin]` keys), naming what to use instead.
+- New `check --settings` lists every key and where its value comes from, secrets hidden. It reads `config/` for the `RUSTANGO_ENV` tier, which can differ from settings the app built itself.
 - On the staging tier without a usable `RUSTANGO_SESSION_SECRET`, the tenancy server warns at boot that its `./var/` session keys are per pod.
 
 ---

@@ -498,6 +498,11 @@ const DB_UNSET_HINT: &str = "set DATABASE_URL, or DB_USER + DB_NAME \
      for SQLite, DB_DRIVER=sqlite + DB_NAME=<file path>; \
      or RUSTANGO__DATABASE__URL, or [database] url in the settings file";
 
+/// Why the prod tier ignores `[database] url`.
+const DB_PROD_FILE_HINT: &str = "on the prod tier the database URL must come from \
+     the environment (DATABASE_URL, the DB_* vars or RUSTANGO__DATABASE__URL); \
+     [database] url in a settings file is refused there";
+
 /// The settings-file `[database] url` override var.
 const DATABASE_URL_OVERRIDE: &str = "RUSTANGO__DATABASE__URL";
 
@@ -576,7 +581,8 @@ pub(crate) fn set_settings_database_url(url: &str) {
 /// - [`EnvError::Parse`] when `DB_PORT` is not a number, or
 ///   `DB_PASSWORD_FILE` can't be read or is set with `DB_PASSWORD`.
 pub fn database_url_from_env() -> Result<String, EnvError> {
-    let (url, _) = database_url_with_source()?;
+    let (url, source) = database_url_with_source()?;
+    note_database_url_source(&source);
     if let Some(msg) = database_style_conflict_with(&lookup) {
         warn_style_conflict_once(&msg);
     }
@@ -617,6 +623,17 @@ fn database_style_conflict_with(get: &dyn Fn(&str) -> Option<String>) -> Option<
         parts.join(", "),
         crate::sql::connect_diagnosis::redact(&url),
     ))
+}
+
+/// Log once where the database URL came from, never the URL itself.
+/// `true` when this call logged.
+fn note_database_url_source(source: &SettingSource) -> bool {
+    static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return false;
+    }
+    tracing::info!(target: "rustango::server", "database URL from {source}");
+    true
 }
 
 /// One warning per process: every pool open resolves the URL again.
@@ -669,9 +686,16 @@ pub(crate) fn resolve_database_url_from(
         ));
     }
     if let Some(url) = settings_url.filter(|u| !u.trim().is_empty()) {
+        // A committed dev URL must never reach prod when its secret fails to mount.
+        if is_prod_tier(&get("RUSTANGO_ENV").unwrap_or_default()) {
+            return Err(EnvError::MissingRequired {
+                name: "DATABASE_URL".into(),
+                hint: DB_PROD_FILE_HINT.into(),
+            });
+        }
         return Ok((
             normal(url.to_owned()),
-            SettingSource::File("[database] url".into()),
+            SettingSource::File("settings file [database] url".into()),
         ));
     }
     Err(EnvError::MissingRequired {
@@ -801,23 +825,16 @@ fn is_path_safe(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    // Env vars are process-global, so these tests run one at a time.
-    fn env_lock() -> &'static Mutex<()> {
-        static M: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| Mutex::new(()))
-    }
 
     fn with_env<F: FnOnce()>(name: &str, value: &str, f: F) {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         std::env::set_var(name, value);
         f();
         std::env::remove_var(name);
     }
 
     fn without_env<F: FnOnce()>(name: &str, f: F) {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         std::env::remove_var(name);
         f();
     }
@@ -946,7 +963,7 @@ mod tests {
     #[test]
     fn validator_check_passes_when_all_required_set() {
         // Set both vars inline: nesting `with_env` would deadlock.
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         std::env::set_var("RUSTANGO_TEST_VALID_DB", "x");
         std::env::set_var("RUSTANGO_TEST_VALID_KEY", "y");
         let v = Validator::new()
@@ -1100,7 +1117,7 @@ mod tests {
 
     #[test]
     fn database_url_from_env_prefers_database_url() {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         let _snap = EnvSnapshot::capture(DB_VARS);
         std::env::set_var("DATABASE_URL", "postgres://x@y:1/z");
         let url = database_url_from_env().unwrap();
@@ -1109,7 +1126,7 @@ mod tests {
 
     #[test]
     fn database_url_normalizes_postgresql_scheme() {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         let _snap = EnvSnapshot::capture(DB_VARS);
         std::env::set_var("DATABASE_URL", "postgresql://x@y:1/z");
         let url = database_url_from_env().unwrap();
@@ -1118,7 +1135,7 @@ mod tests {
 
     #[test]
     fn database_url_assembles_from_split_vars() {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         let _snap = EnvSnapshot::capture(DB_VARS);
         std::env::set_var("DB_HOST", "db.example.com");
         std::env::set_var("DB_PORT", "6543");
@@ -1131,7 +1148,7 @@ mod tests {
 
     #[test]
     fn database_url_assembles_mysql_when_driver_set() {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         let _snap = EnvSnapshot::capture(DB_VARS);
         std::env::set_var("DB_DRIVER", "mysql");
         std::env::set_var("DB_USER", "u");
@@ -1142,7 +1159,7 @@ mod tests {
 
     #[test]
     fn database_url_errors_when_required_missing() {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         let _snap = EnvSnapshot::capture(DB_VARS);
         std::env::set_var("DB_NAME", "x");
         // DB_USER missing
@@ -1307,7 +1324,7 @@ mod tests {
             resolve(&[]).unwrap(),
             (
                 "postgres://from-file/dev".to_owned(),
-                SettingSource::File("[database] url".into())
+                SettingSource::File("settings file [database] url".into())
             )
         );
         let over = [("RUSTANGO__DATABASE__URL", "postgresql://over/x")];
@@ -1340,9 +1357,43 @@ mod tests {
         assert!(matches!(blank, Err(EnvError::MissingRequired { .. })));
     }
 
+    /// On prod a settings-file URL is refused; env channels still work.
+    #[test]
+    fn prod_refuses_a_database_url_from_the_settings_file() {
+        let file = Some("postgres://dev-host/dev");
+        let prod = |extra: &[(&str, &str)]| {
+            let mut pairs = vec![("RUSTANGO_ENV", "Production")];
+            pairs.extend_from_slice(extra);
+            resolve_database_url_from(&vars(&pairs), file)
+        };
+        let err = prod(&[]).unwrap_err().to_string();
+        assert!(
+            err.contains("RUSTANGO__DATABASE__URL") && err.contains("DATABASE_URL"),
+            "{err}"
+        );
+        assert!(!err.contains("dev-host"), "{err}");
+        let over = [("RUSTANGO__DATABASE__URL", "postgres://p/x")];
+        assert_eq!(prod(&over).unwrap().0, "postgres://p/x");
+        let bare = [("DATABASE_URL", "postgres://p/y")];
+        assert_eq!(prod(&bare).unwrap().0, "postgres://p/y");
+        let staging = vars(&[("RUSTANGO_ENV", "staging")]);
+        assert!(resolve_database_url_from(&staging, file).is_ok());
+    }
+
+    /// The source is logged once per process, and the line has no URL.
+    #[test]
+    fn the_database_url_source_is_noted_once() {
+        let src = SettingSource::File("settings file [database] url".into());
+        assert_eq!(src.to_string(), "settings file [database] url");
+        assert!(note_database_url_source(&src));
+        assert!(!note_database_url_source(&SettingSource::Env(
+            "DATABASE_URL"
+        )));
+    }
+
     #[test]
     fn database_url_errors_on_bad_driver() {
-        let _g = env_lock().lock().unwrap();
+        let _g = crate::error::test_env::lock();
         let _snap = EnvSnapshot::capture(DB_VARS);
         std::env::set_var("DB_DRIVER", "oracle");
         std::env::set_var("DB_USER", "u");
