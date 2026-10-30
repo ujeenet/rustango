@@ -17,7 +17,7 @@ export DATABASE_URL=postgres://rustango:rustango@localhost:5432/orm_cookbook_dev
 cargo test
 ```
 
-Or on SQLite, no server needed:
+Or on SQLite, no server needed (MySQL works the same with `--features mysql`):
 
 ```bash
 DATABASE_URL='sqlite:./orm_cookbook.db?mode=rwc' cargo test --no-default-features --features sqlite
