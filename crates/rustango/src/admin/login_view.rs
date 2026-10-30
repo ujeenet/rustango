@@ -168,6 +168,7 @@ async fn render_login_form(
             .unwrap_or("Rustango Admin"),
         "admin_prefix": admin_prefix,
         "static_url": &state.config.static_url,
+        "brand_favicon_url": state.config.brand_favicon_url.as_deref(),
         // Show the authenticator-code field when `totp` is compiled in.
         // Users who are not enrolled just leave it blank, so a
         // build-time flag is enough and the login GET needs no lookup.
