@@ -322,14 +322,9 @@ fn delivery_headers(event: &WebhookEvent) -> Result<reqwest::header::HeaderMap, 
     extra.sort();
     for (k, v) in extra {
         let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| bad("name"))?;
-        if [HEADER_ID, HEADER_EVENT, HEADER_SIGNATURE]
-            .iter()
-            .any(|own| name.as_str().eq_ignore_ascii_case(own))
-        {
-            continue;
-        }
         map.insert(name, value(v)?);
     }
+    // Last, so a subscription header of the same name is replaced.
     map.insert(HEADER_ID, value(&event.id)?);
     map.insert(HEADER_EVENT, value(&event.event)?);
     map.insert(HEADER_SIGNATURE, value(&event.signature)?);
@@ -715,8 +710,8 @@ mod tests {
             .header("x-webhook-event", "spoofed")
             .header("X-Webhook-Id", "spoofed")
             .header("X-Webhook-Signature", "spoofed")
-            .header("X-Tenant", "a")
-            .header("x-tenant", "b")
+            .header("x-tenant", "a")
+            .header("X-Tenant", "b")
             .dispatch(&q, "order.created", &serde_json::json!({"a": 1}))
             .await
             .unwrap();
