@@ -23,6 +23,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An `unresolved_tenant` router with its own `/health` builds instead of panicking, and gets the api layers (CORS from `[security]`).
 - A tenant host row equal to the apex no longer makes the apex resolve to that tenant, and adding one is refused.
 - `server::Builder::from_env` returns the env error when the database vars are unset or invalid instead of connecting to a built-in URL.
+- `where_not_in` past the backend's bind cap returns `ExecError::InListUnsplittable` instead of a driver error; exact duplicate keys are dropped first.
+- `find_many` and `where_in` split past the bind cap return each row once, even when MySQL's collation matches it from keys in two batches.
+- `DatabaseCache` and `clearsessions --table` accept a `schema.table` name: each part is quoted, so the table is found.
+- Two concurrent media `set_tags` on one row on Postgres leave one caller's set, not both merged: the media row is locked first.
 
 ## [0.61.13] — 2026-10-30
 

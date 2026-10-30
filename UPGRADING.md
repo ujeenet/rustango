@@ -175,6 +175,12 @@ untouched.
 - `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. A `match` on `HostError` needs that arm.
 - `server::Builder::from_env` fails when the database env is missing or invalid; set `DATABASE_URL` (it no longer falls back to a built-in URL).
 
+### ORM
+
+- `Model::where_not_in` past the bind cap (SQLite 32766, MySQL 65535) now fails with `ExecError::InListUnsplittable` before reaching the database. Postgres binds one array and is unchanged.
+- A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
+- Media `set_tags` takes a row lock on the media row (one more query per call).
+
 ---
 
 ## 0.61.13
