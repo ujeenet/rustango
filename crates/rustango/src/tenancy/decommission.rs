@@ -1159,11 +1159,13 @@ impl PgDropTarget {
         ))
     }
 
-    /// Refuse while any session not tagged as this tenant is open.
+    /// Refuse while any session not tagged as this tenant is open. Not an
+    /// autovacuum worker: the drop ends that one itself.
     async fn refuse_foreign_sessions(&mut self) -> Result<(), TenancyError> {
         let foreign: i64 = crate::sql::sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity \
-             WHERE datname = $1 AND application_name IS DISTINCT FROM $2",
+             WHERE datname = $1 AND application_name IS DISTINCT FROM $2 \
+             AND backend_type IS DISTINCT FROM 'autovacuum worker'",
         )
         .bind(&self.dbname)
         .bind(&self.tag)

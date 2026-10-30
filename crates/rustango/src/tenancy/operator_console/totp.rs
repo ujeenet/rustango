@@ -597,6 +597,7 @@ pub(super) async fn account_disable(
 mod missing_table_tests {
     use super::*;
     use crate::sql::Pool;
+    use crate::testkit::matrix::OwnDatabase;
 
     /// A gate whose table step already ran, so the scenario's table state stands.
     fn gate(policy: Policy) -> Gate {
@@ -606,23 +607,26 @@ mod missing_table_tests {
         }
     }
 
-    async fn no_table(pool: &Pool) {
-        crate::testkit::matrix::drop_table(pool, "rustango_operator_totp").await;
-    }
+    /// Each scenario opens a database of its own, which has no table yet.
+    async fn no_table(_: &Pool) {}
 
     async fn optional_policy_without_the_table_signs_in_on_the_password(pool: &Pool) {
-        let owed = gate(Policy::Optional).owed(pool, 1).await;
+        let db = OwnDatabase::on(pool).await;
+        let owed = gate(Policy::Optional).owed(&db.pool, 1).await;
         assert!(matches!(owed, Ok(Owed::Nothing)), "{:?}", owed.err());
     }
 
     async fn required_policy_without_the_table_is_refused(pool: &Pool) {
-        assert!(gate(Policy::Required).owed(pool, 1).await.is_err());
+        let db = OwnDatabase::on(pool).await;
+        assert!(gate(Policy::Required).owed(&db.pool, 1).await.is_err());
     }
 
     /// The table exists but the device row does not decode: refused.
     async fn an_unreadable_table_is_refused(pool: &Pool) {
         use crate::sql::UpdaterPool as _;
         crate::aead::set_test_key();
+        let db = OwnDatabase::on(pool).await;
+        let pool = &db.pool;
         operator_totp::ensure_table(pool).await.unwrap();
         operator_totp::start(pool, 1, &TotpSecret::generate())
             .await
@@ -636,7 +640,6 @@ mod missing_table_tests {
             .await
             .unwrap();
         let owed = gate(Policy::Optional).owed(pool, 1).await;
-        crate::testkit::matrix::drop_table(pool, "rustango_operator_totp").await;
         assert!(owed.is_err(), "an unreadable device read as no device");
     }
 

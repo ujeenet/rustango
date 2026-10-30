@@ -264,6 +264,86 @@ pub async fn drop_table(pool: &Pool, table: &str) {
         .unwrap_or_else(|e| panic!("dropping {table} on {}: {e}", d.name()));
 }
 
+/// A database of one test's own on `pool`'s server, for a lib test whose
+/// table name is fixed: nextest runs each test in its own process, so
+/// [`live_lock`] cannot keep two of them off one table. Dropped with it.
+#[cfg(all(test, feature = "tenancy", feature = "totp"))]
+pub(crate) struct OwnDatabase {
+    pub(crate) pool: Pool,
+    drop: Option<(String, String)>,
+}
+
+#[cfg(all(test, feature = "tenancy", feature = "totp"))]
+impl OwnDatabase {
+    /// SQLite's in-memory pool is already private, so it is used as is.
+    pub(crate) async fn on(pool: &Pool) -> Self {
+        use crate::sql::server::DatabaseName;
+        let Some(var) = [Backend::Postgres, Backend::MySql]
+            .into_iter()
+            .find(|b| b.dialect_name() == pool.dialect().name())
+            .and_then(Backend::env_var)
+        else {
+            return Self {
+                pool: pool.clone(),
+                drop: None,
+            };
+        };
+        let admin_url = std::env::var(var).expect("the arm's URL is set");
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock after 1970")
+            .as_nanos();
+        let name = DatabaseName::new(format!("rgo-own-{}-{nanos}", std::process::id()))
+            .expect("a legal name");
+        let sql = pool
+            .dialect()
+            .create_database_sql(&name, None)
+            .expect("a server backend");
+        crate::sql::raw_execute_pool(pool, &sql, Vec::new())
+            .await
+            .expect("create database");
+        let (base, _) = admin_url.rsplit_once('/').expect("URL names a database");
+        let own = Pool::connect(&format!("{base}/{}", name.as_str()))
+            .await
+            .expect("connect own database");
+        let drop = pool
+            .dialect()
+            .force_drop_database_sql(&name)
+            .or_else(|| pool.dialect().drop_database_sql(&name))
+            .expect("a server backend");
+        Self {
+            pool: own,
+            drop: Some((admin_url, drop)),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "tenancy", feature = "totp"))]
+impl Drop for OwnDatabase {
+    fn drop(&mut self) {
+        let Some((admin_url, sql)) = self.drop.take() else {
+            return;
+        };
+        // Own thread and runtime: this may run inside a test's runtime or its unwind.
+        let done = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| e.to_string())?;
+            rt.block_on(async {
+                let admin = Pool::connect(&admin_url).await.map_err(|e| e.to_string())?;
+                let res = crate::sql::raw_execute_pool(&admin, &sql, Vec::new()).await;
+                admin.close().await;
+                res.map(drop).map_err(|e| e.to_string())
+            })
+        })
+        .join();
+        if let Err(e) = done.unwrap_or_else(|_| Err("drop thread panicked".to_owned())) {
+            eprintln!("could not drop a test's own database: {e}");
+        }
+    }
+}
+
 /// Drop `M`'s table and recreate it from `M::SCHEMA`.
 ///
 /// The DDL comes from the same emitter the migration runner uses, so the

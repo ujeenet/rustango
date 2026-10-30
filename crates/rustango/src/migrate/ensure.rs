@@ -526,9 +526,15 @@ pub(crate) async fn run_statements(pool: &Pool, stmts: &[String]) -> Result<(), 
         let stmt = idempotent(stmt, dialect);
         let mut res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
         // A racer's committed row type also says 42710; once in, the retry sees its table.
-        if dialect == "postgres"
-            && matches!(&res, Err(crate::sql::ExecError::Driver(e)) if is_type_clash(e, &stmt))
-        {
+        // Racing MySQL DDL can lose a deadlock: the statement was undone, so run it again.
+        let retry = match &res {
+            Err(e) if e.is_deadlock() => true,
+            Err(crate::sql::ExecError::Driver(e)) => {
+                dialect == "postgres" && is_type_clash(e, &stmt)
+            }
+            _ => false,
+        };
+        if retry {
             res = crate::sql::raw_execute_pool(pool, &stmt, Vec::new()).await;
         }
         if let Err(e) = res {

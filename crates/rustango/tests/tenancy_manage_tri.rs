@@ -1559,12 +1559,12 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
     let out = env
         .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
         .await;
-    // The server arms point at no server: its SSO secrets can't be reached,
-    // which counts as a failure, but the URL is still left as it is.
-    // Without `sso` the tenant is never opened.
+    // The server arms point at no server: its SSO secrets and sealed casts
+    // can't be reached, which counts as a failure, but the URL is left as it
+    // is. Without `casts` (which `sso` needs) the tenant is never opened.
     match env.backend() {
         BackendKind::Sqlite => drop(out.expect("apply")),
-        _ if !cfg!(feature = "sso") => drop(out.expect("apply")),
+        _ if !cfg!(feature = "casts") => drop(out.expect("apply")),
         _ => {
             assert!(format!("{:?}", out.expect_err("unreachable")).contains("could not be resealed"))
         }
