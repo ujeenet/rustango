@@ -28,4 +28,16 @@ cargo test
 cargo test --no-default-features --features sqlite --test auth_passwords --test auth_sessions
 ```
 
-`DATABASE_URL` defaults to the project `.env`; copy `.env.example` if present.
+The flow tests above need no database. To create the `auth_users` table:
+
+```sh
+cp .env.example .env     # set DATABASE_URL; the database must exist
+cargo run -- migrate     # applies migrations/ and the framework's system/ chain
+
+# or on SQLite, no server needed
+DATABASE_URL='sqlite:./auth_demo.db?mode=rwc' \
+  cargo run --no-default-features --features sqlite -- migrate
+```
+
+After changing `src/models.rs`, run `cargo run -- makemigrations` and commit
+the files it writes.
