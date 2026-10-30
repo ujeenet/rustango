@@ -571,13 +571,15 @@ jobs:
       # PG suites gated on `postgres` alone that import more (#1835).
       - run: cargo test -p rustango --no-default-features --features postgres,sqlite,tenancy --no-run
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
-      # only shape that compiles it; nothing else in CI did.
+      # only shape that compiles it, so it runs here too.
       #
       # `--test` on purpose, unlike the two commands above: the whole test
       # surface under this narrow feature set is not a gate this job owns.
       # Under-gated suites (e.g. `forms_prepare_save_sqlite_live`, now
       # `sqlite` + `forms`) were fixed in #1594 and #2313.
-      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone --no-run
+      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone
+      # The `not(feature = "tenancy")` half; `guards` runs the tenancy half.
+      - run: cargo test -p rustango --no-default-features --features sqlite --test system_migration_scopes
       # `sso` without `admin-sso`: literals gated on the wrong one broke here (#1737).
       - run: cargo test -p rustango --features tenancy,sso --no-run --test non_superuser_admin_visibility_live --test permissions_upsert_live --test admin_user_roles_panel_live
 
@@ -712,7 +714,7 @@ jobs:
       # The derive under a renamed dependency (`orm`, and `rgo` with `#[rgo(...)]`), on the smokes' own features.
       - run: cargo nextest run --profile ci -p rustango-renamed-smoke -p rustango-rgo-smoke
       # A `Decimal` model needs a build without `sqlite`.
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
+      - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri --test macro_decimal_time_binary decimal
       - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test values_tri decimal
 
   # Ungated too. At ~62s it is two billed minutes, and the reasoning that

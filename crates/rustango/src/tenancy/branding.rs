@@ -418,6 +418,15 @@ pub(crate) fn brand_asset_url_at(
     Some(format!("{brand_url}/{slug}/{p}"))
 }
 
+/// Held by lib tests that set the brand env vars, so they don't interleave.
+#[cfg(test)]
+pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+    static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -591,16 +600,7 @@ mod tests {
         assert_eq!(none, "#b04a2c");
     }
 
-    /// Lock for tests that mutate `MAX_BRAND_BYTES_ENV` — prevents
-    /// the parallel test runner from interleaving env mutations
-    /// across different test bodies. Each entrant sets the env to a
-    /// known value and resets to the default on exit.
-    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        static M: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        M.get_or_init(|| std::sync::Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-    }
+    use super::env_guard;
 
     #[tokio::test]
     async fn save_and_load_round_trip_in_memory() {

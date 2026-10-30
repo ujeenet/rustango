@@ -2460,6 +2460,45 @@ mod tests {
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
     }
 
+    /// `runserver`'s auto-migrate sends `pre_migrate` and `post_migrate`.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn auto_migrate_fires_pre_and_post_migrate() {
+        use crate::signals::migrate as sig;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = tmp.path().join("app.db");
+        let url = format!("sqlite://{}?mode=rwc", db.display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        // Receivers are global: record only runs on this test's database.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ours = move |t: &sig::MigrateTarget| {
+            t.pool
+                .as_sqlite()
+                .is_some_and(|p| p.connect_options().get_filename() == db.as_path())
+        };
+        let (pre_seen, pre_ours) = (seen.clone(), ours.clone());
+        let pre = sig::connect_pre_migrate_with_target(move |_, t| {
+            if pre_ours(&t) {
+                pre_seen.lock().unwrap().push("pre");
+            }
+            async {}
+        });
+        let post_seen = seen.clone();
+        let post = sig::connect_post_migrate_with_target(move |_, t| {
+            if ours(&t) {
+                post_seen.lock().unwrap().push("post");
+            }
+            async {}
+        });
+        let res = auto_migrate(&pool, &dir).await;
+        sig::disconnect_pre_migrate(pre);
+        sig::disconnect_post_migrate(post);
+        res.expect("auto-migrate");
+        assert_eq!(*seen.lock().unwrap(), ["pre", "post"]);
+    }
+
     /// `runserver`'s auto-migrate applies the system chain, like `manage migrate` (#2056).
     #[cfg(feature = "sqlite")]
     #[tokio::test]
@@ -3056,6 +3095,20 @@ mod tests {
         assert!(r.headers().contains_key("x-frame-options"));
         let r = send("acme.localhost", "/app", false).await.unwrap();
         assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
+    }
+
+    /// `[server] shutdown_timeout_secs` reaches the tenancy server's drain.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_the_drain_timeout() {
+        let mut s = crate::config::Settings::default();
+        s.server.shutdown_timeout_secs = Some(7);
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        let builder = crate::server::Builder::from_pool(pool, "sqlite::memory:", "localhost");
+        let builder = Cli::new().with_settings(&s).tenancy_builder(builder, None);
+        assert_eq!(builder.drain_timeout, std::time::Duration::from_secs(7));
     }
 
     /// `[server] max_body_bytes` reaches the operator console and tenant admin.

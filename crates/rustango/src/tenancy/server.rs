@@ -530,11 +530,43 @@ mod app_tests {
         ));
     }
 
+    /// A prefix tenant's links back to the apex use the server's apex.
+    #[tokio::test]
+    async fn a_path_prefix_tenant_links_to_the_server_apex() {
+        let (app, _registry, _tmp) = prefix_app(None).await;
+        let req = Request::builder()
+            .method("POST")
+            .uri("/acme/admin/__end-impersonation")
+            .header("host", "apex.test")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let location = resp
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            location.ends_with("://apex.test/orgs"),
+            "{} -> {location:?}",
+            resp.status()
+        );
+    }
+
     /// The logo the prefix tenant's sign-in page links loads on the apex.
     #[tokio::test]
     async fn a_path_prefix_tenants_logo_loads_on_the_apex() {
+        /// Unsets the root even if the test panics.
+        struct UnsetRoot;
+        impl Drop for UnsetRoot {
+            fn drop(&mut self) {
+                std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+            }
+        }
+        let _env = branding::env_guard();
         let brand = tempfile::tempdir().unwrap();
         std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, brand.path());
+        let unset = UnsetRoot;
         let logo = branding::save_brand_asset(
             "pfx-acme",
             branding::BrandAssetKind::Logo,
@@ -545,7 +577,7 @@ mod app_tests {
         .await
         .expect("save logo");
         let (app, _registry, _tmp) = prefix_app(Some(logo)).await;
-        std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+        drop(unset);
 
         let resp = get(&app, "/acme/login").await;
         let html = axum::body::to_bytes(resp.into_body(), 1 << 20)
