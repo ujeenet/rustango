@@ -41,6 +41,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `LocalStorage::url` and `StorageRegistry::cdn_url` percent-encode the key, as the S3 and Azure disks do: `#`, `?` and spaces no longer break the link.
 - On `LocalStorage` a directory key is not an object: `exists` is false, `load` is `NotFound`, `delete` is a no-op, and a save to it says the key names a directory.
 - A webhook subscription header replaces the default `Content-Type` or `User-Agent` instead of sending a second one; `X-Webhook-Id`, `-Event` and `-Signature` set by a subscription are ignored.
+- Admin inline add rows leave a defaulted field optional, and a blank one takes the column default.
+- Two admin inlines of one child table post under their own formset prefixes (`<child>-<fk>`), so each saves its own rows.
+- Admin inline read-only and superuser-only fields render as text instead of inputs whose edits were dropped.
+- The admin list's "show all" facet keeps an active value past the 200 cap and shows "+N more" for the rest.
+- The bare admin login page links the admin favicon.
 
 ## [0.61.13] — 2026-10-30
 

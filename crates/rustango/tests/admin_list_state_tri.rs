@@ -380,6 +380,13 @@ async fn facet_show_all_is_capped(pool: &Pool) {
         .filter(|v| !v.is_empty() && v.bytes().all(|b| b.is_ascii_digit()))
         .collect();
     assert_eq!(shown.len(), 200, "{shown:?}");
+    // Past the cap the active value stays, and the rest is counted, not linked.
+    let body = get(pool, "/adminls_slug?rank=204&facet_show_all=rank").await;
+    assert!(body.contains(r#"class="active">204</a>"#), "{body}");
+    assert!(
+        body.contains(r#"<li class="facet-more">+5 more&hellip;</li>"#),
+        "{body}"
+    );
 }
 
 /// The bulk-action form posts under the prefix.

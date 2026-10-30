@@ -19,7 +19,7 @@ use super::helpers::{chrome_context, ListQuery};
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::AppState;
-use super::views::{fetch_facet_counts, fetch_facet_value_total, FacetRow};
+use super::views::{fetch_capped_facet, FacetRow};
 use crate::audit::AuditPerm;
 
 /// Page size for the `/__audit` activity feed. Matches the per-table
@@ -107,24 +107,17 @@ impl AuditReader<'_> {
                 ..SelectQuery::new(schema)
             }
         };
-        let mut rows =
-            fetch_facet_counts(self.pool, scope(None), field, false, Some(limit + 1)).await?;
-        let mut total = rows.len();
-        if total > limit {
-            total = fetch_facet_value_total(self.pool, scope(None), field).await?;
-            if let Some(v) = active.filter(|v| rows.iter().all(|r| r.raw != *v)) {
-                let own = Filter::new(field.column, Op::Eq, SqlValue::String(v.to_owned()));
-                let extra =
-                    fetch_facet_counts(self.pool, scope(Some(own)), field, false, Some(1)).await?;
-                // A case-insensitive collation can match a shown value.
-                let extra: Vec<FacetRow> = extra
-                    .into_iter()
-                    .filter(|e| rows.iter().all(|r| r.raw != e.raw))
-                    .collect();
-                rows.extend(extra);
-            }
-        }
-        Ok((rows, total))
+        let own = active.map(|v| {
+            scope(Some(Filter::new(
+                field.column,
+                Op::Eq,
+                SqlValue::String(v.to_owned()),
+            )))
+        });
+        fetch_capped_facet(self.pool, scope(None), (field, false), limit, own, |r| {
+            active == Some(r.raw.as_str())
+        })
+        .await
     }
 }
 

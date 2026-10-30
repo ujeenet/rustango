@@ -1011,44 +1011,28 @@ async fn compute_facets(
         } else {
             FACET_TRUNCATE
         };
-        // One past the cap tells whether there are more (#2344).
-        let limit = Some(cap + 1);
-        let mut facet_rows =
-            fetch_facet_counts(&state.pool, source.clone(), field, is_bool, limit).await?;
-        let is_active = |r: &FacetRow| {
-            active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw))
-        };
-        let mut total_values = facet_rows.len();
-        if !show_all && total_values > FACET_TRUNCATE {
-            total_values = fetch_facet_value_total(&state.pool, source, field).await?;
-            // The active value may sit past the cut: read it on its own.
-            // The field's own filters select at most one value.
-            if !facet_rows.iter().any(is_active) {
-                let own: Vec<Filter> = field_filters
-                    .iter()
-                    .filter(|(name, _)| *name == field.name)
-                    .map(|(_, f)| f.clone())
-                    .collect();
-                if !own.is_empty() {
-                    let active_source = SelectQuery {
-                        where_clause: WhereExpr::and_predicates(
-                            facet_filters.into_iter().chain(own).collect(),
-                        ),
-                        search: search.cloned(),
-                        ..SelectQuery::new(model)
-                    };
-                    let extra =
-                        fetch_facet_counts(&state.pool, active_source, field, is_bool, Some(1))
-                            .await?;
-                    // `?author=01` names a shown value in another spelling.
-                    let extra: Vec<FacetRow> = extra
-                        .into_iter()
-                        .filter(|e| facet_rows.iter().all(|r| r.raw != e.raw))
-                        .collect();
-                    facet_rows.extend(extra);
-                }
-            }
-        }
+        // The field's own filters select at most one value.
+        let own: Vec<Filter> = field_filters
+            .iter()
+            .filter(|(name, _)| *name == field.name)
+            .map(|(_, f)| f.clone())
+            .collect();
+        let active_source = (!own.is_empty()).then(|| SelectQuery {
+            where_clause: WhereExpr::and_predicates(
+                facet_filters.iter().cloned().chain(own).collect(),
+            ),
+            search: search.cloned(),
+            ..SelectQuery::new(model)
+        });
+        let (mut facet_rows, total_values) = fetch_capped_facet(
+            &state.pool,
+            source,
+            (field, is_bool),
+            cap,
+            active_source,
+            |r| active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw)),
+        )
+        .await?;
         // An FK facet shows the target's display value: "Dr. Maeve O'Hara (3)", not "1 (3)".
         let fk_target = field.relation.and_then(|rel| match rel {
             crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
@@ -1128,14 +1112,12 @@ async fn compute_facets(
             }
             let room = cap.saturating_sub(active_first.len());
             let kept_rest_len = rest.len().min(room);
-            // "Show all" has no further page to link to.
-            if !show_all {
-                more_count = total_values - active_first.len() - kept_rest_len;
-            }
+            more_count = total_values.saturating_sub(active_first.len() + kept_rest_len);
             active_first.extend(rest.into_iter().take(room));
             values = active_first;
         }
-        let show_all_url = if more_count > 0 {
+        // "Show all" has no further page to link to.
+        let show_all_url = if more_count > 0 && !show_all {
             // Keep the current filters and add
             // `facet_show_all=<field>`, which swaps the truncated
             // list for the full one.
@@ -1265,6 +1247,35 @@ pub(crate) struct FacetRow {
     pub(crate) raw: String,
     display: Option<String>,
     pub(crate) count: i64,
+}
+
+/// `field`'s most used values over `source`, at most `cap + 1`, and how
+/// many distinct values it takes. Past the cap, the rows of
+/// `active_source` are read on their own when no fetched row `is_active`.
+pub(crate) async fn fetch_capped_facet(
+    pool: &crate::sql::Pool,
+    source: SelectQuery,
+    (field, is_bool): (&'static FieldSchema, bool),
+    cap: usize,
+    active_source: Option<SelectQuery>,
+    is_active: impl Fn(&FacetRow) -> bool,
+) -> Result<(Vec<FacetRow>, usize), AdminError> {
+    // One past the cap tells whether there are more (#2344).
+    let mut rows = fetch_facet_counts(pool, source.clone(), field, is_bool, Some(cap + 1)).await?;
+    let mut total = rows.len();
+    if total > cap {
+        total = fetch_facet_value_total(pool, source, field).await?;
+        if let Some(active) = active_source.filter(|_| !rows.iter().any(&is_active)) {
+            let extra = fetch_facet_counts(pool, active, field, is_bool, Some(1)).await?;
+            // Another spelling or a case-insensitive collation can name a shown value.
+            let extra: Vec<FacetRow> = extra
+                .into_iter()
+                .filter(|e| rows.iter().all(|r| r.raw != e.raw))
+                .collect();
+            rows.extend(extra);
+        }
+    }
+    Ok((rows, total))
 }
 
 /// How many distinct values (NULL included) `field` takes over `source`'s rows.
@@ -2559,7 +2570,7 @@ async fn edit_inline_panels(
         &state.pool,
         model,
         pk_value.clone(),
-        Some(parts),
+        Some((state, parts)),
         submitted,
     )
     .await
@@ -2568,7 +2579,7 @@ async fn edit_inline_panels(
         &state.pool,
         model,
         pk_value,
-        Some(parts),
+        Some((state, parts)),
         submitted,
     )
     .await
