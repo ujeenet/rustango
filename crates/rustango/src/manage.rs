@@ -1447,7 +1447,8 @@ impl Cli {
     ) -> crate::server::Builder<DB> {
         let mut builder = builder
             .observability(self.access_log_layer())
-            .span_redact(self.span_redact_params());
+            .span_redact(self.span_redact_params())
+            .drain_timeout(self.drain_timeout());
         if let Some(h) = &self.tenant_header {
             builder = builder.header_resolver(h.clone());
         }
@@ -1743,10 +1744,7 @@ impl Cli {
         // merged with the tenant admin and dispatched beside the
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
-        let mut builder = crate::server::Builder::from_env()
-            .await?
-            .api(api)
-            .drain_timeout(self.drain_timeout());
+        let mut builder = crate::server::Builder::from_env().await?.api(api);
         if let Some(apex) = self.apex.take() {
             builder = builder.with_apex(apex);
         }
@@ -1830,8 +1828,7 @@ impl Cli {
             registry_url,
             apex,
         )
-        .api(api)
-        .drain_timeout(self.drain_timeout());
+        .api(api);
         if let Some(apex) = apex_flag {
             builder = builder.with_apex(apex);
         }
