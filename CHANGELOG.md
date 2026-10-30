@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.13] — 2026-10-30
+
 ### Fixed
 
 - Tenant admin login on a path-prefix tenant lands on the tenant's root (`/t1/`) by default, and a `next` outside its prefix falls back there instead of leaving for the apex or another tenant. Under `RouteConfig::legacy()` a `next` at the login page no longer loops back to it.
