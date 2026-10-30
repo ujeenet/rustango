@@ -1869,8 +1869,9 @@ async fn migrate_target_runs_the_projects_registry_chain(pool: &Pool) {
     assert!(!root.join("blog/system").exists());
 }
 
-/// `migrate <target>` before a legacy file that creates a framework table:
-/// the system chain makes the table, since that file does not run.
+/// `migrate <target>` before a legacy file that creates `rustango_orgs`,
+/// which framework steps reference: the system chain makes it, since that
+/// file does not run.
 async fn migrate_target_before_a_legacy_framework_table(pool: &Pool) {
     use rustango::core::Model as _;
     use rustango::migrate::MigrationScope::Registry;
@@ -1879,19 +1880,20 @@ async fn migrate_target_before_a_legacy_framework_table(pool: &Pool) {
     let env = Env::bare(pool).await;
     let dir = env.dir("proj/migrations");
     scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
-    let table = rustango::tenancy::DbServer::SCHEMA.table;
     let legacy = rustango::migrate::Migration {
-        name: "0002_legacy_db_servers".into(),
+        name: "0002_legacy_orgs".into(),
         created_at: "2026-10-09T00:00:00Z".into(),
         prev: Some("0001_registry".into()),
         atomic: true,
         scope: Registry,
         replaces: Vec::new(),
         merges: Vec::new(),
-        snapshot: SchemaSnapshot::from_models(&[rustango::tenancy::DbServer::SCHEMA]),
-        forward: vec![Operation::Schema(SchemaChange::CreateTable(table.into()))],
+        snapshot: SchemaSnapshot::from_models(&[Org::SCHEMA]),
+        forward: vec![Operation::Schema(SchemaChange::CreateTable(
+            Org::SCHEMA.table.into(),
+        ))],
     };
-    rustango::migrate::file::write(&dir.join("0002_legacy_db_servers.json"), &legacy).unwrap();
+    rustango::migrate::file::write(&dir.join("0002_legacy_orgs.json"), &legacy).unwrap();
 
     let out = env
         .run_out(&dir, &["migrate", "0001_registry"])
@@ -1901,18 +1903,17 @@ async fn migrate_target_before_a_legacy_framework_table(pool: &Pool) {
         .await
         .expect("registry ledger");
     assert!(applied.contains("0001_registry"), "{out}");
-    assert!(!applied.contains("0002_legacy_db_servers"), "{out}");
-    let servers = rustango::tenancy::DbServer::objects()
-        .count(&env.registry)
-        .await
-        .expect("the system chain made the table");
-    assert_eq!(servers, 0);
-    // The bootstrap after the chains ran too.
+    assert!(!applied.contains("0002_legacy_orgs"), "{out}");
     let orgs = Org::objects()
         .count(&env.registry)
         .await
-        .expect("orgs table");
+        .expect("the system chain made the table");
     assert_eq!(orgs, 0);
+    let hosts = rustango::tenancy::OrgHost::objects()
+        .count(&env.registry)
+        .await
+        .expect("and the steps that reference it ran");
+    assert_eq!(hosts, 0);
 }
 
 /// A target name two folders share is refused before anything runs.
