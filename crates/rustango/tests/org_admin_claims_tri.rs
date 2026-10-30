@@ -220,6 +220,59 @@ async fn admin_org_edit_keeps_and_normalizes_its_own_routing(pool: &Pool) {
     assert_eq!(row.path_prefix.as_deref(), Some(prefix.as_str()));
 }
 
+/// A tenant holding `prefix`, a console route now, written past the
+/// validators as an older release could; any earlier holder removed.
+async fn legacy_prefix_org(pool: &Pool, tag: &str, prefix: &str) -> (i64, String) {
+    Org::objects()
+        .filter("path_prefix", prefix)
+        .delete_on(pool)
+        .await
+        .expect("clear the prefix");
+    let slug = name(pool, tag);
+    let id = org(pool, &slug).await;
+    let mut row = org_named(pool, &slug).await.unwrap();
+    row.path_prefix = Some(prefix.to_owned());
+    row.save_pool(pool).await.expect("legacy prefix");
+    (id, slug)
+}
+
+/// An unchanged legacy prefix does not block an edit; a new console one does.
+async fn admin_org_edit_keeps_a_legacy_console_prefix(pool: &Pool) {
+    let (id, slug) = legacy_prefix_org(pool, "legacy", "/audit").await;
+    let uri = format!("/rustango_orgs/{id}");
+    let (status, html) = send(pool, Method::POST, &uri, org_form(&slug, "", "/audit", "")).await;
+    assert!(status.is_redirection(), "{status}: {html}");
+    let (status, html) = send(pool, Method::POST, &uri, org_form(&slug, "", "/orgs", "")).await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    assert!(html.contains("operator console route"), "{html}");
+    let row = org_named(pool, &slug).await.unwrap();
+    assert_eq!(row.path_prefix.as_deref(), Some("/audit"));
+}
+
+/// The console's edit path keeps an unchanged legacy prefix too.
+async fn console_edit_keeps_a_legacy_console_prefix(pool: &Pool) {
+    let (_, slug) = legacy_prefix_org(pool, "legacy-console", "/account").await;
+    let patch = OrgPatch {
+        display_name: Some("renamed".into()),
+        path_prefix: Some("/account".into()),
+        ..OrgPatch::default()
+    };
+    apply(pool, &slug, &patch)
+        .await
+        .expect("edit keeps the prefix");
+    let row = org_named(pool, &slug).await.unwrap();
+    assert_eq!(row.display_name, "renamed");
+    assert_eq!(row.path_prefix.as_deref(), Some("/account"));
+    let patch = OrgPatch {
+        path_prefix: Some("/operators".into()),
+        ..OrgPatch::default()
+    };
+    let err = apply(pool, &slug, &patch)
+        .await
+        .expect_err("a new console prefix");
+    assert!(err.to_string().contains("operator console route"), "{err}");
+}
+
 /// The admin and the CLI take one free prefix at once: only one gets it.
 async fn admin_and_cli_racing_for_a_prefix_one_wins(pool: &Pool) {
     let (a, b) = (name(pool, "race-a"), name(pool, "race-b"));
@@ -560,5 +613,7 @@ tri_dialect_test! {
         admin_host_create_refuses_a_base_host,
         admin_org_edit_keeps_and_normalizes_its_own_routing,
         admin_and_cli_racing_for_a_prefix_one_wins,
+        admin_org_edit_keeps_a_legacy_console_prefix,
+        console_edit_keeps_a_legacy_console_prefix,
     ],
 }

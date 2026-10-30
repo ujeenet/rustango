@@ -1032,4 +1032,41 @@ mod tests {
         run(pool.clone(), dir, chain).await.unwrap();
         assert!(runner::table_exists_here(&pool, "sc_links").await);
     }
+
+    /// A target the ledger has under the lock runs nothing: the caller's
+    /// look was outside it, and the move is backward.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_applied_target_runs_no_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+        let pool = Pool::connect(&url).await.unwrap();
+        let sys = tmp.path().join("system/migrations");
+        let snap = json!({ "tables": [table("sc_sys", None)] });
+        let ops = vec![json!({ "CreateTable": "sc_sys" })];
+        write(&sys, &mig("0001_sys", None, snap, ops));
+        let dir = tmp.path().join("migrations");
+        let empty = json!({ "tables": [] });
+        write(&dir, &mig("0001_a", None, empty.clone(), vec![]));
+        write(&dir, &mig("0002_b", Some("0001_a"), empty, vec![]));
+        runner::migrate_pool(&pool, &dir).await.unwrap();
+
+        let chain = SystemChain::shipped(sys);
+        let dirs = [dir.clone()];
+        let ran = migrate_chains_to(
+            &pool,
+            &chain,
+            MigrationScope::Tenant,
+            &dirs,
+            Signals::Skip,
+            &dir,
+            "0001_a",
+        )
+        .await
+        .unwrap();
+        assert!(ran.is_none());
+        assert!(!runner::table_exists_here(&pool, "sc_sys").await);
+        let applied = runner::applied_set_pool(&pool).await.unwrap();
+        assert!(applied.contains("0002_b"), "{applied:?}");
+    }
 }
