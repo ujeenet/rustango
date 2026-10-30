@@ -55,6 +55,7 @@ for inline usage.
 - [Database utilities](#database-utilities)
 - [System commands](#system-commands)
 - [Tenancy commands](#tenancy-commands)
+- [Running several replicas](#running-several-replicas)
 - [Custom subcommands](#custom-subcommands)
 - [Common workflows](#common-workflows)
 - [Every verb](#every-verb)
@@ -974,7 +975,8 @@ cargo run -- runserver           # explicit
 
 On SIGTERM it stops accepting and gives open connections
 `[server] shutdown_timeout_secs` (default 20) to finish, then closes the rest.
-SSE and long-poll never finish by themselves. Provisioning and migration runs
+A `WsHub` WebSocket gets Close 1001 and an SSE stream wrapped in `Shutdown::cut`
+ends; long-poll and other streams run to the deadline. Provisioning and migration runs
 left `running` by a stopped process for over an hour are marked failed at the
 next boot, and a webhook retry with the same `event_id` runs again.
 
@@ -1530,6 +1532,76 @@ cargo run -- migrate              # creates rustango_users with your extras
 
 `Builder::user_model::<AppUser>()` does the same thing for code that
 builds the server `Builder` directly, without going through `Cli`.
+
+---
+
+## Running several replicas
+
+Some state lives in one process. Behind a load balancer with two or more
+replicas, each pod keeps its own copy:
+
+- **Cache.** The default `[cache] backend = "memory"` is one map per process.
+  Use Redis or the database cache ([caching](caching.md)), so counters, locks
+  and single-use marks are shared.
+- **Rate limits.** `RateLimitLayer` counts per process, so the real limit is
+  the limit times the replica count. Use `CacheRateLimitLayer` on a shared cache.
+- **Login throttle and lockout.** The per-IP and global login limits and the
+  username lock count per process until you install shared ones with
+  `login_throttle::configure_shared` and `account_lockout::configure_shared`
+  ([security](security.md)).
+- **Locks.** A `DistributedLock` on the in-memory cache locks one process only.
+- **JWT revocation.** The default `InMemoryJtiStore` does not tell other
+  replicas about a revoked token. Install a shared store with `with_jti_store`.
+- **i18n overrides.** Each process holds its own copy. Other replicas see an
+  edit after they call `refresh_overrides_pool` ([i18n](i18n.md)).
+- **MCP.** The notification bus and the cancel registry live in one process.
+  A `list_changed` or progress frame reaches only SSE clients on the same pod,
+  and a `notifications/cancelled` that lands on another pod is ignored
+  ([MCP](mcp.md)).
+- **Session keys.** Off prod, with `RUSTANGO_SESSION_SECRET` unset, the tenancy
+  server keeps its tenant and operator session keys in `./var/` on each pod. A
+  session made on one pod is then refused on another. Set
+  `RUSTANGO_SESSION_SECRET` on every tier that runs more than one pod.
+- **Brand files.** The operator console stores logos in a local dir by default
+  ([operator console](operator-console.md)).
+
+### Shutdown
+
+On SIGTERM the server:
+
+1. Stops accepting at once. The listener closes, so new connections to this
+   pod are refused.
+2. Asks each open connection to close after its current request.
+3. Sends Close 1001 to each `WsHub` WebSocket and ends each SSE stream wrapped
+   in `Shutdown::cut`, such as the MCP stream ([WebSockets](websockets.md)).
+4. Waits for open connections up to `[server] shutdown_timeout_secs`
+   (default 20; `server::Builder::drain_timeout` in code), then logs a warning
+   and closes the rest.
+
+Kubernetes takes a stopping pod out of its Service a moment after it sends
+SIGTERM, so a few new connections still arrive and are refused. Add a short
+`preStop` sleep, so the pod keeps serving until it is removed. Set
+`terminationGracePeriodSeconds` above the sleep plus `shutdown_timeout_secs`:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: web
+      lifecycle:
+        preStop:
+          sleep:
+            seconds: 5 # Kubernetes 1.30+; older: exec: { command: ["sleep", "5"] }
+```
+
+`/ready` pings the database with `SELECT 1`. When every pool connection is
+busy within 30 seconds of a passed ping, it reports the database up without a
+ping, so a traffic spike does not fail every replica at once. After 30 seconds
+it pings again, so a hung database still gives `503`. Each process tracks its
+own last ping.
+
+For a single-database app, turn off `migrate_on_boot` and run `migrate` once
+as a pre-deploy job (see `runserver` above).
 
 ---
 

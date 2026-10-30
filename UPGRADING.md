@@ -480,6 +480,10 @@ A refused shared-provider add now returns the console page (400) with the error,
 
 A model with `db_table_comment` gets a `makemigrations` warning: file migrations still do not write it, so add a data migration with the comment statement. MCP discovery on `*.localhost` / `[::1]` now says `http`; set a trusted `X-Forwarded-Proto` if a TLS proxy fronts it. The admin list's "show all" facet stops at 200 values.
 
+### Startup line, Job methods, `make_empty`, MCP agent key
+
+The `server listening on http://…` line on stderr is gone: every serve path now logs `listening on http://…` at INFO under the `rustango::server` target, so a script that waits for the old text, or an app with no tracing subscriber, sees nothing. `Job` gains the provided methods `max_attempts(&self)` and `retry_delay(&self, u32)`; a job type that also has an own trait method of that name gets an ambiguous-call error. The public `migrate::make_empty(dir, name)` now chains onto the last tenant-scope file, not the dir's last file; use `make_empty_in_scope` for a registry one. Off the prod tier with `RUSTANGO_SESSION_SECRET` unset, MCP agent tokens are signed with the tenant session key in `./var/`, so they survive a restart.
+
 ## 0.61.7
 
 ### Admin: no self-deactivation

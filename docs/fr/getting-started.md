@@ -333,7 +333,7 @@ cargo run
 Vous verrez :
 
 ```
-server listening on http://127.0.0.1:8080
+INFO rustango::server: listening on http://127.0.0.1:8080
 ```
 
 `cargo run` applique aussi les migrations en attente avant de commencer à écouter.

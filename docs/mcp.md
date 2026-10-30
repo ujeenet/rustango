@@ -157,10 +157,15 @@ The authed router mounts: `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
 (OAuth 2.1), and the two `.well-known/*` discovery documents. It signs agent
 tokens with `RUSTANGO_SESSION_SECRET`. If that is unset or shorter than 32 bytes,
-it logs a warning and uses a random per-process key, so tokens die on restart.
+off the prod tier it uses the tenant session key saved in `./var/`; on prod it
+logs a warning and uses a random per-process key, so tokens die on restart.
 Each process keeps at most 8 open SSE streams per agent and 256 per tenant; past
 that `GET {prefix}` answers `429`. Set `RUSTANGO_MCP_SSE_PER_AGENT` /
 `RUSTANGO_MCP_SSE_PER_TENANT` to change them (`0` is no cap).
+The notification bus and the cancel registry live in one process too. With
+several replicas, a `list_changed` or progress frame reaches only SSE clients on
+the same pod, and a `notifications/cancelled` that lands on another pod does not
+stop the call.
 
 The `initialize` handshake is a plain JSON-RPC POST. On the authed mount every
 POST needs a Bearer token, `initialize` and `ping` included; an unauthed call

@@ -69,6 +69,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Pagination links (`page_number_links`, `cursor_links`, `LinkHeaderBuilder`) keep every value of a repeated query key such as `?tag=a&tag=b`.
 - A NaN sitemap priority is left out instead of rendering `<priority>NaN</priority>`.
 - Operator console pages no longer tell operators to run build commands; inactive tenants hide the impersonate button, and impersonate refusals come back to the edit page as a message.
+- Docs: a "Running several replicas" section (per-process state, SIGTERM drain, `preStop`, `/ready`); MCP agent-key and per-process notes; four missed 0.61.8 upgrade notes; stale code comments. The console favicon field accepts every type the server takes.
 
 ### Deprecated
 
