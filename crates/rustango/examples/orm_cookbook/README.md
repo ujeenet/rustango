@@ -2,7 +2,7 @@
 
 Defines the recurring `Post` / `Author` models once and exercises the ORM
 recipes from [`docs/orm.md`](../../../../docs/orm.md) against a **real
-Postgres**, so the documented API can't silently drift.
+database**, so the documented API can't silently drift.
 
 In-repo example → it depends on the framework by path
 (`rustango = { path = "../.." }`).
@@ -10,10 +10,17 @@ In-repo example → it depends on the framework by path
 ## Run it
 
 ```bash
-docker compose -f ../getting_started_blog/docker-compose.yml up -d postgres   # or any Postgres
-# Use a throwaway database — the test resets the `public` schema each run:
+docker compose -f ../getting_started_blog/docker-compose.yml up -d --wait postgres   # or any Postgres
+docker compose -f ../getting_started_blog/docker-compose.yml exec postgres createdb -U rustango orm_cookbook_dev
+# Use a throwaway database — the test drops and recreates the model tables each run:
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/orm_cookbook_dev
 cargo test
+```
+
+Or on SQLite, no server needed:
+
+```bash
+DATABASE_URL='sqlite:./orm_cookbook.db?mode=rwc' cargo test --no-default-features --features sqlite
 ```
 
 ## Sections verified (`tests/orm_smoke.rs`)

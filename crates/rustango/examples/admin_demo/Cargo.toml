@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 # In-repo example → path dep on the framework. Default features include the
-# admin + audit; a real project uses `rustango = "0.43"` from crates.io.
+# admin + audit; a real project uses `rustango = "0.61"` from crates.io.
 rustango = { path = "../.." }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form", "query"] }

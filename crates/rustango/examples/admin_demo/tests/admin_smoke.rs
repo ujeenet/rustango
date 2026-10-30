@@ -8,13 +8,13 @@
 
 use admin_demo::{admin_router, seed};
 use rustango::admin::AdminUser;
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 use rustango::test_client::TestClient;
 
 #[tokio::test]
 async fn admin_renders_list_filters_and_inline() {
     let url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
-    let pool = PgPool::connect(&url).await.expect("connect");
+    let pool = Pool::connect(&url).await.expect("connect");
     seed(&pool).await.expect("seed");
 
     // The router the server mounts, so this pins its login.
@@ -34,7 +34,7 @@ async fn admin_renders_list_filters_and_inline() {
             .as_nanos()
     );
     let mut user = AdminUser::new_with_password(&name, "smoke-pass-123", true).unwrap();
-    user.insert_pool(&pool.clone().into()).await.expect("admin user");
+    user.insert_pool(&pool).await.expect("admin user");
     let login = client
         .login(
             "/admin/login",

@@ -1,10 +1,10 @@
 //! Multi-tenant SQLite demo — minimal end-to-end wiring of v0.33's
 //! `DatabaseTenant<Sqlite>` extractor.
 //!
-//! Runs without external state: spins up a Postgres-shaped registry
-//! against a lazy pool (the resolver in this demo is hardcoded, so
-//! the registry pool is never actually connected to), and uses
-//! in-memory SQLite for each tenant's data.
+//! Runs without external state: the registry is a lazy in-memory
+//! SQLite pool (the resolver in this demo is hardcoded, so it is
+//! never actually connected to), and each tenant's data lives in
+//! in-memory SQLite.
 //!
 //! Run:
 //!
@@ -12,10 +12,13 @@
 //! cargo run --example sqlite_tenant_demo \
 //!     --features=admin,postgres,runserver,tenancy,sqlite,template_views
 //! curl -H "Host: acme.localhost" http://localhost:8090/whoami
-//! # → acme: 1 post
+//! # → acme: 1 post(s)
 //! curl -H "Host: beta.localhost" http://localhost:8090/whoami
-//! # → beta: 1 post
+//! # → beta: 1 post(s)
 //! ```
+//!
+//! Each request adds a post, so the count grows per tenant. It listens
+//! on `127.0.0.1:8090`; set `RUSTANGO_BIND` to change that.
 //!
 //! Each tenant has its own SQLite database; the `posts` table is
 //! created on first acquire via a small bootstrap.
@@ -101,7 +104,7 @@ async fn whoami(mut t: DatabaseTenant<sqlx::Sqlite>) -> impl IntoResponse {
         .await
         .expect("count");
     let n: i64 = row.try_get("n").expect("n");
-    format!("{}: {n} posts\n", t.org.slug)
+    format!("{}: {n} post(s)\n", t.org.slug)
 }
 
 #[rustango::main]
@@ -120,8 +123,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ctx = Arc::new(DatabaseTenantContext {
         pools,
         resolver,
-        session_secret: SessionSecret::from_bytes(b"demo_tenant_secret____32bytes!!!".to_vec()),
-        operator_secret: SessionSecret::from_bytes(b"demo_operator_secret___32bytes!!".to_vec()),
+        // `RUSTANGO_SESSION_SECRET`, else random for this process. The demo
+        // never signs operator sessions, so that key is throwaway.
+        session_secret: SessionSecret::from_env_or_random(),
+        operator_secret: SessionSecret::from_bytes(
+            rustango::random::get_random_token_urlsafe(48).into_bytes(),
+        ),
         // v0.34 B.2 — the demo's registry is itself SQLite, proving
         // a pure-SQLite stack works end-to-end (no Postgres anywhere).
         registry: rustango::sql::Pool::Sqlite(sqlx::SqlitePool::connect_lazy("sqlite::memory:")?),
@@ -139,10 +146,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         ));
 
-    let bind = std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "0.0.0.0:8090".into());
+    let bind = std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "127.0.0.1:8090".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     println!("sqlite_tenant_demo listening on {bind}");
-    println!("try: curl -H 'Host: acme.localhost' http://localhost:8090/whoami");
+    println!("try: curl -H 'Host: acme.localhost' http://{bind}/whoami");
     axum::serve(listener, app).await?;
     Ok(())
 }

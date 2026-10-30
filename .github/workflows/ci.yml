@@ -2103,7 +2103,7 @@ jobs:
   # class of drift these examples were added to catch).
   #
   # getting_started_blog runs `migrate` first to create its schema;
-  # orm_cookbook resets the `public` schema inside the test itself.
+  # orm_cookbook recreates its tables inside the test itself.
   doc_examples:
     # Service images come from the GHCR mirror (#1688).
     permissions:

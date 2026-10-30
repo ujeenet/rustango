@@ -13,6 +13,7 @@
 //!   cargo run -p rustango --example sqlite_app_demo --features sqlite
 //! ```
 //!
+//! It listens on `127.0.0.1:8080`; set `RUSTANGO_BIND` to change that.
 //! Then in another terminal:
 //!
 //! ```sh
@@ -48,6 +49,9 @@ pub struct User {
     pub name: String,
 }
 
+/// A logged 500 that does not leak the database error to the client.
+type Error = (axum::http::StatusCode, String);
+
 #[derive(Deserialize)]
 struct CreateUser {
     name: String,
@@ -67,7 +71,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .bootstrap(&[User::SCHEMA])
         .await?
         .api(routes())
-        .serve("0.0.0.0:8080")
+        // Loopback by default: `POST /users` has no auth.
+        .serve(&std::env::var("RUSTANGO_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into()))
         .await
 }
 
@@ -77,23 +82,23 @@ fn routes() -> Router {
         .route("/healthz", get(|| async { "ok" }))
 }
 
-async fn list_users(Extension(pool): Extension<Arc<Pool>>) -> Json<Vec<User>> {
+async fn list_users(Extension(pool): Extension<Arc<Pool>>) -> Result<Json<Vec<User>>, Error> {
     let users = User::objects()
         .order_by(&[("id", false)])
         .fetch(&pool)
         .await
-        .expect("fetch users");
-    Json(users)
+        .map_err(rustango::server_error)?;
+    Ok(Json(users))
 }
 
 async fn create_user(
     Extension(pool): Extension<Arc<Pool>>,
     Json(payload): Json<CreateUser>,
-) -> Json<User> {
+) -> Result<Json<User>, Error> {
     let mut u = User {
         id: Auto::Unset,
         name: payload.name,
     };
-    u.insert_pool(&pool).await.expect("insert");
-    Json(u)
+    u.insert_pool(&pool).await.map_err(rustango::server_error)?;
+    Ok(Json(u))
 }

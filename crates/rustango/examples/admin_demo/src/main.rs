@@ -3,12 +3,12 @@
 //! admin has data to browse on first boot. Companion to docs/admin.md.
 
 use admin_demo::{admin_router, seed, Author, Comment, Post, Tag};
-use rustango::sql::sqlx::PgPool;
+use rustango::sql::Pool;
 
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _ = dotenvy::dotenv();
-    let pool = PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
+    let pool = Pool::connect(&std::env::var("DATABASE_URL")?).await?;
 
     // Force the lib's inventory registrations (models + the comments inline)
     // to link into this binary.
