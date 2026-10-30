@@ -59,6 +59,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `InMemoryCache` no longer evicts the entry just written when reads race the write.
 - `RateLimitLayer` at its bucket cap sweeps down to seven eighths of it, so the full scan runs once per eighth of new keys instead of on every one.
 - `/ready` reports the database ready when every pool connection is busy within 30 seconds of a passed ping, instead of queuing behind requests and timing out.
+- The console tenant edit and `edit-tenant --activate` refuse to activate a tenant whose create run failed; resume the run instead.
+- Tenancy `--help` shows the create description under `create-tenant` and the reseal line after `edit-tenant`'s; `test-tenant-connection` has its own.
+- `sqlite,cache` and `postgres,mcp,tenancy` builds compile without unused-item warnings.
 
 ### Deprecated
 

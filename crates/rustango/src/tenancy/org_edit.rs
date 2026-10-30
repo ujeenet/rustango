@@ -229,6 +229,19 @@ pub(crate) async fn apply_values_if(
     let activating = values
         .iter()
         .any(|(c, v)| *c == "active" && matches!(v, SqlValue::Bool(true)));
+    // A failed create left the schema half-migrated: only a resume may go live.
+    if activating && !existing.active {
+        if let Some(run) =
+            crate::tenancy::provision_store::failed_creator_run(registry, existing_id).await?
+        {
+            let run_id = run.id.get().copied().unwrap_or_default();
+            return Err(TenancyError::Validation(format!(
+                "tenant `{slug}` was left inactive by failed provision run #{run_id}; \
+                 resume that run (console run page, or `create-tenant {slug} --resume`) \
+                 instead of activating it"
+            )));
+        }
+    }
     for (column, value) in values {
         let value = match (column, value) {
             // Blank keeps the current URL; it is a credential, never cleared here.

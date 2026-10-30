@@ -1569,6 +1569,22 @@ async fn a_failed_create_resumes_from_its_run() {
         html.contains("resume-hint"),
         "the edit page links the run: {html}"
     );
+    // Ticking `active` on the half-migrated tenant is refused; the run stays resumable.
+    let (status, to, _) = send(
+        &b,
+        "POST",
+        &format!("/orgs/{slug}/edit"),
+        "display_name=Live&active=on",
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+    assert!(to.contains("error=") && to.contains("resume"), "{to}");
+    assert!(
+        !org(&b, &slug).await.unwrap().active,
+        "activated half-migrated"
+    );
+    let (_, _, html) = send(&b, "GET", &format!("/orgs/{slug}/edit"), "").await;
+    assert!(html.contains("resume-hint"), "the run was unlinked: {html}");
 
     // Submitting again says the tenant is resumable.
     std::fs::remove_file(&boom_file).unwrap();

@@ -184,6 +184,7 @@ untouched.
 - The console's new-tenant "Test connection" needs a slug or an explicit URL, and refuses what Create refuses (taken slug, bad fields).
 - `/ready` skips its `SELECT 1` and reports the database ok while every pool connection is checked out, but only within 30 seconds of its last passed ping; after that it pings, and a hung database is 503.
 - At the bucket cap, `RateLimitLayer` also drops partly spent buckets (fullest first) down to 7/8 of the cap, even when the sweep freed room.
+- Activating a tenant left inactive by a failed create run (console edit, `edit-tenant --activate`, `org_edit::apply`) now fails with a validation error; resume the run instead.
 
 ### Migrations
 
