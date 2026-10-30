@@ -60,6 +60,7 @@ pub struct TenantHost {
 
 /// Why a host could not be registered.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum HostError {
     /// Empty, or carrying a scheme, port, path or uppercase.
     Invalid(String),

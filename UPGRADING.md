@@ -179,7 +179,7 @@ untouched.
 - `resolve_user_agent_grants_pool` and `create_user_key_pool` treat an inactive key owner as entitled to nothing; an inactive superuser no longer resolves to every skill.
 - `WsHub::upgrade(ws)` → `upgrade(ws, shutdown)` and `ws_handler(socket, hub)` → `ws_handler(socket, hub, shutdown)`. Add a `shutdown: rustango::shutdown::Shutdown` extractor to the handler and pass it on.
 - `RegisteredHostResolver` is no longer a unit struct: build it with `RegisteredHostResolver::new(apex)`.
-- `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. A `match` on `HostError` needs that arm.
+- `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. `HostError` is now `#[non_exhaustive]`: a `match` on it needs a `_` arm.
 - `server::Builder::from_env` fails when the database env is missing or invalid; set `DATABASE_URL` (it no longer falls back to a built-in URL).
 - A tenant whose stored path prefix is now a console route can be edited again while the prefix stays the same; a new one is still refused.
 - `TenantProvisioner` has a new `resume` method with a default that refuses; implement it to let the console resume tenants.
@@ -223,6 +223,7 @@ untouched.
 - `WebhookSubscription::header` replaces a default header of the same name (any case) and ignores `X-Webhook-Id`, `-Event` and `-Signature`.
 - A webhook `Retry-After` is honoured only up to two minutes after dispatch (it was up to an hour).
 - `WebhookSubscription::header` with `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Keep-Alive` or `Proxy-Connection` (any case) makes `dispatch` fail; a queued row with one dead-letters.
+
 ### i18n and time
 
 - A plural lookup served from a fallback locale now uses that locale's rule (Russian 21 from an English entry reads "21 pages", not "21 page"). An `ngettext` with no catalog entry picks the source string by the default locale's rule.

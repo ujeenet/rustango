@@ -99,7 +99,7 @@ where
 /// ```
 #[deprecated(
     since = "0.61.14",
-    note = "a no-op; scope the offset with `i18n::timezone::with_offset`"
+    note = "a no-op, removed in 0.62.0; scope the offset with `i18n::timezone::with_offset`"
 )]
 pub fn activate(_offset: FixedOffset) -> bool {
     false

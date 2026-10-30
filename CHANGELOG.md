@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant. See UPGRADING.
+**Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant and is `#[non_exhaustive]`. `AuthSettings` has a new field `login_field` (struct literals need `..Default::default()`); `derive(Model)` refuses unknown `validators` names and `validators` on non-`String` fields at compile time; `server::Builder::from_env` no longer falls back to a built-in database URL; a JSON `""` on a nullable `String` field is kept as `""`; `derive(Form)` bool fields refuse unknown values; `where_not_in` past the bind cap returns `InListUnsplittable`; a dotted `DatabaseCache` table name means `schema.table`. See UPGRADING.
 
 ### Added
 
@@ -74,16 +74,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A NaN sitemap priority is left out instead of rendering `<priority>NaN</priority>`.
 - Operator console pages no longer tell operators to run build commands; inactive tenants hide the impersonate button, and impersonate refusals come back to the edit page as a message.
 - Docs: a "Running several replicas" section (per-process state, SIGTERM drain, `preStop`, `/ready`); MCP agent-key and per-process notes; four missed 0.61.8 upgrade notes; stale code comments. The console favicon field accepts every type the server takes.
-
 - `derive(Model)` refuses an unknown `validators = "..."` name and `validators` on a non-`String` field at compile time; before, the first failed every write and the second never ran.
 - An MCP request with a user-owned key reads the agent and owner rows once and its skills and tools in one join: 6 queries before the tool instead of 10.
 - `resolve_user_agent_grants_pool` and `create_user_key_pool` give an inactive owner nothing, as the request path already did; an inactive superuser used to get every skill.
 - The `sqlite_tenant_demo` example adds and counts posts through the ORM on `TenantScope`'s tenant pool instead of hand-written SQL.
 - `testkit::migrate_framework` and `create_framework_tables` build each `rustango_*` table from the model the migrations use (an app's own model over the framework's), not whichever registered first.
-
-### Deprecated
-
-- `i18n::timezone::activate`: it never did anything; use `with_offset`.
 - The operator console can resume a tenant a failed create left inactive: a Resume button on the failed run, a link from the edit page and from the "already exists" error; a failure after the tenant row lands opens the run instead of the form.
 - The new-tenant "Test connection" probes the database Create would use, after Create's own checks (slug, URL, routing clashes).
 - `migrate-tenant-storage` stops pg_dump and psql on SIGINT/SIGTERM and brings the tenant back; their stderr is read while they run, so a chatty dump no longer hangs.
@@ -92,6 +87,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Examples: `admin_demo` uses `sql::Pool`, `save_pool` and an ORM update for its bulk actions; `orm_cookbook` builds and passes on SQLite and MySQL; both READMEs create their database.
 - Examples: `mcp_demo`, `sqlite_tenant_demo` and `sqlite_app_demo` no longer hold literal secrets or bind `0.0.0.0` by default; `sqlite_app_demo` returns a 500 instead of panicking; `mcp_demo` creates its tenant tables, so it runs.
 - Examples: `auth_demo` ships its migrations and a `.env.example`.
+
+### Deprecated
+
+- `i18n::timezone::activate`: it never did anything; use `with_offset`.
 
 ## [0.61.13] — 2026-10-30
 
