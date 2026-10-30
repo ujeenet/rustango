@@ -1950,8 +1950,11 @@ mod tests {
     /// API-key guesses over two replicas: the per-IP limit bounds every compare.
     #[tokio::test]
     async fn per_request_keys_over_replicas_are_bounded_by_the_ip_limit() {
+        // Windows align to the clock: a burst over a window edge gets 2x.
+        // A decade-long window keeps the edge out of the burst.
         let r = replicas(LoginLimits {
             ip_limit: 3,
+            ip_window: Duration::from_secs(10 * 365 * 24 * 3600),
             ..LoginLimits::default()
         });
         let s = LoginScope::TenantApiKey("t-repl-ip".into());
