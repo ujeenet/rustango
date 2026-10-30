@@ -1147,12 +1147,13 @@ async fn two_inlines_of_one_child_keep_their_rows_apart(pool: &Pool) {
     assert_eq!(got, [(ab, 10), (ba, 20)]);
 }
 
-/// An inline's read-only field shows as text, on stored and blank rows.
+/// An inline's read-only field shows as text, on stored and blank rows, and
+/// a posted value for it is not saved.
 async fn inline_read_only_field_shows_as_text(pool: &Pool) {
-    let (a, ..) = seed_xfers(pool).await;
+    let (a, b, ab, ba) = seed_xfers(pool).await;
     let (status, html) = send(pool, "GET", &format!("/aed_acct/{a}/edit"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
-    let out = panel_prefix(&html, "to_id");
+    let (out, inn) = (panel_prefix(&html, "to_id"), panel_prefix(&html, "from_id"));
     for i in 0..2 {
         let name = format!("{out}-{i}-note");
         assert!(control(&html, &name).is_none(), "input for {name}");
@@ -1161,6 +1162,32 @@ async fn inline_read_only_field_shows_as_text(pool: &Pool) {
         html.contains(r#"<span class="readonly">n1</span>"#),
         "{html}"
     );
+    let k = |p: &str, rest: &str| format!("{p}-{rest}");
+    let form = encode(&[
+        ("name", "a".into()),
+        (&k(&out, "TOTAL_FORMS"), "1".into()),
+        (&k(&out, "INITIAL_FORMS"), "1".into()),
+        (&k(&out, "0-id"), ab.to_string()),
+        (&k(&out, "0-to_id"), b.to_string()),
+        (&k(&out, "0-amount"), "1".into()),
+        (&k(&out, "0-rank"), "1".into()),
+        (&k(&out, "0-note"), "forged".into()),
+        (&k(&inn, "TOTAL_FORMS"), "1".into()),
+        (&k(&inn, "INITIAL_FORMS"), "1".into()),
+        (&k(&inn, "0-id"), ba.to_string()),
+        (&k(&inn, "0-from_id"), b.to_string()),
+        (&k(&inn, "0-amount"), "2".into()),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_acct/{a}"), &form).await;
+    assert!(status.is_redirection(), "save: {status} {body}");
+    let notes: Vec<String> = Xfer::objects()
+        .fetch(pool)
+        .await
+        .expect("xfers")
+        .into_iter()
+        .map(|x| x.note)
+        .collect();
+    assert!(!notes.iter().any(|n| n == "forged"), "{notes:?}");
 }
 
 /// An inline add row leaves a defaulted field optional; blank takes the default.
