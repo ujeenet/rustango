@@ -194,6 +194,7 @@ untouched.
 ### Migrations
 
 - Tenancy `downgrade` (registry, `--tenant`, `--all-tenants`) now rolls back `<app>/migrations/` files too, newest first in apply order: `downgrade [N]` may pick an app-folder file where it used to pick one from `migrations/`.
+- `downgrade [N]` (tenancy and plain `manage`) undoes the most recently applied files by the ledger's `applied_at`, not the last names on disk. `downgrade <target>` rolls back only files of the target's folder applied after it; later files in other folders stay applied and are listed.
 - Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders; rename one.
 
 ### Sign-in

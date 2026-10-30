@@ -629,8 +629,9 @@ fn target_home(
 
 const DOWNGRADE_USAGE: &str =
     "downgrade [N | <target>] [--tenant <slug> | --all-tenants [--yes]]   roll back the last N \
-     (default 1) migrations, or those after <target>: registry-scoped, or tenant-scoped in one \
-     tenant / every active tenant. --all-tenants prints each tenant's plan; --yes runs it";
+     (default 1) applied migrations, or those of <target>'s folder applied after it: \
+     registry-scoped, or tenant-scoped in one tenant / every active tenant. --all-tenants \
+     prints each tenant's plan; --yes runs it";
 
 /// `downgrade [N]` on the registry ledger, or with `--tenant <slug>` /
 /// `--all-tenants` on the tenant ledgers, over that scope's files only.
@@ -699,10 +700,10 @@ where
                 ledger,
             )
             .await?;
-            for m in &touched {
+            for (_, m) in &touched.unapply {
                 writeln!(w, "registry: rolled back {}", m.name)?;
             }
-            if touched.is_empty() {
+            if touched.unapply.is_empty() {
                 writeln!(w, "registry: nothing to downgrade")?;
                 let sources = rustango::migrate::file::project_migration_dirs(dir);
                 let all_files = rustango::migrate::file::list_each(&sources)?;
@@ -747,25 +748,25 @@ where
         }
     }
     let project = tenant_migrate::ScopedProject::of(dir, MigrationScope::Tenant).await?;
-    let files = rustango::migrate::file::list_each(project.dirs())?;
     let run = !all || parsed.has("--yes");
     let mut failed = 0;
     for org in &orgs {
         let step = async {
             let (pool, own) = pools.existing_pool_dyn(org).await?;
             let result = async {
-                let applied =
-                    rustango::migrate::applied_or_empty(&pool, rustango::migrate::LEDGER_TABLE)
-                        .await?;
-                let plan = rollback.plan(&files, &applied);
+                let ledger = rustango::migrate::LEDGER_TABLE;
+                let order = crate::migrate::ApplyOrder::read_or_empty(&pool, ledger).await?;
+                let plan = rollback.plan(project.dirs(), &order)?;
                 // Chosen again under the lock: a migrate in between moves the plan.
-                let done = if !run || plan.is_empty() {
+                let done = if !run || plan.unapply.is_empty() {
                     plan
                 } else {
-                    let ledger = rustango::migrate::LEDGER_TABLE;
                     crate::migrate::rollback_pool(&pool, project.dirs(), rollback, ledger).await?
                 };
-                Ok(done.into_iter().map(|m| m.name).collect::<Vec<_>>())
+                let names = done.unapply.into_iter().map(|(_, m)| m.name).collect();
+                Ok::<(Vec<String>, Vec<String>), rustango::migrate::MigrateError>((
+                    names, done.kept,
+                ))
             }
             .await;
             if own {
@@ -773,19 +774,29 @@ where
             }
             result.map_err(TenancyError::Migrate)
         };
-        match step.await {
-            Ok(names) if names.is_empty() => {
+        let result = step.await;
+        match &result {
+            Ok((names, _)) if names.is_empty() => {
                 writeln!(w, "  · {}: nothing to downgrade", org.slug)?;
             }
-            Ok(names) if run => {
+            Ok((names, _)) if run => {
                 writeln!(w, "  ✓ {}: rolled back {}", org.slug, names.join(", "))?;
             }
-            Ok(names) => {
+            Ok((names, _)) => {
                 writeln!(w, "  · {}: would roll back {}", org.slug, names.join(", "))?;
             }
             Err(e) => {
                 failed += 1;
                 writeln!(w, "  ✗ {}: {e}", org.slug)?;
+            }
+        }
+        if let (Ok((_, kept)), Rollback::After(target)) = (&result, rollback) {
+            if !kept.is_empty() {
+                writeln!(
+                    w,
+                    "    left applied (other folders, applied after {target}): {}",
+                    kept.join(", ")
+                )?;
             }
         }
     }

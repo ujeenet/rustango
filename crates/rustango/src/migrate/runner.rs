@@ -1359,7 +1359,7 @@ async fn migrate_to_with_ledger(
 
         let mut applied = applied;
         let mut touched = Vec::new();
-        for mig in Rollback::After(target).plan(&all, &applied) {
+        for mig in backward_from(&all, &applied, target) {
             unapply_locked(pool, dir, &mig.name, ledger).await?;
             applied.remove(&mig.name);
             touched.push(mig);
@@ -1469,12 +1469,11 @@ async fn downgrade_with_ledger(
     }
     ensure_ledger_for(pool, ledger).await?;
     with_migrate_lock(pool, async {
-        let all = file::list_dir(dir)?;
-        let applied = applied_set_for(pool, ledger).await?;
-        let to_unapply = Rollback::Steps(steps).plan(&all, &applied);
+        let order = ApplyOrder::read(&crate::sql::Pool::Postgres(pool.clone()), ledger).await?;
+        let plan = Rollback::Steps(steps).plan(&[dir.to_path_buf()], &order)?;
 
-        let mut touched = Vec::with_capacity(to_unapply.len());
-        for mig in to_unapply {
+        let mut touched = Vec::with_capacity(plan.unapply.len());
+        for (_, mig) in plan.unapply {
             unapply_locked(pool, dir, &mig.name, ledger).await?;
             touched.push(mig);
         }
@@ -2865,7 +2864,10 @@ pub(crate) async fn try_table_resolves(
     pool: &crate::sql::Pool,
     table: &str,
 ) -> Result<bool, sqlx::Error> {
-    #[allow(unused_variables)]
+    #[cfg_attr(
+        not(any(feature = "mysql", feature = "sqlite")),
+        allow(unused_variables)
+    )]
     let (schema, bare) = crate::sql::split_qualified(table);
     Ok(match pool {
         #[cfg(feature = "postgres")]
@@ -2890,6 +2892,18 @@ pub(crate) async fn try_table_resolves(
         // SQLite resolves names case-insensitively; MySQL's catalog already follows the server.
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
+            // An unknown schema is no table, as on PG and MySQL, not an error.
+            if let Some(s) = schema {
+                let n = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM pragma_database_list WHERE name = ? COLLATE NOCASE",
+                )
+                .bind(s)
+                .fetch_one(sq)
+                .await?;
+                if n == 0 {
+                    return Ok(false);
+                }
+            }
             let master = match schema {
                 Some(s) => format!(
                     "{}.sqlite_master",
@@ -5029,7 +5043,7 @@ pub(crate) async fn migrate_to_locked(
         unapplied: Vec::new(),
         applied: Vec::new(),
     };
-    for mig in Rollback::After(target).plan(&all, &applied) {
+    for mig in backward_from(&all, &applied, target) {
         unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
         applied.remove(&mig.name);
         moved.unapplied.push(mig);
@@ -5069,7 +5083,8 @@ pub async fn downgrade_pool_with_ledger(
     if steps == 0 {
         return Ok(Vec::new());
     }
-    rollback_pool(pool, &[dir.to_path_buf()], Rollback::Steps(steps), ledger).await
+    let plan = rollback_pool(pool, &[dir.to_path_buf()], Rollback::Steps(steps), ledger).await?;
+    Ok(plan.unapply.into_iter().map(|(_, m)| m).collect())
 }
 
 /// What a rollback unapplies from a ledger.
@@ -5077,62 +5092,133 @@ pub async fn downgrade_pool_with_ledger(
 pub(crate) enum Rollback<'a> {
     /// The last N applied.
     Steps(usize),
-    /// Everything applied after this migration, which stays.
+    /// Every file of this migration's folder applied after it; it stays.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     After(&'a str),
 }
 
-impl Rollback<'_> {
-    /// The applied files of `all` this unapplies, newest first.
-    pub(crate) fn plan(self, all: &[Migration], applied: &HashSet<String>) -> Vec<Migration> {
-        match self {
-            Rollback::Steps(n) => all
-                .iter()
-                .rev()
-                .filter(|m| applied.contains(&m.name))
-                .take(n)
-                .cloned()
-                .collect(),
-            Rollback::After(target) => backward_from(all, applied, target),
+/// A ledger's names in apply order: `applied_at`, ties in file order.
+#[derive(Debug, Default)]
+pub(crate) struct ApplyOrder(std::collections::HashMap<String, i64>);
+
+impl ApplyOrder {
+    /// Each name with how many rows were applied strictly before it.
+    pub(crate) async fn read(pool: &crate::sql::Pool, ledger: &str) -> Result<Self, MigrateError> {
+        let sql = format!(
+            "SELECT l1.name, (SELECT COUNT(*) FROM {ledger} l2 \
+             WHERE l2.applied_at < l1.applied_at) FROM {ledger} l1"
+        );
+        let rows: Vec<(String, i64)> = crate::sql::raw_query_pool(&sql, Vec::new(), pool).await?;
+        Ok(Self(rows.into_iter().collect()))
+    }
+
+    /// [`Self::read`], empty while the ledger does not exist yet.
+    #[cfg(feature = "tenancy")]
+    pub(crate) async fn read_or_empty(
+        pool: &crate::sql::Pool,
+        ledger: &str,
+    ) -> Result<Self, MigrateError> {
+        if try_table_exists_here(pool, ledger).await? {
+            Self::read(pool, ledger).await
+        } else {
+            Ok(Self::default())
         }
     }
 }
 
-/// Unapply `rollback`'s plan over `dirs` in apply order, read and run under
-/// one migrate lock. Each file is unapplied against its own folder.
+/// A rollback's files, newest applied first, each with its folder.
+#[derive(Debug, Default)]
+pub(crate) struct RollbackPlan {
+    pub(crate) unapply: Vec<(std::path::PathBuf, Migration)>,
+    /// Other folders' files applied after an `After` target; left applied.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) kept: Vec<String>,
+}
+
+impl Rollback<'_> {
+    /// Plan over `dirs`' files by apply order. A name in two folders that
+    /// the plan touches is refused, so nothing is unapplied.
+    pub(crate) fn plan(
+        self,
+        dirs: &[std::path::PathBuf],
+        order: &ApplyOrder,
+    ) -> Result<RollbackPlan, MigrateError> {
+        let mut files: Vec<(usize, Migration)> = Vec::new();
+        for (folder, dir) in dirs.iter().enumerate() {
+            files.extend(file::list_dir(dir)?.into_iter().map(|m| (folder, m)));
+        }
+        let mut applied: Vec<(i64, usize)> = files
+            .iter()
+            .enumerate()
+            .filter_map(|(at, (_, m))| order.0.get(&m.name).map(|&r| (r, at)))
+            .collect();
+        applied.sort_unstable_by(|a, b| b.cmp(a));
+        let mut kept = Vec::new();
+        let picked: Vec<usize> = match self {
+            Rollback::Steps(n) => applied.iter().take(n).map(|&(_, at)| at).collect(),
+            Rollback::After(target) => {
+                let mut homes = files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, m))| m.name == target);
+                let (t, folder) = match (homes.next(), homes.next()) {
+                    (Some((t, (folder, _))), None) => (t, *folder),
+                    (None, _) => {
+                        return Err(MigrateError::Validation(format!(
+                            "target migration `{target}` not found"
+                        )))
+                    }
+                    (Some(_), Some(_)) => return Err(in_two_folders(target)),
+                };
+                // An unapplied target has no apply time: later by name, in its folder.
+                let key = order.0.get(target).map(|&r| (r, t));
+                let mut picked = Vec::new();
+                for &(r, at) in &applied {
+                    let later = key.map_or(at > t, |k| (r, at) > k);
+                    if !later {
+                        continue;
+                    }
+                    if files[at].0 == folder {
+                        picked.push(at);
+                    } else if key.is_some() {
+                        kept.push(files[at].1.name.clone());
+                    }
+                }
+                picked
+            }
+        };
+        let mut unapply = Vec::with_capacity(picked.len());
+        for at in picked {
+            let (folder, mig) = &files[at];
+            if files.iter().filter(|(_, m)| m.name == mig.name).count() > 1 {
+                return Err(in_two_folders(&mig.name));
+            }
+            unapply.push((dirs[*folder].clone(), mig.clone()));
+        }
+        Ok(RollbackPlan { unapply, kept })
+    }
+}
+
+fn in_two_folders(name: &str) -> MigrateError {
+    MigrateError::Validation(format!(
+        "`{name}` is in more than one migrations folder; rename one"
+    ))
+}
+
+/// Unapply `rollback`'s plan over `dirs`, newest applied first, read and run
+/// under one migrate lock. Each file is unapplied against its own folder.
 pub(crate) async fn rollback_pool(
     pool: &crate::sql::Pool,
     dirs: &[std::path::PathBuf],
     rollback: Rollback<'_>,
     ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
+) -> Result<RollbackPlan, MigrateError> {
     with_migrate_lock_pool(pool, ledger, async {
-        let mut all = Vec::new();
-        let mut home: Vec<&Path> = Vec::new();
-        for dir in dirs {
-            for m in file::list_dir(dir)? {
-                all.push(m);
-                home.push(dir);
-            }
-        }
-        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        // Every file's folder first, so a duplicate name unapplies nothing.
-        let mut planned = Vec::new();
-        for mig in rollback.plan(&all, &applied) {
-            let mut homes = all.iter().zip(&home).filter(|(m, _)| m.name == mig.name);
-            let (Some((_, dir)), None) = (homes.next(), homes.next()) else {
-                return Err(MigrateError::Validation(format!(
-                    "`{}` is in more than one migrations folder; rename one",
-                    mig.name
-                )));
-            };
-            planned.push((*dir, mig));
-        }
-        let mut touched = Vec::new();
-        for (dir, mig) in planned {
+        let plan = rollback.plan(dirs, &ApplyOrder::read(pool, ledger).await?)?;
+        for (dir, mig) in &plan.unapply {
             unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
-            touched.push(mig);
         }
-        Ok(touched)
+        Ok(plan)
     })
     .await
 }
