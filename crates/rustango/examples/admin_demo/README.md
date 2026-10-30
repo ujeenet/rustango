@@ -22,7 +22,8 @@ In-repo example → path dep on the framework. A real project uses
 ## Run it
 
 ```bash
-docker compose -f ../getting_started_blog/docker-compose.yml up -d postgres  # or any Postgres
+docker compose -f ../getting_started_blog/docker-compose.yml up -d --wait postgres  # or any Postgres
+docker compose -f ../getting_started_blog/docker-compose.yml exec postgres createdb -U rustango admin_demo
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/admin_demo
 cargo run -- migrate     # create tables (+ the audit-log table)
 cargo run -- create-admin alice  # the admin login

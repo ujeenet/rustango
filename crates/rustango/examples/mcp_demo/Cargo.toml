@@ -19,7 +19,7 @@ path = "src/main.rs"
 
 [dependencies]
 # In-repo example → path dep on the framework. A real project uses
-# `rustango = { version = "0.43", features = ["mcp", "sqlite"] }` instead.
+# `rustango = { version = "0.61", features = ["mcp", "sqlite"] }` instead.
 rustango = { path = "../..", default-features = false, features = ["mcp", "sqlite"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "net"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }

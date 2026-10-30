@@ -3,7 +3,7 @@
 //! shown as an inline on the post edit page.
 
 use chrono::{DateTime, TimeZone, Utc};
-use rustango::sql::sqlx::{self, PgPool};
+use rustango::sql::{CounterPool as _, Pool, UpdaterPool as _};
 use rustango::{Auto, Model};
 
 #[derive(Model, Clone, Debug)]
@@ -92,9 +92,8 @@ rustango::register_admin_inline!(
 /// Idempotent demo seed: 3 authors, 5 tags, 15 posts (varied status + dates)
 /// and comments, so the admin has browsable content. Shared by the binary's
 /// boot-time `.seed()` hook and the integration test.
-pub async fn seed(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM posts").fetch_one(pool).await?;
-    if count > 0 {
+pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if Post::objects().count(pool).await? > 0 {
         return Ok(());
     }
 
@@ -105,13 +104,13 @@ pub async fn seed(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send 
             name: name.into(),
             email: format!("{}@example.com", name.split(' ').next().unwrap().to_lowercase()),
         };
-        a.save(pool).await?;
+        a.save_pool(pool).await?;
         author_ids.push(a.id.get().copied().unwrap());
     }
 
     for t in ["rust", "web", "orm", "admin", "async"] {
         let mut tag = Tag { id: Auto::default(), name: t.into(), slug: t.into() };
-        tag.save(pool).await?;
+        tag.save_pool(pool).await?;
     }
 
     let statuses = ["draft", "published", "archived"];
@@ -128,7 +127,7 @@ pub async fn seed(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send 
             view_count: (i * 37) % 500,
             published_at: Utc.with_ymd_and_hms(2025, month, day, 12, 0, 0).unwrap(),
         };
-        p.save(pool).await?;
+        p.save_pool(pool).await?;
         let pid = p.id.get().copied().unwrap();
 
         for c in 1..=3u32 {
@@ -139,7 +138,7 @@ pub async fn seed(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send 
                 body: format!("Comment {c} on post {i}."),
                 created_at: Utc.with_ymd_and_hms(2025, month, day, 13, c, 0).unwrap(),
             };
-            cm.save(pool).await?;
+            cm.save_pool(pool).await?;
         }
     }
     Ok(())
@@ -147,7 +146,7 @@ pub async fn seed(pool: &PgPool) -> Result<(), Box<dyn std::error::Error + Send 
 
 /// The admin the server mounts at `/admin`: behind a login, with the two
 /// bulk actions. Create the first account with `cargo run -- create-admin <name>`.
-pub fn admin_router(pool: PgPool) -> axum::Router {
+pub fn admin_router(pool: Pool) -> axum::Router {
     use rustango::session::{load_session_secret_for_tier, tier_from_env};
     let secret = load_session_secret_for_tier(
         &tier_from_env(),
@@ -169,23 +168,17 @@ pub fn admin_router(pool: PgPool) -> axum::Router {
 
 /// Bulk action handler — sets `status` on every selected post.
 async fn set_status(
-    pool: &rustango::sql::Pool,
+    pool: &Pool,
     pks: &[rustango::core::SqlValue],
     status: &str,
 ) -> Result<(), rustango::admin::AdminError> {
-    use rustango::core::SqlValue;
-    let ids: Vec<String> = pks
-        .iter()
-        .filter_map(|v| match v {
-            SqlValue::I64(n) => Some(n.to_string()),
-            SqlValue::I32(n) => Some(n.to_string()),
-            _ => None,
-        })
-        .collect();
-    if !ids.is_empty() {
-        // ids are integers parsed from the admin — safe to inline.
-        let sql = format!("UPDATE posts SET status = '{status}' WHERE id IN ({})", ids.join(", "));
-        rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
+    if !pks.is_empty() {
+        Post::objects()
+            .filter("id__in", rustango::core::SqlValue::List(pks.to_vec()))
+            .update()
+            .set("status", status)
+            .execute_pool(pool)
+            .await?;
     }
     Ok(())
 }

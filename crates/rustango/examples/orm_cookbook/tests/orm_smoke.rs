@@ -1,39 +1,32 @@
 //! Runs representative queries from each section of `docs/orm.md`
-//! against a real Postgres. Set `DATABASE_URL` to a throwaway database
-//! (the suite resets the `public` schema on every run).
+//! against a real database. Set `DATABASE_URL` to a throwaway database
+//! (the suite drops and recreates the model tables on every run).
 //!
 //! One test function on purpose: the sections share a freshly-seeded
 //! database, and a single test keeps that setup deterministic instead
-//! of racing parallel `DROP SCHEMA`s.
+//! of racing parallel drops.
 
 use chrono::{TimeZone, Utc};
 use orm_cookbook::{Author, Post};
 use rustango::core::aggregates::count_all;
 use rustango::core::Column as _;
 use rustango::core::{Op, SqlValue, WhereExpr};
-use rustango::sql::sqlx::PgPool;
 use rustango::sql::{CounterPool as _, FetcherPool as _, Pool};
 use rustango::Auto;
 
 fn url() -> String {
-    std::env::var("DATABASE_URL").expect("DATABASE_URL must point at a throwaway Postgres")
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must point at a throwaway database")
 }
 
-/// Reset the schema, create the model tables, and seed a handful of posts.
-/// Returns (rustango `Pool` for `.fetch`, sqlx `PgPool` for `.save`).
-async fn setup() -> (Pool, PgPool) {
-    let pool = Pool::connect(&url()).await.expect("connect rustango pool");
-    rustango::sql::raw_execute_pool(&pool, "DROP SCHEMA public CASCADE", Vec::new())
+/// Recreate the model tables and seed a handful of posts.
+async fn setup() -> Pool {
+    let pool = Pool::connect(&url()).await.expect("connect");
+    rustango::migrate::drop_all_pool(&pool)
         .await
-        .expect("drop schema");
-    rustango::sql::raw_execute_pool(&pool, "CREATE SCHEMA public", Vec::new())
-        .await
-        .expect("create schema");
+        .expect("drop tables");
     rustango::migrate::apply_all_pool(&pool)
         .await
         .expect("apply_all (create tables)");
-
-    let pg = PgPool::connect(&url()).await.expect("connect sqlx pool");
 
     // Seed: 3 published + 1 draft.
     for (title, status, author_id, views, active, price, pages) in [
@@ -56,17 +49,17 @@ async fn setup() -> (Pool, PgPool) {
             created_at: Auto::default(),
             deleted_at: None,
         };
-        p.save(&pg).await.expect("seed post");
+        p.save_pool(&pool).await.expect("seed post");
     }
     let mut a = Author { id: Auto::default(), name: "Ada".into() };
-    a.save(&pg).await.expect("seed author");
+    a.save_pool(&pool).await.expect("seed author");
 
-    (pool, pg)
+    pool
 }
 
 #[tokio::test]
 async fn orm_cookbook_recipes() {
-    let (pool, _pg) = setup().await;
+    let pool = setup().await;
 
     // ---- Querying ----
     let all = Post::objects().fetch(&pool).await.unwrap();

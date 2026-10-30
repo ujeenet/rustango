@@ -57,6 +57,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `migrate-tenant-storage` stops pg_dump and psql on SIGINT/SIGTERM and brings the tenant back; their stderr is read while they run, so a chatty dump no longer hangs.
 - The tenant pool near-cap warning keeps one latch per cache, so a full database cache no longer warns on every miss next to a quiet schema cache.
 - `--help` and the `tenant` SQLite README show the SQLite `add-db-server --sqlite-dir` form, the absolute existing directory it needs, and `create-tenant --mode database`.
+- Examples: `admin_demo` uses `sql::Pool`, `save_pool` and an ORM update for its bulk actions; `orm_cookbook` builds and passes on SQLite and MySQL; both READMEs create their database.
+- Examples: `mcp_demo`, `sqlite_tenant_demo` and `sqlite_app_demo` no longer hold literal secrets or bind `0.0.0.0` by default; `sqlite_app_demo` returns a 500 instead of panicking; `mcp_demo` creates its tenant tables, so it runs.
+- Examples: `auth_demo` ships its migrations and a `.env.example`.
 
 ## [0.61.13] — 2026-10-30
 
