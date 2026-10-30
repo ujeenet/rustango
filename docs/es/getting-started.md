@@ -329,7 +329,7 @@ cargo run
 Verás:
 
 ```
-server listening on http://127.0.0.1:8080
+INFO rustango::server: listening on http://127.0.0.1:8080
 ```
 
 `cargo run` también aplica las migraciones pendientes antes de empezar a escuchar.

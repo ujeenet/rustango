@@ -1311,7 +1311,7 @@ impl Cli {
     /// Generic over the pool type because the Postgres path extends a
     /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
     /// enum) while the other two extend `crate::sql::Pool`.
-    /// `server.shutdown_timeout_secs`, or the default (#1883).
+    /// `server.shutdown_timeout_secs`, or the default.
     fn drain_timeout(&self) -> std::time::Duration {
         #[cfg(feature = "config")]
         if let Some(s) = &self.settings_for_layers {

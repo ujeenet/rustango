@@ -51,7 +51,7 @@ pub async fn shutdown_signal() {
 }
 
 /// How long open connections get after the stop signal, when
-/// `server.shutdown_timeout_secs` is unset (#1883).
+/// `server.shutdown_timeout_secs` is unset.
 pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The signal a graceful server stops accepting on.
@@ -155,7 +155,7 @@ pub(crate) async fn bind_announced(
 
 /// Serve `app` until [`shutdown_signal`], then give open connections
 /// `drain` to finish. SSE and long-poll never finish on their own, so
-/// without a deadline SIGTERM waited for SIGKILL (#1883). This is the
+/// without a deadline SIGTERM waited for SIGKILL. This is the
 /// crate's only `axum::serve`, so no serve path can skip the drain (#1948).
 ///
 /// ```ignore
@@ -341,7 +341,7 @@ mod tests {
     }
 
     /// A request that never ends (long-poll, SSE) must not hold
-    /// shutdown past the deadline (#1883).
+    /// shutdown past the deadline.
     #[tokio::test]
     async fn an_endless_request_does_not_outlive_the_drain_deadline() {
         use tokio::io::AsyncWriteExt as _;
