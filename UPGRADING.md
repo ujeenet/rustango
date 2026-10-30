@@ -148,6 +148,15 @@ untouched.
 
 ---
 
+## Unreleased
+
+- `WsHub::upgrade(ws)` → `upgrade(ws, shutdown)` and `ws_handler(socket, hub)` → `ws_handler(socket, hub, shutdown)`. Add a `shutdown: rustango::shutdown::Shutdown` extractor to the handler and pass it on.
+- `RegisteredHostResolver` is no longer a unit struct: build it with `RegisteredHostResolver::new(apex)`.
+- `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. A `match` on `HostError` needs that arm.
+- `server::Builder::from_env` fails when the database env is missing or invalid; set `DATABASE_URL` (it no longer falls back to a built-in URL).
+
+---
+
 ## 0.61.12
 
 ### Tenancy

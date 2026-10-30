@@ -827,6 +827,7 @@ pub(super) async fn provision_run_stream(
     Extension(_op): Extension<auth::Operator>,
     Path(run_id): Path<i64>,
     Query(q): Query<StreamQuery>,
+    shutdown: crate::shutdown::Shutdown,
     headers: HeaderMap,
     // `impl IntoResponse` rather than naming `Sse<impl Stream<…>>`:
     // the `Stream` trait lives in `futures-core`, which is in the tree
@@ -921,7 +922,8 @@ pub(super) async fn provision_run_stream(
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // A watcher reconnects with `Last-Event-ID`, so shutdown just ends it.
+    Sse::new(shutdown.cut(stream)).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]

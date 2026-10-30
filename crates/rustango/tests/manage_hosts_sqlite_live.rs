@@ -129,7 +129,7 @@ async fn the_verb_and_the_engine_see_one_table() {
     );
 
     // And the other direction.
-    org_host::add_host(&b.registry, &slug, "b.example.com")
+    org_host::add_host(&b.registry, &slug, "b.example.com", "apex.invalid")
         .await
         .expect("engine add");
     let listed = b.run(&["list-hosts", &slug]).await.expect("list");

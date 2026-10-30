@@ -11,6 +11,7 @@
 //!   connections.
 //! - **Slow clients**: a lagging client gets a `{"_lagged":n}` message
 //!   instead of being dropped, so it can resync.
+//! - **Shutdown**: a stopping server sends Close 1001 (going away).
 //!
 //! The upgrade itself is yours to guard: axum does not check the
 //! `Origin` header, so a page on any site can open a socket to you.
@@ -21,6 +22,7 @@
 //!
 //! ```ignore
 //! use rustango::sse::EventBus;
+//! use rustango::shutdown::Shutdown;
 //! use rustango::ws::{ws_handler, WsHub};
 //! use axum::{Router, extract::WebSocketUpgrade, response::Response};
 //! use serde::{Serialize, Deserialize};
@@ -33,10 +35,11 @@
 //!
 //! async fn ws_route(
 //!     ws: WebSocketUpgrade,
+//!     shutdown: Shutdown,
 //!     State(hub): State<WsHub<Tick>>,
 //! ) -> Response {
 //!     // Applies `max_message_bytes` to the frame reader too.
-//!     hub.upgrade(ws)
+//!     hub.upgrade(ws, shutdown)
 //! }
 //!
 //! let app = Router::new().route("/ws", get(ws_route)).with_state(hub);
@@ -49,11 +52,12 @@
 
 use std::time::Duration;
 
-use axum::extract::ws::{Message, WebSocket};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::shutdown::Shutdown;
 use crate::sse::EventBus;
 
 /// Fans messages out to every connected WebSocket. Cheap to clone.
@@ -130,7 +134,11 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
     /// `max_message_bytes`, then run [`ws_handler`]. A bare
     /// `on_upgrade` reads up to 64 MiB before the size check (#1957).
     #[must_use = "the upgrade response must be returned"]
-    pub fn upgrade(&self, ws: axum::extract::WebSocketUpgrade) -> axum::response::Response
+    pub fn upgrade(
+        &self,
+        ws: axum::extract::WebSocketUpgrade,
+        shutdown: Shutdown,
+    ) -> axum::response::Response
     where
         T: DeserializeOwned,
     {
@@ -138,7 +146,7 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
         let max = self.config.max_message_bytes;
         ws.max_message_size(max)
             .max_frame_size(max)
-            .on_upgrade(move |socket| ws_handler(socket, hub))
+            .on_upgrade(move |socket| ws_handler(socket, hub, shutdown))
     }
 
     /// Send `event` to every connected client and return how many
@@ -164,13 +172,14 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
 /// the size cap applied; call it yourself only if you set that cap:
 ///
 /// ```ignore
-/// ws.max_message_size(n).on_upgrade(move |socket| ws_handler(socket, hub.clone()))
+/// ws.max_message_size(n).on_upgrade(move |socket| ws_handler(socket, hub.clone(), shutdown))
 /// ```
 ///
 /// A ping goes out every `keepalive`, traffic or not. It returns when the
 /// client disconnects, sends nothing for a whole interval after a ping,
-/// a send outlasts `max(keepalive, 10 s)`, or the bus closes.
-pub async fn ws_handler<T>(mut socket: WebSocket, hub: WsHub<T>)
+/// a send outlasts `max(keepalive, 10 s)`, or the bus closes. At
+/// `shutdown` it sends Close 1001 first.
+pub async fn ws_handler<T>(mut socket: WebSocket, hub: WsHub<T>, shutdown: Shutdown)
 where
     T: Clone + Send + Serialize + DeserializeOwned + 'static,
 {
@@ -184,9 +193,21 @@ where
     let mut ticks = tokio::time::interval_at(tokio::time::Instant::now() + keepalive, keepalive);
     ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut awaiting_reply = false;
+    let stopped = shutdown.stopped();
+    tokio::pin!(stopped);
 
     loop {
         tokio::select! {
+            // The server is stopping: say so, so the client reconnects elsewhere.
+            () = &mut stopped => {
+                let away = CloseFrame {
+                    code: close_code::AWAY,
+                    reason: "server shutting down".into(),
+                };
+                let _ = send(&mut socket, Message::Close(Some(away)), send_limit).await;
+                return;
+            }
+
             // Outbound: fan-out from the bus.
             recv = rx.recv() => match recv {
                 Ok(event) => {
@@ -305,7 +326,7 @@ mod tests {
             "/ws",
             axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
                 let hub = hub.clone();
-                async move { hub.upgrade(ws) }
+                async move { hub.upgrade(ws, Shutdown::default()) }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -351,7 +372,7 @@ mod tests {
             "/ws",
             axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
                 let hub = hub.clone();
-                async move { hub.upgrade(ws) }
+                async move { hub.upgrade(ws, Shutdown::default()) }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -319,7 +319,10 @@ async fn resolve(pool: &Pool, host: &str) -> Option<String> {
         .body(())
         .unwrap()
         .into_parts();
-    let org = RegisteredHostResolver.resolve(&parts, pool).await.unwrap();
+    let org = RegisteredHostResolver::new("apex.invalid")
+        .resolve(&parts, pool)
+        .await
+        .unwrap();
     org.map(|o| o.slug)
 }
 

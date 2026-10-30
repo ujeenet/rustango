@@ -1458,6 +1458,27 @@ impl Cli {
         api.layer(axum::Extension(pool))
     }
 
+    /// CSRF, the panic guard and the `[server]`/`[security]` layers the api
+    /// router gets; the outer ones are the builder's.
+    #[cfg(feature = "tenancy")]
+    fn with_api_layers(&self, router: Router) -> Router {
+        #[cfg(feature = "csrf")]
+        let router = match self.csrf_layer() {
+            Some(layer) => router.layer(layer),
+            None => router,
+        };
+        let router = crate::panic_guard::catch_panics(router);
+        #[cfg(feature = "config")]
+        let router = match self.settings_for_layers.as_ref() {
+            Some(s) => {
+                let (router, _outer) = apply_settings_layers(router, s);
+                router
+            }
+            None => router,
+        };
+        router
+    }
+
     /// Everything the tenancy builder must put on its outermost router:
     /// observability and the `[security]` outer layers, which layers on
     /// the api router never reach (#1480, #1699, #1700). Both tenancy
@@ -1475,7 +1496,7 @@ impl Cli {
             builder = builder.header_resolver(h.clone());
         }
         if let Some(r) = &self.unresolved_tenant {
-            builder = builder.unresolved_tenant(r.clone());
+            builder = builder.unresolved_tenant(self.with_api_layers(r.clone()));
         }
         if let Some(s) = &self.brand_storage {
             builder = builder.brand_storage(s.clone());
@@ -2936,6 +2957,37 @@ mod tests {
         assert_eq!(
             get(&app, "ghost.localhost", "/").await,
             (200, "unresolved:true".into())
+        );
+    }
+
+    /// The unresolved router gets the api layers: CORS from `[security]`.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn unresolved_tenant_gets_the_api_layers() {
+        use crate::server::resolver_tests::{hosted_registry, setup_router};
+        use tower::ServiceExt as _;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let mut s = crate::config::Settings::default();
+        s.security.cors_allowed_origins = vec!["https://app.example".into()];
+        let b = crate::server::Builder::from_pool(sq, url, "localhost");
+        let app = Cli::new()
+            .with_settings(&s)
+            .unresolved_tenant(setup_router())
+            .tenancy_builder(b, None)
+            .into_router()
+            .await
+            .expect("assemble");
+        let req = axum::http::Request::get("/")
+            .header("host", "ghost.localhost")
+            .header("origin", "https://app.example")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers()["access-control-allow-origin"],
+            "https://app.example"
         );
     }
 
