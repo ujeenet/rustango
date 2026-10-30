@@ -289,7 +289,8 @@ async fn a_jobs_payload_sets_its_cap_and_wait(pool: &Pool) {
     );
 }
 
-/// A webhook's `Retry-After` sets its retry time on a database queue.
+/// A webhook's `Retry-After` sets its retry time on a database queue,
+/// capped two minutes after dispatch.
 async fn a_retry_after_sets_a_webhooks_retry_time(pool: &Pool) {
     #[cfg(feature = "webhook-delivery")]
     {
@@ -330,10 +331,16 @@ async fn a_retry_after_sets_a_webhooks_retry_time(pool: &Pool) {
         }
         q.shutdown().await;
         srv.abort();
+        // Honoured, but only up to two minutes after dispatch.
         assert_eq!(
-            rows_due_after(pool, chrono::Duration::minutes(45)).await,
+            rows_due_after(pool, chrono::Duration::seconds(60)).await,
             1,
             "Retry-After not honoured"
+        );
+        assert_eq!(
+            rows_due_after(pool, chrono::Duration::minutes(3)).await,
+            0,
+            "Retry-After not capped"
         );
     }
     #[cfg(not(feature = "webhook-delivery"))]
