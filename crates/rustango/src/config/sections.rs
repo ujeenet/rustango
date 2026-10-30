@@ -69,36 +69,12 @@ pub struct Settings {
     /// `[errors]`: HTML error pages. Off unless `enabled = true`.
     pub errors: ErrorsSettings,
 
-    /// `[sso]`: **has no effect yet** — nothing reads it (#1379).
+    /// `[sso]`: **has no effect**; boot warns for each key set.
     /// Configure admin SSO in the admin UI instead.
     pub sso: SsoSettings,
 }
 
 impl Settings {
-    /// Keys that are set but that nothing reads yet (#1379), so boot can
-    /// say so instead of failing silently.
-    #[cfg(any(test, feature = "manage"))]
-    pub(crate) fn inert_keys(&self) -> Vec<&'static str> {
-        let checks = [
-            (self.sso != SsoSettings::default(), "[sso]"),
-            (self.auth.jwt.issuer.is_some(), "[auth.jwt] issuer"),
-            (self.auth.jwt.audience.is_some(), "[auth.jwt] audience"),
-            (self.admin.primary_color.is_some(), "[admin] primary_color"),
-            (
-                self.admin.csrf_cookie_secure.is_some(),
-                "[admin] csrf_cookie_secure",
-            ),
-            (
-                self.admin.session_timeout_minutes.is_some(),
-                "[admin] session_timeout_minutes",
-            ),
-        ];
-        checks
-            .into_iter()
-            .filter_map(|(set, key)| set.then_some(key))
-            .collect()
-    }
-
     /// The cargo features compiled into this build. Handy on version
     /// pages and in deploy audits, for example to spot that a prod
     /// binary lacks `oauth2` before the login button 500s. The list
@@ -223,8 +199,8 @@ impl McpSettings {
     }
 }
 
-/// **Has no effect yet: nothing in the framework reads this section**
-/// (#1379). Admin SSO providers are rows of the `SsoProvider` model,
+/// **Has no effect: nothing in the framework reads this section**, and
+/// boot warns for each key set. Admin SSO providers are rows of the `SsoProvider` model,
 /// set up in the admin UI; multi-tenant apps configure SSO per `Org`.
 /// Do not put a client secret here expecting it to be used.
 ///
@@ -298,10 +274,10 @@ impl SsoSettings {
 #[serde(default)]
 #[non_exhaustive]
 pub struct DatabaseSettings {
-    /// Connection URL. **Not used to connect yet** (#1379): every pool
-    /// the framework opens reads the `DATABASE_URL` env var.
-    /// `RUSTANGO__DATABASE__URL` only sets this field, so it does not
-    /// work either. [`DatabaseSettings::resolved_backend`] reads it.
+    /// Connection URL, used when no env var names one. Order:
+    /// `DATABASE_URL` (or the `DB_*` vars), `RUSTANGO__DATABASE__URL`,
+    /// then this key once `Cli::with_settings` has loaded it. The prod
+    /// tier refuses this key.
     pub url: Option<String>,
     /// Which backend this deploy expects: `"postgres"`, `"mysql"` or
     /// `"sqlite"`. Optional. When unset,
@@ -522,8 +498,6 @@ pub struct MailSettings {
     #[serde(default)]
     pub smtp_timeout_secs: Option<u64>,
     /// The `From:` address on normal outgoing mail.
-    /// `default_from_email` is the other name for this field and
-    /// wins when both are set.
     pub from_address: Option<String>,
     /// The `From:` address on mail the server generates, such as
     /// `mail_admins`. Falls back to
@@ -1171,20 +1145,6 @@ mod tests {
     fn resolved_backend_none_when_neither_set() {
         let s = DatabaseSettings::default();
         assert_eq!(s.resolved_backend(), None);
-    }
-
-    /// Every key nothing reads is reported once it is set (#1379).
-    #[test]
-    fn inert_keys_lists_the_settings_nothing_reads() {
-        let mut s = Settings::default();
-        assert!(s.inert_keys().is_empty());
-        s.sso.client_secret = Some("x".into());
-        s.auth.jwt.issuer = Some("x".into());
-        s.auth.jwt.audience = Some("x".into());
-        s.admin.primary_color = Some("#fff".into());
-        s.admin.csrf_cookie_secure = Some(true);
-        s.admin.session_timeout_minutes = Some(30);
-        assert_eq!(s.inert_keys().len(), 6, "{:?}", s.inert_keys());
     }
 
     // The optional AdminSettings fields default to None, so an

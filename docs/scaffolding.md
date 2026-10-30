@@ -241,18 +241,19 @@ How the templates differ inside `main.rs` / `urls.rs`:
 
 Settings load `config/default.toml` first, then `config/<RUSTANGO_ENV>_settings.toml` on top. `RUSTANGO_ENV` defaults to `dev`, so a freshly scaffolded `cargo run` works with no edits; set `RUSTANGO_ENV=prod` in production to pick up `prod_settings.toml`.
 
+The environment always wins over the files. `RUSTANGO__SECTION__KEY` overrides `[section] key`, and a few keys also have a bare env var that wins over both: `DATABASE_URL` (or the `DB_*` vars) for `[database] url`, `RUSTANGO_BIND` for `[server] bind`, `RUSTANGO_APEX_DOMAIN` for `[tenancy] apex_domain`. So the database URL comes from `DATABASE_URL` / `DB_*`, then `RUSTANGO__DATABASE__URL`, then `[database] url`; the prod tier refuses a URL from a settings file. `cargo run -- check --settings` lists every key and where its value comes from, with secrets hidden.
+
 The dev and staging files set a `[brand] tagline` of `dev` and `staging`. To change it, or to set your own name and logo, see [Branding](operator-console.md#branding) and the admin's [config keys](admin.md#config-admin-and-brand).
 
 ### Settings that do not take effect on their own
 
-Not every key is read by the framework. `Cli::with_settings` warns at boot when one of the first group is set.
+Not every key is read by the framework. `Cli::with_settings` warns at boot, once per key, when one of the first group is set.
 
 | Key | Status |
 |---|---|
 | `[sso]` (every key) | No effect yet. Set up admin SSO in the admin UI. |
 | `[auth.jwt] issuer`, `audience` | No effect yet. |
 | `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | No effect yet; only `check --deploy` reads them. |
-| `[database] url` | Not used to connect: every pool reads the `DATABASE_URL` env var. |
 | `[audit] retention_days` | Nothing prunes on it; schedule `audit-cleanup --days <N>`. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]` TTLs, `[admin]` | User-wired: read only by the constructor you call (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 

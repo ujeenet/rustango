@@ -887,6 +887,14 @@ all checks passed
 Se termine avec un code non nul si une vérification de niveau erreur
 échoue. Les avertissements seuls ne provoquent pas d'échec.
 
+`check --settings` n'a pas besoin de base de données. Il affiche chaque
+clé de paramètre avec l'origine de sa valeur (une variable d'environnement
+propre, `RUSTANGO__SECTION__KEY`, un fichier de paramètres ou la valeur
+par défaut), la valeur sauf pour un secret, les clés que rien ne lit et
+une URL de base manquante ou invalide. Il lit `config/` pour le niveau
+`RUSTANGO_ENV`, qui peut différer des paramètres que l'application passe
+à `with_settings`.
+
 ### `docs`
 
 Ouvre la documentation de **Rustango** (<https://docs.rs/rustango>) dans

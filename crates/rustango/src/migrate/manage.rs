@@ -104,6 +104,9 @@ pub fn run_pool_free<W: Write>(
         c if MAKE_VERBS.contains(&c) => make_cmd(c, &args[1..], writer, compiled_feature),
         "showurls" => showurls_cmd(&args[1..], writer),
         "showmodels" => showmodels_cmd(&args[1..], writer),
+        "check" if args[1..].iter().any(|a| a == "--settings") => {
+            check_settings_cmd(&args[1..], writer)
+        }
         _ => return None,
     })
 }
@@ -306,7 +309,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(w, "  about")?;
     writeln!(w, "      Print framework version, registered models/apps,")?;
     writeln!(w, "      and detected backend configuration.\n")?;
-    writeln!(w, "  check [--deploy]")?;
+    writeln!(w, "  check [--deploy | --settings]")?;
     writeln!(
         w,
         "      Run system audits — pending migrations, missing models, common"
@@ -314,6 +317,10 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     writeln!(
         w,
         "      misconfigurations. With --deploy: production hardening checks."
+    )?;
+    writeln!(
+        w,
+        "      With --settings: where each setting comes from, reading config/\n      for the RUSTANGO_ENV tier (no database)."
     )?;
     writeln!(w, "      Exits non-zero on any error-level finding.\n")?;
     writeln!(w, "  flush [--yes] [--app <label>] [--model <name>]")?;
@@ -6749,11 +6756,12 @@ use crate::sql::connect_diagnosis::redact as redact_url;
 /// Lifted out so the audit logic is pure (testable without
 /// `unsafe { env::set_var }` race conditions across `cargo test`'s
 /// parallel runners). No `Debug`: it holds the session secret.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub(crate) struct DeployAuditEnv {
     pub rustango_env: Option<String>,
     pub session_secret: Option<String>,
-    pub database_url: Option<String>,
+    /// The resolver's URL, or its error text (never holds a URL).
+    pub database_url: Result<String, String>,
     /// `DATABASE_URL` and `DB_*` both set: the resolver's warning.
     pub database_style_conflict: Option<String>,
     pub apex_domain: ApexDomain,
@@ -6776,7 +6784,7 @@ fn deploy_audit_env(tenancy: bool) -> DeployAuditEnv {
     DeployAuditEnv {
         rustango_env: std::env::var("RUSTANGO_ENV").ok(),
         session_secret: std::env::var("RUSTANGO_SESSION_SECRET").ok(),
-        database_url: crate::env::database_url_from_env().ok(),
+        database_url: crate::env::database_url_from_env().map_err(|e| e.to_string()),
         database_style_conflict: crate::env::database_style_conflict(),
         #[cfg(feature = "tenancy")]
         apex_domain: if tenancy {
@@ -6910,18 +6918,15 @@ pub(crate) fn run_deploy_audit(env: &DeployAuditEnv, out: &mut DeployAuditFindin
 
     // DATABASE_URL — required.
     match env.database_url.as_deref() {
-        None => out.errors.push(
-            "no database configured: DATABASE_URL, or DB_USER + DB_NAME, is required in production"
-                .into(),
-        ),
-        Some(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
+        Err(e) => out.errors.push(format!("no usable database URL: {e}")),
+        Ok(url) if url.contains("localhost") || url.contains("127.0.0.1") => {
             out.warnings.push(
                 "DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in \
                  production (typically a managed service hostname)"
                     .into(),
             );
         }
-        Some(_) => out.info.push("DATABASE_URL set".into()),
+        Ok(_) => out.info.push("DATABASE_URL set".into()),
     }
     if let Some(conflict) = &env.database_style_conflict {
         out.warnings.push(conflict.clone());
@@ -6985,6 +6990,125 @@ fn run_settings_audit(out: &mut DeployAuditFindings) {
     out.info
         .push(format!("config tier resolved to `{env_tier}`"));
     settings_audit_loaded(&env_tier, Settings::load_from_env(), out);
+}
+
+/// `check --settings`: where each setting comes from, values of secrets hidden.
+fn check_settings_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError> {
+    if args.len() != 1 {
+        return Err(MigrateError::Validation(
+            "check --settings takes no other arguments".into(),
+        ));
+    }
+    #[cfg(feature = "config")]
+    {
+        let tier = crate::config::Settings::current_env_tier();
+        let loaded = crate::config::report(Path::new("config"), &tier);
+        write_settings_report(w, &tier, loaded, &|n| std::env::var(n).ok())
+    }
+    #[cfg(not(feature = "config"))]
+    {
+        let _ = w;
+        Err(MigrateError::Validation(
+            "check --settings needs the `config` feature".into(),
+        ))
+    }
+}
+
+/// [`check_settings_cmd`] on a load result and an env lookup.
+#[cfg(feature = "config")]
+fn write_settings_report<W: Write>(
+    w: &mut W,
+    tier: &str,
+    loaded: Result<crate::config::Loaded, crate::config::ConfigError>,
+    get: &dyn Fn(&str) -> Option<String>,
+) -> Result<(), MigrateError> {
+    use crate::config::registry::{Reader, KEYS};
+    use crate::env::SettingSource;
+
+    let loaded = match loaded {
+        Ok(l) => Some(l),
+        Err(e) if e.is_missing_config() => None,
+        Err(e) => return Err(MigrateError::Validation(e.to_string())),
+    };
+    writeln!(w, "settings for tier `{tier}`:")?;
+    if loaded.is_none() {
+        writeln!(w, "  (no config/default.toml: only env vars apply)")?;
+    }
+    let blank = |v: &String| v.trim().is_empty();
+    let file_source = |path: &str| -> SettingSource {
+        let Some(l) = &loaded else {
+            return SettingSource::Default;
+        };
+        l.sources
+            .iter()
+            .filter(|(k, _)| crate::config::registry::find(k).is_some_and(|r| r.path == path))
+            .map(|(_, s)| s.clone())
+            .max_by_key(|s| matches!(s, SettingSource::Override(_)))
+            .unwrap_or(SettingSource::Default)
+    };
+    for key in KEYS {
+        let mut missing = None;
+        let source = if key.path == "database.url" {
+            let file_url = loaded
+                .as_ref()
+                .and_then(|l| l.settings.database.url.clone());
+            match crate::env::resolve_database_url_from(get, file_url.as_deref()) {
+                Ok((_, SettingSource::File(_))) => file_source(key.path),
+                Ok((_, src)) => src,
+                Err(e) => {
+                    let kind = match e {
+                        crate::env::EnvError::MissingRequired { .. } => "MISSING (required)",
+                        _ => "INVALID",
+                    };
+                    missing = Some(format!("{kind}: {e}"));
+                    SettingSource::Default
+                }
+            }
+        } else {
+            match key.env.iter().find(|v| get(v).is_some_and(|x| !blank(&x))) {
+                Some(var) => SettingSource::Env(var),
+                None => file_source(key.path),
+            }
+        };
+        let set = source != SettingSource::Default;
+        let value = match (&source, set && key.secret) {
+            (_, true) => " = <hidden>".to_owned(),
+            (SettingSource::Env(var), false) => {
+                format!(" = {}", get(var).unwrap_or_default())
+            }
+            (SettingSource::Default, false) => String::new(),
+            (_, false) => loaded
+                .as_ref()
+                .and_then(|l| key.path.split('.').try_fold(&l.tree, |v, seg| v.get(seg)))
+                .map(|v| format!(" = {}", toml_text(v)))
+                .unwrap_or_default(),
+        };
+        let note = match (key.reader, set) {
+            (_, false) if missing.is_some() => format!("  {}", missing.unwrap_or_default()),
+            (Reader::Unread { instead, .. }, true) => format!("  (nothing reads it; {instead})"),
+            (Reader::App(by), true) => format!("  (read only by {by})"),
+            _ => String::new(),
+        };
+        writeln!(w, "  {:<40} {source}{value}{note}", key.path)?;
+    }
+    Ok(())
+}
+
+/// A settings value as one line; strings unquoted.
+#[cfg(feature = "config")]
+fn toml_text(v: &toml::Value) -> String {
+    match v {
+        toml::Value::String(s) => s.clone(),
+        toml::Value::Integer(i) => i.to_string(),
+        toml::Value::Float(f) => f.to_string(),
+        toml::Value::Boolean(b) => b.to_string(),
+        toml::Value::Datetime(d) => d.to_string(),
+        toml::Value::Array(a) => {
+            let items: Vec<String> = a.iter().map(toml_text).collect();
+            format!("[{}]", items.join(", "))
+        }
+        toml::Value::Table(_) => "{…}".to_owned(),
+    }
 }
 
 /// [`run_settings_audit`] for a load result, so tests skip the disk.
@@ -9408,7 +9532,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         DeployAuditEnv {
             rustango_env: Some("prod".into()),
             session_secret: Some("a".repeat(48)),
-            database_url: Some("postgres://app:s3cr3t@db.example.com/app_prod".into()),
+            database_url: Ok("postgres://app:s3cr3t@db.example.com/app_prod".into()),
             database_style_conflict: None,
             apex_domain: ApexDomain::Tenancy(Some("app.example.com".into())),
             bind: Some("0.0.0.0:8080".into()),
@@ -9664,13 +9788,33 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     #[test]
     fn deploy_audit_unset_database_url_errors() {
         let env = DeployAuditEnv {
-            database_url: None,
+            database_url: Err("environment variable `DATABASE_URL` is required".into()),
             ..good_prod_env()
         };
         let r = run(&env);
         assert!(
             r.errors.iter().any(|e| e.contains("DATABASE_URL")),
             "expected error for unset DATABASE_URL, got: {:?}",
+            r.errors
+        );
+    }
+
+    /// On prod a URL only a settings file names is a deploy error.
+    #[test]
+    fn deploy_audit_refuses_a_settings_file_database_url_on_prod() {
+        let get = |n: &str| (n == "RUSTANGO_ENV").then(|| "prod".to_owned());
+        let env = DeployAuditEnv {
+            database_url: crate::env::resolve_database_url_from(&get, Some("postgres://dev/x"))
+                .map(|(url, _)| url)
+                .map_err(|e| e.to_string()),
+            ..good_prod_env()
+        };
+        let r = run(&env);
+        assert!(
+            r.errors
+                .iter()
+                .any(|e| e.contains("RUSTANGO__DATABASE__URL") && !e.contains("dev/x")),
+            "{:?}",
             r.errors
         );
     }
@@ -9692,7 +9836,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     #[test]
     fn deploy_audit_localhost_database_url_warns() {
         let env = DeployAuditEnv {
-            database_url: Some("postgres://app:p@localhost/db".into()),
+            database_url: Ok("postgres://app:p@localhost/db".into()),
             ..good_prod_env()
         };
         let r = run(&env);
@@ -9747,6 +9891,92 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             "expected warning for loopback bind, got: {:?}",
             r.warnings
         );
+    }
+
+    /// `check --settings` names each key's source and never prints a secret.
+    #[cfg(feature = "config")]
+    #[test]
+    fn check_settings_names_sources_and_hides_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("default.toml"),
+            "[database]\nurl = \"postgres://app:DBSECRET@db/app\"\npool_max_size = 7\n\
+             [server]\nbind = \"127.0.0.1:9\"\n[sso]\nclient_id = \"abc\"\n\
+             client_secret = \"SSOSECRET\"\n[mail]\nsmtp_host = \"smtp.x\"\n",
+        )
+        .unwrap();
+        let env = vec![(
+            "RUSTANGO__MAIL__SMTP_PASSWORD".to_owned(),
+            "MAILSECRET".to_owned(),
+        )];
+        let report = |get: &dyn Fn(&str) -> Option<String>| {
+            let loaded = crate::config::report_from(dir.path(), "dev", env.clone());
+            let mut out = Vec::new();
+            write_settings_report(&mut out, "dev", loaded, get).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        let line = |text: &str, key: &str| {
+            text.lines()
+                .find(|l| l.trim_start().starts_with(&format!("{key} ")))
+                .unwrap_or_else(|| panic!("no {key} in {text}"))
+                .to_owned()
+        };
+        let default_toml = dir.path().join("default.toml").display().to_string();
+        let vars = |name: &str| {
+            [
+                ("RUSTANGO_BIND", "0.0.0.0:1"),
+                ("RUSTANGO__MAIL__SMTP_PASSWORD", "MAILSECRET"),
+            ]
+            .iter()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| (*v).to_owned())
+        };
+        let text = report(&vars);
+        for secret in ["DBSECRET", "SSOSECRET", "MAILSECRET"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+        let db = line(&text, "database.url");
+        assert!(
+            db.contains(&default_toml) && db.contains("<hidden>"),
+            "{db}"
+        );
+        assert!(line(&text, "database.pool_max_size").ends_with(&format!("{default_toml} = 7")));
+        assert!(line(&text, "server.bind").contains("env RUSTANGO_BIND = 0.0.0.0:1"));
+        assert!(line(&text, "mail.smtp_password")
+            .contains("env RUSTANGO__MAIL__SMTP_PASSWORD = <hidden>"));
+        assert!(line(&text, "sso.client_id").contains("nothing reads it"));
+        assert!(line(&text, "database.backend").contains("default"));
+
+        // A bare DATABASE_URL beats the file.
+        let env_db = |name: &str| (name == "DATABASE_URL").then(|| "sqlite::memory:".to_owned());
+        assert!(line(&report(&env_db), "database.url").contains("env DATABASE_URL = <hidden>"));
+
+        // No URL anywhere: required and missing.
+        let none = |_: &str| None;
+        let mut out = Vec::new();
+        write_settings_report(&mut out, "dev", Err(missing_config()), &none).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(
+            line(&text, "database.url").contains("MISSING (required)"),
+            "{text}"
+        );
+
+        // A bad DB_PORT is invalid, not missing.
+        let bad_port = |name: &str| match name {
+            "DB_USER" | "DB_NAME" => Some("x".to_owned()),
+            "DB_PORT" => Some("nope".to_owned()),
+            _ => None,
+        };
+        let db = line(&report(&bad_port), "database.url");
+        assert!(db.contains("INVALID") && db.contains("DB_PORT"), "{db}");
+    }
+
+    #[cfg(feature = "config")]
+    fn missing_config() -> crate::config::ConfigError {
+        crate::config::ConfigError::Io {
+            path: "config/default.toml".into(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        }
     }
 
     // -------- settings_audit_check (#87 slice 4) --------

@@ -3,8 +3,9 @@
 # (database url, secret key) come from the environment or your secrets
 # manager — leaving them out of source control.
 
-# The URL comes from the `DATABASE_URL` environment variable, which is
-# what every pool reads. Set it from your secrets manager.
+# The database URL comes from the environment: `DATABASE_URL` (or the
+# `DB_*` vars), then `RUSTANGO__DATABASE__URL`. On this tier a `[database] url`
+# in a settings file is refused. Set it from your secrets manager.
 #
 # Pool sizes can be pinned here. If you do, uncomment the header *with*
 # the keys: a key left uncommented under a commented-out `[database]`

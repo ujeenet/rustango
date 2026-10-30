@@ -241,18 +241,19 @@ En quoi les templates diffèrent à l'intérieur de `main.rs` / `urls.rs` :
 
 Les paramètres se chargent d'abord depuis `config/default.toml`, puis depuis `config/<RUSTANGO_ENV>_settings.toml` par-dessus. `RUSTANGO_ENV` vaut `dev` par défaut, si bien qu'un `cargo run` juste après l'échafaudage fonctionne sans aucune modification ; définissez `RUSTANGO_ENV=prod` en production pour prendre en compte `prod_settings.toml`.
 
+L'environnement l'emporte toujours sur les fichiers. `RUSTANGO__SECTION__KEY` remplace `[section] key`, et quelques clés ont aussi une variable d'environnement propre qui passe avant les deux : `DATABASE_URL` (ou les variables `DB_*`) pour `[database] url`, `RUSTANGO_BIND` pour `[server] bind`, `RUSTANGO_APEX_DOMAIN` pour `[tenancy] apex_domain`. L'URL de la base vient donc de `DATABASE_URL` / `DB_*`, puis de `RUSTANGO__DATABASE__URL`, puis de `[database] url` ; le niveau prod refuse une URL venant d'un fichier de paramètres. `cargo run -- check --settings` liste chaque clé et l'origine de sa valeur, secrets masqués.
+
 Les fichiers dev et staging définissent un `[brand] tagline` valant `dev` et `staging`. Pour le changer, ou pour définir votre propre nom et logo, voir [Identité visuelle](operator-console.md#identité-visuelle) et les [clés de configuration](admin.md#configuration--admin-et-brand) de l'admin.
 
 ### Paramètres sans effet par eux-mêmes
 
-Toutes les clés ne sont pas lues par le framework. `Cli::with_settings` avertit au démarrage quand l'une des clés du premier groupe est définie.
+Toutes les clés ne sont pas lues par le framework. `Cli::with_settings` avertit au démarrage, une fois par clé, quand l'une des clés du premier groupe est définie.
 
 | Clé | Statut |
 |---|---|
 | `[sso]` (chaque clé) | Sans effet pour l'instant. Configurez le SSO de l'admin dans l'interface de l'admin. |
 | `[auth.jwt] issuer`, `audience` | Sans effet pour l'instant. |
 | `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Sans effet pour l'instant ; seul `check --deploy` les lit. |
-| `[database] url` | Pas utilisé pour se connecter : chaque pool lit la variable d'environnement `DATABASE_URL`. |
 | `[audit] retention_days` | Rien n'élague sur cette base ; planifiez `audit-cleanup --days <N>`. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, TTL de `[auth.jwt]`, `[admin]` | Câblés par l'utilisateur : lus uniquement par le constructeur que vous appelez (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
