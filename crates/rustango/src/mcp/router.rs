@@ -50,6 +50,10 @@ impl McpState {
 }
 
 /// The mount prefix when `[mcp] prefix` is unset.
+#[cfg(all(
+    feature = "manage",
+    any(feature = "csrf", all(test, feature = "config"))
+))]
 pub(crate) const DEFAULT_PREFIX: &str = "/mcp";
 
 /// Where agents trade a credential for a token, below the mount prefix.
@@ -59,6 +63,7 @@ const OAUTH_TOKEN_PATH: &str = "/oauth/token";
 
 /// Every path an MCP client POSTs to under `prefix`; CSRF exempts these.
 /// `None` for a root prefix, whose endpoints would be `/` and `/token`.
+#[cfg(all(feature = "manage", feature = "csrf"))]
 pub(crate) fn post_endpoints(prefix: &str) -> Option<[String; 3]> {
     let base = prefix.trim_end_matches('/');
     if base.is_empty() {

@@ -23,7 +23,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Datelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use tera::{to_value, Tera, Value};
 
 /// Add every humanize filter to `tera`. Call it at app setup, right
@@ -775,7 +775,8 @@ pub fn naturaltime_short(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
 }
 
 /// Name a day relative to today: `"today"`, `"yesterday"`,
-/// `"tomorrow"`, or a date like `"Apr 27"`.
+/// `"tomorrow"`, or a date like `"Apr 27"`. Days are counted in the
+/// active timezone (`i18n::timezone`, UTC by default).
 ///
 /// ```
 /// use chrono::{Duration, TimeZone, Utc};
@@ -790,7 +791,7 @@ pub fn naturaltime_short(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
 /// ```
 #[must_use]
 pub fn naturalday(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
-    natural_day_string(now, then)
+    natural_day_string(local_date(now), local_date(then))
 }
 
 fn natural_time_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
@@ -997,16 +998,23 @@ pub fn format_duration_short(d: chrono::Duration) -> String {
 // ------------------------------------------------------------------ naturalday
 
 fn naturalday_filter(value: &Value, _: &HashMap<String, Value>) -> tera::Result<Value> {
-    let dt = match parse_datetime(value) {
-        Some(d) => d,
-        None => return Ok(value.clone()),
+    let other = match parse_datetime(value) {
+        Some(d) => local_date(d),
+        // A date column serializes as a bare `YYYY-MM-DD`.
+        None => match value.as_str().and_then(crate::dateparse::parse_date) {
+            Some(d) => d,
+            None => return Ok(value.clone()),
+        },
     };
-    Ok(to_value(natural_day_string(Utc::now(), dt))?)
+    Ok(to_value(natural_day_string(local_date(Utc::now()), other))?)
 }
 
-fn natural_day_string(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
-    let today = now.date_naive();
-    let other = then.date_naive();
+/// The calendar date of `dt` in the active timezone.
+fn local_date(dt: DateTime<Utc>) -> NaiveDate {
+    crate::i18n::timezone::localtime(dt).date_naive()
+}
+
+fn natural_day_string(today: NaiveDate, other: NaiveDate) -> String {
     let diff = (other - today).num_days();
     match diff {
         0 => "today".to_owned(),
@@ -1298,11 +1306,46 @@ mod tests {
         let yesterday = now - Duration::days(1);
         let tomorrow = now + Duration::days(1);
         let week_ago = now - Duration::days(7);
-        assert_eq!(natural_day_string(now, today), "today");
-        assert_eq!(natural_day_string(now, yesterday), "yesterday");
-        assert_eq!(natural_day_string(now, tomorrow), "tomorrow");
+        assert_eq!(naturalday(now, today), "today");
+        assert_eq!(naturalday(now, yesterday), "yesterday");
+        assert_eq!(naturalday(now, tomorrow), "tomorrow");
         // 7 days before 2026-05-16 is 2026-05-09.
-        assert_eq!(natural_day_string(now, week_ago), "May 09");
+        assert_eq!(naturalday(now, week_ago), "May 09");
+    }
+
+    #[tokio::test]
+    async fn naturalday_uses_the_active_offset() {
+        use crate::i18n::timezone::with_offset;
+        // 12:00 on Jun 5 at UTC-8; the item is 17:00 local on Jun 4.
+        let now = Utc.with_ymd_and_hms(2026, 6, 5, 20, 0, 0).unwrap();
+        let then = Utc.with_ymd_and_hms(2026, 6, 5, 1, 0, 0).unwrap();
+        assert_eq!(naturalday(now, then), "today");
+        let west8 = chrono::FixedOffset::west_opt(8 * 3600).unwrap();
+        let local = with_offset(west8, async { naturalday(now, then) }).await;
+        assert_eq!(local, "yesterday");
+    }
+
+    #[tokio::test]
+    async fn naturalday_filter_reads_dates_in_the_active_offset() {
+        use crate::i18n::timezone::with_offset;
+        let tera = setup();
+        // At any hour one of these is on another date than UTC, so a
+        // UTC day count fails at least one of them.
+        let mut checked = 0;
+        for hours in [14, -12] {
+            let tz = chrono::FixedOffset::east_opt(hours * 3600).unwrap();
+            let now = Utc::now();
+            let local_today = now.with_timezone(&tz).date_naive();
+            if local_today == now.date_naive() {
+                continue;
+            }
+            checked += 1;
+            let mut ctx = tera::Context::new();
+            ctx.insert("d", &local_today.to_string());
+            let out = with_offset(tz, async { render(&tera, "{{ d | naturalday }}", ctx) }).await;
+            assert_eq!(out, "today", "offset {hours}h");
+        }
+        assert!(checked > 0);
     }
 
     // -------- register --------

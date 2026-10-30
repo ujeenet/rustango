@@ -89,6 +89,13 @@ async fn body_string(resp: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// The trimmed `<dd>` after `<dt>{label}</dt>` on a detail page.
+fn detail_value<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let rest = body.split_once(&format!("<dt>{label}</dt>"))?.1;
+    let dd = rest.trim_start().strip_prefix("<dd>")?;
+    Some(dd.split_once("</dd>")?.0.trim())
+}
+
 async fn seed(pool: &sqlx::PgPool) {
     migrate::drop_all(pool).await.unwrap();
     migrate::apply_all(pool).await.unwrap();
@@ -310,9 +317,9 @@ async fn detail_view_renders_full_row() {
     let body = body_string(response).await;
     assert!(body.contains("AdminUser #1"), "missing heading: {body}");
     assert!(body.contains("alice"), "missing alice: {body}");
-    // v0.29+ detail view wraps field values in `<dd>...whitespace...value...</dd>`.
-    assert!(
-        body.contains("<dt>age</dt>") && body.contains("30"),
+    assert_eq!(
+        detail_value(&body, "age"),
+        Some("30"),
         "missing age 30: {body}"
     );
     assert!(

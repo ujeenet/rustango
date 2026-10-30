@@ -500,6 +500,8 @@ tenancy = [
     "dep:serde_urlencoded",
     "dep:tempfile",
     "_tower",
+    # `migrate-tenant-storage` kills pg_dump when interrupted.
+    "tokio/process",
 ]
 
 # `#[rustango::main]` runserver shim (slice 9.0 / 0.8.2). Pulls in
@@ -526,7 +528,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "=0.61.13", path = "../rustango-macros" }
+rustango-macros = { version = "=0.61.14", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }

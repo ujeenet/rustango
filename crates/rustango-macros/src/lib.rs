@@ -5281,14 +5281,19 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", col);
+                let _batches = #root::sql::__rustango_in_batches::<Self>(pool, _values)?;
+                let _split = _batches.len() > 1;
                 let mut _rows = ::std::vec::Vec::new();
-                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                for _keys in _batches {
                     _rows.extend(
                         #root::query::QuerySet::<Self>::default()
                             .filter(&_key, #root::core::SqlValue::List(_keys))
                             .fetch(pool)
                             .await?,
                     );
+                }
+                if _split {
+                    _rows = #root::sql::__rustango_dedupe_by_pk(_rows);
                 }
                 ::core::result::Result::Ok(_rows)
             }
@@ -5299,7 +5304,8 @@ fn inherent_impl_tokens(
             /// semantics — vacuously true for every row).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch`].
+            /// As [`FetcherPool::fetch`]; `ExecError::InListUnsplittable`
+            /// when `vals` pass the backend's bind cap.
             ///
             /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_in<V>(
@@ -5322,6 +5328,8 @@ fn inherent_impl_tokens(
                         .await;
                 }
                 let _key = ::std::format!("{}__not_in", col);
+                // A `NOT IN` cannot be split: past the bind cap it is refused.
+                let _values = #root::sql::__rustango_one_in_list::<Self>(pool, _values)?;
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::List(_values))
                     .fetch(pool)
@@ -6376,14 +6384,19 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
+                let _batches = #root::sql::__rustango_in_batches::<Self>(pool, _values)?;
+                let _split = _batches.len() > 1;
                 let mut _rows = ::std::vec::Vec::new();
-                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                for _keys in _batches {
                     _rows.extend(
                         #root::query::QuerySet::<Self>::default()
                             .filter(&_key, #root::core::SqlValue::List(_keys))
                             .fetch(pool)
                             .await?,
                     );
+                }
+                if _split {
+                    _rows = #root::sql::__rustango_dedupe_by_pk(_rows);
                 }
                 ::core::result::Result::Ok(_rows)
             }
@@ -6460,14 +6473,13 @@ fn inherent_impl_tokens(
             /// Differs from [`Self::find_many`] in that this method
             /// requires every PK to resolve. If even one is missing,
             /// the call surfaces `sqlx::Error::RowNotFound` (wrapped
-            /// in `ExecError::Driver`). Rows are deduped at the SQL
-            /// layer, so passing the same PK twice in `pks` counts as
-            /// one expected row.
+            /// in `ExecError::Driver`). A key counts as found when the
+            /// database matches it to a row, so repeats and keys its
+            /// collation folds together (`abc` / `ABC` on MySQL) pass.
             ///
             /// # Errors
-            /// As [`Self::find_many`], plus `RowNotFound` when the
-            /// returned row count is less than the count of distinct
-            /// requested PKs.
+            /// As [`Self::find_many`], plus `RowNotFound` when a
+            /// requested PK matches no row.
             pub async fn find_many_or_fail<V>(
                 pks: impl ::core::iter::IntoIterator<Item = V>,
                 pool: &#root::sql::Pool,
@@ -6483,23 +6495,39 @@ fn inherent_impl_tokens(
                 if _values.is_empty() {
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
-                // Dedup the requested PK list before counting so
-                // duplicate-PK requests don't false-fail (the SQL
-                // `IN (...)` clause naturally dedups too).
+                use #root::sql::ExistsPool as _;
                 let mut _seen: ::std::collections::HashSet<
                     ::std::string::String,
                 > = ::std::collections::HashSet::new();
+                let mut _keys: ::std::vec::Vec<#root::core::SqlValue> =
+                    ::std::vec::Vec::new();
                 for v in &_values {
-                    _seen.insert(v.to_display_string());
+                    if _seen.insert(v.to_display_string()) {
+                        _keys.push(::core::clone::Clone::clone(v));
+                    }
                 }
-                let _expected = _seen.len();
                 let _rows = Self::find_many(_values, pool).await?;
-                if _rows.len() < _expected {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Driver(
-                            #root::sql::sqlx::Error::RowNotFound,
-                        ),
-                    );
+                let _found: ::std::collections::HashSet<::std::string::String> = _rows
+                    .iter()
+                    .map(|r| r.__rustango_pk_value().to_display_string())
+                    .collect();
+                // A key with no exact twin among the rows may still match one
+                // under the column's collation: the database decides.
+                for _key in _keys {
+                    if _found.contains(&_key.to_display_string()) {
+                        continue;
+                    }
+                    let _hit = #root::query::QuerySet::<Self>::default()
+                        .filter(::core::stringify!(#pk_ident), _key)
+                        .exists(pool)
+                        .await?;
+                    if !_hit {
+                        return ::core::result::Result::Err(
+                            #root::sql::ExecError::Driver(
+                                #root::sql::sqlx::Error::RowNotFound,
+                            ),
+                        );
+                    }
                 }
                 ::core::result::Result::Ok(_rows)
             }
@@ -11027,8 +11055,9 @@ struct FieldAttrs {
     /// `#[rustango(validators = "email,url")]` — the
     /// model-level validator chain. Comma-separated names that
     /// dispatch to the `validators::*` family in `validate_value`.
-    /// Empty by default; fires on every typed INSERT/UPDATE.
-    validators: Vec<String>,
+    /// Empty by default; fires on every typed INSERT/UPDATE. Each is
+    /// spanned on the attribute string, so an unknown name errors there.
+    validators: Vec<syn::Ident>,
 }
 
 /// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
@@ -11417,8 +11446,14 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
+                    .map(|name| {
+                        let mut ident = syn::parse_str::<syn::Ident>(name).map_err(|_| {
+                            syn::Error::new(s.span(), format!("unknown validator `{name}`"))
+                        })?;
+                        ident.set_span(s.span());
+                        Ok(ident)
+                    })
+                    .collect::<syn::Result<_>>()?;
                 if out.validators.is_empty() {
                     return Err(syn::Error::new(
                         s.span(),
@@ -11866,7 +11901,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let editable = attrs.editable;
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
-    let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
+    // A path per name: one the runtime does not know fails to resolve.
+    let validators = &attrs.validators;
     if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() && fk_inner.is_none()
     {
         return Err(syn::Error::new_spanned(
@@ -11930,7 +11966,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             blank: #blank,
             case_insensitive: #case_insensitive,
             fk_on_delete: #fk_on_delete,
-            validators: &[ #(#validators_lits),* ],
+            validators: &[ #( #root::core::__validator_names::#validators ),* ],
             cast: #cast,
         })
     }};
@@ -12036,6 +12072,13 @@ fn check_bound_compatibility(
             "`choices` is only valid on `String` fields (or `Option<String>`) — \
              integer-valued enumerations should be modeled with a Rust enum and \
              custom (de)serializer for now",
+        ));
+    }
+    // They run only on string values, so elsewhere they would never fire.
+    if !attrs.validators.is_empty() && kind != DetectedKind::String {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`validators` is only valid on `String` fields (or `Option<String>`)",
         ));
     }
     if (attrs.min.is_some() || attrs.max.is_some()) && !kind.is_integer() {
@@ -12994,6 +13037,17 @@ fn render_form_field_parse(
         let __raw: ::core::option::Option<&::std::string::String> = #data_param.get(#name_lit);
     };
 
+    let root = rustango_root();
+    // Strict, as ModelForm: an unknown spelling is an error, not `true`.
+    let checkbox = quote! {
+        match #root::forms::checkbox(__s) {
+            ::core::option::Option::Some(__b) => __b,
+            ::core::option::Option::None => {
+                #errs.add(#name_lit, "Enter true or false.");
+                false
+            }
+        }
+    };
     let parsed_value = match kind {
         // `Option<bool>`: absent or blank is `None`, as for the other types.
         FormFieldKind::Bool if nullable => quote! {
@@ -13002,19 +13056,13 @@ fn render_form_field_parse(
                 ::core::option::Option::Some(__s) if __s.is_empty() => {
                     ::core::option::Option::None
                 }
-                ::core::option::Option::Some(__s) => ::core::option::Option::Some(!matches!(
-                    __s.to_ascii_lowercase().as_str(),
-                    "false" | "0" | "off" | "no"
-                )),
+                ::core::option::Option::Some(__s) => ::core::option::Option::Some(#checkbox),
             };
         },
         FormFieldKind::Bool => quote! {
             let __v: bool = match __raw {
                 ::core::option::Option::None => false,
-                ::core::option::Option::Some(__s) => !matches!(
-                    __s.to_ascii_lowercase().as_str(),
-                    "" | "false" | "0" | "off" | "no"
-                ),
+                ::core::option::Option::Some(__s) => #checkbox,
             };
         },
         FormFieldKind::String => {

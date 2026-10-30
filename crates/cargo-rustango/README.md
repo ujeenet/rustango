@@ -26,7 +26,7 @@ option and then prints the equivalent command line.
 | `-b, --backend <name>` | `postgres` (default), `sqlite`, or `mysql`. |
 | `-F, --features <list>` | Extra rustango features, comma-separated. |
 | `-i, --interactive` | Pick from numbered menus instead of passing flags. |
-| `--rustango-path <dir>` | Depend on a local rustango checkout rather than the published crate. |
+| `--rustango-path <dir>` | Depend on a local rustango checkout rather than the published crate. A relative path is read from the current directory. |
 
 `--backend` decides what `cargo run` uses and shapes `.env.example`,
 `docker-compose.yml`, and the settings tiers to match. The other two stay one

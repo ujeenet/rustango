@@ -361,7 +361,7 @@ same tagline is the admin's subtitle.
 Each tenant has its own brand on its `Org` row, set on
 **Organizations → Edit**: `brand_name`, `brand_tagline`, `primary_color` and
 `theme_mode`. The **Branding assets** form on the same page uploads a logo
-(PNG, JPEG or WebP) and a favicon (PNG or ICO), up to 1 MB each
+(PNG, JPEG or WebP) and a favicon (PNG, JPEG, WebP or ICO), up to 1 MB each
 (`RUSTANGO_BRAND_MAX_BYTES`). Files are stored under
 `RUSTANGO_BRAND_STORAGE_DIR`, default `./var/brand`. That dir is local to
 each pod and lost on redeploy; with several replicas pass a shared disk with

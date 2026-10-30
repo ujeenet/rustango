@@ -370,7 +370,7 @@ l'admin, le même slogan sert de sous-titre à l'admin.
 Chaque tenant a sa propre identité sur sa ligne `Org`, définie dans
 **Organizations → Edit** : `brand_name`, `brand_tagline`, `primary_color` et
 `theme_mode`. Le formulaire **Branding assets** de la même page envoie un logo
-(PNG, JPEG ou WebP) et un favicon (PNG ou ICO), jusqu'à 1 Mo chacun
+(PNG, JPEG ou WebP) et un favicon (PNG, JPEG, WebP ou ICO), jusqu'à 1 Mo chacun
 (`RUSTANGO_BRAND_MAX_BYTES`). Les fichiers sont stockés sous
 `RUSTANGO_BRAND_STORAGE_DIR`, par défaut `./var/brand`. Ce dossier est local
 à chaque pod et perdu au redéploiement ; avec plusieurs réplicas, passez un

@@ -939,6 +939,14 @@ pub async fn release_for_retry(
 /// # Errors
 /// A registry read failure.
 pub async fn org_left_by_failed_run(registry: &Pool, org_id: i64) -> Result<bool, TenancyError> {
+    Ok(failed_creator_run(registry, org_id).await?.is_some())
+}
+
+/// The failed run [`org_left_by_failed_run`] means, for a link to it.
+pub(crate) async fn failed_creator_run(
+    registry: &Pool,
+    org_id: i64,
+) -> Result<Option<ProvisioningRun>, TenancyError> {
     let creator = ProvisioningRun::objects()
         .where_(ProvisioningRun::org_id.eq(Some(org_id)))
         .where_(ProvisioningRun::kind.eq(RunKind::Provision.as_str().to_owned()))
@@ -948,7 +956,7 @@ pub async fn org_left_by_failed_run(registry: &Pool, org_id: i64) -> Result<bool
         .await?
         .into_iter()
         .next();
-    Ok(creator.is_some_and(|r| RunState::parse(&r.state) == RunState::Failed))
+    Ok(creator.filter(|r| RunState::parse(&r.state) == RunState::Failed))
 }
 
 /// Unlink `org_id` from every provision run that did not succeed: a running

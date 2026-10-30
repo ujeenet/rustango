@@ -148,6 +148,100 @@ untouched.
 
 ---
 
+## 0.61.14
+
+### Forms and ViewSets
+
+- A JSON `""` on a nullable `String` field is now stored as `""`, not NULL (ViewSet bodies, `ModelFormFor::from_json`). Send `null` to clear a field. What this changes:
+  - a nullable field with `choices` refuses `""` with a 400 where it used to store NULL;
+  - a nullable UNIQUE field stores `""` once; a second `""` is a 409 where it used to add another NULL.
+- `derive(Form)` `bool` fields accept only `true`, `1`, `on`, `yes`, `false`, `0`, `off`, `no` (any case) or empty. Anything else, such as a custom checkbox `value="checked"` or `value="newsletter"`, `t`, `y` or `2`, is now the field error "Enter true or false."; it used to read as `true`.
+- NaN and infinity on float fields are a field error in ModelForm, admin and ViewSet writes.
+- A Decimal form value may use scientific notation (`1e3`).
+- `validate_decimal` with both bounds refuses values a `NUMERIC(p,s)` column cannot hold and accepts trailing fraction zeros. It checks `max_decimal_places`, then `max_digits`, then the new `max_whole_digits`, so a value that broke `max_digits` keeps that code.
+- The admin edit form keeps a stored `""` in a nullable text field left empty; it can no longer turn that `""` into NULL. Clearing a non-empty value still stores NULL.
+- Pagination links keep every value of a repeated query key; they used to keep only the last.
+- The workspace `serde_json` now enables `raw_value`. Through feature unification your app's `serde_json` gets it too; the feature only adds API.
+
+### Admin
+
+- Admin writes now refuse an FK to a target row the user's hooks hide; a form that relied on it gets "no such object".
+- Admin audit entries for edits and deletes are filed under the canonical key (`7`, not `007`); older entries keep the spelling they were filed under.
+- A blocked admin delete answers `Accept: text/html` with an HTML 409 page instead of JSON.
+- When two inlines on one parent show the same child table, their formset prefix is `<child>-<fk column>` (generic: `<child>-<ct column>-<pk column>`), not `<child>`; code that posts these forms by hand must use it.
+- Inline `readonly_fields`, the child's `readonly_fields` and superuser-only fields render as text in inline rows, not inputs.
+- A blank inline add-row value for a field with a column default now stores the default instead of failing with "required".
+- A list facet in show-all mode keeps the active value past the cap and shows the rest as "+N more" text.
+- The bare admin login page links a favicon (the brand favicon when set).
+
+### Server and tenancy
+
+- `resolve_user_agent_grants_pool` and `create_user_key_pool` treat an inactive key owner as entitled to nothing; an inactive superuser no longer resolves to every skill.
+- `WsHub::upgrade(ws)` → `upgrade(ws, shutdown)` and `ws_handler(socket, hub)` → `ws_handler(socket, hub, shutdown)`. Add a `shutdown: rustango::shutdown::Shutdown` extractor to the handler and pass it on.
+- `RegisteredHostResolver` is no longer a unit struct: build it with `RegisteredHostResolver::new(apex)`.
+- `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. `HostError` is now `#[non_exhaustive]`: a `match` on it needs a `_` arm.
+- `server::Builder::from_env` fails when the database env is missing or invalid; set `DATABASE_URL` (it no longer falls back to a built-in URL).
+- A tenant whose stored path prefix is now a console route can be edited again while the prefix stays the same; a new one is still refused.
+- `TenantProvisioner` has a new `resume` method with a default that refuses; implement it to let the console resume tenants.
+- The console's new-tenant "Test connection" needs a slug or an explicit URL, and refuses what Create refuses (taken slug, bad fields).
+- `/ready` skips its `SELECT 1` and reports the database ok while every pool connection is checked out, but only within 30 seconds of its last passed ping; after that it pings, and a hung database is 503.
+- At the bucket cap, `RateLimitLayer` also drops partly spent buckets (fullest first) down to 7/8 of the cap, even when the sweep freed room.
+- Activating a tenant left inactive by a failed create run (console edit, `edit-tenant --activate`, `org_edit::apply`) now fails with a validation error; resume the run instead.
+- Console impersonation of a missing or inactive tenant redirects with an error message (303) instead of a 404 or 409 text page.
+- `cargo rustango new --rustango-path` resolves a relative path from where you run it, not from the new project, and fails when the folder has no `Cargo.toml`. The new project's `Cargo.toml` gets the absolute path; make it relative before you commit it.
+- `manage db:info` prints a `sqlite feature:` line and no longer the old MySQL notes; without the `cache` feature, `clear-cache` and `createcachetable` are hidden from `--help` and say which feature they need.
+
+### Migrations
+
+- Tenancy `downgrade` (registry, `--tenant`, `--all-tenants`) now rolls back `<app>/migrations/` files too, newest first in apply order: `downgrade [N]` may pick an app-folder file where it used to pick one from `migrations/`.
+- `downgrade [N]` (tenancy and plain `manage`) undoes the most recently applied files by the ledger's `applied_at`, not the last names on disk. `downgrade <target>` rolls back only files of the target's folder applied after it; later files in other folders stay applied and are listed.
+- Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders; rename one.
+
+### Sign-in
+
+- `AuthSettings` has a new field, `login_field`; build it with `..Default::default()`.
+- The tenant sign-in and password pages show `tenant_name`, now the display name or else the slug. A custom `tenant_login.html` gets `login_label`, `login_input_type` and `login_autocomplete`; the form field is still named `username`.
+- With `login_field = "email"`, a user without an email, or sharing one with another user ignoring case, cannot sign in; the server logs each tenant that has such users at boot. `/auth/login` also accepts `{"email": …}`.
+- The `user_logged_in` signal from the tenant sign-in form carries the stored username, not the typed one.
+- `tenancy::authenticate_user_pool` matches by `login_field` too; the Postgres-connection `authenticate_user` still matches the username only.
+
+### ORM
+
+- `derive(Model)` no longer compiles with an unknown name in `validators = "..."` (it failed every write at runtime) or with `validators` on a non-`String` field (it never ran). Fix the name, or drop the attribute from the field.
+- `Model::where_not_in` past the bind cap (SQLite 32766, MySQL 65535) now fails with `ExecError::InListUnsplittable` before reaching the database. Postgres binds one array and is unchanged.
+- A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
+- Media `set_tags` takes a row lock on the media row (one more query per call).
+- `contenttypes::for_each_row_of_ct` now skips rows hidden by the model's global scopes.
+- `get_or_create` / `update_or_create`: when `create_fn` fails with a unique violation, the query runs again and the row found is returned with `created = false`; other errors still return as before.
+- `find_many_or_fail` runs one existence query per requested key that matches no returned pk exactly.
+- `testkit::migrate_framework` / `create_framework_tables` now build a framework table from your own model when you declare one on it (as migrations do); a test that expected the stock columns there sees your model's.
+
+### Storage and webhooks
+
+- `cache_query(true)`: a QUERY body over 1 MiB now reaches the handler uncached (it was a 413); add a body-limit layer to keep rejecting it.
+- `LocalStorage::url` and `cdn_url` percent-encode the key; a caller that encoded the key first now gets it encoded twice.
+- `LocalStorage::exists` is false for a directory, and `load` of one is `NotFound`.
+- `WebhookSubscription::header` replaces a default header of the same name (any case) and ignores `X-Webhook-Id`, `-Event` and `-Signature`.
+- A webhook `Retry-After` is honoured only up to two minutes after dispatch (it was up to an hour).
+- `WebhookSubscription::header` with `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Keep-Alive` or `Proxy-Connection` (any case) makes `dispatch` fail; a queued row with one dead-letters.
+
+### i18n and time
+
+- A plural lookup served from a fallback locale now uses that locale's rule (Russian 21 from an English entry reads "21 pages", not "21 page"). An `ngettext` with no catalog entry picks the source string by the default locale's rule.
+- Under `with_offset`, `naturalday`, `dateformat` and `timeformat` render in that offset; `O`, `T`, `e` and `Z` show it. Without an override they stay UTC. `dateformat::format_datetime` is generic over the timezone.
+- A datetime with no zone (a `NaiveDateTime` column, `"2026-06-05T00:00:00"`) is read as UTC and then shifted, so under `-08:00` it shows the evening before.
+- `i18n::timezone::activate` is deprecated (it was always a no-op); use `with_offset`.
+
+### Settings
+
+- `[database] url` and `RUSTANGO__DATABASE__URL` now connect when no env var names a database. Order: `DATABASE_URL` (or the `DB_*` vars), then `RUSTANGO__DATABASE__URL`, then `[database] url`. The env still wins, so a URL committed in a settings tier is used only where `DATABASE_URL` is unset. Boot logs which source the URL came from (never the URL).
+- On the prod tier a database URL from a settings file is refused, from any file: the app does not start and `check --deploy` reports an error. Set `DATABASE_URL` or `RUSTANGO__DATABASE__URL` there.
+- Boot (`Cli::run` after `with_settings`) now warns once per key that nothing reads (every `[sso]` key, `[auth.jwt] issuer`/`audience`, three `[admin]` keys), naming what to use instead.
+- New `check --settings` lists every key and where its value comes from, secrets hidden. It reads `config/` for the `RUSTANGO_ENV` tier, which can differ from settings the app built itself.
+- On the staging tier without a usable `RUSTANGO_SESSION_SECRET`, the tenancy server warns at boot that its `./var/` session keys are per pod.
+
+---
+
 ## 0.61.13
 
 ### Tenancy
@@ -398,6 +492,10 @@ A refused shared-provider add now returns the console page (400) with the error,
 ### Table comments, MCP scheme, facet cap
 
 A model with `db_table_comment` gets a `makemigrations` warning: file migrations still do not write it, so add a data migration with the comment statement. MCP discovery on `*.localhost` / `[::1]` now says `http`; set a trusted `X-Forwarded-Proto` if a TLS proxy fronts it. The admin list's "show all" facet stops at 200 values.
+
+### Startup line, Job methods, `make_empty`, MCP agent key
+
+The `server listening on http://…` line on stderr is gone: every serve path now logs `listening on http://…` at INFO under the `rustango::server` target, so a script that waits for the old text, or an app with no tracing subscriber, sees nothing. `Job` gains the provided methods `max_attempts(&self)` and `retry_delay(&self, u32)`; a job type that also has an own trait method of that name gets an ambiguous-call error. The public `migrate::make_empty(dir, name)` now chains onto the last tenant-scope file, not the dir's last file; use `make_empty_in_scope` for a registry one. Off the prod tier with `RUSTANGO_SESSION_SECRET` unset, MCP agent tokens are signed with the tenant session key in `./var/`, so they survive a restart.
 
 ## 0.61.7
 

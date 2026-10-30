@@ -372,7 +372,7 @@ Admin ist dieselbe Tagline der Untertitel des Admins.
 Jeder Tenant hat seine eigene Marke in seiner `Org`-Zeile, gesetzt unter
 **Organizations → Edit**: `brand_name`, `brand_tagline`, `primary_color` und
 `theme_mode`. Das Formular **Branding assets** auf derselben Seite lädt ein
-Logo (PNG, JPEG oder WebP) und ein Favicon (PNG oder ICO) hoch, je bis 1 MB
+Logo (PNG, JPEG oder WebP) und ein Favicon (PNG, JPEG, WebP oder ICO) hoch, je bis 1 MB
 (`RUSTANGO_BRAND_MAX_BYTES`). Die Dateien liegen unter
 `RUSTANGO_BRAND_STORAGE_DIR`, Standard `./var/brand`. Dieses Verzeichnis ist
 lokal je Pod und geht beim Redeploy verloren; bei mehreren Replikas eine

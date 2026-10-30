@@ -543,6 +543,18 @@ where
         .await
         .map_err(TenancyError::Migrate);
     }
+    // The folder holding the target: the project's own, or an app's.
+    let home = match target {
+        Some(target) => target_home(dir, target)?,
+        None => None,
+    };
+    if let (Some(target), Some((_, MigrationScope::Tenant))) = (target, &home) {
+        return Err(TenancyError::Validation(format!(
+            "`{target}` is tenant-scoped — `migrate <target>` moves the registry only; \
+             apply it with `migrate-tenants`, roll it back with \
+             `downgrade [N] --tenant <slug>` or `downgrade [N] --all-tenants`"
+        )));
+    }
     // Forward: the tenancy runner, with the project's registry-scope system
     // chain. The single-database path would build one from the copy.
     let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -550,6 +562,7 @@ where
         let registry = pools.registry_pool();
         let applied =
             rustango::migrate::applied_or_empty(&registry, rustango::migrate::LEDGER_TABLE).await?;
+        // `None` too when applied meanwhile: the move is then backward.
         if !applied.contains(target.as_str()) {
             let moved =
                 tenant_migrate::migrate_registry_to(&pools.registry_pool(), dir, target).await?;
@@ -567,25 +580,7 @@ where
             }
         }
     }
-    // The folder holding the target: the project's own, or an app's.
-    let mut source = dir.to_path_buf();
-    if let Some(target) = target {
-        for d in rustango::migrate::file::project_migration_dirs(dir) {
-            let all = rustango::migrate::file::list_dir(&d)?;
-            let Some(m) = all.iter().find(|m| &m.name == target) else {
-                continue;
-            };
-            if m.scope == MigrationScope::Tenant {
-                return Err(TenancyError::Validation(format!(
-                    "`{target}` is tenant-scoped — `migrate <target>` moves the registry only; \
-                     apply it with `migrate-tenants`, roll it back with \
-                     `downgrade [N] --tenant <slug>` or `downgrade [N] --all-tenants`"
-                )));
-            }
-            source = d;
-            break;
-        }
-    }
+    let source = home.map_or_else(|| dir.to_path_buf(), |(d, _)| d);
     // An app folder is always copied: run in place, it would get a `system/`.
     let scoped = if source.as_path() == dir {
         tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?
@@ -607,12 +602,36 @@ where
     .map_err(TenancyError::Migrate)
 }
 
+/// The one folder of `dir`'s project holding `target`, and its scope. The
+/// ledger keys by name, so a name in two folders is refused.
+fn target_home(
+    dir: &Path,
+    target: &str,
+) -> Result<Option<(std::path::PathBuf, rustango::migrate::MigrationScope)>, TenancyError> {
+    let mut found: Vec<(std::path::PathBuf, rustango::migrate::MigrationScope)> = Vec::new();
+    for d in rustango::migrate::file::project_migration_dirs(dir) {
+        let all = rustango::migrate::file::list_dir(&d)?;
+        if let Some(m) = all.iter().find(|m| m.name == target) {
+            found.push((d, m.scope));
+        }
+    }
+    if let [(a, _), (b, _), ..] = found.as_slice() {
+        return Err(TenancyError::Validation(format!(
+            "`{target}` is in both {} and {}; rename one, so the target is unambiguous",
+            a.display(),
+            b.display()
+        )));
+    }
+    Ok(found.pop())
+}
+
 // ---------- downgrade (scope-aware) ----------
 
 const DOWNGRADE_USAGE: &str =
     "downgrade [N | <target>] [--tenant <slug> | --all-tenants [--yes]]   roll back the last N \
-     (default 1) migrations, or those after <target>: registry-scoped, or tenant-scoped in one \
-     tenant / every active tenant. --all-tenants prints each tenant's plan; --yes runs it";
+     (default 1) applied migrations, or those of <target>'s folder applied after it: \
+     registry-scoped, or tenant-scoped in one tenant / every active tenant. --all-tenants \
+     prints each tenant's plan; --yes runs it";
 
 /// `downgrade [N]` on the registry ledger, or with `--tenant <slug>` /
 /// `--all-tenants` on the tenant ledgers, over that scope's files only.
@@ -631,7 +650,7 @@ where
     use crate::migrate::Rollback;
     use crate::sql::FetcherPool as _;
     use crate::tenancy::org::Org;
-    use rustango::migrate::{downgrade_pool, MigrationScope};
+    use rustango::migrate::MigrationScope;
 
     let parsed = super::args::parse(
         args,
@@ -665,21 +684,29 @@ where
             ))
         }
         (None, false) => {
-            let Rollback::Steps(steps) = rollback else {
+            let Rollback::Steps(_) = rollback else {
                 return Err(TenancyError::Validation(
                     "a registry rollback to a target is `migrate <target>`; \
                      `downgrade <target>` needs `--tenant <slug>` or `--all-tenants`"
                         .into(),
                 ));
             };
-            let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Registry).await?;
-            let touched = downgrade_pool(&pools.registry_pool(), scoped.path(dir), steps).await?;
-            for m in &touched {
+            let project = tenant_migrate::ScopedProject::of(dir, MigrationScope::Registry).await?;
+            let ledger = rustango::migrate::LEDGER_TABLE;
+            let touched = crate::migrate::rollback_pool(
+                &pools.registry_pool(),
+                project.dirs(),
+                rollback,
+                ledger,
+            )
+            .await?;
+            for (_, m) in &touched.unapply {
                 writeln!(w, "registry: rolled back {}", m.name)?;
             }
-            if touched.is_empty() {
+            if touched.unapply.is_empty() {
                 writeln!(w, "registry: nothing to downgrade")?;
-                let all_files = rustango::migrate::file::list_dir(dir)?;
+                let sources = rustango::migrate::file::project_migration_dirs(dir);
+                let all_files = rustango::migrate::file::list_each(&sources)?;
                 if all_files.iter().any(|m| m.scope == MigrationScope::Tenant) {
                     writeln!(
                         w,
@@ -713,33 +740,33 @@ where
         writeln!(w, "no active tenants")?;
         return Ok(());
     }
-    let scoped = tenant_migrate::scoped_subset(dir, MigrationScope::Tenant).await?;
-    let files = rustango::migrate::file::list_dir(scoped.path(dir))?;
     if let Rollback::After(target) = rollback {
-        if !files.iter().any(|m| m.name == target) {
+        if !matches!(target_home(dir, target)?, Some((_, MigrationScope::Tenant))) {
             return Err(TenancyError::Validation(format!(
                 "`{target}` is not a tenant-scoped migration"
             )));
         }
     }
+    let project = tenant_migrate::ScopedProject::of(dir, MigrationScope::Tenant).await?;
     let run = !all || parsed.has("--yes");
     let mut failed = 0;
     for org in &orgs {
         let step = async {
             let (pool, own) = pools.existing_pool_dyn(org).await?;
             let result = async {
-                let applied =
-                    rustango::migrate::applied_or_empty(&pool, rustango::migrate::LEDGER_TABLE)
-                        .await?;
-                let plan = rollback.plan(&files, &applied);
+                let ledger = rustango::migrate::LEDGER_TABLE;
+                let order = crate::migrate::ApplyOrder::read_or_empty(&pool, ledger).await?;
+                let plan = rollback.plan(project.dirs(), &order)?;
                 // Chosen again under the lock: a migrate in between moves the plan.
-                let done = if !run || plan.is_empty() {
+                let done = if !run || plan.unapply.is_empty() {
                     plan
                 } else {
-                    let ledger = rustango::migrate::LEDGER_TABLE;
-                    crate::migrate::rollback_pool(&pool, scoped.path(dir), rollback, ledger).await?
+                    crate::migrate::rollback_pool(&pool, project.dirs(), rollback, ledger).await?
                 };
-                Ok(done.into_iter().map(|m| m.name).collect::<Vec<_>>())
+                let names = done.unapply.into_iter().map(|(_, m)| m.name).collect();
+                Ok::<(Vec<String>, Vec<String>), rustango::migrate::MigrateError>((
+                    names, done.kept,
+                ))
             }
             .await;
             if own {
@@ -747,19 +774,29 @@ where
             }
             result.map_err(TenancyError::Migrate)
         };
-        match step.await {
-            Ok(names) if names.is_empty() => {
+        let result = step.await;
+        match &result {
+            Ok((names, _)) if names.is_empty() => {
                 writeln!(w, "  · {}: nothing to downgrade", org.slug)?;
             }
-            Ok(names) if run => {
+            Ok((names, _)) if run => {
                 writeln!(w, "  ✓ {}: rolled back {}", org.slug, names.join(", "))?;
             }
-            Ok(names) => {
+            Ok((names, _)) => {
                 writeln!(w, "  · {}: would roll back {}", org.slug, names.join(", "))?;
             }
             Err(e) => {
                 failed += 1;
                 writeln!(w, "  ✗ {}: {e}", org.slug)?;
+            }
+        }
+        if let (Ok((_, kept)), Rollback::After(target)) = (&result, rollback) {
+            if !kept.is_empty() {
+                writeln!(
+                    w,
+                    "    left applied (other folders, applied after {target}): {}",
+                    kept.join(", ")
+                )?;
             }
         }
     }

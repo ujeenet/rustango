@@ -74,6 +74,10 @@ impl ServerKeys {
     /// Panics on the prod tier without a valid `RUSTANGO_SESSION_SECRET`.
     pub(crate) fn load() -> Self {
         let tier = crate::session::tier_from_env();
+        let env = std::env::var("RUSTANGO_SESSION_SECRET").ok();
+        if let Some(msg) = per_pod_key_warning(&tier, env.as_deref()) {
+            tracing::warn!(target: "rustango::server", "{msg}");
+        }
         Self::from_files(|p| crate::session::load_session_secret_for_tier(&tier, p))
     }
 
@@ -91,6 +95,15 @@ impl ServerKeys {
     fn dev_at(env: Option<&str>, root: &std::path::Path) -> Self {
         Self::from_files(|p| SessionSecret::from_raw_or_disk(env, &root.join(p)))
     }
+}
+
+/// On staging, keys from `./var/` files differ per pod: say so once at boot.
+fn per_pod_key_warning(tier: &str, env: Option<&str>) -> Option<&'static str> {
+    let usable = env.is_some_and(|raw| SessionSecret::from_b64(raw).is_ok());
+    (crate::env::canonical_tier(tier) == "staging" && !usable).then_some(
+        "RUSTANGO_SESSION_SECRET is not set (or unusable) on staging: session keys come \
+         from ./var/ files on this pod, so sessions are not shared across replicas",
+    )
 }
 
 /// Where [`existing_tenant_secret`] found the key.
@@ -290,6 +303,17 @@ mod tests {
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::default()
+    }
+
+    /// Staging without a usable env key warns; dev, prod and a set key do not.
+    #[test]
+    fn staging_on_dev_key_files_warns_once() {
+        let good = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+        assert!(per_pod_key_warning("staging", None).is_some());
+        assert!(per_pod_key_warning(" STAGING ", Some("short")).is_some());
+        assert!(per_pod_key_warning("staging", Some(good)).is_none());
+        assert!(per_pod_key_warning("dev", None).is_none());
+        assert!(per_pod_key_warning("prod", None).is_none());
     }
 
     /// Off prod a fresh project gets the dev key file the server would write,

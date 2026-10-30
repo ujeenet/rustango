@@ -265,33 +265,6 @@ pub(super) fn canonical_header_value(v: Option<&str>) -> Result<Option<String>, 
     Ok((!v.is_empty()).then_some(v))
 }
 
-/// Percent-encode a key for a URL path. `/` stays as it is, because
-/// keys use it as a separator; everything outside the unreserved set
-/// is escaped.
-pub(super) fn encode_key(key: &str) -> String {
-    percent_encode(key, true)
-}
-
-/// Like [`encode_key`], but it escapes `/` as well, for query values.
-pub(super) fn encode_query(s: &str) -> String {
-    percent_encode(s, false)
-}
-
-fn percent_encode(s: &str, keep_slash: bool) -> String {
-    let mut out = String::with_capacity(s.len());
-    for &b in s.as_bytes() {
-        if b.is_ascii_alphanumeric()
-            || matches!(b, b'-' | b'_' | b'.' | b'~')
-            || (keep_slash && b == b'/')
-        {
-            out.push(b as char);
-        } else {
-            let _ = write!(out, "%{b:02X}");
-        }
-    }
-    out
-}
-
 #[cfg(feature = "storage-azure")]
 /// `(scheme://authority, path)` of an endpoint URL, the path without a
 /// trailing `/`. A bare host is taken as https.

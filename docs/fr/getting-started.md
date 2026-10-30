@@ -180,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.61.13`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.61.14`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -333,7 +333,7 @@ cargo run
 Vous verrez :
 
 ```
-server listening on http://127.0.0.1:8080
+INFO rustango::server: listening on http://127.0.0.1:8080
 ```
 
 `cargo run` applique aussi les migrations en attente avant de commencer à écouter.

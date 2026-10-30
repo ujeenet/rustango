@@ -112,13 +112,17 @@ mod tests {
 
     /// [`call`] from one client address.
     async fn call_from(app: &Router, user_pass: &str) -> StatusCode {
+        call_at(app, user_pass, [10, 65, 0, 1]).await
+    }
+
+    /// [`call`] from `ip`.
+    async fn call_at(app: &Router, user_pass: &str, ip: [u8; 4]) -> StatusCode {
         let creds = base64::engine::general_purpose::STANDARD.encode(user_pass);
         let req = Request::builder()
             .uri("/")
             .header(header::AUTHORIZATION, format!("Basic {creds}"))
             .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
-                [10, 65, 0, 1],
-                1,
+                ip, 1,
             ))))
             .body(Body::empty())
             .unwrap();
@@ -215,21 +219,27 @@ mod tests {
             "basic-quiet-admin",
             "right",
         );
-        let writes = || counting.writes();
+        // Other tests share the gate: count only this client's and account's keys.
+        let ip = [10, 65, 0, 2];
+        let account = crate::login_throttle::counting::account_key(
+            &crate::login_throttle::LoginScope::Admin,
+            "basic-quiet-admin",
+        );
+        let writes = || counting.writes_to(&["10.65.0.2", &account]);
         assert_eq!(
-            call_from(&app, "basic-quiet-admin:right").await,
+            call_at(&app, "basic-quiet-admin:right", ip).await,
             StatusCode::OK
         );
         let first = writes();
         for _ in 0..3 {
             assert_eq!(
-                call_from(&app, "basic-quiet-admin:right").await,
+                call_at(&app, "basic-quiet-admin:right", ip).await,
                 StatusCode::OK
             );
         }
         assert_eq!(writes(), first, "a repeat success wrote to the login gate");
         assert_eq!(
-            call_from(&app, "basic-quiet-admin:wrong").await,
+            call_at(&app, "basic-quiet-admin:wrong", ip).await,
             StatusCode::UNAUTHORIZED
         );
         assert!(writes() > 0, "a miss was not counted");

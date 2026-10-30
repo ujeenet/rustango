@@ -1008,7 +1008,7 @@ pub async fn user_permissions_pool(
     uid: i64,
     pool: &crate::sql::Pool,
 ) -> Result<Vec<String>, TenancyError> {
-    use crate::core::{Column as _, SqlValue};
+    use crate::core::Column as _;
     use crate::sql::ExistsPool as _;
     // An inactive user holds no grants, as in `has_perm_pool`.
     let active = super::auth::User::objects()
@@ -1019,6 +1019,16 @@ pub async fn user_permissions_pool(
     if !active {
         return Ok(Vec::new());
     }
+    permissions_of_active_user(uid, pool).await
+}
+
+/// [`user_permissions_pool`] for a caller that already read the user
+/// row in this request and saw it active.
+pub(crate) async fn permissions_of_active_user(
+    uid: i64,
+    pool: &crate::sql::Pool,
+) -> Result<Vec<String>, TenancyError> {
+    use crate::core::SqlValue;
     let dialect = pool.dialect();
     let user_perms_t = dialect.quote_ident("rustango_user_permissions");
     let user_roles_t = dialect.quote_ident("rustango_user_roles");

@@ -19,11 +19,10 @@ use crate::sql::Pool;
 /// programming error and returns
 /// [`ExecError::MultipleRowsReturned`].
 ///
-/// This is **not atomic** without an enclosing
-/// transaction — between the SELECT and the INSERT another writer
-/// could insert a colliding row. For race-free behaviour pair it
-/// with `Pool::begin()` or with a UNIQUE constraint that surfaces
-/// the conflict via the existing `upsert()` machinery.
+/// Not atomic: another writer can insert between the SELECT and the
+/// INSERT. When `create_fn` fails on a UNIQUE or primary-key violation,
+/// the query runs again and the row it now finds is returned, so a
+/// UNIQUE constraint over the filtered columns makes concurrent callers safe.
 ///
 /// The closure receives an **owned** `Pool` (cheap to clone — it's
 /// an `Arc` internally). That sidesteps Rust's async-closure
@@ -70,16 +69,67 @@ where
     F: FnOnce(Pool) -> Fut,
     Fut: std::future::Future<Output = Result<T, ExecError>>,
 {
+    match fetch_at_most_one(qs.clone(), "get_or_create", pool).await? {
+        Some(row) => Ok((row, false)),
+        None => match create_fn(pool.clone()).await {
+            Ok(row) => Ok((row, true)),
+            Err(e) => Ok((lost_race(qs, e, "get_or_create", pool).await?, false)),
+        },
+    }
+}
+
+/// The one row `qs` matches, if any.
+async fn fetch_at_most_one<T>(
+    qs: crate::query::QuerySet<T>,
+    op: &'static str,
+    pool: &Pool,
+) -> Result<Option<T>, ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
     let mut rows = qs.fetch(pool).await?;
     match rows.len() {
-        0 => Ok((create_fn(pool.clone()).await?, true)),
-        1 => Ok((rows.remove(0), false)),
+        0 => Ok(None),
+        1 => Ok(Some(rows.remove(0))),
         n => Err(ExecError::MultipleRowsReturned {
-            op: "get_or_create",
+            op,
             table: T::SCHEMA.table,
             count: n,
         }),
     }
+}
+
+/// After `create_fn` failed with `err`: the row a concurrent writer
+/// inserted first when `err` is a unique violation, else `err`.
+async fn lost_race<T>(
+    qs: crate::query::QuerySet<T>,
+    err: ExecError,
+    op: &'static str,
+    pool: &Pool,
+) -> Result<T, ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+{
+    if !err.is_unique_violation() {
+        return Err(err);
+    }
+    fetch_at_most_one(qs, op, pool).await?.ok_or(err)
 }
 
 /// v0.45 — `update_or_create`. Runs the queryset; if
@@ -88,9 +138,8 @@ where
 /// none, invoke `create_fn` and return `(created, true)`. Matching
 /// multiple rows returns [`ExecError::MultipleRowsReturned`].
 ///
-/// Same atomicity caveat as [`get_or_create`] — wrap in a
-/// transaction or rely on a UNIQUE constraint for race-free
-/// semantics.
+/// Not atomic, as [`get_or_create`]: a create that loses to a concurrent
+/// insert on a UNIQUE constraint updates the winner's row instead.
 ///
 /// Both closures receive an **owned** `Pool` for the same
 /// async-lifetime reason as [`get_or_create`].
@@ -137,20 +186,14 @@ where
     CF: FnOnce(Pool) -> CFut,
     CFut: std::future::Future<Output = Result<T, ExecError>>,
 {
-    let mut rows = qs.fetch(pool).await?;
-    match rows.len() {
-        0 => Ok((create_fn(pool.clone()).await?, true)),
-        1 => {
-            let existing = rows.remove(0);
-            let updated = update_fn(pool.clone(), existing).await?;
-            Ok((updated, false))
-        }
-        n => Err(ExecError::MultipleRowsReturned {
-            op: "update_or_create",
-            table: T::SCHEMA.table,
-            count: n,
-        }),
-    }
+    let existing = match fetch_at_most_one(qs.clone(), "update_or_create", pool).await? {
+        Some(row) => row,
+        None => match create_fn(pool.clone()).await {
+            Ok(row) => return Ok((row, true)),
+            Err(e) => lost_race(qs, e, "update_or_create", pool).await?,
+        },
+    };
+    Ok((update_fn(pool.clone(), existing).await?, false))
 }
 
 impl<T> crate::query::QuerySet<T>

@@ -5,6 +5,7 @@
 //! checks (`FieldType` vs `SqlValue`) live elsewhere.
 
 use super::{FieldSchema, QueryError, SqlValue};
+use crate::validators::{self as v, ValidationError};
 
 /// Check one bound value against the rules declared on its field.
 ///
@@ -92,6 +93,52 @@ fn check_choices(model: &'static str, field: &FieldSchema, value: &str) -> Resul
     })
 }
 
+/// The one list of `#[rustango(validators = "...")]` names. It builds the
+/// runtime dispatch and the `names` items the derive points at, so a name
+/// the derive accepts always runs here.
+macro_rules! named_validators {
+    ($($name:ident => $check:path),* $(,)?) => {
+        /// One item per accepted name; the derive refers to them, so a
+        /// typo fails to compile.
+        #[doc(hidden)]
+        #[allow(non_upper_case_globals)]
+        pub mod names {
+            $(pub const $name: &str = stringify!($name);)*
+        }
+
+        fn named_check(name: &str) -> Option<fn(&str) -> Result<(), ValidationError>> {
+            match name {
+                $(stringify!($name) => Some($check),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+named_validators! {
+    email => v::validate_email,
+    url => v::validate_url,
+    slug => v::validate_slug,
+    unicode_slug => v::validate_unicode_slug,
+    phone_e164 => v::validate_phone_e164,
+    hex_color => v::validate_hex_color,
+    uuid => v::validate_uuid,
+    iso_date => v::validate_iso_date,
+    iso_time => v::validate_iso_time,
+    iso_datetime => v::validate_iso_datetime,
+    ipv4 => v::validate_ipv4_address,
+    ipv6 => v::validate_ipv6_address,
+    // Either IP family; `genericipaddress` is an accepted alias.
+    ip_address => v::validate_ip_address,
+    genericipaddress => v::validate_ip_address,
+    // Shape only: non-empty, no NUL, no `..` segments. It does not touch the disk.
+    filepath => v::validate_filepath,
+    filepath_field => v::validate_filepath,
+    no_null => v::validate_prohibit_null_characters,
+    email_list => v::validate_email_list,
+    integer => v::validate_integer,
+}
+
 /// Run each `#[rustango(validators = "...")]` name in
 /// `field.validators` through the built-in `validators::*` family.
 /// An unknown name gives [`QueryError::UnknownValidator`]; a rejected
@@ -101,39 +148,15 @@ fn check_named_validators(
     field: &FieldSchema,
     value: &str,
 ) -> Result<(), QueryError> {
-    use crate::validators as v;
-
     for name in field.validators {
-        let result = match *name {
-            "email" => v::validate_email(value),
-            "url" => v::validate_url(value),
-            "slug" => v::validate_slug(value),
-            "unicode_slug" => v::validate_unicode_slug(value),
-            "phone_e164" => v::validate_phone_e164(value),
-            "hex_color" => v::validate_hex_color(value),
-            "uuid" => v::validate_uuid(value),
-            "iso_date" => v::validate_iso_date(value),
-            "iso_time" => v::validate_iso_time(value),
-            "iso_datetime" => v::validate_iso_datetime(value),
-            "ipv4" => v::validate_ipv4_address(value),
-            "ipv6" => v::validate_ipv6_address(value),
-            // Either IP family; `genericipaddress` is an accepted alias.
-            "ip_address" | "genericipaddress" => v::validate_ip_address(value),
-            // Shape only: non-empty, no NUL, no `..` segments. It does
-            // not touch the disk.
-            "filepath" | "filepath_field" => v::validate_filepath(value),
-            "no_null" => v::validate_prohibit_null_characters(value),
-            "email_list" => v::validate_email_list(value),
-            "integer" => v::validate_integer(value),
-            other => {
-                return Err(QueryError::UnknownValidator {
-                    model,
-                    field: field.name.to_owned(),
-                    validator: other,
-                });
-            }
+        let Some(check) = named_check(name) else {
+            return Err(QueryError::UnknownValidator {
+                model,
+                field: field.name.to_owned(),
+                validator: name,
+            });
         };
-        if let Err(e) = result {
+        if let Err(e) = check(value) {
             return Err(QueryError::ValidatorFailed {
                 model,
                 field: field.name.to_owned(),

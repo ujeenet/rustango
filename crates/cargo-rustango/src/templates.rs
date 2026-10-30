@@ -687,7 +687,16 @@ fn tenant_dev_note(backend: Backend) -> String {
 save the server as `root` (password `rustango`), host `mysql` (`localhost`
 from the host)."
         }
-        Backend::Sqlite => "Save a server with a directory for tenant files, e.g. `var/tenants`.",
+        Backend::Sqlite => {
+            "SQLite tenants use database mode, one file each, in a saved server's
+directory. The directory must be absolute and exist:
+
+```sh
+mkdir -p var/tenants
+cargo run -- add-db-server files --sqlite-dir \"$PWD/var/tenants\"
+cargo run -- create-tenant <slug> --mode database --server files
+```"
+        }
     };
     format!(
         "
@@ -695,7 +704,9 @@ from the host)."
 
 The operator console has **New tenant** and **Database servers** pages (see
 `src/main.rs`). Saving a server password needs `RUSTANGO_SECRET_KEY` in `.env`
-(see `.env.example`). {server}
+(see `.env.example`).
+
+{server}
 "
     )
 }
@@ -1329,9 +1340,8 @@ retention_days = 30
 
 /// `config/prod_settings.toml` — production. Strict defaults; expects
 /// real values (DATABASE_URL, RUSTANGO_SESSION_SECRET, etc.) supplied via env
-/// vars or out-of-band secret management. The TOML purposefully
-/// leaves the database url commented — operators set `DATABASE_URL`,
-/// which is the variable every pool actually reads.
+/// vars or out-of-band secret management. The TOML leaves the database
+/// url out: the prod tier refuses one from a settings file.
 pub fn config_prod_settings_toml(name: &str) -> String {
     format!(
         r##"# {name} — production tier
@@ -1339,8 +1349,9 @@ pub fn config_prod_settings_toml(name: &str) -> String {
 # (database url, secret key) come from the environment or your secrets
 # manager — leaving them out of source control.
 
-# The URL comes from the `DATABASE_URL` environment variable, which is
-# what every pool reads. Set it from your secrets manager.
+# The database URL comes from the environment: `DATABASE_URL` (or the
+# `DB_*` vars), then `RUSTANGO__DATABASE__URL`. On this tier a `[database] url`
+# in a settings file is refused. Set it from your secrets manager.
 #
 # Pool sizes can be pinned here. If you do, uncomment the header *with*
 # the keys: a key left uncommented under a commented-out `[database]`

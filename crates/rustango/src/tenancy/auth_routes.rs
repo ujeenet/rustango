@@ -552,6 +552,8 @@ fn session_claims(
 
 #[derive(Deserialize)]
 pub struct LoginInput {
+    /// The `[auth] login_field` value; `email` is accepted as the key too.
+    #[serde(alias = "email")]
     pub username: String,
     pub password: String,
 }
@@ -599,13 +601,11 @@ async fn login_in(
     headers: axum::http::HeaderMap,
     body: LoginInput,
 ) -> Result<Json<LoginOutput>, Response> {
-    use crate::core::Column as _;
     use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
         meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
-    use crate::sql::FetcherPool as _;
     use crate::tenancy::auth::User;
 
     let meta = meta_from_parts(&extensions, &headers, Some("/auth/login"));
@@ -634,13 +634,12 @@ async fn login_in(
         e => err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    let users = User::objects()
-        .where_(User::username.eq(body.username.clone()))
-        .fetch(t.pool())
+    let field = crate::tenancy::login_field();
+    let found = crate::tenancy::find_login_user(t.pool(), field, &body.username)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
-    let Some(mut user) = users.into_iter().next() else {
+    let Some(mut user) = found else {
         // H1: spend a verify's worth of work on the unknown-user path so
         // timing doesn't reveal whether the username exists.
         crate::tenancy::password::verify_dummy_async(&body.password)
@@ -651,7 +650,7 @@ async fn login_in(
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     };
     attempt
-        .resolve(&user.username)
+        .resolve(crate::tenancy::login_key(field, &user))
         .await
         .map_err(LoginRefused::into_response)?;
     let uid = user.id.get().copied().unwrap_or(0);

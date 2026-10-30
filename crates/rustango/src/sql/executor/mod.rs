@@ -99,23 +99,63 @@ pub(crate) async fn fetch_in_chunks<T, C, F, Fut>(
     base: &QuerySet<T>,
     keys: Vec<SqlValue>,
     fetch: F,
-) -> Result<Vec<C>, ExecError>
+) -> Result<Chunked<C>, ExecError>
 where
     T: Model,
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
     let select = base.clone().compile()?;
-    fetch_select_in_chunks(pool, &select, base.is_sliced(), keys, fetch).await
+    let batches = in_batches(pool.dialect(), &select, base.is_sliced(), keys)?;
+    let split = batches.len() > 1;
+    let rows = fetch_batches(batches, fetch).await?;
+    Ok(Chunked { rows, split })
+}
+
+/// Rows [`fetch_in_chunks`] read over one or more `IN` lists. A collation
+/// can fold keys in two lists onto one row, so split results may repeat it.
+pub(crate) struct Chunked<C> {
+    rows: Vec<C>,
+    split: bool,
+}
+
+impl<C> Chunked<C> {
+    /// The rows as read: for callers keying them so a repeat collapses,
+    /// or whose keys no collation folds.
+    pub(crate) fn rows(self) -> Vec<C> {
+        self.rows
+    }
+}
+
+impl<C: HasPkValue> Chunked<C> {
+    /// Each row once, by primary key.
+    pub(crate) fn distinct(self) -> Vec<C> {
+        if self.split {
+            __rustango_dedupe_by_pk(self.rows)
+        } else {
+            self.rows
+        }
+    }
 }
 
 /// [`fetch_in_chunks`] over a schema-level `base`, for callers with no
-/// typed model (#2318).
+/// typed model (#2318). Rows are not deduped.
 pub(crate) async fn fetch_select_in_chunks<C, F, Fut>(
     pool: &Pool,
     base: &SelectQuery,
     sliced: bool,
     keys: Vec<SqlValue>,
+    fetch: F,
+) -> Result<Vec<C>, ExecError>
+where
+    F: FnMut(Vec<SqlValue>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+{
+    fetch_batches(in_batches(pool.dialect(), base, sliced, keys)?, fetch).await
+}
+
+async fn fetch_batches<C, F, Fut>(
+    batches: Vec<Vec<SqlValue>>,
     mut fetch: F,
 ) -> Result<Vec<C>, ExecError>
 where
@@ -123,14 +163,15 @@ where
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
     let mut out = Vec::new();
-    for batch in in_batches(pool.dialect(), base, sliced, keys)? {
+    for batch in batches {
         out.extend(fetch(batch).await?);
     }
     Ok(out)
 }
 
-/// Split `keys` into the `IN` lists `base` has bind room for. Split keys
-/// are deduplicated, so no row matches in two batches.
+/// Split `keys` into the `IN` lists `base` has bind room for. Exact
+/// duplicates are dropped; keys a collation folds together are not, so
+/// callers dedupe split results by row.
 fn in_batches(
     dialect: &dyn Dialect,
     base: &SelectQuery,
@@ -175,6 +216,44 @@ pub fn __rustango_in_batches<T: Model>(
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
     let base = QuerySet::<T>::default().compile()?;
     in_batches(pool.dialect(), &base, false, keys)
+}
+
+/// `keys` as the one `NOT IN` list a statement over `T` can bind: exact
+/// duplicates dropped. A `NOT IN` cannot be split across statements.
+///
+/// # Errors
+/// [`ExecError::InListUnsplittable`] when the keys still pass the bind cap.
+#[doc(hidden)]
+pub fn __rustango_one_in_list<T: Model>(
+    pool: &Pool,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let dialect = pool.dialect();
+    let room = bind_room(dialect, &QuerySet::<T>::default().compile()?)?;
+    let mut seen = std::collections::HashSet::new();
+    let keys: Vec<SqlValue> = keys
+        .into_iter()
+        .filter(|k| seen.insert(dedupe_key(k)))
+        .collect();
+    if crate::sql::writers::in_list_binds(dialect, &keys) > room {
+        return Err(ExecError::InListUnsplittable {
+            table: T::SCHEMA.table,
+            keys: keys.len(),
+            max: room,
+        });
+    }
+    Ok(keys)
+}
+
+/// `rows` fetched over split `IN` lists, one per primary key: a collation
+/// can match one row from keys in two batches.
+#[doc(hidden)]
+#[must_use]
+pub fn __rustango_dedupe_by_pk<T: HasPkValue>(rows: Vec<T>) -> Vec<T> {
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|r| seen.insert(dedupe_key(&r.__rustango_pk_value_impl())))
+        .collect()
 }
 
 /// Binds left for an `IN` list beside the ones `base` already carries.
@@ -3203,7 +3282,9 @@ where
                 )
                 .fetch(pool)
         })
-        .await?;
+        .await?
+        // Keyed into a map, so a row two lists return lands once.
+        .rows();
         let mut out = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let key = extract(&row);

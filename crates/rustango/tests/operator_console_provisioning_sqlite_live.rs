@@ -11,7 +11,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::{sqlx, Auto, FetcherPool as _};
 use rustango::tenancy::operator_console::{router_with_provisioning, SessionSecret};
-use rustango::tenancy::provision::Provisioner;
+use rustango::tenancy::provision::{Provisioner, TenantProvisioner};
 use rustango::tenancy::{Org, TenantPools};
 use tower::ServiceExt;
 
@@ -31,7 +31,14 @@ fn unique(prefix: &str) -> String {
     )
 }
 
+/// `RUSTANGO_PROVISION_FAIL_AT` is process-global: every booted test reads
+/// it, so they share this lock and the one test that sets it takes it alone.
+static FAIL_AT: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
+type Wrap = Box<dyn FnOnce(Arc<dyn TenantProvisioner>) -> Arc<dyn TenantProvisioner>>;
+
 struct Booted {
+    env: Option<tokio::sync::RwLockReadGuard<'static, ()>>,
     app: axum::Router,
     cookie: String,
     pools: Arc<TenantPools<sqlx::Sqlite>>,
@@ -46,6 +53,12 @@ async fn boot() -> Booted {
 
 /// `provisioner_url`: the registry URL the provisioner is told, if not the pool's.
 async fn boot_with(provisioner_url: Option<&str>) -> Booted {
+    boot_wrapped(provisioner_url, Box::new(|p| p)).await
+}
+
+/// [`boot_with`], with the console's provisioner passed through `wrap`.
+async fn boot_wrapped(provisioner_url: Option<&str>, wrap: Wrap) -> Booted {
+    let env = Some(FAIL_AT.read().await);
     let tmp = tempfile::tempdir().expect("tempdir");
     let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
     let pool = sqlx::SqlitePool::connect(&url).await.expect("connect");
@@ -79,7 +92,7 @@ async fn boot_with(provisioner_url: Option<&str>) -> Booted {
     op.insert_pool(&registry).await.expect("seed operator");
 
     let told = provisioner_url.map_or_else(|| url.clone(), ToOwned::to_owned);
-    let provisioner = Provisioner::new(pools.clone(), told, migrations.path()).erased();
+    let provisioner = wrap(Provisioner::new(pools.clone(), told, migrations.path()).erased());
     let app = router_with_provisioning(
         registry.clone(),
         pools.clone(),
@@ -120,6 +133,7 @@ async fn boot_with(provisioner_url: Option<&str>) -> Booted {
         .to_owned();
 
     Booted {
+        env,
         app,
         cookie,
         pools,
@@ -1443,4 +1457,336 @@ async fn a_registry_blip_does_not_end_the_stream() {
         .unwrap();
     assert!(!body.contains("session ended"), "{body}");
     assert!(body.contains("event: done"), "{body}");
+}
+
+/// One request through the app: (status, `location`, body).
+async fn send(b: &Booted, method: &str, uri: &str, form: &str) -> (StatusCode, String, String) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("cookie", &b.cookie);
+    if method == "POST" {
+        req = req
+            .header("cookie", "rustango_csrf=t")
+            .header("x-csrf-token", "t")
+            .header("content-type", "application/x-www-form-urlencoded");
+    }
+    let resp = b
+        .app
+        .clone()
+        .oneshot(req.body(Body::from(form.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get("location")
+        .map(|l| l.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    (status, location, body_of(resp).await)
+}
+
+async fn org(b: &Booted, slug: &str) -> Option<Org> {
+    use rustango::core::Column as _;
+    Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .fetch(&b.pools.registry_pool())
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+}
+
+/// The probe reads the fields Create reads, and checks what Create checks.
+#[tokio::test]
+async fn the_probe_tests_what_create_would_use() {
+    let b = boot().await;
+    let slug = unique("probe");
+    // The URL choice with no URL: Create refuses, so must the probe.
+    let (_, _, html) = send(
+        &b,
+        "POST",
+        "/orgs/test-connection",
+        &format!("slug={slug}&storage_mode=database&database_source=url"),
+    )
+    .await;
+    assert!(html.contains(r#""status":"bad""#), "{html}");
+    assert!(html.contains("Enter the existing database"), "{html}");
+
+    // The registry choice ignores a URL typed before switching.
+    let (_, _, html) = send(
+        &b,
+        "POST",
+        "/orgs/test-connection",
+        &format!(
+            "slug={slug}&storage_mode=database&database_source=registry&database_url={}",
+            form_encode(&b.registry_url)
+        ),
+    )
+    .await;
+    assert!(html.contains(r#""status":"ok""#), "{html}");
+
+    // Create's own checks run first: a bad slug, a good URL.
+    let good = b._tmp.path().join("good.db");
+    let (_, _, html) = send(
+        &b,
+        "POST",
+        "/orgs/test-connection",
+        &format!(
+            "slug=Not_A_Slug&storage_mode=database&database_source=url&database_url={}",
+            form_encode(&format!("sqlite://{}?mode=rwc", good.display()))
+        ),
+    )
+    .await;
+    assert!(html.contains(r#""status":"bad""#), "{html}");
+    assert!(html.contains("lowercase letters"), "{html}");
+}
+
+/// A create whose migrations failed can be finished from the console.
+#[tokio::test]
+async fn a_failed_create_resumes_from_its_run() {
+    use rustango::migrate::{file, DataOp, Migration, Operation};
+    let b = boot().await;
+    let boom = Migration {
+        name: "0001_boom".into(),
+        created_at: "2026-10-07T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: Default::default(),
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: Default::default(),
+        forward: vec![Operation::Data(DataOp {
+            sql: "SELECT * FROM boom_missing_tbl".into(),
+            reverse_sql: None,
+            reversible: false,
+        })],
+    };
+    let boom_file = b._migrations.path().join("0001_boom.json");
+    file::write(&boom_file, &boom).unwrap();
+
+    let slug = unique("resume");
+    let form = format!(
+        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        form_encode(&format!(
+            "sqlite://{}?mode=rwc",
+            b._tmp.path().join("resume.db").display()
+        ))
+    );
+    let (_, location, _) = send(&b, "POST", "/orgs/new", &form).await;
+    let run_uri = format!("/orgs/{location}");
+    let (_, _, html) = send(&b, "GET", &run_uri, "").await;
+    assert!(html.contains("resume-form"), "{html}");
+    assert!(!org(&b, &slug).await.unwrap().active);
+    let (_, _, html) = send(&b, "GET", &format!("/orgs/{slug}/edit"), "").await;
+    assert!(
+        html.contains("resume-hint"),
+        "the edit page links the run: {html}"
+    );
+    // Ticking `active` on the half-migrated tenant is refused; the run stays resumable.
+    let (status, to, _) = send(
+        &b,
+        "POST",
+        &format!("/orgs/{slug}/edit"),
+        "display_name=Live&active=on",
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}");
+    assert!(to.contains("error=") && to.contains("resume"), "{to}");
+    assert!(
+        !org(&b, &slug).await.unwrap().active,
+        "activated half-migrated"
+    );
+    let (_, _, html) = send(&b, "GET", &format!("/orgs/{slug}/edit"), "").await;
+    assert!(html.contains("resume-hint"), "the run was unlinked: {html}");
+
+    // Submitting again says the tenant is resumable.
+    std::fs::remove_file(&boom_file).unwrap();
+    let (status, _, html) = send(&b, "POST", "/orgs/new", &form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("already exists"), "{html}");
+    assert!(
+        html.contains(&format!("{run_uri}\"")),
+        "links the run: {html}"
+    );
+
+    let (status, to, _) = send(&b, "POST", &format!("{run_uri}/resume"), "").await;
+    assert!(status.is_redirection(), "{status}");
+    assert_ne!(to, run_uri, "a resume is its own run");
+    assert!(org(&b, &slug).await.unwrap().active, "resumed and live");
+    let (_, _, html) = send(&b, "GET", &run_uri, "").await;
+    assert!(
+        !html.contains("resume-form"),
+        "nothing left to resume: {html}"
+    );
+}
+
+/// A failure after the row lands shows the run, not the form.
+#[tokio::test]
+async fn a_failure_after_the_row_redirects_to_the_run() {
+    let mut b = boot().await;
+    drop(b.env.take());
+    let _alone = FAIL_AT.write().await;
+    let slug = unique("late");
+    let form = format!(
+        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        form_encode(&format!(
+            "sqlite://{}?mode=rwc",
+            b._tmp.path().join("late.db").display()
+        ))
+    );
+    std::env::set_var("RUSTANGO_PROVISION_FAIL_AT", "activate");
+    let (status, location, html) = send(&b, "POST", "/orgs/new", &form).await;
+    std::env::remove_var("RUSTANGO_PROVISION_FAIL_AT");
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert!(location.starts_with("provision/"), "{location}");
+    let (_, _, html) = send(&b, "GET", &format!("/orgs/{location}"), "").await;
+    assert!(html.contains("resume-form"), "{html}");
+    assert!(!org(&b, &slug).await.unwrap().active);
+}
+
+/// A provisioner whose first resume waits for `gate`, detached as the real
+/// one is, so it outlives the request that started it.
+struct SlowResume {
+    inner: Arc<dyn TenantProvisioner>,
+    started: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+    calls: AtomicU64,
+}
+
+impl TenantProvisioner for SlowResume {
+    fn provision<'a>(
+        &'a self,
+        request: &'a rustango::tenancy::provision::ProvisionRequest,
+        requested_by: Option<&'a str>,
+        idempotency_key: Option<&'a str>,
+    ) -> rustango::tenancy::provision::BoxFuture<
+        'a,
+        (
+            rustango::tenancy::provision_store::ProvisioningRun,
+            rustango::tenancy::provision::ProvisionOutcome,
+        ),
+    > {
+        self.inner.provision(request, requested_by, idempotency_key)
+    }
+
+    fn provision_in_run<'a>(
+        &'a self,
+        run_id: i64,
+        request: &'a rustango::tenancy::provision::ProvisionRequest,
+    ) -> rustango::tenancy::provision::BoxFuture<'a, rustango::tenancy::provision::ProvisionOutcome>
+    {
+        self.inner.provision_in_run(run_id, request)
+    }
+
+    fn resume<'a>(
+        &'a self,
+        request: &'a rustango::tenancy::provision::ProvisionRequest,
+        requested_by: Option<&'a str>,
+    ) -> rustango::tenancy::provision::BoxFuture<
+        'a,
+        (
+            rustango::tenancy::provision_store::ProvisioningRun,
+            rustango::tenancy::provision::ProvisionOutcome,
+        ),
+    > {
+        let first = self.calls.fetch_add(1, Ordering::SeqCst) == 0;
+        let (inner, started, gate) = (self.inner.clone(), self.started.clone(), self.gate.clone());
+        let (request, by) = (request.clone(), requested_by.map(ToOwned::to_owned));
+        Box::pin(async move {
+            tokio::spawn(async move {
+                if first {
+                    started.notify_one();
+                    gate.notified().await;
+                }
+                inner.resume(&request, by.as_deref()).await
+            })
+            .await
+            .unwrap()
+        })
+    }
+
+    fn migrate_in_run<'a>(
+        &'a self,
+        run_id: i64,
+        slug: Option<&'a str>,
+    ) -> rustango::tenancy::provision::BoxFuture<'a, ()> {
+        self.inner.migrate_in_run(run_id, slug)
+    }
+
+    fn registry_url(&self) -> String {
+        self.inner.registry_url()
+    }
+
+    fn registry(&self) -> rustango::sql::Pool {
+        self.inner.registry()
+    }
+}
+
+/// A resume whose request was dropped still holds the tenant: a second
+/// click is refused until the first resume ends.
+#[tokio::test]
+async fn a_dropped_resume_request_still_blocks_a_second_resume() {
+    use rustango::migrate::{file, DataOp, Migration, Operation};
+    let started = Arc::new(tokio::sync::Notify::new());
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let (s, g) = (started.clone(), gate.clone());
+    let b = boot_wrapped(
+        None,
+        Box::new(move |inner| {
+            Arc::new(SlowResume {
+                inner,
+                started: s,
+                gate: g,
+                calls: AtomicU64::new(0),
+            })
+        }),
+    )
+    .await;
+    let boom = Migration {
+        name: "0001_boom".into(),
+        created_at: "2026-10-07T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: Default::default(),
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: Default::default(),
+        forward: vec![Operation::Data(DataOp {
+            sql: "SELECT * FROM boom_missing_tbl".into(),
+            reverse_sql: None,
+            reversible: false,
+        })],
+    };
+    let boom_file = b._migrations.path().join("0001_boom.json");
+    file::write(&boom_file, &boom).unwrap();
+    let slug = unique("twice");
+    let form = format!(
+        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        form_encode(&format!(
+            "sqlite://{}?mode=rwc",
+            b._tmp.path().join("twice.db").display()
+        ))
+    );
+    let (_, location, _) = send(&b, "POST", "/orgs/new", &form).await;
+    let resume_uri = format!("/orgs/{location}/resume");
+    std::fs::remove_file(&boom_file).unwrap();
+
+    // The first request is dropped once its resume is under way.
+    tokio::select! {
+        _ = send(&b, "POST", &resume_uri, "") => panic!("the first resume finished early"),
+        () = started.notified() => {}
+    }
+    let (status, _, html) = send(&b, "POST", &resume_uri, "").await;
+    assert_eq!(status, StatusCode::OK, "a second resume started: {html}");
+    assert!(html.contains("already running"), "{html}");
+
+    gate.notify_one();
+    for _ in 0..200 {
+        if org(&b, &slug).await.is_some_and(|o| o.active) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!("the detached resume never finished");
 }

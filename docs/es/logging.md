@@ -161,6 +161,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::tenancy::admin` | Admin de inquilino |
 | `rustango::tenancy::decommission` | Baja y purga de inquilinos |
 | `rustango::tenancy::first_admin` | El primer admin de un inquilino nuevo y su enlace |
+| `rustango::tenancy::login` | Campo de inicio de sesión de los usuarios del inquilino y comprobaciones de email |
 | `rustango::tenancy::migrate_run` | Migraciones por inquilino |
 | `rustango::tenancy::operation` | Purga y rotación de contraseña de inquilinos |
 | `rustango::tenancy::operator_console` | Consola de operador |

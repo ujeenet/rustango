@@ -98,8 +98,7 @@ pub struct InlineAdmin {
     /// It renders as `MAX_NUM_FORMS`; a POST that adds rows past it is refused.
     pub max_num: Option<usize>,
     /// Field names to render as plain text in edit mode, a subset of
-    /// `fields`. The edit form still renders them as inputs, but the
-    /// POST never writes them.
+    /// `fields`. The POST never writes them.
     pub readonly_fields: &'static [&'static str],
 }
 
@@ -211,8 +210,7 @@ pub struct InlineAdminGeneric {
     /// Upper bound on total rows. Wired through to the management
     /// form; enforced by #243's POST handler.
     pub max_num: Option<usize>,
-    /// Field names the POST never writes. The edit form still renders
-    /// them as inputs.
+    /// Field names the edit form shows as plain text and the POST never writes.
     pub readonly_fields: &'static [&'static str],
 }
 
@@ -764,14 +762,16 @@ pub async fn render_form_for_parent(
     render_form_for_parent_in(pool, parent_model, parent_pk, None, None).await
 }
 
-/// [`render_form_for_parent`] limited to child rows the request's queryset hooks allow.
+/// [`render_form_for_parent`] limited to child rows the request's queryset
+/// hooks allow, with the fields it may not write locked.
 pub(crate) async fn render_form_for_parent_in(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
-    parts: Option<&Parts>,
+    req: Option<(&AppState, &Parts)>,
     submitted: Option<&HashMap<String, String>>,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
+    let parts = req.map(|(_, p)| p);
     let registrations = for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -819,14 +819,21 @@ pub(crate) async fn render_form_for_parent_in(
             &[(fk_name, parent_pk.to_display_string())],
         );
 
-        let prefix = child_model.table.to_owned();
+        let pins = [inline.fk_column];
+        let prefix = formset_prefix(parent_model.table, child_model.table, &pins);
         let initial_forms = rows.len();
         let child_cfg = admin_config_or_default(child_model);
+        let locked = inline_locks(
+            child_model,
+            inline.readonly_fields,
+            &pins,
+            req.map(|(s, _)| s),
+        );
         let (total_forms, rendered_rows) = form_panel_rows(
             &child_cfg,
             &display_fields,
             pk_field,
-            &prefix,
+            (&prefix, &locked),
             &rows,
             extra,
             submitted,
@@ -872,7 +879,7 @@ fn form_panel_rows(
     child_cfg: &crate::core::AdminConfig,
     display_fields: &[&'static FieldSchema],
     pk_field: Option<&'static FieldSchema>,
-    prefix: &str,
+    (prefix, locked): (&str, &[&str]),
     rows: &[serde_json::Value],
     extra: usize,
     submitted: Option<&HashMap<String, String>>,
@@ -889,7 +896,7 @@ fn form_panel_rows(
     });
     // `slot` is the posted index; `None` keeps the stored value.
     let typed = |slot: Option<usize>, f: &FieldSchema, kind: WriteKind| -> Option<String> {
-        let form = submitted.filter(|_| f.accepts_input(kind))?;
+        let form = submitted.filter(|_| f.accepts_input(kind) && !locked.contains(&f.name))?;
         // An unchecked box is not sent: missing means blank.
         Some(
             form.get(&format!("{prefix}-{}-{}", slot?, f.name))
@@ -909,8 +916,13 @@ fn form_panel_rows(
                 // what each `<input>` accepts.
                 let raw_str = typed(slot, f, WriteKind::Update)
                     .unwrap_or_else(|| crate::admin::render::render_value_for_input_json(row, f));
-                let input_html =
-                    render_prefixed_input(child_cfg, f, &raw_str, (prefix, idx, WriteKind::Update));
+                let input_html = render_prefixed_input(
+                    child_cfg,
+                    f,
+                    &raw_str,
+                    (prefix, idx, WriteKind::Update),
+                    locked.contains(&f.name),
+                );
                 serde_json::json!({
                     "label": f.display_label(),
                     "input_html": input_html,
@@ -971,8 +983,13 @@ fn form_panel_rows(
             .iter()
             .map(|f| {
                 let raw_str = typed(slot, f, WriteKind::Insert).unwrap_or_default();
-                let input_html =
-                    render_prefixed_input(child_cfg, f, &raw_str, (prefix, idx, WriteKind::Insert));
+                let input_html = render_prefixed_input(
+                    child_cfg,
+                    f,
+                    &raw_str,
+                    (prefix, idx, WriteKind::Insert),
+                    locked.contains(&f.name),
+                );
                 serde_json::json!({
                     "label": f.display_label(),
                     "input_html": input_html,
@@ -1055,9 +1072,10 @@ fn render_prefixed_input(
     field: &FieldSchema,
     value: &str,
     (prefix, idx, kind): (&str, usize, crate::core::WriteKind),
+    locked: bool,
 ) -> String {
-    // An auto or generated column is shown, never input; a secret only as set or not.
-    if !field.accepts_input(kind) {
+    // A locked, auto or generated column is shown, never input; a secret only as set or not.
+    if locked || !field.accepts_input(kind) {
         let shown = if is_secret_field(cfg, field.name) {
             super::helpers::render_secret_value(Some(&serde_json::Value::String(value.to_owned())))
         } else {
@@ -1065,6 +1083,12 @@ fn render_prefixed_input(
         };
         return format!(r#"<span class="readonly">{shown}</span>"#);
     }
+    // A blank add-row value takes the column default, so it may be left empty.
+    let field = &FieldSchema {
+        blank: field.blank
+            || (kind == WriteKind::Insert && crate::forms::blank_takes_default(field, Some(""))),
+        ..*field
+    };
     // The child's widget overrides apply; a secret is never echoed (#1861).
     let base = if is_secret_field(cfg, field.name) {
         crate::admin::render::render_secret_input(field, false, false)
@@ -1153,14 +1177,62 @@ impl ParentScope {
             .map(|(column, value)| Filter::new(column, Op::Eq, value.clone()))
     }
 
-    fn pins(&self, column: &str) -> bool {
-        self.0.iter().any(|(c, _)| *c == column)
+    fn columns(&self) -> Vec<&'static str> {
+        self.0.iter().map(|(c, _)| *c).collect()
     }
+}
+
+/// The FormSet prefix of one inline, for render and POST alike: the child
+/// table, plus the pin columns when another inline on the parent shows it.
+fn formset_prefix(parent_table: &str, child_table: &str, pins: &[&str]) -> String {
+    let fk = for_parent_table(parent_table)
+        .iter()
+        .filter(|i| i.child_table == child_table)
+        .count();
+    let generic = generic_for_parent_table(parent_table)
+        .iter()
+        .filter(|i| i.child_table == child_table)
+        .count();
+    if fk + generic > 1 {
+        format!("{child_table}-{}", pins.join("-"))
+    } else {
+        child_table.to_owned()
+    }
+}
+
+/// Child fields an inline row never writes: the parent pins, the inline's
+/// and the child's read-only fields, and superuser-only ones on add or
+/// change. Without a request every superuser-only field is locked.
+fn inline_locks(
+    child: &'static ModelSchema,
+    inline_readonly: &[&'static str],
+    pins: &[&str],
+    state: Option<&AppState>,
+) -> Vec<&'static str> {
+    use super::object_permissions::{superuser_fields, AdminWrite};
+    let mut out: Vec<&'static str> = child
+        .scalar_fields()
+        .filter(|f| pins.contains(&f.column))
+        .map(|f| f.name)
+        .collect();
+    out.extend_from_slice(inline_readonly);
+    for action in [AdminWrite::Add, AdminWrite::Change] {
+        match state {
+            Some(state) => out.extend(state.locked_fields(child, action).all()),
+            None => {
+                out.extend_from_slice(admin_config_or_default(child).readonly_fields);
+                out.extend(superuser_fields(child.table, action));
+            }
+        }
+    }
+    out
 }
 
 /// One inline registration resolved for a parent row.
 struct InlineTarget {
     child: &'static ModelSchema,
+    /// The FormSet prefix its panel posts under.
+    prefix: String,
     pk: &'static FieldSchema,
     /// Fields a row may write: not the PK, a pin, or a read-only field.
     writable: Vec<&'static FieldSchema>,
@@ -1176,10 +1248,12 @@ struct InlineTarget {
 }
 
 impl InlineTarget {
+    #[allow(clippy::too_many_arguments)]
     fn new(
+        parent_table: &str,
         child: &'static ModelSchema,
         display: &[&'static FieldSchema],
-        inline_readonly: &[&str],
+        inline_readonly: &[&'static str],
         max_num: Option<usize>,
         scope: ParentScope,
         state: &AppState,
@@ -1187,9 +1261,10 @@ impl InlineTarget {
     ) -> Option<Self> {
         let pk = child.primary_key()?;
         let cfg = admin_config_or_default(child);
+        let pins = scope.columns();
         // An inline row may be added or changed: lock for both.
+        let locked = inline_locks(child, inline_readonly, &pins, Some(state));
         let add = state.locked_fields(child, super::object_permissions::AdminWrite::Add);
-        let change = state.locked_fields(child, super::object_permissions::AdminWrite::Change);
         let secrets = display
             .iter()
             .filter(|f| is_secret_field(&cfg, f.name))
@@ -1201,14 +1276,12 @@ impl InlineTarget {
             .filter(|f| {
                 f.accepts_input(WriteKind::Update)
                     && f.column != pk.column
-                    && !scope.pins(f.column)
-                    && !inline_readonly.contains(&f.name)
-                    && !add.contains(f.name)
-                    && !change.contains(f.name)
+                    && !locked.contains(&f.name)
             })
             .collect();
         Some(Self {
             child,
+            prefix: formset_prefix(parent_table, child.table, &pins),
             pk,
             writable,
             scope,
@@ -1232,7 +1305,6 @@ impl InlineTarget {
         row: &HashMap<String, String>,
         edit: bool,
     ) -> Result<Vec<(&'static str, SqlValue)>, crate::forms::FormError> {
-        use crate::forms::{absent_takes_default, Encoding};
         self.writable
             .iter()
             .filter(|f| {
@@ -1240,7 +1312,7 @@ impl InlineTarget {
                     !(self.secrets.contains(&f.name)
                         && row.get(f.name).is_none_or(String::is_empty))
                 } else {
-                    !(absent_takes_default(f, Encoding::Form) && !row.contains_key(f.name))
+                    !crate::forms::blank_takes_default(f, row.get(f.name).map(String::as_str))
                 }
             })
             .map(|f| {
@@ -1362,6 +1434,15 @@ fn pk_key(row: &serde_json::Value, pk: &FieldSchema) -> String {
         .or_else(|| row.get(pk.column))
         .map(stringify_pk)
         .unwrap_or_default()
+}
+
+/// An inline row's FK values, checked after the plan loop.
+struct PendingLink {
+    /// How the refusal names the row: its slot number or its PK.
+    row: String,
+    values: Vec<(&'static str, SqlValue)>,
+    /// An update's PK and stored row.
+    stored: Option<(SqlValue, serde_json::Value)>,
 }
 
 /// Why [`plan_post`] refused the inline rows.
@@ -1596,6 +1677,7 @@ async fn inline_targets(
         let scope = ParentScope(vec![(inline.fk_column, parent_pk.clone())]);
         let display = resolve_render_fields(child, inline);
         out.extend(InlineTarget::new(
+            parent_model.table,
             child,
             &display,
             inline.readonly_fields,
@@ -1634,6 +1716,7 @@ async fn inline_targets(
         ]);
         let display = resolve_render_fields_generic(child, inline);
         out.extend(InlineTarget::new(
+            parent_model.table,
             child,
             &display,
             inline.readonly_fields,
@@ -1654,10 +1737,11 @@ async fn plan_target(
     plan: &mut InlinePlan,
 ) -> Result<(), InlinePlanError> {
     let table = target.child.table;
+    let prefix = target.prefix.as_str();
     // Messages name the model, as the parent's do.
     let name = target.child.name;
     // No management form: the panel was not rendered, nothing to do.
-    let total_forms = match crate::forms::formset::total_forms(form, table) {
+    let total_forms = match crate::forms::formset::total_forms(form, prefix) {
         Ok(n) => n,
         Err(crate::forms::formset::FormSetError::MissingTotalForms(_)) => return Ok(()),
         Err(e) => return Err(InlinePlanError::BadFormset(e)),
@@ -1676,7 +1760,7 @@ async fn plan_target(
 
     // Slots past INITIAL_FORMS are new rows, so a typed natural PK
     // inserts rather than updates (#1717).
-    let initial = crate::forms::formset::initial_forms(form, table);
+    let initial = crate::forms::formset::initial_forms(form, prefix);
     let natural_pk = (!target.pk.auto).then_some(target.pk);
     let cfg = admin_config_or_default(target.child);
     let mut out = TargetPlan {
@@ -1687,7 +1771,7 @@ async fn plan_target(
         cap: None,
     };
     let is_new = |idx: usize, raw_pk: &str| slot_is_new(initial, idx, raw_pk);
-    let rows = crate::forms::formset::row_payloads(form, table, total_forms);
+    let rows = crate::forms::formset::row_payloads(form, prefix, total_forms);
     // Every existing row's stored state in one read, not one per row.
     let existing_raw: Vec<String> = rows
         .iter()
@@ -1712,165 +1796,210 @@ async fn plan_target(
         .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
-    for (idx, row) in rows.into_iter().enumerate() {
-        let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
-        let delete_flag = row
-            .get("DELETE")
-            .is_some_and(|s| s == "on" || s == "true" || s == "1");
+    // FK links to check, in row order: one read per target after the loop.
+    let mut links: Vec<PendingLink> = Vec::new();
+    let plan_rows = || -> Result<(), InlinePlanError> {
+        for (idx, row) in rows.into_iter().enumerate() {
+            let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
+            let delete_flag = row
+                .get("DELETE")
+                .is_some_and(|s| s == "on" || s == "true" || s == "1");
 
-        if is_new(idx, &raw_pk) {
-            // Blank extra rows stay blank.
-            let has_content = target
-                .writable
-                .iter()
-                .chain(&natural_pk)
-                .any(|f| row.get(f.name).is_some_and(|s| !s.trim().is_empty()));
-            if !has_content || delete_flag {
-                continue;
-            }
-            if !state.can_add(table) {
-                return Err(read_only().into());
-            }
-            if !crate::admin::object_permissions::is_allowed(table, "add", parts, None) {
-                return Err(refused("add").into());
-            }
-            let mut values = target.values(&row, false).map_err(|e| bad_row(idx, e))?;
-            #[cfg(feature = "tenancy")]
-            let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, None)
-                .map_err(|e| InlinePlanError::Rejected(format!("{name} row {}: {e}", idx + 1)))?;
-            if let Some(pk) = natural_pk {
-                let value =
-                    crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
-                values.push((pk.column, value));
-            }
-            super::object_permissions::default_locked_flags(
-                target.child,
-                &target.add_locked,
-                &mut values,
-            );
-            let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
-                values.into_iter().unzip();
-            for (column, value) in &target.scope.0 {
-                columns.push(column);
-                sql_values.push(value.clone());
-            }
-            // Schema-driven INSERT: nothing else supplies these (#1464).
-            crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
-            // MySQL cannot read back a DB-default UUID key; the scope re-read needs it.
-            if target.pk.auto && !columns.contains(&target.pk.column) {
-                if let crate::core::FieldType::Uuid = target.pk.ty {
-                    columns.push(target.pk.column);
-                    sql_values.push(SqlValue::Uuid(uuid::Uuid::now_v7()));
-                }
-            }
-            let audit = {
-                let written: Vec<(&'static str, SqlValue)> = columns
+            if is_new(idx, &raw_pk) {
+                // Blank extra rows stay blank.
+                let has_content = target
+                    .writable
                     .iter()
-                    .copied()
-                    .zip(sql_values.iter().cloned())
-                    .collect();
-                // The pins are not form input; the snapshot still names the parent.
-                let mut row = row.clone();
+                    .chain(&natural_pk)
+                    .any(|f| row.get(f.name).is_some_and(|s| !s.trim().is_empty()));
+                if !has_content || delete_flag {
+                    continue;
+                }
+                if !state.can_add(table) {
+                    return Err(read_only().into());
+                }
+                if !crate::admin::object_permissions::is_allowed(table, "add", parts, None) {
+                    return Err(refused("add").into());
+                }
+                let mut values = target.values(&row, false).map_err(|e| bad_row(idx, e))?;
+                #[cfg(feature = "tenancy")]
+                let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, None)
+                    .map_err(|e| {
+                        InlinePlanError::Rejected(format!("{name} row {}: {e}", idx + 1))
+                    })?;
+                if let Some(pk) = natural_pk {
+                    let value =
+                        crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
+                    values.push((pk.column, value));
+                }
+                super::object_permissions::default_locked_flags(
+                    target.child,
+                    &target.add_locked,
+                    &mut values,
+                );
+                links.push(PendingLink {
+                    row: (idx + 1).to_string(),
+                    values: values.clone(),
+                    stored: None,
+                });
+                let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
+                    values.into_iter().unzip();
                 for (column, value) in &target.scope.0 {
-                    if let Some(f) = target.child.field_by_column(column) {
-                        row.insert(f.name.to_owned(), value.to_display_string());
+                    columns.push(column);
+                    sql_values.push(value.clone());
+                }
+                // Schema-driven INSERT: nothing else supplies these (#1464).
+                crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
+                // MySQL cannot read back a DB-default UUID key; the scope re-read needs it.
+                if target.pk.auto && !columns.contains(&target.pk.column) {
+                    if let crate::core::FieldType::Uuid = target.pk.ty {
+                        columns.push(target.pk.column);
+                        sql_values.push(SqlValue::Uuid(uuid::Uuid::now_v7()));
                     }
                 }
-                super::audit::audit_form(target.child, &cfg, &row, &written)
+                let audit = {
+                    let written: Vec<(&'static str, SqlValue)> = columns
+                        .iter()
+                        .copied()
+                        .zip(sql_values.iter().cloned())
+                        .collect();
+                    // The pins are not form input; the snapshot still names the parent.
+                    let mut row = row.clone();
+                    for (column, value) in &target.scope.0 {
+                        if let Some(f) = target.child.field_by_column(column) {
+                            row.insert(f.name.to_owned(), value.to_display_string());
+                        }
+                    }
+                    super::audit::audit_form(target.child, &cfg, &row, &written)
+                };
+                // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
+                let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
+                query.returning = vec![target.pk.column];
+                out.inserts.push(InlineInsert {
+                    query,
+                    audit,
+                    #[cfg(feature = "tenancy")]
+                    claims,
+                });
+                continue;
+            }
+
+            let pk = match stored.get(raw_pk.as_str()) {
+                Some(key) => key.clone(),
+                None => crate::forms::parse_pk_string(target.pk, &raw_pk)
+                    .map_err(|e| bad_row(idx, e))?,
             };
-            // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
-            let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
-            query.returning = vec![target.pk.column];
-            out.inserts.push(InlineInsert {
-                query,
+
+            if delete_flag {
+                if !state.can_delete(table) {
+                    return Err(read_only().into());
+                }
+                if !deleted.insert(pk.to_display_string()) {
+                    continue;
+                }
+                let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
+                    continue;
+                };
+                if !crate::admin::object_permissions::is_allowed(
+                    table,
+                    "delete",
+                    parts,
+                    Some(&before),
+                ) {
+                    return Err(refused("delete").into());
+                }
+                // `row_where` holds the live-rows scope, so a stamp lands once.
+                let pk_text = pk.to_display_string();
+                let query = match target.child.soft_delete_column {
+                    Some(col) => {
+                        let stamp = SqlValue::DateTime(chrono::Utc::now());
+                        let set = vec![crate::core::Assignment::new(col, stamp)];
+                        InlineRemove::Soft(crate::core::UpdateQuery::new(
+                            target.child,
+                            set,
+                            target.row_where(pk),
+                        ))
+                    }
+                    None => InlineRemove::Hard(crate::core::DeleteQuery::new(
+                        target.child,
+                        target.row_where(pk),
+                    )),
+                };
+                out.existing
+                    .push(InlineWrite::Delete { query, pk: pk_text });
+                continue;
+            }
+
+            let mut values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
+            if values.is_empty() {
+                continue;
+            }
+            let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
+                return Err(InlinePlanError::Rejected(format!(
+                "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
+            )));
+            };
+            #[cfg(feature = "tenancy")]
+            let claims =
+                crate::tenancy::org_host::AdminClaims::of(table, &mut values, Some(&before))
+                    .map_err(|e| InlinePlanError::Rejected(format!("{name} row {raw_pk}: {e}")))?;
+            if target.unchanged(&before, &values) {
+                continue;
+            }
+            super::views::keep_echoed_lossy(target.child, &row, Some(&before), &mut values);
+            if state.is_read_only(table) {
+                return Err(read_only().into());
+            }
+            if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before))
+            {
+                return Err(refused("change").into());
+            }
+            links.push(PendingLink {
+                row: raw_pk.clone(),
+                values: values.clone(),
+                stored: Some((pk.clone(), before)),
+            });
+            let audit = ChildAudit {
+                pk: pk.to_display_string(),
+                form: super::audit::audit_form(target.child, &cfg, &row, &values),
+            };
+            let set = values
+                .into_iter()
+                .map(|(column, value)| crate::core::Assignment::new(column, value))
+                .collect();
+            out.existing.push(InlineWrite::Update {
+                query: crate::core::UpdateQuery::new(
+                    target.child,
+                    set,
+                    target.row_where(pk.clone()),
+                ),
+                pk,
                 audit,
                 #[cfg(feature = "tenancy")]
                 claims,
             });
-            continue;
         }
-
-        let pk = match stored.get(raw_pk.as_str()) {
-            Some(key) => key.clone(),
-            None => {
-                crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?
-            }
-        };
-
-        if delete_flag {
-            if !state.can_delete(table) {
-                return Err(read_only().into());
-            }
-            if !deleted.insert(pk.to_display_string()) {
-                continue;
-            }
-            let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
-                continue;
-            };
-            if !crate::admin::object_permissions::is_allowed(table, "delete", parts, Some(&before))
-            {
-                return Err(refused("delete").into());
-            }
-            // `row_where` holds the live-rows scope, so a stamp lands once.
-            let pk_text = pk.to_display_string();
-            let query = match target.child.soft_delete_column {
-                Some(col) => {
-                    let stamp = SqlValue::DateTime(chrono::Utc::now());
-                    let set = vec![crate::core::Assignment::new(col, stamp)];
-                    InlineRemove::Soft(crate::core::UpdateQuery::new(
-                        target.child,
-                        set,
-                        target.row_where(pk),
-                    ))
-                }
-                None => InlineRemove::Hard(crate::core::DeleteQuery::new(
-                    target.child,
-                    target.row_where(pk),
-                )),
-            };
-            out.existing
-                .push(InlineWrite::Delete { query, pk: pk_text });
-            continue;
-        }
-
-        let mut values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
-        if values.is_empty() {
-            continue;
-        }
-        let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
-            return Err(InlinePlanError::Rejected(format!(
-                "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
-            )));
-        };
-        #[cfg(feature = "tenancy")]
-        let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, Some(&before))
-            .map_err(|e| InlinePlanError::Rejected(format!("{name} row {raw_pk}: {e}")))?;
-        if target.unchanged(&before, &values) {
-            continue;
-        }
-        super::views::keep_echoed_lossy(target.child, &row, Some(&before), &mut values);
-        if state.is_read_only(table) {
-            return Err(read_only().into());
-        }
-        if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before)) {
-            return Err(refused("change").into());
-        }
-        let audit = ChildAudit {
-            pk: pk.to_display_string(),
-            form: super::audit::audit_form(target.child, &cfg, &row, &values),
-        };
-        let set = values
-            .into_iter()
-            .map(|(column, value)| crate::core::Assignment::new(column, value))
-            .collect();
-        out.existing.push(InlineWrite::Update {
-            query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk.clone())),
-            pk,
-            audit,
-            #[cfg(feature = "tenancy")]
-            claims,
-        });
+        Ok(())
+    };
+    let planned = plan_rows();
+    // Rows before a refused one were checked first, so check their links first.
+    let writes: Vec<super::queryset_hooks::LinkedWrite<'_>> = links
+        .iter()
+        .map(|l| super::queryset_hooks::LinkedWrite {
+            values: &l.values,
+            stored: l.stored.as_ref().map(|(pk, _)| (target.pk, pk)),
+            held: l.stored.as_ref().map(|(_, row)| row),
+        })
+        .collect();
+    if let Some((i, msg)) =
+        super::views::hidden_fk_refusal(state, parts, target.child, &writes).await?
+    {
+        return Err(InlinePlanError::Rejected(format!(
+            "{name} row {}: {msg}",
+            links[i].row
+        )));
     }
+    planned?;
     // `max_num` caps the rows a POST that adds any may leave (#1717):
     // every live row of the parent, not only those the hooks show.
     if let Some(max) = target.max_num.filter(|_| !out.inserts.is_empty()) {
@@ -2150,14 +2279,15 @@ pub async fn render_form_generic_for_parent(
     render_form_generic_for_parent_in(pool, parent_model, parent_pk, None, None).await
 }
 
-/// [`render_form_generic_for_parent`] limited to child rows the request's queryset hooks allow.
+/// [`render_form_generic_for_parent`] as [`render_form_for_parent_in`] scopes it.
 pub(crate) async fn render_form_generic_for_parent_in(
     pool: &Pool,
     parent_model: &'static ModelSchema,
     parent_pk: SqlValue,
-    parts: Option<&Parts>,
+    req: Option<(&AppState, &Parts)>,
     submitted: Option<&HashMap<String, String>>,
 ) -> Result<Vec<InlineFormPanel>, ExecError> {
+    let parts = req.map(|(_, p)| p);
     let registrations = generic_for_parent_table(parent_model.table);
     if registrations.is_empty() {
         return Ok(Vec::new());
@@ -2233,14 +2363,21 @@ pub(crate) async fn render_form_generic_for_parent_in(
             ],
         );
 
-        let prefix = child_model.table.to_owned();
+        let pins = [inline.ct_column, inline.pk_column];
+        let prefix = formset_prefix(parent_model.table, child_model.table, &pins);
         let initial_forms = rows.len();
         let child_cfg = admin_config_or_default(child_model);
+        let locked = inline_locks(
+            child_model,
+            inline.readonly_fields,
+            &pins,
+            req.map(|(s, _)| s),
+        );
         let (total_forms, rendered_rows) = form_panel_rows(
             &child_cfg,
             &display_fields,
             pk_field,
-            &prefix,
+            (&prefix, &locked),
             &rows,
             extra,
             submitted,
@@ -2385,7 +2522,7 @@ mod tests {
             cast: None,
         };
         let cfg = crate::core::AdminConfig::DEFAULT;
-        let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update));
+        let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update), false);
         assert!(!html.contains("s3cret"), "{html}");
         assert!(html.contains("<em>set</em>"), "{html}");
     }
@@ -2403,7 +2540,7 @@ mod tests {
         .map(|(k, v)| (k.to_owned(), v.to_owned()))
         .collect();
         let cfg = crate::core::AdminConfig::DEFAULT;
-        let (_, rows) = form_panel_rows(&cfg, &[], None, "c", &[], 0, Some(&form));
+        let (_, rows) = form_panel_rows(&cfg, &[], None, ("c", &[]), &[], 0, Some(&form));
         let error = rows[0]["error"].as_str().expect("an error row");
         assert!(error.contains("1002"), "{error}");
         assert!(!error.contains("was deleted"), "{error}");

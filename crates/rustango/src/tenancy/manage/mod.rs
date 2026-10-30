@@ -558,10 +558,6 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
-    )?;
-    writeln!(
-        w,
         "                       Provision a new tenant. Schema mode (default) gives the"
     )?;
     writeln!(
@@ -575,6 +571,18 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       one with its own login on a saved server via --server."
+    )?;
+    writeln!(
+        w,
+        "                       SQLite has no schemas: use --mode database --server <name>."
+    )?;
+    writeln!(
+        w,
+        "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
+    )?;
+    writeln!(
+        w,
+        "                       Check a candidate tenant database URL; writes no registry row."
     )?;
     writeln!(w, "  drop-tenant   <slug> [--confirm <slug>]")?;
     writeln!(
@@ -612,10 +620,6 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  reseal-tenant-secrets [--apply]  Re-seal stored tenant URLs with the current key (dry run without --apply)."
-    )?;
-    writeln!(
-        w,
         "                       Change routing and display config. Only the fields you"
     )?;
     writeln!(
@@ -623,6 +627,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "                       name are touched; --clear empties one. Rotating the URL"
     )?;
     writeln!(w, "                       evicts the tenant's pool.")?;
+    writeln!(
+        w,
+        "  reseal-tenant-secrets [--apply]  Re-seal stored tenant URLs with the current key (dry run without --apply)."
+    )?;
     writeln!(w)?;
     writeln!(w, "INSPECTION (read-only):")?;
     writeln!(
@@ -677,7 +685,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "                [--maintenance-db <db>] [--sqlite-dir <dir>] [--password-env <VAR> | --no-password]"
+        "                [--maintenance-db <db>] [--password-env <VAR> | --no-password]"
+    )?;
+    writeln!(
+        w,
+        "  add-db-server <name> --sqlite-dir <absolute dir>   SQLite: an existing directory only"
     )?;
     writeln!(
         w,
@@ -731,12 +743,13 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  create-user <slug> <username> [--password <p> | --generate] [--superuser]"
+        "  create-user <slug> <username> [--email <e>] [--password <p> | --generate] [--superuser]"
     )?;
     writeln!(
         w,
-        "                       Tenant-scoped user; signs into <slug>.<apex>{}.",
-        crate::tenancy::RouteConfig::default().login_url
+        "                       Tenant-scoped user; signs into <slug>.<apex>{} with their {}.",
+        crate::tenancy::RouteConfig::default().login_url,
+        crate::tenancy::login_field().label().to_lowercase()
     )?;
     writeln!(w, "  create-superuser <slug> <username> [--password <p>]")?;
     writeln!(

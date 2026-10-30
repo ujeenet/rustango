@@ -712,29 +712,71 @@ async fn query_response_forced_private() {
     assert!(cc.contains("max-age=60"), "freshness preserved: {cc}");
 }
 
+fn big_query(auth: bool) -> Request<Body> {
+    // 1 MiB + 1 byte: over the cacheable cap.
+    let mut b = Request::builder()
+        .method(Method::from_bytes(b"QUERY").unwrap())
+        .uri("/page");
+    if auth {
+        b = b.header(header::AUTHORIZATION, "Bearer t");
+    }
+    b.body(Body::from("a".repeat((1 << 20) + 1))).unwrap()
+}
+
 #[tokio::test]
-async fn query_body_over_cap_is_413() {
+async fn query_body_over_cap_runs_uncached() {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     COUNTER.store(0, Ordering::SeqCst);
     let cache = Arc::new(InMemoryCache::new());
     let app = query_app(&COUNTER, cache, true);
 
-    // 1 MiB + 1 byte QUERY body exceeds the cacheable cap.
-    let big = "a".repeat((1 << 20) + 1);
+    for n in 0..2 {
+        let resp = app.clone().oneshot(big_query(false)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("x-cache-status")
+                .and_then(|h| h.to_str().ok()),
+            Some("BYPASS")
+        );
+        // The handler got the whole body.
+        let body = body_to_string(resp.into_body()).await;
+        assert_eq!(body.len(), format!("q{n}:").len() + (1 << 20) + 1);
+    }
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn authenticated_big_query_reaches_the_handler() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    let app = query_app(&COUNTER, cache, true);
+
+    let resp = app.oneshot(big_query(true)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(resp.headers().get("x-cache-status").is_none());
+    assert_eq!(COUNTER.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn query_body_read_error_is_400() {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    COUNTER.store(0, Ordering::SeqCst);
+    let cache = Arc::new(InMemoryCache::new());
+    let app = query_app(&COUNTER, cache, true);
+
+    let broken = futures_util::stream::iter(vec![
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"q=")),
+        Err(std::io::Error::other("reset")),
+    ]);
     let req = Request::builder()
         .method(Method::from_bytes(b"QUERY").unwrap())
         .uri("/page")
-        .body(Body::from(big))
+        .body(Body::from_stream(broken))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(
-        resp.headers()
-            .get("x-cache-status")
-            .and_then(|h| h.to_str().ok()),
-        Some("BYPASS")
-    );
-    // The handler never ran (body rejected before dispatch).
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert_eq!(COUNTER.load(Ordering::SeqCst), 0);
 }
 

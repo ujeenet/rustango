@@ -37,7 +37,9 @@
 //! //           );
 //! //       }
 //! //   };
-//! //   axum::response::sse::Sse::new(stream)
+//! //   // `shutdown: rustango::shutdown::Shutdown` is an extractor; the
+//! //   // stream then ends when the server stops instead of at its deadline.
+//! //   axum::response::sse::Sse::new(shutdown.cut(stream))
 //! //       .keep_alive(KeepAlive::new())
 //! ```
 //!

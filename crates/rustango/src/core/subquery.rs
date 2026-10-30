@@ -198,6 +198,7 @@ pub fn reverse_has_aggregate(rel: &ReverseRelation, agg: AggregateExpr) -> Expr 
             rhs: Expr::OuterRef(rel.self_pk_column),
         },
         group_by: Vec::new(),
+        group_by_exprs: Vec::new(),
         // The alias is unused in a scalar subquery, but the aggregate
         // writer requires one.
         aggregates: vec![("c".into(), agg)],

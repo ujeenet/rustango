@@ -180,7 +180,7 @@
       {% endfor %}
     </select>
     {% if facet.more_count and facet.more_count > 0 %}
-    <ul><li class="facet-more"><a href="{{ facet.show_all_url | safe }}">+{{ facet.more_count }} more&hellip;</a></li></ul>
+    <ul><li class="facet-more">{% if facet.show_all_url %}<a href="{{ facet.show_all_url | safe }}">+{{ facet.more_count }} more&hellip;</a>{% else %}+{{ facet.more_count }} more&hellip;{% endif %}</li></ul>
     {% endif %}
     {% else %}
     {# Non-FK facets: link list (original behaviour) #}
@@ -192,7 +192,7 @@
       </li>
     {% endfor %}
     {% if facet.more_count and facet.more_count > 0 %}
-      <li class="facet-more"><a href="{{ facet.show_all_url | safe }}">+{{ facet.more_count }} more&hellip;</a></li>
+      <li class="facet-more">{% if facet.show_all_url %}<a href="{{ facet.show_all_url | safe }}">+{{ facet.more_count }} more&hellip;</a>{% else %}+{{ facet.more_count }} more&hellip;{% endif %}</li>
     {% endif %}
     </ul>
     {% endif %}

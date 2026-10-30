@@ -6,7 +6,8 @@
 //! - `validate_value` accepts in-spec values
 //! - `validate_value` rejects off-spec values with
 //!   `QueryError::ValidatorFailed` carrying the validator name + reason
-//! - unknown validator names surface `QueryError::UnknownValidator`
+//! - unknown validator names surface `QueryError::UnknownValidator` on a
+//!   hand-built schema (the derive refuses them at compile time)
 //! - multiple validators chain — first failure wins
 //! - `validators` is presentation/runtime-only — no DDL impact
 
@@ -34,9 +35,14 @@ pub struct Post {
     #[rustango(max_length = 64)]
     pub title: String,
 
-    /// Bad name — caught at runtime when validate_value fires.
-    #[rustango(max_length = 64, validators = "this_does_not_exist")]
-    pub bad: String,
+    /// Every name the derive accepts, aliases included.
+    #[rustango(
+        max_length = 64,
+        validators = "email, url, slug, unicode_slug, phone_e164, hex_color, uuid, \
+                      iso_date, iso_time, iso_datetime, ipv4, ipv6, ip_address, \
+                      genericipaddress, filepath, filepath_field, no_null, email_list, integer"
+    )]
+    pub every: String,
 }
 
 fn field<'a>(name: &str) -> &'a FieldSchema {
@@ -106,8 +112,25 @@ fn validate_value_passes_when_all_validators_pass() {
 }
 
 #[test]
+fn every_accepted_name_runs_at_write_time() {
+    // A name the derive accepts but the runtime does not know would be UnknownValidator.
+    for name in field("every").validators {
+        let mut f = *field("title");
+        f.validators = std::slice::from_ref(name);
+        match validate_value("Post", &f, &SqlValue::String("\0".into())) {
+            Err(QueryError::ValidatorFailed { .. }) => {}
+            other => panic!("{name}: expected ValidatorFailed, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn unknown_validator_name_surfaces_clear_error() {
-    let err = validate_value("Post", field("bad"), &SqlValue::String("x".into())).unwrap_err();
+    // Only a hand-built schema can carry an unknown name.
+    let mut bad = *field("title");
+    bad.name = "bad";
+    bad.validators = &["this_does_not_exist"];
+    let err = validate_value("Post", &bad, &SqlValue::String("x".into())).unwrap_err();
     match err {
         QueryError::UnknownValidator {
             field: name,

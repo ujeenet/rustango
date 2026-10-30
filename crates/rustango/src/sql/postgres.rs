@@ -180,11 +180,13 @@ impl Dialect for Postgres {
         })
     }
 
+    /// `DROP DATABASE` ends an autovacuum worker itself, so it is neither.
     fn database_sessions_sql(&self, db: &DatabaseName, tag: &str) -> Option<CompiledStatement> {
         Some(CompiledStatement {
             sql: "SELECT count(*) FILTER (WHERE application_name = $2), \
                   count(*) FILTER (WHERE application_name IS DISTINCT FROM $2) \
-                  FROM pg_stat_activity WHERE datname = $1"
+                  FROM pg_stat_activity WHERE datname = $1 \
+                  AND backend_type IS DISTINCT FROM 'autovacuum worker'"
                 .to_owned(),
             params: vec![
                 crate::core::SqlValue::String(db.as_str().to_owned()),

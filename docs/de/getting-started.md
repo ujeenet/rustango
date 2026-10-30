@@ -178,7 +178,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.61.13`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.61.14`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -329,7 +329,7 @@ cargo run
 Du siehst:
 
 ```
-server listening on http://127.0.0.1:8080
+INFO rustango::server: listening on http://127.0.0.1:8080
 ```
 
 `cargo run` wendet außerdem ausstehende Migrationen an, bevor es zu lauschen beginnt.

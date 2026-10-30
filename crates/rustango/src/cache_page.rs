@@ -41,7 +41,7 @@
 //! - **GET, and QUERY when opted in.** Every other method bypasses
 //!   the cache. A cached QUERY response is forced `private`, because
 //!   a shared cache cannot key on the request body, and a QUERY body
-//!   over the 1 MiB cap gets `413`.
+//!   over the 1 MiB cap runs uncached.
 //! - **200 only.** Errors, redirects and 304s are not cached, so a
 //!   transient failure cannot poison the cache.
 //! - **`Cache-Control: no-store`, `private` or `no-cache`** on the
@@ -92,7 +92,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use axum::body::{to_bytes, Body};
+use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use tower::Service;
 
@@ -325,9 +325,9 @@ impl CachePageLayer {
     /// of it goes into the cache key, so only a byte-identical body
     /// hits. It is off by default because buffering costs something.
     ///
-    /// Buffering stops at 1 MiB; a larger QUERY body is rejected with
-    /// `413`. Add a request body-limit layer to reject oversized
-    /// bodies earlier.
+    /// Buffering stops at 1 MiB; a larger QUERY body reaches the handler
+    /// uncached. Add a request body-limit layer to reject oversized
+    /// bodies.
     #[must_use]
     pub fn cache_query(mut self, enabled: bool) -> Self {
         self.cache_query = enabled;
@@ -535,29 +535,6 @@ where
                 return inner.call(req).await;
             }
 
-            // For QUERY, buffer the body so its digest can go into
-            // the key and a fresh body can reach the inner service.
-            let (req, body_digest) = if is_query {
-                let (parts, body) = req.into_parts();
-                match to_bytes(body, MAX_CACHEABLE_BODY_BYTES).await {
-                    Ok(bytes) => {
-                        let digest = query_body_digest(&bytes);
-                        (Request::from_parts(parts, Body::from(bytes)), Some(digest))
-                    }
-                    Err(_) => {
-                        // Body over the cap, or a read error. `to_bytes`
-                        // consumed it and will not give the bytes back,
-                        // so the handler cannot get the real body.
-                        // Return 413 rather than run it on an empty body
-                        // and answer with something quietly wrong.
-                        let _ = parts;
-                        return Ok(payload_too_large());
-                    }
-                }
-            } else {
-                (req, None)
-            };
-
             // Unless the route opted in, a request with a credential
             // header is per-user: never served from and never stored
             // in the shared cache.
@@ -581,6 +558,26 @@ where
             // Unknown generation: a purged page could be served, so bypass.
             let Ok(generation) = read_generation(&cache, &counter).await else {
                 return inner.call(req).await;
+            };
+            // Bypasses first. Then buffer a QUERY body so its digest can
+            // go into the key; one over the cap runs uncached.
+            let (req, body_digest) = if is_query {
+                let (parts, body) = req.into_parts();
+                match collect_capped(body, MAX_CACHEABLE_BODY_BYTES).await {
+                    Ok(Ok(bytes)) => {
+                        let digest = query_body_digest(&bytes);
+                        (Request::from_parts(parts, Body::from(bytes)), Some(digest))
+                    }
+                    Ok(Err(whole)) => {
+                        let mut resp = inner.call(Request::from_parts(parts, whole)).await?;
+                        resp.headers_mut()
+                            .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
+                        return Ok(resp);
+                    }
+                    Err(_) => return Ok(bad_query_body()),
+                }
+            } else {
+                (req, None)
             };
             // A `vary_on` value that is not UTF-8 has no key of its own.
             let Some(key) = compute_cache_key(
@@ -958,10 +955,11 @@ fn query_body_digest(body: &[u8]) -> String {
     B64.encode(Sha256::digest(body))
 }
 
-/// `413 Payload Too Large` for a QUERY body over the cacheable cap.
-fn payload_too_large() -> Response<Body> {
-    let mut resp = Response::new(Body::from("QUERY body too large to cache"));
-    *resp.status_mut() = StatusCode::PAYLOAD_TOO_LARGE;
+/// `400` for a QUERY body that failed to read: it is gone, so the
+/// handler cannot run on it.
+fn bad_query_body() -> Response<Body> {
+    let mut resp = Response::new(Body::from("QUERY body could not be read"));
+    *resp.status_mut() = StatusCode::BAD_REQUEST;
     resp.headers_mut()
         .insert(X_CACHE_STATUS, HeaderValue::from_static("BYPASS"));
     resp

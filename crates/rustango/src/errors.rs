@@ -116,6 +116,16 @@ pub(crate) fn keep_own_page(res: &mut Response) {
     }
 }
 
+/// Whether the client takes an HTML page (`Accept: text/html`).
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) fn accepts_html(headers: &axum::http::HeaderMap) -> bool {
+    headers
+        .get_all(axum::http::header::ACCEPT)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|a| a.to_ascii_lowercase().contains("text/html"))
+}
+
 /// A handler error for the error page: a 4xx carries its message, a
 /// 5xx logs its cause and keeps it out of the body (unless disclosed).
 #[derive(Debug)]

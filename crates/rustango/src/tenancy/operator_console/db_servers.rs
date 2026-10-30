@@ -371,8 +371,8 @@ pub(super) async fn delete(
         return redirect(
             "/db-servers",
             Flash::Error(
-                "this console has no tenant pools, so it cannot tell which tenants use the \
-                 server; remove it with `remove-db-server`",
+                "this console was set up without tenant pools, so it cannot check which \
+                 tenants use the server and cannot remove it",
             ),
         );
     };

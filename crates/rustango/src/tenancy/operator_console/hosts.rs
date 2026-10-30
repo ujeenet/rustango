@@ -99,9 +99,11 @@ pub(super) async fn org_hosts_add(
     State(state): State<ConsoleState>,
     Path(slug): Path<String>,
     Extension(op): Extension<auth::Operator>,
+    apex: Option<Extension<crate::tenancy::server::LinkApex>>,
     Form(form): Form<AddForm>,
 ) -> Response<Body> {
-    match org_host::add_host(&state.registry, &slug, &form.hostname).await {
+    let apex = apex.map(|Extension(a)| a).unwrap_or_default().get();
+    match org_host::add_host(&state.registry, &slug, &form.hostname, &apex).await {
         Ok(row) => {
             audit(&state, &slug, &op, "host_add", &row.hostname).await;
             back(&slug, None, Some(&format!("added `{}`", row.hostname)))
@@ -193,6 +195,10 @@ fn explain(e: &HostError, slug: &str) -> String {
         HostError::IsBaseHost(h) => format!(
             "`{h}` is `{slug}`'s base host and has no row to remove. Change it on the edit \
              page instead"
+        ),
+        HostError::IsApex(h) => format!(
+            "`{h}` is the apex, where this console and path-prefix tenants live. \
+             Use a tenant hostname instead"
         ),
         HostError::NoSuchOrg(s) => {
             format!("there is no tenant `{s}` — it may have been purged, or the link is stale")

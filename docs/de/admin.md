@@ -338,6 +338,8 @@ manipulationssicheren Fingerabdruck. Zwei Stellen zeigen es an:
 - Die **Detailseite** des Modells erhält eine **Audit trail**-Karte, die aktuelle
   Änderungen auflistet (wer, wann und das Diff), mit einem **View full history**-Link
   (im [Detail-Screenshot](#inlines) oben gezeigt).
+- Die Einträge einer Zeile liegen unter dem kanonischen Text ihres Schlüssels, also
+  teilen `/posts/007` und `/posts/7` eine Historie.
 - Die **Activity**-Ansicht der Seitenleiste (`GET /<prefix>/__audit`) ist ein
   zeilenübergreifender Feed, neueste zuerst, mit Facetten-Karten für Entität / Operation
   / Quelle und einem Aufräumformular, um Einträge älter als N Tage zu bereinigen (was
@@ -400,7 +402,9 @@ Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrier
 - **Queryset-Einschränkung** —
   `register_admin_queryset!("posts", hook)`, wobei `hook: fn(&Parts) -> Vec<Filter>`
   einschränkt, was eine Anfrage sehen kann (z. B. nur die Zeilen des aktuellen
-  Benutzers). Mehrere Hooks auf einer Tabelle fügen sich zusammen.
+  Benutzers). Mehrere Hooks auf einer Tabelle fügen sich zusammen. Ein Anlegen,
+  Bearbeiten oder eine Inline-Zeile, deren FK auf eine Zielzeile zeigt, die deren Hooks,
+  Soft Delete oder `view`-Hook verbergen, wird mit "no such object" abgelehnt.
 - **Berechtigungen auf Zeilenebene** —
   `register_admin_object_permission!("posts", "change", check)`, wobei
   `check: fn(&Parts, Option<&Value>) -> bool` pro Zeile erlaubt oder verweigert.
@@ -604,7 +608,7 @@ Alle Pfade sind relativ zu `admin_prefix`:
 | `/<table>/<pk>` | GET | Detailansicht (schreibgeschützt), mit Inlines + Prüfpfad-Karte. |
 | `/<table>/<pk>` | POST | Aktualisieren-Absenden. |
 | `/<table>/<pk>/edit` | GET | Bearbeitungsformular. |
-| `/<table>/<pk>/delete` | POST | Löschen (nach Bestätigung). |
+| `/<table>/<pk>/delete` | POST | Löschen (nach Bestätigung). Eine Zeile, auf die andere noch zeigen, antwortet mit 409: eine Seite für den Browser, sonst JSON. |
 | `/<table>/__action` | POST | Führt eine Massenaktion auf ausgewählten PKs aus. |
 | `/<table>/__autocomplete` | GET | FK-Vervollständigungs-JSON (`?q=`). |
 | `/__docs` | GET | Modellreferenz. |

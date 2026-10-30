@@ -395,6 +395,18 @@ impl Interrupt {
             let _ = tokio::signal::ctrl_c().await;
         }
     }
+
+    /// `work`, or "interrupted" once a signal comes. Dropping `work` kills
+    /// its children; a signal that came earlier is still seen here.
+    async fn guard<T>(
+        &mut self,
+        work: impl std::future::Future<Output = Result<T, TenancyError>>,
+    ) -> Result<T, TenancyError> {
+        tokio::select! {
+            r = work => r,
+            () = self.recv() => Err(TenancyError::Validation("interrupted".into())),
+        }
+    }
 }
 
 /// The part of the move that runs while the tenant is offline.
@@ -425,13 +437,8 @@ impl MoveCtx<'_> {
         interrupt: &mut Interrupt,
         writer: &mut W,
     ) -> Result<(), TenancyError> {
-        let done = tokio::select! {
-            r = self.copy(restore, writer) => r,
-            () = interrupt.recv() => {
-                self.release_claim().await;
-                Err(TenancyError::Validation("interrupted".into()))
-            }
-        };
+        // Only the drain and the dumps listen, so cleanup always runs.
+        let done = self.copy(restore, interrupt, writer).await;
         let done = match done {
             Ok(()) => self.switch().await,
             Err(e) => Err(e),
@@ -492,9 +499,10 @@ impl MoveCtx<'_> {
     async fn copy<W: Write + Send>(
         &self,
         restore: Restore,
+        interrupt: &mut Interrupt,
         writer: &mut W,
     ) -> Result<(), TenancyError> {
-        if let Err(e) = self.restore(restore, writer).await {
+        if let Err(e) = self.restore(restore, interrupt, writer).await {
             self.release_claim().await;
             return Err(e);
         }
@@ -507,10 +515,17 @@ impl MoveCtx<'_> {
     async fn restore<W: Write + Send>(
         &self,
         restore: Restore,
+        interrupt: &mut Interrupt,
         writer: &mut W,
     ) -> Result<(), TenancyError> {
         if self.reactivate {
-            tokio::time::sleep(std::time::Duration::from_secs(self.parsed.drain_secs)).await;
+            let drain = std::time::Duration::from_secs(self.parsed.drain_secs);
+            interrupt
+                .guard(async {
+                    tokio::time::sleep(drain).await;
+                    Ok(())
+                })
+                .await?;
         }
         // Streams pg_dump stdout into psql stdin so we never buffer the
         // full snapshot in memory.
@@ -519,7 +534,7 @@ impl MoveCtx<'_> {
         let (source, target) = (conn(self.source_url)?, conn(self.target_url)?);
         match restore {
             Restore::IntoSchema(plan) => {
-                run_into_schema(self.pools.registry(), &source, &target, plan).await?;
+                run_into_schema(self.pools.registry(), &source, &target, plan, interrupt).await?;
             }
             Restore::Dump {
                 extensions,
@@ -527,7 +542,8 @@ impl MoveCtx<'_> {
                 after,
             } => {
                 let scope = self.source_schema;
-                pg_dump_to_psql(&source, scope, &extensions, &target, &before, &after)?;
+                let dump = pg_dump_to_psql(&source, scope, &extensions, &target, &before, &after);
+                interrupt.guard(dump).await?;
             }
         }
         writeln!(writer, "  data move OK")?;
@@ -1091,6 +1107,7 @@ async fn run_into_schema(
     source: &Conn,
     target: &Conn,
     plan: SchemaPlan,
+    interrupt: &mut Interrupt,
 ) -> Result<(), TenancyError> {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1108,8 +1125,12 @@ async fn run_into_schema(
         quote_ident(&plan.schema.0)
     )];
     before.extend(plan.create);
-    let moved = pg_dump_to_psql(source, None, &[], &stage, &[], &plan.moves)
-        .and_then(|()| pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &before, &[]));
+    let moved = interrupt
+        .guard(async {
+            pg_dump_to_psql(source, None, &[], &stage, &[], &plan.moves).await?;
+            pg_dump_to_psql(&stage, Some(&plan.schema), &[], target, &before, &[]).await
+        })
+        .await;
     let dropped = crate::sql::sqlx::query(&format!("DROP DATABASE {quoted} WITH (FORCE)"))
         .execute(registry)
         .await;
@@ -1121,7 +1142,7 @@ async fn run_into_schema(
 /// Pipe `pg_dump <source>` into `psql <target>` in one transaction. When
 /// the source is schema-scoped, pass `--schema=<name>` to pg_dump, and
 /// `--extension` (pg_dump 14+) for each of `extensions`.
-fn pg_dump_to_psql(
+async fn pg_dump_to_psql(
     source: &Conn,
     source_schema: Option<&SchemaName>,
     extensions: &[String],
@@ -1143,10 +1164,6 @@ fn pg_dump_to_psql(
     for e in extensions {
         dump_cmd.arg(format!("--extension={}", quote_ident(e)));
     }
-    dump_cmd.stdout(Stdio::piped());
-    dump_cmd.stderr(Stdio::piped());
-    let mut dump = spawn(&mut dump_cmd, "pg_dump")?;
-    let dump_stdout = dump.stdout.take().expect("pg_dump stdout was piped");
 
     let mut restore_cmd = target.psql();
     // psql reads no stdin once `-c` is given, so `-f -` (#1864); all in
@@ -1159,54 +1176,64 @@ fn pg_dump_to_psql(
     for stmt in after {
         restore_cmd.arg("-c").arg(stmt);
     }
-    restore_cmd.stdin(dump_stdout);
-    let restored = run(restore_cmd, "psql restore");
-    let dump_status = dump.wait().map_err(TenancyError::Io)?;
+    pipe((dump_cmd, "pg_dump"), (restore_cmd, "psql restore")).await
+}
+
+/// Stream `dump`'s stdout into `restore`, reading both stderrs as they
+/// run so neither blocks on a full pipe. Dropping the future kills both.
+async fn pipe(
+    (dump, dump_what): (std::process::Command, &str),
+    (restore, restore_what): (std::process::Command, &str),
+) -> Result<(), TenancyError> {
+    let mut dump = tokio::process::Command::from(dump);
+    dump.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut dump = spawn(&mut dump, dump_what)?;
+    let dump_stdout: Stdio = dump
+        .stdout
+        .take()
+        .expect("dump stdout was piped")
+        .try_into()
+        .map_err(TenancyError::Io)?;
+    let mut restore = tokio::process::Command::from(restore);
+    restore
+        .stdin(dump_stdout)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let restore_child = spawn(&mut restore, restore_what)?;
+    // Our copy of the piped stdin would keep the dump from seeing EPIPE.
+    drop(restore);
+    let (restored, dumped) =
+        tokio::join!(restore_child.wait_with_output(), dump.wait_with_output());
+    let (restored, dumped) = (
+        restored.map_err(TenancyError::Io)?,
+        dumped.map_err(TenancyError::Io)?,
+    );
     // A failed restore closes the pipe, which fails the dump too.
-    restored?;
-    if !dump_status.success() {
-        return Err(TenancyError::Validation(format!(
-            "pg_dump failed (exit {:?}): {}",
-            dump_status.code(),
-            stderr_of(&mut dump)
-        )));
+    for (out, what) in [(restored, restore_what), (dumped, dump_what)] {
+        if !out.status.success() {
+            return Err(TenancyError::Validation(format!(
+                "{what} failed (exit {:?}): {}",
+                out.status.code(),
+                error_lines(&String::from_utf8_lossy(&out.stderr))
+            )));
+        }
     }
     Ok(())
 }
 
-fn spawn(cmd: &mut std::process::Command, what: &str) -> Result<std::process::Child, TenancyError> {
+fn spawn(
+    cmd: &mut tokio::process::Command,
+    what: &str,
+) -> Result<tokio::process::Child, TenancyError> {
     cmd.spawn().map_err(|e| {
         TenancyError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             format!("failed to spawn `{what}`: {e} — install Postgres client tools?"),
         ))
     })
-}
-
-/// Run `cmd` to the end; a non-zero exit is an error with its stderr.
-fn run(mut cmd: std::process::Command, what: &str) -> Result<(), TenancyError> {
-    cmd.stdout(Stdio::null()).stderr(Stdio::piped());
-    let child = spawn(&mut cmd, what)?;
-    // Our copy of a piped stdin would keep its writer from seeing EPIPE.
-    drop(cmd);
-    let out = child.wait_with_output().map_err(TenancyError::Io)?;
-    if out.status.success() {
-        return Ok(());
-    }
-    Err(TenancyError::Validation(format!(
-        "{what} failed (exit {:?}): {}",
-        out.status.code(),
-        error_lines(&String::from_utf8_lossy(&out.stderr))
-    )))
-}
-
-fn stderr_of(child: &mut std::process::Child) -> String {
-    use std::io::Read;
-    let mut buf = String::new();
-    if let Some(mut s) = child.stderr.take() {
-        let _ = s.read_to_string(&mut buf);
-    }
-    error_lines(&buf)
 }
 
 /// The lines that say why a client failed: psql prints NOTICEs first, so
@@ -1428,6 +1455,72 @@ mod tests {
     #[test]
     fn redact_url_handles_no_scheme() {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
+    }
+
+    /// `script` run by `sh -c`.
+    fn sh(script: &str) -> std::process::Command {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    /// The dump's stderr is read while it runs: unread, >64 KiB of
+    /// warnings filled the pipe and hung both clients.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_chatty_dump_does_not_hang_the_pipe() {
+        let dump = sh("head -c 300000 /dev/zero | tr '\\0' w >&2; echo data");
+        let done = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            pipe((dump, "dump"), (sh("cat >/dev/null"), "restore")),
+        )
+        .await;
+        assert!(matches!(done, Ok(Ok(()))), "{done:?}");
+    }
+
+    /// SIGTERM during the dump stops it and kills both children, so the
+    /// move can bring the tenant back before the supervisor kills us.
+    /// It signals the whole test process, so it needs nextest's one
+    /// process per test.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_during_the_dump_kills_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pid_file = dir.path().join("pid");
+        let dump = sh(&format!("echo $$ > '{}'; exec sleep 8", pid_file.display()));
+        let mut interrupt = Interrupt::listen().expect("listen");
+        let started = std::time::Instant::now();
+        let term = async {
+            while !pid_file.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            let me = std::process::id().to_string();
+            let sent = std::process::Command::new("kill")
+                .args(["-TERM", &me])
+                .status();
+            assert!(sent.expect("kill").success());
+        };
+        let work = interrupt.guard(pipe((dump, "dump"), (sh("cat >/dev/null"), "restore")));
+        let (done, ()) = tokio::join!(work, term);
+        let err = done.expect_err("interrupted");
+        assert!(err.to_string().contains("interrupted"), "{err}");
+        assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+        let pid = std::fs::read_to_string(&pid_file).expect("pid");
+        let gone = || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "stat=", "-p", pid.trim()])
+                .output()
+                .expect("ps");
+            let stat = String::from_utf8_lossy(&out.stdout);
+            stat.trim().is_empty() || stat.trim_start().starts_with('Z')
+        };
+        for _ in 0..100 {
+            if gone() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("the dump outlived the interrupt");
     }
 
     /// psql's error is shown, not the NOTICE lines before it.

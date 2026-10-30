@@ -144,7 +144,8 @@ impl StorageRegistry {
     #[must_use]
     pub fn cdn_url(&self, disk: &str, key: &str) -> Option<String> {
         if let Some(base) = self.inner.cdns.get(disk) {
-            return Some(format!("{base}/{}", key.trim_start_matches('/')));
+            let key = super::encode_key(key.trim_start_matches('/'));
+            return Some(format!("{base}/{key}"));
         }
         self.inner.disks.get(disk).and_then(|s| s.url(key))
     }
@@ -493,6 +494,24 @@ mod tests {
         // cdn_url has nothing to return.
         let r = StorageRegistry::new().set("local", local());
         assert!(r.cdn_url("local", "k.txt").is_none());
+    }
+
+    #[test]
+    fn urls_percent_encode_the_key() {
+        let r = StorageRegistry::new()
+            .set(
+                "a",
+                StdArc::new(LocalStorage::new(PathBuf::from("/tmp")).with_base_url("/m")),
+            )
+            .cdn("a", "https://cdn.x");
+        assert_eq!(
+            r.cdn_url("a", "docs/Q3 report #2.pdf").as_deref(),
+            Some("https://cdn.x/docs/Q3%20report%20%232.pdf")
+        );
+        assert_eq!(
+            r.origin_url("a", "a?b.png").as_deref(),
+            Some("/m/a%3Fb.png")
+        );
     }
 
     #[test]

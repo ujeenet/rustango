@@ -4,6 +4,97 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.14] — 2026-10-30
+
+**Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant and is `#[non_exhaustive]`. `AuthSettings` has a new field `login_field` (struct literals need `..Default::default()`); `derive(Model)` refuses unknown `validators` names and `validators` on non-`String` fields at compile time; `server::Builder::from_env` no longer falls back to a built-in database URL; a JSON `""` on a nullable `String` field is kept as `""`; `derive(Form)` bool fields refuse unknown values; `where_not_in` past the bind cap returns `InListUnsplittable`; a dotted `DatabaseCache` table name means `schema.table`. See UPGRADING.
+
+### Added
+
+- `[auth] login_field = "email"` (or `Cli::login_field` / `server::Builder::login_field`): tenant users sign in by email, ignoring case, on the sign-in form, HTTP Basic and `/auth/login`. It needs the `sso` feature; the login lock follows the email, and the server warns at boot about users without their own email.
+- Tenancy `create-user --email <e>`.
+- `manage check --settings` lists every settings key with where its value comes from (env var, `RUSTANGO__*`, settings file or default), hiding secrets, and needs no database.
+- On the staging tier, the tenancy server warns at boot when session keys come from per-pod `./var/` files.
+- `AggregateQuery::group_by_exprs` groups by expressions such as `lower(trim(email))`, on every backend.
+
+### Fixed
+
+- `[database] url` is read: after `DATABASE_URL` / `DB_*` and `RUSTANGO__DATABASE__URL`, every pool falls back to it, except on the prod tier, where a URL from a settings file is refused. Boot logs the URL's source once.
+- Each set settings key that nothing reads (`[sso]`, `[auth.jwt] issuer`/`audience`, some `[admin]` keys) gets its own boot warning saying what to use instead; a test fails when a new settings field names no reader.
+- ViewSet JSON bodies and `ModelFormFor::from_json` keep `""` on a nullable `String` field as `""`; only `null` writes NULL.
+- The admin edit form keeps a stored `""` in a nullable text field when the operator leaves it alone, instead of writing NULL. Clearing a non-empty value still stores NULL.
+- ModelForm, admin and ViewSet writes refuse NaN and infinity (and an `f32` that overflows to it) on float fields.
+- `derive(Form)` reads a `bool` only from `true/1/on/yes`, `false/0/off/no` or empty; any other value is the error "Enter true or false." instead of `true`.
+- A decimal sent as a JSON number to a ViewSet keeps all its digits and its scale instead of passing through an f64. New `ModelFormFor::from_json_slice` does the same for a raw body; `from_json(&Value)` cannot.
+- A Decimal form value accepts scientific notation (`1e3`). The workspace `serde_json` enables `raw_value` (additive).
+- `validate_decimal` refuses more than `max_digits - decimal_places` digits before the point (`max_whole_digits`, checked after `max_digits`) and no longer counts trailing fraction zeros.
+- Admin create, edit and inline rows refuse an FK that points at a target row the user cannot see (outside its queryset hooks, soft-deleted, or refused by its `view` hook) with "no such object"; a link the row already holds is kept.
+- Admin autocomplete works for a target whose primary key or display field has a `column` rename.
+- Admin edits and deletes are audited under the key's canonical text, so `/x/007` and `/x/7` share one history; the detail page reads it the same way.
+- An admin delete blocked by rows that still point at it shows a browser an admin page (409); other clients keep the JSON 409.
+- At shutdown a WebSocket gets Close 1001 and the drain waits for it; an SSE stream ends at the stop signal instead of holding the drain to its deadline. Handlers get the signal through the new `shutdown::Shutdown` extractor.
+- An `unresolved_tenant` router with its own `/health` builds instead of panicking, and gets the api layers (CORS from `[security]`).
+- A tenant host row equal to the apex no longer makes the apex resolve to that tenant, and adding one is refused.
+- `server::Builder::from_env` returns the env error when the database vars are unset or invalid instead of connecting to a built-in URL.
+- The tenant sign-in and password pages name the tenant by its display name instead of its slug; the set-password mail falls back to the slug when the name is empty.
+- `where_not_in` past the backend's bind cap returns `ExecError::InListUnsplittable` instead of a driver error; exact duplicate keys are dropped first.
+- `find_many` and `where_in` split past the bind cap return each row once, even when MySQL's collation matches it from keys in two batches.
+- `DatabaseCache` and `clearsessions --table` accept a `schema.table` name: each part is quoted, so the table is found.
+- Two concurrent media `set_tags` on one row on Postgres leave one caller's set, not both merged: the media row is locked first.
+- Tenancy `downgrade` (registry, `--tenant`, `--all-tenants`) rolls back `<app>/migrations/` files too, newest applied first; `downgrade <target>` rolls back only the target's folder. `downgrade [N]` follows apply order on every backend.
+- `migrate <target>` plans the system chain around only the files it moves, so a later project file that creates a framework table no longer fails the move; the "already applied" check is repeated under the migrate lock.
+- Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders instead of picking one.
+- A tenant whose stored path prefix is now a console route can be edited (console and admin) while that prefix is unchanged.
+- With `cache_query(true)`, a QUERY that skips the cache (credential header, unknown tenant) is no longer buffered; a body over 1 MiB reaches the handler uncached instead of a 413, and a body read error is a 400.
+- `LocalStorage::url` and `StorageRegistry::cdn_url` percent-encode the key, as the S3 and Azure disks do: `#`, `?` and spaces no longer break the link.
+- On `LocalStorage` a directory key is not an object: `exists` is false, `load` is `NotFound`, `delete` is a no-op, and a save to it says the key names a directory.
+- `fetch_with_prefetch_related` over a reverse relation split past the bind cap loads each child once, even when MySQL's collation matches it from keys in two batches.
+- `find_many_or_fail` no longer reports `RowNotFound` for keys the database matched, such as `abc` and `ABC` under MySQL's case-insensitive collation.
+- `contenttypes::for_each_row_of_ct` applies the model's global scopes, so it skips rows a `QuerySet` hides.
+- `get_or_create` and `update_or_create` that lose an insert race on a UNIQUE constraint return the winner's row (updated, for `update_or_create`) instead of the unique-violation error.
+- A webhook subscription header replaces the default `Content-Type` or `User-Agent` instead of sending a second one; `X-Webhook-Id`, `-Event` and `-Signature` set by a subscription are ignored.
+- Admin inline add rows leave a defaulted field optional, and a blank one takes the column default.
+- Two admin inlines of one child table post under their own formset prefixes (`<child>-<fk>`), so each saves its own rows.
+- Admin inline read-only and superuser-only fields render as text instead of inputs whose edits were dropped.
+- The admin list's "show all" facet keeps an active value past the 200 cap and shows "+N more" for the rest.
+- The bare admin login page links the admin favicon.
+- `translate_plural`, `ngettext` and `ngettext_fmt` pick the plural form by the rule of the locale the text comes from; untranslated `ngettext` source strings use the default locale's rule.
+- `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
+- A Postgres database-mode purge no longer refuses because an autovacuum worker is in the tenant database; the drop ends it.
+- Boot DDL (`AppBuilder::bootstrap`, the `ensure_*` table helpers) runs a statement again once after a deadlock, which racing replicas can hit on MySQL.
+- A webhook `Retry-After` no longer delays a retry past two minutes after dispatch, so a receiver checking the signed timestamp with a five-minute `max_age` still accepts it.
+- A webhook subscription header named `Host`, `Content-Length`, `Transfer-Encoding` or a hop-by-hop name (`Connection`, `Upgrade`, `TE`, `Trailer`, `Keep-Alive`, `Proxy-Connection`) is refused: `dispatch` fails, and an already queued row dead-letters.
+- `InMemoryCache` no longer evicts the entry just written when reads race the write.
+- `RateLimitLayer` at its bucket cap sweeps down to seven eighths of it, so the full scan runs once per eighth of new keys instead of on every one.
+- `/ready` reports the database ready when every pool connection is busy within 30 seconds of a passed ping, instead of queuing behind requests and timing out.
+- The console tenant edit and `edit-tenant --activate` refuse to activate a tenant whose create run failed; resume the run instead.
+- Tenancy `--help` shows the create description under `create-tenant` and the reseal line after `edit-tenant`'s; `test-tenant-connection` has its own.
+- `sqlite,cache` and `postgres,mcp,tenancy` builds compile without unused-item warnings.
+- An unknown `[logging]` `format`, `color` or `file_rotation` is logged once logging is installed; the warning used to fire before any subscriber and was lost.
+- `manage db:info` drops its stale MySQL notes and shows the `sqlite` feature, warning when a `sqlite:` URL meets a build without it.
+- Without the `cache` feature, `--help` no longer lists `clear-cache` and `createcachetable`, and running them names the missing feature.
+- `cargo rustango new --rustango-path` reads a relative path from the current directory, writes it absolute, and refuses a folder with no `Cargo.toml`.
+- Pagination links (`page_number_links`, `cursor_links`, `LinkHeaderBuilder`) keep every value of a repeated query key such as `?tag=a&tag=b`.
+- A NaN sitemap priority is left out instead of rendering `<priority>NaN</priority>`.
+- Operator console pages no longer tell operators to run build commands; inactive tenants hide the impersonate button, and impersonate refusals come back to the edit page as a message.
+- Docs: a "Running several replicas" section (per-process state, SIGTERM drain, `preStop`, `/ready`); MCP agent-key and per-process notes; four missed 0.61.8 upgrade notes; stale code comments. The console favicon field accepts every type the server takes.
+- `derive(Model)` refuses an unknown `validators = "..."` name and `validators` on a non-`String` field at compile time; before, the first failed every write and the second never ran.
+- An MCP request with a user-owned key reads the agent and owner rows once and its skills and tools in one join: 6 queries before the tool instead of 10.
+- `resolve_user_agent_grants_pool` and `create_user_key_pool` give an inactive owner nothing, as the request path already did; an inactive superuser used to get every skill.
+- The `sqlite_tenant_demo` example adds and counts posts through the ORM on `TenantScope`'s tenant pool instead of hand-written SQL.
+- `testkit::migrate_framework` and `create_framework_tables` build each `rustango_*` table from the model the migrations use (an app's own model over the framework's), not whichever registered first.
+- The operator console can resume a tenant a failed create left inactive: a Resume button on the failed run, a link from the edit page and from the "already exists" error; a failure after the tenant row lands opens the run instead of the form.
+- The new-tenant "Test connection" probes the database Create would use, after Create's own checks (slug, URL, routing clashes).
+- `migrate-tenant-storage` stops pg_dump and psql on SIGINT/SIGTERM and brings the tenant back; their stderr is read while they run, so a chatty dump no longer hangs.
+- The tenant pool near-cap warning keeps one latch per cache, so a full database cache no longer warns on every miss next to a quiet schema cache.
+- `--help` and the `tenant` SQLite README show the SQLite `add-db-server --sqlite-dir` form, the absolute existing directory it needs, and `create-tenant --mode database`.
+- Examples: `admin_demo` uses `sql::Pool`, `save_pool` and an ORM update for its bulk actions; `orm_cookbook` builds and passes on SQLite and MySQL; both READMEs create their database.
+- Examples: `mcp_demo`, `sqlite_tenant_demo` and `sqlite_app_demo` no longer hold literal secrets or bind `0.0.0.0` by default; `sqlite_app_demo` returns a 500 instead of panicking; `mcp_demo` creates its tenant tables, so it runs.
+- Examples: `auth_demo` ships its migrations and a `.env.example`.
+
+### Deprecated
+
+- `i18n::timezone::activate`: it never did anything; use `with_offset`.
+
 ## [0.61.13] — 2026-10-30
 
 ### Fixed

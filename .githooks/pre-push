@@ -50,12 +50,16 @@ fi
 # ---------------------------------------------------------------- lib tests
 if [ "${PREPUSH_SKIP_TESTS:-0}" != "1" ]; then
   gray "[pre-push] cargo test -p rustango --features tenancy --lib"
-  if ! cargo test -p rustango --features tenancy --lib 2>&1 | tail -3; then
-    red "[pre-push] cargo test --lib failed"
+  test_log="${TMPDIR:-/tmp}/rustango-pre-push-lib.log"
+  if ! cargo test -p rustango --features tenancy --lib >"$test_log" 2>&1; then
+    # The failing names, not just the summary line.
+    awk '/^failures:$/{n++} n==2' "$test_log" | grep -v '^$' || tail -20 "$test_log"
+    red "[pre-push] cargo test --lib failed (full log: $test_log)"
     yellow "[pre-push] live integration tests are NOT run here (need DATABASE_URL)"
     yellow "[pre-push] override with: PREPUSH_SKIP_TESTS=1 git push"
     exit 1
   fi
+  grep '^test result' "$test_log" | tail -1
 fi
 
 # ---------------------------------------------------------------- cargo deny (opt-in)

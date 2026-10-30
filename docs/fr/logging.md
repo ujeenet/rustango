@@ -163,6 +163,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::tenancy::admin` | Admin de locataire |
 | `rustango::tenancy::decommission` | Désactivation et purge de locataire |
 | `rustango::tenancy::first_admin` | Le premier admin d'un nouveau locataire et son lien |
+| `rustango::tenancy::login` | Champ de connexion des utilisateurs du locataire et contrôles d'e-mail |
 | `rustango::tenancy::migrate_run` | Migrations par locataire |
 | `rustango::tenancy::operation` | Purge et rotation de mot de passe des locataires |
 | `rustango::tenancy::operator_console` | Console opérateur |

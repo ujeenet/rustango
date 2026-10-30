@@ -51,11 +51,80 @@ pub async fn shutdown_signal() {
 }
 
 /// How long open connections get after the stop signal, when
-/// `server.shutdown_timeout_secs` is unset (#1883).
+/// `server.shutdown_timeout_secs` is unset.
 pub const DEFAULT_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The signal a graceful server stops accepting on.
 pub type StopSignal = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+/// The serve loop's stop signal, as a handler extractor. A WebSocket or
+/// SSE stream never ends on its own, so it watches this to end at shutdown.
+/// While a clone lives, the drain waits for it (up to its deadline).
+/// Outside [`serve_until_drained`] it never fires.
+#[cfg(feature = "_axum")]
+#[derive(Clone, Debug, Default)]
+pub struct Shutdown {
+    stop: Option<tokio::sync::watch::Receiver<()>>,
+    /// Counts in the drain, like the connection that carried the request.
+    _open: Option<tokio::sync::watch::Receiver<()>>,
+}
+
+#[cfg(feature = "_axum")]
+impl Shutdown {
+    fn new(stop: tokio::sync::watch::Receiver<()>, open: tokio::sync::watch::Receiver<()>) -> Self {
+        Self {
+            stop: Some(stop),
+            _open: Some(open),
+        }
+    }
+
+    /// A signal fired by `stop`, outside any server.
+    #[cfg(all(test, feature = "mcp", feature = "sqlite", feature = "testkit"))]
+    pub(crate) fn on(stop: tokio::sync::watch::Receiver<()>) -> Self {
+        Self {
+            stop: Some(stop),
+            _open: None,
+        }
+    }
+
+    /// The one in `extensions`, else one that never fires.
+    #[must_use]
+    pub fn from_extensions(extensions: &axum::http::Extensions) -> Self {
+        extensions.get::<Self>().cloned().unwrap_or_default()
+    }
+
+    /// Resolves once the server stops accepting connections.
+    pub async fn stopped(&self) {
+        match &self.stop {
+            // A fresh clone has not seen the stop value, so a late call fires at once.
+            Some(stop) => {
+                let _ = stop.clone().changed().await;
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    /// `stream`, ended at shutdown: wrap an SSE body in it.
+    pub fn cut<S: futures_util::Stream>(
+        &self,
+        stream: S,
+    ) -> impl futures_util::Stream<Item = S::Item> {
+        let this = self.clone();
+        futures_util::StreamExt::take_until(stream, async move { this.stopped().await })
+    }
+}
+
+#[cfg(feature = "_axum")]
+impl<S: Send + Sync> axum::extract::FromRequestParts<S> for Shutdown {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        _state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self::from_extensions(&parts.extensions))
+    }
+}
 
 /// Bind `addr` and log where the server listens: every serve path binds
 /// here, so none starts silently. `apex` adds the operator console URL.
@@ -86,7 +155,7 @@ pub(crate) async fn bind_announced(
 
 /// Serve `app` until [`shutdown_signal`], then give open connections
 /// `drain` to finish. SSE and long-poll never finish on their own, so
-/// without a deadline SIGTERM waited for SIGKILL (#1883). This is the
+/// without a deadline SIGTERM waited for SIGKILL. This is the
 /// crate's only `axum::serve`, so no serve path can skip the drain (#1948).
 ///
 /// ```ignore
@@ -189,17 +258,20 @@ async fn serve_with(
         };
         let served = std::sync::Arc::new(tokio::sync::Notify::new());
         let on_request = std::sync::Arc::clone(&served);
+        let open = open_rx.clone();
+        // An upgraded socket outlives its connection future; this keeps it in the drain.
+        let shutdown = Shutdown::new(stop_rx.clone(), open.clone());
         // `ConnectInfo` feeds `access_log`, IP filters and per-IP limits.
         let svc =
             app.clone()
                 .map_request(move |mut req: axum::http::Request<hyper::body::Incoming>| {
                     req.extensions_mut()
                         .insert(axum::extract::ConnectInfo(addr));
+                    req.extensions_mut().insert(shutdown.clone());
                     on_request.notify_one();
                     req
                 });
         let mut stop = stop_rx.clone();
-        let open = open_rx.clone();
         tokio::spawn(async move {
             let builder = conn_builder(limits);
             let conn = builder.serve_connection_with_upgrades(
@@ -269,7 +341,7 @@ mod tests {
     }
 
     /// A request that never ends (long-poll, SSE) must not hold
-    /// shutdown past the deadline (#1883).
+    /// shutdown past the deadline.
     #[tokio::test]
     async fn an_endless_request_does_not_outlive_the_drain_deadline() {
         use tokio::io::AsyncWriteExt as _;
@@ -408,6 +480,126 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// An open SSE stream ends at the stop signal, not at the drain deadline.
+    #[tokio::test]
+    async fn an_sse_stream_ends_at_the_stop_signal() {
+        use axum::response::sse::{Event, Sse};
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let app = axum::Router::new().route(
+            "/events",
+            axum::routing::get(|shutdown: Shutdown| async move {
+                let endless =
+                    futures_util::stream::pending::<Result<Event, std::convert::Infallible>>();
+                Sse::new(shutdown.cut(endless))
+            }),
+        );
+        let (addr, stop, server) = spawn_drained(app, std::time::Duration::from_secs(60)).await;
+        let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        client
+            .write_all(b"GET /events HTTP/1.1\r\nhost: x\r\n\r\n")
+            .await
+            .unwrap();
+        // The head arrives once the stream is open.
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut b = [0u8; 1];
+            client.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(head.starts_with(b"HTTP/1.1 200"));
+        stop.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("shutdown waited out the drain deadline for an SSE stream")
+            .unwrap()
+            .unwrap();
+        assert!(closed_by_server(&mut client).await);
+    }
+
+    /// A WebSocket gets Close 1001 at the stop signal, and the drain waits for it.
+    #[cfg(feature = "websocket")]
+    #[tokio::test]
+    async fn a_websocket_gets_going_away_at_the_stop_signal() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let hub = crate::ws::WsHub::new(crate::sse::EventBus::<String>::new(4));
+        let app = axum::Router::new().route(
+            "/ws",
+            axum::routing::get({
+                let hub = hub.clone();
+                move |ws: axum::extract::WebSocketUpgrade, shutdown: Shutdown| {
+                    let hub = hub.clone();
+                    async move { hub.upgrade(ws, shutdown) }
+                }
+            }),
+        );
+        let (addr, stop, server) = spawn_drained(app, std::time::Duration::from_secs(60)).await;
+        let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        tcp.write_all(
+            b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+              Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        )
+        .await
+        .unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut b = [0u8; 1];
+            tcp.read_exact(&mut b).await.unwrap();
+            head.push(b[0]);
+        }
+        assert!(head.starts_with(b"HTTP/1.1 101"));
+        // The handler subscribes once it runs.
+        while hub.receiver_count() == 0 {
+            tokio::task::yield_now().await;
+        }
+        stop.send(()).unwrap();
+        let close = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut h = [0u8; 2];
+            tcp.read_exact(&mut h).await.unwrap();
+            let mut body = vec![0u8; usize::from(h[1] & 0x7f)];
+            tcp.read_exact(&mut body).await.unwrap();
+            (h[0], body)
+        })
+        .await
+        .expect("no close frame at shutdown");
+        assert_eq!(close.0, 0x88, "a final Close frame");
+        assert_eq!(&close.1[..2], &1001u16.to_be_bytes(), "going away");
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("the drain outlived the closed socket")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// While a handler holds the signal, the drain waits for it.
+    #[tokio::test]
+    async fn the_drain_waits_for_a_held_signal() {
+        let (held, on_held) = tokio::sync::oneshot::channel::<Shutdown>();
+        let held = std::sync::Arc::new(std::sync::Mutex::new(Some(held)));
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::get(move |shutdown: Shutdown| {
+                if let Some(tx) = held.lock().unwrap().take() {
+                    let _ = tx.send(shutdown);
+                }
+                async { "ok" }
+            }),
+        );
+        let (addr, stop, server) = spawn_drained(app, std::time::Duration::from_secs(60)).await;
+        assert!(get(addr, "/").await.starts_with("HTTP/1.1 200"));
+        let shutdown = on_held.await.unwrap();
+        stop.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), shutdown.stopped())
+            .await
+            .expect("the handler's signal never fired");
+        assert!(!server.is_finished(), "the drain ended under a held signal");
+        drop(shutdown);
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("the drain outlived the dropped signal")
+            .unwrap()
+            .unwrap();
     }
 
     /// With nothing open, shutdown does not wait for the drain deadline.

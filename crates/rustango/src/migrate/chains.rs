@@ -15,9 +15,21 @@ use super::{ensure, runner, MigrateError, SchemaSnapshot};
 use crate::sql::Pool;
 
 /// What each chain applied.
+#[derive(Default)]
 pub(crate) struct Applied {
     pub(crate) system: Vec<Migration>,
     pub(crate) project: Vec<Migration>,
+    /// Project files a `migrate <target>` rolled back first.
+    pub(crate) unapplied: Vec<Migration>,
+}
+
+/// The project files a run moves: what the system chain plans around.
+#[derive(Clone, Copy)]
+enum ProjectRun<'a> {
+    /// Every pending file.
+    Pending,
+    /// `dir` moved to `target`; the other folders stay as they are.
+    To { dir: &'a Path, target: &'a str },
 }
 
 /// Apply `chain`'s `scope` steps, then the project chain via `project`, then
@@ -51,12 +63,61 @@ where
         scope,
         project_dirs,
         observer,
-        project,
+        ProjectRun::Pending,
+        |held| async move {
+            Ok(runner::Moved {
+                unapplied: Vec::new(),
+                applied: project(held).await?,
+            })
+        },
     ));
+    // `Pending` never stops early.
+    with_signals(run, pool, signals)
+        .await
+        .map(Option::unwrap_or_default)
+}
+
+/// [`migrate_chains`] for `migrate <target>`: `dir`, one of `project_dirs`,
+/// moved to `target`. The system chain plans around the files that move
+/// only. `None`, with nothing run, when the ledger has `target` under the lock.
+///
+/// # Errors
+/// As [`migrate_chains`].
+pub(crate) async fn migrate_chains_to(
+    pool: &Pool,
+    chain: &SystemChain,
+    scope: MigrationScope,
+    project_dirs: &[PathBuf],
+    signals: Signals<'_>,
+    dir: &Path,
+    target: &str,
+) -> Result<Option<Applied>, MigrateError> {
+    let run = Box::pin(locked_chains(
+        pool,
+        chain,
+        scope,
+        project_dirs,
+        None,
+        ProjectRun::To { dir, target },
+        |held| runner::migrate_to_locked(held, pool, dir, target, runner::LEDGER_TABLE),
+    ));
+    with_signals(run, pool, signals).await
+}
+
+async fn with_signals(
+    run: impl Future<Output = Result<Option<Applied>, MigrateError>>,
+    pool: &Pool,
+    signals: Signals<'_>,
+) -> Result<Option<Applied>, MigrateError> {
     match signals {
         Signals::Skip => run.await,
         Signals::Fire { tenant } => {
-            let names = |a: &Applied| a.project.iter().map(|m| m.name.clone()).collect();
+            let names = |a: &Option<Applied>| {
+                a.iter()
+                    .flat_map(|a| &a.project)
+                    .map(|m| m.name.clone())
+                    .collect()
+            };
             runner::with_migrate_signals(run, names, pool, tenant).await
         }
     }
@@ -68,14 +129,22 @@ async fn locked_chains<F, Fut>(
     scope: MigrationScope,
     project_dirs: &[PathBuf],
     observer: Option<&dyn MigrationObserver>,
+    moves: ProjectRun<'_>,
     project: F,
-) -> Result<Applied, MigrateError>
+) -> Result<Option<Applied>, MigrateError>
 where
     F: FnOnce(LockHeld) -> Fut,
-    Fut: Future<Output = Result<Vec<Migration>, MigrateError>>,
+    Fut: Future<Output = Result<runner::Moved, MigrateError>>,
 {
     runner::with_migrate_lock_held(pool, |held| async move {
-        let tables = ProjectTables::read(held, pool, project_dirs).await?;
+        let applied = runner::ledger_names(held, pool, runner::LEDGER_TABLE).await?;
+        // Checked again here: the caller's look was outside the lock.
+        if let ProjectRun::To { target, .. } = moves {
+            if applied.contains(target) {
+                return Ok(None);
+            }
+        }
+        let tables = ProjectTables::read(project_dirs, &applied, moves)?;
         let run = Run {
             held,
             pool,
@@ -86,8 +155,8 @@ where
         };
         // Boxed: inline, these futures overflow the stack of deep `manage` callers.
         let first = Box::pin(run.system_pass(&tables.pending)).await?;
-        let project = match Box::pin(project(held)).await {
-            Ok(applied) => applied,
+        let moved = match Box::pin(project(held)).await {
+            Ok(moved) => moved,
             Err(e) if first.applied.is_empty() => return Err(e),
             // The report would say nothing ran; the system steps did.
             Err(e) => {
@@ -108,7 +177,11 @@ where
         Box::pin(run.finish(&tables.claimed)).await?;
         let mut system = first.applied;
         system.extend(second.applied);
-        Ok(Applied { system, project })
+        Ok(Some(Applied {
+            system,
+            project: moved.applied,
+            unapplied: moved.unapplied,
+        }))
     })
     .await
 }
@@ -125,10 +198,27 @@ struct ProjectTables {
 }
 
 impl ProjectTables {
-    async fn read(held: LockHeld, pool: &Pool, dirs: &[PathBuf]) -> Result<Self, MigrateError> {
-        let migs = file::list_each(dirs)?;
-        let applied = runner::ledger_names(held, pool, runner::LEDGER_TABLE).await?;
-        Ok(Self::of(&migs, &applied))
+    /// The files the project ends with after `moves`: a targeted move
+    /// leaves out what it rolls back and the other folders' pending files.
+    fn read(
+        dirs: &[PathBuf],
+        applied: &std::collections::HashSet<String>,
+        moves: ProjectRun<'_>,
+    ) -> Result<Self, MigrateError> {
+        let mut migs = Vec::new();
+        for d in dirs {
+            let all = file::list_dir(d)?;
+            match moves {
+                ProjectRun::Pending => migs.extend(all),
+                ProjectRun::To { dir, target } if d.as_path() == dir => {
+                    migs.extend(all.into_iter().filter(|m| m.name.as_str() <= target));
+                }
+                ProjectRun::To { .. } => {
+                    migs.extend(all.into_iter().filter(|m| applied.contains(&m.name)));
+                }
+            }
+        }
+        Ok(Self::of(&migs, applied))
     }
 
     fn of(migs: &[Migration], applied: &std::collections::HashSet<String>) -> Self {
@@ -941,5 +1031,42 @@ mod tests {
         );
         run(pool.clone(), dir, chain).await.unwrap();
         assert!(runner::table_exists_here(&pool, "sc_links").await);
+    }
+
+    /// A target the ledger has under the lock runs nothing: the caller's
+    /// look was outside it, and the move is backward.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_applied_target_runs_no_chain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("db.sqlite").display());
+        let pool = Pool::connect(&url).await.unwrap();
+        let sys = tmp.path().join("system/migrations");
+        let snap = json!({ "tables": [table("sc_sys", None)] });
+        let ops = vec![json!({ "CreateTable": "sc_sys" })];
+        write(&sys, &mig("0001_sys", None, snap, ops));
+        let dir = tmp.path().join("migrations");
+        let empty = json!({ "tables": [] });
+        write(&dir, &mig("0001_a", None, empty.clone(), vec![]));
+        write(&dir, &mig("0002_b", Some("0001_a"), empty, vec![]));
+        runner::migrate_pool(&pool, &dir).await.unwrap();
+
+        let chain = SystemChain::shipped(sys);
+        let dirs = [dir.clone()];
+        let ran = migrate_chains_to(
+            &pool,
+            &chain,
+            MigrationScope::Tenant,
+            &dirs,
+            Signals::Skip,
+            &dir,
+            "0001_a",
+        )
+        .await
+        .unwrap();
+        assert!(ran.is_none());
+        assert!(!runner::table_exists_here(&pool, "sc_sys").await);
+        let applied = runner::applied_set_pool(&pool).await.unwrap();
+        assert!(applied.contains("0002_b"), "{applied:?}");
     }
 }

@@ -89,7 +89,7 @@ async fn base_host_is_listed_and_flagged() {
 async fn an_extra_host_can_be_added_listed_and_removed() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    add_host(&pool, "acme", "add-remove.acme.com")
+    add_host(&pool, "acme", "add-remove.acme.com", "apex.invalid")
         .await
         .expect("add");
 
@@ -142,10 +142,10 @@ async fn the_base_host_cannot_be_disabled_either() {
 async fn a_host_cannot_be_claimed_twice() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    add_host(&pool, "acme", "twice.acme.com")
+    add_host(&pool, "acme", "twice.acme.com", "apex.invalid")
         .await
         .expect("add");
-    let err = add_host(&pool, "acme", "twice.acme.com")
+    let err = add_host(&pool, "acme", "twice.acme.com", "apex.invalid")
         .await
         .expect_err("duplicate must fail");
     assert!(matches!(err, HostError::Taken(_)), "got {err:?}");
@@ -158,7 +158,7 @@ async fn a_host_cannot_be_claimed_twice() {
 async fn a_host_matching_another_tenants_base_is_refused() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    let err = add_host(&pool, "acme", "acme.example.com")
+    let err = add_host(&pool, "acme", "acme.example.com", "apex.invalid")
         .await
         .expect_err("must not shadow a base host");
     assert!(matches!(err, HostError::Taken(_)), "got {err:?}");
@@ -179,7 +179,7 @@ async fn removal_is_scoped_to_the_owning_org() {
         ..rustango::testkit::org()
     };
     other.insert_pool(&pool).await.expect("insert org");
-    add_host(&pool, "acme", "scoped.acme.com")
+    add_host(&pool, "acme", "scoped.acme.com", "apex.invalid")
         .await
         .expect("add");
 
@@ -195,7 +195,7 @@ async fn removal_is_scoped_to_the_owning_org() {
 async fn an_extra_host_can_be_disabled_without_unbinding_it() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    add_host(&pool, "acme", "disabled.acme.com")
+    add_host(&pool, "acme", "disabled.acme.com", "apex.invalid")
         .await
         .expect("add");
     set_host_enabled(&pool, "acme", "disabled.acme.com", false)
@@ -210,13 +210,15 @@ async fn an_extra_host_can_be_disabled_without_unbinding_it() {
 async fn hostnames_are_normalized_on_the_way_in() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    add_host(&pool, "acme", "  SHOP.Acme.COM  ")
+    add_host(&pool, "acme", "  SHOP.Acme.COM  ", "apex.invalid")
         .await
         .expect("add");
     let hosts = list_for_org(&pool, "acme").await.expect("list");
     assert!(hosts.iter().any(|h| h.hostname == "shop.acme.com"));
     // ...so the same host in a different case is a duplicate, not a second row.
-    assert!(add_host(&pool, "acme", "Shop.Acme.Com").await.is_err());
+    assert!(add_host(&pool, "acme", "Shop.Acme.Com", "apex.invalid")
+        .await
+        .is_err());
     assert_eq!(
         normalize_hostname("Shop.Acme.Com").unwrap(),
         "shop.acme.com"
@@ -289,7 +291,7 @@ async fn an_existing_registry_gains_the_table_on_a_plain_migrate() {
     assert_eq!(orgs[0].host_pattern.as_deref(), Some("legacy.example.com"));
 
     // The feature is live immediately after that migrate.
-    add_host(&pool, "legacy", "extra.example.com")
+    add_host(&pool, "legacy", "extra.example.com", "apex.invalid")
         .await
         .expect("add after upgrade");
     let hosts = list_for_org(&pool, "legacy").await.expect("list");
@@ -343,8 +345,10 @@ async fn a_populated_host_table_survives_a_re_migrate() {
     org.insert_pool(&pool).await.expect("insert org");
 
     // Real operator data in the table before the upgrade runs.
-    add_host(&pool, "acme", "kept.acme.com").await.expect("add");
-    add_host(&pool, "acme", "also-kept.acme.com")
+    add_host(&pool, "acme", "kept.acme.com", "apex.invalid")
+        .await
+        .expect("add");
+    add_host(&pool, "acme", "also-kept.acme.com", "apex.invalid")
         .await
         .expect("add");
 
@@ -381,7 +385,9 @@ async fn every_mutation_moves_the_fingerprint() {
         "an empty table must fingerprint as all-zero, not error"
     );
 
-    add_host(&pool, "acme", "fp.acme.com").await.expect("add");
+    add_host(&pool, "acme", "fp.acme.com", "apex.invalid")
+        .await
+        .expect("add");
     let after_add = generation(&pool).await.expect("generation");
     assert_ne!(after_add, empty, "an add must move the fingerprint");
     assert_eq!((after_add.count, after_add.enabled), (1, 1));
@@ -429,8 +435,12 @@ async fn compensating_toggles_still_move_the_fingerprint() {
     use rustango::tenancy::org_host::generation;
     let pool = registry_with_org().await;
 
-    add_host(&pool, "acme", "aaa.acme.com").await.expect("add");
-    add_host(&pool, "acme", "bbb.acme.com").await.expect("add");
+    add_host(&pool, "acme", "aaa.acme.com", "apex.invalid")
+        .await
+        .expect("add");
+    add_host(&pool, "acme", "bbb.acme.com", "apex.invalid")
+        .await
+        .expect("add");
     set_host_enabled(&pool, "acme", "bbb.acme.com", false)
         .await
         .expect("disable bbb");
@@ -477,7 +487,7 @@ async fn a_failing_host_lookup_backs_off_instead_of_querying_per_request() {
     use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    add_host(&pool, "acme", "backoff.acme.com")
+    add_host(&pool, "acme", "backoff.acme.com", "apex.invalid")
         .await
         .expect("add");
 
@@ -491,7 +501,7 @@ async fn a_failing_host_lookup_backs_off_instead_of_querying_per_request() {
         .await
         .expect("rename away");
     rustango::tenancy::invalidate_host_cache();
-    let during = RegisteredHostResolver
+    let during = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("backoff.acme.com"), &pool)
         .await
         .expect("a missing table must not error the request");
@@ -508,7 +518,7 @@ async fn a_failing_host_lookup_backs_off_instead_of_querying_per_request() {
         .expect("rename back");
     rustango::tenancy::invalidate_host_cache();
 
-    let still_backed_off = RegisteredHostResolver
+    let still_backed_off = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("backoff.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -521,7 +531,7 @@ async fn a_failing_host_lookup_backs_off_instead_of_querying_per_request() {
     // Clearing the backoff (as the interval elapsing would) restores it.
     rustango::testkit::reset_host_generation();
     rustango::tenancy::invalidate_host_cache();
-    let recovered = RegisteredHostResolver
+    let recovered = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("backoff.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -576,11 +586,11 @@ async fn a_registered_host_routes_to_its_tenant() {
     use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
     let pool = registry_with_org().await;
     rustango::tenancy::invalidate_host_cache();
-    add_host(&pool, "acme", "routes.acme.com")
+    add_host(&pool, "acme", "routes.acme.com", "apex.invalid")
         .await
         .expect("add");
 
-    let got = RegisteredHostResolver
+    let got = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("routes.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -593,7 +603,7 @@ async fn an_unregistered_host_resolves_to_nothing() {
     use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
     let pool = registry_with_org().await;
     rustango::tenancy::invalidate_host_cache();
-    let got = RegisteredHostResolver
+    let got = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("nobody.example.com"), &pool)
         .await
         .expect("resolve");
@@ -608,14 +618,14 @@ async fn a_disabled_host_stops_routing() {
     use rustango::tenancy::{OrgResolver, RegisteredHostResolver};
     let pool = registry_with_org().await;
     rustango::tenancy::invalidate_host_cache();
-    add_host(&pool, "acme", "parked.acme.com")
+    add_host(&pool, "acme", "parked.acme.com", "apex.invalid")
         .await
         .expect("add");
     set_host_enabled(&pool, "acme", "parked.acme.com", false)
         .await
         .expect("disable");
 
-    let got = RegisteredHostResolver
+    let got = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("parked.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -633,16 +643,16 @@ async fn mutations_invalidate_the_resolution_cache() {
     rustango::tenancy::invalidate_host_cache();
 
     // Prime the NEGATIVE entry first — the case that would otherwise stick.
-    let miss = RegisteredHostResolver
+    let miss = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("later.acme.com"), &pool)
         .await
         .expect("resolve");
     assert!(miss.is_none());
 
-    add_host(&pool, "acme", "later.acme.com")
+    add_host(&pool, "acme", "later.acme.com", "apex.invalid")
         .await
         .expect("add");
-    let hit = RegisteredHostResolver
+    let hit = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("later.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -656,7 +666,7 @@ async fn mutations_invalidate_the_resolution_cache() {
     remove_host(&pool, "acme", "later.acme.com")
         .await
         .expect("remove");
-    let gone = RegisteredHostResolver
+    let gone = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("later.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -699,7 +709,7 @@ async fn a_host_added_by_another_pod_is_picked_up() {
     rustango::testkit::reset_host_generation();
 
     // This pod caches the miss.
-    let miss = RegisteredHostResolver
+    let miss = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("otherpod.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -710,7 +720,7 @@ async fn a_host_added_by_another_pod_is_picked_up() {
 
     // Without the generation check this stays None until the 30s TTL.
     rustango::testkit::expire_host_generation();
-    let hit = RegisteredHostResolver
+    let hit = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("otherpod.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -737,7 +747,7 @@ async fn a_deactivation_by_another_pod_is_picked_up() {
 
     insert_host_behind_the_cache(&pool, "acme", "toggle.acme.com").await;
     rustango::testkit::expire_host_generation();
-    let hit = RegisteredHostResolver
+    let hit = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("toggle.acme.com"), &pool)
         .await
         .expect("resolve");
@@ -754,7 +764,7 @@ async fn a_deactivation_by_another_pod_is_picked_up() {
     row.save_pool(&pool).await.expect("save");
 
     rustango::testkit::expire_host_generation();
-    let gone = RegisteredHostResolver
+    let gone = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("toggle.acme.com"), &pool)
         .await
         .expect("resolve");

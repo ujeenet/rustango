@@ -46,6 +46,8 @@ pub use schema::{
 };
 #[doc(hidden)]
 pub use schema::{AdminConfigParts, FieldSchemaParts, GenericM2MEntry, ModelSchemaParts};
+#[doc(hidden)]
+pub use validate::names as __validator_names;
 pub use validate::validate_value;
 pub use value::SqlValue;
 #[doc(hidden)]

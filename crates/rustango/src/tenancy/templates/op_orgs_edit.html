@@ -12,12 +12,8 @@
 
 <h1>Edit <code>{{ slug }}</code></h1>
 <p class="lead">
-  Adjust the live config for this tenant. Locked fields stay where they
-  are — re-provisioning needs <code>cargo run -- purge-tenant</code> and
-  <code>create-tenant</code>. Inputs are generated from
-  <code>Org::SCHEMA</code> via
-  <code>rustango::admin::render::render_input</code>, so new columns
-  added to <code>Org</code> show up here without template edits.
+  Adjust the live config for this tenant. Locked fields cannot change;
+  to start over, purge the tenant below and create it again.
 </p>
 
 {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
@@ -27,6 +23,10 @@
     field. The extra hostnames it can also answer on are a collection
     with their own verbs, so they live on their own page — which needs
     a link from here, or nothing reaches it. -#}
+{% if resume_run %}
+<div class="alert alert-error" id="resume-hint">A failed create left this tenant inactive.
+  <a href="{{ console_prefix }}/orgs/provision/{{ resume_run }}">Resume it from run #{{ resume_run }}</a>.</div>
+{% endif %}
 {#- A div, not a p — see op_orgs.html: a `<form>` closes an open `<p>`. -#}
 <div class="page-actions">
   <a href="{{ console_prefix }}/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>
@@ -113,8 +113,8 @@
         <th><label for="favicon">Favicon</label></th>
         <td>
           {% if favicon_url %}<img class="brand-asset-preview" src="{{ favicon_url }}" alt="">{% endif %}
-          <input type="file" id="favicon" name="favicon" accept="image/png,image/x-icon">
-          <div class="field-helper">PNG or ICO. Max 1 MB. Leave empty to keep the current favicon.</div>
+          <input type="file" id="favicon" name="favicon" accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon">
+          <div class="field-helper">PNG, JPEG, WebP, or ICO. Max 1 MB. Leave empty to keep the current favicon.</div>
         </td>
       </tr>
     </table>
@@ -130,7 +130,8 @@
    to the tenant admin's /__admin/. Banner + audit entries make
    the session visible + traceable. Hidden if impersonation
    wasn't enabled at boot (the operator console route only
-   mounts when the tenant session secret is shared). #}
+   mounts when the tenant session secret is shared), and for an
+   inactive tenant, which refuses it. #}
 {% if impersonate_enabled %}
 <form method="post" action="{{ console_prefix }}/orgs/{{ slug }}/impersonate" class="edit-form">
   {{ csrf_input | default(value='') | safe }}

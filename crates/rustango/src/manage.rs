@@ -374,6 +374,22 @@ impl Cli {
         self
     }
 
+    /// What tenant users sign in with. Beats `[auth] login_field`.
+    /// See [`crate::tenancy::configure_login_field`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn login_field(self, field: crate::login_field::LoginField) -> Self {
+        if !crate::tenancy::configure_login_field(field) {
+            tracing::warn!(
+                target: "rustango::tenancy::login",
+                ignored = %field,
+                kept = %crate::tenancy::login_field(),
+                "login_field was already set; this call is ignored"
+            );
+        }
+        self
+    }
+
     /// Opt in to resolving the tenant from a header (`X-Org`) when no
     /// host matched; off by default (#1856).
     #[cfg(feature = "tenancy")]
@@ -783,6 +799,8 @@ impl Cli {
     ///   [`Cli::bind`] call wins over both.
     /// - `Settings.tenancy.apex_domain` → the tenancy apex host.
     ///   `RUSTANGO_APEX_DOMAIN` still wins.
+    /// - `Settings.database.url` → the database URL when no env var
+    ///   names one (`DATABASE_URL`, `DB_*`, `RUSTANGO__DATABASE__URL`).
     ///
     /// Future fields land here as the wiring catches up — the method
     /// is forward-compatible because every Settings field is
@@ -810,6 +828,11 @@ impl Cli {
             if let Some(bind) = s.server.bind.as_deref() {
                 self.bind = bind.to_owned();
             }
+        }
+
+        // Below every env var in the one URL resolver; first call wins.
+        if let Some(url) = s.database.url.as_deref() {
+            crate::env::set_settings_database_url(url);
         }
 
         // `[tenancy] apex_domain` was parsed and dropped (#1379).
@@ -1295,7 +1318,7 @@ impl Cli {
     /// Generic over the pool type because the Postgres path extends a
     /// `PgPool` (handlers taking `Extension<PgPool>` predate the `Pool`
     /// enum) while the other two extend `crate::sql::Pool`.
-    /// `server.shutdown_timeout_secs`, or the default (#1883).
+    /// `server.shutdown_timeout_secs`, or the default.
     fn drain_timeout(&self) -> std::time::Duration {
         #[cfg(feature = "config")]
         if let Some(s) = &self.settings_for_layers {
@@ -1398,6 +1421,27 @@ impl Cli {
         api.layer(axum::Extension(pool))
     }
 
+    /// CSRF, the panic guard and the `[server]`/`[security]` layers the api
+    /// router gets; the outer ones are the builder's.
+    #[cfg(feature = "tenancy")]
+    fn with_api_layers(&self, router: Router) -> Router {
+        #[cfg(feature = "csrf")]
+        let router = match self.csrf_layer() {
+            Some(layer) => router.layer(layer),
+            None => router,
+        };
+        let router = crate::panic_guard::catch_panics(router);
+        #[cfg(feature = "config")]
+        let router = match self.settings_for_layers.as_ref() {
+            Some(s) => {
+                let (router, _outer) = apply_settings_layers(router, s);
+                router
+            }
+            None => router,
+        };
+        router
+    }
+
     /// Everything the tenancy builder must put on its outermost router:
     /// observability and the `[security]` outer layers, which layers on
     /// the api router never reach (#1480, #1699, #1700). Both tenancy
@@ -1410,12 +1454,13 @@ impl Cli {
     ) -> crate::server::Builder<DB> {
         let mut builder = builder
             .observability(self.access_log_layer())
-            .span_redact(self.span_redact_params());
+            .span_redact(self.span_redact_params())
+            .drain_timeout(self.drain_timeout());
         if let Some(h) = &self.tenant_header {
             builder = builder.header_resolver(h.clone());
         }
         if let Some(r) = &self.unresolved_tenant {
-            builder = builder.unresolved_tenant(r.clone());
+            builder = builder.unresolved_tenant(self.with_api_layers(r.clone()));
         }
         if let Some(s) = &self.brand_storage {
             builder = builder.brand_storage(s.clone());
@@ -1706,10 +1751,7 @@ impl Cli {
         // merged with the tenant admin and dispatched beside the
         // operator console, and layers applied now would reach neither.
         // The builder applies them to the outermost router instead.
-        let mut builder = crate::server::Builder::from_env()
-            .await?
-            .api(api)
-            .drain_timeout(self.drain_timeout());
+        let mut builder = crate::server::Builder::from_env().await?.api(api);
         if let Some(apex) = self.apex.take() {
             builder = builder.with_apex(apex);
         }
@@ -1793,8 +1835,7 @@ impl Cli {
             registry_url,
             apex,
         )
-        .api(api)
-        .drain_timeout(self.drain_timeout());
+        .api(api);
         if let Some(apex) = apex_flag {
             builder = builder.with_apex(apex);
         }
@@ -2001,18 +2042,17 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
     inert
 }
 
-/// Say which set keys nothing reads yet (#1379). Falls back to stderr
-/// when no tracing subscriber is installed, so the warning is never lost.
+/// One warning per set key that nothing reads, naming what to use
+/// instead. Stderr when no subscriber is installed, so it is never lost.
 #[cfg(feature = "config")]
-fn warn_unread_settings(keys: &[&str]) {
-    if keys.is_empty() {
-        return;
-    }
-    let keys = keys.join(", ");
-    if tracing::dispatcher::has_been_set() {
-        tracing::warn!(target: "rustango::manage", keys = %keys, "these settings have no effect yet; see the config docs");
-    } else {
-        eprintln!("warning: these settings have no effect yet: {keys}");
+fn warn_unread_settings(keys: &[&crate::config::registry::Key]) {
+    for k in keys {
+        let msg = k.unread_message();
+        if tracing::dispatcher::has_been_set() {
+            tracing::warn!(target: "rustango::manage", key = k.path, "{msg}");
+        } else {
+            eprintln!("warning: {msg}");
+        }
     }
 }
 
@@ -2291,6 +2331,12 @@ fn apply_login_settings(a: &crate::config::AuthSettings) {
             ignored("lockout_*");
         }
     }
+    #[cfg(feature = "tenancy")]
+    if let Some(field) = a.login_field {
+        if !crate::tenancy::login::configure_login_field_from_settings(field) {
+            ignored("login_field");
+        }
+    }
     #[cfg(not(any(feature = "passwords", feature = "admin", feature = "cache")))]
     let _ = (a, ignored);
 }
@@ -2415,6 +2461,45 @@ mod tests {
         };
         BootMigrate::Skip.run(migrate).await.expect("skip");
         assert!(!ran.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// `runserver`'s auto-migrate sends `pre_migrate` and `post_migrate`.
+    #[cfg(all(feature = "sqlite", feature = "signals"))]
+    #[tokio::test]
+    async fn auto_migrate_fires_pre_and_post_migrate() {
+        use crate::signals::migrate as sig;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = tmp.path().join("app.db");
+        let url = format!("sqlite://{}?mode=rwc", db.display());
+        let pool = crate::sql::Pool::connect(&url).await.expect("connect");
+        // Receivers are global: record only runs on this test's database.
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ours = move |t: &sig::MigrateTarget| {
+            t.pool
+                .as_sqlite()
+                .is_some_and(|p| p.connect_options().get_filename() == db.as_path())
+        };
+        let (pre_seen, pre_ours) = (seen.clone(), ours.clone());
+        let pre = sig::connect_pre_migrate_with_target(move |_, t| {
+            if pre_ours(&t) {
+                pre_seen.lock().unwrap().push("pre");
+            }
+            async {}
+        });
+        let post_seen = seen.clone();
+        let post = sig::connect_post_migrate_with_target(move |_, t| {
+            if ours(&t) {
+                post_seen.lock().unwrap().push("post");
+            }
+            async {}
+        });
+        let res = auto_migrate(&pool, &dir).await;
+        sig::disconnect_pre_migrate(pre);
+        sig::disconnect_post_migrate(post);
+        res.expect("auto-migrate");
+        assert_eq!(*seen.lock().unwrap(), ["pre", "post"]);
     }
 
     /// `runserver`'s auto-migrate applies the system chain, like `manage migrate` (#2056).
@@ -2671,6 +2756,16 @@ mod tests {
         s.server.bind = Some("127.0.0.1:9090".into());
         let cli = Cli::new().with_settings(&s);
         assert_eq!(cli.bind, "127.0.0.1:9090");
+    }
+
+    /// `[database] url` reaches the one URL resolver; env vars still win there.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_hands_the_database_url_to_the_resolver() {
+        let mut s = crate::config::Settings::default();
+        s.database.url = Some("sqlite::memory:".into());
+        let _cli = Cli::new().with_settings(&s);
+        assert_eq!(crate::env::settings_database_url(), Some("sqlite::memory:"));
     }
 
     /// `[tenancy] apex_domain` reaches the apex the server uses (#1379).
@@ -2933,6 +3028,37 @@ mod tests {
         );
     }
 
+    /// The unresolved router gets the api layers: CORS from `[security]`.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn unresolved_tenant_gets_the_api_layers() {
+        use crate::server::resolver_tests::{hosted_registry, setup_router};
+        use tower::ServiceExt as _;
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let mut s = crate::config::Settings::default();
+        s.security.cors_allowed_origins = vec!["https://app.example".into()];
+        let b = crate::server::Builder::from_pool(sq, url, "localhost");
+        let app = Cli::new()
+            .with_settings(&s)
+            .unresolved_tenant(setup_router())
+            .tenancy_builder(b, None)
+            .into_router()
+            .await
+            .expect("assemble");
+        let req = axum::http::Request::get("/")
+            .header("host", "ghost.localhost")
+            .header("origin", "https://app.example")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers()["access-control-allow-origin"],
+            "https://app.example"
+        );
+    }
+
     /// #1699, #1700 — what both tenancy paths hand the builder, checked
     /// by request: headers, Host allowlist outermost, HTTPS redirect with
     /// its proxy header and exempt paths.
@@ -2982,6 +3108,20 @@ mod tests {
         assert!(r.headers().contains_key("x-frame-options"));
         let r = send("acme.localhost", "/app", false).await.unwrap();
         assert_ne!(r.status(), StatusCode::MOVED_PERMANENTLY);
+    }
+
+    /// `[server] shutdown_timeout_secs` reaches the tenancy server's drain.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_the_drain_timeout() {
+        let mut s = crate::config::Settings::default();
+        s.server.shutdown_timeout_secs = Some(7);
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("connect");
+        let builder = crate::server::Builder::from_pool(pool, "sqlite::memory:", "localhost");
+        let builder = Cli::new().with_settings(&s).tenancy_builder(builder, None);
+        assert_eq!(builder.drain_timeout, std::time::Duration::from_secs(7));
     }
 
     /// `[server] max_body_bytes` reaches the operator console and tenant admin.

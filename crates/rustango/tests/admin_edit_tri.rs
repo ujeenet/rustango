@@ -199,8 +199,67 @@ rustango::register_admin_inline!(
     extra = 1,
 );
 
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_acct")]
+#[allow(dead_code)]
+pub struct Acct {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 8)]
+    pub name: String,
+}
+
+/// A child shown twice under one parent, by each of its FKs.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_xfer")]
+#[allow(dead_code)]
+pub struct Xfer {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(fk = "aed_acct", on = "id")]
+    pub from_id: i64,
+    #[rustango(fk = "aed_acct", on = "id")]
+    pub to_id: i64,
+    pub amount: i64,
+    #[rustango(default = "5")]
+    pub rank: i64,
+    #[rustango(max_length = 16, default = "''")]
+    pub note: String,
+}
+
+rustango::register_admin_inline!(
+    parent = "aed_acct",
+    child = "aed_xfer",
+    fk = "from_id",
+    fields = &["to_id", "amount", "rank", "note"],
+    extra = 1,
+    readonly_fields = &["note"],
+);
+
+rustango::register_admin_inline!(
+    parent = "aed_acct",
+    child = "aed_xfer",
+    fk = "to_id",
+    fields = &["from_id", "amount"],
+);
+
+/// A nullable text field an app may set to `""`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_note")]
+#[allow(dead_code)]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(max_length = 32)]
+    pub memo: Option<String>,
+    pub score: Option<f64>,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
+    fresh_table::<Note>(pool).await;
     drop_table(pool, "aed_slugref").await;
     fresh_table::<Slugged>(pool).await;
     fresh_table::<SlugRef>(pool).await;
@@ -220,6 +279,9 @@ async fn setup(pool: &Pool) {
     drop_table(pool, "aed_rline").await;
     fresh_table::<RParent>(pool).await;
     fresh_table::<RLine>(pool).await;
+    drop_table(pool, "aed_xfer").await;
+    fresh_table::<Acct>(pool).await;
+    fresh_table::<Xfer>(pool).await;
 }
 
 /// The detail page lists the first 100 inline rows and 20 audit entries,
@@ -568,6 +630,55 @@ async fn rename_through_the_form(
 async fn untouched_nullable_json_object_is_kept(pool: &Pool) {
     let row = rename_through_the_form(pool, Some(serde_json::json!({})), false).await;
     assert_eq!(row.meta, Some(serde_json::json!({})), "nullable {{}} lost");
+}
+
+/// A stored `""` and a NULL both survive a save that only renames the row.
+async fn untouched_empty_string_is_kept(pool: &Pool) {
+    for memo in [Some(String::new()), None] {
+        let mut n = Note {
+            id: Auto::default(),
+            name: "a".into(),
+            memo: memo.clone(),
+            score: None,
+        };
+        n.insert_pool(pool).await.expect("insert");
+        let id = *n.id.get().expect("pk");
+        let (status, html) = send(pool, "GET", &format!("/aed_note/{id}/edit"), "").await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        let form = encode(&[
+            ("name", "renamed".to_owned()),
+            ("memo", shown(&html, "memo")),
+        ]);
+        let (status, body) = send(pool, "POST", &format!("/aed_note/{id}"), &form).await;
+        assert!(status.is_redirection(), "{status}: {body}");
+        let row = Note::objects().fetch(pool).await.expect("fetch").remove(0);
+        assert_eq!(
+            (row.name.as_str(), row.memo.clone()),
+            ("renamed", memo),
+            "memo rewritten"
+        );
+        row.delete_pool(pool).await.expect("delete");
+    }
+}
+
+/// NaN and infinity re-show the form; the row keeps its value.
+async fn non_finite_float_is_refused(pool: &Pool) {
+    let mut n = Note {
+        id: Auto::default(),
+        name: "a".into(),
+        memo: None,
+        score: Some(1.5),
+    };
+    n.insert_pool(pool).await.expect("insert");
+    let id = *n.id.get().expect("pk");
+    for bad in ["NaN", "inf", "-infinity"] {
+        let form = encode(&[("name", "a".to_owned()), ("score", bad.to_owned())]);
+        let (status, body) = send(pool, "POST", &format!("/aed_note/{id}"), &form).await;
+        assert!(!status.is_redirection(), "{bad} saved: {status} {body}");
+        let row = Note::objects().fetch(pool).await.expect("fetch").remove(0);
+        assert_eq!(row.score, Some(1.5), "{bad}");
+    }
+    n.delete_pool(pool).await.expect("delete");
 }
 
 /// A stored value outside `choices` survives a rename.
@@ -954,6 +1065,165 @@ async fn refused_edit_keys_typed_rows_by_pk(pool: &Pool) {
     assert_eq!((stored.len(), stored[2].1), (3, 40));
 }
 
+/// Two accounts, a transfer each way; returns (a, b, a→b, b→a).
+async fn seed_xfers(pool: &Pool) -> (i64, i64, i64, i64) {
+    let mut ids = Vec::new();
+    for name in ["a", "b"] {
+        let mut acct = Acct {
+            id: Auto::default(),
+            name: name.into(),
+        };
+        acct.insert_pool(pool).await.expect("acct");
+        ids.push(*acct.id.get().expect("pk"));
+    }
+    let (a, b) = (ids[0], ids[1]);
+    for (from_id, to_id, amount) in [(a, b, 1), (b, a, 2)] {
+        let mut x = Xfer {
+            id: Auto::default(),
+            from_id,
+            to_id,
+            amount,
+            rank: 1,
+            note: format!("n{amount}"),
+        };
+        x.insert_pool(pool).await.expect("xfer");
+        ids.push(*x.id.get().expect("pk"));
+    }
+    (a, b, ids[2], ids[3])
+}
+
+/// The opening tag of control `name`.
+fn control<'a>(html: &'a str, name: &str) -> Option<&'a str> {
+    let at = html.find(&format!(r#"name="{name}""#))?;
+    let start = html[..at].rfind('<')?;
+    Some(&html[start..at + html[at..].find('>')?])
+}
+
+/// The panel prefix whose rows carry field `field`.
+fn panel_prefix(html: &str, field: &str) -> String {
+    html.split(r#"name=""#)
+        .skip(1)
+        .filter_map(|s| s.split('"').next())
+        .filter_map(|n| n.strip_suffix("-TOTAL_FORMS"))
+        .find(|p| html.contains(&format!(r#"name="{p}-0-{field}""#)))
+        .unwrap_or_else(|| panic!("no panel with {field}"))
+        .to_owned()
+}
+
+/// Two inlines of one child table post apart; each saves its own row.
+async fn two_inlines_of_one_child_keep_their_rows_apart(pool: &Pool) {
+    let (a, b, ab, ba) = seed_xfers(pool).await;
+    let (status, html) = send(pool, "GET", &format!("/aed_acct/{a}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let (out, inn) = (panel_prefix(&html, "to_id"), panel_prefix(&html, "from_id"));
+    assert_ne!(out, inn, "one prefix for both panels");
+    assert_eq!(shown(&html, &format!("{out}-0-id")), ab.to_string());
+    assert_eq!(shown(&html, &format!("{inn}-0-id")), ba.to_string());
+    let k = |p: &str, rest: &str| format!("{p}-{rest}");
+    let form = encode(&[
+        ("name", "a".into()),
+        (&k(&out, "TOTAL_FORMS"), "1".into()),
+        (&k(&out, "INITIAL_FORMS"), "1".into()),
+        (&k(&out, "0-id"), ab.to_string()),
+        (&k(&out, "0-to_id"), b.to_string()),
+        (&k(&out, "0-amount"), "10".into()),
+        (&k(&out, "0-rank"), "1".into()),
+        (&k(&inn, "TOTAL_FORMS"), "1".into()),
+        (&k(&inn, "INITIAL_FORMS"), "1".into()),
+        (&k(&inn, "0-id"), ba.to_string()),
+        (&k(&inn, "0-from_id"), b.to_string()),
+        (&k(&inn, "0-amount"), "20".into()),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_acct/{a}"), &form).await;
+    assert!(status.is_redirection(), "save: {status} {body}");
+    let mut got: Vec<(i64, i64)> = Xfer::objects()
+        .fetch(pool)
+        .await
+        .expect("xfers")
+        .into_iter()
+        .map(|x| (*x.id.get().expect("pk"), x.amount))
+        .collect();
+    got.sort_unstable();
+    assert_eq!(got, [(ab, 10), (ba, 20)]);
+}
+
+/// An inline's read-only field shows as text, on stored and blank rows, and
+/// a posted value for it is not saved.
+async fn inline_read_only_field_shows_as_text(pool: &Pool) {
+    let (a, b, ab, ba) = seed_xfers(pool).await;
+    let (status, html) = send(pool, "GET", &format!("/aed_acct/{a}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let (out, inn) = (panel_prefix(&html, "to_id"), panel_prefix(&html, "from_id"));
+    for i in 0..2 {
+        let name = format!("{out}-{i}-note");
+        assert!(control(&html, &name).is_none(), "input for {name}");
+    }
+    assert!(
+        html.contains(r#"<span class="readonly">n1</span>"#),
+        "{html}"
+    );
+    let k = |p: &str, rest: &str| format!("{p}-{rest}");
+    let form = encode(&[
+        ("name", "a".into()),
+        (&k(&out, "TOTAL_FORMS"), "1".into()),
+        (&k(&out, "INITIAL_FORMS"), "1".into()),
+        (&k(&out, "0-id"), ab.to_string()),
+        (&k(&out, "0-to_id"), b.to_string()),
+        (&k(&out, "0-amount"), "1".into()),
+        (&k(&out, "0-rank"), "1".into()),
+        (&k(&out, "0-note"), "forged".into()),
+        (&k(&inn, "TOTAL_FORMS"), "1".into()),
+        (&k(&inn, "INITIAL_FORMS"), "1".into()),
+        (&k(&inn, "0-id"), ba.to_string()),
+        (&k(&inn, "0-from_id"), b.to_string()),
+        (&k(&inn, "0-amount"), "2".into()),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_acct/{a}"), &form).await;
+    assert!(status.is_redirection(), "save: {status} {body}");
+    let notes: Vec<String> = Xfer::objects()
+        .fetch(pool)
+        .await
+        .expect("xfers")
+        .into_iter()
+        .map(|x| x.note)
+        .collect();
+    assert!(!notes.iter().any(|n| n == "forged"), "{notes:?}");
+}
+
+/// An inline add row leaves a defaulted field optional; blank takes the default.
+async fn inline_add_row_leaves_a_defaulted_field_optional(pool: &Pool) {
+    let (a, b, ab, _) = seed_xfers(pool).await;
+    let (status, html) = send(pool, "GET", &format!("/aed_acct/{a}/edit"), "").await;
+    assert_eq!(status, StatusCode::OK, "{html}");
+    let out = panel_prefix(&html, "to_id");
+    let rank = control(&html, &format!("{out}-1-rank")).expect("add-row rank input");
+    assert!(!rank.contains("required"), "{rank}");
+    let k = |rest: &str| format!("{out}-{rest}");
+    let form = encode(&[
+        ("name", "a".into()),
+        (&k("TOTAL_FORMS"), "2".into()),
+        (&k("INITIAL_FORMS"), "1".into()),
+        (&k("0-id"), ab.to_string()),
+        (&k("0-to_id"), b.to_string()),
+        (&k("0-amount"), "1".into()),
+        (&k("0-rank"), "1".into()),
+        (&k("1-to_id"), b.to_string()),
+        (&k("1-amount"), "7".into()),
+        (&k("1-rank"), String::new()),
+    ]);
+    let (status, body) = send(pool, "POST", &format!("/aed_acct/{a}"), &form).await;
+    assert!(status.is_redirection(), "add: {status} {body}");
+    let added: Vec<Xfer> = Xfer::objects()
+        .fetch(pool)
+        .await
+        .expect("xfers")
+        .into_iter()
+        .filter(|x| x.amount == 7)
+        .collect();
+    assert_eq!(added.len(), 1);
+    assert_eq!((added[0].from_id, added[0].rank), (a, 5));
+}
+
 /// The bare admin serves the favicon its pages link, outside the session gate.
 async fn bare_admin_serves_the_favicon_it_links(pool: &Pool) {
     let admin = rustango::admin::Builder::new(pool.clone())
@@ -988,16 +1258,26 @@ async fn bare_admin_serves_the_favicon_it_links(pool: &Pool) {
     let gated = rustango::admin::Builder::new(pool.clone())
         .with_session_auth(rustango::session::SessionSecret::from_bytes(vec![7u8; 32]))
         .build();
+    let gated = axum::Router::new().nest("/__admin", gated);
     let req = Request::builder()
         .uri("/__admin/__static__/icon.png")
         .body(Body::empty())
         .unwrap();
-    let res = axum::Router::new()
-        .nest("/__admin", gated)
-        .oneshot(req)
-        .await
-        .unwrap();
+    let res = gated.clone().oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::OK, "gated favicon");
+    // The login page links it too.
+    let req = Request::builder()
+        .uri("/__admin/login")
+        .body(Body::empty())
+        .unwrap();
+    let res = gated.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK, "login");
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let html = String::from_utf8_lossy(&bytes).replace("&#x2F;", "/");
+    assert!(
+        html.contains(r#"<link rel="icon" type="image/png" href="/__admin/__static__/icon.png">"#),
+        "{html}"
+    );
 }
 
 /// Under a nested prefix, Home and the first breadcrumb open the index:
@@ -1039,6 +1319,8 @@ tri_dialect_test! {
         read_only_edit_link_shows_detail,
         inline_rows_read_renamed_columns,
         untouched_nullable_json_object_is_kept,
+        untouched_empty_string_is_kept,
+        non_finite_float_is_refused,
         untouched_unknown_choice_is_kept,
         stale_form_still_wins,
         inline_rows_take_no_auto_or_generated_input,
@@ -1049,6 +1331,9 @@ tri_dialect_test! {
         refused_edit_keys_typed_rows_by_pk,
         bare_admin_serves_the_favicon_it_links,
         home_links_open_the_nested_index,
+        two_inlines_of_one_child_keep_their_rows_apart,
+        inline_read_only_field_shows_as_text,
+        inline_add_row_leaves_a_defaulted_field_optional,
     ],
 }
 

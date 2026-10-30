@@ -1570,12 +1570,14 @@ pub fn validate_integer(s: &str) -> Result<(), ValidationError> {
 ///
 /// `max_digits` is the **total** digit count — pre- and
 /// post-decimal combined. So `12.34` is 4 digits, 2 decimal_places.
-/// Pass `None` for either bound to disable that check.
+/// Pass `None` for either bound to disable that check. With both set,
+/// at most `max_digits - decimal_places` digits may precede the point,
+/// as in a `NUMERIC(p,s)` column; trailing fraction zeros never count.
 ///
 /// # Errors
 /// `ValidationError { code: "invalid_decimal", ... }` for non-numeric
-/// input. `code: "max_digits"` / `"max_decimal_places"` for bound
-/// violations.
+/// input. `code: "max_digits"` / `"max_decimal_places"` /
+/// `"max_whole_digits"` for bound violations.
 pub fn validate_decimal(
     s: &str,
     max_digits: Option<usize>,
@@ -1600,10 +1602,9 @@ pub fn validate_decimal(
     {
         return Err(ValidationError::new("invalid_decimal", "Enter a number."));
     }
-    // Drop leading zeros from int_part when counting, so "007.5"
-    // has 2 digits, not 4.
+    // Leading and trailing zeros hold no digit: "007.50" counts 2.
     let int_digits = int_part.trim_start_matches('0').len();
-    let frac_digits = frac_part.len();
+    let frac_digits = frac_part.trim_end_matches('0').len();
     if let Some(places) = decimal_places {
         if frac_digits > places {
             return Err(ValidationError::new(
@@ -1621,6 +1622,19 @@ pub fn validate_decimal(
                 "max_digits",
                 format!(
                     "Ensure there are no more than {total} digits in total (got {total_digits})."
+                ),
+            ));
+        }
+    }
+    // NUMERIC(p,s) keeps p-s digits before the point. Checked last, so
+    // a value over `max_digits` keeps that code.
+    if let (Some(total), Some(places)) = (max_digits, decimal_places) {
+        let whole = total.saturating_sub(places);
+        if int_digits > whole {
+            return Err(ValidationError::new(
+                "max_whole_digits",
+                format!(
+                    "Ensure there are no more than {whole} digits before the decimal point (got {int_digits})."
                 ),
             ));
         }
@@ -2569,6 +2583,32 @@ mod tests {
     fn decimal_max_digits_ignores_leading_zeros() {
         // "007.5" should count as 2 digits (7 + 5) not 4.
         assert!(validate_decimal("007.5", Some(2), None).is_ok());
+    }
+
+    /// NUMERIC(5,2) holds at most 3 whole digits.
+    #[test]
+    fn decimal_enforces_whole_digits() {
+        let e = validate_decimal("12345", Some(5), Some(2)).unwrap_err();
+        assert_eq!(e.code, "max_whole_digits");
+        assert!(validate_decimal("1234.5", Some(5), Some(2)).is_err());
+        assert!(validate_decimal("123.45", Some(5), Some(2)).is_ok());
+        assert!(validate_decimal("-999", Some(5), Some(2)).is_ok());
+    }
+
+    /// Too many digits in total still reports `max_digits` first.
+    #[test]
+    fn decimal_reports_max_digits_before_whole_digits() {
+        let e = validate_decimal("12345.67", Some(5), Some(2)).unwrap_err();
+        assert_eq!(e.code, "max_digits");
+    }
+
+    /// A trailing fraction zero adds no digit the column must hold.
+    #[test]
+    fn decimal_ignores_trailing_fraction_zeros() {
+        assert!(validate_decimal("1.50", Some(5), Some(1)).is_ok());
+        assert!(validate_decimal("1.000", Some(1), Some(0)).is_ok());
+        assert!(validate_decimal("123.40", Some(4), None).is_ok());
+        assert!(validate_decimal("1.51", Some(5), Some(1)).is_err());
     }
 
     // -------- validate_ipv4_address --------

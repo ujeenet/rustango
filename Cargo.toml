@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.61.13"
+version = "0.61.14"
 readme = "README.md"
 edition = "2021"
 rust-version = "1.88"
@@ -18,9 +18,9 @@ categories = ["web-programming::http-server", "database", "asynchronous"]
 # Internal — collapsed shape: one library facade `rustango` (with
 # feature flags for admin / tenancy) plus the proc-macro crate which
 # Rust requires to live separately.
-rustango-macros     = { version = "=0.61.13", path = "crates/rustango-macros" }
-rustango-orm-macros = { version = "=0.61.13", path = "crates/rustango-orm-macros" }
-rustango            = { version = "0.61.13", path = "crates/rustango" }
+rustango-macros     = { version = "=0.61.14", path = "crates/rustango-macros" }
+rustango-orm-macros = { version = "=0.61.14", path = "crates/rustango-orm-macros" }
+rustango            = { version = "0.61.14", path = "crates/rustango" }
 
 # Async runtime
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
@@ -42,7 +42,7 @@ indexmap  = { version = "2", features = ["serde"] }
 # Serde
 serde      = { version = "1", features = ["derive"] }
 # `float_roundtrip`: loaddata must read back every f64 bit dumpdata wrote.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 
 # Field types
 chrono       = { version = "0.4", default-features = false, features = ["serde", "clock"] }

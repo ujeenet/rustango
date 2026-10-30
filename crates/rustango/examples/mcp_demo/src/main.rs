@@ -12,6 +12,8 @@
 //! ```bash
 //! cargo run            # → listens on http://localhost:8090/mcp
 //! ```
+//! Tokens are signed with `MCP_DEMO_JWT_SECRET` (32+ bytes) when set, else
+//! a random key, so they last until the process exits.
 //! then mint a token and call the tool:
 //! ```bash
 //! TOKEN=$(curl -s http://localhost:8090/mcp/token \
@@ -139,6 +141,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Step 4: seed an agent + a skill that grants `add` ───────────────────
     let tenant_pool: Pool = pools.scoped_pool_dyn(&org).await?;
+    // The fresh tenant DB has no tables yet; create the framework ones.
+    rustango::migrate::apply_all_pool(&tenant_pool).await?;
     let issued = create_agent_pool(&tenant_pool, AGENT_NAME).await?;
     create_skill_pool(
         &tenant_pool,
@@ -152,18 +156,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     grant_skill_pool(&tenant_pool, TENANT_SLUG, AGENT_NAME, SKILL_SLUG).await?;
 
     // ── Step 3: mount the agent-guarded MCP router ──────────────────────────
-    // A stable secret keeps issued tokens valid across the process lifetime.
-    let jwt = Arc::new(JwtLifecycle::new(
-        b"mcp-demo-signing-secret-at-least-32-bytes!!".to_vec(),
-    ));
+    // Keys come from the environment, else random for this process: tokens
+    // stay valid while it runs, and no key lives in the source.
+    let jwt = Arc::new(JwtLifecycle::new(jwt_secret()));
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
         pools: pools.clone(),
         resolver: ChainResolver::new().push(AcmeResolver { org }),
-        session_secret: SessionSecret::from_bytes(
-            b"mcp-demo-session-secret-32-bytes-min!".to_vec(),
-        ),
+        session_secret: SessionSecret::from_env_or_random(),
+        // The demo never signs operator sessions; a throwaway key.
         operator_secret: SessionSecret::from_bytes(
-            b"mcp-demo-operator-secret-32-bytes-mn!".to_vec(),
+            rustango::random::get_random_token_urlsafe(48).into_bytes(),
         ),
     });
 
@@ -198,4 +200,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(BIND).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// `MCP_DEMO_JWT_SECRET` (32+ bytes), else a random key for this process.
+fn jwt_secret() -> Vec<u8> {
+    match std::env::var("MCP_DEMO_JWT_SECRET") {
+        Ok(s) if s.len() >= 32 => s.into_bytes(),
+        Ok(_) => panic!("MCP_DEMO_JWT_SECRET must be at least 32 bytes"),
+        Err(_) => rustango::random::get_random_token_urlsafe(64).into_bytes(),
+    }
 }

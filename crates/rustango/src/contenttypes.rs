@@ -446,8 +446,7 @@ where
     let mut visited = 0_usize;
     let mut offset = 0_i64;
     loop {
-        // #562 — struct-update over SelectQuery::new for the
-        // paginated full-table scan (no WHERE).
+        // Scoped like `fetch_row_as_json`: a row a `QuerySet` hides stays hidden.
         let select_q = SelectQuery {
             order_by: vec![OrderClause {
                 column: pk_field.column,
@@ -457,7 +456,8 @@ where
             limit: Some(batch),
             offset: Some(offset),
             ..SelectQuery::new(entry.schema)
-        };
+        }
+        .with_global_scopes();
         let rows = crate::sql::select_rows_as_json(pool, &select_q, &fields).await?;
         if rows.is_empty() {
             break;
@@ -687,7 +687,9 @@ where
                 .fetch(pool)
         },
     )
-    .await?;
+    .await?
+    // Integer keys: no collation folds two together.
+    .rows();
     let mut grouped: ::std::collections::HashMap<i64, Vec<C>> = ::std::collections::HashMap::new();
     for child in children {
         let key = extract(&child);
@@ -772,7 +774,8 @@ where
                 .fetch(pool)
         },
     )
-    .await?;
+    .await?
+    .distinct();
 
     let mut out: ::std::collections::HashMap<(i64, i64), C> =
         ::std::collections::HashMap::with_capacity(rows.len());

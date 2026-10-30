@@ -433,6 +433,7 @@ pub(crate) async fn check_operator_password(
 /// set on the connection. New code on any backend should reach for
 /// [`authenticate_user_pool`] instead, which takes the unified
 /// [`crate::sql::Pool`] enum and works on PG / SQLite / MySQL.
+/// It matches `username` only, whatever `[auth] login_field` says.
 ///
 /// # Errors
 /// As [`authenticate_operator`].
@@ -467,20 +468,18 @@ pub async fn authenticate_user(
 /// for unknown user, wrong password, or inactive row; `Ok(Some(_))`
 /// only on a successful match.
 ///
+/// `identifier` is matched by the active
+/// [`login_field`](super::login_field): a username, or an email ignoring case.
+///
 /// # Errors
 /// As [`authenticate_operator_pool`].
 pub async fn authenticate_user_pool(
     pool: &crate::sql::Pool,
-    username: &str,
+    identifier: &str,
     password: &str,
 ) -> Result<Option<PasswordVerified<User>>, TenancyError> {
-    use crate::core::Column as _;
-    use crate::sql::FetcherPool as _;
-    let rows: Vec<User> = User::objects()
-        .where_(User::username.eq(username.to_owned()))
-        .fetch(pool)
-        .await?;
-    check_user_password(rows.into_iter().next(), password).await
+    let user = super::login::find_login_user(pool, super::login_field(), identifier).await?;
+    check_user_password(user, password).await
 }
 
 /// [`check_operator_password`] for a tenant user.
@@ -680,7 +679,8 @@ mod tests {
     }
 
     #[derive(crate::Model, Debug, Clone)]
-    #[rustango(table = "rustango_users")]
+    // Unmanaged: no helper may build the shared table from this shape.
+    #[rustango(table = "rustango_users", managed = false)]
     #[allow(dead_code)]
     pub struct MissingDataColumn {
         #[rustango(primary_key)]

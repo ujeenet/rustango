@@ -353,37 +353,38 @@ async fn guard_held_across_nested_is_an_error(pool: &Pool) {
 async fn concurrent_nested_blocks_are_refused(pool: &Pool) {
     let p = one_conn(pool).await;
     let (a, b) = (p.clone(), p.clone());
+    // `b` starts once `a` is open and idle, and `a` ends after `b` is refused.
+    let (a_open, b_may_start) = tokio::sync::oneshot::channel::<()>();
+    let (b_done, a_may_end) = tokio::sync::oneshot::channel::<()>();
     let res: Result<(), ExecError> = within(rustango::atomic!(&p, |tx| {
         put(tx, 1).await?;
         let (ra, rb) = tokio::join!(
             rustango::atomic!(&a, |sp| {
                 put(sp, 2).await?;
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                a_open.send(()).unwrap();
+                a_may_end.await.unwrap();
                 Ok::<_, ExecError>(())
             }),
             async {
-                // Start while `a` runs its body without holding the lock.
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                rustango::atomic!(&b, |sp| { put(sp, 3).await }).await
+                b_may_start.await.unwrap();
+                let rb = rustango::atomic!(&b, |sp| { put(sp, 3).await }).await;
+                b_done.send(()).unwrap();
+                rb
             },
         );
-        let refused = [&ra, &rb]
-            .iter()
-            .filter(|r| matches!(r, Err(ExecError::NestedAtomic)))
-            .count();
-        assert_eq!(
-            refused, 1,
-            "one of two concurrent blocks is refused: {ra:?} {rb:?}"
+        assert!(ra.is_ok(), "the open block was refused: {ra:?}");
+        assert!(
+            matches!(rb, Err(ExecError::NestedAtomic)),
+            "a second block on the same transaction ran: {rb:?}"
         );
-        assert!(ra.is_ok() || rb.is_ok());
         Ok(())
     }))
     .await;
     res.unwrap();
-    let got = ids(pool).await;
-    assert!(
-        got == vec![1, 2] || got == vec![1, 3],
-        "only the accepted block commits: {got:?}"
+    assert_eq!(
+        ids(pool).await,
+        vec![1, 2],
+        "only the accepted block commits"
     );
 }
 

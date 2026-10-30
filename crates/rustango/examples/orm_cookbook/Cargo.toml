@@ -14,8 +14,9 @@ name = "orm_cookbook"
 path = "src/lib.rs"
 
 [dependencies]
-# In-repo example → path dep on the framework.
-rustango = { path = "../.." }
+# In-repo example → path dep on the framework. No default features, so the
+# backend comes only from this crate's `postgres` / `sqlite` / `mysql`.
+rustango = { path = "../..", default-features = false, features = ["batteries"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "signal", "net"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
