@@ -182,6 +182,8 @@ untouched.
 - A tenant whose stored path prefix is now a console route can be edited again while the prefix stays the same; a new one is still refused.
 - `TenantProvisioner` has a new `resume` method with a default that refuses; implement it to let the console resume tenants.
 - The console's new-tenant "Test connection" needs a slug or an explicit URL, and refuses what Create refuses (taken slug, bad fields).
+- `/ready` skips its `SELECT 1` and reports the database ok while every pool connection is checked out, but only within 30 seconds of its last passed ping; after that it pings, and a hung database is 503.
+- At the bucket cap, `RateLimitLayer` also drops partly spent buckets (fullest first) down to 7/8 of the cap, even when the sweep freed room.
 
 ### Migrations
 
@@ -211,6 +213,8 @@ untouched.
 - `LocalStorage::url` and `cdn_url` percent-encode the key; a caller that encoded the key first now gets it encoded twice.
 - `LocalStorage::exists` is false for a directory, and `load` of one is `NotFound`.
 - `WebhookSubscription::header` replaces a default header of the same name (any case) and ignores `X-Webhook-Id`, `-Event` and `-Signature`.
+- A webhook `Retry-After` is honoured only up to two minutes after dispatch (it was up to an hour).
+- `WebhookSubscription::header` with `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Keep-Alive` or `Proxy-Connection` (any case) makes `dispatch` fail; a queued row with one dead-letters.
 ### i18n and time
 
 - A plural lookup served from a fallback locale now uses that locale's rule (Russian 21 from an English entry reads "21 pages", not "21 page"). An `ngettext` with no catalog entry picks the source string by the default locale's rule.

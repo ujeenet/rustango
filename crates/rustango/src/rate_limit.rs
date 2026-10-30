@@ -244,8 +244,8 @@ impl RateLimitLayer {
     /// cannot give anyone one extra request. Dropping a partly spent
     /// bucket would, and that is a rate-limit bypass.
     ///
-    /// If every bucket is still partly spent, the hard cap kicks in
-    /// and drops the **fullest** ones, which are the cheapest to lose.
+    /// If more than seven eighths of the cap are still partly spent, the
+    /// **fullest** go down to that mark, as they are the cheapest to lose.
     ///
     /// **Both passes rank on projected tokens, never on age.** Ranking
     /// by age is backwards: `last_refill` moves on every take, so the
@@ -266,18 +266,20 @@ impl RateLimitLayer {
 
         // A bucket at capacity allows the same as a missing one.
         store.retain(|_, b| projected(b) < cap);
-        if store.len() < self.max_buckets {
+
+        // Down to seven eighths, so the next eighth of new keys skip
+        // this scan instead of each paying for it.
+        let low_water = self.max_buckets - (self.max_buckets / 8).max(1);
+        let excess = store.len().saturating_sub(low_water);
+        if excess == 0 {
             return;
         }
-
-        // Still at the cap. Drop the fullest eighth, so this does not
-        // run again on the very next miss.
         let mut by_fullness: Vec<(f64, String)> = store
             .iter()
             .map(|(k, b)| (projected(b), k.clone()))
             .collect();
         by_fullness.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-        for (_, k) in by_fullness.into_iter().take((self.max_buckets / 8).max(1)) {
+        for (_, k) in by_fullness.into_iter().take(excess) {
             store.remove(&k);
         }
     }
@@ -479,6 +481,33 @@ mod tests {
             key("[2001:db8:1:2::ffff]:4000")
         );
         assert_ne!(key("[2001:db8:1:2::1]:4000"), key("[2001:db8:1:3::1]:4000"));
+    }
+
+    /// At the cap with one bucket maturing per new key, the full scan runs
+    /// once per eighth of the cap, not on every new key.
+    #[tokio::test]
+    async fn a_sweep_at_the_cap_makes_room_for_an_eighth() {
+        const CAP: usize = 64;
+        let l = RateLimitLayer::per_header("x-key", 2, Duration::from_secs(3600)).max_buckets(CAP);
+        for i in 0..CAP {
+            assert!(l.take(&format!("old{i}")).await.is_ok());
+        }
+        let mut scans = 0;
+        for i in 0..CAP {
+            {
+                let mut store = l.store.lock().await;
+                // One bucket refills to full, as steady traffic would.
+                if let Some(b) = store.values_mut().find(|b| b.tokens < 2.0) {
+                    b.tokens = 2.0;
+                }
+                if store.len() >= CAP {
+                    scans += 1;
+                }
+            }
+            assert!(l.take(&format!("new{i}")).await.is_ok());
+        }
+        assert!(scans <= CAP / 8 + 1, "{scans} scans for {CAP} new keys");
+        assert!(l.store.lock().await.len() <= CAP);
     }
 
     #[cfg(feature = "admin")]

@@ -676,7 +676,7 @@ fn check(secret: &[u8], headers: &HeaderMap, body: &Bytes) -> StatusCode {
 
 The older `X-Webhook-Signature` covers the body alone and is still sent while receivers move to v2.
 
-A delivery answered 408, 429 or 5xx, or one that fails in transport, is retried: 8 runs in all, waiting 1s and doubling. `WebhookSubscription::max_attempts(n)` and `retry_backoff(base)` change both for a subscription. A `Retry-After` on a 429 or 503, in seconds or as an HTTP date, makes the next retry wait at least that long, at most an hour. Other 4xx answers are dead-lettered at once; `retry_status_codes([...])` adds codes to retry. Retries reuse the first timestamp, so the receiver's `max_age` must cover the whole retry window.
+A delivery answered 408, 429 or 5xx, or one that fails in transport, is retried: 8 runs in all, waiting 1s and doubling. `WebhookSubscription::max_attempts(n)` and `retry_backoff(base)` change both for a subscription. A `Retry-After` on a 429 or 503, in seconds or as an HTTP date, makes the next retry wait at least that long, but never past two minutes after dispatch, so the signed timestamp stays fresh. Other 4xx answers are dead-lettered at once; `retry_status_codes([...])` adds codes to retry. Retries reuse the first timestamp, so the receiver's `max_age` must cover the whole retry window.
 
 The signature comparison is constant-time, meaning it always takes the same amount of time whether the guess is right or wrong. That stops timing attacks, where an attacker measures tiny response-time differences to guess the secret one character at a time.
 

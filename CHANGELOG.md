@@ -54,6 +54,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
 - A Postgres database-mode purge no longer refuses because an autovacuum worker is in the tenant database; the drop ends it.
 - Boot DDL (`AppBuilder::bootstrap`, the `ensure_*` table helpers) runs a statement again once after a deadlock, which racing replicas can hit on MySQL.
+- A webhook `Retry-After` no longer delays a retry past two minutes after dispatch, so a receiver checking the signed timestamp with a five-minute `max_age` still accepts it.
+- A webhook subscription header named `Host`, `Content-Length`, `Transfer-Encoding` or a hop-by-hop name (`Connection`, `Upgrade`, `TE`, `Trailer`, `Keep-Alive`, `Proxy-Connection`) is refused: `dispatch` fails, and an already queued row dead-letters.
+- `InMemoryCache` no longer evicts the entry just written when reads race the write.
+- `RateLimitLayer` at its bucket cap sweeps down to seven eighths of it, so the full scan runs once per eighth of new keys instead of on every one.
+- `/ready` reports the database ready when every pool connection is busy within 30 seconds of a passed ping, instead of queuing behind requests and timing out.
 
 ### Deprecated
 
