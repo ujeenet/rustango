@@ -175,6 +175,8 @@ untouched.
 - `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. A `match` on `HostError` needs that arm.
 - `server::Builder::from_env` fails when the database env is missing or invalid; set `DATABASE_URL` (it no longer falls back to a built-in URL).
 - A tenant whose stored path prefix is now a console route can be edited again while the prefix stays the same; a new one is still refused.
+- `TenantProvisioner` has a new `resume` method with a default that refuses; implement it to let the console resume tenants.
+- The console's new-tenant "Test connection" needs a slug or an explicit URL, and refuses what Create refuses (taken slug, bad fields).
 
 ### Migrations
 

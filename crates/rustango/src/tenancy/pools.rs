@@ -554,6 +554,7 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     /// Near-cap warning latches, one per capped cache, so one cache's
     /// level never re-arms or silences another's warning.
     database_near_cap: NearCapLatch,
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     schema_near_cap: NearCapLatch,
     cache: RwLock<HashMap<String, CachedPool<DB>>>,
     /// Schema-mode scoped pools, keyed by `slug` (#1235). Separate

@@ -37,6 +37,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `migrate <target>` plans the system chain around only the files it moves, so a later project file that creates a framework table no longer fails the move; the "already applied" check is repeated under the migrate lock.
 - Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders instead of picking one.
 - A tenant whose stored path prefix is now a console route can be edited (console and admin) while that prefix is unchanged.
+- The operator console can resume a tenant a failed create left inactive: a Resume button on the failed run, a link from the edit page and from the "already exists" error; a failure after the tenant row lands opens the run instead of the form.
+- The new-tenant "Test connection" probes the database Create would use, after Create's own checks (slug, URL, routing clashes).
+- `migrate-tenant-storage` stops pg_dump and psql on SIGINT/SIGTERM and brings the tenant back; their stderr is read while they run, so a chatty dump no longer hangs.
+- The tenant pool near-cap warning keeps one latch per cache, so a full database cache no longer warns on every miss next to a quiet schema cache.
+- `--help` and the `tenant` SQLite README show the SQLite `add-db-server --sqlite-dir` form, the absolute existing directory it needs, and `create-tenant --mode database`.
 
 ## [0.61.13] — 2026-10-30
 
