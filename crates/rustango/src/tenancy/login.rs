@@ -99,30 +99,46 @@ impl EmailGaps {
     }
 }
 
-/// Count the tenant users email sign-in leaves out.
+/// Count the tenant users email sign-in leaves out, in two aggregate reads.
 ///
 /// # Errors
 /// A driver failure.
 #[cfg(feature = "sso")]
 pub async fn email_gaps(pool: &crate::sql::Pool) -> Result<EmailGaps, crate::sql::ExecError> {
-    use crate::core::Column as _;
-    let active: Vec<Option<String>> = User::objects()
-        .where_(User::active.eq(true))
-        .values_list_flat("email")
-        .fetch::<Option<String>>(pool)
-        .await?;
-    let all: Vec<Option<String>> = User::objects()
-        .values_list_flat("email")
-        .fetch::<Option<String>>(pool)
-        .await?;
-    let blank = |e: &Option<String>| e.as_deref().map_or(true, |e| e.trim().is_empty());
-    let mut seen = std::collections::HashMap::<String, usize>::new();
-    for e in all.iter().filter(|e| !blank(e)).flatten() {
-        *seen.entry(e.trim().to_lowercase()).or_default() += 1;
-    }
+    use crate::core::aggregates::count_all;
+    use crate::core::funcs::{lower, trim};
+    use crate::core::{
+        AggregateExpr, AggregateQuery, Expr, Filter, Model as _, Op, SqlValue, WhereExpr,
+    };
+    use crate::sql::fetch_aggregate_pool;
+    let email = || trim(Expr::Column("email"));
+    let blank = WhereExpr::Or(vec![
+        WhereExpr::Predicate(Filter::new("email", Op::IsNull, SqlValue::Bool(true))),
+        WhereExpr::ExprCompare {
+            lhs: email(),
+            op: Op::Eq,
+            rhs: Expr::Literal(SqlValue::String(String::new())),
+        },
+    ]);
+    let active = WhereExpr::Predicate(Filter::new("active", Op::Eq, SqlValue::Bool(true)));
+    let without = count_all().filter(WhereExpr::And(vec![active, blank.clone()]));
+    let q = AggregateQuery::new(User::SCHEMA, vec![("n".into(), without.into())]);
+    let rows: Vec<(i64,)> = fetch_aggregate_pool(pool, &q).await?;
+    let without_email = rows.first().map_or(0, |r| r.0);
+    // One row per email two or more users share, ignoring case and spaces.
+    let mut q = AggregateQuery::new(User::SCHEMA, vec![("n".into(), count_all().into())]);
+    q.where_clause = WhereExpr::Not(Box::new(blank));
+    q.group_by_exprs = vec![lower(email())];
+    q.having = Some(WhereExpr::ExprCompare {
+        lhs: Expr::Aggregate(Box::new(AggregateExpr::Count(None))),
+        op: Op::Gt,
+        rhs: Expr::Literal(SqlValue::I64(1)),
+    });
+    let groups: Vec<(i64,)> = fetch_aggregate_pool(pool, &q).await?;
+    let count = |n: i64| usize::try_from(n).unwrap_or(0);
     Ok(EmailGaps {
-        without_email: active.iter().filter(|e| blank(e)).count(),
-        shared_email: seen.values().filter(|n| **n > 1).sum(),
+        without_email: count(without_email),
+        shared_email: groups.iter().map(|g| count(g.0)).sum(),
     })
 }
 
@@ -134,8 +150,19 @@ where
     DB: sqlx::Database,
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let sweep =
-        super::for_each_tenant(pools, |_, pool| async move { email_gaps(&pool).await }).await;
+    // Own caches, each pool dropped after its tenant: a boot check must
+    // not fill the serving cache or hold every tenant's pool at once.
+    let own = pools.fresh();
+    let sweep = super::for_each_tenant(&own, |org, pool| {
+        let own = &own;
+        async move {
+            let gaps = email_gaps(&pool).await;
+            drop(pool);
+            own.invalidate(&org.slug).await;
+            gaps
+        }
+    })
+    .await;
     let sweep = match sweep {
         Ok(s) => s,
         Err(e) => {
@@ -163,5 +190,47 @@ where
             error = %e,
             "login_field = \"email\": could not check user emails"
         );
+    }
+}
+
+#[cfg(all(test, feature = "sqlite", feature = "sso"))]
+mod sweep_tests {
+    use super::super::provision::{DatabaseSource, ProvisionRequest, Provisioner, TenantStorage};
+    use super::super::TenantPools;
+    use crate::sql::sqlx;
+
+    /// The boot sweep opens each tenant's pool on its own and drops it,
+    /// so the serving cache is as it was.
+    #[tokio::test]
+    async fn the_email_sweep_leaves_the_pool_cache_as_it_was() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
+        let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
+        let pools = std::sync::Arc::new(TenantPools::<sqlx::Sqlite>::new(pool));
+        let migrations = tempfile::tempdir().unwrap();
+        let mut out = Vec::new();
+        super::super::manage::run_with_writer(
+            pools.as_ref(),
+            &url,
+            migrations.path(),
+            vec!["migrate-registry".to_owned()],
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let p = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
+        let db = tmp.path().join("acme.db");
+        let req = ProvisionRequest::new(
+            "acme",
+            TenantStorage::Database(DatabaseSource::Url(format!(
+                "sqlite://{}?mode=rwc",
+                db.display()
+            ))),
+        );
+        p.provision(&req, None, None).await.unwrap();
+        pools.invalidate("acme").await;
+        assert_eq!(pools.cached_database_pool_count().await, 0);
+        super::warn_email_gaps(pools.as_ref()).await;
+        assert_eq!(pools.cached_database_pool_count().await, 0);
     }
 }

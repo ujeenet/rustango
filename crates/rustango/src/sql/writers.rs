@@ -1486,7 +1486,7 @@ fn write_aggregate_inner(
         write_where(b, &query.where_clause, Some(query.model))
     })?;
 
-    if !query.group_by.is_empty() {
+    if !query.group_by.is_empty() || !query.group_by_exprs.is_empty() {
         b.sql.push_str(" GROUP BY ");
         for (i, col) in query.group_by.iter().enumerate() {
             if i > 0 {
@@ -1494,6 +1494,15 @@ fn write_aggregate_inner(
             }
             write_agg_group_col(b, col, scope, has_joins, derived, /*project=*/ false);
         }
+        b.with_qualifier(q, |b| {
+            for (i, expr) in query.group_by_exprs.iter().enumerate() {
+                if i > 0 || !query.group_by.is_empty() {
+                    b.sql.push_str(", ");
+                }
+                write_expr(b, expr, None)?;
+            }
+            Ok::<_, SqlError>(())
+        })?;
     }
 
     // HAVING and ORDER BY see the derived table, not its joins.

@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Tenancy `create-user --email <e>`.
 - `manage check --settings` lists every settings key with where its value comes from (env var, `RUSTANGO__*`, settings file or default), hiding secrets, and needs no database.
 - On the staging tier, the tenancy server warns at boot when session keys come from per-pod `./var/` files.
+- `AggregateQuery::group_by_exprs` groups by expressions such as `lower(trim(email))`, on every backend.
 
 ### Fixed
 
