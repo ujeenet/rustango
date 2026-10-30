@@ -307,6 +307,29 @@ async fn superuser_user_key_resolves_to_all_skills_and_tools() {
     assert_eq!(tools, vec!["coach_log", "invoice.create", "invoice.void"]);
 }
 
+/// A deactivated superuser's key resolves to nothing, called directly too.
+#[tokio::test]
+async fn an_inactive_superusers_key_resolves_to_nothing() {
+    let pool = world().await;
+    let root = make_superuser(&pool, "root").await;
+    create_skill_pool(&pool, "coach", "Coach", "", "", &["coach_log".into()])
+        .await
+        .expect("skill");
+    let issued = create_user_key_pool(&pool, root, "root's key", &[])
+        .await
+        .expect("key");
+    let agent_id = issued.agent.id.get().copied().unwrap();
+    deactivate_user(&pool, root).await;
+
+    let (skills, tools) = resolve_user_agent_grants_pool(&pool, agent_id, root)
+        .await
+        .expect("resolve");
+    assert!(
+        skills.is_empty() && tools.is_empty(),
+        "{skills:?} {tools:?}"
+    );
+}
+
 /// Request-time re-check (#2): a token stays valid while the key + owner are
 /// live, and is refused as soon as the key is revoked or the owner is
 /// deactivated — the effect `post_authed` / `sse_handler` rely on for immediate
