@@ -186,7 +186,8 @@ untouched.
 - `/ready` skips its `SELECT 1` and reports the database ok while every pool connection is checked out, but only within 30 seconds of its last passed ping; after that it pings, and a hung database is 503.
 - At the bucket cap, `RateLimitLayer` also drops partly spent buckets (fullest first) down to 7/8 of the cap, even when the sweep freed room.
 - Console impersonation of a missing or inactive tenant redirects with an error message (303) instead of a 404 or 409 text page.
-- `cargo rustango new --rustango-path` resolves a relative path from where you run it, not from the new project, and fails when the folder has no `Cargo.toml`.
+- `cargo rustango new --rustango-path` resolves a relative path from where you run it, not from the new project, and fails when the folder has no `Cargo.toml`. The new project's `Cargo.toml` gets the absolute path; make it relative before you commit it.
+- `manage db:info` prints a `sqlite feature:` line and no longer the old MySQL notes; without the `cache` feature, `clear-cache` and `createcachetable` are hidden from `--help` and say which feature they need.
 
 ### Migrations
 
