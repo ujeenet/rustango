@@ -99,23 +99,63 @@ pub(crate) async fn fetch_in_chunks<T, C, F, Fut>(
     base: &QuerySet<T>,
     keys: Vec<SqlValue>,
     fetch: F,
-) -> Result<Vec<C>, ExecError>
+) -> Result<Chunked<C>, ExecError>
 where
     T: Model,
     F: FnMut(Vec<SqlValue>) -> Fut,
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
     let select = base.clone().compile()?;
-    fetch_select_in_chunks(pool, &select, base.is_sliced(), keys, fetch).await
+    let batches = in_batches(pool.dialect(), &select, base.is_sliced(), keys)?;
+    let split = batches.len() > 1;
+    let rows = fetch_batches(batches, fetch).await?;
+    Ok(Chunked { rows, split })
+}
+
+/// Rows [`fetch_in_chunks`] read over one or more `IN` lists. A collation
+/// can fold keys in two lists onto one row, so split results may repeat it.
+pub(crate) struct Chunked<C> {
+    rows: Vec<C>,
+    split: bool,
+}
+
+impl<C> Chunked<C> {
+    /// The rows as read: for callers keying them so a repeat collapses,
+    /// or whose keys no collation folds.
+    pub(crate) fn rows(self) -> Vec<C> {
+        self.rows
+    }
+}
+
+impl<C: HasPkValue> Chunked<C> {
+    /// Each row once, by primary key.
+    pub(crate) fn distinct(self) -> Vec<C> {
+        if self.split {
+            __rustango_dedupe_by_pk(self.rows)
+        } else {
+            self.rows
+        }
+    }
 }
 
 /// [`fetch_in_chunks`] over a schema-level `base`, for callers with no
-/// typed model (#2318).
+/// typed model (#2318). Rows are not deduped.
 pub(crate) async fn fetch_select_in_chunks<C, F, Fut>(
     pool: &Pool,
     base: &SelectQuery,
     sliced: bool,
     keys: Vec<SqlValue>,
+    fetch: F,
+) -> Result<Vec<C>, ExecError>
+where
+    F: FnMut(Vec<SqlValue>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
+{
+    fetch_batches(in_batches(pool.dialect(), base, sliced, keys)?, fetch).await
+}
+
+async fn fetch_batches<C, F, Fut>(
+    batches: Vec<Vec<SqlValue>>,
     mut fetch: F,
 ) -> Result<Vec<C>, ExecError>
 where
@@ -123,7 +163,7 @@ where
     Fut: std::future::Future<Output = Result<Vec<C>, ExecError>>,
 {
     let mut out = Vec::new();
-    for batch in in_batches(pool.dialect(), base, sliced, keys)? {
+    for batch in batches {
         out.extend(fetch(batch).await?);
     }
     Ok(out)
@@ -3242,7 +3282,9 @@ where
                 )
                 .fetch(pool)
         })
-        .await?;
+        .await?
+        // Keyed into a map, so a row two lists return lands once.
+        .rows();
         let mut out = std::collections::HashMap::with_capacity(rows.len());
         for row in rows {
             let key = extract(&row);

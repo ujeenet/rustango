@@ -130,7 +130,10 @@ where
     // The IN list AND-composes with the caller's filters, order and limit.
     // Over the bind cap the keys go in batches; a limit or offset then refuses.
     stitch(parents, on, |keys| async {
-        let children = reverse_children(pool, &child_qs, child_fk_column, keys).await?;
+        // Keys are an FK target's unique values: no two fold together.
+        let children = reverse_children(pool, &child_qs, child_fk_column, keys)
+            .await?
+            .rows();
         Ok(children
             .into_iter()
             .filter_map(|c| Some((c.__rustango_fk_pk_value(child_fk_column)?, c)))
@@ -145,7 +148,7 @@ async fn reverse_children<C>(
     child_qs: &crate::query::QuerySet<C>,
     child_fk_column: &'static str,
     keys: Vec<crate::core::SqlValue>,
-) -> Result<Vec<C>, ExecError>
+) -> Result<super::Chunked<C>, ExecError>
 where
     C: Model
         + MaybePgFromRow
@@ -258,7 +261,9 @@ where
     match named {
         Named::Reverse { field, column, on } => {
             stitch(parents, on, |keys| async {
-                let children = reverse_children(pool, &child_qs, field, keys).await?;
+                let children = reverse_children(pool, &child_qs, field, keys)
+                    .await?
+                    .distinct();
                 children
                     .into_iter()
                     .map(|c| Ok((child_key(&c, column)?, c)))

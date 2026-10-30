@@ -40,6 +40,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - With `cache_query(true)`, a QUERY that skips the cache (credential header, unknown tenant) is no longer buffered; a body over 1 MiB reaches the handler uncached instead of a 413, and a body read error is a 400.
 - `LocalStorage::url` and `StorageRegistry::cdn_url` percent-encode the key, as the S3 and Azure disks do: `#`, `?` and spaces no longer break the link.
 - On `LocalStorage` a directory key is not an object: `exists` is false, `load` is `NotFound`, `delete` is a no-op, and a save to it says the key names a directory.
+- `fetch_with_prefetch_related` over a reverse relation split past the bind cap loads each child once, even when MySQL's collation matches it from keys in two batches.
+- `find_many_or_fail` no longer reports `RowNotFound` for keys the database matched, such as `abc` and `ABC` under MySQL's case-insensitive collation.
+- `contenttypes::for_each_row_of_ct` applies the model's global scopes, so it skips rows a `QuerySet` hides.
+- `get_or_create` and `update_or_create` that lose an insert race on a UNIQUE constraint return the winner's row (updated, for `update_or_create`) instead of the unique-violation error.
 - A webhook subscription header replaces the default `Content-Type` or `User-Agent` instead of sending a second one; `X-Webhook-Id`, `-Event` and `-Signature` set by a subscription are ignored.
 - Admin inline add rows leave a defaulted field optional, and a blank one takes the column default.
 - Two admin inlines of one child table post under their own formset prefixes (`<child>-<fk>`), so each saves its own rows.

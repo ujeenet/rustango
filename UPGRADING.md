@@ -201,6 +201,9 @@ untouched.
 - `Model::where_not_in` past the bind cap (SQLite 32766, MySQL 65535) now fails with `ExecError::InListUnsplittable` before reaching the database. Postgres binds one array and is unchanged.
 - A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
 - Media `set_tags` takes a row lock on the media row (one more query per call).
+- `contenttypes::for_each_row_of_ct` now skips rows hidden by the model's global scopes.
+- `get_or_create` / `update_or_create`: when `create_fn` fails with a unique violation, the query runs again and the row found is returned with `created = false`; other errors still return as before.
+- `find_many_or_fail` runs one existence query per requested key that matches no returned pk exactly.
 
 ### Storage and webhooks
 

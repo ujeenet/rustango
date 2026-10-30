@@ -565,6 +565,14 @@ async fn generic_reads_apply_global_scopes(pool: &Pool) {
             .await
             .expect("reverse prefetch");
     assert_eq!(ids(&grouped[&1]), [1], "{grouped:?}");
+    let mut seen = Vec::new();
+    contenttypes::for_each_row_of_ct(pool, &ct, 10, |row| {
+        seen.push(row["id"].as_i64());
+        Ok(())
+    })
+    .await
+    .expect("for_each_row_of_ct");
+    assert_eq!(seen, [Some(1)], "for_each_row_of_ct read a scoped-out row");
 }
 
 /// `__week` is the ISO 8601 week on every backend.
@@ -1053,6 +1061,137 @@ async fn split_key_lists_return_each_row_once(pool: &Pool) {
     assert_eq!(found.len(), 1, "where_in: {found:?}");
 }
 
+/// `find_many_or_fail` takes a key the database matched as found: MySQL
+/// matches `ABC` to `abc`; PG and SQLite do not.
+async fn find_many_or_fail_follows_the_collation(pool: &Pool) {
+    Code { code: "abc".into() }
+        .insert_pool(pool)
+        .await
+        .expect("code");
+    let got = Code::find_many_or_fail(["abc", "ABC"], pool).await;
+    if pool.dialect().name() == "mysql" {
+        assert_eq!(got.expect("both keys match").len(), 1);
+    } else {
+        assert!(
+            matches!(
+                got,
+                Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound))
+            ),
+            "{got:?}"
+        );
+    }
+    let missing = Code::find_many_or_fail(["abc", "abd"], pool).await;
+    assert!(
+        matches!(
+            missing,
+            Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound))
+        ),
+        "{missing:?}"
+    );
+}
+
+/// Concurrent `get_or_create` on a unique key: the losers return the
+/// winner's row instead of the unique violation.
+async fn get_or_create_survives_concurrent_callers(pool: &Pool) {
+    for round in 0..5 {
+        let key = format!("race{round}");
+        let calls = (0..8).map(|_| {
+            let key = key.clone();
+            async move {
+                Code::objects()
+                    .filter("code", key.clone())
+                    .get_or_create(
+                        |pool| async move {
+                            // Widen the gap between the SELECT and the INSERT.
+                            tokio::task::yield_now().await;
+                            let row = Code { code: key };
+                            row.insert_pool(&pool).await?;
+                            Ok(row)
+                        },
+                        pool,
+                    )
+                    .await
+            }
+        });
+        let results = futures_util::future::join_all(calls).await;
+        let mut created = 0;
+        for r in results {
+            let (row, was_created) = r.expect("get_or_create");
+            assert_eq!(row.code, key);
+            created += usize::from(was_created);
+        }
+        assert_eq!(created, 1, "round {round}");
+    }
+}
+
+/// Concurrent `update_or_create`: one caller creates, every other one runs
+/// `update_fn` on the winner's row, a lost race included.
+async fn update_or_create_survives_concurrent_callers(pool: &Pool) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let updates = std::sync::Arc::new(AtomicUsize::new(0));
+    let key = "urace".to_owned();
+    let calls = (0..8).map(|_| {
+        let (key, updates) = (key.clone(), updates.clone());
+        async move {
+            Code::objects()
+                .filter("code", key.clone())
+                .update_or_create(
+                    move |_pool, row| async move {
+                        updates.fetch_add(1, Ordering::SeqCst);
+                        Ok(row)
+                    },
+                    |pool| async move {
+                        tokio::task::yield_now().await;
+                        let row = Code { code: key };
+                        row.insert_pool(&pool).await?;
+                        Ok(row)
+                    },
+                    pool,
+                )
+                .await
+        }
+    });
+    let mut created = 0;
+    for r in futures_util::future::join_all(calls).await {
+        let (row, was_created) = r.expect("update_or_create");
+        assert_eq!(row.code, "urace");
+        created += usize::from(was_created);
+    }
+    assert_eq!(created, 1);
+    assert_eq!(updates.load(Ordering::SeqCst), 7);
+}
+
+/// A create that collides on another key is not a lost race: the original
+/// error comes back and nothing is made under the requested key.
+async fn get_or_create_keeps_a_violation_on_another_key(pool: &Pool) {
+    Code {
+        code: "taken".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .expect("seed");
+    let got = Code::objects()
+        .filter("code", "wanted".to_owned())
+        .get_or_create(
+            |pool| async move {
+                let row = Code {
+                    code: "taken".into(),
+                };
+                row.insert_pool(&pool).await?;
+                Ok(row)
+            },
+            pool,
+        )
+        .await;
+    assert!(got.is_err(), "{got:?}");
+    let wanted = Code::objects()
+        .filter("code", "wanted".to_owned())
+        .fetch(pool)
+        .await
+        .expect("read");
+    assert!(wanted.is_empty());
+}
+
 /// `where_not_in` cannot split its list: past the bind cap it is refused,
 /// unless dropping duplicates makes it fit. PG binds one array.
 async fn where_not_in_past_the_bind_cap(pool: &Pool) {
@@ -1201,6 +1340,10 @@ tri_dialect_test! {
         key_list_shortcuts_past_the_bind_cap,
         destroy_past_the_bind_cap_is_all_or_none,
         split_key_lists_return_each_row_once,
+        find_many_or_fail_follows_the_collation,
+        get_or_create_survives_concurrent_callers,
+        update_or_create_survives_concurrent_callers,
+        get_or_create_keeps_a_violation_on_another_key,
         where_not_in_past_the_bind_cap,
         latest_and_earliest_skip_nulls,
         last_of_a_slice,
