@@ -435,10 +435,9 @@ where
     // Kept in the signature so the published `TenantAdminBuilder::new`
     // contract is unchanged.
     let _ = registry_url;
-    // Public brand asset surface — `<brand_url>/{slug}/{filename}`.
-    // Served before the resolver runs so the assets are reachable
-    // even when the requesting host doesn't match a known tenant
-    // (the slug in the path is validated by the branding module).
+    // Public brand assets at `<brand_url>/{slug}/{filename}`, served before
+    // the resolver so any host reaches them; a path-prefix tenant's
+    // `<prefix><brand_url>` is served after it resolves (below).
     if let Some(resp) = brand_response(req.uri().path(), routes, brand_storage).await {
         return resp;
     }

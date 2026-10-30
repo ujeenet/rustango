@@ -61,7 +61,7 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     #[cfg(feature = "email")]
     first_admin_mail: Option<(crate::email::BoxedMailer, String)>,
     /// How long `serve` lets open connections finish after SIGTERM.
-    drain_timeout: std::time::Duration,
+    pub(crate) drain_timeout: std::time::Duration,
     /// A `running` run silent this long is closed at boot.
     stale_run_after: std::time::Duration,
     /// Mounts registered via [`Builder::with_static_files`].
