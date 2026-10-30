@@ -5095,7 +5095,8 @@ pub(crate) async fn rollback_pool(
             }
         }
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        let mut touched = Vec::new();
+        // Every file's folder first, so a duplicate name unapplies nothing.
+        let mut planned = Vec::new();
         for mig in rollback.plan(&all, &applied) {
             let mut homes = all.iter().zip(&home).filter(|(m, _)| m.name == mig.name);
             let (Some((_, dir)), None) = (homes.next(), homes.next()) else {
@@ -5104,6 +5105,10 @@ pub(crate) async fn rollback_pool(
                     mig.name
                 )));
             };
+            planned.push((*dir, mig));
+        }
+        let mut touched = Vec::new();
+        for (dir, mig) in planned {
             unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
             touched.push(mig);
         }
