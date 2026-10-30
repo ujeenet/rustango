@@ -2859,29 +2859,49 @@ pub(crate) async fn try_table_exists_here(
 }
 
 /// Whether a `SELECT` from `table` would find it: views count, and on PG
-/// the whole `search_path` does, unlike [`try_table_exists_here`].
+/// the whole `search_path` does, unlike [`try_table_exists_here`]. A
+/// `schema.table` name looks in that schema only.
 pub(crate) async fn try_table_resolves(
     pool: &crate::sql::Pool,
     table: &str,
 ) -> Result<bool, sqlx::Error> {
+    #[allow(unused_variables)]
+    let (schema, bare) = crate::sql::split_qualified(table);
     Ok(match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => {
-            sqlx::query_scalar::<_, bool>("SELECT to_regclass(quote_ident($1)) IS NOT NULL")
-                .bind(table)
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass($1) IS NOT NULL")
+                .bind(crate::sql::quote_qualified(&crate::sql::Postgres, table))
                 .fetch_one(pg)
                 .await?
         }
         #[cfg(feature = "mysql")]
-        crate::sql::Pool::Mysql(_) => try_table_exists_here(pool, table).await?,
+        crate::sql::Pool::Mysql(my) => {
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM information_schema.tables \
+                 WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ?",
+            )
+            .bind(schema)
+            .bind(bare)
+            .fetch_one(my)
+            .await?
+                > 0
+        }
         // SQLite resolves names case-insensitively; MySQL's catalog already follows the server.
         #[cfg(feature = "sqlite")]
         crate::sql::Pool::Sqlite(sq) => {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type IN ('table', 'view') \
-                 AND name = ? COLLATE NOCASE",
-            )
-            .bind(table)
+            let master = match schema {
+                Some(s) => format!(
+                    "{}.sqlite_master",
+                    crate::sql::Dialect::quote_ident(&crate::sql::Sqlite, s)
+                ),
+                None => "sqlite_master".to_owned(),
+            };
+            sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT COUNT(*) FROM {master} WHERE type IN ('table', 'view') \
+                 AND name = ? COLLATE NOCASE"
+            ))
+            .bind(bare)
             .fetch_one(sq)
             .await?
                 > 0

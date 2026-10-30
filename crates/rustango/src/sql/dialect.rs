@@ -62,6 +62,22 @@ pub(crate) fn quote_with(name: &str, q: char) -> String {
     out
 }
 
+/// `name` as `(schema, table)`: a dotted name splits at its first dot.
+pub(crate) fn split_qualified(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('.') {
+        Some((schema, table)) => (Some(schema), table),
+        None => (None, name),
+    }
+}
+
+/// `name` quoted part by part, so `schema.table` is not one identifier.
+pub(crate) fn quote_qualified(d: &dyn Dialect, name: &str) -> String {
+    match split_qualified(name) {
+        (Some(schema), table) => format!("{}.{}", d.quote_ident(schema), d.quote_ident(table)),
+        (None, table) => d.quote_ident(table),
+    }
+}
+
 /// Refuse a bind whose bind arm can only panic: a `List` (the writer
 /// expands those) anywhere, a Postgres-only value off Postgres. The one
 /// check for both compiled and raw statements.

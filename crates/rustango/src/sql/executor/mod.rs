@@ -129,8 +129,9 @@ where
     Ok(out)
 }
 
-/// Split `keys` into the `IN` lists `base` has bind room for. Split keys
-/// are deduplicated, so no row matches in two batches.
+/// Split `keys` into the `IN` lists `base` has bind room for. Exact
+/// duplicates are dropped; keys a collation folds together are not, so
+/// callers dedupe split results by row.
 fn in_batches(
     dialect: &dyn Dialect,
     base: &SelectQuery,
@@ -175,6 +176,44 @@ pub fn __rustango_in_batches<T: Model>(
 ) -> Result<Vec<Vec<SqlValue>>, ExecError> {
     let base = QuerySet::<T>::default().compile()?;
     in_batches(pool.dialect(), &base, false, keys)
+}
+
+/// `keys` as the one `NOT IN` list a statement over `T` can bind: exact
+/// duplicates dropped. A `NOT IN` cannot be split across statements.
+///
+/// # Errors
+/// [`ExecError::InListUnsplittable`] when the keys still pass the bind cap.
+#[doc(hidden)]
+pub fn __rustango_one_in_list<T: Model>(
+    pool: &Pool,
+    keys: Vec<SqlValue>,
+) -> Result<Vec<SqlValue>, ExecError> {
+    let dialect = pool.dialect();
+    let room = bind_room(dialect, &QuerySet::<T>::default().compile()?)?;
+    let mut seen = std::collections::HashSet::new();
+    let keys: Vec<SqlValue> = keys
+        .into_iter()
+        .filter(|k| seen.insert(dedupe_key(k)))
+        .collect();
+    if crate::sql::writers::in_list_binds(dialect, &keys) > room {
+        return Err(ExecError::InListUnsplittable {
+            table: T::SCHEMA.table,
+            keys: keys.len(),
+            max: room,
+        });
+    }
+    Ok(keys)
+}
+
+/// `rows` fetched over split `IN` lists, one per primary key: a collation
+/// can match one row from keys in two batches.
+#[doc(hidden)]
+#[must_use]
+pub fn __rustango_dedupe_by_pk<T: HasPkValue>(rows: Vec<T>) -> Vec<T> {
+    let mut seen = std::collections::HashSet::new();
+    rows.into_iter()
+        .filter(|r| seen.insert(dedupe_key(&r.__rustango_pk_value_impl())))
+        .collect()
 }
 
 /// Binds left for an `IN` list beside the ones `base` already carries.

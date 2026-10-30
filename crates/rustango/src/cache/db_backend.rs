@@ -135,7 +135,7 @@ impl DatabaseCache {
     /// permission problem. A failed `expires` index only logs a warning.
     pub async fn ensure_table(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let sql = match dialect.name() {
             "postgres" => format!(
                 "CREATE TABLE IF NOT EXISTS {table} (\
@@ -165,14 +165,22 @@ impl DatabaseCache {
             .await
             .map_err(|e| CacheError::Connection(format!("ensure_table: {e}")))?;
         // `purge_expired` scans by `expires`; existing tables get it too.
-        let index = dialect.quote_ident(&self.expires_index());
+        let mut index = dialect.quote_ident(&self.expires_index());
         let guard = if dialect.supports_create_index_if_not_exists() {
             "IF NOT EXISTS "
         } else {
             ""
         };
+        // SQLite puts the schema on the index name and takes a bare table.
+        let mut on = table;
+        if let ("sqlite", (Some(schema), bare)) =
+            (dialect.name(), crate::sql::split_qualified(&self.table))
+        {
+            index = format!("{}.{index}", dialect.quote_ident(schema));
+            on = dialect.quote_ident(bare);
+        }
         // Best effort: a non-owner PG role or a MySQL role without INDEX still gets a cache.
-        let ddl = format!("CREATE INDEX {guard}{index} ON {table} (expires)");
+        let ddl = format!("CREATE INDEX {guard}{index} ON {on} (expires)");
         if let Err(e) = run_ddl_idempotent(&self.pool, &ddl).await {
             static WARNED: AtomicBool = AtomicBool::new(false);
             if !WARNED.swap(true, Ordering::Relaxed) {
@@ -193,17 +201,19 @@ impl DatabaseCache {
     #[must_use]
     pub fn expires_index(&self) -> String {
         const MAX_IDENT: usize = 63;
-        let plain = format!("{}_expires_idx", self.table);
+        // An index lives in its table's schema: name it from the bare table.
+        let table = crate::sql::split_qualified(&self.table).1;
+        let plain = format!("{table}_expires_idx");
         if plain.len() <= MAX_IDENT {
             return plain;
         }
         use sha2::{Digest, Sha256};
         let mut head = 40;
-        while !self.table.is_char_boundary(head) {
+        while !table.is_char_boundary(head) {
             head -= 1;
         }
-        let digest = crate::hex::hex_encode(&Sha256::digest(self.table.as_bytes()));
-        format!("{}_{}_exp", &self.table[..head], &digest[..8])
+        let digest = crate::hex::hex_encode(&Sha256::digest(table.as_bytes()));
+        format!("{}_{}_exp", &table[..head], &digest[..8])
     }
 
     /// Drop the cache table. Handy in tests. In production, run it
@@ -212,7 +222,7 @@ impl DatabaseCache {
     /// # Errors
     /// [`CacheError::Connection`] when the statement fails.
     pub async fn drop_table(&self) -> Result<(), CacheError> {
-        let table = self.pool.dialect().quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(self.pool.dialect(), &self.table);
         let sql = format!("DROP TABLE IF EXISTS {table}");
         raw_execute_pool(&self.pool, &sql, vec![])
             .await
@@ -232,7 +242,7 @@ impl DatabaseCache {
     /// [`CacheError::Connection`] when a DELETE fails.
     pub async fn purge_expired(&self) -> Result<u64, CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         // Keep no-TTL rows. Use the same clock as `get`/`set` so both
         // agree on what "expired" means.
@@ -263,7 +273,7 @@ impl DatabaseCache {
     /// read is not lost (#1906).
     async fn delete_if_expired(&self, key: &str) -> Result<u64, CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let (p1, p2) = (dialect.placeholder(1), dialect.placeholder(2));
         let sql = format!(
             "DELETE FROM {table} WHERE cache_key = {p1} AND expires <> 0 AND expires < {p2}"
@@ -301,7 +311,7 @@ impl DatabaseCache {
 impl Cache for DatabaseCache {
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         let sql = format!("SELECT value, expires FROM {table} WHERE cache_key = {p1} LIMIT 1");
         let rows: Vec<(String, i64)> =
@@ -323,7 +333,7 @@ impl Cache for DatabaseCache {
     async fn set(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<(), CacheError> {
         super::check_text(value)?;
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         let p2 = dialect.placeholder(2);
         let p3 = dialect.placeholder(3);
@@ -370,7 +380,7 @@ impl Cache for DatabaseCache {
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         super::check_text(value)?;
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         let p2 = dialect.placeholder(2);
         let p3 = dialect.placeholder(3);
@@ -453,7 +463,7 @@ impl Cache for DatabaseCache {
     /// Overflow is an error, not a saturation: PG and MySQL raise it.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let (p1, p2, p3, p4, p5, p6) = (
             dialect.placeholder(1),
             dialect.placeholder(2),
@@ -583,7 +593,7 @@ impl Cache for DatabaseCache {
     /// One `UPDATE` of a live row, so a racing `delete` stays deleted (#2300).
     async fn touch(&self, key: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let (p1, p2, p3) = (
             dialect.placeholder(1),
             dialect.placeholder(2),
@@ -607,7 +617,7 @@ impl Cache for DatabaseCache {
 
     async fn delete(&self, key: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
         let sql = format!("DELETE FROM {table} WHERE cache_key = {p1}");
         raw_execute_pool(&self.pool, &sql, vec![StoredKey::new(key).into_value()])
@@ -622,7 +632,7 @@ impl Cache for DatabaseCache {
 
     async fn clear(&self) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let sql = format!("DELETE FROM {table}");
         raw_execute_pool(&self.pool, &sql, vec![])
             .await
@@ -645,7 +655,7 @@ impl Cache for DatabaseCache {
     /// `instr(..) = 1` instead; the prefix stays exact on every backend.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         let dialect = self.pool.dialect();
-        let table = dialect.quote_ident(&self.table);
+        let table = crate::sql::quote_qualified(dialect, &self.table);
         let p = dialect.placeholder(1);
         // Use the crate-wide escaper so the escape character cannot
         // drift between the cache and the ORM's LIKE lookups.

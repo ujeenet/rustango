@@ -5281,14 +5281,19 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", col);
+                let _batches = #root::sql::__rustango_in_batches::<Self>(pool, _values)?;
+                let _split = _batches.len() > 1;
                 let mut _rows = ::std::vec::Vec::new();
-                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                for _keys in _batches {
                     _rows.extend(
                         #root::query::QuerySet::<Self>::default()
                             .filter(&_key, #root::core::SqlValue::List(_keys))
                             .fetch(pool)
                             .await?,
                     );
+                }
+                if _split {
+                    _rows = #root::sql::__rustango_dedupe_by_pk(_rows);
                 }
                 ::core::result::Result::Ok(_rows)
             }
@@ -5299,7 +5304,8 @@ fn inherent_impl_tokens(
             /// semantics — vacuously true for every row).
             ///
             /// # Errors
-            /// As [`FetcherPool::fetch`].
+            /// As [`FetcherPool::fetch`]; `ExecError::InListUnsplittable`
+            /// when `vals` pass the backend's bind cap.
             ///
             /// [`FetcherPool::fetch`]: rustango::sql::FetcherPool::fetch
             pub async fn where_not_in<V>(
@@ -5322,6 +5328,8 @@ fn inherent_impl_tokens(
                         .await;
                 }
                 let _key = ::std::format!("{}__not_in", col);
+                // A `NOT IN` cannot be split: past the bind cap it is refused.
+                let _values = #root::sql::__rustango_one_in_list::<Self>(pool, _values)?;
                 #root::query::QuerySet::<Self>::default()
                     .filter(&_key, #root::core::SqlValue::List(_values))
                     .fetch(pool)
@@ -6376,14 +6384,19 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok(::std::vec::Vec::new());
                 }
                 let _key = ::std::format!("{}__in", ::core::stringify!(#pk_ident));
+                let _batches = #root::sql::__rustango_in_batches::<Self>(pool, _values)?;
+                let _split = _batches.len() > 1;
                 let mut _rows = ::std::vec::Vec::new();
-                for _keys in #root::sql::__rustango_in_batches::<Self>(pool, _values)? {
+                for _keys in _batches {
                     _rows.extend(
                         #root::query::QuerySet::<Self>::default()
                             .filter(&_key, #root::core::SqlValue::List(_keys))
                             .fetch(pool)
                             .await?,
                     );
+                }
+                if _split {
+                    _rows = #root::sql::__rustango_dedupe_by_pk(_rows);
                 }
                 ::core::result::Result::Ok(_rows)
             }
