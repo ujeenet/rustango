@@ -5069,7 +5069,7 @@ pub async fn downgrade_pool_with_ledger(
     if steps == 0 {
         return Ok(Vec::new());
     }
-    rollback_pool(pool, dir, Rollback::Steps(steps), ledger).await
+    rollback_pool(pool, &[dir.to_path_buf()], Rollback::Steps(steps), ledger).await
 }
 
 /// What a rollback unapplies from a ledger.
@@ -5097,18 +5097,38 @@ impl Rollback<'_> {
     }
 }
 
-/// Unapply `rollback`'s plan, read and run under one migrate lock.
+/// Unapply `rollback`'s plan over `dirs` in apply order, read and run under
+/// one migrate lock. Each file is unapplied against its own folder.
 pub(crate) async fn rollback_pool(
     pool: &crate::sql::Pool,
-    dir: &Path,
+    dirs: &[std::path::PathBuf],
     rollback: Rollback<'_>,
     ledger: &str,
 ) -> Result<Vec<Migration>, MigrateError> {
     with_migrate_lock_pool(pool, ledger, async {
-        let all = file::list_dir(dir)?;
+        let mut all = Vec::new();
+        let mut home: Vec<&Path> = Vec::new();
+        for dir in dirs {
+            for m in file::list_dir(dir)? {
+                all.push(m);
+                home.push(dir);
+            }
+        }
         let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        let mut touched = Vec::new();
+        // Every file's folder first, so a duplicate name unapplies nothing.
+        let mut planned = Vec::new();
         for mig in rollback.plan(&all, &applied) {
+            let mut homes = all.iter().zip(&home).filter(|(m, _)| m.name == mig.name);
+            let (Some((_, dir)), None) = (homes.next(), homes.next()) else {
+                return Err(MigrateError::Validation(format!(
+                    "`{}` is in more than one migrations folder; rename one",
+                    mig.name
+                )));
+            };
+            planned.push((*dir, mig));
+        }
+        let mut touched = Vec::new();
+        for (dir, mig) in planned {
             unapply_locked_pool(pool, dir, &mig.name, ledger).await?;
             touched.push(mig);
         }

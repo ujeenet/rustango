@@ -394,7 +394,8 @@ pub(crate) struct MovedTo {
 
 /// `migrate <target>` forward on the registry: the project's registry-scope
 /// system chain, from its root, then the folder holding `target` moved to
-/// it. `None` when no registry-scoped file is named `target`.
+/// it. `None` when no registry-scoped file is named `target`, or the ledger
+/// already has it.
 ///
 /// # Errors
 /// Either chain's error, or the bootstrap after them.
@@ -411,38 +412,24 @@ pub(crate) async fn migrate_registry_to(
         return Ok(None);
     };
     let chain = project.system_chain(crate::core::ModelScope::Registry)?;
-    let unapplied = std::sync::Mutex::new(Vec::new());
-    let slot = &unapplied;
-    let ran = crate::migrate::chains::migrate_chains(
+    let Some(ran) = crate::migrate::chains::migrate_chains_to(
         registry,
         &chain,
         MigrationScope::Registry,
         project.dirs(),
-        None,
         crate::migrate::Signals::Skip,
-        |held| async move {
-            let moved = crate::migrate::migrate_to_locked(
-                held,
-                registry,
-                target_dir,
-                target,
-                crate::migrate::LEDGER_TABLE,
-            )
-            .await?;
-            *slot
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = moved.unapplied;
-            Ok(moved.applied)
-        },
+        target_dir,
+        target,
     )
-    .await?;
+    .await?
+    else {
+        return Ok(None);
+    };
     registry_after_migrate(registry).await?;
     Ok(Some(MovedTo {
         system: ran.system,
         applied: ran.project,
-        unapplied: unapplied
-            .into_inner()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+        unapplied: ran.unapplied,
     }))
 }
 

@@ -33,6 +33,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `find_many` and `where_in` split past the bind cap return each row once, even when MySQL's collation matches it from keys in two batches.
 - `DatabaseCache` and `clearsessions --table` accept a `schema.table` name: each part is quoted, so the table is found.
 - Two concurrent media `set_tags` on one row on Postgres leave one caller's set, not both merged: the media row is locked first.
+- Tenancy `downgrade` (registry, `--tenant`, `--all-tenants`) rolls back `<app>/migrations/` files too, newest first.
+- `migrate <target>` plans the system chain around only the files it moves, so a later project file that creates a framework table no longer fails the move; the "already applied" check is repeated under the migrate lock.
+- Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders instead of picking one.
+- A tenant whose stored path prefix is now a console route can be edited (console and admin) while that prefix is unchanged.
 
 ## [0.61.13] — 2026-10-30
 

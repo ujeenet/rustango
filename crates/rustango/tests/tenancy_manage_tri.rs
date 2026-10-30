@@ -54,6 +54,15 @@ struct Env {
 
 impl Env {
     async fn new(backend: &Pool) -> Self {
+        let env = Self::bare(backend).await;
+        rustango::testkit::migrate_framework(&env.registry)
+            .await
+            .expect("framework tables");
+        env
+    }
+
+    /// A registry with no framework tables yet: what `migrate` meets first.
+    async fn bare(backend: &Pool) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         #[cfg_attr(not(any(feature = "postgres", feature = "mysql")), allow(unused_mut))]
         let mut guards: Vec<Box<dyn std::any::Any>> = Vec::new();
@@ -65,9 +74,6 @@ impl Env {
             Pool::Sqlite(_) => format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display()),
         };
         let registry = Pool::connect(&url).await.expect("registry");
-        rustango::testkit::migrate_framework(&registry)
-            .await
-            .expect("framework tables");
         Self {
             url,
             registry,
@@ -1863,6 +1869,115 @@ async fn migrate_target_runs_the_projects_registry_chain(pool: &Pool) {
     assert!(!root.join("blog/system").exists());
 }
 
+/// `migrate <target>` before a legacy file that creates `rustango_orgs`,
+/// which framework steps reference: the system chain makes it, since that
+/// file does not run.
+async fn migrate_target_before_a_legacy_framework_table(pool: &Pool) {
+    use rustango::core::Model as _;
+    use rustango::migrate::MigrationScope::Registry;
+    use rustango::migrate::{Operation, SchemaChange, SchemaSnapshot};
+    use rustango::sql::CounterPool as _;
+    let env = Env::bare(pool).await;
+    let dir = env.dir("proj/migrations");
+    scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
+    let legacy = rustango::migrate::Migration {
+        name: "0002_legacy_orgs".into(),
+        created_at: "2026-10-09T00:00:00Z".into(),
+        prev: Some("0001_registry".into()),
+        atomic: true,
+        scope: Registry,
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: SchemaSnapshot::from_models(&[Org::SCHEMA]),
+        forward: vec![Operation::Schema(SchemaChange::CreateTable(
+            Org::SCHEMA.table.into(),
+        ))],
+    };
+    rustango::migrate::file::write(&dir.join("0002_legacy_orgs.json"), &legacy).unwrap();
+
+    let out = env
+        .run_out(&dir, &["migrate", "0001_registry"])
+        .await
+        .expect("migrate to 0001");
+    let applied = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .expect("registry ledger");
+    assert!(applied.contains("0001_registry"), "{out}");
+    assert!(!applied.contains("0002_legacy_orgs"), "{out}");
+    let orgs = Org::objects()
+        .count(&env.registry)
+        .await
+        .expect("the system chain made the table");
+    assert_eq!(orgs, 0);
+    let hosts = rustango::tenancy::OrgHost::objects()
+        .count(&env.registry)
+        .await
+        .expect("and the steps that reference it ran");
+    assert_eq!(hosts, 0);
+}
+
+/// A target name two folders share is refused before anything runs.
+async fn a_target_in_two_folders_is_refused(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Registry;
+    let env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    scoped_migration(&dir, "0001_dup", "SELECT 1", Registry);
+    scoped_migration(&app, "0001_dup", "SELECT 1", Registry);
+    let err = env
+        .run(&dir, &["migrate", "0001_dup"])
+        .await
+        .expect_err("ambiguous target");
+    assert!(err.to_string().contains("is in both"), "{err}");
+    let applied = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .unwrap_or_default();
+    assert!(!applied.contains("0001_dup"), "{applied:?}");
+}
+
+/// `downgrade` rolls back app-folder files, newest first, on the registry
+/// and in a tenant, by count and to a target.
+async fn downgrade_covers_app_folders(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Registry;
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
+    scoped_migration(&app, "0002_blog_registry", "SELECT 1", Registry);
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", "SELECT 1");
+    migration(&app, "0003_blog", "SELECT 1");
+    let mut org = env.own_tenant("dgapp").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    env.run(&dir, &["migrate"]).await.expect("migrate");
+
+    let out = env.run_out(&dir, &["downgrade"]).await.expect("downgrade");
+    assert!(
+        out.contains("registry: rolled back 0002_blog_registry"),
+        "{out}"
+    );
+    let registry = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .expect("registry ledger");
+    assert!(!registry.contains("0002_blog_registry"), "{out}");
+    assert!(registry.contains("0001_registry"), "{out}");
+
+    let slug = org.slug.clone();
+    let out = env
+        .run_out(&dir, &["downgrade", "0002_blog", "--tenant", &slug])
+        .await
+        .expect("downgrade to a target");
+    assert!(out.contains("rolled back 0003_blog"), "{out}");
+    let out = env
+        .run_out(&dir, &["downgrade", "--tenant", &slug])
+        .await
+        .expect("downgrade one");
+    assert!(out.contains("rolled back 0002_blog"), "{out}");
+    let applied = env.applied(&org).await;
+    assert!(applied.contains("0001_tenant"), "{out}");
+    assert!(!applied.contains("0002_blog") && !applied.contains("0003_blog"));
+}
+
 /// One run applies the system chain once per database, however many app
 /// folders the project has.
 async fn the_system_chain_runs_once_per_database(pool: &Pool) {
@@ -2095,6 +2210,9 @@ tri_dialect_test! {
         migrate_leaves_a_read_only_app_folder_alone,
         dry_run_and_target_see_app_folders,
         migrate_target_runs_the_projects_registry_chain,
+        migrate_target_before_a_legacy_framework_table,
+        a_target_in_two_folders_is_refused,
+        downgrade_covers_app_folders,
         the_system_chain_runs_once_per_database,
         a_failing_app_folder_is_named,
         check_names_pending_registry_system_steps,

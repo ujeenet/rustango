@@ -882,10 +882,14 @@ impl AdminClaims {
                     "host_pattern" => text(value)
                         .map(|h| validate_host_pattern(&h).map(ClaimKey::Host))
                         .transpose()?,
+                    // A kept prefix passes: one set before a console route took it stays editable.
                     "path_prefix" => text(value)
                         .map(|p| {
                             let p = p.trim().to_owned();
-                            validate_new_path_prefix(&p).map(|()| ClaimKey::PathPrefix(p))
+                            if changed(column, &serde_json::json!(p)) {
+                                validate_new_path_prefix(&p)?;
+                            }
+                            Ok::<_, String>(ClaimKey::PathPrefix(p))
                         })
                         .transpose()?,
                     "port" => match value {
