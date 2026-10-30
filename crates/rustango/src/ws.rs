@@ -557,8 +557,9 @@ mod tests {
             }
         }
         // Block the server in a send, queue the pong behind it, let the tick go overdue.
+        // 15 MiB, past what loopback buffers hold on Linux and macOS; under the bus's 64.
         let big = "y".repeat(256 * 1024);
-        for _ in 0..32 {
+        for _ in 0..60 {
             hub.broadcast(big.clone());
         }
         tokio::time::sleep(keepalive / 3).await;
