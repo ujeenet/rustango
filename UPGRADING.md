@@ -154,6 +154,7 @@ untouched.
 - The tenant sign-in and password pages show `tenant_name`, now the display name or else the slug. A custom `tenant_login.html` gets `login_label`, `login_input_type` and `login_autocomplete`; the form field is still named `username`.
 - With `login_field = "email"`, a user without an email, or sharing one with another user ignoring case, cannot sign in; the server logs each tenant that has such users at boot. `/auth/login` also accepts `{"email": …}`.
 - The `user_logged_in` signal from the tenant sign-in form carries the stored username, not the typed one.
+- `tenancy::authenticate_user_pool` matches by `login_field` too; the Postgres-connection `authenticate_user` still matches the username only.
 
 ---
 

@@ -472,7 +472,14 @@ impl<DB: Database> Builder<DB> {
     /// What tenant users sign in with. Process-wide; beats `[auth] login_field`.
     #[must_use]
     pub fn login_field(self, field: crate::login_field::LoginField) -> Self {
-        let _ = crate::tenancy::configure_login_field(field);
+        if !crate::tenancy::configure_login_field(field) {
+            tracing::warn!(
+                target: "rustango::tenancy::login",
+                ignored = %field,
+                kept = %crate::tenancy::login_field(),
+                "login_field was already set; this call is ignored"
+            );
+        }
         self
     }
 
