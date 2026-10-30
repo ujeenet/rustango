@@ -271,7 +271,9 @@ won't vanish when tokio reschedules the task. Inside the scope:
 - `current_offset()` returns the active `FixedOffset` (UTC outside any scope),
 - `localtime(utc_dt)` converts a stored UTC `DateTime` to it,
 - the `{{ ts | localtime }}` Tera filter (register with
-  `timezone::register_filters`) renders in it automatically.
+  `timezone::register_filters`) renders in it automatically,
+- the `dateformat`, `timeformat` and `naturalday` filters use it too, so
+  "today" is the user's today.
 
 `from_request_headers` accepts the `tz_offset` cookie first, then a
 `Time-Zone:` (or `X-Timezone:`) header. The accepted formats are flexible —

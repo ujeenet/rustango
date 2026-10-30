@@ -206,6 +206,12 @@ untouched.
 - `LocalStorage::url` and `cdn_url` percent-encode the key; a caller that encoded the key first now gets it encoded twice.
 - `LocalStorage::exists` is false for a directory, and `load` of one is `NotFound`.
 - `WebhookSubscription::header` replaces a default header of the same name (any case) and ignores `X-Webhook-Id`, `-Event` and `-Signature`.
+### i18n and time
+
+- A plural lookup served from a fallback locale now uses that locale's rule (Russian 21 from an English entry reads "21 pages", not "21 page"). An `ngettext` with no catalog entry picks the source string by the default locale's rule.
+- Under `with_offset`, `naturalday`, `dateformat` and `timeformat` render in that offset; `O`, `T`, `e` and `Z` show it. Without an override they stay UTC. `dateformat::format_datetime` is generic over the timezone.
+- A datetime with no zone (a `NaiveDateTime` column, `"2026-06-05T00:00:00"`) is read as UTC and then shifted, so under `-08:00` it shows the evening before.
+- `i18n::timezone::activate` is deprecated (it was always a no-op); use `with_offset`.
 
 ---
 

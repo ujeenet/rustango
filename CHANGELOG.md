@@ -46,6 +46,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Admin inline read-only and superuser-only fields render as text instead of inputs whose edits were dropped.
 - The admin list's "show all" facet keeps an active value past the 200 cap and shows "+N more" for the rest.
 - The bare admin login page links the admin favicon.
+- `translate_plural`, `ngettext` and `ngettext_fmt` pick the plural form by the rule of the locale the text comes from; untranslated `ngettext` source strings use the default locale's rule.
+- `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
+
+### Deprecated
+
+- `i18n::timezone::activate`: it never did anything; use `with_offset`.
 
 ## [0.61.13] — 2026-10-30
 

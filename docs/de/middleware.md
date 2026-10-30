@@ -283,7 +283,9 @@ Innerhalb des Scopes:
   Scopes),
 - `localtime(utc_dt)` konvertiert ein gespeichertes UTC-`DateTime` dorthin,
 - der `{{ ts | localtime }}` Tera-Filter (registriert mit
-  `timezone::register_filters`) rendert automatisch darin.
+  `timezone::register_filters`) rendert automatisch darin,
+- die Filter `dateformat`, `timeformat` und `naturalday` nutzen ihn ebenfalls,
+  sodass „today“ der heutige Tag des Nutzers ist.
 
 `from_request_headers` akzeptiert zuerst das `tz_offset`-Cookie, dann einen
 `Time-Zone:`- (oder `X-Timezone:`-)Header. Die akzeptierten Formate sind

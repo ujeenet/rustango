@@ -285,7 +285,9 @@ tâche. À l'intérieur de la portée :
   portée),
 - `localtime(utc_dt)` convertit un `DateTime` UTC stocké vers celui-ci,
 - le filtre Tera `{{ ts | localtime }}` (enregistré avec
-  `timezone::register_filters`) l'affiche automatiquement.
+  `timezone::register_filters`) l'affiche automatiquement,
+- les filtres `dateformat`, `timeformat` et `naturalday` l'utilisent aussi, si
+  bien que « today » est le jour de l'utilisateur.
 
 `from_request_headers` accepte d'abord le cookie `tz_offset`, puis un en-tête
 `Time-Zone:` (ou `X-Timezone:`). Les formats acceptés sont flexibles —
