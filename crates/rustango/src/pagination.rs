@@ -165,9 +165,15 @@ impl LinkHeaderBuilder {
             };
             // The base query merges with the kept params; `page`/`cursor` are ours.
             let mut query = query_params(&self.base_url, &["page", "cursor"]);
-            query.extend(self.extra_query.clone());
-            query.insert(param_key.to_owned(), value.clone());
-            let url = join_url(strip_query(&self.base_url), &query);
+            query.retain(|(k, _)| !self.extra_query.contains_key(k));
+            query.extend(
+                self.extra_query
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != param_key)
+                    .map(|(k, v)| (k.clone(), v.clone())),
+            );
+            query.push((param_key.to_owned(), value.clone()));
+            let url = join_url(strip_query(&self.base_url), query);
             entries.push(format!("<{url}>; rel=\"{rel_str}\""));
         }
         entries.join(", ")
@@ -285,29 +291,30 @@ pub fn cursor_links(
 
 fn page_number_url(base: &str, page: usize, page_size: usize) -> String {
     let mut params = base_params(base);
-    params.insert("page".into(), page.to_string());
-    params.insert("page_size".into(), page_size.to_string());
-    join_url(strip_query(base), &params)
+    params.push(("page".into(), page.to_string()));
+    params.push(("page_size".into(), page_size.to_string()));
+    join_url(strip_query(base), params)
 }
 
 fn cursor_url(base: &str, cursor: Option<&str>, page_size: usize) -> String {
     let mut params = base_params(base);
     if let Some(c) = cursor {
-        params.insert("cursor".into(), c.to_owned());
-    } else {
-        params.remove("cursor");
+        params.push(("cursor".into(), c.to_owned()));
     }
-    params.insert("page_size".into(), page_size.to_string());
-    join_url(strip_query(base), &params)
+    params.push(("page_size".into(), page_size.to_string()));
+    join_url(strip_query(base), params)
 }
 
-fn base_params(base: &str) -> BTreeMap<String, String> {
+/// Query pairs in order. A list, not a map: `?tag=a&tag=b` keeps both.
+type Query = Vec<(String, String)>;
+
+fn base_params(base: &str) -> Query {
     query_params(base, &["page", "page_size", "cursor"])
 }
 
 /// `base`'s query, decoded, without the `dropped` keys.
-fn query_params(base: &str, dropped: &[&str]) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::new();
+fn query_params(base: &str, dropped: &[&str]) -> Query {
+    let mut out = Query::new();
     if let Some(qs) = base.split('?').nth(1) {
         for pair in qs.split('&') {
             if pair.is_empty() {
@@ -320,7 +327,7 @@ fn query_params(base: &str, dropped: &[&str]) -> BTreeMap<String, String> {
                 crate::url_codec::url_decode(v),
             );
             if !dropped.contains(&k.as_str()) {
-                out.insert(k, v);
+                out.push((k, v));
             }
         }
     }
@@ -331,10 +338,12 @@ fn strip_query(base: &str) -> &str {
     base.split_once('?').map_or(base, |(b, _)| b)
 }
 
-fn join_url(path: &str, params: &BTreeMap<String, String>) -> String {
+/// Keys sorted; a stable sort keeps repeated keys in their order.
+fn join_url(path: &str, mut params: Query) -> String {
     if params.is_empty() {
         return path.to_owned();
     }
+    params.sort_by(|a, b| a.0.cmp(&b.0));
     let qs = params
         .iter()
         .map(|(k, v)| {
@@ -582,6 +591,26 @@ mod tests {
             c.next.as_deref(),
             Some("/posts?cursor=c1&page_size=20&q=a%20b")
         );
+    }
+
+    /// A multi-select filter (`?tag=a&tag=b`) keeps every value.
+    #[test]
+    fn repeated_query_keys_are_kept() {
+        let l = page_number_links("/posts?tag=a&tag=b&q=x+y&page=3", 1, 10, 100);
+        assert_eq!(
+            l.next.as_deref(),
+            Some("/posts?page=2&page_size=10&q=x%20y&tag=a&tag=b")
+        );
+        let c = cursor_links("/posts?tag=a&tag=b", None, Some("c1"), 10);
+        assert_eq!(
+            c.next.as_deref(),
+            Some("/posts?cursor=c1&page_size=10&tag=a&tag=b")
+        );
+        let h = LinkHeaderBuilder::new("/posts?tag=a&tag=b&sort=x")
+            .keep_param("sort", "y")
+            .rel("next", 2)
+            .build();
+        assert_eq!(h, "</posts?page=2&sort=y&tag=a&tag=b>; rel=\"next\"");
     }
 
     #[test]

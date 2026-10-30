@@ -1237,3 +1237,66 @@ async fn a_host_tenant_login_defaults_to_the_root() {
         .await;
     assert_eq!(resp.headers()["location"], "/");
 }
+
+/// Console pages talk to operators: no build commands, and an inactive
+/// tenant shows no impersonate button; refusals come back as a flash.
+#[tokio::test]
+async fn console_pages_speak_to_operators_and_impersonate_flashes_refusals() {
+    let env = boot().await;
+    let (_, console, cookie) = console_session(&env).await;
+    let send = |method: &str, uri: String| {
+        let console = console.clone();
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::COOKIE, format!("rustango_csrf=t; {cookie}"))
+            .header("x-csrf-token", "t")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::empty())
+            .unwrap();
+        async move { console.oneshot(req).await.unwrap() }
+    };
+    let body = |resp: axum::response::Response| async move {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    };
+    let edit = format!("/orgs/{}/edit", env.slug);
+    for page in ["/".to_owned(), "/orgs".to_owned(), edit.clone()] {
+        let html = body(send("GET", page.clone()).await).await;
+        for dev in ["cargo run", "rustango::", "Org::SCHEMA"] {
+            assert!(!html.contains(dev), "{page} shows `{dev}`");
+        }
+    }
+    assert!(body(send("GET", edit.clone()).await)
+        .await
+        .contains("/impersonate"));
+
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.active = false;
+    org.save_pool(&env.registry).await.expect("deactivate");
+    assert!(
+        !body(send("GET", edit.clone()).await)
+            .await
+            .contains("/impersonate"),
+        "an inactive tenant offers impersonation"
+    );
+
+    let refused = send("POST", format!("/orgs/{}/impersonate", env.slug)).await;
+    assert_eq!(refused.status(), StatusCode::SEE_OTHER);
+    let location = refused.headers()["location"].to_str().unwrap();
+    assert!(
+        location.starts_with(&format!("{edit}?error=")),
+        "{location}"
+    );
+    let missing = send("POST", "/orgs/nope/impersonate".to_owned()).await;
+    assert_eq!(missing.status(), StatusCode::SEE_OTHER);
+    let location = missing.headers()["location"].to_str().unwrap();
+    assert!(location.starts_with("/orgs?error="), "{location}");
+}

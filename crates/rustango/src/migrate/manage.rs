@@ -180,6 +180,12 @@ pub async fn run_with_writer<W: Write + Send>(
         "createcachetable" | "create-cache-table" => {
             createcachetable_cmd(pool, &args[1..], writer).await
         }
+        #[cfg(not(feature = "cache"))]
+        verb @ ("clear-cache" | "clearsessions" | "createcachetable" | "create-cache-table") => {
+            Err(MigrateError::Validation(format!(
+                "`{verb}` needs the `cache` feature on rustango"
+            )))
+        }
         "sendtestemail" => sendtestemail_cmd(&args[1..], writer).await,
         // v0.38 — `inspectdb` is tri-dialect: PG + MySQL via
         // `information_schema`, SQLite via `PRAGMA table_info` +
@@ -368,20 +374,23 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      N newest per row. N <= 0 deletes everything and needs --yes.\n"
     )?;
-    writeln!(w, "  clear-cache [--table <name>]")?;
-    writeln!(w, "      (alias: clearsessions)")?;
-    writeln!(
-        w,
-        "      Purge expired rows from a DatabaseCache-backed table."
-    )?;
-    writeln!(w, "      Default table: rustango_cache.\n")?;
-    writeln!(w, "  createcachetable [--table <name>]")?;
-    writeln!(w, "      (alias: create-cache-table)")?;
-    writeln!(
-        w,
-        "      Idempotent CREATE TABLE IF NOT EXISTS for DatabaseCache."
-    )?;
-    writeln!(w, "      Default table: rustango_cache. Safe to re-run.\n")?;
+    #[cfg(feature = "cache")]
+    {
+        writeln!(w, "  clear-cache [--table <name>]")?;
+        writeln!(w, "      (alias: clearsessions)")?;
+        writeln!(
+            w,
+            "      Purge expired rows from a DatabaseCache-backed table."
+        )?;
+        writeln!(w, "      Default table: rustango_cache.\n")?;
+        writeln!(w, "  createcachetable [--table <name>]")?;
+        writeln!(w, "      (alias: create-cache-table)")?;
+        writeln!(
+            w,
+            "      Idempotent CREATE TABLE IF NOT EXISTS for DatabaseCache."
+        )?;
+        writeln!(w, "      Default table: rustango_cache. Safe to re-run.\n")?;
+    }
     writeln!(
         w,
         "  sendtestemail --to <addr> [--from <addr>] [--subject <text>]"
@@ -533,10 +542,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "      Print the resolved DB URL (password redacted), detected"
     )?;
-    writeln!(
-        w,
-        "      backend, and which `postgres`/`mysql` Cargo features are"
-    )?;
+    writeln!(w, "      backend, and which backend Cargo features are")?;
     writeln!(w, "      compiled in. Read-only — does not connect.\n")?;
     writeln!(w, "  inspectdb [--schema <name>] [--table <name>]")?;
     writeln!(
@@ -4183,58 +4189,58 @@ fn run_psql_restore<W: Write>(
 
 /// `db:info` — read-only summary of the DB configuration this build
 /// would use. Shows the resolved URL (password redacted), the detected
-/// backend, and which `postgres`/`mysql` Cargo features are compiled
-/// in. Does not connect — handy in CI / containers where DB might not
-/// be reachable yet but you still want to confirm the runtime sees
-/// the expected backend.
+/// backend, and which backend Cargo features are compiled in. Does not
+/// connect — handy in CI / containers where DB might not be reachable
+/// yet but you still want to confirm the runtime sees the expected
+/// backend.
 fn db_info_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
+    write_db_info(w, crate::env::database_url_from_env())
+}
+
+fn write_db_info<W: Write>(
+    w: &mut W,
+    url: Result<String, crate::env::EnvError>,
+) -> Result<(), MigrateError> {
     writeln!(w, "rustango db:info")?;
     writeln!(w, "  framework version:  {}", env!("CARGO_PKG_VERSION"))?;
 
-    let pg_enabled = cfg!(feature = "postgres");
-    let mysql_enabled = cfg!(feature = "mysql");
-    writeln!(
-        w,
-        "  postgres feature:   {}",
-        if pg_enabled { "enabled" } else { "disabled" }
-    )?;
-    writeln!(
-        w,
-        "  mysql feature:      {} (impl lands in v0.23.0-batch2)",
-        if mysql_enabled { "enabled" } else { "disabled" }
-    )?;
+    let backends = [
+        ("postgres", cfg!(feature = "postgres")),
+        ("mysql", cfg!(feature = "mysql")),
+        ("sqlite", cfg!(feature = "sqlite")),
+    ];
+    for (feature, on) in backends {
+        let label = format!("{feature} feature:");
+        writeln!(
+            w,
+            "  {label:<20}{}",
+            if on { "enabled" } else { "disabled" }
+        )?;
+    }
 
-    match crate::env::database_url_from_env() {
+    match url {
         Ok(url) => {
-            let scheme = url.split("://").next().unwrap_or("(unknown)");
+            // Up to the first colon, as `Pool::connect` reads it:
+            // SQLite URLs are often `sqlite:path` with no `//`.
+            let scheme = url.split(':').next().unwrap_or("").to_ascii_lowercase();
             writeln!(w, "  resolved URL:       {}", redact_url(&url))?;
             writeln!(w, "  detected backend:   {scheme}")?;
-            // Soft warning when scheme + feature don't line up — caught
-            // at runtime by Pool::connect, but this surfaces it before
-            // the operator tries to start the server.
-            match scheme {
-                "postgres" | "postgresql" if !pg_enabled => {
-                    writeln!(
-                        w,
-                        "  ! warning: URL is postgres but the `postgres` feature is disabled — \
-                         add `features = [\"postgres\"]` to rustango"
-                    )?;
-                }
-                "mysql" if !mysql_enabled => {
-                    writeln!(
-                        w,
-                        "  ! warning: URL is mysql but the `mysql` feature is disabled — \
-                         add `features = [\"mysql\"]` to rustango"
-                    )?;
-                }
-                "mysql" if mysql_enabled => {
-                    writeln!(
-                        w,
-                        "  ! note: MySql connections will fail in v0.23.0-batch1 \
-                         (MySqlDialect lands in batch2)"
-                    )?;
-                }
-                _ => {}
+            // Caught at runtime by Pool::connect too; this surfaces it
+            // before the operator tries to start the server.
+            let feature = match scheme.as_str() {
+                "postgres" | "postgresql" => Some("postgres"),
+                "mysql" => Some("mysql"),
+                "sqlite" => Some("sqlite"),
+                _ => None,
+            };
+            if let Some((feature, false)) =
+                feature.and_then(|f| backends.into_iter().find(|(b, _)| *b == f))
+            {
+                writeln!(
+                    w,
+                    "  ! warning: URL is {feature} but the `{feature}` feature is disabled — \
+                     add `features = [\"{feature}\"]` to rustango"
+                )?;
             }
         }
         Err(e) => {
@@ -10499,5 +10505,54 @@ mod db_cmd_tests {
             redact_url("postgres://alice:p@ss@localhost/db"),
             "postgres://alice:***@localhost/db"
         );
+    }
+
+    /// Every backend gets a feature line and a warning when it is off;
+    /// a working MySQL setup gets no note.
+    #[test]
+    fn db_info_reports_each_backend_feature() {
+        let info = |url: &str| {
+            let mut buf = Vec::new();
+            write_db_info(&mut buf, Ok(url.to_owned())).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        for (url, feature, on) in [
+            ("postgres://u@h/db", "postgres", cfg!(feature = "postgres")),
+            ("mysql://u@h/db", "mysql", cfg!(feature = "mysql")),
+            ("sqlite::memory:", "sqlite", cfg!(feature = "sqlite")),
+        ] {
+            let out = info(url);
+            let state = if on { "enabled" } else { "disabled" };
+            let line = format!("{:<20}{state}", format!("{feature} feature:"));
+            assert!(out.contains(&line), "{out}");
+            assert!(
+                out.contains(&format!("detected backend:   {feature}")),
+                "{out}"
+            );
+            assert_eq!(out.contains("! warning"), !on, "{out}");
+            assert!(!out.contains("! note"), "{out}");
+        }
+    }
+
+    /// A cache verb `--help` lists must not answer "unknown subcommand".
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cache_verbs_follow_the_cache_feature() {
+        let mut help = Vec::new();
+        print_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+        assert_eq!(help.contains("clear-cache"), cfg!(feature = "cache"));
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        for verb in ["clear-cache", "createcachetable"] {
+            let mut out = Vec::new();
+            let r =
+                run_with_writer(&pool, Path::new("/nonexistent"), args(&[verb]), &mut out).await;
+            if cfg!(feature = "cache") {
+                assert!(r.is_ok(), "{verb}: {r:?}");
+            } else {
+                let err = r.unwrap_err().to_string();
+                assert!(err.contains("needs the `cache` feature"), "{verb}: {err}");
+            }
+        }
     }
 }

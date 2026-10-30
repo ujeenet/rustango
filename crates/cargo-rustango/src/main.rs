@@ -110,7 +110,8 @@ fn print_help() {
     println!("  -F, --features <list>    extra rustango features, comma-separated");
     println!("  -i, --interactive        pick from numbered menus instead");
     println!("      --rustango-path <d>  depend on a local rustango checkout");
-    println!("                           instead of the published crate");
+    println!("                           instead of the published crate;");
+    println!("                           relative to the current directory");
     println!("      --alias rgo          name the dependency `rgo`: code uses");
     println!("                           `rgo::` paths and `#[rgo(...)]`");
     println!();
@@ -505,7 +506,11 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     // a prompt nobody can answer.
     let asked = args.iter().any(|a| a == "-i" || a == "--interactive");
     let bare = args.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin());
-    let flags = parse_new_flags(args, asked || bare)?;
+    let mut flags = parse_new_flags(args, asked || bare)?;
+    if let Some(raw) = flags.rustango_path.take() {
+        let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+        flags.rustango_path = Some(local_checkout(&raw, &cwd)?);
+    }
     let parsed = if flags.interactive {
         let named = !flags.name.is_empty();
         wizard::run(flags, named)?
@@ -541,6 +546,21 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
         println!("  {line}");
     }
     Ok(())
+}
+
+/// `--rustango-path` as an absolute path. It is typed relative to the
+/// shell, but cargo would read a relative one from the new project.
+fn local_checkout(raw: &str, cwd: &Path) -> Result<String, String> {
+    let path = cwd.join(raw);
+    if !path.join("Cargo.toml").is_file() {
+        return Err(format!(
+            "--rustango-path `{raw}`: no Cargo.toml in {}",
+            path.display()
+        ));
+    }
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| format!("--rustango-path `{raw}` is not valid UTF-8"))
 }
 
 #[cfg(test)]
