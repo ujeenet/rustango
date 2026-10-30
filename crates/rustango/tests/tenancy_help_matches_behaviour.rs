@@ -135,6 +135,49 @@ fn create_user_help_names_the_real_login_path() {
     assert!(h.contains(&format!("<apex>{login}")), "{h}");
 }
 
+/// Each tenant verb's description sits under that verb, not its neighbour.
+#[cfg(all(feature = "tenancy", feature = "manage"))]
+#[test]
+fn tenant_verbs_carry_their_own_description() {
+    let h = help();
+    let section = h
+        .split("TENANT MANAGEMENT:\n")
+        .nth(1)
+        .and_then(|s| s.split("\n\n").next())
+        .unwrap_or_else(|| panic!("no TENANT MANAGEMENT section:\n{h}"));
+    // A line indented by exactly two spaces starts a verb's entry.
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for line in section.lines() {
+        match line.strip_prefix("  ") {
+            Some(rest) if !rest.starts_with(' ') => {
+                let verb = rest.split_whitespace().next().unwrap_or_default();
+                entries.push((verb.to_owned(), line.to_owned()));
+            }
+            _ => match entries.last_mut() {
+                Some((_, text)) => text.push_str(line),
+                None => panic!("text before the first verb: {line}"),
+            },
+        }
+    }
+    for (verb, phrase) in [
+        ("create-tenant", "Provision a new tenant"),
+        ("create-tenant", "SQLite has no schemas"),
+        ("test-tenant-connection", "writes no registry row"),
+        ("drop-tenant", "Soft-delete"),
+        ("purge-tenant", "HARD-delete"),
+        ("rotate-tenant-password", "New password"),
+        ("edit-tenant", "Change routing"),
+        ("reseal-tenant-secrets", "Re-seal stored tenant URLs"),
+    ] {
+        let owner: Vec<&str> = entries
+            .iter()
+            .filter(|(_, text)| text.contains(phrase))
+            .map(|(v, _)| v.as_str())
+            .collect();
+        assert_eq!(owner, [verb], "`{phrase}` belongs to {verb}:\n{section}");
+    }
+}
+
 // A third test tried to assert that every verb in the help text has a
 // dispatcher arm. Dropped: the help block mixes verb entries, wrapped
 // prose and `cargo run --` examples at the same indent, so a scanner

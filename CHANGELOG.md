@@ -48,6 +48,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The bare admin login page links the admin favicon.
 - `translate_plural`, `ngettext` and `ngettext_fmt` pick the plural form by the rule of the locale the text comes from; untranslated `ngettext` source strings use the default locale's rule.
 - `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
+- The console tenant edit and `edit-tenant --activate` refuse to activate a tenant whose create run failed; resume the run instead.
+- Tenancy `--help` shows the create description under `create-tenant` and the reseal line after `edit-tenant`'s; `test-tenant-connection` has its own.
+- `sqlite,cache` and `postgres,mcp,tenancy` builds compile without unused-item warnings.
 
 ### Deprecated
 

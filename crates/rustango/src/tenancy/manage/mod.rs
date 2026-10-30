@@ -558,10 +558,6 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
-    )?;
-    writeln!(
-        w,
         "                       Provision a new tenant. Schema mode (default) gives the"
     )?;
     writeln!(
@@ -579,6 +575,14 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                       SQLite has no schemas: use --mode database --server <name>."
+    )?;
+    writeln!(
+        w,
+        "  test-tenant-connection <url> [--no-write-probe] [--timeout <secs>]"
+    )?;
+    writeln!(
+        w,
+        "                       Check a candidate tenant database URL; writes no registry row."
     )?;
     writeln!(w, "  drop-tenant   <slug> [--confirm <slug>]")?;
     writeln!(
@@ -616,10 +620,6 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "  reseal-tenant-secrets [--apply]  Re-seal stored tenant URLs with the current key (dry run without --apply)."
-    )?;
-    writeln!(
-        w,
         "                       Change routing and display config. Only the fields you"
     )?;
     writeln!(
@@ -627,6 +627,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         "                       name are touched; --clear empties one. Rotating the URL"
     )?;
     writeln!(w, "                       evicts the tenant's pool.")?;
+    writeln!(
+        w,
+        "  reseal-tenant-secrets [--apply]  Re-seal stored tenant URLs with the current key (dry run without --apply)."
+    )?;
     writeln!(w)?;
     writeln!(w, "INSPECTION (read-only):")?;
     writeln!(

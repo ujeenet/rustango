@@ -182,6 +182,7 @@ untouched.
 - A tenant whose stored path prefix is now a console route can be edited again while the prefix stays the same; a new one is still refused.
 - `TenantProvisioner` has a new `resume` method with a default that refuses; implement it to let the console resume tenants.
 - The console's new-tenant "Test connection" needs a slug or an explicit URL, and refuses what Create refuses (taken slug, bad fields).
+- Activating a tenant left inactive by a failed create run (console edit, `edit-tenant --activate`, `org_edit::apply`) now fails with a validation error; resume the run instead.
 
 ### Migrations
 

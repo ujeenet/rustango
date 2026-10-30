@@ -933,6 +933,7 @@ mod tests {
         assert!(matches!(agent_key(None), AgentKey::Missing));
     }
 
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
     fn client(ip: [u8; 4]) -> ClientIp {
         let mut ext = no_ext();
         ext.insert(crate::real_ip::TrustedRealIp(ip.into()));
