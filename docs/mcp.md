@@ -180,7 +180,7 @@ gets `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.13" },
+    "serverInfo": { "name": "rustango", "version": "0.61.14" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }
