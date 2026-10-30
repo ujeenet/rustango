@@ -284,7 +284,7 @@ impl HealthRouter {
 }
 
 /// Where [`HealthRouter::into_router`] mounts liveness and readiness.
-const PROBE_PATHS: [&str; 2] = ["/health", "/ready"];
+pub(crate) const PROBE_PATHS: [&str; 2] = ["/health", "/ready"];
 
 /// `true` for exactly the paths the health router serves, so the outer
 /// layers can let probes through without exempting a subtree.

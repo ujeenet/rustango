@@ -241,6 +241,19 @@ where
     Ok(out)
 }
 
+/// [`list_dir`] of each of `dirs`, kept in their order: the order a
+/// tenancy project applies its folders in.
+///
+/// # Errors
+/// Whatever [`list_dir`] returns for any of them.
+pub(crate) fn list_each(dirs: &[PathBuf]) -> Result<Vec<Migration>, MigrateError> {
+    let mut out = Vec::new();
+    for dir in dirs {
+        out.extend(list_dir(dir)?);
+    }
+    Ok(out)
+}
+
 /// Every migrations directory under `project_root`: the top-level
 /// `migrations/`, plus one per app at `<app>/migrations/`.
 ///
@@ -290,6 +303,35 @@ pub fn discover_migration_dirs(project_root: &Path) -> Vec<PathBuf> {
         out.extend(app_dirs);
     }
     out
+}
+
+/// The dirs tenancy migrates for `dir`: a `migrations` dir and the
+/// `<app>/migrations/` beside it, a project root's dirs, else `dir` alone.
+/// Boot, provisioning, `migrate` and `check` all walk this list.
+#[must_use]
+pub(crate) fn project_migration_dirs(dir: &Path) -> Vec<PathBuf> {
+    let found = discover_migration_dirs(project_root_of(dir));
+    if found.is_empty() {
+        vec![dir.to_path_buf()]
+    } else {
+        found
+    }
+}
+
+/// The dir whose `migrations/` and `<app>/migrations/` belong with `dir`:
+/// its parent when it is a `migrations` dir, else `dir` itself.
+pub(crate) fn project_root_of(dir: &Path) -> &Path {
+    match dir.parent() {
+        // A bare `migrations` has the parent `""`, which `read_dir` refuses.
+        Some(p) if dir.file_name().is_some_and(|n| n == "migrations") => {
+            if p.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                p
+            }
+        }
+        _ => dir,
+    }
 }
 
 /// Check that every `prev` names another migration in the same list.

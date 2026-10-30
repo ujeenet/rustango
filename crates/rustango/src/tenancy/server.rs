@@ -426,10 +426,13 @@ async fn no_operators_warn<W: Write + Send>(
 mod app_tests {
     use super::*;
     use crate::sql::Auto;
+    use crate::tenancy::branding;
+    use axum::http::StatusCode;
 
-    /// A path-prefix tenant is reached at `<apex>/<prefix>`, not the console.
-    #[tokio::test]
-    async fn a_path_prefix_tenant_is_served_on_the_apex() {
+    /// `run-server`'s app on `apex.test` with one tenant at `/acme`.
+    async fn prefix_app(
+        logo_path: Option<String>,
+    ) -> (axum::Router, crate::sql::Pool, tempfile::TempDir) {
         let tmp = tempfile::tempdir().unwrap();
         let url = format!("sqlite://{}?mode=rwc", tmp.path().join("reg.db").display());
         let registry = sqlx::SqlitePool::connect(&url).await.unwrap();
@@ -462,7 +465,7 @@ mod app_tests {
             created_at: chrono::Utc::now(),
             brand_name: None,
             brand_tagline: None,
-            logo_path: None,
+            logo_path,
             favicon_path: None,
             primary_color: None,
             theme_mode: None,
@@ -474,7 +477,22 @@ mod app_tests {
             operator: secret,
         };
         let registry = pools.registry_pool();
-        let app = app(pools, url, "apex.test", keys);
+        (app(pools, url, "apex.test", keys), registry, tmp)
+    }
+
+    async fn get(app: &axum::Router, path: &str) -> Response<Body> {
+        let req = Request::builder()
+            .uri(path)
+            .header("host", "apex.test")
+            .body(Body::empty())
+            .unwrap();
+        app.clone().oneshot(req).await.unwrap()
+    }
+
+    /// A path-prefix tenant is reached at `<apex>/<prefix>`, not the console.
+    #[tokio::test]
+    async fn a_path_prefix_tenant_is_served_on_the_apex() {
+        let (app, registry, _tmp) = prefix_app(None).await;
         let req = Request::builder()
             .uri("/acme/admin")
             .header("host", "apex.test")
@@ -510,6 +528,36 @@ mod app_tests {
             &registry,
             "/no-such-tenant"
         ));
+    }
+
+    /// The logo the prefix tenant's sign-in page links loads on the apex.
+    #[tokio::test]
+    async fn a_path_prefix_tenants_logo_loads_on_the_apex() {
+        let brand = tempfile::tempdir().unwrap();
+        std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, brand.path());
+        let logo = branding::save_brand_asset(
+            "pfx-acme",
+            branding::BrandAssetKind::Logo,
+            b"\x89PNG\r\n\x1a\n",
+            Some("image/png"),
+            &branding::default_brand_storage(),
+        )
+        .await
+        .expect("save logo");
+        let (app, _registry, _tmp) = prefix_app(Some(logo)).await;
+        std::env::remove_var(branding::BRAND_STORAGE_ROOT_ENV);
+
+        let resp = get(&app, "/acme/login").await;
+        let html = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let html = String::from_utf8_lossy(&html).replace("&#x2F;", "/");
+        let src = html
+            .split('"')
+            .find(|s| s.contains("/_brand/"))
+            .expect("logo linked");
+        assert!(src.starts_with("/acme/_brand/pfx-acme/"), "{src}");
+        assert_eq!(get(&app, src).await.status(), StatusCode::OK, "GET {src}");
     }
 }
 

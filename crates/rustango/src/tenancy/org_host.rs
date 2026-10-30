@@ -859,7 +859,7 @@ impl AdminClaims {
     ) -> Result<Self, String> {
         use crate::core::SqlValue;
         use crate::tenancy::provision::{
-            validate_host_pattern, validate_path_prefix, validate_port,
+            validate_host_pattern, validate_new_path_prefix, validate_port,
         };
         let changed = |column: &str, now: &serde_json::Value| {
             before.is_none_or(|row| row.get(column).unwrap_or(&serde_json::Value::Null) != now)
@@ -878,7 +878,7 @@ impl AdminClaims {
                     "path_prefix" => text(value)
                         .map(|p| {
                             let p = p.trim().to_owned();
-                            validate_path_prefix(&p).map(|()| ClaimKey::PathPrefix(p))
+                            validate_new_path_prefix(&p).map(|()| ClaimKey::PathPrefix(p))
                         })
                         .transpose()?,
                     "port" => match value {

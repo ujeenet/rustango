@@ -336,7 +336,8 @@ applique d'abord les migrations registry à la base de données registry
 partagée, puis applique les migrations tenant à travers chaque tenant
 actif. Pour un contrôle plus fin, utilisez
 [`migrate-registry`](#migrate-registry) /
-[`migrate-tenants`](#migrate-tenants).
+[`migrate-tenants`](#migrate-tenants). Les trois appliquent aussi les dossiers `<app>/migrations/` à côté
+de `migrations/`, comme le serveur au démarrage.
 
 ### `migrate <target>`
 
@@ -823,7 +824,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.12
+rustango 0.61.13
 ```
 
 ### `about`
@@ -836,7 +837,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.12
+  version:        0.61.13
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -854,7 +855,7 @@ préparation à la production.
 - ≥ 1 modèle enregistré via `inventory`
 - Base de données accessible (`SELECT 1`)
 - Des modèles enregistrés mais **aucune** migration sur le disque (il ne compare pas les nombres — un répertoire `migrations/` existant est signalé en info, quel que soit son contenu)
-- Les migrations que le ledger n'a pas appliquées. Dans un projet tenancy : les fichiers du registre contre le registre, ceux des tenants contre le ledger de chaque tenant actif (les tenants en retard sont nommés, dix en entier), dossiers `<app>/migrations/` compris. Huit tenants sont lus à la fois, chacun 5 s au plus ; un tenant plus lent est signalé comme illisible. `check --no-tenants` saute les ledgers des tenants
+- Les migrations que le ledger n'a pas appliquées. Dans un projet tenancy : les fichiers du registre contre le registre, ceux des tenants contre le ledger de chaque tenant actif (les tenants en retard sont nommés, dix en entier), dossiers `<app>/migrations/` compris. Huit tenants sont lus à la fois, chacun 5 s au plus ; un tenant plus lent est signalé comme illisible. `check --no-tenants` saute les ledgers des tenants. Les étapes du framework dans `system/migrations/` sont aussi comparées au ledger système (en tenancy, celles du registre contre le registre)
 
 **Avec `--deploy` :**
 - `RUSTANGO_ENV` vaut `prod` ou `production`

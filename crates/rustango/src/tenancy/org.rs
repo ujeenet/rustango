@@ -76,7 +76,8 @@ pub struct Org {
     /// `Host` header pattern (e.g. `"acme.app.com"`). The default
     /// resolver chain matches subdomain-first, so `manage
     /// create-tenant <slug>` populates this as `"<slug>.<apex>"`
-    /// where `<apex>` comes from `RUSTANGO_APEX_DOMAIN`.
+    /// where `<apex>` comes from `RUSTANGO_APEX_DOMAIN`; with
+    /// `--path-prefix` and no host it stays empty.
     #[rustango(max_length = 255)]
     pub host_pattern: Option<String>,
 
