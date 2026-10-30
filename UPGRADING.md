@@ -183,6 +183,12 @@ untouched.
 - The `user_logged_in` signal from the tenant sign-in form carries the stored username, not the typed one.
 - `tenancy::authenticate_user_pool` matches by `login_field` too; the Postgres-connection `authenticate_user` still matches the username only.
 
+### ORM
+
+- `Model::where_not_in` past the bind cap (SQLite 32766, MySQL 65535) now fails with `ExecError::InListUnsplittable` before reaching the database. Postgres binds one array and is unchanged.
+- A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
+- Media `set_tags` takes a row lock on the media row (one more query per call).
+
 ---
 
 ## 0.61.13

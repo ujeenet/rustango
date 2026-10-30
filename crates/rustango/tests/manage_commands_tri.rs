@@ -540,6 +540,30 @@ async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool
     }
 }
 
+/// `clearsessions --table schema.table` finds and purges that table.
+async fn clearsessions_on_a_schema_qualified_table(pool: &Pool) {
+    let schema = match pool.dialect().name() {
+        "postgres" => "public".to_owned(),
+        "sqlite" => "main".to_owned(),
+        _ => {
+            let rows: Vec<(String,)> =
+                rustango::sql::raw_query_pool("SELECT DATABASE()", Vec::new(), pool)
+                    .await
+                    .unwrap();
+            rows[0].0.clone()
+        }
+    };
+    let table = cache_table("cc_qualified");
+    let name = format!("{schema}.{table}");
+    cache_verb(pool, "createcachetable", &name).await;
+    seed_expired(pool, &table).await;
+    let out = cache_verb(pool, "clearsessions", &name).await;
+    assert!(out.contains("purged 1 expired row(s)"), "{out}");
+    rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .unwrap();
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -549,5 +573,6 @@ tri_dialect_test! {
         migrate_target_names_each_direction,
         clearsessions_without_a_cache_table_has_nothing_to_clear,
         clearsessions_finds_the_cache_table_through_the_search_path,
+        clearsessions_on_a_schema_qualified_table,
     ],
 }
