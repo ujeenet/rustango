@@ -11,6 +11,10 @@ connection check passes.</p>
 {% if error %}
 <div class="alert alert-error alert-lines">{{ error }}</div>
 {% endif %}
+{% if resume_run %}
+<div class="alert alert-error" id="resume-hint">An earlier create left this tenant inactive.
+  <a href="{{ console_prefix }}/orgs/provision/{{ resume_run }}">Resume it from run #{{ resume_run }}</a>.</div>
+{% endif %}
 
 <form method="post" action="{{ console_prefix }}/orgs/new" class="edit-form">
   {{ csrf_input | default(value='') | safe }}

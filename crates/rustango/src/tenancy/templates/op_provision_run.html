@@ -65,6 +65,30 @@
   </tbody>
 </table>
 
+{% if resume_error %}
+<div class="alert alert-error alert-lines">{{ resume_error }}</div>
+{% endif %}
+{% if resume %}
+<form method="post" action="{{ console_prefix }}/orgs/provision/{{ run_id }}/resume" class="edit-form" id="resume-form">
+  {{ csrf_input | default(value='') | safe }}
+  <p>The tenant stays inactive. Fix the cause, then resume: this runs the
+  migrations again and activates the tenant.</p>
+  {% if first_admin %}
+  <table>
+    <tr>
+      <th><label for="admin_email">first admin email</label></th>
+      <td><input type="email" id="admin_email" name="admin_email" maxlength="254" placeholder="optional"></td>
+    </tr>
+    <tr>
+      <th><label for="admin_username">username</label></th>
+      <td><input type="text" id="admin_username" name="admin_username" maxlength="64" placeholder="optional"></td>
+    </tr>
+  </table>
+  {% endif %}
+  <button type="submit" class="btn">Resume</button>
+</form>
+{% endif %}
+
 <p class="form-actions"><a href="{{ console_prefix }}/orgs" class="btn btn-secondary">Back to tenants</a></p>
 
 {% if not terminal %}
