@@ -620,6 +620,14 @@ async fn database_purge_ignores_an_autovacuum_worker() {
     let Pool::Postgres(pg) = &pool else {
         unreachable!()
     };
+    let autovacuum: String = rustango::sql::sqlx::query_scalar("SHOW autovacuum")
+        .fetch_one(pg)
+        .await
+        .unwrap();
+    if autovacuum != "on" {
+        eprintln!("autovacuum is off on this server — skipping");
+        return;
+    }
     let (org, db) = org_with_database(&pool, "autovac").await;
     // Dead rows and a tiny cost budget: once a worker starts, it stays.
     let mut tenant = PgConnection::connect(org.database_url.as_deref().unwrap())
@@ -636,7 +644,7 @@ async fn database_purge_ignores_an_autovacuum_worker() {
     .await
     .unwrap();
     tenant.close().await.unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let workers: i64 = rustango::sql::sqlx::query_scalar(
             "SELECT count(*) FROM pg_stat_activity \
