@@ -124,3 +124,35 @@ async fn user_key_capabilities_follow_permissions_on_pg() {
         .expect("resolve2");
     assert!(s2.is_empty() && t2.is_empty());
 }
+
+/// A request with a user-owned key reads the agent and owner rows once.
+#[tokio::test]
+async fn a_user_key_request_reads_each_row_once() {
+    let _g = live_lock().lock().await;
+    let Some(pool) = pool().await else {
+        return;
+    };
+    let uid = make_user(&pool, "ukpg_carol").await;
+    set_user_perm_pool(uid, "ukpg.count", true, &pool)
+        .await
+        .expect("perm");
+    create_skill_pool(&pool, "ukpg_count", "Count", "", "", &["coach_log".into()])
+        .await
+        .expect("skill");
+    map_skill_to_permission_pool(&pool, "ukpg_count", "ukpg.count")
+        .await
+        .expect("map");
+    let issued = create_user_key_pool(&pool, uid, "counted", &[])
+        .await
+        .expect("key");
+    // The first call runs the hash check and fills the raw-key cache.
+    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, "acme", &issued.token);
+    verify().await.expect("verify").expect("valid");
+    // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
+    let agent = rustango::test_assertions::assert_num_queries(6, verify())
+        .await
+        .expect("verify")
+        .expect("valid");
+    assert_eq!(agent.skills, vec!["ukpg_count"]);
+    assert_eq!(agent.tools, vec!["coach_log"]);
+}

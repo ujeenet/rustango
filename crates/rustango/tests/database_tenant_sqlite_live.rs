@@ -123,3 +123,102 @@ async fn full_request_path_through_extractor() {
     let text = std::str::from_utf8(&body).expect("utf8");
     assert_eq!(text, "acme:42");
 }
+
+/// Picks the org from the `x-tenant` header, each with its own database.
+#[derive(Clone)]
+struct HeaderResolver;
+
+#[async_trait::async_trait]
+impl OrgResolver for HeaderResolver {
+    async fn resolve(
+        &self,
+        parts: &axum::http::request::Parts,
+        _registry: &rustango::sql::Pool,
+    ) -> Result<Option<Org>, rustango::tenancy::TenancyError> {
+        let slug = parts
+            .headers
+            .get("x-tenant")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("");
+        Ok(Some(Org {
+            slug: slug.into(),
+            database_url: None,
+            ..fake_sqlite_org()
+        }))
+    }
+}
+
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "dts_posts")]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+}
+
+/// The `sqlite_tenant_demo` handler: ORM writes and reads on the tenant pool.
+async fn orm_handler(t: rustango::extractors::TenantScope) -> String {
+    use rustango::core::Model as _;
+    use rustango::sql::CounterPool as _;
+    let pool = t.pool();
+    let ddl = rustango::migrate::ddl::create_table_if_not_exists_sql_with_dialect(
+        pool.dialect(),
+        Post::SCHEMA,
+    );
+    rustango::sql::raw_execute_pool(pool, &ddl, Vec::new())
+        .await
+        .expect("create");
+    let mut post = Post {
+        id: rustango::sql::Auto::default(),
+        title: "hello".into(),
+    };
+    post.insert_pool(pool).await.expect("insert");
+    let n = Post::objects().count(pool).await.expect("count");
+    format!("{}:{n}", t.org.slug)
+}
+
+/// Each tenant's ORM writes land in its own database only.
+#[tokio::test]
+async fn orm_writes_through_the_tenant_pool_stay_in_that_tenant() {
+    let pools = Arc::new(
+        DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite)
+            .with_url_template("sqlite:file:dts_orm_{slug}?mode=memory&cache=shared"),
+    );
+    let ctx = Arc::new(DatabaseTenantContext {
+        pools,
+        resolver: ChainResolver::new().push(HeaderResolver),
+        session_secret: rustango::tenancy::session::SessionSecret::from_bytes(vec![7; 32]),
+        operator_secret: rustango::tenancy::session::SessionSecret::from_bytes(vec![8; 32]),
+        registry: rustango::sql::Pool::Sqlite(
+            sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite pool"),
+        ),
+    });
+    let app: Router =
+        Router::new()
+            .route("/whoami", get(orm_handler))
+            .layer(axum::middleware::from_fn(
+                move |mut req: Request, next: axum::middleware::Next| {
+                    let ctx = ctx.clone();
+                    async move {
+                        req.extensions_mut().insert(ctx);
+                        next.run(req).await
+                    }
+                },
+            ));
+    let mut seen = Vec::new();
+    for slug in ["acme", "acme", "beta"] {
+        let req = Request::builder()
+            .uri("/whoami")
+            .header("x-tenant", slug)
+            .body(Body::empty())
+            .expect("build req");
+        let resp = app.clone().oneshot(req).await.expect("oneshot");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        seen.push(String::from_utf8(body.to_vec()).expect("utf8"));
+    }
+    assert_eq!(seen, ["acme:1", "acme:2", "beta:1"]);
+}

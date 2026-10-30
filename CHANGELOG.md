@@ -71,6 +71,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Operator console pages no longer tell operators to run build commands; inactive tenants hide the impersonate button, and impersonate refusals come back to the edit page as a message.
 - Docs: a "Running several replicas" section (per-process state, SIGTERM drain, `preStop`, `/ready`); MCP agent-key and per-process notes; four missed 0.61.8 upgrade notes; stale code comments. The console favicon field accepts every type the server takes.
 
+- `derive(Model)` refuses an unknown `validators = "..."` name and `validators` on a non-`String` field at compile time; before, the first failed every write and the second never ran.
+- An MCP request with a user-owned key reads the agent and owner rows once and its skills and tools in one join: 6 queries before the tool instead of 10.
+- `resolve_user_agent_grants_pool` and `create_user_key_pool` give an inactive owner nothing, as the request path already did; an inactive superuser used to get every skill.
+- The `sqlite_tenant_demo` example adds and counts posts through the ORM on `TenantScope`'s tenant pool instead of hand-written SQL.
+
 ### Deprecated
 
 - `i18n::timezone::activate`: it never did anything; use `with_offset`.

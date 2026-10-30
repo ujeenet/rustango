@@ -1784,6 +1784,15 @@ Les tenants en mode schéma partagent le pool du registre mais dépendent d'un
 `SET search_path` par checkout, si bien que passer `&PgPool` toucherait
 silencieusement le mauvais schéma.
 
+En mode une base par tenant (SQLite, MySQL ou Postgres, avec un
+`DatabaseTenantContext`), prenez `TenantScope` pour l'ORM (ou `Tenant<DB>` sur
+SQLite et MySQL). Son `t.pool()` est le pool propre au tenant : toutes les méthodes de pool marchent,
+écritures comprises, et aucune connexion n'est tenue avant la première requête.
+Le `t.conn()` de l'extracteur `DatabaseTenant` ne sert qu'aux lectures `_on`.
+
+Par exemple `post.insert_pool(t.pool())` et `Post::objects().count(t.pool())` ;
+l'exemple `sqlite_tenant_demo` fait exactement cela.
+
 ## Une connexion par requête
 
 Chaque `fetch(&pool)` emprunte sa propre connexion. Pour exécuter les requêtes

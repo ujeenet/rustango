@@ -15,6 +15,20 @@
 //!     Json(rows)
 //! }
 //! ```
+//!
+//! For the ORM, take [`super::TenantScope`] (or [`super::Tenant<DB>`]
+//! on SQLite and MySQL) instead: it reads the same context and hands out the tenant's
+//! [`crate::sql::Pool`], so `insert_pool`, `save` and `fetch` work, and
+//! it holds no connection until a query runs.
+//!
+//! ```ignore
+//! async fn add_post(t: TenantScope) -> Result<String, (StatusCode, String)> {
+//!     let mut post = Post { id: Auto::default(), title: "hello".into() };
+//!     post.insert_pool(t.pool()).await.map_err(rustango::server_error)?;
+//!     let n = Post::objects().count(t.pool()).await.map_err(rustango::server_error)?;
+//!     Ok(format!("{}: {n} post(s)", t.org.slug))
+//! }
+//! ```
 
 use std::sync::Arc;
 
@@ -53,7 +67,9 @@ pub struct DatabaseTenantContext<DB: Database> {
 /// that connection and returns it to the pool when the handler ends.
 ///
 /// This is the non-Postgres twin of [`super::Tenant`]. Pick the one
-/// that matches your backend.
+/// that matches your backend. Its connection takes the `_on` reads
+/// (`fetch_on`, `count_on`); for ORM writes use [`super::TenantScope`],
+/// whose pool is the same tenant's.
 pub struct DatabaseTenant<DB: Database> {
     pub org: Org,
     conn: DatabaseConn<DB>,
