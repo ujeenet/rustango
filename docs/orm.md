@@ -1781,6 +1781,23 @@ async fn handler(mut t: Tenant) -> Result<...> {
 Schema-mode tenants share the registry pool but rely on a per-checkout
 `SET search_path`, so passing `&PgPool` would silently hit the wrong schema.
 
+In database-per-tenant mode (SQLite, MySQL or Postgres, with a
+`DatabaseTenantContext`), take `TenantScope` for the ORM (or `Tenant<DB>` on
+SQLite and MySQL). Its `t.pool()` is the tenant's own pool, so every pool method works, writes
+included, and no connection is held until a query runs. The `DatabaseTenant`
+extractor's `t.conn()` takes the `_on` reads only.
+
+```rust
+use rustango::extractors::TenantScope;
+
+async fn add_post(t: TenantScope) -> Result<...> {
+    let mut post = Post { id: Auto::default(), title: "hello".into() };
+    post.insert_pool(t.pool()).await?;
+    let n = Post::objects().count(t.pool()).await?;
+    Ok(...)
+}
+```
+
 ## One connection per request
 
 Each `fetch(&pool)` checks out its own connection. To run a handler's queries

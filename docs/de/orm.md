@@ -1782,6 +1782,24 @@ Schema-Mode-Tenants teilen sich den Registry-Pool, verlassen sich aber auf ein
 `SET search_path` pro Checkout, sodass ein `&PgPool` stillschweigend das falsche
 Schema träfe.
 
+Im Modus „eine Datenbank pro Mandant“ (SQLite, MySQL oder Postgres, mit einem
+`DatabaseTenantContext`) nimm für das ORM `TenantScope` (oder `Tenant<DB>` auf
+SQLite und MySQL). Sein `t.pool()` ist der eigene Pool des Mandanten, also funktioniert jede
+Pool-Methode, auch Schreibzugriffe, und bis zur ersten Abfrage wird keine
+Verbindung gehalten. `t.conn()` des `DatabaseTenant`-Extraktors nimmt nur die
+`_on`-Lesezugriffe.
+
+```rust
+use rustango::extractors::TenantScope;
+
+async fn add_post(t: TenantScope) -> Result<...> {
+    let mut post = Post { id: Auto::default(), title: "hello".into() };
+    post.insert_pool(t.pool()).await?;
+    let n = Post::objects().count(t.pool()).await?;
+    Ok(...)
+}
+```
+
 ## Eine Verbindung pro Request
 
 Jedes `fetch(&pool)` leiht sich seine eigene Verbindung. Um die Abfragen eines

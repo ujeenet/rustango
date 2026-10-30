@@ -175,6 +175,7 @@ untouched.
 
 ### Server and tenancy
 
+- `resolve_user_agent_grants_pool` and `create_user_key_pool` treat an inactive key owner as entitled to nothing; an inactive superuser no longer resolves to every skill.
 - `WsHub::upgrade(ws)` → `upgrade(ws, shutdown)` and `ws_handler(socket, hub)` → `ws_handler(socket, hub, shutdown)`. Add a `shutdown: rustango::shutdown::Shutdown` extractor to the handler and pass it on.
 - `RegisteredHostResolver` is no longer a unit struct: build it with `RegisteredHostResolver::new(apex)`.
 - `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. A `match` on `HostError` needs that arm.
@@ -201,6 +202,7 @@ untouched.
 
 ### ORM
 
+- `derive(Model)` no longer compiles with an unknown name in `validators = "..."` (it failed every write at runtime) or with `validators` on a non-`String` field (it never ran). Fix the name, or drop the attribute from the field.
 - `Model::where_not_in` past the bind cap (SQLite 32766, MySQL 65535) now fails with `ExecError::InListUnsplittable` before reaching the database. Postgres binds one array and is unchanged.
 - A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
 - Media `set_tags` takes a row lock on the media row (one more query per call).

@@ -1782,6 +1782,24 @@ Los tenants en modo esquema comparten el pool del registro pero dependen de un
 `SET search_path` por checkout, así que pasar `&PgPool` daría en el esquema
 equivocado sin avisar.
 
+En modo una base de datos por tenant (SQLite, MySQL o Postgres, con un
+`DatabaseTenantContext`), usa `TenantScope` para el ORM (o `Tenant<DB>` en
+SQLite y MySQL). Su `t.pool()` es el pool propio del tenant: funcionan todos los métodos de pool,
+escrituras incluidas, y no se retiene ninguna conexión hasta la primera
+consulta. El `t.conn()` del extractor `DatabaseTenant` solo sirve para las
+lecturas `_on`.
+
+```rust
+use rustango::extractors::TenantScope;
+
+async fn add_post(t: TenantScope) -> Result<...> {
+    let mut post = Post { id: Auto::default(), title: "hello".into() };
+    post.insert_pool(t.pool()).await?;
+    let n = Post::objects().count(t.pool()).await?;
+    Ok(...)
+}
+```
+
 ## Una conexión por petición
 
 Cada `fetch(&pool)` toma su propia conexión. Para ejecutar las consultas de un
