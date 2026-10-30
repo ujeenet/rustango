@@ -2458,7 +2458,7 @@ mod tests {
     }
 
     /// `runserver`'s auto-migrate sends `pre_migrate` and `post_migrate`.
-    #[cfg(feature = "sqlite")]
+    #[cfg(all(feature = "sqlite", feature = "signals"))]
     #[tokio::test]
     async fn auto_migrate_fires_pre_and_post_migrate() {
         use crate::signals::migrate as sig;
