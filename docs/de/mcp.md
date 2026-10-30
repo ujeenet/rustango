@@ -158,11 +158,16 @@ Der authentifizierte Router mountet: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (SSE-Benachrichtigungen), `POST {prefix}/token` (Credential → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1) und die beiden `.well-known/*`
 Discovery-Dokumente. Er signiert Agenten-Tokens mit `RUSTANGO_SESSION_SECRET`.
-Fehlt der Wert oder ist er kürzer als 32 Bytes, warnt er und nutzt einen
+Fehlt der Wert oder ist er kürzer als 32 Bytes, nutzt er außerhalb von prod den
+Tenant-Session-Schlüssel aus `./var/`; auf prod warnt er und nutzt einen
 zufälligen Schlüssel pro Prozess; Tokens gelten dann nur bis zum Neustart.
 Jeder Prozess hält höchstens 8 offene SSE-Streams pro Agent und 256 pro Tenant;
 darüber antwortet `GET {prefix}` mit `429`. `RUSTANGO_MCP_SSE_PER_AGENT` /
 `RUSTANGO_MCP_SSE_PER_TENANT` ändern das (`0` heißt ohne Grenze).
+Auch der Benachrichtigungsbus und die Abbruch-Registry leben in einem Prozess.
+Bei mehreren Replikas erreicht ein `list_changed`- oder Fortschritts-Frame nur
+SSE-Clients auf demselben Pod, und ein `notifications/cancelled`, das auf einem
+anderen Pod ankommt, stoppt den Aufruf nicht.
 
 Der `initialize`-Handshake ist ein einfacher JSON-RPC-POST. Auf dem
 authentifizierten Mount braucht jeder POST ein Bearer-Token, auch `initialize`

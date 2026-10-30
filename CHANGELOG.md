@@ -62,6 +62,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The console tenant edit and `edit-tenant --activate` refuse to activate a tenant whose create run failed; resume the run instead.
 - Tenancy `--help` shows the create description under `create-tenant` and the reseal line after `edit-tenant`'s; `test-tenant-connection` has its own.
 - `sqlite,cache` and `postgres,mcp,tenancy` builds compile without unused-item warnings.
+- Docs: a "Running several replicas" section (per-process state, SIGTERM drain, `preStop`, `/ready`); MCP agent-key and per-process notes; four missed 0.61.8 upgrade notes; stale code comments. The console favicon field accepts every type the server takes.
 
 ### Deprecated
 

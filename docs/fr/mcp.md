@@ -157,11 +157,16 @@ Le routeur authentifié monte : `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
 (OAuth 2.1), et les deux documents de découverte `.well-known/*`. Il signe les
 tokens d'agent avec `RUSTANGO_SESSION_SECRET`. Si elle est absente ou fait moins
-de 32 octets, il avertit et utilise une clé aléatoire par processus : les tokens
-ne survivent pas à un redémarrage.
+de 32 octets, hors prod il utilise la clé de session tenant enregistrée dans
+`./var/` ; en prod il avertit et utilise une clé aléatoire par processus : les
+tokens ne survivent pas à un redémarrage.
 Chaque processus garde au plus 8 flux SSE ouverts par agent et 256 par tenant ;
 au-delà, `GET {prefix}` répond `429`. `RUSTANGO_MCP_SSE_PER_AGENT` /
 `RUSTANGO_MCP_SSE_PER_TENANT` les changent (`0` = sans limite).
+Le bus de notifications et le registre d'annulation vivent aussi dans un seul
+processus. Avec plusieurs réplicas, une trame `list_changed` ou de progression
+n'atteint que les clients SSE du même pod, et un `notifications/cancelled` arrivé
+sur un autre pod n'arrête pas l'appel.
 
 Le handshake `initialize` est un simple POST JSON-RPC. Sur le montage
 authentifié, chaque POST exige un jeton Bearer, `initialize` et `ping` compris ;

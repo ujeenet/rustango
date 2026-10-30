@@ -59,6 +59,7 @@ retour non nul en cas d'erreur de validation ou d'E/S. Exécutez
 - [Utilitaires de base de données](#utilitaires-de-base-de-données)
 - [Commandes système](#commandes-système)
 - [Commandes de tenancy](#commandes-de-tenancy)
+- [Plusieurs réplicas](#plusieurs-réplicas)
 - [Sous-commandes personnalisées](#sous-commandes-personnalisées)
 - [Flux de travail courants](#flux-de-travail-courants)
 - [Tous les verbes](#tous-les-verbes)
@@ -1024,7 +1025,9 @@ cargo run -- runserver           # explicit
 
 Sur SIGTERM, il n'accepte plus de connexions et laisse aux connexions ouvertes
 `[server] shutdown_timeout_secs` (20 par défaut) pour finir, puis ferme le reste.
-SSE et long-poll ne finissent jamais seuls. Les exécutions de provisionnement et
+Une WebSocket `WsHub` reçoit Close 1001 et un flux SSE enveloppé dans
+`Shutdown::cut` se termine ; le long-poll et les autres flux vont jusqu'au délai.
+Les exécutions de provisionnement et
 de migration laissées en `running` plus d'une heure par un processus arrêté sont
 marquées en échec au démarrage suivant, et une relance du webhook avec le même
 `event_id` s'exécute à nouveau.
@@ -1613,6 +1616,79 @@ cargo run -- migrate              # creates rustango_users with your extras
 
 `Builder::user_model::<AppUser>()` fait la même chose pour le code qui
 construit directement le `Builder` du serveur, sans passer par `Cli`.
+
+---
+
+## Plusieurs réplicas
+
+Une partie de l'état vit dans un seul processus. Derrière un load balancer avec
+deux réplicas ou plus, chaque pod garde sa propre copie :
+
+- **Cache.** Le défaut `[cache] backend = "memory"` est une map par processus.
+  Utilisez Redis ou le cache en base ([cache](caching.md)) pour partager
+  compteurs, verrous et marques à usage unique.
+- **Limites de débit.** `RateLimitLayer` compte par processus : la vraie limite
+  est la limite fois le nombre de réplicas. Utilisez `CacheRateLimitLayer` sur un
+  cache partagé.
+- **Freinage et verrouillage des connexions.** Les limites de connexion par IP
+  et globales et le verrou par nom d'utilisateur comptent par processus tant que
+  vous n'en installez pas de partagés avec `login_throttle::configure_shared` et
+  `account_lockout::configure_shared` ([sécurité](security.md)).
+- **Verrous.** Un `DistributedLock` sur le cache en mémoire ne verrouille qu'un
+  processus.
+- **Révocation JWT.** Le `InMemoryJtiStore` par défaut ne signale pas un token
+  révoqué aux autres réplicas. Installez un store partagé avec `with_jti_store`.
+- **Surcharges i18n.** Chaque processus a sa propre copie. Les autres réplicas
+  voient une modification après avoir appelé `refresh_overrides_pool`
+  ([i18n](i18n.md)).
+- **MCP.** Le bus de notifications et le registre d'annulation vivent dans un
+  seul processus. Une trame `list_changed` ou de progression n'atteint que les
+  clients SSE du même pod, et un `notifications/cancelled` arrivé sur un autre
+  pod est ignoré ([MCP](mcp.md)).
+- **Clés de session.** Hors prod, sans `RUSTANGO_SESSION_SECRET`, le serveur
+  tenancy garde ses clés de session tenant et opérateur dans `./var/` sur chaque
+  pod. Une session créée sur un pod est alors refusée sur un autre. Définissez
+  `RUSTANGO_SESSION_SECRET` sur chaque niveau qui fait tourner plus d'un pod.
+- **Fichiers de marque.** La console opérateur stocke les logos dans un dossier
+  local par défaut ([console opérateur](operator-console.md)).
+
+### Arrêt
+
+Sur SIGTERM, le serveur :
+
+1. Cesse aussitôt d'accepter. Le listener se ferme : les nouvelles connexions à
+   ce pod sont refusées.
+2. Demande à chaque connexion ouverte de se fermer après sa requête en cours.
+3. Envoie Close 1001 à chaque WebSocket `WsHub` et termine chaque flux SSE
+   enveloppé dans `Shutdown::cut`, comme le flux MCP ([WebSockets](websockets.md)).
+4. Attend les connexions ouvertes jusqu'à `[server] shutdown_timeout_secs`
+   (20 par défaut ; `server::Builder::drain_timeout` dans le code), puis journalise
+   un avertissement et ferme le reste.
+
+Kubernetes retire un pod qui s'arrête de son Service un peu après l'envoi de
+SIGTERM : quelques nouvelles connexions arrivent encore et sont refusées. Ajoutez
+un court `sleep` en `preStop` pour que le pod serve jusqu'à son retrait. Réglez
+`terminationGracePeriodSeconds` au-dessus du sleep plus `shutdown_timeout_secs` :
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: web
+      lifecycle:
+        preStop:
+          sleep:
+            seconds: 5 # Kubernetes 1.30+ ; avant : exec: { command: ["sleep", "5"] }
+```
+
+`/ready` interroge la base avec `SELECT 1`. Quand toutes les connexions du pool
+sont occupées dans les 30 secondes qui suivent un ping réussi, il déclare la base
+prête sans ping, pour qu'un pic de trafic ne fasse pas échouer tous les réplicas
+à la fois. Après 30 secondes il refait un ping : une base bloquée donne toujours
+`503`. Chaque processus garde son propre dernier ping.
+
+Pour une app à base unique, désactivez `migrate_on_boot` et lancez `migrate` une
+fois dans un job avant le déploiement (voir `runserver` plus haut).
 
 ---
 
