@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- ViewSet JSON bodies and `ModelFormFor::from_json` keep `""` on a nullable `String` field as `""`; only `null` writes NULL.
+- The admin edit form keeps a stored `""` in a nullable text field when the operator leaves it alone, instead of writing NULL. Clearing a non-empty value still stores NULL.
+- ModelForm, admin and ViewSet writes refuse NaN and infinity (and an `f32` that overflows to it) on float fields.
+- `derive(Form)` reads a `bool` only from `true/1/on/yes`, `false/0/off/no` or empty; any other value is the error "Enter true or false." instead of `true`.
+- A decimal sent as a JSON number to a ViewSet keeps all its digits and its scale instead of passing through an f64. New `ModelFormFor::from_json_slice` does the same for a raw body; `from_json(&Value)` cannot.
+- A Decimal form value accepts scientific notation (`1e3`). The workspace `serde_json` enables `raw_value` (additive).
+- `validate_decimal` refuses more than `max_digits - decimal_places` digits before the point (`max_whole_digits`, checked after `max_digits`) and no longer counts trailing fraction zeros.
+
 ## [0.61.13] — 2026-10-30
 
 ### Fixed

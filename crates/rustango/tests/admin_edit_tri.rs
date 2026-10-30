@@ -199,8 +199,23 @@ rustango::register_admin_inline!(
     extra = 1,
 );
 
+/// A nullable text field an app may set to `""`.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "aed_note")]
+#[allow(dead_code)]
+pub struct Note {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 32)]
+    pub name: String,
+    #[rustango(max_length = 32)]
+    pub memo: Option<String>,
+    pub score: Option<f64>,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
+    fresh_table::<Note>(pool).await;
     drop_table(pool, "aed_slugref").await;
     fresh_table::<Slugged>(pool).await;
     fresh_table::<SlugRef>(pool).await;
@@ -568,6 +583,55 @@ async fn rename_through_the_form(
 async fn untouched_nullable_json_object_is_kept(pool: &Pool) {
     let row = rename_through_the_form(pool, Some(serde_json::json!({})), false).await;
     assert_eq!(row.meta, Some(serde_json::json!({})), "nullable {{}} lost");
+}
+
+/// A stored `""` and a NULL both survive a save that only renames the row.
+async fn untouched_empty_string_is_kept(pool: &Pool) {
+    for memo in [Some(String::new()), None] {
+        let mut n = Note {
+            id: Auto::default(),
+            name: "a".into(),
+            memo: memo.clone(),
+            score: None,
+        };
+        n.insert_pool(pool).await.expect("insert");
+        let id = *n.id.get().expect("pk");
+        let (status, html) = send(pool, "GET", &format!("/aed_note/{id}/edit"), "").await;
+        assert_eq!(status, StatusCode::OK, "{html}");
+        let form = encode(&[
+            ("name", "renamed".to_owned()),
+            ("memo", shown(&html, "memo")),
+        ]);
+        let (status, body) = send(pool, "POST", &format!("/aed_note/{id}"), &form).await;
+        assert!(status.is_redirection(), "{status}: {body}");
+        let row = Note::objects().fetch(pool).await.expect("fetch").remove(0);
+        assert_eq!(
+            (row.name.as_str(), row.memo.clone()),
+            ("renamed", memo),
+            "memo rewritten"
+        );
+        row.delete_pool(pool).await.expect("delete");
+    }
+}
+
+/// NaN and infinity re-show the form; the row keeps its value.
+async fn non_finite_float_is_refused(pool: &Pool) {
+    let mut n = Note {
+        id: Auto::default(),
+        name: "a".into(),
+        memo: None,
+        score: Some(1.5),
+    };
+    n.insert_pool(pool).await.expect("insert");
+    let id = *n.id.get().expect("pk");
+    for bad in ["NaN", "inf", "-infinity"] {
+        let form = encode(&[("name", "a".to_owned()), ("score", bad.to_owned())]);
+        let (status, body) = send(pool, "POST", &format!("/aed_note/{id}"), &form).await;
+        assert!(!status.is_redirection(), "{bad} saved: {status} {body}");
+        let row = Note::objects().fetch(pool).await.expect("fetch").remove(0);
+        assert_eq!(row.score, Some(1.5), "{bad}");
+    }
+    n.delete_pool(pool).await.expect("delete");
 }
 
 /// A stored value outside `choices` survives a rename.
@@ -1039,6 +1103,8 @@ tri_dialect_test! {
         read_only_edit_link_shows_detail,
         inline_rows_read_renamed_columns,
         untouched_nullable_json_object_is_kept,
+        untouched_empty_string_is_kept,
+        non_finite_float_is_refused,
         untouched_unknown_choice_is_kept,
         stale_form_still_wins,
         inline_rows_take_no_auto_or_generated_input,

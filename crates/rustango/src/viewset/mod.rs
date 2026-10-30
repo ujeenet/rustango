@@ -123,8 +123,8 @@ use crate::core::{
     SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::forms::{
-    absent_takes_default, collect_insert_values, parse_form_value, parse_pk_string, Encoding,
-    FormError,
+    absent_takes_default, collect_insert_values_with, json_number_text, parse_body_value,
+    parse_form_value, parse_pk_string, Encoding, FormError, RawMembers,
 };
 use crate::sql::Pool;
 
@@ -2228,22 +2228,18 @@ impl WriteSet {
 
     /// The INSERT's `(column, value)` list: writable fields from `form`,
     /// the server-stamped timestamps, then the pins.
-    fn insert_values(
-        &self,
-        form: &HashMap<String, String>,
-        encoding: Encoding,
-    ) -> Result<Vec<(&'static str, SqlValue)>, Refusal> {
+    fn insert_values(&self, body: FormBody<'_>) -> Result<Vec<(&'static str, SqlValue)>, Refusal> {
         // An omitted defaulted field is left to the column default (#2528).
         let skip: Vec<&str> = self
             .schema
             .scalar_fields()
             .filter(|f| {
                 !self.is_writable(f.name)
-                    || (absent_takes_default(f, encoding) && !form.contains_key(f.name))
+                    || (absent_takes_default(f, body.encoding) && !body.form.contains_key(f.name))
             })
             .map(|f| f.name)
             .collect();
-        let mut out = collect_insert_values(self.schema, form, &skip)?;
+        let mut out = collect_insert_values_with(self.schema, &skip, |f| body.read(f))?;
         // A pin replaces a stamped `auto` value rather than doubling the column.
         out.retain(|(c, _)| !self.pinned.iter().any(|(f, _)| f.column == *c));
         out.extend(self.pinned.iter().map(|(f, v)| (f.column, v.clone())));
@@ -2260,15 +2256,15 @@ impl WriteSet {
     /// The UPDATE's `SET` list. Pinned fields are never in it.
     fn update_assignments(
         &self,
-        form: &HashMap<String, String>,
+        body: FormBody<'_>,
         partial: bool,
     ) -> Result<Vec<Assignment>, Refusal> {
         let mut out = Vec::new();
         for field in self.updatable() {
-            if partial && !form.contains_key(field.name) {
+            if partial && !body.form.contains_key(field.name) {
                 continue;
             }
-            match parse_form_value(field, form.get(field.name).map(String::as_str)) {
+            match body.read(field) {
                 Ok(v) => out.push((field.column, v)),
                 Err(FormError::Missing { .. }) if partial => {}
                 Err(e) => return Err(e.into()),
@@ -3931,7 +3927,13 @@ async fn create_one(
     if write_set.sends_required_locked(form) {
         return json_error(StatusCode::FORBIDDEN, "forbidden");
     }
-    let mut collected = match write_set.insert_values(form, encoding) {
+    let nulls = json_nulls(state, json, encoding);
+    let body = FormBody {
+        form,
+        encoding,
+        nulls: &nulls,
+    };
+    let mut collected = match write_set.insert_values(body) {
         Ok(v) => v,
         Err(e) => return e.into_response(state, None),
     };
@@ -4004,7 +4006,13 @@ async fn create_many(
             return json_error(StatusCode::FORBIDDEN, "forbidden");
         }
         // A bulk body is always JSON.
-        let mut collected = match write_set.insert_values(row, Encoding::Json) {
+        let nulls = json_nulls(state, json, Encoding::Json);
+        let body = FormBody {
+            form: row,
+            encoding: Encoding::Json,
+            nulls: &nulls,
+        };
+        let mut collected = match write_set.insert_values(body) {
             Ok(v) => v,
             Err(e) => return e.into_response(state, Some(i)),
         };
@@ -4231,6 +4239,11 @@ async fn update_inner(
         Ok(b) => b,
         Err(e) => return e.into_response(),
     };
+    let encoding = if json.is_some() {
+        Encoding::Json
+    } else {
+        Encoding::Form
+    };
     let json = write_json(&state, &form, json);
 
     // PATCH checks only the sent fields, over the stored row (#1995),
@@ -4269,7 +4282,13 @@ async fn update_inner(
     let renamed = serializer_input_renamed_form(&state, &form);
     let form = renamed.as_ref().unwrap_or(&form);
 
-    let mut assignments = match write_set.update_assignments(form, partial) {
+    let nulls = json_nulls(&state, &json, encoding);
+    let body = FormBody {
+        form,
+        encoding,
+        nulls: &nulls,
+    };
+    let mut assignments = match write_set.update_assignments(body, partial) {
         Ok(a) => a,
         Err(e) => return e.into_response(&state, None),
     };
@@ -4625,7 +4644,19 @@ pub(crate) async fn extract_create_body(
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        // A Decimal number is read from its text; the Value holds an f64.
+        let decimals =
+            typed.is_some_and(|t| t.schema.scalar_fields().any(|f| f.ty == FieldType::Decimal));
         if let Some(array) = value.as_array() {
+            let raw: Vec<Option<RawMembers<'_>>> = if decimals {
+                serde_json::from_slice::<Vec<&serde_json::value::RawValue>>(&bytes)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .map(|entry| serde_json::from_str::<RawMembers<'_>>(entry.get()).ok())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // Bulk shape: each element must be an object. Keep the raw
             // JSON entry alongside the stringified form for serializer
             // validation.
@@ -4635,8 +4666,9 @@ pub(crate) async fn extract_create_body(
                 let obj = entry
                     .as_object()
                     .ok_or_else(|| format!("bulk entry {i} is not a JSON object"))?;
-                let form =
-                    json_object_to_form(obj, typed).map_err(|e| format!("bulk entry {i}: {e}"))?;
+                let raw = raw.get(i).and_then(Option::as_ref);
+                let form = json_object_to_form(obj, typed, raw)
+                    .map_err(|e| format!("bulk entry {i}: {e}"))?;
                 bulk.push((form, Some(entry.clone())));
             }
             return Ok(CreateBody::Bulk(bulk));
@@ -4644,8 +4676,11 @@ pub(crate) async fn extract_create_body(
         let obj = value
             .as_object()
             .ok_or("expected a JSON object or array of objects")?;
+        let raw = decimals
+            .then(|| serde_json::from_slice::<RawMembers<'_>>(&bytes).ok())
+            .flatten();
         Ok(CreateBody::Single(
-            json_object_to_form(obj, typed)?,
+            json_object_to_form(obj, typed, raw.as_ref())?,
             Some(value),
         ))
     } else {
@@ -4668,6 +4703,7 @@ pub(crate) async fn extract_create_body(
 fn json_object_to_form(
     obj: &serde_json::Map<String, Value>,
     typed: Option<BodyTypes>,
+    raw: Option<&RawMembers<'_>>,
 ) -> Result<HashMap<String, String>, String> {
     let mut form = HashMap::with_capacity(obj.len());
     for (k, v) in obj {
@@ -4682,13 +4718,52 @@ fn json_object_to_form(
             (Value::Null, _) => String::new(),
             (other, Some(f)) if f.ty == FieldType::Json => other.to_string(),
             (Value::String(s), _) => s.clone(),
-            (Value::Number(n), _) => n.to_string(),
+            (Value::Number(n), Some(f)) => {
+                json_number_text(f, n, raw.and_then(|r| r.get(k)).copied())
+            }
+            (Value::Number(n), None) => n.to_string(),
             (Value::Bool(b), _) => b.to_string(),
             (other, _) => other.to_string(),
         };
         form.insert(k.clone(), s);
     }
     Ok(form)
+}
+
+/// A write body's form map and how its values read.
+#[derive(Clone, Copy)]
+struct FormBody<'a> {
+    form: &'a HashMap<String, String>,
+    encoding: Encoding,
+    /// Fields a JSON body set to `null`; the form holds them as `""`.
+    nulls: &'a [&'static str],
+}
+
+impl FormBody<'_> {
+    fn read(&self, field: &crate::core::FieldSchema) -> Result<SqlValue, FormError> {
+        if field.nullable && self.nulls.contains(&field.name) {
+            return Ok(SqlValue::Null);
+        }
+        parse_body_value(
+            field,
+            self.form.get(field.name).map(String::as_str),
+            self.encoding,
+        )
+    }
+}
+
+/// The model fields a JSON body sets to `null`, by field name as the
+/// renamed form map keys them.
+fn json_nulls(state: &ViewSetState, json: &Value, encoding: Encoding) -> Vec<&'static str> {
+    let (Encoding::Json, Some(obj)) = (encoding, json.as_object()) else {
+        return Vec::new();
+    };
+    let types = body_types(state);
+    obj.iter()
+        .filter(|(_, v)| v.is_null())
+        .filter_map(|(k, _)| types.field(k))
+        .map(|f| f.name)
+        .collect()
 }
 
 /// How a JSON body's keys find their model field: by name, or by a

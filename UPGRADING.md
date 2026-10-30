@@ -148,6 +148,22 @@ untouched.
 
 ---
 
+## Unreleased
+
+### Forms and ViewSets
+
+- A JSON `""` on a nullable `String` field is now stored as `""`, not NULL (ViewSet bodies, `ModelFormFor::from_json`). Send `null` to clear a field. What this changes:
+  - a nullable field with `choices` refuses `""` with a 400 where it used to store NULL;
+  - a nullable UNIQUE field stores `""` once; a second `""` is a 409 where it used to add another NULL.
+- `derive(Form)` `bool` fields accept only `true`, `1`, `on`, `yes`, `false`, `0`, `off`, `no` (any case) or empty. Anything else, such as a custom checkbox `value="checked"` or `value="newsletter"`, `t`, `y` or `2`, is now the field error "Enter true or false."; it used to read as `true`.
+- NaN and infinity on float fields are a field error in ModelForm, admin and ViewSet writes.
+- A Decimal form value may use scientific notation (`1e3`).
+- `validate_decimal` with both bounds refuses values a `NUMERIC(p,s)` column cannot hold and accepts trailing fraction zeros. It checks `max_decimal_places`, then `max_digits`, then the new `max_whole_digits`, so a value that broke `max_digits` keeps that code.
+- The admin edit form keeps a stored `""` in a nullable text field left empty; it can no longer turn that `""` into NULL. Clearing a non-empty value still stores NULL.
+- The workspace `serde_json` now enables `raw_value`. Through feature unification your app's `serde_json` gets it too; the feature only adds API.
+
+---
+
 ## 0.61.13
 
 ### Tenancy
