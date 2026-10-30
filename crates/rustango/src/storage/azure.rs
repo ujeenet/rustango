@@ -45,13 +45,14 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 
 use super::transport::{
-    canonical_header_value, encode_key, encode_query, send_error, split_endpoint, stream_body,
-    Http, Parts, Split, MAX_PRESIGN_SECS,
+    canonical_header_value, send_error, split_endpoint, stream_body, Http, Parts, Split,
+    MAX_PRESIGN_SECS,
 };
 use super::{
     already_exists, check_declared_len, validate_key, ByteStream, ObjectMeta, PutConditions,
     Storage, StorageError,
 };
+use super::{encode_key, encode_query};
 use crate::crypto::hmac_sha256;
 
 /// REST version sent on every request and signed into every SAS.

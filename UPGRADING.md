@@ -195,6 +195,13 @@ untouched.
 - A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
 - Media `set_tags` takes a row lock on the media row (one more query per call).
 
+### Storage and webhooks
+
+- `cache_query(true)`: a QUERY body over 1 MiB now reaches the handler uncached (it was a 413); add a body-limit layer to keep rejecting it.
+- `LocalStorage::url` and `cdn_url` percent-encode the key; a caller that encoded the key first now gets it encoded twice.
+- `LocalStorage::exists` is false for a directory, and `load` of one is `NotFound`.
+- `WebhookSubscription::header` replaces a default header of the same name (any case) and ignores `X-Webhook-Id`, `-Event` and `-Signature`.
+
 ---
 
 ## 0.61.13

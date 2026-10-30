@@ -37,6 +37,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `migrate <target>` plans the system chain around only the files it moves, so a later project file that creates a framework table no longer fails the move; the "already applied" check is repeated under the migrate lock.
 - Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders instead of picking one.
 - A tenant whose stored path prefix is now a console route can be edited (console and admin) while that prefix is unchanged.
+- With `cache_query(true)`, a QUERY that skips the cache (credential header, unknown tenant) is no longer buffered; a body over 1 MiB reaches the handler uncached instead of a 413, and a body read error is a 400.
+- `LocalStorage::url` and `StorageRegistry::cdn_url` percent-encode the key, as the S3 and Azure disks do: `#`, `?` and spaces no longer break the link.
+- On `LocalStorage` a directory key is not an object: `exists` is false, `load` is `NotFound`, `delete` is a no-op, and a save to it says the key names a directory.
+- A webhook subscription header replaces the default `Content-Type` or `User-Agent` instead of sending a second one; `X-Webhook-Id`, `-Event` and `-Signature` set by a subscription are ignored.
 
 ## [0.61.13] — 2026-10-30
 
