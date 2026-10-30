@@ -37,6 +37,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `migrate <target>` plans the system chain around only the files it moves, so a later project file that creates a framework table no longer fails the move; the "already applied" check is repeated under the migrate lock.
 - Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders instead of picking one.
 - A tenant whose stored path prefix is now a console route can be edited (console and admin) while that prefix is unchanged.
+- `translate_plural`, `ngettext` and `ngettext_fmt` pick the plural form by the rule of the locale the text comes from; untranslated `ngettext` source strings use the default locale's rule.
+- `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
+
+### Deprecated
+
+- `i18n::timezone::activate`: it never did anything; use `with_offset`.
 
 ## [0.61.13] — 2026-10-30
 

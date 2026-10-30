@@ -195,6 +195,12 @@ untouched.
 - A `DatabaseCache` table name with a dot is now `schema.table`; a table whose own name holds a dot no longer works.
 - Media `set_tags` takes a row lock on the media row (one more query per call).
 
+### i18n and time
+
+- A plural lookup served from a fallback locale now uses that locale's rule (Russian 21 from an English entry reads "21 pages", not "21 page"). An `ngettext` with no catalog entry picks the source string by the default locale's rule.
+- Under `with_offset`, `naturalday`, `dateformat` and `timeformat` render in that offset; `O`, `T`, `e` and `Z` show it. Without an override they stay UTC. `dateformat::format_datetime` is generic over the timezone.
+- `i18n::timezone::activate` is deprecated (it was always a no-op); use `with_offset`.
+
 ---
 
 ## 0.61.13
