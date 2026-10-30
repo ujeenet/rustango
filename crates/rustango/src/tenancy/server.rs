@@ -538,6 +538,8 @@ mod app_tests {
             .method("POST")
             .uri("/acme/admin/__end-impersonation")
             .header("host", "apex.test")
+            .header("cookie", "rustango_csrf=t0k3n")
+            .header("x-csrf-token", "t0k3n")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
