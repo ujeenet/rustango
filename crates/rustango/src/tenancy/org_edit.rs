@@ -268,8 +268,11 @@ pub(crate) async fn apply_values_if(
             }
             ("path_prefix", SqlValue::String(v)) => {
                 let v = v.trim().to_owned();
-                crate::tenancy::provision::validate_new_path_prefix(&v)
-                    .map_err(TenancyError::Validation)?;
+                // A kept prefix passes: one set before a console route took it stays editable.
+                if existing.path_prefix.as_deref() != Some(v.as_str()) {
+                    crate::tenancy::provision::validate_new_path_prefix(&v)
+                        .map_err(TenancyError::Validation)?;
+                }
                 claims.push(ClaimKey::PathPrefix(v.clone()));
                 SqlValue::String(v)
             }

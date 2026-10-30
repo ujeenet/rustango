@@ -866,33 +866,24 @@ async fn migrate<W: Write>(
         if target != "zero" && !target_is_applied(pool, target).await? {
             // Files after the target are rolled back first: only the rest
             // count as applied, in the output and in `post_migrate`.
-            let unapplied = std::sync::Mutex::new(Vec::new());
-            let slot = &unapplied;
-            let mut out = Vec::new();
-            let run = migrate_with_framework(
+            let chain = system_chain(dir)?;
+            let moved = super::chains::migrate_chains_to(
                 pool,
-                dir,
-                &mut out,
+                &chain,
+                super::MigrationScope::Tenant,
+                &[dir.to_path_buf()],
                 runner::Signals::Fire { tenant: None },
-                |held| async move {
-                    let moved =
-                        runner::migrate_to_locked(held, pool, dir, target, runner::LEDGER_TABLE)
-                            .await?;
-                    *slot
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = moved.unapplied;
-                    Ok(moved.applied)
-                },
+                dir,
+                target,
             )
-            .await;
-            let unapplied = unapplied
-                .into_inner()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for m in unapplied {
-                writeln!(w, "  unapplied {}", m.name)?;
+            .await?;
+            // `None`: applied meanwhile, so the move is backward.
+            if let Some(applied) = moved {
+                for m in &applied.unapplied {
+                    writeln!(w, "  unapplied {}", m.name)?;
+                }
+                return after_chains(pool, &applied, w).await;
             }
-            w.write_all(&out)?;
-            return run;
         }
         let touched = runner::migrate_to_pool(pool, dir, target).await?;
         if touched.is_empty() {
@@ -1106,6 +1097,15 @@ where
         project,
     )
     .await?;
+    after_chains(pool, &applied, w).await
+}
+
+/// What both chains applied, then the framework bootstrap DDL.
+async fn after_chains<W: Write>(
+    pool: &Pool,
+    applied: &super::chains::Applied,
+    w: &mut W,
+) -> Result<(), MigrateError> {
     for m in &applied.system {
         writeln!(w, "  applied {} (system)", m.name)?;
     }
