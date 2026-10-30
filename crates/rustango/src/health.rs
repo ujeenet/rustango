@@ -17,8 +17,9 @@
 //!   the process is alive.
 //! - **`GET /ready`** pings the database with `SELECT 1` and runs any
 //!   probes you added. It returns `200 OK` only if all of them pass,
-//!   and `503` otherwise. When every pool connection is busy, the
-//!   database counts as up and the ping is skipped.
+//!   and `503` otherwise. When every pool connection is busy within
+//!   30 seconds of a passed ping, the database counts as up and the
+//!   ping is skipped.
 //!
 //! Each probe has its own timeout, 5 seconds by default, so one slow
 //! service cannot hold up the whole handler. Set [`HealthRouter::timeout`]
@@ -113,7 +114,12 @@ struct HealthState {
     per_check_timeout: Duration,
     include_db_probe: bool,
     show_errors: bool,
+    /// When the last `SELECT 1` passed: a busy pool counts as up only shortly after.
+    last_ping_ok: Arc<std::sync::Mutex<Option<Instant>>>,
 }
+
+/// How long a passed ping lets a fully busy pool count as up.
+const BUSY_POOL_GRACE: Duration = Duration::from_secs(30);
 
 impl HealthRouter {
     /// Health router with the default `/health` and `/ready` routes.
@@ -279,6 +285,7 @@ impl HealthRouter {
             per_check_timeout: self.per_check_timeout,
             include_db_probe: self.include_db_probe,
             show_errors: self.show_errors,
+            last_ping_ok: Arc::default(),
         };
         Router::new()
             .route(PROBE_PATHS[0], get(handle_live))
@@ -329,18 +336,27 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
 
     if state.include_db_probe {
         let pool = state.pool.clone();
+        let last_ok = state.last_ping_ok.clone();
         let outcome = run_with_timeout(state.per_check_timeout, None, async move {
-            // Every connection busy serving means the database answers:
-            // queuing behind them would fail every replica in a spike.
-            if pool.is_saturated() {
+            // Every connection busy right after a passed ping: queuing
+            // behind them would fail every replica in a spike. Later, a
+            // hung database could look the same, so ping.
+            let recent = last_ok
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some_and(|at| at.elapsed() < BUSY_POOL_GRACE);
+            if recent && pool.is_saturated() {
                 return Ok(());
             }
             // Postgres, MySQL and SQLite all accept `SELECT 1`, and
             // the Pool enum dispatches it, so no per-dialect SQL.
             crate::sql::raw_execute_pool(&pool, "SELECT 1", Vec::new())
                 .await
-                .map(|_| ())
-                .map_err(|e| e.to_string())
+                .map_err(|e| e.to_string())?;
+            *last_ok
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Instant::now());
+            Ok(())
         })
         .await;
         if record(&mut checks, "database", outcome, state.show_errors) {
@@ -618,6 +634,31 @@ mod tests {
         let _busy = sqlite.acquire().await.unwrap();
         let resp = ready().await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// A busy pool with no recent passed ping is pinged, so hung queries are 503.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn busy_pool_without_a_recent_ping_is_not_ready() {
+        let sqlite = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let app = HealthRouter::new(Pool::Sqlite(sqlite.clone()))
+            .timeout(Duration::from_millis(200))
+            .into_router();
+        let _busy = sqlite.acquire().await.unwrap();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]

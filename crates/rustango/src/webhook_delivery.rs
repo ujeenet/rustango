@@ -43,7 +43,8 @@
 //!   move receivers to v2. Both are in your chosen [`SignatureFormat`].
 //! - Any extra headers from [`WebhookSubscription::header`]. One replaces
 //!   a default such as `Content-Type`; it never replaces an `X-Webhook-*` header,
-//!   and `Host`, `Content-Length` and `Transfer-Encoding` are refused.
+//!   and `Host`, `Content-Length`, `Transfer-Encoding` and hop-by-hop
+//!   names such as `Connection` are refused.
 //!
 //! ## Retry policy
 //!
@@ -316,12 +317,22 @@ fn retry_after(
     Some(wait.min(RETRY_AFTER_HORIZON.saturating_sub(age)))
 }
 
-/// Header names the HTTP client owns: a subscription value would break
-/// the request framing or its target.
+/// Header names the HTTP client owns, framing and hop-by-hop: a
+/// subscription value would break the request or its target.
 fn is_client_owned(name: &str) -> bool {
-    ["host", "content-length", "transfer-encoding"]
-        .iter()
-        .any(|n| name.eq_ignore_ascii_case(n))
+    [
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "te",
+        "trailer",
+        "keep-alive",
+        "proxy-connection",
+    ]
+    .iter()
+    .any(|n| name.eq_ignore_ascii_case(n))
 }
 
 /// The headers sent: a subscription header replaces a default, and
@@ -474,9 +485,10 @@ impl WebhookSubscription {
 
     /// Add a header to every delivery. It replaces a default such as
     /// `Content-Type`; the `X-Webhook-*` names the framework sets are
-    /// ignored. An invalid name or value, or `Host`, `Content-Length` or
-    /// `Transfer-Encoding`, is dropped and makes [`Self::dispatch`] fail
-    /// with [`JobError::Fatal`].
+    /// ignored. An invalid name or value, `Host`, `Content-Length`,
+    /// `Transfer-Encoding` or a hop-by-hop name (`Connection`, `Upgrade`,
+    /// `TE`, `Trailer`, `Keep-Alive`, `Proxy-Connection`) is dropped and
+    /// makes [`Self::dispatch`] fail with [`JobError::Fatal`].
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let (name, value) = (name.into(), value.into());
@@ -1309,7 +1321,17 @@ mod tests {
     async fn client_owned_headers_are_refused() {
         let q = InMemoryJobQueue::with_workers(1);
         WebhookSubscription::register(&q).await;
-        for name in ["Host", "content-length", "Transfer-Encoding"] {
+        for name in [
+            "Host",
+            "content-length",
+            "Transfer-Encoding",
+            "Connection",
+            "upgrade",
+            "TE",
+            "Trailer",
+            "Keep-Alive",
+            "proxy-connection",
+        ] {
             let err = WebhookSubscription::new("https://example.com/hook", "s")
                 .header(name, "1")
                 .dispatch(&q, "ping", &())
