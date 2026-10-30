@@ -213,6 +213,7 @@ untouched.
 - `contenttypes::for_each_row_of_ct` now skips rows hidden by the model's global scopes.
 - `get_or_create` / `update_or_create`: when `create_fn` fails with a unique violation, the query runs again and the row found is returned with `created = false`; other errors still return as before.
 - `find_many_or_fail` runs one existence query per requested key that matches no returned pk exactly.
+- `testkit::migrate_framework` / `create_framework_tables` now build a framework table from your own model when you declare one on it (as migrations do); a test that expected the stock columns there sees your model's.
 
 ### Storage and webhooks
 

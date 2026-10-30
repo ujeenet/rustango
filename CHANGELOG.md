@@ -79,6 +79,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An MCP request with a user-owned key reads the agent and owner rows once and its skills and tools in one join: 6 queries before the tool instead of 10.
 - `resolve_user_agent_grants_pool` and `create_user_key_pool` give an inactive owner nothing, as the request path already did; an inactive superuser used to get every skill.
 - The `sqlite_tenant_demo` example adds and counts posts through the ORM on `TenantScope`'s tenant pool instead of hand-written SQL.
+- `testkit::migrate_framework` and `create_framework_tables` build each `rustango_*` table from the model the migrations use (an app's own model over the framework's), not whichever registered first.
 
 ### Deprecated
 

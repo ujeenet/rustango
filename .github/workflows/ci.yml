@@ -404,6 +404,7 @@ jobs:
             --test system_migration_scopes \
             --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
+            --test framework_tables_are_never_hand_built \
             --test logging_fields_agree
       # The #1464 datetime suites, which the list above cannot run.
       #
