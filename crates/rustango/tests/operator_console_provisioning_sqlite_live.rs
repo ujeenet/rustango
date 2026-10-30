@@ -1444,3 +1444,172 @@ async fn a_registry_blip_does_not_end_the_stream() {
     assert!(!body.contains("session ended"), "{body}");
     assert!(body.contains("event: done"), "{body}");
 }
+
+/// One request through the app: (status, `location`, body).
+async fn send(b: &Booted, method: &str, uri: &str, form: &str) -> (StatusCode, String, String) {
+    let mut req = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("cookie", &b.cookie);
+    if method == "POST" {
+        req = req
+            .header("cookie", "rustango_csrf=t")
+            .header("x-csrf-token", "t")
+            .header("content-type", "application/x-www-form-urlencoded");
+    }
+    let resp = b
+        .app
+        .clone()
+        .oneshot(req.body(Body::from(form.to_owned())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let location = resp
+        .headers()
+        .get("location")
+        .map(|l| l.to_str().unwrap().to_owned())
+        .unwrap_or_default();
+    (status, location, body_of(resp).await)
+}
+
+async fn org(b: &Booted, slug: &str) -> Option<Org> {
+    use rustango::core::Column as _;
+    Org::objects()
+        .where_(Org::slug.eq(slug.to_owned()))
+        .fetch(&b.pools.registry_pool())
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+}
+
+/// The probe reads the fields Create reads, and checks what Create checks.
+#[tokio::test]
+async fn the_probe_tests_what_create_would_use() {
+    let b = boot().await;
+    let slug = unique("probe");
+    // The URL choice with no URL: Create refuses, so must the probe.
+    let (_, _, html) = send(
+        &b,
+        "POST",
+        "/orgs/test-connection",
+        &format!("slug={slug}&storage_mode=database&database_source=url"),
+    )
+    .await;
+    assert!(html.contains(r#""status":"bad""#), "{html}");
+    assert!(html.contains("Enter the existing database"), "{html}");
+
+    // The registry choice ignores a URL typed before switching.
+    let (_, _, html) = send(
+        &b,
+        "POST",
+        "/orgs/test-connection",
+        &format!(
+            "slug={slug}&storage_mode=database&database_source=registry&database_url={}",
+            form_encode(&b.registry_url)
+        ),
+    )
+    .await;
+    assert!(html.contains(r#""status":"ok""#), "{html}");
+
+    // Create's own checks run first: a bad slug, a good URL.
+    let good = b._tmp.path().join("good.db");
+    let (_, _, html) = send(
+        &b,
+        "POST",
+        "/orgs/test-connection",
+        &format!(
+            "slug=Not_A_Slug&storage_mode=database&database_source=url&database_url={}",
+            form_encode(&format!("sqlite://{}?mode=rwc", good.display()))
+        ),
+    )
+    .await;
+    assert!(html.contains(r#""status":"bad""#), "{html}");
+    assert!(html.contains("lowercase letters"), "{html}");
+}
+
+/// A create whose migrations failed can be finished from the console.
+#[tokio::test]
+async fn a_failed_create_resumes_from_its_run() {
+    use rustango::migrate::{file, DataOp, Migration, Operation};
+    let b = boot().await;
+    let boom = Migration {
+        name: "0001_boom".into(),
+        created_at: "2026-10-07T00:00:00Z".into(),
+        prev: None,
+        atomic: true,
+        scope: Default::default(),
+        replaces: Vec::new(),
+        merges: Vec::new(),
+        snapshot: Default::default(),
+        forward: vec![Operation::Data(DataOp {
+            sql: "SELECT * FROM boom_missing_tbl".into(),
+            reverse_sql: None,
+            reversible: false,
+        })],
+    };
+    let boom_file = b._migrations.path().join("0001_boom.json");
+    file::write(&boom_file, &boom).unwrap();
+
+    let slug = unique("resume");
+    let form = format!(
+        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        form_encode(&format!(
+            "sqlite://{}?mode=rwc",
+            b._tmp.path().join("resume.db").display()
+        ))
+    );
+    let (_, location, _) = send(&b, "POST", "/orgs/new", &form).await;
+    let run_uri = format!("/orgs/{location}");
+    let (_, _, html) = send(&b, "GET", &run_uri, "").await;
+    assert!(html.contains("resume-form"), "{html}");
+    assert!(!org(&b, &slug).await.unwrap().active);
+    let (_, _, html) = send(&b, "GET", &format!("/orgs/{slug}/edit"), "").await;
+    assert!(
+        html.contains("resume-hint"),
+        "the edit page links the run: {html}"
+    );
+
+    // Submitting again says the tenant is resumable.
+    std::fs::remove_file(&boom_file).unwrap();
+    let (status, _, html) = send(&b, "POST", "/orgs/new", &form).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(html.contains("already exists"), "{html}");
+    assert!(
+        html.contains(&format!("{run_uri}\"")),
+        "links the run: {html}"
+    );
+
+    let (status, to, _) = send(&b, "POST", &format!("{run_uri}/resume"), "").await;
+    assert!(status.is_redirection(), "{status}");
+    assert_ne!(to, run_uri, "a resume is its own run");
+    assert!(org(&b, &slug).await.unwrap().active, "resumed and live");
+    let (_, _, html) = send(&b, "GET", &run_uri, "").await;
+    assert!(
+        !html.contains("resume-form"),
+        "nothing left to resume: {html}"
+    );
+}
+
+/// A failure after the row lands shows the run, not the form.
+#[tokio::test]
+async fn a_failure_after_the_row_redirects_to_the_run() {
+    let b = boot().await;
+    let slug = unique("late");
+    let form = format!(
+        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        form_encode(&format!(
+            "sqlite://{}?mode=rwc",
+            b._tmp.path().join("late.db").display()
+        ))
+    );
+    // Process-global, but nextest runs each test in its own process.
+    std::env::set_var("RUSTANGO_PROVISION_FAIL_AT", "activate");
+    let (status, location, html) = send(&b, "POST", "/orgs/new", &form).await;
+    std::env::remove_var("RUSTANGO_PROVISION_FAIL_AT");
+    assert!(status.is_redirection(), "{status}: {html}");
+    assert!(location.starts_with("provision/"), "{location}");
+    let (_, _, html) = send(&b, "GET", &format!("/orgs/{location}"), "").await;
+    assert!(html.contains("resume-form"), "{html}");
+    assert!(!org(&b, &slug).await.unwrap().active);
+}

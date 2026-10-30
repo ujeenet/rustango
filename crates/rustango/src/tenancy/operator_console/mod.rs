@@ -985,6 +985,10 @@ fn router_unlogged(
             .route(
                 at("/orgs/provision/{run_id}/stream"),
                 get(provisioning::provision_run_stream),
+            )
+            .route(
+                at("/orgs/provision/{run_id}/resume"),
+                get(op_post_only_redirect).post(provisioning::provision_resume),
             );
     }
     if impersonation_enabled {
@@ -2064,6 +2068,12 @@ async fn org_edit_form(
     // Drives the "Run migrations" button: migrations ride with the
     // provisioner, which owns the migrations directory.
     ctx.insert("provisioning_enabled", &state.provisioner.is_some());
+    let resume_run = if state.provisioner.is_some() {
+        provisioning::resumable(&state.registry, &slug).await
+    } else {
+        None
+    };
+    ctx.insert("resume_run", &resume_run);
     // A database the console made on a saved server. No password in it.
     let managed = if state.provisioner.is_some() {
         super::TenantDatabase::of_org(&state.registry, &org_row)

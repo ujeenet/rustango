@@ -576,6 +576,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "                       one with its own login on a saved server via --server."
     )?;
+    writeln!(
+        w,
+        "                       SQLite has no schemas: use --mode database --server <name>."
+    )?;
     writeln!(w, "  drop-tenant   <slug> [--confirm <slug>]")?;
     writeln!(
         w,
@@ -677,7 +681,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
-        "                [--maintenance-db <db>] [--sqlite-dir <dir>] [--password-env <VAR> | --no-password]"
+        "                [--maintenance-db <db>] [--password-env <VAR> | --no-password]"
+    )?;
+    writeln!(
+        w,
+        "  add-db-server <name> --sqlite-dir <absolute dir>   SQLite: an existing directory only"
     )?;
     writeln!(
         w,

@@ -27,6 +27,10 @@
     field. The extra hostnames it can also answer on are a collection
     with their own verbs, so they live on their own page — which needs
     a link from here, or nothing reaches it. -#}
+{% if resume_run %}
+<div class="alert alert-error" id="resume-hint">A failed create left this tenant inactive.
+  <a href="{{ console_prefix }}/orgs/provision/{{ resume_run }}">Resume it from run #{{ resume_run }}</a>.</div>
+{% endif %}
 {#- A div, not a p — see op_orgs.html: a `<form>` closes an open `<p>`. -#}
 <div class="page-actions">
   <a href="{{ console_prefix }}/orgs/{{ slug }}/hosts" class="btn btn-secondary">Hostnames →</a>

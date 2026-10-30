@@ -2323,14 +2323,15 @@ impl RolledBack {
     }
 }
 
-/// The checks a create on a saved server runs before any DDL, and no DDL:
-/// slug free, fields and routing, server rights, database and login free.
-pub(crate) async fn dry_run_on_server(
+/// The checks a create runs before any DDL, and no DDL: slug free, fields
+/// and routing, the URL vetted, or server rights and names free. Returns
+/// an existing database's resolved URL, to probe; never show it.
+pub(crate) async fn dry_run(
     registry: &crate::sql::Pool,
     secrets: &TenantSecrets,
     registry_url: &str,
     request: &ProvisionRequest,
-) -> Result<(), TenancyError> {
+) -> Result<Option<String>, TenancyError> {
     let taken = Org::objects()
         .where_(Org::slug.eq(request.slug.clone()))
         .first(registry)
@@ -2343,7 +2344,7 @@ pub(crate) async fn dry_run_on_server(
     }
     let checked = checked_request(registry, secrets, registry_url, request).await?;
     let Some(server) = checked.server() else {
-        return Ok(());
+        return Ok(checked.probe_target().map(ToOwned::to_owned));
     };
     let (admin, _) = ServerDatabase::open(server, registry).await?;
     let name = crate::sql::DatabaseName::new(request.slug.as_str())
@@ -2351,7 +2352,8 @@ pub(crate) async fn dry_run_on_server(
     let login = crate::sql::Login::new(super::server_admin::tenant_login_name(&name));
     let free = admin.names_free(&name, &login).await;
     admin.close().await;
-    Ok(free?)
+    free?;
+    Ok(None)
 }
 
 /// The registry database's utf8mb4 collation, which tenant databases copy:
@@ -2918,6 +2920,21 @@ pub trait TenantProvisioner: Send + Sync {
         request: &'a ProvisionRequest,
     ) -> BoxFuture<'a, ProvisionOutcome>;
 
+    /// Finish a tenant a failed create left inactive, in a new run. The
+    /// default refuses, so older implementors still build.
+    fn resume<'a>(
+        &'a self,
+        request: &'a ProvisionRequest,
+        requested_by: Option<&'a str>,
+    ) -> BoxFuture<'a, (super::provision_store::ProvisioningRun, ProvisionOutcome)> {
+        let _ = (request, requested_by);
+        Box::pin(async {
+            Err(TenancyError::Validation(
+                "this provisioner cannot resume a tenant".into(),
+            ))
+        })
+    }
+
     /// Migrate one tenant, or every active one when `slug` is `None`,
     /// recording into an already-open run.
     ///
@@ -3075,6 +3092,34 @@ where
                     None,
                     requested_by.as_deref(),
                     idempotency_key.as_deref(),
+                )
+                .await
+            })
+            .await
+            .map_err(|e| TenancyError::Validation(format!("the provisioning task stopped: {e}")))?
+        })
+    }
+
+    fn resume<'a>(
+        &'a self,
+        request: &'a ProvisionRequest,
+        requested_by: Option<&'a str>,
+    ) -> BoxFuture<'a, (super::provision_store::ProvisioningRun, ProvisionOutcome)> {
+        // Detached, as `provision` is.
+        let pools = self.pools.clone();
+        let (url, dir) = (self.registry_url.clone(), self.migrations_dir.clone());
+        let request = request.clone();
+        let requested_by = requested_by.map(ToOwned::to_owned);
+        Box::pin(async move {
+            tokio::spawn(async move {
+                provision_tenant_recorded_or_resume(
+                    pools.as_ref(),
+                    &url,
+                    &dir,
+                    &request,
+                    None,
+                    requested_by.as_deref(),
+                    true,
                 )
                 .await
             })
