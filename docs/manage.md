@@ -1273,6 +1273,10 @@ tenant. That makes them an admin of the tenant (full write access in the
 tenant admin), but it never grants access to the cross-tenant operator
 console.
 
+`--email <e>` stores the user's email (needs the `sso` feature). With
+`[auth] login_field = "email"` users sign in with it, so give every user
+one; the verb prints which field the user signs in with.
+
 ### `create-role <tenant> <name>`
 
 Creates a role (a named bundle of permissions) inside one tenant.

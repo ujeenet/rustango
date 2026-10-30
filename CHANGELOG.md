@@ -6,6 +6,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 **Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant. See UPGRADING.
 
+### Added
+
+- `[auth] login_field = "email"` (or `Cli::login_field` / `server::Builder::login_field`): tenant users sign in by email, ignoring case, on the sign-in form, HTTP Basic and `/auth/login`. It needs the `sso` feature; the login lock follows the email, and the server warns at boot about users without their own email.
+- Tenancy `create-user --email <e>`.
+
 ### Fixed
 
 - ViewSet JSON bodies and `ModelFormFor::from_json` keep `""` on a nullable `String` field as `""`; only `null` writes NULL.
@@ -23,6 +28,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An `unresolved_tenant` router with its own `/health` builds instead of panicking, and gets the api layers (CORS from `[security]`).
 - A tenant host row equal to the apex no longer makes the apex resolve to that tenant, and adding one is refused.
 - `server::Builder::from_env` returns the env error when the database vars are unset or invalid instead of connecting to a built-in URL.
+- The tenant sign-in and password pages name the tenant by its display name instead of its slug; the set-password mail falls back to the slug when the name is empty.
 
 ## [0.61.13] — 2026-10-30
 

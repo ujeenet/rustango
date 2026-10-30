@@ -228,14 +228,12 @@ impl AuthBackend for ModelBackend {
         parts: &Parts,
         pool: &Pool,
     ) -> Result<Option<AuthUser>, AuthError> {
-        use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
-
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
 
+        // `username` is the `[auth] login_field` value.
         let (username, password) = match parse_basic_auth(auth_header) {
             Some(pair) => pair,
             None => return Ok(None),
@@ -251,11 +249,8 @@ impl AuthBackend for ModelBackend {
             .begin_per_request(&scope, &client_ip(parts), &username)
             .await
             .map_err(refused)?;
-        let users = super::auth::User::objects()
-            .where_(super::auth::User::username.eq(username.clone()))
-            .fetch(pool)
-            .await?;
-        let user = users.into_iter().next();
+        let field = super::login_field();
+        let user = super::find_login_user(pool, field, &username).await?;
 
         // A credential verified moments ago against this same stored hash
         // skips argon2: it is not a guess.
@@ -271,11 +266,12 @@ impl AuthBackend for ModelBackend {
                 is_superuser: u.is_superuser,
             })
         };
-        if let Some(hit) = user.as_ref().and_then(cached) {
-            // The stored name's lock too, when the submitted one differs.
-            if hit.username != username {
-                attempt.resolve(&hit.username).await.map_err(refused)?;
-            }
+        if let Some((u, hit)) = user.as_ref().and_then(|u| Some((u, cached(u)?))) {
+            // The stored identifier's lock too, when the submitted one differs.
+            attempt
+                .resolve(super::login_key(field, u))
+                .await
+                .map_err(refused)?;
             attempt.settle(true).await;
             return Ok(Some(hit));
         }
@@ -293,7 +289,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         };
         attempt
-            .resolve(&user.username)
+            .resolve(super::login_key(field, &user))
             .await
             .map_err(AuthError::Refused)?;
         // A parallel request may have verified it while this one waited.

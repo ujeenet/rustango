@@ -1294,6 +1294,10 @@ tenant. Eso lo convierte en admin del tenant (acceso de escritura completo en el
 admin del tenant), pero nunca otorga acceso a la consola de operador entre
 tenants.
 
+`--email <e>` guarda el email del usuario (requiere la feature `sso`). Con
+`[auth] login_field = "email"` los usuarios inician sesión con él, así que da
+uno a cada usuario; el comando indica con qué campo inicia sesión el usuario.
+
 ### `create-role <tenant> <name>`
 
 Crea un rol (un paquete con nombre de permisos) dentro

@@ -1342,6 +1342,11 @@ du tenant. Cela en fait un administrateur du tenant (accès en écriture
 complet dans l'admin du tenant), mais cela ne lui donne jamais accès à
 la console opérateur inter-tenant.
 
+`--email <e>` enregistre l'e-mail de l'utilisateur (demande la feature `sso`).
+Avec `[auth] login_field = "email"`, les utilisateurs se connectent avec, donc
+donnez-en un à chacun ; la commande indique le champ de connexion de
+l'utilisateur.
+
 ### `create-role <tenant> <name>`
 
 Crée un rôle (un ensemble nommé de permissions) au sein d'un tenant.

@@ -317,23 +317,26 @@ impl FirstAdminHandover {
     ) -> crate::email::Email {
         // No CR/LF from a tenant name may reach a mail header.
         let name: String = org
-            .brand_name
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&org.display_name)
+            .brand_label()
             .chars()
             .filter(|c| !c.is_control())
             .collect();
+        let field = super::login_field();
+        let sign_in_as = match field {
+            crate::login_field::LoginField::Username => &admin.username,
+            #[cfg(feature = "sso")]
+            crate::login_field::LoginField::Email => &admin.email,
+        };
         crate::email::Email::new()
             .to(admin.email.clone())
             .from(from)
             .subject(format!("Set your password for {name}"))
             .body(format!(
                 "An administrator account was created for you on {name}.\n\n\
-                 Username: {}\n\n\
+                 {}: {sign_in_as}\n\n\
                  Set your password here. The link works once and expires in {} hours:\n\
                  {}\n",
-                admin.username,
+                field.label(),
                 self.ttl_hours(),
                 link.expose(),
             ))

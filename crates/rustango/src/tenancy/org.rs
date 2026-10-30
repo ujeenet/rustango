@@ -190,6 +190,27 @@ impl Org {
         )
         .then(|| self.effective_schema())
     }
+
+    /// The name people see: `display_name`, else the slug.
+    #[must_use]
+    pub fn display_label(&self) -> &str {
+        let name = self.display_name.trim();
+        if name.is_empty() {
+            &self.slug
+        } else {
+            name
+        }
+    }
+
+    /// The brand people see: `brand_name`, else [`Self::display_label`].
+    #[must_use]
+    pub fn brand_label(&self) -> &str {
+        self.brand_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| self.display_label())
+    }
 }
 
 /// The one home of the "`schema_name`, else the slug" rule.
@@ -484,6 +505,23 @@ mod tests {
         };
         let s = format!("{org:?}");
         assert!(s.contains("acme") && !s.contains("db-pw-123"), "{s}");
+    }
+
+    #[test]
+    fn labels_fall_back_to_the_slug() {
+        let mut org = Org {
+            slug: "shufoundation".into(),
+            display_name: "Sandhill University Foundation".into(),
+            ..crate::testkit::org()
+        };
+        assert_eq!(org.display_label(), "Sandhill University Foundation");
+        assert_eq!(org.brand_label(), "Sandhill University Foundation");
+        org.brand_name = Some("SHU".into());
+        assert_eq!(org.brand_label(), "SHU");
+        org.display_name = " ".into();
+        org.brand_name = Some(String::new());
+        assert_eq!(org.display_label(), "shufoundation");
+        assert_eq!(org.brand_label(), "shufoundation");
     }
 
     #[test]
