@@ -684,10 +684,11 @@ impl Storage for LocalStorage {
         validate_key(key)?;
         let path = self.full_path(key);
         let file = match tokio::fs::File::open(&path).await {
-            // Opening a directory works on unix; it holds no object.
+            // Opening a directory works on unix and is refused on Windows;
+            // either way it holds no object.
             Ok(_) if is_dir(&path).await => return Err(StorageError::NotFound(key.to_owned())),
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_dir(&path).await => {
                 return Err(StorageError::NotFound(key.to_owned()))
             }
             Err(e) => return Err(StorageError::Io(e.to_string())),
