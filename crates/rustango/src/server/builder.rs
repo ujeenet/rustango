@@ -140,16 +140,15 @@ impl Builder<sqlx::Postgres> {
     /// `Cli::with_settings` already ran in this process. Tracing init is
     /// left to the caller — one `tracing_subscriber::fmt().init()` away.
     ///
-    /// PG-only: defaults to `postgres://...` and uses
-    /// `PgPool::connect`. For sqlite / mysql tenancy apps, use
+    /// PG-only: uses `PgPool::connect`. For sqlite / mysql tenancy apps, use
     /// [`Builder::from_pool`] with the right `sqlx::Pool<DB>` instead.
     ///
     /// # Errors
-    /// Connection to `DATABASE_URL` failures.
+    /// The [`crate::env::EnvError`] when the database vars are unset or
+    /// invalid, or the connection failure.
     pub async fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let apex = crate::tenancy::server::apex_domain();
-        let registry_url = crate::env::database_url_from_env()
-            .unwrap_or_else(|_| "postgres://rustango:rustango@localhost:5432/rustango_test".into());
+        let registry_url = crate::env::database_url_from_env()?;
         use crate::tenancy::RegistryConnect as _;
         let registry = sqlx::Postgres::connect_registry(&registry_url).await?;
         Ok(Self::from_pool(registry, registry_url, apex))
@@ -907,13 +906,14 @@ impl<DB: Database> Builder<DB> {
         let registry_pool: crate::sql::Pool = self.registry.clone().into();
         // Health too: a load balancer probes by IP, which resolves no tenant.
         let unresolved = self.unresolved.map(|r| {
-            let r = match &health {
-                Some(h) => r.merge(h.clone()),
-                None => r,
-            };
             let r = r.layer(Extension(crate::tenancy::TenantRegistry::new(
                 registry_pool.clone(),
             )));
+            // In front, not merged: a router with its own `/health` panicked at build.
+            let r = match &health {
+                Some(h) => h.clone().fallback_service(r),
+                None => r,
+            };
             #[cfg(feature = "_http_layers")]
             let r = with_body_limit(r, self.body_limit.clone());
             r
@@ -1612,6 +1612,54 @@ pub(crate) mod resolver_tests {
         assert_ne!(body, unresolved.1);
     }
 
+    /// An unresolved router with its own `/health` builds; health stays in front.
+    #[tokio::test]
+    async fn an_unresolved_router_with_its_own_health_builds() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let mine = Router::new()
+            .route("/health", axum::routing::get(|| async { "mine" }))
+            .route("/setup", axum::routing::get(|| async { "setup" }));
+        let app = Builder::<sqlx::Sqlite>::from_pool(sq, url, "localhost")
+            .with_health()
+            .unresolved_tenant(mine)
+            .into_router()
+            .await
+            .unwrap();
+        let (status, body) = get(&app, "10.0.0.5:8080", "/health").await;
+        assert_eq!(status, 200);
+        assert_ne!(body, "mine");
+        assert_eq!(get(&app, "10.0.0.5:8080", "/ready").await.0, 200);
+        assert_eq!(
+            get(&app, "10.0.0.5:8080", "/setup").await,
+            (200, "setup".into())
+        );
+    }
+
+    /// An extra-host row equal to the apex does not make the apex a tenant.
+    #[tokio::test]
+    async fn an_apex_host_row_does_not_resolve_the_apex() {
+        let _iso = crate::tenancy::isolated_resolver().await;
+        let (_tmp, sq, url) = hosted_registry(true).await;
+        let pool = crate::sql::Pool::Sqlite(sq.clone());
+        crate::testkit::create_tables_for::<crate::tenancy::OrgHost>(&pool)
+            .await
+            .expect("org hosts");
+        let mut row = crate::tenancy::OrgHost {
+            id: crate::sql::Auto::Unset,
+            org_id: 1,
+            hostname: "localhost".into(),
+            enabled: true,
+            created_at: crate::sql::Auto::Unset,
+        };
+        row.insert_pool(&pool).await.expect("apex row");
+        let app = app_with(sq, url, true).await;
+        assert_eq!(
+            get(&app, "localhost", "/setup").await,
+            (200, "unresolved:true".to_owned())
+        );
+    }
+
     /// Unset, routing is as before: an unknown host reaches the app's
     /// routes (where `Tenant` answers 404), an unserved apex path is a 404.
     #[tokio::test]
@@ -1955,5 +2003,27 @@ mod span_redact_tests {
             Some(&layer_with("invite_token")),
         );
         assert_eq!(got, vec!["only_this".to_owned()]);
+    }
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod from_env_tests {
+    use super::Builder;
+
+    /// A bad database env is the error, not a connect to a built-in URL.
+    #[tokio::test]
+    async fn a_bad_database_env_is_the_error() {
+        let saved = std::env::var("DATABASE_URL").ok();
+        std::env::remove_var("DATABASE_URL");
+        std::env::set_var("DB_DRIVER", "oracle");
+        let got = Builder::<sqlx::Postgres>::from_env().await;
+        std::env::remove_var("DB_DRIVER");
+        if let Some(url) = saved {
+            std::env::set_var("DATABASE_URL", url);
+        }
+        let Err(e) = got else {
+            panic!("connected despite DB_DRIVER=oracle");
+        };
+        assert!(e.to_string().contains("oracle"), "{e}");
     }
 }

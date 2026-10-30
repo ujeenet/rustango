@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant. See UPGRADING.
+
 ### Fixed
 
 - ViewSet JSON bodies and `ModelFormFor::from_json` keep `""` on a nullable `String` field as `""`; only `null` writes NULL.
@@ -17,6 +19,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Admin autocomplete works for a target whose primary key or display field has a `column` rename.
 - Admin edits and deletes are audited under the key's canonical text, so `/x/007` and `/x/7` share one history; the detail page reads it the same way.
 - An admin delete blocked by rows that still point at it shows a browser an admin page (409); other clients keep the JSON 409.
+- At shutdown a WebSocket gets Close 1001 and the drain waits for it; an SSE stream ends at the stop signal instead of holding the drain to its deadline. Handlers get the signal through the new `shutdown::Shutdown` extractor.
+- An `unresolved_tenant` router with its own `/health` builds instead of panicking, and gets the api layers (CORS from `[security]`).
+- A tenant host row equal to the apex no longer makes the apex resolve to that tenant, and adding one is refused.
+- `server::Builder::from_env` returns the env error when the database vars are unset or invalid instead of connecting to a built-in URL.
 
 ## [0.61.13] — 2026-10-30
 

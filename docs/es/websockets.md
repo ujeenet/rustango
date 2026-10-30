@@ -87,9 +87,10 @@ Cablea el bus a un endpoint SSE con la respuesta `Sse` de axum + un
 use std::convert::Infallible;
 use axum::{extract::State, response::sse::{Event, KeepAlive, Sse}, routing::get, Router};
 use futures::Stream;
-use rustango::sse::EventBus;
+use rustango::{shutdown::Shutdown, sse::EventBus};
 
 async fn events(
+    shutdown: Shutdown,
     State(bus): State<EventBus<Notification>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = bus.subscribe();
@@ -106,7 +107,8 @@ async fn events(
         }
     };
     // keep-alive comments stop idle connections being reaped by proxies.
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // Ends the stream when the server stops.
+    Sse::new(shutdown.cut(stream)).keep_alive(KeepAlive::default())
 }
 
 let app = Router::new()
@@ -134,7 +136,7 @@ lentos; `ws_handler` ejecuta una conexión hasta que el cliente se desconecta.
 ```rust
 use std::time::Duration;
 use axum::{extract::{State, WebSocketUpgrade}, response::Response, routing::get, Router};
-use rustango::{sse::EventBus, ws::WsHub};
+use rustango::{shutdown::Shutdown, sse::EventBus, ws::WsHub};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -143,9 +145,13 @@ struct Tick { value: i64 }
 let bus: EventBus<Tick> = EventBus::new(100);
 let hub = WsHub::new(bus).keepalive(Duration::from_secs(20));
 
-async fn ws_route(ws: WebSocketUpgrade, State(hub): State<WsHub<Tick>>) -> Response {
+async fn ws_route(
+    ws: WebSocketUpgrade,
+    shutdown: Shutdown,
+    State(hub): State<WsHub<Tick>>,
+) -> Response {
     // Caps the frame reader at `max_message_bytes` before buffering.
-    hub.upgrade(ws)
+    hub.upgrade(ws, shutdown)
 }
 
 let app = Router::new()
@@ -174,6 +180,8 @@ se perdió `n` mensajes para que pueda resincronizarse o continuar: recibe el fr
 de texto `{"_lagged": n}`. Los frames binarios del cliente se descartan. Para pasar
 una `WsConfig` completa usa `WsHub::with_config(bus, config)`;
 `hub.receiver_count()` cuenta los sockets abiertos.
+
+Ambos toman [`Shutdown`] como extractor. Cuando el servidor se detiene, un flujo SSE envuelto en `shutdown.cut(..)` termina y un socket recibe Close 1001 (going away), así un despliegue no espera el plazo de drenaje.
 
 ## Enviar desde otro sitio
 

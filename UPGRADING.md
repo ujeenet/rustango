@@ -168,6 +168,13 @@ untouched.
 - Admin audit entries for edits and deletes are filed under the canonical key (`7`, not `007`); older entries keep the spelling they were filed under.
 - A blocked admin delete answers `Accept: text/html` with an HTML 409 page instead of JSON.
 
+### Server and tenancy
+
+- `WsHub::upgrade(ws)` → `upgrade(ws, shutdown)` and `ws_handler(socket, hub)` → `ws_handler(socket, hub, shutdown)`. Add a `shutdown: rustango::shutdown::Shutdown` extractor to the handler and pass it on.
+- `RegisteredHostResolver` is no longer a unit struct: build it with `RegisteredHostResolver::new(apex)`.
+- `org_host::add_host(registry, slug, host)` → `add_host(registry, slug, host, apex)`; a host equal to the apex is refused with the new `HostError::IsApex`. A `match` on `HostError` needs that arm.
+- `server::Builder::from_env` fails when the database env is missing or invalid; set `DATABASE_URL` (it no longer falls back to a built-in URL).
+
 ---
 
 ## 0.61.13

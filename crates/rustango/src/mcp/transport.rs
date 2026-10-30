@@ -145,6 +145,7 @@ async fn sse_in(
         agent,
         exp.map(|exp| JwtBound { jwt, exp }),
         StreamCaps::from_env(),
+        crate::shutdown::Shutdown::from_extensions(&extensions),
     )
 }
 
@@ -154,6 +155,7 @@ fn open_capped(
     agent: super::McpAgent,
     token: Option<JwtBound>,
     caps: StreamCaps,
+    shutdown: crate::shutdown::Shutdown,
 ) -> Response {
     let Some(slot) = StreamSlot::acquire(&agent.tenant, agent.agent_id, caps) else {
         return (
@@ -168,6 +170,7 @@ fn open_capped(
         token,
         KEEP_ALIVE * RECHECK_EVERY_KEEP_ALIVES,
         slot,
+        shutdown,
     )
 }
 
@@ -268,13 +271,14 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 const RECHECK_EVERY_KEEP_ALIVES: u32 = 4;
 
 /// The agent's frames until the JWT's `exp`, a re-check that finds the agent
-/// revoked, deactivated or rotated or the JWT revoked, or the bus closing.
+/// revoked, deactivated or rotated or the JWT revoked, the bus closing, or shutdown.
 fn agent_sse(
     pool: crate::sql::Pool,
     agent: super::McpAgent,
     token: Option<JwtBound>,
     recheck_every: Duration,
     slot: StreamSlot,
+    shutdown: crate::shutdown::Shutdown,
 ) -> Response {
     use tokio::sync::broadcast::error::RecvError;
     // Own tenant's channel: another tenant's burst cannot make it lag.
@@ -336,7 +340,7 @@ fn agent_sse(
             }
         }
     };
-    Sse::new(stream)
+    Sse::new(shutdown.cut(stream))
         .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
         .into_response()
 }
@@ -357,6 +361,7 @@ fn jsonrpc_id_string(id: &Value) -> String {
 #[cfg(all(test, feature = "sqlite", feature = "testkit"))]
 mod tests {
     use super::*;
+    use crate::shutdown::Shutdown;
     use crate::tenancy::{create_agent_pool, rotate_agent_secret_pool};
 
     type World = (
@@ -409,7 +414,7 @@ mod tests {
         recheck: Duration,
     ) -> Response {
         let slot = StreamSlot::acquire(&agent.tenant, agent.agent_id, NO_CAP).unwrap();
-        agent_sse(pool, agent, token, recheck, slot)
+        agent_sse(pool, agent, token, recheck, slot, Shutdown::default())
     }
 
     /// Past either cap a stream is refused; a closed stream frees its place.
@@ -449,7 +454,7 @@ mod tests {
             per_tenant: 0,
         };
         let held = StreamSlot::acquire(&agent.tenant, agent.agent_id, caps).unwrap();
-        let resp = open_capped(pool, agent, None, caps);
+        let resp = open_capped(pool, agent, None, caps, Shutdown::default());
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         drop(held);
     }
@@ -502,6 +507,26 @@ mod tests {
         assert!(jwt.revoke(&bearer).await);
         let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
         assert!(ended.is_ok(), "the stream outlived the JWT revoke");
+    }
+
+    /// The stream ends at the server's stop signal, not at the drain deadline.
+    #[tokio::test]
+    async fn the_stream_ends_at_shutdown() {
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        let (stop, on_stop) = tokio::sync::watch::channel(());
+        let slot = StreamSlot::acquire(&agent.tenant, agent.agent_id, NO_CAP).unwrap();
+        let resp = agent_sse(
+            pool,
+            agent,
+            token,
+            Duration::from_secs(3600),
+            slot,
+            Shutdown::on(on_stop),
+        );
+        let body = drain(resp);
+        stop.send(()).unwrap();
+        let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
+        assert!(ended.is_ok(), "the stream outlived the stop signal");
     }
 
     /// A raw-key stream has no `exp`; the re-check alone ends it.
