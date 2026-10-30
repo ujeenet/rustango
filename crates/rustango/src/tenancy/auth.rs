@@ -679,7 +679,8 @@ mod tests {
     }
 
     #[derive(crate::Model, Debug, Clone)]
-    #[rustango(table = "rustango_users")]
+    // Unmanaged: no helper may build the shared table from this shape.
+    #[rustango(table = "rustango_users", managed = false)]
     #[allow(dead_code)]
     pub struct MissingDataColumn {
         #[rustango(primary_key)]

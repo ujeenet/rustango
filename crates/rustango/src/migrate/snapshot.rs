@@ -246,7 +246,9 @@ pub struct RelationSnapshot {
 }
 
 /// Keep one model per table, or the migration emits two `CREATE TABLE`s.
-fn one_owner_per_table<'a>(entries: impl Iterator<Item = &'a ModelEntry>) -> Vec<&'a ModelEntry> {
+pub(crate) fn one_owner_per_table<'a>(
+    entries: impl Iterator<Item = &'a ModelEntry>,
+) -> Vec<&'a ModelEntry> {
     // A custom user model declares
     // `rustango_users` while the built-in `User` derive is always
     // present, so both reach the inventory. Dedupe by table and

@@ -57,11 +57,19 @@ use crate::sql::Pool;
 /// # Errors
 /// Any DDL failure ([`MigrateError`]).
 pub async fn create_framework_tables(pool: &Pool) -> Result<(), MigrateError> {
-    let models: Vec<&'static ModelSchema> = crate::migrate::registered_models()
+    emit_tables(pool, &framework_models()).await
+}
+
+/// Managed `rustango_*` models, one per table by the migration's own rule,
+/// so inventory order never decides which model builds a shared table.
+fn framework_models() -> Vec<&'static ModelSchema> {
+    let entries = inventory::iter::<crate::core::ModelEntry>
         .into_iter()
-        .filter(|m| m.managed && m.table.starts_with("rustango_"))
-        .collect();
-    emit_tables(pool, &models).await
+        .filter(|e| e.schema.managed && e.schema.table.starts_with("rustango_"));
+    crate::migrate::snapshot::one_owner_per_table(entries)
+        .into_iter()
+        .map(|e| e.schema)
+        .collect()
 }
 
 /// Create the given models' tables for the pool's dialect, from their
@@ -208,12 +216,7 @@ pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
     // shared audit/content_types tables appear once — materialized in one
     // pass (tables → indexes → FK ALTERs), exactly what the migration
     // engine emits. Fresh-DB use only (tests).
-    let mut seen = std::collections::HashSet::new();
-    let models: Vec<&'static ModelSchema> = crate::migrate::registered_models()
-        .into_iter()
-        .filter(|m| m.managed && m.table.starts_with("rustango_") && seen.insert(m.table))
-        .collect();
-    let snapshot = crate::migrate::SchemaSnapshot::from_models(&models);
+    let snapshot = crate::migrate::SchemaSnapshot::from_models(&framework_models());
     // The sixth copy of this loop used to live here, matching English
     // error text. It is the path most live suites use to build their
     // tables, so a genuinely failed setup reported `Ok` (#1646).
@@ -515,5 +518,25 @@ mod tests {
         // full column set (from SCHEMA) and the factories are
         // insert-valid on every framework model.
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod owner_tests {
+    /// Two managed framework models on one table leave the shared table's
+    /// shape to inventory order.
+    #[test]
+    fn each_framework_table_has_one_managed_framework_model() {
+        let mut by_table = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+        for e in inventory::iter::<crate::core::ModelEntry> {
+            if e.is_framework() && e.schema.managed && e.schema.table.starts_with("rustango_") {
+                by_table
+                    .entry(e.schema.table)
+                    .or_default()
+                    .push(e.schema.name);
+            }
+        }
+        let shared: Vec<_> = by_table.iter().filter(|(_, m)| m.len() > 1).collect();
+        assert!(shared.is_empty(), "{shared:?}");
     }
 }
