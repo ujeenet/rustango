@@ -106,6 +106,25 @@ fn create_user_key_help_shows_flags_not_a_third_positional() {
     );
 }
 
+/// A SQLite server takes only a directory; help must show that form
+/// and say SQLite tenants need database mode.
+#[cfg(all(feature = "tenancy", feature = "manage"))]
+#[test]
+fn db_server_help_shows_the_sqlite_form() {
+    let h = help();
+    assert!(
+        h.lines().any(
+            |l| l.contains("add-db-server <name> --sqlite-dir <absolute dir>")
+                && !l.contains("--host")
+        ),
+        "{h}"
+    );
+    assert!(
+        h.contains("SQLite has no schemas: use --mode database"),
+        "{h}"
+    );
+}
+
 /// The login form lives at the route config's `login_url`; `/__login` is 404.
 #[cfg(all(feature = "tenancy", feature = "manage"))]
 #[test]

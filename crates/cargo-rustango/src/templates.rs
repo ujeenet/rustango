@@ -687,7 +687,16 @@ fn tenant_dev_note(backend: Backend) -> String {
 save the server as `root` (password `rustango`), host `mysql` (`localhost`
 from the host)."
         }
-        Backend::Sqlite => "Save a server with a directory for tenant files, e.g. `var/tenants`.",
+        Backend::Sqlite => {
+            "SQLite tenants use database mode, one file each, in a saved server's
+directory. The directory must be absolute and exist:
+
+```sh
+mkdir -p var/tenants
+cargo run -- add-db-server files --sqlite-dir \"$PWD/var/tenants\"
+cargo run -- create-tenant <slug> --mode database --server files
+```"
+        }
     };
     format!(
         "
@@ -695,7 +704,9 @@ from the host)."
 
 The operator console has **New tenant** and **Database servers** pages (see
 `src/main.rs`). Saving a server password needs `RUSTANGO_SECRET_KEY` in `.env`
-(see `.env.example`). {server}
+(see `.env.example`).
+
+{server}
 "
     )
 }

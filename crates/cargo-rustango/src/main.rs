@@ -2036,6 +2036,20 @@ mod tests {
         }
     }
 
+    /// The SQLite server dir must be absolute and exist, and SQLite
+    /// tenants need database mode: the README's steps must work as typed.
+    #[test]
+    fn tenant_sqlite_readme_server_steps_work_as_typed() {
+        let readme = templates::readme("myapp", Template::Tenant, Backend::Sqlite);
+        for step in [
+            "mkdir -p var/tenants",
+            "cargo run -- add-db-server files --sqlite-dir \"$PWD/var/tenants\"",
+            "cargo run -- create-tenant <slug> --mode database --server files",
+        ] {
+            assert!(readme.contains(step), "missing `{step}`:\n{readme}");
+        }
+    }
+
     /// `rust-toolchain.toml` names `stable`, which the `rust:1` images do not
     /// install under that name; pin both images to their own toolchain.
     #[test]
