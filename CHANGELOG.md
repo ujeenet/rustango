@@ -10,9 +10,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `[auth] login_field = "email"` (or `Cli::login_field` / `server::Builder::login_field`): tenant users sign in by email, ignoring case, on the sign-in form, HTTP Basic and `/auth/login`. It needs the `sso` feature; the login lock follows the email, and the server warns at boot about users without their own email.
 - Tenancy `create-user --email <e>`.
+- `manage check --settings` lists every settings key with where its value comes from (env var, `RUSTANGO__*`, settings file or default), hiding secrets, and needs no database.
+- On the staging tier, the tenancy server warns at boot when session keys come from per-pod `./var/` files.
 
 ### Fixed
 
+- `[database] url` is read: after `DATABASE_URL` / `DB_*` and `RUSTANGO__DATABASE__URL`, every pool falls back to it.
+- Each set settings key that nothing reads (`[sso]`, `[auth.jwt] issuer`/`audience`, some `[admin]` keys) gets its own boot warning saying what to use instead; a test fails when a new settings field names no reader.
 - ViewSet JSON bodies and `ModelFormFor::from_json` keep `""` on a nullable `String` field as `""`; only `null` writes NULL.
 - The admin edit form keeps a stored `""` in a nullable text field when the operator leaves it alone, instead of writing NULL. Clearing a non-empty value still stores NULL.
 - ModelForm, admin and ViewSet writes refuse NaN and infinity (and an `f32` that overflows to it) on float fields.

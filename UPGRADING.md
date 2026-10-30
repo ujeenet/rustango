@@ -227,6 +227,12 @@ untouched.
 - A datetime with no zone (a `NaiveDateTime` column, `"2026-06-05T00:00:00"`) is read as UTC and then shifted, so under `-08:00` it shows the evening before.
 - `i18n::timezone::activate` is deprecated (it was always a no-op); use `with_offset`.
 
+### Settings
+
+- `[database] url` and `RUSTANGO__DATABASE__URL` now connect when no env var names a database. Order: `DATABASE_URL` (or the `DB_*` vars), then `RUSTANGO__DATABASE__URL`, then `[database] url`. The env still wins, so a URL committed in a settings tier is used only where `DATABASE_URL` is unset; check that before relying on a missing-URL error.
+- `Cli::with_settings` now warns once per key that nothing reads (every `[sso]` key, `[auth.jwt] issuer`/`audience`, three `[admin]` keys), naming what to use instead.
+- On the staging tier without a usable `RUSTANGO_SESSION_SECRET`, the tenancy server warns at boot that its `./var/` session keys are per pod.
+
 ---
 
 ## 0.61.13

@@ -511,6 +511,7 @@ pub(crate) enum SettingSource {
     /// A settings file.
     File(String),
     /// Set nowhere.
+    #[cfg(feature = "config")]
     Default,
 }
 
@@ -520,6 +521,7 @@ impl std::fmt::Display for SettingSource {
             Self::Env(var) => write!(f, "env {var}"),
             Self::Override(var) => write!(f, "env {var}"),
             Self::File(file) => f.write_str(file),
+            #[cfg(feature = "config")]
             Self::Default => f.write_str("default"),
         }
     }
@@ -528,7 +530,14 @@ impl std::fmt::Display for SettingSource {
 /// `[database] url` as `Cli::with_settings` loaded it; first call wins.
 static SETTINGS_DATABASE_URL: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
+/// What [`set_settings_database_url`] recorded.
+#[cfg(all(test, feature = "manage", feature = "config"))]
+pub(crate) fn settings_database_url() -> Option<&'static str> {
+    SETTINGS_DATABASE_URL.get().map(String::as_str)
+}
+
 /// Hand the settings' `[database] url` to the resolver, below every env var.
+#[cfg(all(feature = "manage", feature = "config"))]
 pub(crate) fn set_settings_database_url(url: &str) {
     if !url.trim().is_empty() {
         let _ = SETTINGS_DATABASE_URL.set(url.to_owned());

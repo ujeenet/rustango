@@ -16,6 +16,8 @@ pub(crate) enum Reader {
     /// whether a loaded [`Settings`] has it.
     Unread {
         instead: &'static str,
+        // Read by the boot warning, which needs `manage`.
+        #[cfg_attr(not(any(test, feature = "manage")), allow(dead_code))]
         set: fn(&Settings) -> bool,
     },
 }
@@ -256,6 +258,7 @@ pub(crate) const KEYS: &[Key] = &[
     sso("sso.redirect_uri", |s| s.sso.redirect_uri.is_some()),
 ];
 
+#[cfg(feature = "manage")]
 impl Key {
     /// `[section] key`, as written in the settings file.
     pub(crate) fn toml_name(&self) -> String {

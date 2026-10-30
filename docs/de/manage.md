@@ -867,6 +867,12 @@ all checks passed
 Beendet sich mit Exit-Code ungleich null, wenn eine Prüfung auf Fehler-Ebene
 scheitert. Warnungen allein verursachen kein Scheitern.
 
+`check --settings` braucht keine Datenbank. Es gibt jeden
+Einstellungsschlüssel aus, mit der Herkunft seines Werts (eine eigene
+Umgebungsvariable, `RUSTANGO__SECTION__KEY`, eine Einstellungsdatei oder
+der Standard), dem Wert, außer bei Geheimnissen, Schlüsseln, die nichts
+liest, und einer fehlenden Datenbank-URL.
+
 ### `docs`
 
 Öffnet die **Rustango**-Dokumentation (<https://docs.rs/rustango>) in Ihrem

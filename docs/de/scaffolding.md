@@ -245,18 +245,19 @@ Wie sich die Vorlagen innerhalb von `main.rs` / `urls.rs` unterscheiden:
 
 Die Einstellungen laden zuerst `config/default.toml`, dann `config/<RUSTANGO_ENV>_settings.toml` darüber. `RUSTANGO_ENV` ist standardmäßig `dev`, sodass ein frisch gescaffoldetes `cargo run` ohne Änderungen funktioniert; setze `RUSTANGO_ENV=prod` in der Produktion, um `prod_settings.toml` aufzunehmen.
 
+Die Umgebung gewinnt immer über die Dateien. `RUSTANGO__SECTION__KEY` überschreibt `[section] key`, und einige Schlüssel haben zusätzlich eine eigene Umgebungsvariable, die über beiden steht: `DATABASE_URL` (oder die `DB_*`-Variablen) für `[database] url`, `RUSTANGO_BIND` für `[server] bind`, `RUSTANGO_APEX_DOMAIN` für `[tenancy] apex_domain`. Die Datenbank-URL kommt also aus `DATABASE_URL` / `DB_*`, dann `RUSTANGO__DATABASE__URL`, dann `[database] url`. `cargo run -- check --settings` listet jeden Schlüssel und woher sein Wert kommt, Geheimnisse verborgen.
+
 Die Dev- und Staging-Dateien setzen eine `[brand] tagline` von `dev` bzw. `staging`. Um sie zu ändern oder deinen eigenen Namen und dein Logo zu setzen, siehe [Branding](operator-console.md#branding) und die [Konfigurationsschlüssel](admin.md#konfiguration-admin-und-brand) des Admins.
 
 ### Einstellungen, die nicht von selbst wirken
 
-Nicht jeden Schlüssel liest das Framework. `Cli::with_settings` warnt beim Start, wenn einer aus der ersten Gruppe gesetzt ist.
+Nicht jeden Schlüssel liest das Framework. `Cli::with_settings` warnt beim Start, einmal pro Schlüssel, wenn einer aus der ersten Gruppe gesetzt ist.
 
 | Schlüssel | Status |
 |---|---|
 | `[sso]` (jeder Schlüssel) | Noch ohne Wirkung. Richte Admin-SSO in der Admin-UI ein. |
 | `[auth.jwt] issuer`, `audience` | Noch ohne Wirkung. |
 | `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Noch ohne Wirkung; nur `check --deploy` liest sie. |
-| `[database] url` | Wird nicht zum Verbinden genutzt: Jeder Pool liest die Umgebungsvariable `DATABASE_URL`. |
 | `[audit] retention_days` | Nichts räumt danach auf; plane `audit-cleanup --days <N>` ein. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]`-TTLs, `[admin]` | Vom Benutzer verdrahtet: nur vom Konstruktor gelesen, den du aufrufst (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 

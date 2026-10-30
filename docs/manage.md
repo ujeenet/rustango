@@ -845,6 +845,11 @@ all checks passed
 Exits non-zero if any error-level check fails. Warnings alone don't
 cause a failure.
 
+`check --settings` needs no database. It prints every settings key with
+where its value comes from (a bare env var, `RUSTANGO__SECTION__KEY`, a
+settings file, or the default), the value unless it is a secret, keys
+nothing reads, and a missing database URL.
+
 ### `docs`
 
 Opens the **Rustango** docs (<https://docs.rs/rustango>) in your browser. It

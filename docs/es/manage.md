@@ -857,6 +857,12 @@ all checks passed
 Termina con un código distinto de cero si falla cualquier comprobación de nivel
 de error. Las advertencias por sí solas no provocan un fallo.
 
+`check --settings` no necesita base de datos. Imprime cada clave de
+ajustes con el origen de su valor (una variable de entorno propia,
+`RUSTANGO__SECTION__KEY`, un archivo de ajustes o el valor por defecto),
+el valor salvo si es un secreto, las claves que nada lee y una URL de base
+de datos que falte.
+
 ### `docs`
 
 Abre la documentación de **Rustango** (<https://docs.rs/rustango>) en tu

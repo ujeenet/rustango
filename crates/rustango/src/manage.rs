@@ -2758,6 +2758,16 @@ mod tests {
         assert_eq!(cli.bind, "127.0.0.1:9090");
     }
 
+    /// `[database] url` reaches the one URL resolver; env vars still win there.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_hands_the_database_url_to_the_resolver() {
+        let mut s = crate::config::Settings::default();
+        s.database.url = Some("sqlite::memory:".into());
+        let _cli = Cli::new().with_settings(&s);
+        assert_eq!(crate::env::settings_database_url(), Some("sqlite::memory:"));
+    }
+
     /// `[tenancy] apex_domain` reaches the apex the server uses (#1379).
     #[cfg(all(feature = "config", feature = "tenancy"))]
     #[test]

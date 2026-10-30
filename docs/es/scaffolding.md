@@ -241,18 +241,19 @@ Cómo difieren las plantillas dentro de `main.rs` / `urls.rs`:
 
 Los ajustes cargan primero `config/default.toml`, luego `config/<RUSTANGO_ENV>_settings.toml` encima. `RUSTANGO_ENV` es `dev` por defecto, así que un `cargo run` recién generado funciona sin ediciones; establece `RUSTANGO_ENV=prod` en producción para recoger `prod_settings.toml`.
 
+El entorno siempre gana sobre los archivos. `RUSTANGO__SECTION__KEY` sobrescribe `[section] key`, y algunas claves tienen además una variable de entorno propia que gana sobre ambas: `DATABASE_URL` (o las variables `DB_*`) para `[database] url`, `RUSTANGO_BIND` para `[server] bind`, `RUSTANGO_APEX_DOMAIN` para `[tenancy] apex_domain`. Así, la URL de la base de datos sale de `DATABASE_URL` / `DB_*`, luego de `RUSTANGO__DATABASE__URL`, luego de `[database] url`. `cargo run -- check --settings` lista cada clave y de dónde sale su valor, con los secretos ocultos.
+
 Los archivos de dev y staging definen un `[brand] tagline` de `dev` y `staging`. Para cambiarlo, o para poner tu propio nombre y logo, consulta [Marca](operator-console.md#marca) y las [claves de configuración](admin.md#configuración-admin-y-brand) del admin.
 
 ### Ajustes que no surten efecto por sí solos
 
-No todas las claves las lee el framework. `Cli::with_settings` avisa al arrancar cuando se define una del primer grupo.
+No todas las claves las lee el framework. `Cli::with_settings` avisa al arrancar, una vez por clave, cuando se define una del primer grupo.
 
 | Clave | Estado |
 |---|---|
 | `[sso]` (todas las claves) | Aún sin efecto. Configura el SSO del admin en la UI del admin. |
 | `[auth.jwt] issuer`, `audience` | Aún sin efecto. |
 | `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Aún sin efecto; solo las lee `check --deploy`. |
-| `[database] url` | No se usa para conectar: cada pool lee la variable de entorno `DATABASE_URL`. |
 | `[audit] retention_days` | Nada poda en base a ella; programa `audit-cleanup --days <N>`. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, TTLs de `[auth.jwt]`, `[admin]` | Cableadas por el usuario: solo las lee el constructor al que llamas (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
