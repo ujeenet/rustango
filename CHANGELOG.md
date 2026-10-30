@@ -48,6 +48,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The bare admin login page links the admin favicon.
 - `translate_plural`, `ngettext` and `ngettext_fmt` pick the plural form by the rule of the locale the text comes from; untranslated `ngettext` source strings use the default locale's rule.
 - `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
+- A Postgres database-mode purge no longer refuses because an autovacuum worker is in the tenant database; the drop ends it.
+- Boot DDL (`AppBuilder::bootstrap`, the `ensure_*` table helpers) runs a statement again once after a deadlock, which racing replicas can hit on MySQL.
 
 ### Deprecated
 
