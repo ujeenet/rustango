@@ -580,3 +580,54 @@ async fn a_pinned_user_key_never_widens() {
         .unwrap();
     assert!(empty(id, root).await, "a superuser's scoped key widened");
 }
+
+/// A request with a user-owned key reads the agent and owner rows once.
+#[tokio::test]
+async fn a_user_key_request_reads_each_row_once() {
+    let pool = world().await;
+    let uid = make_user(&pool, "uksq_carol").await;
+    set_user_perm_pool(uid, "uksq.count", true, &pool)
+        .await
+        .expect("perm");
+    create_skill_pool(&pool, "uksq_count", "Count", "", "", &["coach_log".into()])
+        .await
+        .expect("skill");
+    map_skill_to_permission_pool(&pool, "uksq_count", "uksq.count")
+        .await
+        .expect("map");
+    let issued = create_user_key_pool(&pool, uid, "counted", &[])
+        .await
+        .expect("key");
+    // The first call runs the hash check and fills the raw-key cache.
+    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, "acme", &issued.token);
+    verify().await.expect("verify").expect("valid");
+    // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
+    let agent = rustango::test_assertions::assert_num_queries(6, verify())
+        .await
+        .expect("verify")
+        .expect("valid");
+    assert_eq!(agent.skills, vec!["uksq_count"]);
+    assert_eq!(agent.tools, vec!["coach_log"]);
+}
+
+/// A superuser's unscoped key reads every skill in the same join.
+#[tokio::test]
+async fn a_superuser_key_request_skips_the_permission_lookups() {
+    let pool = world().await;
+    let uid = make_superuser(&pool, "uksq_root").await;
+    create_skill_pool(&pool, "uksq_all", "All", "", "", &["coach_log".into()])
+        .await
+        .expect("skill");
+    let issued = create_user_key_pool(&pool, uid, "root", &[])
+        .await
+        .expect("key");
+    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, "acme", &issued.token);
+    verify().await.expect("verify").expect("valid");
+    // Agent, owner, pinned grants, skills with tools.
+    let agent = rustango::test_assertions::assert_num_queries(4, verify())
+        .await
+        .expect("verify")
+        .expect("valid");
+    assert_eq!(agent.skills, vec!["uksq_all"]);
+    assert_eq!(agent.tools, vec!["coach_log"]);
+}

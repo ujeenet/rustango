@@ -11055,8 +11055,9 @@ struct FieldAttrs {
     /// `#[rustango(validators = "email,url")]` — the
     /// model-level validator chain. Comma-separated names that
     /// dispatch to the `validators::*` family in `validate_value`.
-    /// Empty by default; fires on every typed INSERT/UPDATE.
-    validators: Vec<String>,
+    /// Empty by default; fires on every typed INSERT/UPDATE. Each is
+    /// spanned on the attribute string, so an unknown name errors there.
+    validators: Vec<syn::Ident>,
 }
 
 /// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
@@ -11445,8 +11446,14 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
                     .split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
+                    .map(|name| {
+                        let mut ident = syn::parse_str::<syn::Ident>(name).map_err(|_| {
+                            syn::Error::new(s.span(), format!("unknown validator `{name}`"))
+                        })?;
+                        ident.set_span(s.span());
+                        Ok(ident)
+                    })
+                    .collect::<syn::Result<_>>()?;
                 if out.validators.is_empty() {
                     return Err(syn::Error::new(
                         s.span(),
@@ -11894,7 +11901,8 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let editable = attrs.editable;
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
-    let validators_lits: Vec<&str> = attrs.validators.iter().map(String::as_str).collect();
+    // A path per name: one the runtime does not know fails to resolve.
+    let validators = &attrs.validators;
     if attrs.on_delete.is_some() && attrs.fk.is_none() && attrs.o2o.is_none() && fk_inner.is_none()
     {
         return Err(syn::Error::new_spanned(
@@ -11958,7 +11966,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             blank: #blank,
             case_insensitive: #case_insensitive,
             fk_on_delete: #fk_on_delete,
-            validators: &[ #(#validators_lits),* ],
+            validators: &[ #( #root::core::__validator_names::#validators ),* ],
             cast: #cast,
         })
     }};
@@ -12064,6 +12072,13 @@ fn check_bound_compatibility(
             "`choices` is only valid on `String` fields (or `Option<String>`) — \
              integer-valued enumerations should be modeled with a Rust enum and \
              custom (de)serializer for now",
+        ));
+    }
+    // They run only on string values, so elsewhere they would never fire.
+    if !attrs.validators.is_empty() && kind != DetectedKind::String {
+        return Err(syn::Error::new_spanned(
+            field,
+            "`validators` is only valid on `String` fields (or `Option<String>`)",
         ));
     }
     if (attrs.min.is_some() || attrs.max.is_some()) && !kind.is_integer() {

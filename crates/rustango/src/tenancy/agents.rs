@@ -622,35 +622,81 @@ pub async fn resolve_agent_grants_pool(
     pool: &Pool,
     agent_id: i64,
 ) -> Result<(Vec<String>, Vec<String>), AgentError> {
+    let granted = granted_skill_ids(pool, agent_id).await?;
+    skills_and_tools(pool, Skills::Only(granted)).await
+}
+
+/// The skill ids granted to `agent_id`, deduplicated.
+async fn granted_skill_ids(pool: &Pool, agent_id: i64) -> Result<Vec<i64>, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    let grants: Vec<AgentGrant> = AgentGrant::objects()
+    let mut ids = Vec::new();
+    for g in AgentGrant::objects()
         .where_(AgentGrant::agent_id.eq(agent_id))
         .fetch(pool)
-        .await?;
-    let skill_ids: Vec<i64> = grants.iter().map(|g| g.skill_id).collect();
-    if skill_ids.is_empty() {
-        return Ok((vec![], vec![]));
-    }
-
-    let skills: Vec<AgentSkill> = AgentSkill::objects()
-        .where_(AgentSkill::id.is_in(skill_ids.clone()))
-        .fetch(pool)
-        .await?;
-    let skill_codenames: Vec<String> = skills.into_iter().map(|s| s.codename).collect();
-
-    let skill_tools: Vec<AgentSkillTool> = AgentSkillTool::objects()
-        .where_(AgentSkillTool::skill_id.is_in(skill_ids))
-        .fetch(pool)
-        .await?;
-    let mut tools: Vec<String> = Vec::new();
-    for st in skill_tools {
-        if !tools.contains(&st.tool_name) {
-            tools.push(st.tool_name);
+        .await?
+    {
+        if !ids.contains(&g.skill_id) {
+            ids.push(g.skill_id);
         }
     }
-    Ok((skill_codenames, tools))
+    Ok(ids)
+}
+
+/// Which skills [`skills_and_tools`] reads.
+enum Skills {
+    All,
+    Only(Vec<i64>),
+}
+
+/// `(skill codenames, deduped tool names)` for `which`, in one query:
+/// skills LEFT JOIN their tools, so a skill with no tools still counts.
+async fn skills_and_tools(
+    pool: &Pool,
+    which: Skills,
+) -> Result<(Vec<String>, Vec<String>), AgentError> {
+    use crate::core::{
+        joins::aliased, Column as _, Join, JoinKind, Model as _, Op, SqlValue, WhereExpr,
+    };
+
+    let mut qs = AgentSkill::objects().join(Join {
+        target: AgentSkillTool::SCHEMA,
+        alias: "t",
+        kind: JoinKind::Left,
+        on: WhereExpr::ExprCompare {
+            lhs: aliased("t", "skill_id"),
+            op: Op::Eq,
+            rhs: aliased(AgentSkill::SCHEMA.table, "id"),
+        },
+        project: vec!["tool_name"],
+    });
+    if let Skills::Only(ids) = which {
+        if ids.is_empty() {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        qs = qs.where_(AgentSkill::id.is_in(ids));
+    }
+    let rows = qs
+        .order_by(&[("id", false)])
+        .values_list(&["codename"])
+        .fetch(pool)
+        .await?;
+    let (mut skills, mut tools) = (Vec::new(), Vec::new());
+    for row in rows {
+        let mut cells = row.into_iter();
+        if let Some(SqlValue::String(codename)) = cells.next() {
+            if !skills.contains(&codename) {
+                skills.push(codename);
+            }
+        }
+        if let Some(SqlValue::String(tool)) = cells.next() {
+            if !tools.contains(&tool) {
+                tools.push(tool);
+            }
+        }
+    }
+    Ok((skills, tools))
 }
 
 // =========================================== permission-driven capabilities
@@ -738,31 +784,25 @@ pub async fn unmap_skill_from_permission_pool(
     Ok(())
 }
 
-/// The skill ids the owning user is **entitled** to. `Ok(None)` means a
-/// superuser (entitled to every skill); `Ok(Some(ids))` is the set of skills
-/// mapped to a permission the user currently holds (may be empty).
+/// The skill ids `owner` is **entitled** to. `Ok(None)` means a superuser
+/// (entitled to every skill); `Ok(Some(ids))` is the set of skills mapped
+/// to a permission the owner currently holds (may be empty). `owner` must
+/// be active: the caller read the row in this request.
 ///
 /// # Errors
 /// Propagates DB / permission-lookup errors.
 async fn user_entitled_skill_ids(
     pool: &Pool,
-    user_id: i64,
+    owner: &crate::tenancy::User,
 ) -> Result<Option<Vec<i64>>, AgentError> {
     use crate::core::Column as _;
     use crate::sql::FetcherPool as _;
 
-    let is_superuser = crate::tenancy::User::objects()
-        .filter("id", user_id)
-        .limit(1)
-        .fetch(pool)
-        .await?
-        .into_iter()
-        .next()
-        .is_some_and(|u| u.is_superuser);
-    if is_superuser {
+    if owner.is_superuser {
         return Ok(None);
     }
-    let perms = super::user_permissions_pool(user_id, pool).await?;
+    let uid = owner.id.get().copied().unwrap_or_default();
+    let perms = super::permissions::permissions_of_active_user(uid, pool).await?;
     if perms.is_empty() {
         return Ok(Some(Vec::new()));
     }
@@ -801,35 +841,29 @@ pub async fn resolve_user_agent_grants_pool(
     agent_id: i64,
     user_id: i64,
 ) -> Result<(Vec<String>, Vec<String>), AgentError> {
-    use crate::core::Column as _;
-    use crate::sql::FetcherPool as _;
-
-    let Some(agent) = Agent::objects()
-        .filter("id", agent_id)
-        .limit(1)
-        .fetch(pool)
-        .await?
-        .into_iter()
-        .next()
-    else {
+    let Some(agent) = fetch_agent(pool, agent_id).await? else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let entitled = user_entitled_skill_ids(pool, user_id).await?;
-
-    // Skills pinned onto THIS key at creation (the per-key scope).
-    let pinned: Vec<i64> = {
-        let grants: Vec<AgentGrant> = AgentGrant::objects()
-            .filter("agent_id", agent_id)
-            .fetch(pool)
-            .await?;
-        let mut ids = Vec::new();
-        for g in grants {
-            if !ids.contains(&g.skill_id) {
-                ids.push(g.skill_id);
-            }
-        }
-        ids
+    let Some(owner) = fetch_user(pool, user_id).await? else {
+        return Ok((Vec::new(), Vec::new()));
     };
+    user_key_grants(pool, &agent, &owner).await
+}
+
+/// [`resolve_user_agent_grants_pool`] on rows the caller already read.
+/// An inactive owner gets nothing.
+async fn user_key_grants(
+    pool: &Pool,
+    agent: &Agent,
+    owner: &crate::tenancy::User,
+) -> Result<(Vec<String>, Vec<String>), AgentError> {
+    if !owner.active {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let agent_id = agent.id.get().copied().unwrap_or_default();
+    let entitled = user_entitled_skill_ids(pool, owner).await?;
+    // Skills pinned onto THIS key at creation (the per-key scope).
+    let pinned = granted_skill_ids(pool, agent_id).await?;
 
     // Effective skill ids: pinned∩entitled (scoped) or the full entitlement.
     // A key with grants is scoped; a pre-#2537 one gets the flag now.
@@ -837,39 +871,37 @@ pub async fn resolve_user_agent_grants_pool(
         pin_user_key(pool, agent_id).await?;
     }
     let unscoped = pinned.is_empty() && !agent.is_scoped_key();
-    let effective: Vec<i64> = match (&entitled, unscoped) {
-        (None, true) => AgentSkill::objects()
-            .fetch(pool)
-            .await?
-            .into_iter()
-            .filter_map(|s| s.id.get().copied())
-            .collect(), // superuser, unscoped → every skill
-        (None, false) => pinned, // superuser, scoped → the pinned skills
-        (Some(ent), true) => ent.clone(), // non-superuser, unscoped → entitled
-        (Some(ent), false) => pinned.into_iter().filter(|id| ent.contains(id)).collect(),
+    let which = match (entitled, unscoped) {
+        (None, true) => Skills::All, // superuser, unscoped → every skill
+        (None, false) => Skills::Only(pinned), // superuser, scoped → the pinned skills
+        (Some(ent), true) => Skills::Only(ent), // non-superuser, unscoped → entitled
+        (Some(ent), false) => {
+            Skills::Only(pinned.into_iter().filter(|id| ent.contains(id)).collect())
+        }
     };
-    if effective.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
-    }
+    skills_and_tools(pool, which).await
+}
 
-    let skills: Vec<String> = AgentSkill::objects()
-        .where_(AgentSkill::id.is_in(effective.clone()))
+async fn fetch_agent(pool: &Pool, agent_id: i64) -> Result<Option<Agent>, AgentError> {
+    use crate::sql::FetcherPool as _;
+    Ok(Agent::objects()
+        .filter("id", agent_id)
+        .limit(1)
         .fetch(pool)
         .await?
         .into_iter()
-        .map(|s| s.codename)
-        .collect();
-    let mut tools: Vec<String> = Vec::new();
-    for st in AgentSkillTool::objects()
-        .where_(AgentSkillTool::skill_id.is_in(effective))
+        .next())
+}
+
+async fn fetch_user(pool: &Pool, user_id: i64) -> Result<Option<crate::tenancy::User>, AgentError> {
+    use crate::sql::FetcherPool as _;
+    Ok(crate::tenancy::User::objects()
+        .filter("id", user_id)
+        .limit(1)
         .fetch(pool)
         .await?
-    {
-        if !tools.contains(&st.tool_name) {
-            tools.push(st.tool_name);
-        }
-    }
-    Ok((skills, tools))
+        .into_iter()
+        .next())
 }
 
 // ================================================================ user keys
@@ -933,7 +965,11 @@ pub async fn create_user_key_pool(
     // request fails before any key row is written.
     let mut skill_ids: Vec<i64> = Vec::new();
     if !skills.is_empty() {
-        let entitled = user_entitled_skill_ids(pool, user_id).await?;
+        // A missing or inactive owner is entitled to nothing.
+        let entitled = match fetch_user(pool, user_id).await?.filter(|u| u.active) {
+            Some(owner) => user_entitled_skill_ids(pool, &owner).await?,
+            None => Some(Vec::new()),
+        };
         for codename in skills {
             let skill = AgentSkill::objects()
                 .where_(AgentSkill::codename.eq(codename.clone()))
@@ -1166,19 +1202,58 @@ pub async fn agent_token_still_valid_pool(
     user_id: Option<i64>,
     secret_prefix: &str,
 ) -> Result<bool, AgentError> {
-    let Some(agent) = agent_auth_state_pool(pool, agent_id).await? else {
-        return Ok(false);
-    };
-    if !agent.active || agent.user_id != user_id || agent.secret_prefix != secret_prefix {
-        return Ok(false);
+    Ok(LiveAgent::load(pool, agent_id).await?.is_some_and(|live| {
+        live.agent.user_id == user_id && live.agent.secret_prefix == secret_prefix
+    }))
+}
+
+/// An agent that passed the request-time checks, with its owner's row.
+///
+/// Only [`LiveAgent::load`] builds one: the agent row is active and, for
+/// a user-owned key, its owner exists and is active. Grants resolve from
+/// these rows, so a request reads each of them once. Never cache one.
+pub(crate) struct LiveAgent {
+    pub(crate) agent: Agent,
+    owner: Option<crate::tenancy::User>,
+}
+
+impl LiveAgent {
+    /// Read the agent and its owner; `None` when either check fails.
+    ///
+    /// # Errors
+    /// Propagates DB errors.
+    pub(crate) async fn load(pool: &Pool, agent_id: i64) -> Result<Option<Self>, AgentError> {
+        let Some(agent) = fetch_agent(pool, agent_id).await?.filter(|a| a.active) else {
+            return Ok(None);
+        };
+        let owner = match agent.user_id {
+            None => None,
+            Some(uid) => match fetch_user(pool, uid).await? {
+                Some(user) if user.active => Some(user),
+                _ => return Ok(None),
+            },
+        };
+        Ok(Some(Self { agent, owner }))
     }
 
-    if let Some(uid) = user_id {
-        if !agent_owner_is_active_pool(pool, uid).await? {
-            return Ok(false);
+    pub(crate) fn id(&self) -> i64 {
+        self.agent.id.get().copied().unwrap_or_default()
+    }
+
+    /// `(skill codenames, tools)`: the owner's entitlement for a user
+    /// key, the agent's own grants for a machine agent.
+    ///
+    /// # Errors
+    /// Propagates DB / permission-lookup errors.
+    pub(crate) async fn grants(
+        &self,
+        pool: &Pool,
+    ) -> Result<(Vec<String>, Vec<String>), AgentError> {
+        match &self.owner {
+            Some(owner) => user_key_grants(pool, &self.agent, owner).await,
+            None => resolve_agent_grants_pool(pool, self.id()).await,
         }
     }
-    Ok(true)
 }
 
 // ====================================================== resources (Slice 5)
