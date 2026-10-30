@@ -17,10 +17,12 @@
 //!   the process is alive.
 //! - **`GET /ready`** pings the database with `SELECT 1` and runs any
 //!   probes you added. It returns `200 OK` only if all of them pass,
-//!   and `503` otherwise.
+//!   and `503` otherwise. When every pool connection is busy, the
+//!   database counts as up and the ping is skipped.
 //!
 //! Each probe has its own timeout, 5 seconds by default, so one slow
-//! service cannot hold up the whole handler. The response reports
+//! service cannot hold up the whole handler. Set [`HealthRouter::timeout`]
+//! below your orchestrator's probe timeout. The response reports
 //! each probe's latency, so you can see it getting slower over time.
 //!
 //! ## Custom checks
@@ -63,6 +65,7 @@
 //! ```
 //!
 //! [`HealthRouter::check`]: crate::health::HealthRouter::check
+//! [`HealthRouter::timeout`]: crate::health::HealthRouter::timeout
 //! [`HealthRouter::show_errors`]: crate::health::HealthRouter::show_errors
 //! [`HealthRouter::tcp_probe`]: crate::health::HealthRouter::tcp_probe
 //! [`HealthRouter::cache_probe`]: crate::health::HealthRouter::cache_probe
@@ -136,7 +139,8 @@ impl HealthRouter {
     }
 
     /// Change the per-check timeout. A lower value reports failure
-    /// sooner; a higher one tolerates a slow service.
+    /// sooner; a higher one tolerates a slow service. Keep the total
+    /// below the probe timeout, which is 1 second on Kubernetes by default.
     #[must_use]
     pub fn timeout(mut self, t: Duration) -> Self {
         self.per_check_timeout = t;
@@ -326,6 +330,11 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
     if state.include_db_probe {
         let pool = state.pool.clone();
         let outcome = run_with_timeout(state.per_check_timeout, None, async move {
+            // Every connection busy serving means the database answers:
+            // queuing behind them would fail every replica in a spike.
+            if pool.is_saturated() {
+                return Ok(());
+            }
             // Postgres, MySQL and SQLite all accept `SELECT 1`, and
             // the Pool enum dispatches it, so no per-dialect SQL.
             crate::sql::raw_execute_pool(&pool, "SELECT 1", Vec::new())
@@ -583,6 +592,32 @@ mod tests {
             .unwrap();
         let v = body_json(resp).await;
         assert!(v["checks"].get("database").is_none());
+    }
+
+    /// Every connection busy serving is ready, not a probe queued past its timeout.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn ready_when_every_connection_is_busy() {
+        let sqlite = crate::sql::sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let app = HealthRouter::new(Pool::Sqlite(sqlite.clone()))
+            .timeout(Duration::from_millis(200))
+            .into_router();
+        let ready = || {
+            app.clone().oneshot(
+                Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        assert_eq!(ready().await.unwrap().status(), StatusCode::OK);
+        let _busy = sqlite.acquire().await.unwrap();
+        let resp = ready().await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

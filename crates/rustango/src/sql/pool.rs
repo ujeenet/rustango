@@ -488,6 +488,23 @@ impl Pool {
         }
     }
 
+    /// Every connection is open and checked out: the next query waits.
+    #[cfg(feature = "_http_layers")]
+    #[must_use]
+    pub(crate) fn is_saturated(&self) -> bool {
+        fn full<DB: sqlx::Database>(p: &sqlx::Pool<DB>) -> bool {
+            p.num_idle() == 0 && p.size() >= p.options().get_max_connections()
+        }
+        match self {
+            #[cfg(feature = "postgres")]
+            Pool::Postgres(p) => full(p),
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => full(p),
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => full(p),
+        }
+    }
+
     /// The backend's short name, for logs and `manage` output. The
     /// same as `pool.dialect().name()`.
     #[must_use]

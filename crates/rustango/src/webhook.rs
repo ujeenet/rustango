@@ -165,7 +165,7 @@ pub fn sign_delivery(
 /// Check a delivery's v2 signature, and that its timestamp is within
 /// `max_age` of now. Drop repeated `X-Webhook-Id`s seen within `max_age`
 /// to refuse replays. Retries reuse the dispatch timestamp, so `max_age`
-/// must cover queue backlog plus the retry window (about two minutes).
+/// must cover queue backlog plus the retry window (about four minutes).
 ///
 /// ```
 /// use rustango::webhook::{sign_delivery, verify_delivery, DeliveryHeaders, SignatureFormat};
