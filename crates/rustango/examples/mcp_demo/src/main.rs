@@ -12,6 +12,8 @@
 //! ```bash
 //! cargo run            # → listens on http://localhost:8090/mcp
 //! ```
+//! Tokens are signed with `MCP_DEMO_JWT_SECRET` (32+ bytes) when set, else
+//! a random key, so they last until the process exits.
 //! then mint a token and call the tool:
 //! ```bash
 //! TOKEN=$(curl -s http://localhost:8090/mcp/token \
@@ -139,6 +141,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Step 4: seed an agent + a skill that grants `add` ───────────────────
     let tenant_pool: Pool = pools.scoped_pool_dyn(&org).await?;
+    // The fresh tenant DB has no tables yet; create the framework ones.
+    rustango::migrate::apply_all_pool(&tenant_pool).await?;
     let issued = create_agent_pool(&tenant_pool, AGENT_NAME).await?;
     create_skill_pool(
         &tenant_pool,
