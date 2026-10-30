@@ -41,6 +41,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `LocalStorage::url` and `StorageRegistry::cdn_url` percent-encode the key, as the S3 and Azure disks do: `#`, `?` and spaces no longer break the link.
 - On `LocalStorage` a directory key is not an object: `exists` is false, `load` is `NotFound`, `delete` is a no-op, and a save to it says the key names a directory.
 - A webhook subscription header replaces the default `Content-Type` or `User-Agent` instead of sending a second one; `X-Webhook-Id`, `-Event` and `-Signature` set by a subscription are ignored.
+- Examples: `admin_demo` uses `sql::Pool`, `save_pool` and an ORM update for its bulk actions; `orm_cookbook` builds and passes on SQLite and MySQL; both READMEs create their database.
+- Examples: `mcp_demo`, `sqlite_tenant_demo` and `sqlite_app_demo` no longer hold literal secrets or bind `0.0.0.0` by default; `sqlite_app_demo` returns a 500 instead of panicking; `mcp_demo` creates its tenant tables, so it runs.
+- Examples: `auth_demo` ships its migrations and a `.env.example`.
 
 ## [0.61.13] — 2026-10-30
 
