@@ -1978,6 +1978,65 @@ async fn downgrade_covers_app_folders(pool: &Pool) {
     assert!(!applied.contains("0002_blog") && !applied.contains("0003_blog"));
 }
 
+/// `downgrade` follows the ledger's apply order, not folder and name order;
+/// a target rolls back its own folder and leaves other folders' later files.
+async fn downgrade_follows_apply_order(pool: &Pool) {
+    use rustango::migrate::MigrationScope::Registry;
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("proj/migrations");
+    let app = env.dir("proj/blog/migrations");
+    scoped_migration(&dir, "0001_registry", "SELECT 1", Registry);
+    scoped_migration(&app, "0002_blog_registry", "SELECT 1", Registry);
+    migration(&dir, "0001_tenant", "SELECT 1");
+    migration(&app, "0002_blog", "SELECT 1");
+    migration(&app, "0003_blog", "SELECT 1");
+    let mut org = env.own_tenant("dgorder").await;
+    org.save_pool(&env.registry).await.expect("insert org");
+    env.run(&dir, &["migrate"]).await.expect("migrate");
+    // Applied later, yet sorting before app files or the target.
+    scoped_migration(&dir, "0005_registry", "SELECT 1", Registry);
+    migration(&dir, "0004_tenant", "SELECT 1");
+    migration(&app, "0001_blog_early", "SELECT 1");
+    env.run(&dir, &["migrate"]).await.expect("migrate again");
+
+    let out = env.run_out(&dir, &["downgrade"]).await.expect("downgrade");
+    assert!(out.contains("registry: rolled back 0005_registry"), "{out}");
+    let registry = rustango::migrate::applied_set_pool(&env.registry)
+        .await
+        .expect("registry ledger");
+    assert!(registry.contains("0002_blog_registry"), "{out}");
+
+    let slug = org.slug.clone();
+    let out = env
+        .run_out(&dir, &["downgrade", "0002_blog", "--tenant", &slug])
+        .await
+        .expect("downgrade to a target");
+    assert!(
+        out.contains("rolled back 0001_blog_early, 0003_blog"),
+        "{out}"
+    );
+    assert!(
+        out.contains("left applied") && out.contains("0004_tenant"),
+        "{out}"
+    );
+    let applied = env.applied(&org).await;
+    assert!(
+        applied.contains("0004_tenant") && applied.contains("0002_blog"),
+        "{out}"
+    );
+
+    let out = env
+        .run_out(&dir, &["downgrade", "--tenant", &slug])
+        .await
+        .expect("downgrade one");
+    assert!(out.contains("rolled back 0004_tenant"), "{out}");
+    let applied = env.applied(&org).await;
+    assert!(
+        applied.contains("0002_blog") && !applied.contains("0004_tenant"),
+        "{out}"
+    );
+}
+
 /// One run applies the system chain once per database, however many app
 /// folders the project has.
 async fn the_system_chain_runs_once_per_database(pool: &Pool) {
@@ -2213,6 +2272,7 @@ tri_dialect_test! {
         migrate_target_before_a_legacy_framework_table,
         a_target_in_two_folders_is_refused,
         downgrade_covers_app_folders,
+        downgrade_follows_apply_order,
         the_system_chain_runs_once_per_database,
         a_failing_app_folder_is_named,
         check_names_pending_registry_system_steps,

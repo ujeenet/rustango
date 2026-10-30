@@ -80,7 +80,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Generate a migration from the model diff |
 | `migrate [target]` / `--dry-run` / `--squash` | Apply pending migrations |
-| `downgrade [N \| <target>]` | Roll back the last N migrations, or those after `<target>` (tenant scope) |
+| `downgrade [N \| <target>]` | Roll back the last N applied migrations, or those of `<target>`'s folder applied after it (tenant scope) |
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
 | `forget-pending <name>` | Delete an un-applied migration JSON no later file builds on |

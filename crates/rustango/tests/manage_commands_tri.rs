@@ -559,6 +559,9 @@ async fn clearsessions_on_a_schema_qualified_table(pool: &Pool) {
     seed_expired(pool, &table).await;
     let out = cache_verb(pool, "clearsessions", &name).await;
     assert!(out.contains("purged 1 expired row(s)"), "{out}");
+    // A schema that does not exist has no table, on every backend.
+    let out = cache_verb(pool, "clearsessions", &format!("cc_no_schema.{table}")).await;
+    assert!(out.contains("nothing to clear"), "{out}");
     rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
         .await
         .unwrap();
