@@ -5,7 +5,7 @@
 //! `FixedOffset`:
 //!
 //! ```ignore
-//! use rustango::i18n::timezone::{activate, current_offset, localtime};
+//! use rustango::i18n::timezone::{current_offset, localtime, with_offset};
 //! use chrono::{Duration, FixedOffset, Utc};
 //!
 //! // Per-request: pull the user's TZ offset from a cookie / settings row.
@@ -30,7 +30,7 @@
 //! What's NOT here: DST transitions ("America/New_York switches from
 //! -05 to -04 in March"). For full IANA support, parse the user's
 //! `Tz` via `chrono-tz` at request time and pass `tz.offset_from_utc_datetime(...)`
-//! into [`activate`] / [`with_offset`]. The session-cookie + middleware
+//! into [`with_offset`]. The session-cookie + middleware
 //! shape in this file is offset-aware and the chrono-tz layer is
 //! strictly additive.
 //!
@@ -57,7 +57,7 @@ tokio::task_local! {
 }
 
 /// The active timezone for the current task. Returns `UTC` when no
-/// override has been installed via [`with_offset`] or [`activate`].
+/// override has been installed via [`with_offset`].
 ///
 /// **Pure read** — never mutates the task-local. Use as the
 /// "what TZ should I render in?" lookup inside handlers / template
@@ -88,22 +88,20 @@ where
     ACTIVE_TZ.scope(offset, future).await
 }
 
-/// **DO NOT USE in production code.** This is a process-global
-/// override that affects every future task on every thread. It
-/// exists for tests and one-off scripts that want a fixed offset for
-/// the whole process.
+/// Does nothing and returns `false`: the active offset is never set
+/// process-wide, where it would leak across requests and tenants.
+/// Use [`with_offset`] (task-scoped).
 ///
-/// For per-request overrides, use [`with_offset`] (task-scoped).
-///
-/// Returns `true` if the global was installed for the first time,
-/// `false` if a fallback had already been set (idempotent — first
-/// call wins, like `OnceLock`).
+/// ```compile_fail
+/// #![deny(deprecated)]
+/// let utc = chrono::FixedOffset::east_opt(0).unwrap();
+/// rustango::i18n::timezone::activate(utc);
+/// ```
+#[deprecated(
+    since = "0.61.14",
+    note = "a no-op; scope the offset with `i18n::timezone::with_offset`"
+)]
 pub fn activate(_offset: FixedOffset) -> bool {
-    // Reserved for a future process-global fallback layer (a
-    // `OnceLock<FixedOffset>` consulted by `current_offset` when
-    // no task-local is set). The current shape uses task-local
-    // only — keeping this function as a no-op so the public API
-    // is stable when the global fallback lands.
     false
 }
 

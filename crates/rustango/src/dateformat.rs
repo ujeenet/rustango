@@ -1,6 +1,6 @@
 //! Template-style date format codes.
 //!
-//! Render a `DateTime<Utc>`, `NaiveDate` or `NaiveTime` with the
+//! Render a `DateTime` (any offset), `NaiveDate` or `NaiveTime` with the
 //! format string you would write in a template as
 //! `{{ obj|date:"Y-m-d H:i" }}`. The codes are single characters and
 //! are not the same as strftime's. The common ones:
@@ -50,16 +50,28 @@
 //!
 //! [`format_datetime`]: crate::dateformat::format_datetime
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Offset, TimeZone, Timelike};
 
-/// Format a `DateTime<Utc>` with the single-character codes;
-/// the module doc has the table.
+/// Format a `DateTime` with the single-character codes;
+/// the module doc has the table. Fields and the zone codes
+/// (`O`, `T`, `e`, `Z`) follow the value's own offset.
 ///
 /// A backslash makes the next character literal, so
 /// `r"\Y\e\a\r: Y"` gives `"Year: 2026"`. Any character
 /// that is not a code passes through unchanged.
 #[must_use]
-pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
+pub fn format_datetime<Tz: TimeZone>(dt: &DateTime<Tz>, format_string: &str) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let secs = dt.offset().fix().local_minus_utc();
+    let sign = if secs < 0 { '-' } else { '+' };
+    let (hh, mm) = (secs.abs() / 3600, secs.abs() % 3600 / 60);
+    let zone = if secs == 0 {
+        "UTC".to_owned()
+    } else {
+        format!("{sign}{hh:02}:{mm:02}")
+    };
     let mut out = String::with_capacity(format_string.len() * 2);
     let mut chars = format_string.chars();
     while let Some(c) = chars.next() {
@@ -104,12 +116,10 @@ pub fn format_datetime(dt: &DateTime<Utc>, format_string: &str) -> String {
             'r' => out.push_str(&dt.to_rfc2822()),
             'S' => out.push_str(day_suffix(dt.day())),
             'L' => out.push(if is_leap(dt.year()) { '1' } else { '0' }),
-            // The input is always UTC, so the zone codes are fixed.
-            'O' => out.push_str("+0000"),
-            'T' => out.push_str("UTC"),
-            'Z' => out.push_str("0"),
-            'e' => out.push_str("UTC"),
-            'I' => out.push('0'), // DST flag, always 0 for UTC
+            'O' => out.push_str(&format!("{sign}{hh:02}{mm:02}")),
+            'T' | 'e' => out.push_str(&zone),
+            'Z' => out.push_str(&secs.to_string()),
+            'I' => out.push('0'), // DST flag: a fixed offset has none
             // Microseconds, 6 digits.
             'u' => out.push_str(&format!("{:06}", dt.nanosecond() / 1000)),
             'P' => out.push_str(&fmt_pretty_meridiem(dt.hour(), dt.minute())),
@@ -168,12 +178,14 @@ pub fn time_format(time: &NaiveTime, format_string: &str) -> String {
 mod tera_filters {
     use super::{format_date, format_datetime, time_format};
     use crate::dateparse::{parse_date, parse_datetime, parse_time};
+    use crate::i18n::timezone::localtime;
     use std::collections::HashMap;
     use tera::{to_value, Tera, Value};
 
     /// Add date and time filters to a Tera instance.
     /// Each one parses its ISO 8601 string input, then formats it
-    /// with the codes in [`format_datetime`]. A value that
+    /// with the codes in [`format_datetime`]. A datetime renders in the
+    /// active timezone (`i18n::timezone`, UTC by default). A value that
     /// does not parse is passed through unchanged.
     ///
     /// Two filters are added: `dateformat` for a date or datetime,
@@ -217,7 +229,7 @@ mod tera_filters {
             _ => return Ok(value.clone()),
         };
         if let Some(dt) = parse_datetime(s) {
-            return Ok(to_value(format_datetime(&dt, &fmt))?);
+            return Ok(to_value(format_datetime(&localtime(dt), &fmt))?);
         }
         if let Some(d) = parse_date(s) {
             return Ok(to_value(format_date(&d, &fmt))?);
@@ -235,7 +247,7 @@ mod tera_filters {
             return Ok(to_value(time_format(&t, &fmt))?);
         }
         if let Some(dt) = parse_datetime(s) {
-            return Ok(to_value(time_format(&dt.time(), &fmt))?);
+            return Ok(to_value(time_format(&localtime(dt).time(), &fmt))?);
         }
         Ok(value.clone())
     }
@@ -292,6 +304,25 @@ mod tera_filters {
         fn timeformat_falls_back_to_full_datetime() {
             let out = timeformat(&json!("2026-06-05T13:05:09Z"), &args("H:i:s")).unwrap();
             assert_eq!(out, json!("13:05:09"));
+        }
+
+        #[tokio::test]
+        async fn filters_render_in_the_active_offset() {
+            use crate::i18n::timezone::with_offset;
+            let ts = json!("2026-06-05T13:05:00+05:00");
+            // No override: UTC.
+            let out = dateformat(&ts, &args("H:i O T")).unwrap();
+            assert_eq!(out, json!("08:05 +0000 UTC"));
+            let west8 = chrono::FixedOffset::west_opt(8 * 3600).unwrap();
+            let (d, t) = with_offset(west8, async {
+                (
+                    dateformat(&ts, &args("Y-m-d H:i O T Z")).unwrap(),
+                    timeformat(&ts, &args("H:i")).unwrap(),
+                )
+            })
+            .await;
+            assert_eq!(d, json!("2026-06-05 00:05 -0800 -08:00 -28800"));
+            assert_eq!(t, json!("00:05"));
         }
 
         #[test]
@@ -434,7 +465,7 @@ fn fmt_12h_minutes(hour: u32, minute: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone as _;
+    use chrono::Utc;
 
     fn dt(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, h, mi, s).unwrap()
@@ -609,6 +640,17 @@ mod tests {
         assert_eq!(format_datetime(&t, "e"), "UTC");
         assert_eq!(format_datetime(&t, "I"), "0");
         assert_eq!(format_datetime(&t, "Z"), "0");
+    }
+
+    #[test]
+    fn format_timezone_codes_for_a_fixed_offset() {
+        let off = chrono::FixedOffset::east_opt(5 * 3600 + 30 * 60).unwrap();
+        let t = dt(2026, 1, 1, 0, 0, 0).with_timezone(&off);
+        assert_eq!(
+            format_datetime(&t, "H:i O T e Z I"),
+            "05:30 +0530 +05:30 +05:30 19800 0"
+        );
+        assert_eq!(format_datetime(&t, "c"), "2026-01-01T05:30:00+05:30");
     }
 
     #[test]
