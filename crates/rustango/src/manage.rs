@@ -374,6 +374,15 @@ impl Cli {
         self
     }
 
+    /// What tenant users sign in with. Beats `[auth] login_field`.
+    /// See [`crate::tenancy::configure_login_field`].
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn login_field(self, field: crate::login_field::LoginField) -> Self {
+        let _ = crate::tenancy::configure_login_field(field);
+        self
+    }
+
     /// Opt in to resolving the tenant from a header (`X-Org`) when no
     /// host matched; off by default (#1856).
     #[cfg(feature = "tenancy")]
@@ -2349,6 +2358,12 @@ fn apply_login_settings(a: &crate::config::AuthSettings) {
             ));
         if !configure_from_settings(lockout) {
             ignored("lockout_*");
+        }
+    }
+    #[cfg(feature = "tenancy")]
+    if let Some(field) = a.login_field {
+        if !crate::tenancy::login::configure_login_field_from_settings(field) {
+            ignored("login_field");
         }
     }
     #[cfg(not(any(feature = "passwords", feature = "admin", feature = "cache")))]

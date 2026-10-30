@@ -152,14 +152,26 @@ where
         args,
         &Spec {
             verb: "create-user",
-            usage: "create-user <slug> <username> [--password <p> | --password-stdin | --generate] [--skip-validation] [--superuser]",
+            usage: "create-user <slug> <username> [--email <e>] [--password <p> | --password-stdin | --generate] [--skip-validation] [--superuser]",
             switches: &["--generate", "--password-stdin", "--skip-validation", "--superuser"],
-            valued: &["--password"],
+            valued: &["--password", "--email"],
             max_positionals: 2,
         },
     )?;
     let slug_arg = parsed.positional(0).cloned();
     let username_arg = parsed.positional(1).cloned();
+    let email = parsed
+        .value("--email")?
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(str::to_owned);
+    // Without `sso` there is no email column to store it in.
+    #[cfg(not(feature = "sso"))]
+    if email.is_some() {
+        return Err(TenancyError::Validation(
+            "create-user: --email needs the `sso` feature".into(),
+        ));
+    }
     let mut is_superuser = parsed.has("--superuser");
     let slug = match slug_arg {
         Some(s) => s,
@@ -222,7 +234,7 @@ where
         username: &username,
         password_hash: hash,
         is_superuser,
-        email: None,
+        email: email.as_deref(),
     }
     .insert(&scoped)
     .await?;
@@ -238,6 +250,15 @@ where
         writeln!(
             w,
             "created user `{username}` in tenant `{slug}` (id {row_id}, superuser={is_superuser})"
+        )?;
+    }
+    let field = crate::tenancy::login_field();
+    writeln!(w, "  signs in with: {}", field.label().to_lowercase())?;
+    #[cfg(feature = "sso")]
+    if field == crate::login_field::LoginField::Email && email.is_none() {
+        writeln!(
+            w,
+            "  note: no --email given, so this user cannot sign in while login_field = \"email\""
         )?;
     }
     if generated {

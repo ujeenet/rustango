@@ -1417,6 +1417,8 @@ jobs:
           --test tenant_admin_state_tri
           --test operator_last_active_tri
           --test basic_auth_cache_tri
+          --test tenant_login_field_tri
+          --test tenant_sign_in_page_sqlite_live
           --test api_key_hmac_tri
           --test system_chain_order_tri
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy,mcp,testkit --test agent_grants_unique_tri
@@ -1726,6 +1728,7 @@ jobs:
           binary(=tenant_admin_state_tri) |
           binary(=operator_last_active_tri) |
           binary(=basic_auth_cache_tri) |
+          binary(=tenant_login_field_tri) |
           binary(=api_key_hmac_tri) |
           binary(=system_chain_order_tri) |
           binary(=agent_grants_unique_tri) |

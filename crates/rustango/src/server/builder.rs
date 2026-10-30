@@ -469,6 +469,13 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// What tenant users sign in with. Process-wide; beats `[auth] login_field`.
+    #[must_use]
+    pub fn login_field(self, field: crate::login_field::LoginField) -> Self {
+        let _ = crate::tenancy::configure_login_field(field);
+        self
+    }
+
     /// The tenant pools this builder will hand the server.
     ///
     /// Read access, mirroring [`TenantPools::pool_config`]. Useful for
@@ -1224,6 +1231,12 @@ impl<DB: Database> Builder<DB> {
     {
         let drain = self.drain_timeout;
         let apex = self.apex.clone();
+        #[cfg(feature = "sso")]
+        if crate::tenancy::login_field() == crate::login_field::LoginField::Email {
+            // Off the boot path: one slow tenant must not delay the bind.
+            let pools = self.pools.clone();
+            tokio::spawn(async move { crate::tenancy::login::warn_email_gaps(&pools).await });
+        }
         let app = self.into_router().await?;
         let listener = crate::shutdown::bind_announced(addr, Some(&apex)).await?;
         let app = tag_listener_port(app, &listener)?;

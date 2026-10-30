@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `[auth] login_field = "email"` (or `Cli::login_field` / `server::Builder::login_field`): tenant users sign in by email, ignoring case, on the sign-in form, HTTP Basic and `/auth/login`. It needs the `sso` feature; the login lock follows the email, and the server warns at boot about users without their own email.
+- Tenancy `create-user --email <e>`.
+
+### Fixed
+
+- The tenant sign-in and password pages name the tenant by its display name instead of its slug; the set-password mail falls back to the slug when the name is empty.
+
 ## [0.61.12] — 2026-10-29
 
 **Breaking:** the auth and admin signal contexts are `#[non_exhaustive]` with a new `tenant` field (build them with `::new(...)`); the doc-hidden `FieldSchemaParts` has a new `cast` field. See UPGRADING.

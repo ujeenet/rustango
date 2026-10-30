@@ -1303,6 +1303,11 @@ Tenants. Das macht ihn zu einem Admin des Tenants (voller Schreibzugriff im
 Tenant-Admin), gewährt aber nie Zugang zur tenant-übergreifenden
 Operator-Konsole.
 
+`--email <e>` speichert die E-Mail des Benutzers (braucht das Feature `sso`).
+Mit `[auth] login_field = "email"` melden sich Benutzer damit an, also geben
+Sie jedem Benutzer eine; der Befehl nennt das Feld, mit dem sich der Benutzer
+anmeldet.
+
 ### `create-role <tenant> <name>`
 
 Erstellt eine Rolle (ein benanntes Bündel von Berechtigungen) innerhalb eines

@@ -698,6 +698,9 @@ pub struct AuthSettings {
     /// How long a login waits for a password-hashing slot before it
     /// answers 503, in milliseconds. Default `5000`.
     pub hash_wait_ms: Option<u64>,
+    /// What tenant users sign in with: `"username"` (default) or
+    /// `"email"` (needs the `sso` feature). Emails must be unique per tenant.
+    pub login_field: Option<crate::login_field::LoginField>,
 }
 
 /// JWT lifetimes. The defaults match

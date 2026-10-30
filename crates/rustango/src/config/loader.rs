@@ -744,6 +744,7 @@ request_timeout_secs = 30
 argon2_memory_kib = 19456
 argon2_iterations = 2
 lockout_threshold = 5
+login_field = "username"
 
 [auth.jwt]
 access_ttl_secs = 900
@@ -776,6 +777,10 @@ retention_days = 90
         assert_eq!(cfg.server.request_timeout_secs, Some(30));
         assert_eq!(cfg.auth.argon2_memory_kib, Some(19456));
         assert_eq!(cfg.auth.lockout_threshold, Some(5));
+        assert_eq!(
+            cfg.auth.login_field,
+            Some(crate::login_field::LoginField::Username)
+        );
         assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
         assert_eq!(cfg.auth.jwt.issuer.as_deref(), Some("myapp"));
         assert_eq!(cfg.brand.name.as_deref(), Some("Acme Operator"));

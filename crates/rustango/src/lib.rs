@@ -925,6 +925,10 @@ pub mod account_lockout;
 #[cfg(any(feature = "cache", feature = "passwords"))]
 pub(crate) mod boot_slot;
 
+/// `[auth] login_field`: username or email for tenant sign-in.
+#[cfg(any(feature = "config", feature = "tenancy"))]
+pub mod login_field;
+
 /// Per-IP, per-account and global limits in front of every built-in
 /// password login. See [`login_throttle::LoginThrottle`].
 #[cfg(feature = "admin")]

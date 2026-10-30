@@ -1078,17 +1078,16 @@ async fn login_form(
     }
     let mut ctx = Context::new();
     ctx.insert("tenant_slug", &org.slug);
-    ctx.insert("tenant_name", &org.display_name);
+    ctx.insert("tenant_name", org.display_label());
     ctx.insert("next", &next.unwrap_or_else(|| "/".into()));
     ctx.insert("error", &error);
+    let field = super::login_field();
+    ctx.insert("login_label", field.label());
+    ctx.insert("login_input_type", field.input_type());
+    ctx.insert("login_autocomplete", field.autocomplete());
     // Per-tenant brand, so even the login page shows the org's logo,
     // favicon, color, theme and name.
-    let brand_name = org
-        .brand_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&org.display_name);
-    ctx.insert("brand_name", brand_name);
+    ctx.insert("brand_name", org.brand_label());
     ctx.insert("brand_tagline", &org.brand_tagline);
     let brand_logo_url = routes.brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
     ctx.insert("brand_logo_url", &brand_logo_url);
@@ -1186,13 +1185,11 @@ async fn login_submit(
     headers: HeaderMap,
     body: Body,
 ) -> Response {
-    use crate::core::Column as _;
     use crate::login_throttle::LoginRefused;
     use crate::signals::auth::{
         meta_from_parts, send_user_logged_in, send_user_login_failed, AuthFailureReason,
         UserLoggedInContext, UserLoginFailedContext,
     };
-    use crate::sql::FetcherPool as _;
 
     let ip = crate::login_throttle::ClientIp::from_parts(extensions, &headers);
     let meta = meta_from_parts(extensions, &headers, Some(routes.login_url.as_str()));
@@ -1234,15 +1231,9 @@ async fn login_submit(
         Err(refused) => return refused.into_response(),
     };
 
-    // v0.38 — auth check via the tri-dialect ORM. The query targets
-    // the tenant's `rustango_users` table on the user-supplied pool;
-    // schema-mode PG handles search_path internally (the admin pool
-    // is built with search_path baked in).
-    let users: Vec<super::auth::User> = match super::auth::User::objects()
-        .where_(super::auth::User::username.eq(form.username.clone()))
-        .fetch(tenant_pool)
-        .await
-    {
+    // The form's `username` carries whatever `[auth] login_field` names.
+    let field = super::login_field();
+    let found = match super::find_login_user(tenant_pool, field, &form.username).await {
         Ok(v) => v,
         Err(e) => {
             warn!(target: "rustango::tenancy::admin", error = %e, "login query");
@@ -1266,7 +1257,7 @@ async fn login_submit(
         };
         async move { send_user_login_failed(ctx).await }
     };
-    let Some(mut user) = users.into_iter().next() else {
+    let Some(mut user) = found else {
         // Audit H1 — this handler does its own lookup+verify (so it
         // wasn't covered by the authenticate_*_pool timing fix); spend a
         // verify's worth of work on the unknown-user path so timing
@@ -1281,7 +1272,7 @@ async fn login_submit(
         fire_failed(AuthFailureReason::InvalidCredentials).await;
         return bad_creds();
     };
-    if let Err(refused) = attempt.resolve(&user.username).await {
+    if let Err(refused) = attempt.resolve(super::login_key(field, &user)).await {
         return refused.into_response();
     }
     let uid: i64 = user.id.get().copied().unwrap_or(0);
@@ -1322,7 +1313,7 @@ async fn login_submit(
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
         user_id: uid,
-        username: form.username.clone(),
+        username: user.username.clone(),
         is_superuser: user.is_superuser,
         request: meta,
         tenant: Some(org.slug.clone()),
@@ -1610,13 +1601,8 @@ fn password_page_ctx(
 ) -> Context {
     let mut ctx = Context::new();
     ctx.insert("tenant_slug", &org.slug);
-    ctx.insert("tenant_name", &org.display_name);
-    let brand_name = org
-        .brand_name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&org.display_name);
-    ctx.insert("brand_name", brand_name);
+    ctx.insert("tenant_name", org.display_label());
+    ctx.insert("brand_name", org.brand_label());
     ctx.insert("brand_tagline", &org.brand_tagline);
     let brand_logo_url = routes.brand_asset_url(&org.slug, org.logo_path.as_deref(), brand_storage);
     ctx.insert("brand_logo_url", &brand_logo_url);
@@ -1742,7 +1728,7 @@ async fn change_password_submit(
         .verify_current_password(
             &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
             ip,
-            &user.username,
+            super::login_key(super::login_field(), &user),
             verify,
         )
         .await
