@@ -65,7 +65,7 @@ pub async fn create_framework_tables(pool: &Pool) -> Result<(), MigrateError> {
 fn framework_models() -> Vec<&'static ModelSchema> {
     let entries = inventory::iter::<crate::core::ModelEntry>
         .into_iter()
-        .filter(|e| e.schema.managed && e.schema.table.starts_with("rustango_"));
+        .filter(|e| e.schema.owns_table() && e.schema.table.starts_with("rustango_"));
     crate::migrate::snapshot::one_owner_per_table(entries)
         .into_iter()
         .map(|e| e.schema)
