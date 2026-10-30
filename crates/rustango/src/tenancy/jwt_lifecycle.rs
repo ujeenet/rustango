@@ -555,8 +555,7 @@ impl JwtLifecycle {
         // token that has not expired yet.
         //
         // This is a compatibility path with an end date, not a permanent
-        // one — remove it in 0.58, by which time every token minted in
-        // the old shape has aged out. It weakens nothing in the
+        // one — it goes in 0.62.0; old-shape tokens have long aged out. It weakens nothing in the
         // meantime: both shapes are verified with the same HMAC key, and
         // an attacker who cannot forge one cannot forge the other.
         let parts: Vec<&str> = token.split('.').collect();

@@ -25,7 +25,7 @@
 //!     async fn authenticate(
 //!         &self,
 //!         parts: &axum::http::request::Parts,
-//!         pool: &rustango::sql::sqlx::PgPool,
+//!         pool: &rustango::sql::Pool,
 //!     ) -> Result<Option<AuthUser>, AuthError> {
 //!         // read a custom header, verify, return Some(AuthUser { .. })
 //!         Ok(None)
@@ -430,7 +430,7 @@ pub async fn ensure_api_keys_table_pool(pool: &Pool) -> Result<(), sqlx::Error> 
 /// `Authorization: Bearer <key>` backend. Keys are stored hashed;
 /// the bearer token format is `<8-char prefix>.<secret>`.
 ///
-/// Generate a key with `cargo run -- create-api-key <username>`.
+/// Generate a key with `cargo run -- create-api-key <slug> <username>`.
 pub struct ApiKeyBackend;
 
 #[async_trait]

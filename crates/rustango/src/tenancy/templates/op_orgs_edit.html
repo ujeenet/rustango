@@ -117,8 +117,8 @@
         <th><label for="favicon">Favicon</label></th>
         <td>
           {% if favicon_url %}<img class="brand-asset-preview" src="{{ favicon_url }}" alt="">{% endif %}
-          <input type="file" id="favicon" name="favicon" accept="image/png,image/x-icon">
-          <div class="field-helper">PNG or ICO. Max 1 MB. Leave empty to keep the current favicon.</div>
+          <input type="file" id="favicon" name="favicon" accept="image/png,image/jpeg,image/webp,image/x-icon,image/vnd.microsoft.icon">
+          <div class="field-helper">PNG, JPEG, WebP, or ICO. Max 1 MB. Leave empty to keep the current favicon.</div>
         </td>
       </tr>
     </table>

@@ -166,7 +166,7 @@ impl Settings {
 ///
 /// ```toml
 /// [mcp]
-/// # prefix = "/mcp"                 # URL prefix the MCP router mounts under
+/// # prefix = "/mcp"                 # where you nest the router; CSRF exempts its endpoints
 /// # token_ttl_secs = 900            # agent access-token lifetime (15 min)
 /// # enable_sse = true               # serve the GET {prefix} SSE stream
 /// # allowed_origins = []            # CORS allow-list (empty = same-origin only)
@@ -176,7 +176,8 @@ impl Settings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct McpSettings {
-    /// URL prefix the MCP router mounts under. Default `/mcp`.
+    /// Where you nest the MCP router. Default `/mcp`. `Cli` exempts the MCP
+    /// endpoints under it from CSRF; the router itself does not read it.
     pub prefix: Option<String>,
     /// Agent access-token lifetime in seconds. Default 900 (15 min).
     pub token_ttl_secs: Option<i64>,
@@ -543,9 +544,8 @@ pub struct MailSettings {
     #[serde(default)]
     pub managers: Vec<String>,
     /// Directory the `"file"` mail backend writes `.eml` files to
-    /// instead of sending. If
-    /// `backend = "file"` but this is unset, the resolver warns and
-    /// uses `ConsoleMailer`.
+    /// instead of sending. Required with `backend = "file"`: unset, the
+    /// resolver returns an error.
     pub file_email_dir: Option<std::path::PathBuf>,
 }
 
