@@ -1286,8 +1286,11 @@ mod tests {
                 std::time::Duration::from_millis(100),
             ),
         );
+        // A window that cannot roll over mid-burst: the per-IP windows line
+        // up with the clock, and the slow cache stretches the burst.
         let limits = crate::login_throttle::LoginLimits {
             ip_limit: 3,
+            ip_window: std::time::Duration::from_secs(10 * 365 * 24 * 3600),
             ..Default::default()
         };
         let installed = crate::login_throttle::configure_shared(
