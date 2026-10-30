@@ -1789,16 +1789,8 @@ Pool-Methode, auch Schreibzugriffe, und bis zur ersten Abfrage wird keine
 Verbindung gehalten. `t.conn()` des `DatabaseTenant`-Extraktors nimmt nur die
 `_on`-Lesezugriffe.
 
-```rust
-use rustango::extractors::TenantScope;
-
-async fn add_post(t: TenantScope) -> Result<...> {
-    let mut post = Post { id: Auto::default(), title: "hello".into() };
-    post.insert_pool(t.pool()).await?;
-    let n = Post::objects().count(t.pool()).await?;
-    Ok(...)
-}
-```
+Zum Beispiel `post.insert_pool(t.pool())` und `Post::objects().count(t.pool())`;
+das Beispiel `sqlite_tenant_demo` macht genau das.
 
 ## Eine Verbindung pro Request
 

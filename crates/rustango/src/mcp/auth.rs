@@ -929,11 +929,13 @@ mod tests {
             .unwrap();
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
         let ip = ClientIp::default();
-        let Ok(minted) =
-            mint_agent_jwt(&jwt, &pool, "acme", &key.agent.name, &key.token, &ip).await
-        else {
-            panic!("mint");
-        };
+        let minted =
+            match mint_agent_jwt(&jwt, &pool, "acme", &key.agent.name, &key.token, &ip).await {
+                Ok(m) => m,
+                Err(MintError::Unauthorized) => panic!("mint: unauthorized"),
+                Err(MintError::Internal) => panic!("mint: internal"),
+                Err(MintError::Refused(_)) => panic!("mint: refused"),
+            };
         // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
         let agent = crate::test_assertions::assert_num_queries(
             6,

@@ -1790,16 +1790,8 @@ SQLite et MySQL). Son `t.pool()` est le pool propre au tenant : toutes les méth
 écritures comprises, et aucune connexion n'est tenue avant la première requête.
 Le `t.conn()` de l'extracteur `DatabaseTenant` ne sert qu'aux lectures `_on`.
 
-```rust
-use rustango::extractors::TenantScope;
-
-async fn add_post(t: TenantScope) -> Result<...> {
-    let mut post = Post { id: Auto::default(), title: "hello".into() };
-    post.insert_pool(t.pool()).await?;
-    let n = Post::objects().count(t.pool()).await?;
-    Ok(...)
-}
-```
+Par exemple `post.insert_pool(t.pool())` et `Post::objects().count(t.pool())` ;
+l'exemple `sqlite_tenant_demo` fait exactement cela.
 
 ## Une connexion par requête
 

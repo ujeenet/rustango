@@ -1789,16 +1789,8 @@ escrituras incluidas, y no se retiene ninguna conexión hasta la primera
 consulta. El `t.conn()` del extractor `DatabaseTenant` solo sirve para las
 lecturas `_on`.
 
-```rust
-use rustango::extractors::TenantScope;
-
-async fn add_post(t: TenantScope) -> Result<...> {
-    let mut post = Post { id: Auto::default(), title: "hello".into() };
-    post.insert_pool(t.pool()).await?;
-    let n = Post::objects().count(t.pool()).await?;
-    Ok(...)
-}
-```
+Por ejemplo `post.insert_pool(t.pool())` y `Post::objects().count(t.pool())`;
+el ejemplo `sqlite_tenant_demo` hace exactamente eso.
 
 ## Una conexión por petición
 
