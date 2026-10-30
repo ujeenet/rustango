@@ -58,6 +58,7 @@ Nutzungshilfe aus.
 - [Datenbank-Werkzeuge](#datenbank-werkzeuge)
 - [Systembefehle](#systembefehle)
 - [Tenancy-Befehle](#tenancy-befehle)
+- [Mehrere Replikas betreiben](#mehrere-replikas-betreiben)
 - [Eigene Unterbefehle](#eigene-unterbefehle)
 - [Häufige Arbeitsabläufe](#häufige-arbeitsabläufe)
 - [Alle Verben](#alle-verben)
@@ -115,6 +116,8 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `createcachetable` / `create-cache-table` `[--table <name>]` | Legt die Cache-Tabelle an (und die Session-Tabelle, wenn Sessions in die DB gehen) |
 | `clear-cache [--table <name>]` / `clearsessions` | Leert ihn; gibt die Anzahl gelöschter Zeilen zurück. Ohne Tabelle meldet er, dass nichts zu leeren ist |
 | `sendtestemail --to <addr>` | Sendet eine feste Test-Mail über das konfigurierte Backend |
+
+Die beiden Cache-Verben brauchen das `cache`-Feature; ohne es fehlen sie in `--help` und sagen das beim Aufruf.
 
 ### Introspektion
 
@@ -751,7 +754,7 @@ cargo run -- make:test post_smoke
 
 Zeigt, mit welcher Datenbank dieser Build zu sprechen konfiguriert ist, ohne
 sich zu verbinden. Es gibt die Framework-Version aus, welche
-Datenbanktreiber (`postgres`/`mysql` Cargo-Features) einkompiliert sind, die
+Datenbanktreiber (`postgres`/`mysql`/`sqlite` Cargo-Features) einkompiliert sind, die
 Verbindungs-URL mit verstecktem Passwort und das erkannte Backend. Da es nie
 eine Verbindung öffnet, ist es praktisch in CI oder Containern, in denen die
 Datenbank noch nicht läuft, Sie aber bestätigen wollen, dass die Einstellungen
@@ -807,7 +810,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.13
+rustango 0.61.14
 ```
 
 ### `about`
@@ -819,7 +822,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.13
+  version:        0.61.14
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -864,6 +867,14 @@ all checks passed
 
 Beendet sich mit Exit-Code ungleich null, wenn eine Prüfung auf Fehler-Ebene
 scheitert. Warnungen allein verursachen kein Scheitern.
+
+`check --settings` braucht keine Datenbank. Es gibt jeden
+Einstellungsschlüssel aus, mit der Herkunft seines Werts (eine eigene
+Umgebungsvariable, `RUSTANGO__SECTION__KEY`, eine Einstellungsdatei oder
+der Standard), dem Wert, außer bei Geheimnissen, Schlüsseln, die nichts
+liest, und einer fehlenden oder ungültigen Datenbank-URL. Es liest
+`config/` für die `RUSTANGO_ENV`-Stufe; das kann von den Einstellungen
+abweichen, die die App an `with_settings` übergibt.
 
 ### `docs`
 
@@ -998,7 +1009,8 @@ cargo run -- runserver           # explicit
 
 Bei SIGTERM nimmt er keine Verbindungen mehr an und gibt offenen Verbindungen
 `[server] shutdown_timeout_secs` (Standard 20) Zeit, dann schließt er den Rest.
-SSE und Long-Poll enden nie von selbst. Provisionierungs- und Migrationsläufe,
+Ein `WsHub`-WebSocket bekommt Close 1001, ein SSE-Stream in `Shutdown::cut`
+endet; Long-Poll und andere Streams laufen bis zur Frist. Provisionierungs- und Migrationsläufe,
 die ein gestoppter Prozess über eine Stunde auf `running` ließ, werden beim
 nächsten Start als fehlgeschlagen markiert; ein Webhook-Retry mit derselben
 `event_id` läuft erneut.
@@ -1304,6 +1316,11 @@ Tenants. Das macht ihn zu einem Admin des Tenants (voller Schreibzugriff im
 Tenant-Admin), gewährt aber nie Zugang zur tenant-übergreifenden
 Operator-Konsole.
 
+`--email <e>` speichert die E-Mail des Benutzers (braucht das Feature `sso`).
+Mit `[auth] login_field = "email"` melden sich Benutzer damit an, also geben
+Sie jedem Benutzer eine; der Befehl nennt das Feld, mit dem sich der Benutzer
+anmeldet.
+
 ### `create-role <tenant> <name>`
 
 Erstellt eine Rolle (ein benanntes Bündel von Berechtigungen) innerhalb eines
@@ -1565,6 +1582,80 @@ cargo run -- migrate              # creates rustango_users with your extras
 
 `Builder::user_model::<AppUser>()` macht dasselbe für Code, der den
 Server-`Builder` direkt baut, ohne über `Cli` zu gehen.
+
+---
+
+## Mehrere Replikas betreiben
+
+Mancher Zustand lebt in einem Prozess. Hinter einem Load Balancer mit zwei oder
+mehr Replikas hält jeder Pod seine eigene Kopie:
+
+- **Cache.** Der Standard `[cache] backend = "memory"` ist eine Map pro Prozess.
+  Nutzen Sie Redis oder den Datenbank-Cache ([Caching](caching.md)), damit
+  Zähler, Sperren und Einmal-Marken geteilt werden.
+- **Rate Limits.** `RateLimitLayer` zählt pro Prozess; das echte Limit ist also
+  das Limit mal die Zahl der Replikas. Nutzen Sie `CacheRateLimitLayer` mit einem
+  geteilten Cache.
+- **Login-Drossel und Sperre.** Die Login-Limits pro IP und global und die
+  Benutzernamen-Sperre zählen pro Prozess, bis Sie geteilte mit
+  `login_throttle::configure_shared` und `account_lockout::configure_shared`
+  installieren ([Sicherheit](security.md)).
+- **Sperren.** Ein `DistributedLock` auf dem In-Memory-Cache sperrt nur einen
+  Prozess.
+- **JWT-Widerruf.** Der Standard `InMemoryJtiStore` meldet anderen Replikas kein
+  widerrufenes Token. Installieren Sie einen geteilten Store mit `with_jti_store`.
+- **i18n-Overrides.** Jeder Prozess hält eine eigene Kopie. Andere Replikas sehen
+  eine Änderung, nachdem sie `refresh_overrides_pool` aufrufen ([i18n](i18n.md)).
+- **MCP.** Der Benachrichtigungsbus und die Abbruch-Registry leben in einem
+  Prozess. Ein `list_changed`- oder Fortschritts-Frame erreicht nur SSE-Clients
+  auf demselben Pod, und ein `notifications/cancelled`, das auf einem anderen Pod
+  ankommt, wird ignoriert ([MCP](mcp.md)).
+- **Session-Schlüssel.** Außerhalb von prod und ohne `RUSTANGO_SESSION_SECRET`
+  legt der Tenancy-Server seine Tenant- und Operator-Session-Schlüssel auf jedem
+  Pod in `./var/` ab. Eine Session von einem Pod wird dann auf einem anderen
+  abgelehnt. Setzen Sie `RUSTANGO_SESSION_SECRET` auf jeder Stufe mit mehr als
+  einem Pod.
+- **Brand-Dateien.** Die Operator-Konsole speichert Logos standardmäßig in einem
+  lokalen Verzeichnis ([Operator-Konsole](operator-console.md)).
+
+### Herunterfahren
+
+Bei SIGTERM:
+
+1. Nimmt der Server sofort keine Verbindungen mehr an. Der Listener schließt,
+   neue Verbindungen zu diesem Pod werden abgewiesen.
+2. Bittet er jede offene Verbindung, nach ihrer laufenden Anfrage zu schließen.
+3. Sendet er jedem `WsHub`-WebSocket Close 1001 und beendet jeden SSE-Stream,
+   der in `Shutdown::cut` steckt, etwa den MCP-Stream ([WebSockets](websockets.md)).
+4. Wartet er auf offene Verbindungen bis zu `[server] shutdown_timeout_secs`
+   (Standard 20; im Code `server::Builder::drain_timeout`), loggt dann eine
+   Warnung und schließt den Rest.
+
+Kubernetes nimmt einen stoppenden Pod erst kurz nach dem SIGTERM aus seinem
+Service. Ein paar neue Verbindungen kommen also noch an und werden abgewiesen.
+Fügen Sie einen kurzen `preStop`-Sleep hinzu, damit der Pod bedient, bis er
+entfernt ist. Setzen Sie `terminationGracePeriodSeconds` über Sleep plus
+`shutdown_timeout_secs`:
+
+```yaml
+spec:
+  terminationGracePeriodSeconds: 30
+  containers:
+    - name: web
+      lifecycle:
+        preStop:
+          sleep:
+            seconds: 5 # Kubernetes 1.30+; älter: exec: { command: ["sleep", "5"] }
+```
+
+`/ready` pingt die Datenbank mit `SELECT 1`. Ist jede Pool-Verbindung innerhalb
+von 30 Sekunden nach einem erfolgreichen Ping belegt, meldet es die Datenbank
+ohne Ping als bereit, damit eine Lastspitze nicht alle Replikas zugleich
+scheitern lässt. Nach 30 Sekunden pingt es wieder; eine hängende Datenbank gibt
+also weiter `503`. Jeder Prozess merkt sich seinen eigenen letzten Ping.
+
+Bei einer App mit einer Datenbank `migrate_on_boot` abschalten und `migrate`
+einmal als Job vor dem Deploy laufen lassen (siehe `runserver` oben).
 
 ---
 

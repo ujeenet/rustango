@@ -83,6 +83,35 @@ fn already_exists(key: &str) -> StorageError {
     StorageError::Io(format!("`{key}` already exists"))
 }
 
+/// Percent-encode a key for a URL path. `/` stays as it is, because
+/// keys use it as a separator; everything outside the unreserved set
+/// is escaped.
+fn encode_key(key: &str) -> String {
+    percent_encode(key, true)
+}
+
+/// Like [`encode_key`], but it escapes `/` as well, for query values.
+#[cfg(any(feature = "storage-s3", feature = "storage-azure"))]
+fn encode_query(s: &str) -> String {
+    percent_encode(s, false)
+}
+
+fn percent_encode(s: &str, keep_slash: bool) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for &b in s.as_bytes() {
+        if b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'_' | b'.' | b'~')
+            || (keep_slash && b == b'/')
+        {
+            out.push(b as char);
+        } else {
+            let _ = write!(out, "%{b:02X}");
+        }
+    }
+    out
+}
+
 /// Refuse a `put.content_length` that disagrees with the length passed.
 fn check_declared_len(key: &str, len: u64, put: &PutConditions) -> Result<(), StorageError> {
     match put.content_length {
@@ -579,13 +608,29 @@ impl LocalStorage {
             // then drops the temp name.
             return match tokio::fs::hard_link(&tmp, &path).await {
                 Ok(()) => Ok(()),
+                Err(_) if is_dir(&path).await => Err(names_a_directory(key)),
                 Err(e) => Err(link_error(key, &e)),
             };
         }
-        tokio::fs::rename(&tmp, &path).await.map_err(io)?;
+        if let Err(e) = tokio::fs::rename(&tmp, &path).await {
+            return Err(if is_dir(&path).await {
+                names_a_directory(key)
+            } else {
+                io(e)
+            });
+        }
         guard.keep();
         Ok(())
     }
+}
+
+/// `true` when `path` is a directory: a key prefix, not an object.
+async fn is_dir(path: &std::path::Path) -> bool {
+    tokio::fs::metadata(path).await.is_ok_and(|m| m.is_dir())
+}
+
+fn names_a_directory(key: &str) -> StorageError {
+    StorageError::Io(format!("`{key}` names a directory on this disk"))
 }
 
 /// A failed create-only link. FAT, SMB and some FUSE mounts have no
@@ -623,8 +668,13 @@ impl Storage for LocalStorage {
     ) -> Result<(), StorageError> {
         check_declared_len(key, len, put)?;
         // Fail before reading the body; the link below is what holds.
-        if put.create_only && self.exists(key).await? {
-            return Err(already_exists(key));
+        if put.create_only {
+            if self.exists(key).await? {
+                return Err(already_exists(key));
+            }
+            if is_dir(&self.full_path(key)).await {
+                return Err(names_a_directory(key));
+            }
         }
         self.write_file(key, LocalBody::Stream(body, len), put.create_only)
             .await
@@ -632,9 +682,13 @@ impl Storage for LocalStorage {
 
     async fn load_stream(&self, key: &str) -> Result<ByteStream, StorageError> {
         validate_key(key)?;
-        let file = match tokio::fs::File::open(self.full_path(key)).await {
+        let path = self.full_path(key);
+        let file = match tokio::fs::File::open(&path).await {
+            // Opening a directory works on unix and is refused on Windows;
+            // either way it holds no object.
+            Ok(_) if is_dir(&path).await => return Err(StorageError::NotFound(key.to_owned())),
             Ok(f) => f,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_dir(&path).await => {
                 return Err(StorageError::NotFound(key.to_owned()))
             }
             Err(e) => return Err(StorageError::Io(e.to_string())),
@@ -656,7 +710,7 @@ impl Storage for LocalStorage {
         let path = self.full_path(key);
         match tokio::fs::read(&path).await {
             Ok(bytes) => Ok(bytes),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_dir(&path).await => {
                 Err(StorageError::NotFound(key.to_owned()))
             }
             Err(e) => Err(StorageError::Io(e.to_string())),
@@ -668,16 +722,15 @@ impl Storage for LocalStorage {
         let path = self.full_path(key);
         match tokio::fs::remove_file(&path).await {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // A directory holds no object: nothing to delete.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || is_dir(&path).await => Ok(()),
             Err(e) => Err(StorageError::Io(e.to_string())),
         }
     }
 
     async fn exists(&self, key: &str) -> Result<bool, StorageError> {
-        validate_key(key)?;
-        Ok(tokio::fs::try_exists(self.full_path(key))
-            .await
-            .map_err(|e| StorageError::Io(e.to_string()))?)
+        // Only a file is an object; a directory is a key prefix.
+        Ok(self.metadata(key).await?.is_some())
     }
 
     async fn metadata(&self, key: &str) -> Result<Option<ObjectMeta>, StorageError> {
@@ -692,7 +745,11 @@ impl Storage for LocalStorage {
 
     fn url(&self, key: &str) -> Option<String> {
         let base = self.base_url.as_ref()?;
-        Some(format!("{}/{}", base.trim_end_matches('/'), key))
+        Some(format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            encode_key(key)
+        ))
     }
 }
 
@@ -957,6 +1014,47 @@ mod tests {
         s.save("a/b/c/file.txt", b"deep").await.unwrap();
         assert_eq!(s.load("a/b/c/file.txt").await.unwrap(), b"deep");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A directory is not an object: local disk answers like memory.
+    #[tokio::test]
+    async fn local_directory_key_is_not_an_object() {
+        let dir = tempdir();
+        let s = LocalStorage::new(dir.clone());
+        let mem = InMemoryStorage::new();
+        for st in [&s as &dyn Storage, &mem] {
+            st.save("avatars/a.png", b"x").await.unwrap();
+            assert!(!st.exists("avatars").await.unwrap());
+            assert!(st.metadata("avatars").await.unwrap().is_none());
+            assert!(matches!(
+                st.load("avatars").await,
+                Err(StorageError::NotFound(_))
+            ));
+            assert!(matches!(
+                st.load_stream("avatars").await,
+                Err(StorageError::NotFound(_))
+            ));
+            st.delete("avatars").await.unwrap();
+            assert!(st.exists("avatars/a.png").await.unwrap());
+        }
+        let put = PutConditions::new().create_only();
+        let err = s
+            .save_stream("avatars", 1, ByteStream::from(vec![1u8]), &put)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("directory"), "{err}");
+        let err = s.save("avatars", b"x").await.unwrap_err();
+        assert!(err.to_string().contains("directory"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn local_url_percent_encodes_the_key() {
+        let s = LocalStorage::new(PathBuf::from("/tmp")).with_base_url("https://x/m/");
+        assert_eq!(
+            s.url("docs/Q3 report #2.pdf").as_deref(),
+            Some("https://x/m/docs/Q3%20report%20%232.pdf")
+        );
     }
 
     #[test]

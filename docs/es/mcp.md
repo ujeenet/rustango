@@ -161,11 +161,16 @@ El router autenticado monta: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (notificaciones SSE), `POST {prefix}/token` (credencial → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1), y los dos documentos de descubrimiento
 `.well-known/*`. Firma los tokens de agente con `RUSTANGO_SESSION_SECRET`. Si
-falta o tiene menos de 32 bytes, avisa y usa una clave aleatoria por proceso: los
+falta o tiene menos de 32 bytes, fuera de prod usa la clave de sesión de tenant
+guardada en `./var/`; en prod avisa y usa una clave aleatoria por proceso: los
 tokens no sobreviven a un reinicio.
 Cada proceso mantiene como mucho 8 streams SSE abiertos por agente y 256 por
 tenant; por encima, `GET {prefix}` responde `429`. `RUSTANGO_MCP_SSE_PER_AGENT` /
 `RUSTANGO_MCP_SSE_PER_TENANT` los cambian (`0` = sin límite).
+El bus de notificaciones y el registro de cancelaciones también viven en un solo
+proceso. Con varias réplicas, un frame `list_changed` o de progreso solo llega a
+los clientes SSE del mismo pod, y un `notifications/cancelled` que llega a otro
+pod no detiene la llamada.
 
 El handshake `initialize` es un simple POST JSON-RPC. En el montaje autenticado
 cada POST necesita un token Bearer, `initialize` y `ping` incluidos; una llamada
@@ -180,7 +185,7 @@ sin token recibe `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.61.13" },
+    "serverInfo": { "name": "rustango", "version": "0.61.14" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }

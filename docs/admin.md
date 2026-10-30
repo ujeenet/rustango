@@ -333,6 +333,8 @@ fingerprint. Two places surface it:
 - The model's **detail page** grows an **Audit trail** card listing recent
   changes (who, when, and the diff), with a **View full history** link
   (shown in the [detail screenshot](#inlines) above).
+- A row's entries are filed under its key's canonical text, so `/posts/007`
+  and `/posts/7` share one history.
 - The sidebar's **Activity** view (`GET /<prefix>/__audit`) is a cross-row feed,
   newest first, with facet cards for entity / operation / source and a cleanup
   form to purge entries older than N days (itself recorded as an audit entry).
@@ -393,7 +395,8 @@ Three more registration macros hook into a model's admin pages:
 - **Queryset scoping** —
   `register_admin_queryset!("posts", hook)` where `hook: fn(&Parts) -> Vec<Filter>`
   narrows what a request can see (e.g. only the current user's rows). Multiple
-  hooks on a table compose.
+  hooks on a table compose. A create, edit or inline row that points an FK at a
+  target row its hooks, soft delete or `view` hook hide is refused with "no such object".
 - **Row-level permissions** —
   `register_admin_object_permission!("posts", "change", check)` where
   `check: fn(&Parts, Option<&Value>) -> bool` allows or denies per row. Built-in
@@ -594,7 +597,7 @@ All paths are relative to `admin_prefix`:
 | `/<table>/<pk>` | GET | Detail (read-only) view, with inlines + audit card. |
 | `/<table>/<pk>` | POST | Update-submit. |
 | `/<table>/<pk>/edit` | GET | Edit form. |
-| `/<table>/<pk>/delete` | POST | Delete (after confirmation). |
+| `/<table>/<pk>/delete` | POST | Delete (after confirmation). A row other rows still point at answers 409: a page for a browser, JSON otherwise. |
 | `/<table>/__action` | POST | Run a bulk action on selected PKs. |
 | `/<table>/__autocomplete` | GET | FK typeahead JSON (`?q=`). |
 | `/__docs` | GET | Model reference. |

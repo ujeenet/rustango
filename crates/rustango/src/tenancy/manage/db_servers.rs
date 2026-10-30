@@ -23,8 +23,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const ADD: Spec<'static> = Spec {
     verb: "add-db-server",
     usage: "add-db-server <name> [--backend <b>] [--host <h>] [--port <n>] [--user <u>] \
-            [--tls <mode>, default require] [--maintenance-db <db>] [--sqlite-dir <dir>] \
-            [--password-env <VAR> | --no-password] [--inactive]",
+            [--tls <mode>, default require] [--maintenance-db <db>] \
+            [--password-env <VAR> | --no-password] [--inactive] \
+            | add-db-server <name> --sqlite-dir <absolute dir> [--inactive]",
     switches: &["--no-password", "--inactive"],
     valued: &[
         "--backend",

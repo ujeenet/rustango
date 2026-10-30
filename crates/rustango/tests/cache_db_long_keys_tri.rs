@@ -121,7 +121,47 @@ async fn keys_compare_exactly(pool: &Pool) {
     let _ = cache.drop_table().await;
 }
 
+/// The schema (database on MySQL) the pool's unqualified names land in.
+async fn home_schema(pool: &Pool) -> String {
+    match pool.dialect().name() {
+        "postgres" => "public".into(),
+        "sqlite" => "main".into(),
+        _ => {
+            let rows: Vec<(String,)> =
+                rustango::sql::raw_query_pool("SELECT DATABASE()", Vec::new(), pool)
+                    .await
+                    .expect("current database");
+            rows[0].0.clone()
+        }
+    }
+}
+
+/// A `schema.table` name quotes each part, so every cache call finds it.
+async fn schema_qualified_table(pool: &Pool) {
+    let name = format!("{}.rustango_cache_qualified", home_schema(pool).await);
+    let cache = fresh(pool, &name).await;
+    cache.set("a", "1", None).await.unwrap();
+    assert_eq!(cache.get("a").await.unwrap().as_deref(), Some("1"));
+    assert!(cache.add("b", "2", None).await.unwrap(), "add");
+    assert_eq!(cache.incr("n", 2, None).await.unwrap(), 2);
+    assert!(cache.touch("a", None).await.unwrap(), "touch");
+    assert_eq!(cache.purge_expired().await.unwrap(), 0);
+    cache.delete_prefix("b").await.unwrap();
+    assert_eq!(cache.get("b").await.unwrap(), None, "delete_prefix");
+    // The same table, reached by its bare name.
+    let bare = DatabaseCache::new(pool.clone(), "rustango_cache_qualified");
+    assert_eq!(bare.get("a").await.unwrap().as_deref(), Some("1"));
+    cache.clear().await.unwrap();
+    assert_eq!(bare.get("a").await.unwrap(), None, "clear");
+    cache.drop_table().await.unwrap();
+}
+
 tri_dialect_test! {
     setup: noop,
-    scenarios: [long_keys_round_trip, prefix_delete_reaches_long_keys, keys_compare_exactly],
+    scenarios: [
+        long_keys_round_trip,
+        prefix_delete_reaches_long_keys,
+        keys_compare_exactly,
+        schema_qualified_table,
+    ],
 }

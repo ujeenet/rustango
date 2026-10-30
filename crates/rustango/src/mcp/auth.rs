@@ -387,29 +387,21 @@ pub(crate) async fn authenticate_bearer_until(
             // active, and that its secret was not rotated. A revoked
             // key is then refused at once instead of working until it
             // expires.
-            match crate::tenancy::agent_token_still_valid_pool(
-                pool,
-                agent.agent_id,
-                agent.user_id,
-                &agent.secret_prefix,
-            )
-            .await
-            {
-                Ok(true) => {}
-                Ok(false) => return Err(BearerRejection::Unauthorized),
+            let live = match crate::tenancy::agents::LiveAgent::load(pool, agent.agent_id).await {
+                Ok(Some(live))
+                    if live.agent.user_id == agent.user_id
+                        && live.agent.secret_prefix == agent.secret_prefix =>
+                {
+                    live
+                }
+                Ok(_) => return Err(BearerRejection::Unauthorized),
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp agent liveness re-check failed");
                     return Err(BearerRejection::CheckFailed);
                 }
-            }
-            // Grants come from the rows, not the claims, as on the raw-key path (#1962).
-            let grants = match agent.user_id {
-                Some(uid) => {
-                    crate::tenancy::resolve_user_agent_grants_pool(pool, agent.agent_id, uid).await
-                }
-                None => crate::tenancy::resolve_agent_grants_pool(pool, agent.agent_id).await,
             };
-            (agent.skills, agent.tools) = grants?;
+            // Grants come from the rows, not the claims, as on the raw-key path (#1962).
+            (agent.skills, agent.tools) = live.grants(pool).await?;
             Ok((agent, Some(exp)))
         }
         None => {
@@ -553,13 +545,11 @@ async fn verify_raw_with<E: From<AgentError>>(
     // there. `user_id` picks the grant resolver, so it is read from
     // the row; caching it would keep using the wrong resolver for
     // the rest of the TTL after an owner change.
-    let Some(state) = crate::tenancy::agent_auth_state_pool(pool, agent_id).await? else {
-        return Ok(None);
-    };
-    if !state.active {
+    // `LiveAgent::load` refuses an inactive key or owner.
+    let Some(live) = crate::tenancy::agents::LiveAgent::load(pool, agent_id).await? else {
         raw_key_cache_forget(&cache_key);
         return Ok(None);
-    }
+    };
     // Check the cached id against the credential actually presented.
     //
     // A cache entry only says that some token hashed to agent N in
@@ -577,31 +567,21 @@ async fn verify_raw_with<E: From<AgentError>>(
     // while a verify stamps after an Argon2 of about 11 ms, and both
     // biases make a rotation inside that window look older than the
     // verify. A string comparison needs no clock at all.
-    if state.secret_prefix != prefix {
+    if live.agent.secret_prefix != prefix {
         raw_key_cache_forget(&cache_key);
         return Ok(None);
     }
-    let user_id = state.user_id;
-    if let Some(uid) = user_id {
-        if !crate::tenancy::agent_owner_is_active_pool(pool, uid).await? {
-            return Ok(None);
-        }
-    }
 
     // Grants resolve on every request, and are never cached.
-    let grants = match user_id {
-        Some(uid) => crate::tenancy::resolve_user_agent_grants_pool(pool, agent_id, uid).await,
-        None => crate::tenancy::resolve_agent_grants_pool(pool, agent_id).await,
-    };
-    let (skills, tools) = grants?;
+    let (skills, tools) = live.grants(pool).await?;
     Ok(Some(McpAgent {
         agent_id,
         tenant: slug.to_owned(),
         skills,
         tools,
-        user_id,
+        user_id: live.agent.user_id,
         jti: format!("raw:{agent_id}"),
-        secret_prefix: state.secret_prefix,
+        secret_prefix: live.agent.secret_prefix,
     }))
 }
 
@@ -917,6 +897,59 @@ mod tests {
         assert_eq!(tools().await, None, "a rotation ends the JWT");
     }
 
+    /// A user-owned JWT reads the agent and owner rows once per request.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    #[tokio::test]
+    async fn a_user_key_jwt_reads_each_row_once() {
+        use crate::tenancy::{
+            create_skill_pool, create_user_key_pool, map_skill_to_permission_pool,
+        };
+        // A file, not `:memory:`: every pooled connection must see one database.
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}", dir.path().join("t.db").display());
+        let pool = crate::sql::Pool::connect(&url).await.unwrap();
+        crate::testkit::migrate_framework(&pool).await.unwrap();
+        crate::sql::raw_execute_pool(
+            &pool,
+            "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
+             VALUES ('carol', '', 0, 1, datetime('now'))",
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        let uid = 1;
+        crate::tenancy::permissions::set_user_perm_pool(uid, "app.edit", true, &pool)
+            .await
+            .unwrap();
+        create_skill_pool(&pool, "editor", "Editor", "", "", &["edit".into()])
+            .await
+            .unwrap();
+        map_skill_to_permission_pool(&pool, "editor", "app.edit")
+            .await
+            .unwrap();
+        let key = create_user_key_pool(&pool, uid, "laptop", &[])
+            .await
+            .unwrap();
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        let ip = ClientIp::default();
+        let minted =
+            match mint_agent_jwt(&jwt, &pool, "acme", &key.agent.name, &key.token, &ip).await {
+                Ok(m) => m,
+                Err(MintError::Unauthorized) => panic!("mint: unauthorized"),
+                Err(MintError::Internal) => panic!("mint: internal"),
+                Err(MintError::Refused(_)) => panic!("mint: refused"),
+            };
+        // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
+        let agent = crate::test_assertions::assert_num_queries(
+            6,
+            authenticate_bearer(&jwt, &pool, "acme", &minted.token, &ip),
+        )
+        .await
+        .ok()
+        .expect("authenticated");
+        assert_eq!(agent.tools, vec!["edit".to_owned()]);
+    }
+
     /// A secret `SessionSecret` refuses is flagged; a valid one keeps the
     /// key existing agent tokens were signed with.
     #[test]
@@ -933,6 +966,7 @@ mod tests {
         assert!(matches!(agent_key(None), AgentKey::Missing));
     }
 
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
     fn client(ip: [u8; 4]) -> ClientIp {
         let mut ext = no_ext();
         ext.insert(crate::real_ip::TrustedRealIp(ip.into()));

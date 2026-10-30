@@ -35,12 +35,16 @@
 //! - `X-Webhook-Signature-V2: <signature>` over the id, event, timestamp
 //!   and body; check it with [`verify_delivery`], which also bounds the age.
 //!   The timestamp is set at dispatch and retries reuse it: the default
-//!   retries span about two minutes, so `max_age` must cover that, any
-//!   longer retry window you set, and any queue backlog.
+//!   retries end within about four minutes, `Retry-After` included, so
+//!   `max_age` must cover that, any longer retry window you set, and any
+//!   queue backlog.
 //! - `X-Webhook-Signature: <signature>` over the body only, for receivers
 //!   not yet on v2. It does not stop a replay under a new id or event:
 //!   move receivers to v2. Both are in your chosen [`SignatureFormat`].
-//! - Any extra headers from [`WebhookSubscription::header`].
+//! - Any extra headers from [`WebhookSubscription::header`]. One replaces
+//!   a default such as `Content-Type`; it never replaces an `X-Webhook-*` header,
+//!   and `Host`, `Content-Length`, `Transfer-Encoding` and hop-by-hop
+//!   names such as `Connection` are refused.
 //!
 //! ## Retry policy
 //!
@@ -49,7 +53,8 @@
 //!   doubling. Change both with [`WebhookSubscription::max_attempts`] and
 //!   [`WebhookSubscription::retry_backoff`].
 //! - A `Retry-After` on 429 or 503, in seconds or as an HTTP date, makes
-//!   the next retry wait at least that long, at most an hour.
+//!   the next retry wait at least that long, but never past two minutes
+//!   after dispatch, so the signed timestamp stays fresh.
 //! - Other 4xx: dead-lettered at once. A bad URL or bad auth will not
 //!   fix itself.
 //! - Transport errors (refused connection, DNS, TLS): retried.
@@ -281,13 +286,16 @@ impl Job for Delivery {
     }
 }
 
-/// The longest `Retry-After` a delivery honours.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(3600);
+/// A `Retry-After` never delays a retry past this long after dispatch:
+/// retries reuse the dispatch timestamp, which the receiver's `max_age` bounds.
+const RETRY_AFTER_HORIZON: Duration = Duration::from_secs(120);
 
-/// A `Retry-After` in seconds or as an HTTP date, capped; a past date is 0.
+/// A `Retry-After` in seconds or as an HTTP date, capped at the horizon
+/// from `dispatched_at` (unix seconds); a past date is 0.
 fn retry_after(
     headers: &reqwest::header::HeaderMap,
     now: chrono::DateTime<chrono::Utc>,
+    dispatched_at: Option<i64>,
 ) -> Option<Duration> {
     let v = headers
         .get(reqwest::header::RETRY_AFTER)?
@@ -303,7 +311,55 @@ fn retry_after(
                 .unwrap_or_default()
         }
     };
-    Some(wait.min(MAX_RETRY_AFTER))
+    let age = dispatched_at
+        .and_then(|at| u64::try_from(now.timestamp().saturating_sub(at)).ok())
+        .map_or(Duration::ZERO, Duration::from_secs);
+    Some(wait.min(RETRY_AFTER_HORIZON.saturating_sub(age)))
+}
+
+/// Header names the HTTP client owns, framing and hop-by-hop: a
+/// subscription value would break the request or its target.
+fn is_client_owned(name: &str) -> bool {
+    [
+        "host",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "te",
+        "trailer",
+        "keep-alive",
+        "proxy-connection",
+    ]
+    .iter()
+    .any(|n| name.eq_ignore_ascii_case(n))
+}
+
+/// The headers sent: a subscription header replaces a default, and
+/// never one the framework signs or owns.
+fn delivery_headers(event: &WebhookEvent) -> Result<reqwest::header::HeaderMap, JobError> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT as UA};
+    // A bad header never builds: retrying cannot fix it.
+    let bad = |what: &str| JobError::Fatal(format!("request: invalid header {what}"));
+    let value = |v: &str| HeaderValue::from_str(v).map_err(|_| bad("value"));
+    let mut map = HeaderMap::new();
+    map.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    map.insert(UA, HeaderValue::from_static(USER_AGENT));
+    // Sorted: two spellings of one name in an older row pick a stable winner.
+    let mut extra: Vec<_> = event.headers.iter().collect();
+    extra.sort();
+    for (k, v) in extra {
+        if is_client_owned(k) {
+            return Err(bad("name"));
+        }
+        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| bad("name"))?;
+        map.insert(name, value(v)?);
+    }
+    // Last, so a subscription header of the same name is replaced.
+    map.insert(HEADER_ID, value(&event.id)?);
+    map.insert(HEADER_EVENT, value(&event.event)?);
+    map.insert(HEADER_SIGNATURE, value(&event.signature)?);
+    Ok(map)
 }
 
 async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
@@ -321,25 +377,11 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         _ => JobError::Fatal(e.to_string()),
     })?;
 
-    let mut req = target
+    let req = target
         .request(reqwest::Method::POST)
         .timeout(Duration::from_secs(event.timeout_secs.max(1)))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(HEADER_ID, &event.id)
-        .header(HEADER_EVENT, &event.event)
-        .header(HEADER_SIGNATURE, &event.signature)
+        .headers(delivery_headers(event)?)
         .body(event.body.clone());
-    for (k, v) in &event.headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-    // A default, as the per-call client had: a subscription header wins.
-    if !event
-        .headers
-        .keys()
-        .any(|k| k.eq_ignore_ascii_case("user-agent"))
-    {
-        req = req.header(reqwest::header::USER_AGENT, USER_AGENT);
-    }
 
     let resp = match req.send().await {
         Ok(r) => r,
@@ -361,7 +403,11 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         return Ok(());
     }
     if status == 429 || status == 503 {
-        if let Some(wait) = retry_after(resp.headers(), chrono::Utc::now()) {
+        let at = event
+            .headers
+            .get(HEADER_TIMESTAMP)
+            .and_then(|v| v.parse().ok());
+        if let Some(wait) = retry_after(resp.headers(), chrono::Utc::now(), at) {
             crate::jobs::retry_after(wait);
         }
     }
@@ -437,18 +483,26 @@ impl WebhookSubscription {
         self
     }
 
-    /// Add a header to every delivery. An invalid name or value is
-    /// dropped and makes [`Self::dispatch`] fail with [`JobError::Fatal`].
+    /// Add a header to every delivery. It replaces a default such as
+    /// `Content-Type`; the `X-Webhook-*` names the framework sets are
+    /// ignored. An invalid name or value, `Host`, `Content-Length`,
+    /// `Transfer-Encoding` or a hop-by-hop name (`Connection`, `Upgrade`,
+    /// `TE`, `Trailer`, `Keep-Alive`, `Proxy-Connection`) is dropped and
+    /// makes [`Self::dispatch`] fail with [`JobError::Fatal`].
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let (name, value) = (name.into(), value.into());
         let bad = if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
             // Length only: a pasted "Authorization: Bearer …" name holds a secret.
             format!("invalid header name ({} bytes)", name.len())
+        } else if is_client_owned(&name) {
+            format!("header {name:?} is set by the HTTP client")
         } else if reqwest::header::HeaderValue::from_str(&value).is_err() {
             // The value often carries auth: name only.
             format!("invalid value for header {name:?}")
         } else {
+            // Names are case-insensitive: the later call wins.
+            self.headers.retain(|k, _| !k.eq_ignore_ascii_case(&name));
             self.headers.insert(name, value);
             return self;
         };
@@ -604,10 +658,16 @@ mod tests {
                     let bytes = axum::body::to_bytes(body, 1 << 20)
                         .await
                         .unwrap_or_default();
-                    let mut hdrs = HashMap::new();
+                    // A repeated header shows as its values joined by `\n`.
+                    let mut hdrs: HashMap<String, String> = HashMap::new();
                     for (k, v) in parts.headers.iter() {
                         if let Ok(s) = v.to_str() {
-                            hdrs.insert(k.as_str().to_owned(), s.to_owned());
+                            hdrs.entry(k.as_str().to_owned())
+                                .and_modify(|e| {
+                                    e.push('\n');
+                                    e.push_str(s);
+                                })
+                                .or_insert_with(|| s.to_owned());
                         }
                     }
                     received.lock().unwrap().push((
@@ -669,6 +729,47 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["order_id"], 42);
 
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    /// A subscription header replaces a default; the framework's own
+    /// `X-Webhook-*` names are never sent twice.
+    #[tokio::test]
+    async fn subscription_headers_never_duplicate_defaults() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (url, srv) = start_server(200, received.clone()).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        q.start().await;
+
+        let id = WebhookSubscription::new(url, "secret")
+            .allow_private_targets(true)
+            .header("Content-Type", "application/cloudevents+json")
+            .header("x-webhook-event", "spoofed")
+            .header("X-Webhook-Id", "spoofed")
+            .header("X-Webhook-Signature", "spoofed")
+            .header("x-tenant", "a")
+            .header("X-Tenant", "b")
+            .dispatch(&q, "order.created", &serde_json::json!({"a": 1}))
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if !received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let recv = received.lock().unwrap();
+        let hdrs = &recv[0].1;
+        let get = |n: &str| hdrs.get(n).map(String::as_str);
+        assert_eq!(get("content-type"), Some("application/cloudevents+json"));
+        assert_eq!(get("x-webhook-event"), Some("order.created"));
+        assert_eq!(get("x-webhook-id"), Some(id.as_str()));
+        assert!(!get("x-webhook-signature").unwrap().contains("spoofed"));
+        // The later call wins, whatever its case.
+        assert_eq!(get("x-tenant"), Some("b"));
+        drop(recv);
         srv.abort();
         q.shutdown().await;
     }
@@ -912,6 +1013,55 @@ mod tests {
         q.shutdown().await;
     }
 
+    /// Past the horizon from the queued timestamp, `Retry-After` no longer delays.
+    #[tokio::test]
+    async fn retry_after_is_not_honoured_past_the_horizon() {
+        let seen = Arc::new(AtomicUsize::new(0));
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/hook",
+            post(move || {
+                let first = s.fetch_add(1, Ordering::SeqCst) == 0;
+                async move {
+                    if first {
+                        (
+                            axum::http::StatusCode::TOO_MANY_REQUESTS,
+                            [("retry-after", "600")],
+                        )
+                            .into_response()
+                    } else {
+                        "ok".into_response()
+                    }
+                }
+            }),
+        );
+        let (base, srv) = serve(app).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        q.start().await;
+        let mut ev = event(format!("{base}/hook"), true);
+        let old = chrono::Utc::now().timestamp() - 200;
+        ev.headers.insert(HEADER_TIMESTAMP.into(), old.to_string());
+        q.dispatch(&Delivery {
+            event: ev,
+            max_attempts: None,
+            backoff_ms: Some(50),
+        })
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while seen.load(Ordering::SeqCst) < 2 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            2,
+            "the retry waited for Retry-After"
+        );
+        srv.abort();
+        q.shutdown().await;
+    }
+
     /// The subscription's attempts and backoff replace the 8-run default.
     #[tokio::test]
     async fn the_subscription_sets_attempts_and_backoff() {
@@ -953,17 +1103,20 @@ mod tests {
         let of = |v: &str| {
             let mut h = reqwest::header::HeaderMap::new();
             h.insert(reqwest::header::RETRY_AFTER, v.parse().unwrap());
-            retry_after(&h, now)
+            retry_after(&h, now, None)
         };
-        assert_eq!(of("120"), Some(Duration::from_secs(120)));
+        assert_eq!(of("90"), Some(Duration::from_secs(90)));
         assert_eq!(
-            of("Tue, 27 Oct 2026 12:05:00 GMT"),
-            Some(Duration::from_secs(300))
+            of("Tue, 27 Oct 2026 12:01:00 GMT"),
+            Some(Duration::from_secs(60))
         );
         assert_eq!(of("Tue, 27 Oct 2026 11:00:00 GMT"), Some(Duration::ZERO));
-        assert_eq!(of("999999"), Some(MAX_RETRY_AFTER));
+        assert_eq!(of("999999"), Some(RETRY_AFTER_HORIZON));
         assert_eq!(of("soon"), None);
-        assert_eq!(retry_after(&reqwest::header::HeaderMap::new(), now), None);
+        assert_eq!(
+            retry_after(&reqwest::header::HeaderMap::new(), now, None),
+            None
+        );
     }
 
     /// Without retry settings the row has the shape older releases read.
@@ -1161,6 +1314,57 @@ mod tests {
         ev.headers.insert("X Bad".into(), "v".into());
         let err = deliver(&ev).await.unwrap_err();
         assert!(matches!(err, JobError::Fatal(_)), "{err:?}");
+    }
+
+    /// Framing and target headers belong to the client: refused at dispatch and delivery.
+    #[tokio::test]
+    async fn client_owned_headers_are_refused() {
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        for name in [
+            "Host",
+            "content-length",
+            "Transfer-Encoding",
+            "Connection",
+            "upgrade",
+            "TE",
+            "Trailer",
+            "Keep-Alive",
+            "proxy-connection",
+        ] {
+            let err = WebhookSubscription::new("https://example.com/hook", "s")
+                .header(name, "1")
+                .dispatch(&q, "ping", &())
+                .await
+                .unwrap_err();
+            assert!(matches!(err, JobError::Fatal(_)), "{name}: {err:?}");
+            let mut ev = event("https://example.com/hook".into(), false);
+            ev.headers.insert(name.into(), "1".into());
+            assert!(
+                matches!(delivery_headers(&ev), Err(JobError::Fatal(_))),
+                "{name} queued"
+            );
+        }
+    }
+
+    /// A long `Retry-After` is cut so the retry stays near the signed timestamp.
+    #[test]
+    fn retry_after_stops_at_the_horizon_from_dispatch() {
+        let now = chrono::Utc::now();
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(reqwest::header::RETRY_AFTER, "600".parse().unwrap());
+        let t = now.timestamp();
+        assert_eq!(retry_after(&h, now, Some(t)), Some(RETRY_AFTER_HORIZON));
+        assert_eq!(
+            retry_after(&h, now, Some(t - 100)),
+            Some(RETRY_AFTER_HORIZON - Duration::from_secs(100))
+        );
+        assert_eq!(retry_after(&h, now, Some(t - 900)), Some(Duration::ZERO));
+        // A clock behind the dispatcher's never extends the horizon.
+        assert_eq!(
+            retry_after(&h, now, Some(t + 900)),
+            Some(RETRY_AFTER_HORIZON)
+        );
     }
 
     /// A row queued by an older release, which stored the secret, still delivers.

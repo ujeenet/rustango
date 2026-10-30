@@ -379,7 +379,6 @@ pub enum ExecError {
 }
 
 /// The declared constraint a database refused a write on (#2345).
-#[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Unique,
@@ -414,7 +413,6 @@ impl ExecError {
     }
 
     /// Which constraint refused the write, read from sqlx's `ErrorKind`.
-    #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn refusal(&self) -> Option<Refusal> {
         use sqlx::error::ErrorKind;
         let Self::Driver(sqlx::Error::Database(db)) = self else {
@@ -430,7 +428,6 @@ impl ExecError {
     }
 
     /// A UNIQUE or primary-key violation, on any backend.
-    #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
     pub(crate) fn is_unique_violation(&self) -> bool {
         self.refusal() == Some(Refusal::Unique)
     }
@@ -446,7 +443,6 @@ impl ExecError {
 
     /// A deadlock the database broke by aborting this transaction:
     /// MySQL 1213, PG 40P01.
-    #[cfg(any(feature = "tenancy", feature = "admin"))]
     pub(crate) fn is_deadlock(&self) -> bool {
         let Self::Driver(sqlx::Error::Database(db)) = self else {
             return false;

@@ -22,7 +22,7 @@ use super::helpers::{
     url_filterable, FormLayout, ListQuery,
 };
 use super::object_permissions::AdminWrite;
-use super::queryset_hooks::RowScope;
+use super::queryset_hooks::{LinkedWrite, RowScope};
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::{ActionHandler, ActionPerm, AppState, CREATE_SEGMENT};
@@ -1011,44 +1011,28 @@ async fn compute_facets(
         } else {
             FACET_TRUNCATE
         };
-        // One past the cap tells whether there are more (#2344).
-        let limit = Some(cap + 1);
-        let mut facet_rows =
-            fetch_facet_counts(&state.pool, source.clone(), field, is_bool, limit).await?;
-        let is_active = |r: &FacetRow| {
-            active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw))
-        };
-        let mut total_values = facet_rows.len();
-        if !show_all && total_values > FACET_TRUNCATE {
-            total_values = fetch_facet_value_total(&state.pool, source, field).await?;
-            // The active value may sit past the cut: read it on its own.
-            // The field's own filters select at most one value.
-            if !facet_rows.iter().any(is_active) {
-                let own: Vec<Filter> = field_filters
-                    .iter()
-                    .filter(|(name, _)| *name == field.name)
-                    .map(|(_, f)| f.clone())
-                    .collect();
-                if !own.is_empty() {
-                    let active_source = SelectQuery {
-                        where_clause: WhereExpr::and_predicates(
-                            facet_filters.into_iter().chain(own).collect(),
-                        ),
-                        search: search.cloned(),
-                        ..SelectQuery::new(model)
-                    };
-                    let extra =
-                        fetch_facet_counts(&state.pool, active_source, field, is_bool, Some(1))
-                            .await?;
-                    // `?author=01` names a shown value in another spelling.
-                    let extra: Vec<FacetRow> = extra
-                        .into_iter()
-                        .filter(|e| facet_rows.iter().all(|r| r.raw != e.raw))
-                        .collect();
-                    facet_rows.extend(extra);
-                }
-            }
-        }
+        // The field's own filters select at most one value.
+        let own: Vec<Filter> = field_filters
+            .iter()
+            .filter(|(name, _)| *name == field.name)
+            .map(|(_, f)| f.clone())
+            .collect();
+        let active_source = (!own.is_empty()).then(|| SelectQuery {
+            where_clause: WhereExpr::and_predicates(
+                facet_filters.iter().cloned().chain(own).collect(),
+            ),
+            search: search.cloned(),
+            ..SelectQuery::new(model)
+        });
+        let (mut facet_rows, total_values) = fetch_capped_facet(
+            &state.pool,
+            source,
+            (field, is_bool),
+            cap,
+            active_source,
+            |r| active_field_filters.contains(&FieldLookup::param(field.name, &r.key, &r.raw)),
+        )
+        .await?;
         // An FK facet shows the target's display value: "Dr. Maeve O'Hara (3)", not "1 (3)".
         let fk_target = field.relation.and_then(|rel| match rel {
             crate::core::Relation::Fk { to, on } | crate::core::Relation::O2O { to, on } => {
@@ -1128,14 +1112,12 @@ async fn compute_facets(
             }
             let room = cap.saturating_sub(active_first.len());
             let kept_rest_len = rest.len().min(room);
-            // "Show all" has no further page to link to.
-            if !show_all {
-                more_count = total_values - active_first.len() - kept_rest_len;
-            }
+            more_count = total_values.saturating_sub(active_first.len() + kept_rest_len);
             active_first.extend(rest.into_iter().take(room));
             values = active_first;
         }
-        let show_all_url = if more_count > 0 {
+        // "Show all" has no further page to link to.
+        let show_all_url = if more_count > 0 && !show_all {
             // Keep the current filters and add
             // `facet_show_all=<field>`, which swaps the truncated
             // list for the full one.
@@ -1265,6 +1247,35 @@ pub(crate) struct FacetRow {
     pub(crate) raw: String,
     display: Option<String>,
     pub(crate) count: i64,
+}
+
+/// `field`'s most used values over `source`, at most `cap + 1`, and how
+/// many distinct values it takes. Past the cap, the rows of
+/// `active_source` are read on their own when no fetched row `is_active`.
+pub(crate) async fn fetch_capped_facet(
+    pool: &crate::sql::Pool,
+    source: SelectQuery,
+    (field, is_bool): (&'static FieldSchema, bool),
+    cap: usize,
+    active_source: Option<SelectQuery>,
+    is_active: impl Fn(&FacetRow) -> bool,
+) -> Result<(Vec<FacetRow>, usize), AdminError> {
+    // One past the cap tells whether there are more (#2344).
+    let mut rows = fetch_facet_counts(pool, source.clone(), field, is_bool, Some(cap + 1)).await?;
+    let mut total = rows.len();
+    if total > cap {
+        total = fetch_facet_value_total(pool, source, field).await?;
+        if let Some(active) = active_source.filter(|_| !rows.iter().any(&is_active)) {
+            let extra = fetch_facet_counts(pool, active, field, is_bool, Some(1)).await?;
+            // Another spelling or a case-insensitive collation can name a shown value.
+            let extra: Vec<FacetRow> = extra
+                .into_iter()
+                .filter(|e| rows.iter().all(|r| r.raw != e.raw))
+                .collect();
+            rows.extend(extra);
+        }
+    }
+    Ok((rows, total))
 }
 
 /// How many distinct values (NULL included) `field` takes over `source`'s rows.
@@ -1829,9 +1840,10 @@ pub(crate) async fn autocomplete_view(
                     )
                 })
                 .filter_map(|row| {
-                    let id = row.get(pk_field.column)?.clone();
-                    let text = row
-                        .get(display_field.column)
+                    // Rows are keyed by field name; a renamed column is not the key.
+                    let get = |f: &FieldSchema| row.get(f.name).or_else(|| row.get(f.column));
+                    let id = get(pk_field)?.clone();
+                    let text = get(display_field)
                         .and_then(|v| v.as_str().map(str::to_owned))
                         .unwrap_or_else(|| id.to_string());
                     Some(serde_json::json!({ "id": id, "text": text }))
@@ -1859,6 +1871,8 @@ pub(crate) async fn detail_view(
     state: AppState,
 ) -> Result<Html<String>, AdminError> {
     let (model, pk_field, pk_value) = resolve_model_and_pk(&state, &table, &pk_raw).await?;
+    // Audit files the row under its key's canonical text, however the URL spelled it.
+    let pk_text = pk_value.to_display_string();
 
     let detail_fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
     // Single PK lookup, plus LEFT JOINs that carry the FK display
@@ -1973,7 +1987,7 @@ pub(crate) async fn detail_view(
     let audit_entries = match state.audit_reader() {
         Some(reader) => {
             reader
-                .recent_for_entity(model.table, &pk_raw, super::audit::DETAIL_ROWS)
+                .recent_for_entity(model.table, &pk_text, super::audit::DETAIL_ROWS)
                 .await
         }
         None => Ok(Vec::new()),
@@ -2021,8 +2035,8 @@ pub(crate) async fn detail_view(
             "label_plural": model.display_label_plural(),
         },
         // Links carry the key as one encoded segment or query value.
-        "pk_path": crate::url_codec::url_encode(&pk_raw),
-        "pk": pk_raw,
+        "pk_path": crate::url_codec::url_encode(&pk_text),
+        "pk": pk_text,
         "cells": cells_ctx,
         "read_only": state.is_read_only(model.table),
         "audit_entries": audit_entries_ctx,
@@ -2188,6 +2202,14 @@ pub(crate) async fn create_submit(
     super::object_permissions::default_locked_flags(model, &locked.superuser_only, &mut collected);
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
         return Ok(refused(e.as_str().to_owned()).await);
+    }
+    let write = LinkedWrite {
+        values: &collected,
+        stored: None,
+        held: None,
+    };
+    if let Some((_, msg)) = hidden_fk_refusal(&state, &parts, model, &[write]).await? {
+        return Ok(refused(msg).await);
     }
     // A tenant's host, path prefix and port, claimed as the console does.
     #[cfg(feature = "tenancy")]
@@ -2401,6 +2423,8 @@ fn prefill_is_lossy(f: &FieldSchema, shown: &str) -> bool {
         | T::Geometry(_) => true,
         // `{}` and JSON null both show empty.
         T::Json => shown.is_empty(),
+        // So do a nullable `""` and NULL; the form reads both back as NULL.
+        T::String if f.nullable && shown.is_empty() => true,
         _ => f
             .choices
             .is_some_and(|c| !shown.is_empty() && !c.iter().any(|(v, _)| *v == shown)),
@@ -2551,7 +2575,7 @@ async fn edit_inline_panels(
         &state.pool,
         model,
         pk_value.clone(),
-        Some(parts),
+        Some((state, parts)),
         submitted,
     )
     .await
@@ -2560,7 +2584,7 @@ async fn edit_inline_panels(
         &state.pool,
         model,
         pk_value,
-        Some(parts),
+        Some((state, parts)),
         submitted,
     )
     .await
@@ -2616,6 +2640,8 @@ pub(crate) async fn update_submit(
     }
     let pk_field = primary_key_or_internal(model)?;
     let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
+    // `/x/007` and `/x/7` are one row: audit and signals name it one way.
+    let pk_text = pk_value.to_display_string();
     // A refused save shows the form again with what was typed.
     let again_pk = (pk_value.clone(), pk_raw.clone());
     let (state_ref, parts_ref, form_ref, again_pk_ref) = (&state, &parts, &form, &again_pk);
@@ -2692,6 +2718,14 @@ pub(crate) async fn update_submit(
     {
         return Ok(refused(e.as_str().to_owned()).await);
     }
+    let write = LinkedWrite {
+        values: &collected,
+        stored: Some((pk_field, &pk_value)),
+        held: pre_update_row.as_ref(),
+    };
+    if let Some((_, msg)) = hidden_fk_refusal(&state, &parts, model, &[write]).await? {
+        return Ok(refused(msg).await);
+    }
     #[cfg(feature = "tenancy")]
     let claims = match crate::tenancy::org_host::AdminClaims::of(
         model.table,
@@ -2738,7 +2772,7 @@ pub(crate) async fn update_submit(
     };
     crate::signals::admin::send_admin_pre_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         change: true,
         tenant: state.config.tenant.clone(),
     })
@@ -2793,7 +2827,7 @@ pub(crate) async fn update_submit(
             &query,
             before_select.clone(),
             &pre_update_fields,
-            |row| super::audit::admin_audit_diff_entry(model, &pk_raw, row, &audit_form),
+            |row| super::audit::admin_audit_diff_entry(model, &pk_text, row, &audit_form),
             emit,
         )
         .await;
@@ -2882,7 +2916,7 @@ pub(crate) async fn update_submit(
     // emit. `change = true` marks this as an edit, not a create.
     crate::signals::admin::send_admin_post_save(crate::signals::admin::AdminSaveContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         change: true,
         tenant: state.config.tenant.clone(),
     })
@@ -2942,6 +2976,18 @@ pub(super) async fn admits_written(
     }))
 }
 
+/// The form error when a write links an FK to a row this request cannot
+/// see, with that write's index.
+pub(super) async fn hidden_fk_refusal(
+    state: &AppState,
+    parts: &axum::http::request::Parts,
+    model: &'static crate::core::ModelSchema,
+    writes: &[super::queryset_hooks::LinkedWrite<'_>],
+) -> Result<Option<(usize, String)>, crate::sql::ExecError> {
+    let hidden = super::queryset_hooks::hidden_fk_target(&state.pool, parts, model, writes).await?;
+    Ok(hidden.map(|(i, f)| (i, format!("field `{}`: no such object", f.name))))
+}
+
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
 async fn rollback_quietly(tx: crate::audit::PoolBoundTx<'_>, table: &str) {
@@ -2965,6 +3011,7 @@ pub(crate) async fn delete_submit(
     }
     let pk_field = primary_key_or_internal(model)?;
     let pk_value = parse_pk(&state, model, pk_field, &pk_raw).await?;
+    let pk_text = pk_value.to_display_string();
 
     // Read the row before deleting it, so the audit entry records
     // what was removed. A row missing or outside the queryset hooks'
@@ -3002,13 +3049,13 @@ pub(crate) async fn delete_submit(
 
     crate::signals::admin::send_admin_pre_delete(crate::signals::admin::AdminDeleteContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         tenant: state.config.tenant.clone(),
     })
     .await;
     let list_url = format!("{}/{}", state.config.admin_prefix, model.table);
     let entry =
-        super::audit::admin_row_snapshot_entry(model, pk_raw.clone(), audit_op, &before_row, None);
+        super::audit::admin_row_snapshot_entry(model, pk_text.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
     let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
@@ -3038,7 +3085,7 @@ pub(crate) async fn delete_submit(
         Ok(n) => n,
         Err(e) => {
             rollback_quietly(tx, model.table).await;
-            return refused_delete(&state, model, e);
+            return refused_delete(&state, &parts, model, e);
         }
     };
     // Deleted by someone else since the read: keep their stamp and audit row (#1929).
@@ -3065,7 +3112,7 @@ pub(crate) async fn delete_submit(
     // emit, in both soft and hard delete mode.
     crate::signals::admin::send_admin_post_delete(crate::signals::admin::AdminDeleteContext {
         table: model.table,
-        pk: pk_raw.clone(),
+        pk: pk_text.clone(),
         tenant: state.config.tenant.clone(),
     })
     .await;
@@ -3073,9 +3120,11 @@ pub(crate) async fn delete_submit(
 }
 
 /// A failed hard delete: a 409 naming who still points at the row when
-/// the database refused on an FK (#2340), else the usual error.
+/// the database refused on an FK, else the usual error. A browser
+/// gets it as an admin page, other clients as JSON.
 fn refused_delete(
     state: &AppState,
+    parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
     e: crate::sql::ExecError,
 ) -> Result<Response, AdminError> {
@@ -3099,16 +3148,34 @@ fn refused_delete(
         (false, true) => format!("rows in {}", tables.join(", ")),
         (false, false) => format!("other rows, possibly in {}", tables.join(", ")),
     };
-    Ok(crate::api_errors::ApiError::conflict(format!(
+    let message = format!(
         "{} is still referenced by {by}; delete or change those first.",
         model.name
-    ))
-    .with_details(serde_json::json!({
-        "table": model.table,
-        "referenced_by": tables,
-        "correlation_id": id,
-    }))
-    .into_response())
+    );
+    if crate::errors::accepts_html(&parts.headers) && !parts.headers.contains_key("hx-request") {
+        let mut ctx = serde_json::json!({
+            "model": {
+                "name": model.name,
+                "table": model.table,
+                "label_plural": model.display_label_plural(),
+            },
+            "message": format!("{message} (error id {id})"),
+        });
+        let html = render_with_chrome(
+            "delete_refused.html",
+            &mut ctx,
+            chrome_context(state, Some(model.table)),
+        );
+        return Ok((axum::http::StatusCode::CONFLICT, Html(html)).into_response());
+    }
+    let body =
+        crate::api_errors::ApiError::conflict(message.clone()).with_details(serde_json::json!({
+            "table": model.table,
+            "referenced_by": tables,
+            "correlation_id": id,
+        }));
+    // The words let the error-pages layer dress it for htmx.
+    Ok((crate::errors::Message::new(message), body).into_response())
 }
 
 /// Tables whose FK onto `table` refuses a parent delete.
@@ -3348,7 +3415,7 @@ pub(crate) async fn action_submit(
         Err(e) => {
             rollback_quietly(tx, model.table).await;
             // Only a hard delete can hit an FK; else this is `Err(e.into())`.
-            return refused_delete(&state, model, e);
+            return refused_delete(&state, &parts, model, e);
         }
     };
     #[cfg(feature = "tenancy")]

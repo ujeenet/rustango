@@ -152,6 +152,34 @@ pub struct Cat {
     pub parent_id: Option<i64>,
 }
 
+/// A reverse relation over a plain, non-unique string column.
+#[derive(Model, Debug, Clone)]
+#[rustango(
+    table = "pfr_bin",
+    app = "pfr",
+    reverse_has(
+        name = "parts",
+        child = "Part",
+        child_fk_column = "bin_label",
+        self_pk_column = "label"
+    )
+)]
+pub struct Bin {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 16)]
+    pub label: String,
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "pfr_part", app = "pfr")]
+pub struct Part {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 16)]
+    pub bin_label: String,
+}
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     drop_table(pool, Item::SCHEMA.table).await;
@@ -167,6 +195,8 @@ async fn setup(pool: &Pool) {
     fresh_table::<Shop>(pool).await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Cat>(pool).await;
+    fresh_table::<Bin>(pool).await;
+    fresh_table::<Part>(pool).await;
 }
 
 async fn insert(
@@ -507,6 +537,37 @@ async fn reverse_over_a_plain_column(pool: &Pool) {
     );
 }
 
+/// Keys a collation folds together, split into two `IN` lists, still load
+/// a child once: MySQL matches `ABC` to `abc`.
+async fn reverse_split_keys_load_each_child_once(pool: &Pool) {
+    const N: i64 = 70_000;
+    let label = |i: i64| match i {
+        0 => "abc".to_owned(),
+        i if i == N - 1 => "ABC".to_owned(),
+        i => format!("k{i}"),
+    };
+    insert(
+        pool,
+        Bin::SCHEMA,
+        vec!["id", "label"],
+        (0..N).map(|i| vec![i.into(), label(i).into()]).collect(),
+    )
+    .await;
+    Part {
+        id: 1,
+        bin_label: "abc".into(),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    let rows: Vec<(Bin, Vec<Part>)> =
+        fetch_with_prefetch_related(Bin::objects().order_by(&[("id", false)]), "parts", pool)
+            .await
+            .expect("the IN list is chunked");
+    let parts: Vec<i64> = rows[0].1.iter().map(|p| p.id).collect();
+    assert_eq!(parts, [1], "bin abc");
+}
+
 async fn unknown_or_mismatched_relation_is_an_error(pool: &Pool) {
     let err = fetch_with_prefetch_related::<Post, Tag>(Post::objects(), "nope", pool)
         .await
@@ -533,6 +594,7 @@ tri_dialect_test! {
         m2m_uuid_keys,
         reverse_fk_on_a_unique_column,
         reverse_over_a_plain_column,
+        reverse_split_keys_load_each_child_once,
         unknown_or_mismatched_relation_is_an_error,
     ],
 }

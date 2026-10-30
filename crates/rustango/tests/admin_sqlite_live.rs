@@ -80,6 +80,13 @@ async fn body_string(resp: axum::response::Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
+/// The trimmed `<dd>` after `<dt>{label}</dt>` on a detail page.
+fn detail_value<'a>(body: &'a str, label: &str) -> Option<&'a str> {
+    let rest = body.split_once(&format!("<dt>{label}</dt>"))?.1;
+    let dd = rest.trim_start().strip_prefix("<dd>")?;
+    Some(dd.split_once("</dd>")?.0.trim())
+}
+
 #[tokio::test]
 async fn index_lists_registered_models_on_sqlite() {
     let pool = pool().await;
@@ -175,7 +182,11 @@ async fn create_then_list_then_detail_round_trips() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("Hello World"), "detail missing title: {body}");
-    assert!(body.contains("42"), "detail missing views=42: {body}");
+    assert_eq!(
+        detail_value(&body, "views"),
+        Some("42"),
+        "detail missing views=42: {body}"
+    );
 }
 
 #[tokio::test]
@@ -263,7 +274,11 @@ async fn update_submit_persists_change() {
         .unwrap();
     let body = body_string(resp).await;
     assert!(body.contains("After"), "missing updated title: {body}");
-    assert!(body.contains("99"), "missing updated views: {body}");
+    assert_eq!(
+        detail_value(&body, "views"),
+        Some("99"),
+        "missing updated views: {body}"
+    );
 }
 
 #[tokio::test]

@@ -34,6 +34,10 @@ fn templates() -> &'static tera::Tera {
                 include_str!("templates/_inline_panels.html"),
             ),
             ("form.html", include_str!("templates/form.html")),
+            (
+                "delete_refused.html",
+                include_str!("templates/delete_refused.html"),
+            ),
             ("login.html", include_str!("templates/login.html")),
             (
                 "change_password.html",

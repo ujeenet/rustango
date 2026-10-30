@@ -147,7 +147,22 @@ impl OrgResolver for SubdomainResolver {
 /// for tenants that never use extra hosts. So a failed lookup is logged
 /// once and treated as "no match", which is the pre-upgrade behaviour to
 /// the byte.
-pub struct RegisteredHostResolver;
+///
+/// The apex never matches: a host row equal to it would hide the
+/// console's fallback and every path-prefix tenant.
+pub struct RegisteredHostResolver {
+    pub apex_domain: String,
+}
+
+impl RegisteredHostResolver {
+    /// Construct from the apex, as [`SubdomainResolver::new`].
+    #[must_use]
+    pub fn new(apex_domain: impl Into<String>) -> Self {
+        Self {
+            apex_domain: apex_domain.into(),
+        }
+    }
+}
 
 /// Resolver caches, polls and breakers for one registry pool. Kept per
 /// registry so two registries in one process never share them (#2077).
@@ -463,6 +478,9 @@ impl OrgResolver for RegisteredHostResolver {
         let Some(host) = host_from_parts(parts) else {
             return Ok(None);
         };
+        if is_apex(&host, &self.apex_domain) {
+            return Ok(None);
+        }
         // Pick up a host added or toggled by another pod before trusting
         // anything cached here. Throttled — see `GEN_CHECK_EVERY`.
         let st = state(registry);
@@ -753,13 +771,14 @@ impl ChainResolver {
     /// ideally with [`HeaderResolver::allow_only`], to opt in.
     #[must_use]
     pub fn standard(apex_domain: impl Into<String>) -> Self {
+        let apex_domain = apex_domain.into();
         Self::new()
-            .push(SubdomainResolver::new(apex_domain))
+            .push(SubdomainResolver::new(apex_domain.clone()))
             // After the base host: an extra hostname must never outrank a
             // tenant's own `host_pattern`, and until an operator registers
             // one the table is empty, so no existing deployment changes
             // behaviour.
-            .push(RegisteredHostResolver)
+            .push(RegisteredHostResolver::new(apex_domain))
     }
 }
 

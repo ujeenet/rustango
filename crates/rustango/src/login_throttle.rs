@@ -1154,11 +1154,16 @@ pub(crate) fn configure_from_settings(throttle: LoginThrottle) -> bool {
 /// A test cache that counts the gate's writes.
 #[cfg(test)]
 pub(crate) mod counting {
-    /// Counts the login gate's cache writes.
+    /// The cache key that counts `username`'s failures in `scope`.
+    pub(crate) fn account_key(scope: &super::LoginScope, username: &str) -> String {
+        super::account_key(&scope.key(), username)
+    }
+
+    /// Records the login gate's cache writes.
     #[derive(Default)]
     pub(crate) struct CountingWrites {
         inner: crate::cache::InMemoryCache,
-        writes: std::sync::atomic::AtomicUsize,
+        written: std::sync::Mutex<Vec<String>>,
         read_delay: std::time::Duration,
         write_delay: std::time::Duration,
     }
@@ -1186,17 +1191,25 @@ pub(crate) mod counting {
             }
         }
 
-        async fn wrote(&self) {
+        async fn wrote(&self, k: &str) {
             if !self.write_delay.is_zero() {
                 tokio::time::sleep(self.write_delay).await;
             }
-            self.writes
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.written
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(k.to_owned());
         }
 
-        /// Writes so far.
-        pub(crate) fn writes(&self) -> usize {
-            self.writes.load(std::sync::atomic::Ordering::SeqCst)
+        /// Writes so far to a key containing any of `needles`. The gate is
+        /// process-global, so a test counts only its own client and account.
+        pub(crate) fn writes_to(&self, needles: &[&str]) -> usize {
+            self.written
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|k| needles.iter().any(|n| k.contains(n)))
+                .count()
         }
     }
 
@@ -1212,11 +1225,11 @@ pub(crate) mod counting {
             v: &str,
             ttl: Option<std::time::Duration>,
         ) -> Result<(), crate::cache::CacheError> {
-            self.wrote().await;
+            self.wrote(k).await;
             self.inner.set(k, v, ttl).await
         }
         async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
-            self.wrote().await;
+            self.wrote(k).await;
             self.inner.delete(k).await
         }
         async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
@@ -1232,7 +1245,7 @@ pub(crate) mod counting {
             by: i64,
             ttl: Option<std::time::Duration>,
         ) -> Result<i64, crate::cache::CacheError> {
-            self.wrote().await;
+            self.wrote(k).await;
             self.inner.incr(k, by, ttl).await
         }
         async fn decr(
@@ -1241,7 +1254,7 @@ pub(crate) mod counting {
             by: i64,
             ttl: Option<std::time::Duration>,
         ) -> Result<i64, crate::cache::CacheError> {
-            self.wrote().await;
+            self.wrote(k).await;
             self.inner.decr(k, by, ttl).await
         }
     }
@@ -1937,8 +1950,11 @@ mod tests {
     /// API-key guesses over two replicas: the per-IP limit bounds every compare.
     #[tokio::test]
     async fn per_request_keys_over_replicas_are_bounded_by_the_ip_limit() {
+        // Windows align to the clock: a burst over a window edge gets 2x.
+        // A decade-long window keeps the edge out of the burst.
         let r = replicas(LoginLimits {
             ip_limit: 3,
+            ip_window: Duration::from_secs(10 * 365 * 24 * 3600),
             ..LoginLimits::default()
         });
         let s = LoginScope::TenantApiKey("t-repl-ip".into());

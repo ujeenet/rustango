@@ -711,6 +711,9 @@ Independientemente de un serializador, la ruta de escritura siempre aplica el
   `bool` inválido es un `400` que nombra el campo.
 - **Requerido / NOT NULL** — un campo no anulable faltante (o cadena vacía para un
   `String` no anulable) es un `400`; los campos anulables aceptan vacío → `NULL`.
+  En un cuerpo JSON solo `null` es `NULL`: `""` en un `String` anulable sigue siendo `""`.
+- **Números** — NaN e infinito dan un `400`; un decimal enviado como número JSON
+  conserva todos sus dígitos.
 - **Restricciones de base de datos** — una clave duplicada es un `409`
   (`conflict`); las claves foráneas y las restricciones check afloran como un
   `400` en INSERT/UPDATE.

@@ -410,7 +410,7 @@ async fn delete(
 
 /// `SELECT pk … FOR NO KEY UPDATE` on the source row. Without it, two PG
 /// `set`s under READ COMMITTED both delete the old rows and keep both inserts.
-fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuery> {
+pub(crate) fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option<SelectQuery> {
     let col = source.pk_column()?;
     let mut q =
         SelectQuery::new(source).where_clause(WhereExpr::and_predicates(vec![eq(col, pk.clone())]));

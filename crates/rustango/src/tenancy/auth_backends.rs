@@ -25,7 +25,7 @@
 //!     async fn authenticate(
 //!         &self,
 //!         parts: &axum::http::request::Parts,
-//!         pool: &rustango::sql::sqlx::PgPool,
+//!         pool: &rustango::sql::Pool,
 //!     ) -> Result<Option<AuthUser>, AuthError> {
 //!         // read a custom header, verify, return Some(AuthUser { .. })
 //!         Ok(None)
@@ -228,14 +228,12 @@ impl AuthBackend for ModelBackend {
         parts: &Parts,
         pool: &Pool,
     ) -> Result<Option<AuthUser>, AuthError> {
-        use crate::core::Column as _;
-        use crate::sql::FetcherPool as _;
-
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok());
 
+        // `username` is the `[auth] login_field` value.
         let (username, password) = match parse_basic_auth(auth_header) {
             Some(pair) => pair,
             None => return Ok(None),
@@ -251,11 +249,8 @@ impl AuthBackend for ModelBackend {
             .begin_per_request(&scope, &client_ip(parts), &username)
             .await
             .map_err(refused)?;
-        let users = super::auth::User::objects()
-            .where_(super::auth::User::username.eq(username.clone()))
-            .fetch(pool)
-            .await?;
-        let user = users.into_iter().next();
+        let field = super::login_field();
+        let user = super::find_login_user(pool, field, &username).await?;
 
         // A credential verified moments ago against this same stored hash
         // skips argon2: it is not a guess.
@@ -271,11 +266,12 @@ impl AuthBackend for ModelBackend {
                 is_superuser: u.is_superuser,
             })
         };
-        if let Some(hit) = user.as_ref().and_then(cached) {
-            // The stored name's lock too, when the submitted one differs.
-            if hit.username != username {
-                attempt.resolve(&hit.username).await.map_err(refused)?;
-            }
+        if let Some((u, hit)) = user.as_ref().and_then(|u| Some((u, cached(u)?))) {
+            // The stored identifier's lock too, when the submitted one differs.
+            attempt
+                .resolve(super::login_key(field, u))
+                .await
+                .map_err(refused)?;
             attempt.settle(true).await;
             return Ok(Some(hit));
         }
@@ -293,7 +289,7 @@ impl AuthBackend for ModelBackend {
             return Ok(None);
         };
         attempt
-            .resolve(&user.username)
+            .resolve(super::login_key(field, &user))
             .await
             .map_err(AuthError::Refused)?;
         // A parallel request may have verified it while this one waited.
@@ -434,7 +430,7 @@ pub async fn ensure_api_keys_table_pool(pool: &Pool) -> Result<(), sqlx::Error> 
 /// `Authorization: Bearer <key>` backend. Keys are stored hashed;
 /// the bearer token format is `<8-char prefix>.<secret>`.
 ///
-/// Generate a key with `cargo run -- create-api-key <username>`.
+/// Generate a key with `cargo run -- create-api-key <slug> <username>`.
 pub struct ApiKeyBackend;
 
 #[async_trait]
@@ -1290,8 +1286,11 @@ mod tests {
                 std::time::Duration::from_millis(100),
             ),
         );
+        // A window that cannot roll over mid-burst: the per-IP windows line
+        // up with the clock, and the slow cache stretches the burst.
         let limits = crate::login_throttle::LoginLimits {
             ip_limit: 3,
+            ip_window: std::time::Duration::from_secs(10 * 365 * 24 * 3600),
             ..Default::default()
         };
         let installed = crate::login_throttle::configure_shared(

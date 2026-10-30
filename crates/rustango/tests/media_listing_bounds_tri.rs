@@ -163,13 +163,13 @@ async fn tagging_is_batched(pool: &Pool) {
     let first: Vec<String> = (0..50).map(|i| format!("s{i:02}")).collect();
     let first: Vec<&str> = first.iter().map(String::as_str).collect();
 
-    // Find, insert the missing, find again; then delete + insert links.
+    // Find, insert the missing, find again; then lock, delete + insert links.
     let queries = QueryCounter::scope(async {
         mgr.set_tags(media, &first).await.expect("set_tags");
         QueryCounter::current()
     })
     .await;
-    assert_eq!(queries, 5, "set_tags with 50 new slugs");
+    assert_eq!(queries, 6, "set_tags with 50 new slugs");
     assert_eq!(mgr.tags_for(media).await.unwrap().len(), 50);
 
     // 25 known + 25 new; a repeat slug is one tag.
@@ -241,6 +241,37 @@ async fn parallel_set_tags_overlap(pool: &Pool) {
         rb.expect("right set_tags");
         assert_eq!(mgr.tags_for(a).await.unwrap().len(), 40);
         assert_eq!(mgr.tags_for(b).await.unwrap().len(), 40);
+    }
+}
+
+/// Two `set_tags` racing on one media row: the result is one of them.
+async fn racing_set_tags_keep_one(pool: &Pool) {
+    let mgr = manager(pool);
+    let media = seed_media(&mgr, None).await;
+    for round in 0..40 {
+        mgr.set_tags(media, &["old"]).await.expect("reset");
+        let barrier = tokio::sync::Barrier::new(2);
+        let run = |slugs: &'static [&'static str]| {
+            let (barrier, mgr) = (&barrier, &mgr);
+            async move {
+                barrier.wait().await;
+                mgr.set_tags(media, slugs).await
+            }
+        };
+        let (a, b) = tokio::join!(run(&["a1", "a2"]), run(&["b1", "b2"]));
+        a.unwrap_or_else(|e| panic!("round {round}: first: {e}"));
+        b.unwrap_or_else(|e| panic!("round {round}: second: {e}"));
+        let got: Vec<String> = mgr
+            .tags_for(media)
+            .await
+            .expect("tags")
+            .into_iter()
+            .map(|t| t.slug)
+            .collect();
+        assert!(
+            got == ["a1", "a2"] || got == ["b1", "b2"],
+            "round {round}: {got:?}"
+        );
     }
 }
 
@@ -349,6 +380,7 @@ tri_dialect_test!(
         tagging_is_batched,
         case_variants_resolve,
         parallel_set_tags_overlap,
+        racing_set_tags_keep_one,
         recursive_listing_spans_bind_cap,
         popular_tags_are_counted,
     ]

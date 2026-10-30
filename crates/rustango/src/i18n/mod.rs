@@ -464,15 +464,21 @@ impl Translator {
     #[must_use]
     pub fn translate(&self, locale: &str, key: &str, params: &[(&str, &str)]) -> String {
         let template = self
-            .resolve(&Locale::new(locale), key, None)
+            .resolve(&Locale::new(locale), |_| (key, None))
             .unwrap_or_else(|| key.to_owned());
         substitute(&template, params)
     }
 
     /// The one lookup order: each locale of exact → base language →
     /// `fallback_chain` → default, and at each one the DB override, then the
-    /// plural entry (when `category` is set), then the flat file entry.
-    fn resolve(&self, req: &Locale, key: &str, category: Option<&str>) -> Option<String> {
+    /// plural entry (when a category is set), then the flat file entry.
+    /// `lookup` names the key and plural category per locale, so a plural
+    /// form follows the rule of the locale the text comes from.
+    fn resolve<'k>(
+        &self,
+        req: &Locale,
+        lookup: impl Fn(&Locale) -> (&'k str, Option<&'static str>),
+    ) -> Option<String> {
         let ov = self.overrides.read().expect("translator poisoned");
         let cats = self.catalogs.read().expect("translator poisoned");
         let pc = self.plural_catalogs.read().expect("translator poisoned");
@@ -492,6 +498,7 @@ impl Translator {
                 continue;
             }
             seen.push(loc);
+            let (key, category) = lookup(loc);
             if let Some(v) = ov.get(loc).and_then(|c| c.get(key)) {
                 return Some(v.clone());
             }
@@ -512,7 +519,8 @@ impl Translator {
     }
 
     /// Count-aware translation (#1102) — the `ngettext` shape. Picks the plural
-    /// form for `n` via `locale`'s CLDR rule ([`plural_category`]), then
+    /// form for `n` via the CLDR rule ([`plural_category`]) of the locale the
+    /// entry is found in (a fallback locale uses its own rule), then
     /// substitutes `params` (pass the count itself, e.g.
     /// `&[("count", &n.to_string())]`, so the chosen form's `{count}` fills in).
     ///
@@ -535,11 +543,26 @@ impl Translator {
         n: i64,
         params: &[(&str, &str)],
     ) -> String {
-        let category = plural_category(locale, n);
         let template = self
-            .resolve(&Locale::new(locale), key, Some(category))
+            .resolve(&Locale::new(locale), |loc| {
+                (key, Some(plural_category(loc.as_str(), n)))
+            })
             .unwrap_or_else(|| key.to_owned());
         substitute(&template, params)
+    }
+
+    /// The `ngettext` pick: at each locale the key its own rule selects; with
+    /// no entry anywhere, the source pair by the default locale's rule.
+    fn ngettext_template(&self, locale: &str, singular: &str, plural: &str, count: i64) -> String {
+        let pick = |loc: &Locale| {
+            if plural_category(loc.as_str(), count) == "one" {
+                singular
+            } else {
+                plural
+            }
+        };
+        self.resolve(&Locale::new(locale), |loc| (pick(loc), None))
+            .unwrap_or_else(|| pick(&self.default_locale).to_owned())
     }
 
     /// `true` when strings are registered for `locale` (or its base
@@ -797,8 +820,9 @@ impl Translator {
     /// the same as [`Self::translate`]; missing entries fall back
     /// to the supplied source strings.
     ///
-    /// The plural form is selected by `locale`'s CLDR rule
-    /// ([`plural_category`]): the `"one"` category picks `singular`, every
+    /// The plural form is selected by the CLDR rule ([`plural_category`]) of
+    /// the locale the entry is found in, or of the default locale when the
+    /// source strings render: the `"one"` category picks `singular`, every
     /// other category picks `plural`. This is correct for two-form languages
     /// (en/de: `n == 1`; fr: `0` and `1` are singular). Languages with three+
     /// forms (Polish/Ukrainian `few`/`many`, Arabic's six) can't be fully
@@ -810,13 +834,7 @@ impl Translator {
     /// without the caller threading it in.
     #[must_use]
     pub fn ngettext(&self, locale: &str, singular: &str, plural: &str, count: i64) -> String {
-        let key = if plural_category(locale, count) == "one" {
-            singular
-        } else {
-            plural
-        };
-        let count_str = count.to_string();
-        self.translate(locale, key, &[("count", &count_str)])
+        self.ngettext_fmt(locale, singular, plural, count, &[])
     }
 
     /// Pluralization with additional placeholder substitution.
@@ -832,16 +850,12 @@ impl Translator {
         count: i64,
         params: &[(&str, &str)],
     ) -> String {
-        let key = if plural_category(locale, count) == "one" {
-            singular
-        } else {
-            plural
-        };
+        let template = self.ngettext_template(locale, singular, plural, count);
         let count_str = count.to_string();
         let mut all: Vec<(&str, &str)> = Vec::with_capacity(params.len() + 1);
         all.push(("count", &count_str));
         all.extend_from_slice(params);
-        self.translate(locale, key, &all)
+        substitute(&template, &all)
     }
 }
 
@@ -1779,6 +1793,46 @@ mod tests {
         assert_eq!(tr(22), "Usunięto 22 strony."); // few
         assert_eq!(tr(5), "Usunięto 5 stron."); // many
         assert_eq!(tr(25), "Usunięto 25 stron."); // many
+    }
+
+    #[test]
+    fn plural_form_follows_the_locale_the_text_came_from() {
+        let mut entry = HashMap::new();
+        entry.insert("one".to_owned(), "Deleted {count} page.".to_owned());
+        entry.insert("other".to_owned(), "Deleted {count} pages.".to_owned());
+        let key = "deleted_pages";
+        let en_pl: HashMap<String, HashMap<String, String>> =
+            [(key.to_owned(), entry)].into_iter().collect();
+        let en: HashMap<String, String> = [
+            ("item_one".to_owned(), "{count} item".to_owned()),
+            ("item_many".to_owned(), "{count} items".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        let t = Translator::new(Locale::new("en"))
+            .add_plural_locale(Locale::new("en"), en_pl)
+            .add_locale(Locale::new("en"), en);
+        let tp = |loc: &str, n: i64| t.translate_plural(loc, key, n, &[("count", &n.to_string())]);
+        // ru says "one" for 21 and ja says "other" for 1; the text is English.
+        assert_eq!(tp("ru", 21), "Deleted 21 pages.");
+        assert_eq!(tp("ja", 1), "Deleted 1 page.");
+        assert_eq!(t.ngettext("ru", "item_one", "item_many", 21), "21 items");
+        assert_eq!(t.ngettext("ja", "item_one", "item_many", 1), "1 item");
+        assert_eq!(
+            t.ngettext_fmt("ru", "item_one", "item_many", 21, &[]),
+            "21 items"
+        );
+        // Nothing translated: the source pair follows the default locale.
+        assert_eq!(
+            t.ngettext("ru", "{count} file", "{count} files", 21),
+            "21 files"
+        );
+        // A ru entry still uses the ru rule.
+        let ru: HashMap<String, String> = [("item_one".to_owned(), "{count} штука".to_owned())]
+            .into_iter()
+            .collect();
+        t.insert_locale(Locale::new("ru"), ru);
+        assert_eq!(t.ngettext("ru", "item_one", "item_many", 21), "21 штука");
     }
 
     #[test]

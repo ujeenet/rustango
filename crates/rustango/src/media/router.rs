@@ -1047,7 +1047,7 @@ async fn no_store(req: axum::extract::Request, next: axum::middleware::Next) -> 
 /// Use [`media_router_with`] and supply a [`MediaAuthorizer`].
 #[deprecated(
     since = "0.57.7",
-    note = "serves nothing — every route is 403, and it is removed in 0.59.0. Use `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`; see the module docs."
+    note = "serves nothing — every route is 403, and it is removed in 0.62.0. Use `media_router_with(manager, authorizer)` and supply a `MediaAuthorizer`; see the module docs."
 )]
 pub fn media_router(manager: MediaManager) -> Router {
     media_router_with(manager, DenyAll)

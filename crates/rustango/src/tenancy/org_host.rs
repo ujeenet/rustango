@@ -60,6 +60,7 @@ pub struct TenantHost {
 
 /// Why a host could not be registered.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum HostError {
     /// Empty, or carrying a scheme, port, path or uppercase.
     Invalid(String),
@@ -67,6 +68,8 @@ pub enum HostError {
     Taken(String),
     /// Removing the base host, which this table cannot represent.
     IsBaseHost(String),
+    /// The apex: the operator console and path-prefix tenants live there.
+    IsApex(String),
     /// No tenant by that slug. Separate from [`Self::NotFound`], which
     /// is about a hostname, so a mistyped slug says so.
     NoSuchOrg(String),
@@ -83,6 +86,7 @@ impl std::fmt::Display for HostError {
             Self::IsBaseHost(h) => {
                 write!(f, "`{h}` is this tenant's base host and cannot be removed")
             }
+            Self::IsApex(h) => write!(f, "`{h}` is the apex and cannot be a tenant host"),
             Self::NoSuchOrg(s) => write!(f, "no tenant named `{s}`"),
             Self::NotFound => write!(f, "no such host"),
             Self::Driver(e) => write!(f, "{e}"),
@@ -166,18 +170,22 @@ pub async fn list_for_org(registry: &Pool, org_slug: &str) -> Result<Vec<TenantH
     Ok(out)
 }
 
-/// Bind an extra `hostname` to `org_slug`.
+/// Bind an extra `hostname` to `org_slug`. `apex` is the server's apex host.
 ///
 /// # Errors
-/// [`HostError::Invalid`] for a malformed host, [`HostError::Taken`] when
-/// any tenant already claims it (including as its base host), or
-/// [`HostError::NotFound`] for an unknown org.
+/// [`HostError::Invalid`] for a malformed host, [`HostError::IsApex`] for
+/// the apex, [`HostError::Taken`] when any tenant already claims it
+/// (including as its base host), or [`HostError::NoSuchOrg`] for an unknown org.
 pub async fn add_host(
     registry: &Pool,
     org_slug: &str,
     hostname: &str,
+    apex: &str,
 ) -> Result<OrgHost, HostError> {
     let host = normalize_hostname(hostname)?;
+    if host.eq_ignore_ascii_case(apex.strip_suffix('.').unwrap_or(apex)) {
+        return Err(HostError::IsApex(host));
+    }
     let Some(org) = super::Org::objects()
         .where_(super::Org::slug.eq(org_slug.to_owned()))
         .first(registry)
@@ -706,6 +714,7 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
         joins: Vec::new(),
         where_clause: WhereExpr::And(Vec::new()),
         group_by: Vec::new(),
+        group_by_exprs: Vec::new(),
         aggregates: vec![
             ("n".into(), count_all().into()),
             (
@@ -875,10 +884,14 @@ impl AdminClaims {
                     "host_pattern" => text(value)
                         .map(|h| validate_host_pattern(&h).map(ClaimKey::Host))
                         .transpose()?,
+                    // A kept prefix passes: one set before a console route took it stays editable.
                     "path_prefix" => text(value)
                         .map(|p| {
                             let p = p.trim().to_owned();
-                            validate_new_path_prefix(&p).map(|()| ClaimKey::PathPrefix(p))
+                            if changed(column, &serde_json::json!(p)) {
+                                validate_new_path_prefix(&p)?;
+                            }
+                            Ok::<_, String>(ClaimKey::PathPrefix(p))
                         })
                         .transpose()?,
                     "port" => match value {

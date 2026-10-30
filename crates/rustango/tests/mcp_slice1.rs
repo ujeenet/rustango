@@ -135,6 +135,7 @@ async fn malformed_json_is_parse_error() {
 /// The unauthenticated routers have no SSE stream: it needs an agent token (#1802).
 #[tokio::test]
 async fn unauthenticated_routers_do_not_mount_the_sse_stream() {
+    #[cfg_attr(not(feature = "sqlite"), allow(unused_mut))]
     let mut apps = vec![rustango::mcp::tenant_router()];
     #[cfg(feature = "sqlite")]
     apps.push(rustango::mcp::router(rustango::sql::Pool::Sqlite(

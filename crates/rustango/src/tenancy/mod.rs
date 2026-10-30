@@ -75,6 +75,7 @@ mod error;
 pub mod first_admin;
 pub mod impersonation_handoff;
 pub mod jwt_lifecycle;
+pub mod login;
 pub mod manage;
 /// Member (end-user) social SSO — OpenID Connect / social OAuth login
 /// for a tenant's own user pool, with optional auto-provisioning.
@@ -195,6 +196,9 @@ pub use db_server::{
 };
 pub use error::TenancyError;
 pub use first_admin::{CreatedAdmin, FirstAdmin, FirstAdminHandover, Handover, SetPasswordLink};
+pub use login::{configure_login_field, find_login_user, login_field, login_key};
+#[cfg(feature = "sso")]
+pub use login::{email_gaps, EmailGaps};
 #[cfg(all(feature = "tenancy", feature = "sso"))]
 pub use member_auth::{member_sso_router, CurrentMember, MemberAuthConfig, MEMBER_COOKIE};
 pub use migrate::{

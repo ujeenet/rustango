@@ -87,9 +87,10 @@ Verdrahte den Bus mit einem SSE-Endpunkt über axums `Sse`-Response + einen
 use std::convert::Infallible;
 use axum::{extract::State, response::sse::{Event, KeepAlive, Sse}, routing::get, Router};
 use futures::Stream;
-use rustango::sse::EventBus;
+use rustango::{shutdown::Shutdown, sse::EventBus};
 
 async fn events(
+    shutdown: Shutdown,
     State(bus): State<EventBus<Notification>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut rx = bus.subscribe();
@@ -106,7 +107,8 @@ async fn events(
         }
     };
     // keep-alive comments stop idle connections being reaped by proxies.
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // Ends the stream when the server stops.
+    Sse::new(shutdown.cut(stream)).keep_alive(KeepAlive::default())
 }
 
 let app = Router::new()
@@ -134,7 +136,7 @@ Konsumenten; `ws_handler` betreibt eine Verbindung, bis der Client sich trennt.
 ```rust
 use std::time::Duration;
 use axum::{extract::{State, WebSocketUpgrade}, response::Response, routing::get, Router};
-use rustango::{sse::EventBus, ws::WsHub};
+use rustango::{shutdown::Shutdown, sse::EventBus, ws::WsHub};
 use serde::{Serialize, Deserialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -143,9 +145,13 @@ struct Tick { value: i64 }
 let bus: EventBus<Tick> = EventBus::new(100);
 let hub = WsHub::new(bus).keepalive(Duration::from_secs(20));
 
-async fn ws_route(ws: WebSocketUpgrade, State(hub): State<WsHub<Tick>>) -> Response {
+async fn ws_route(
+    ws: WebSocketUpgrade,
+    shutdown: Shutdown,
+    State(hub): State<WsHub<Tick>>,
+) -> Response {
     // Caps the frame reader at `max_message_bytes` before buffering.
-    hub.upgrade(ws)
+    hub.upgrade(ws, shutdown)
 }
 
 let app = Router::new()
@@ -174,6 +180,8 @@ wird mitgeteilt, dass er `n` Nachrichten verpasst hat, sodass er neu synchronisi
 oder weitermachen kann: er erhält den Text-Frame `{"_lagged": n}`. Binäre Frames des
 Clients werden verworfen. Für eine ganze `WsConfig` auf einmal nutzen Sie
 `WsHub::with_config(bus, config)`; `hub.receiver_count()` zählt offene Sockets.
+
+Beide nehmen [`Shutdown`] als Extractor. Stoppt der Server, endet ein SSE-Stream in `shutdown.cut(..)`, und ein Socket bekommt Close 1001 (going away). So wartet ein Deploy nicht bis zur Drain-Frist.
 
 ## Von anderswo senden
 

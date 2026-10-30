@@ -274,6 +274,8 @@ pub struct Setup {
     /// Keep the stdout layer next to the file output. [`Setup::file_only`]
     /// clears it.
     keep_stdout: bool,
+    /// Bad `[logging]` values. Logged by `install`, once a subscriber exists.
+    deferred_warnings: Vec<String>,
 }
 
 #[cfg(feature = "runtime")]
@@ -291,6 +293,7 @@ impl Setup {
             with_line_numbers: false,
             file_sink: None,
             keep_stdout: true,
+            deferred_warnings: Vec::new(),
         }
     }
 
@@ -387,8 +390,8 @@ impl Setup {
 
     /// Build a `Setup` from a [`crate::config::LoggingSettings`]
     /// section. Every TOML field maps to a builder method. An
-    /// unknown `format` or `file_rotation` value logs a warning and
-    /// falls back to the default, so a typo does not fail boot.
+    /// unknown `format`, `color` or `file_rotation` value falls back to
+    /// the default; [`install`](Self::install) then logs a warning.
     ///
     /// ```ignore
     /// let settings = rustango::config::Settings::load_from_env()?;
@@ -407,11 +410,9 @@ impl Setup {
             None => setup.with_format(Format::Full),
             Some((_, Some(format))) => setup.with_format(format),
             Some((other, None)) => {
-                tracing::warn!(
-                    target: "rustango::logging",
-                    format = other,
-                    "unknown logging format; falling back to full"
-                );
+                setup.deferred_warnings.push(format!(
+                    "unknown [logging] format `{other}`; falling back to full"
+                ));
                 setup.with_format(Format::Full)
             }
         };
@@ -420,11 +421,9 @@ impl Setup {
             Some("never") => setup.with_color(Color::Never),
             Some("auto") | None => setup.with_color(Color::Auto),
             Some(other) => {
-                tracing::warn!(
-                    target: "rustango::logging",
-                    color = other,
-                    "unknown logging color mode; falling back to auto"
-                );
+                setup.deferred_warnings.push(format!(
+                    "unknown [logging] color `{other}`; falling back to auto"
+                ));
                 setup.with_color(Color::Auto)
             }
         };
@@ -445,11 +444,9 @@ impl Setup {
                 Some("never") => Rotation::Never,
                 Some("daily") | None => Rotation::Daily,
                 Some(other) => {
-                    tracing::warn!(
-                        target: "rustango::logging",
-                        rotation = other,
-                        "unknown logging rotation; falling back to daily"
-                    );
+                    setup.deferred_warnings.push(format!(
+                        "unknown [logging] file_rotation `{other}`; falling back to daily"
+                    ));
                     Rotation::Daily
                 }
             };
@@ -468,7 +465,14 @@ impl Setup {
     /// pending writes when dropped. Keep it alive for the whole
     /// process. Returns `None` when there is no file sink.
     #[must_use = "the returned WorkerGuard must outlive the process so file writes flush"]
-    pub fn install(self) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    pub fn install(mut self) -> Option<tracing_appender::non_blocking::WorkerGuard> {
+        let deferred = std::mem::take(&mut self.deferred_warnings);
+        let guard = self.install_subscriber();
+        emit_deferred_warnings(&deferred);
+        guard
+    }
+
+    fn install_subscriber(self) -> Option<tracing_appender::non_blocking::WorkerGuard> {
         let env_filter = env_filter_from(
             std::env::var(EnvFilter::DEFAULT_ENV).ok().as_deref(),
             &self.default_filter,
@@ -535,6 +539,15 @@ impl Setup {
             return None;
         }
         Some(guard)
+    }
+}
+
+/// Log the `[logging]` typos `from_settings` collected. Before a
+/// subscriber exists a warning goes nowhere.
+#[cfg(feature = "runtime")]
+fn emit_deferred_warnings(warnings: &[String]) {
+    for msg in warnings {
+        tracing::warn!(target: "rustango::logging", "{msg}");
     }
 }
 
@@ -1062,5 +1075,33 @@ mod rendered {
             "JSON must never be coloured — escape codes inside a JSON string break \
              every consumer"
         );
+    }
+
+    /// `from_settings` runs before any subscriber exists, so a typo
+    /// warned there is lost. It must surface when `install` emits it.
+    #[cfg(feature = "config")]
+    #[test]
+    fn logging_typos_are_kept_for_install_not_lost_at_build() {
+        let capture = |f: &mut dyn FnMut()| {
+            let buf = crate::testkit::CaptureWriter::default();
+            let layer = fmt_layer(Format::Full, false, true, false, false, Some(buf.clone()));
+            tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), f);
+            buf.contents()
+        };
+        let cfg = crate::config::LoggingSettings {
+            format: Some("jsno".into()),
+            color: Some("blue".into()),
+            file_dir: Some("/tmp/_logging_typo_test".into()),
+            file_rotation: Some("weekly".into()),
+            ..Default::default()
+        };
+        let mut setup = None;
+        let at_build = capture(&mut || setup = Some(Setup::from_settings(&cfg)));
+        assert!(at_build.is_empty(), "warned before install: {at_build}");
+        let setup = setup.unwrap();
+        let at_install = capture(&mut || emit_deferred_warnings(&setup.deferred_warnings));
+        for typo in ["jsno", "blue", "weekly"] {
+            assert!(at_install.contains(typo), "{typo} not logged: {at_install}");
+        }
     }
 }

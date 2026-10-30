@@ -684,6 +684,9 @@ Unabhängig von einem Serializer erzwingt der Schreibpfad immer das **Schema**:
   Wert ergibt einen `400`, der das Feld nennt.
 - **Erforderlich / NOT NULL** — ein fehlendes nicht-nullbares Feld (oder ein leerer String für einen
   nicht-nullbaren `String`) ergibt einen `400`; nullbare Felder akzeptieren leer → `NULL`.
+  In einem JSON-Body ist nur `null` gleich `NULL`: `""` auf einem nullbaren `String` bleibt `""`.
+- **Zahlen** — NaN und Unendlich ergeben einen `400`; eine als JSON-Zahl gesendete
+  Dezimalzahl behält alle Ziffern.
 - **Datenbank-Constraints** — Unique, Fremdschlüssel und Check-Constraints tauchen
   als `400` beim INSERT/UPDATE auf.
 

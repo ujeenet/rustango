@@ -477,7 +477,7 @@ async fn a_host_belonging_to_another_tenant_cannot_be_touched() {
     };
     org.insert_pool(&b.registry).await.expect("seed other org");
     let victim = format!("owned.{other}.example.com");
-    rustango::tenancy::add_host(&b.registry, &other, &victim)
+    rustango::tenancy::add_host(&b.registry, &other, &victim, "apex.invalid")
         .await
         .expect("bind to the other tenant");
 

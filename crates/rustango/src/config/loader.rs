@@ -12,9 +12,11 @@
 //! The tree is then deserialized into [`Settings`], so a type
 //! mismatch names the field that caused it.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::sections::Settings;
+use crate::env::SettingSource;
 
 /// Errors the layered loader can raise.
 #[derive(Debug, thiserror::Error)]
@@ -161,7 +163,9 @@ where
     let strict = env_vars
         .iter()
         .any(|(k, v)| k == STRICT_VAR && is_truthy(v));
-    let (settings, ignored) = load_report(root, env, env_vars)?;
+    let Loaded {
+        settings, ignored, ..
+    } = load_report(root, env, env_vars)?;
     if !ignored.is_empty() {
         if strict {
             return Err(ConfigError::Shape(
@@ -188,12 +192,37 @@ fn is_truthy(v: &str) -> bool {
     )
 }
 
-/// The merged settings plus every key path nothing reads, sorted.
+/// What one load read.
+pub(crate) struct Loaded {
+    pub(crate) settings: Settings,
+    /// Every key path nothing reads, sorted.
+    pub(crate) ignored: Vec<String>,
+    /// The merged tree, overrides included.
+    pub(crate) tree: toml::Value,
+    /// Leaf path to the layer that set it last.
+    pub(crate) sources: BTreeMap<String, SettingSource>,
+}
+
+/// [`load_report`] on the process env, for `check --settings`.
+pub(crate) fn report(root: &Path, env: &str) -> Result<Loaded, ConfigError> {
+    load_report(root, env, utf8_env_vars(std::env::vars_os()))
+}
+
+/// [`report`] on the given env vars.
+#[cfg(test)]
+pub(crate) fn report_from(
+    root: &Path,
+    env: &str,
+    env_vars: Vec<(String, String)>,
+) -> Result<Loaded, ConfigError> {
+    load_report(root, env, env_vars)
+}
+
 fn load_report(
     root: &Path,
     env: &str,
     env_vars: Vec<(String, String)>,
-) -> Result<(Settings, Vec<String>), ConfigError> {
+) -> Result<Loaded, ConfigError> {
     let default_path = root.join("default.toml");
     // Canonical name first (`PRODUCTION` → `prod`), then the raw one.
     let tier = crate::env::canonical_tier(env);
@@ -212,6 +241,9 @@ fn load_report(
     // so this expect cannot fire.
     let mut tree =
         read_toml(&default_path, true)?.expect("read_toml(_, required=true) returns Some on Ok");
+    let mut sources = BTreeMap::new();
+    let file = |p: &Path| SettingSource::File(p.display().to_string());
+    leaves(&tree, "", &file(&default_path), &mut sources);
 
     let tiered = read_toml(&tiered_path, false)?;
     let legacy = read_toml(&legacy_path, false)?;
@@ -223,6 +255,7 @@ fn load_report(
     }
     match (tiered, legacy) {
         (Some(t), Some(_)) => {
+            leaves(&t, "", &file(&tiered_path), &mut sources);
             // Both exist. `_settings` wins; warn so the unused file
             // does not go unnoticed.
             eprintln!(
@@ -233,11 +266,21 @@ fn load_report(
             );
             merge(&mut tree, t);
         }
-        (Some(t), None) => merge(&mut tree, t),
-        (None, Some(l)) => merge(&mut tree, l),
+        (Some(t), None) => {
+            leaves(&t, "", &file(&tiered_path), &mut sources);
+            merge(&mut tree, t);
+        }
+        (None, Some(l)) => {
+            leaves(&l, "", &file(&legacy_path), &mut sources);
+            merge(&mut tree, l);
+        }
         (None, None) => {}
     }
     let mut overrides = apply_env_overrides(&mut tree, env_vars)?;
+    for o in &overrides {
+        sources.retain(|k, _| !o.covers(k));
+        sources.insert(o.key.clone(), SettingSource::Override(o.var.clone()));
+    }
 
     // Each pass either loads, or turns one override into a string, or fails.
     loop {
@@ -249,7 +292,12 @@ fn load_report(
             Ok(settings) => {
                 ignored.sort();
                 ignored.dedup();
-                return Ok((settings, ignored));
+                return Ok(Loaded {
+                    settings,
+                    ignored,
+                    tree,
+                    sources,
+                });
             }
             Err(e) => e,
         };
@@ -313,6 +361,32 @@ fn safe_shape_message(e: &serde_path_to_error::Error<toml::de::Error>) -> String
         }
     };
     format!("`{path}`: {what}")
+}
+
+/// Record every leaf under `v` as set by `source`. A table replaced by a
+/// scalar, or the reverse, drops the paths it shadows.
+fn leaves(
+    v: &toml::Value,
+    at: &str,
+    source: &SettingSource,
+    out: &mut BTreeMap<String, SettingSource>,
+) {
+    match v {
+        toml::Value::Table(t) => {
+            for (k, child) in t {
+                let path = if at.is_empty() {
+                    k.clone()
+                } else {
+                    format!("{at}.{k}")
+                };
+                leaves(child, &path, source, out);
+            }
+        }
+        _ => {
+            out.retain(|k, _| !(k.strip_prefix(at).is_some_and(|r| r.starts_with('.'))));
+            out.insert(at.to_owned(), source.clone());
+        }
+    }
 }
 
 /// Read a TOML file. With `required = true` a missing file is an
@@ -744,6 +818,7 @@ request_timeout_secs = 30
 argon2_memory_kib = 19456
 argon2_iterations = 2
 lockout_threshold = 5
+login_field = "username"
 
 [auth.jwt]
 access_ttl_secs = 900
@@ -776,6 +851,10 @@ retention_days = 90
         assert_eq!(cfg.server.request_timeout_secs, Some(30));
         assert_eq!(cfg.auth.argon2_memory_kib, Some(19456));
         assert_eq!(cfg.auth.lockout_threshold, Some(5));
+        assert_eq!(
+            cfg.auth.login_field,
+            Some(crate::login_field::LoginField::Username)
+        );
         assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
         assert_eq!(cfg.auth.jwt.issuer.as_deref(), Some("myapp"));
         assert_eq!(cfg.brand.name.as_deref(), Some("Acme Operator"));
@@ -879,7 +958,11 @@ retention_days = 90
         let root = fresh_root("unknown_keys");
         write(&root, "default.toml", MISPLACED);
         let env = vec![("RUSTANGO__MAIL__SMTP_PASWORD".to_owned(), "x".to_owned())];
-        let (cfg, ignored) = load_report(&root, "any", env).unwrap();
+        let Loaded {
+            settings: cfg,
+            ignored,
+            ..
+        } = load_report(&root, "any", env).unwrap();
         assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
         assert_eq!(
             ignored,
@@ -890,6 +973,36 @@ retention_days = 90
                 "top"
             ]
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Each key names the last layer that set it.
+    #[test]
+    fn sources_name_the_last_layer_per_key() {
+        let root = fresh_root("sources");
+        write(
+            &root,
+            "default.toml",
+            "[database]\nurl = \"postgres://a/b\"\npool_max_size = 5\npool_min_size = 1\n",
+        );
+        write(
+            &root,
+            "prod_settings.toml",
+            "[database]\npool_max_size = 50\n",
+        );
+        let env = vec![(
+            "RUSTANGO__DATABASE__POOL_MIN_SIZE".to_owned(),
+            "2".to_owned(),
+        )];
+        let got = load_report(&root, "prod", env).unwrap().sources;
+        let file = |name: &str| SettingSource::File(root.join(name).display().to_string());
+        assert_eq!(got["database.url"], file("default.toml"));
+        assert_eq!(got["database.pool_max_size"], file("prod_settings.toml"));
+        assert_eq!(
+            got["database.pool_min_size"],
+            SettingSource::Override("RUSTANGO__DATABASE__POOL_MIN_SIZE".into())
+        );
+        assert_eq!(got.len(), 3, "{got:?}");
         let _ = std::fs::remove_dir_all(&root);
     }
 

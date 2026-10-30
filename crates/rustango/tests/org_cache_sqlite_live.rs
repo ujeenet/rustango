@@ -257,13 +257,13 @@ async fn a_cached_extra_host_is_served_without_querying() {
     let _g = lock().lock().await;
     let (pool, _dir) = registry().await;
     add_org(&pool, "acme", "acme.app.test").await;
-    rustango::tenancy::add_host(&pool, "acme", "extra.example.test")
+    rustango::tenancy::add_host(&pool, "acme", "extra.example.test", "apex.invalid")
         .await
         .expect("add_host");
     rustango::testkit::reset_org_cache();
     rustango::tenancy::invalidate_host_cache();
 
-    let first = RegisteredHostResolver
+    let first = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("extra.example.test"), &pool)
         .await
         .expect("resolve");
@@ -281,7 +281,7 @@ async fn a_cached_extra_host_is_served_without_querying() {
         .await
         .expect("suspend org");
 
-    let second = RegisteredHostResolver
+    let second = RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("extra.example.test"), &pool)
         .await
         .expect("resolve");
@@ -304,13 +304,13 @@ async fn suspending_a_tenant_also_clears_the_extra_host_cache() {
     let _g = lock().lock().await;
     let (pool, _dir) = registry().await;
     add_org(&pool, "acme", "acme.app.test").await;
-    rustango::tenancy::add_host(&pool, "acme", "extra2.example.test")
+    rustango::tenancy::add_host(&pool, "acme", "extra2.example.test", "apex.invalid")
         .await
         .expect("add_host");
     rustango::testkit::reset_org_cache();
     rustango::tenancy::invalidate_host_cache();
 
-    assert!(RegisteredHostResolver
+    assert!(RegisteredHostResolver::new("apex.invalid")
         .resolve(&parts_for_host("extra2.example.test"), &pool)
         .await
         .expect("resolve")
@@ -331,7 +331,7 @@ async fn suspending_a_tenant_also_clears_the_extra_host_cache() {
     rustango::tenancy::invalidate_org_cache();
 
     assert!(
-        RegisteredHostResolver
+        RegisteredHostResolver::new("apex.invalid")
             .resolve(&parts_for_host("extra2.example.test"), &pool)
             .await
             .expect("resolve")

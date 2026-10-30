@@ -866,8 +866,9 @@ impl InMemoryCache {
     async fn insert(&self, key: &str, value: &[u8], expires_at: Option<Instant>, pinned: bool) {
         let size = key.len() + value.len();
         let value = bytes::Bytes::copy_from_slice(value);
-        let mut entry = CacheEntry::new(value, expires_at, self.next_tick(), size);
         let mut store = self.inner.write().await;
+        // Ticked under the lock, so no read queued alongside outranks it.
+        let mut entry = CacheEntry::new(value, expires_at, self.next_tick(), size);
         if pinned {
             entry.pinned =
                 store.pinned_fits(key, size, self.max_pinned_bytes, self.max_pinned_entries);
@@ -876,7 +877,7 @@ impl InMemoryCache {
             }
         }
         store.put(key.to_owned(), entry);
-        self.evict_locked(&mut store);
+        self.evict_locked(&mut store, key);
     }
 
     /// Warn once that `set_forever` is past the pinned caps; the entry is stored evictable.
@@ -902,9 +903,9 @@ impl InMemoryCache {
 
     /// Once over budget, evict to the low-water mark: expired entries
     /// first, then the least recently used. The caller holds the write
-    /// lock. The newest entry always survives, so a value bigger than
-    /// the whole budget still caches.
-    fn evict_locked(&self, store: &mut Store) {
+    /// lock. `newest`, the key just written, always survives, so a value
+    /// bigger than the whole budget still caches.
+    fn evict_locked(&self, store: &mut Store, newest: &str) {
         if !Self::over(store, self.max_bytes, self.max_entries) {
             return;
         }
@@ -916,11 +917,10 @@ impl InMemoryCache {
         let mut lru: Vec<(u64, String)> = store
             .map
             .iter()
-            .filter(|(_, e)| !e.pinned)
+            .filter(|(k, e)| !e.pinned && k.as_str() != newest)
             .map(|(k, e)| (e.last_used.load(Ordering::Relaxed), k.clone()))
             .collect();
         lru.sort_unstable_by_key(|(tick, _)| *tick);
-        lru.pop();
         for (_, k) in lru {
             if !Self::over(store, bytes, entries) {
                 break;
@@ -995,8 +995,8 @@ impl Cache for InMemoryCache {
     /// rate limiting — need that. Across replicas you still need
     /// `RedisCache`; a per-process cache cannot help there.
     async fn incr(&self, key: &str, by: i64, ttl: Option<Duration>) -> Result<i64, CacheError> {
-        let tick = self.next_tick();
         let mut store = self.inner.write().await;
+        let tick = self.next_tick();
         let current = store
             .map
             .get(key)
@@ -1017,7 +1017,7 @@ impl Cache for InMemoryCache {
             key.to_owned(),
             CacheEntry::new(value, expires_at, tick, size),
         );
-        self.evict_locked(&mut store);
+        self.evict_locked(&mut store, key);
         Ok(new)
     }
 
@@ -1026,16 +1026,15 @@ impl Cache for InMemoryCache {
     /// builds its acquire on this.
     async fn add(&self, key: &str, value: &str, ttl: Option<Duration>) -> Result<bool, CacheError> {
         check_text(value)?;
-        let tick = self.next_tick();
         let mut store = self.inner.write().await;
         if store.map.get(key).is_some_and(|e| !e.is_expired()) {
             return Ok(false);
         }
         let size = key.len() + value.len();
         let value = bytes::Bytes::copy_from_slice(value.as_bytes());
-        let entry = CacheEntry::new(value, self.resolve_ttl(ttl), tick, size);
+        let entry = CacheEntry::new(value, self.resolve_ttl(ttl), self.next_tick(), size);
         store.put(key.to_owned(), entry);
-        self.evict_locked(&mut store);
+        self.evict_locked(&mut store, key);
         Ok(true)
     }
 
@@ -1054,7 +1053,7 @@ impl Cache for InMemoryCache {
         // An expiring entry is no longer `set_forever`: move it to the evictable budget.
         e.pinned &= expires_at.is_none();
         store.put(key.to_owned(), e);
-        self.evict_locked(&mut store);
+        self.evict_locked(&mut store, key);
         Ok(true)
     }
 
@@ -2285,6 +2284,28 @@ mod bound_tests {
         cache.set("c", "v", None).await.unwrap(); // evicts LRU (a)
         cache.set("d", "v", None).await.unwrap(); // evicts LRU (b)
         assert_eq!(cache.get("hot").await.unwrap().as_deref(), Some("v"));
+    }
+
+    /// Reads that land while a write waits for the lock do not get the
+    /// new entry evicted by its own insert.
+    #[tokio::test]
+    async fn the_written_entry_survives_reads_racing_its_insert() {
+        let cache = Arc::new(InMemoryCache::new().with_max_bytes(32).with_max_entries(0));
+        cache.set("a", "v", None).await.unwrap();
+        cache.set("b", "v", None).await.unwrap();
+        let reading = cache.inner.read().await;
+        let c = cache.clone();
+        let write = tokio::spawn(async move { c.set("big", &"x".repeat(100), None).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Reads holding the lock before the writer queued bump their keys.
+        for k in ["a", "b"] {
+            reading.map[k]
+                .last_used
+                .store(cache.next_tick(), Ordering::Relaxed);
+        }
+        drop(reading);
+        write.await.unwrap().unwrap();
+        assert!(cache.get("big").await.unwrap().is_some());
     }
 
     /// A budget of `0` means no limit.

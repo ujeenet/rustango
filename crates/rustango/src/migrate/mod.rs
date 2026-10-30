@@ -67,11 +67,9 @@ pub use runner::migrate_pool_with_ledger;
 pub use runner::migrate_pool_with_ledger_fake_initial;
 pub use runner::migrate_pool_with_ledger_fake_initial_with_progress;
 pub use runner::migrate_pool_with_progress;
-#[cfg(feature = "tenancy")]
-pub(crate) use runner::migrate_to_locked;
 pub use runner::{applied_set_pool_with_ledger, migrate_to_pool_with_ledger};
 #[cfg(feature = "tenancy")]
-pub(crate) use runner::{rollback_pool, Rollback};
+pub(crate) use runner::{rollback_pool, ApplyOrder, Rollback};
 // Ungated like the fn itself: a caller list here drifts from the callers' gates.
 #[allow(unused_imports)]
 pub(crate) use runner::try_table_exists_here;

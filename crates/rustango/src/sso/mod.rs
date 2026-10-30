@@ -17,9 +17,8 @@
 //! session cookie. SSO never auto-provisions an admin. (The member flow
 //! may opt into auto-provisioning.)
 //!
-//! The client secret is resolved from a reference (`env://…`) by the
-//! caller before building the provider, so the raw secret never lands in
-//! a DB column or a config file (mirrors `Org.database_url`).
+//! The client secret is stored encrypted in the provider row and decrypted
+//! only when the provider is built for a login.
 //!
 //! [`SsoProvider`]: crate::sso::SsoProvider
 //! [`OAuth2Provider`]: crate::oauth2::OAuth2Provider
@@ -48,8 +47,7 @@ pub use crate::oauth2::{open_flow, seal_flow, FlowPurpose, FlowScope, Normalized
 pub const SSO_FLOW_COOKIE: &str = "rustango_admin_sso_flow";
 
 /// A fully-resolved SSO provider config — the client secret is the
-/// dereferenced value (not an `env://` reference), ready to build a
-/// provider. Both surfaces normalize their stored config into this.
+/// decrypted value, ready to build a provider. Both surfaces normalize their stored config into this.
 #[derive(Clone)]
 pub struct ResolvedSso {
     /// Provider key: `"google"`, `"microsoft"`, `"github"`, `"gitlab"`,
@@ -58,7 +56,7 @@ pub struct ResolvedSso {
     /// OIDC issuer base URL — required when `provider == "oidc"`.
     pub issuer_url: Option<String>,
     pub client_id: String,
-    /// Resolved secret value (already dereferenced from `env://…`).
+    /// Decrypted secret value.
     pub client_secret: String,
     /// Must match the route mounted at `<login>/sso/{provider}/callback`.
     pub redirect_uri: String,

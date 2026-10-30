@@ -560,6 +560,8 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
             .unwrap(),
         9
     );
+    // The legacy shape must not outlive the test in the shared database.
+    rustango::testkit::matrix::fresh_table::<SsoProvider>(pool).await;
 }
 
 /// A database without the provider table holds no providers, at sign-in and in

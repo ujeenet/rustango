@@ -604,6 +604,74 @@ async fn database_purge_ends_the_tenants_own_sessions_on_other_pods() {
     );
 }
 
+/// An autovacuum worker in the tenant database is no foreign session: the
+/// drop ends it itself.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+#[allow(irrefutable_let_patterns)]
+async fn database_purge_ignores_an_autovacuum_worker() {
+    use rustango::sql::sqlx::{Connection as _, PgConnection};
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    setup(&pool).await;
+    let Pool::Postgres(pg) = &pool else {
+        unreachable!()
+    };
+    let autovacuum: String = rustango::sql::sqlx::query_scalar("SHOW autovacuum")
+        .fetch_one(pg)
+        .await
+        .unwrap();
+    if autovacuum != "on" {
+        eprintln!("autovacuum is off on this server — skipping");
+        return;
+    }
+    let (org, db) = org_with_database(&pool, "autovac").await;
+    // Dead rows and a tiny cost budget: once a worker starts, it stays.
+    let mut tenant = PgConnection::connect(org.database_url.as_deref().unwrap())
+        .await
+        .unwrap();
+    rustango::sql::sqlx::raw_sql(
+        "CREATE TABLE t (id INT, pad TEXT) WITH (autovacuum_vacuum_threshold = 0, \
+         autovacuum_vacuum_scale_factor = 0, autovacuum_vacuum_cost_delay = 100, \
+         autovacuum_vacuum_cost_limit = 1); \
+         INSERT INTO t SELECT g, repeat('x', 200) FROM generate_series(1, 200000) g; \
+         DELETE FROM t WHERE id % 2 = 0",
+    )
+    .execute(&mut tenant)
+    .await
+    .unwrap();
+    tenant.close().await.unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let workers: i64 = rustango::sql::sqlx::query_scalar(
+            "SELECT count(*) FROM pg_stat_activity \
+             WHERE datname = $1 AND backend_type = 'autovacuum worker'",
+        )
+        .bind(&db)
+        .fetch_one(pg)
+        .await
+        .unwrap();
+        if workers > 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "autovacuum never visited {db}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let report = purge_on(&pool, &org.slug).await.expect("purge");
+    assert!(report.database_dropped.is_some());
+    assert!(
+        !database_exists(&pool, &db).await,
+        "the tenant database survived the purge"
+    );
+}
+
 /// A session the tenant's pools did not open blocks the drop, as before (#2291).
 #[cfg(feature = "postgres")]
 #[tokio::test]

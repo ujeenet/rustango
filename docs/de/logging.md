@@ -158,6 +158,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::tenancy::admin` | Mandanten-Admin |
 | `rustango::tenancy::decommission` | Mandanten-Stilllegung und -Bereinigung |
 | `rustango::tenancy::first_admin` | Der erste Admin eines neuen Mandanten und sein Link |
+| `rustango::tenancy::login` | Anmeldefeld der Mandantenbenutzer und E-Mail-Prüfungen |
 | `rustango::tenancy::migrate_run` | Migrationen pro Mandant |
 | `rustango::tenancy::operation` | Mandanten-Purge und Passwortrotation |
 | `rustango::tenancy::operator_console` | Operator-Konsole |

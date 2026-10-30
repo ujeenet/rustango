@@ -703,6 +703,9 @@ Indépendamment d'un sérialiseur, le chemin d'écriture applique toujours le **
   invalide est une `400` nommant le champ.
 - **Requis / NOT NULL** — un champ non-nullable manquant (ou une chaîne vide pour une
   `String` non-nullable) est une `400` ; les champs nullables acceptent le vide → `NULL`.
+  Dans un corps JSON seul `null` vaut `NULL` : `""` sur une `String` nullable reste `""`.
+- **Nombres** — NaN et l'infini donnent une `400` ; un décimal envoyé comme nombre
+  JSON garde tous ses chiffres.
 - **Contraintes de base de données** — une clé dupliquée est une `409` (`conflict`) ;
   les clés étrangères et les contraintes check apparaissent comme une `400` sur
   INSERT/UPDATE.

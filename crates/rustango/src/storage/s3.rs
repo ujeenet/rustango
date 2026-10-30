@@ -86,8 +86,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 
 use super::transport::{
-    canonical_header_value, encode_key, encode_query, send_error, stream_body, Http, Parts, Split,
-    MAX_PRESIGN_SECS,
+    canonical_header_value, send_error, stream_body, Http, Parts, Split, MAX_PRESIGN_SECS,
 };
 #[cfg(test)]
 use super::transport::{upload_timeout, DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT};
@@ -95,6 +94,7 @@ use super::{
     already_exists, check_declared_len, validate_key, ByteStream, ObjectMeta, PutConditions,
     Storage, StorageError,
 };
+use super::{encode_key, encode_query};
 
 /// The most one PUT takes: 5 GiB.
 const MAX_PUT: u64 = 5 << 30;

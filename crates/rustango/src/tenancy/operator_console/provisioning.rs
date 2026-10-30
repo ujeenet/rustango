@@ -66,14 +66,16 @@ pub(super) async fn org_new_form(
     State(state): State<ConsoleState>,
     Extension(op): Extension<auth::Operator>,
 ) -> Response<Body> {
-    render_form(&state, &op, &HashMap::new(), None).await
+    render_form(&state, &op, &HashMap::new(), None, None).await
 }
 
+/// `resume_run`: the failed run that left this slug resumable.
 async fn render_form(
     state: &ConsoleState,
     op: &auth::Operator,
     form: &HashMap<String, String>,
     error: Option<&str>,
+    resume_run: Option<i64>,
 ) -> Response<Body> {
     let mut ctx = Context::new();
     inject_op_brand(&mut ctx, &state.op_brand);
@@ -84,6 +86,7 @@ async fn render_form(
         form.iter().filter(|(k, _)| *k != "database_url").collect();
     ctx.insert("prefill", &prefill);
     ctx.insert("error", &error);
+    ctx.insert("resume_run", &resume_run);
     ctx.insert("key_warning", &super::db_servers::key_warning());
     // Schema-mode is Postgres-only by language. Offering it on a
     // SQLite or MySQL registry would be offering a choice that can
@@ -209,13 +212,7 @@ fn request_from_form(
         )?)),
     };
 
-    let first_admin = match (field("admin_email"), field("admin_username")) {
-        (Some(email), username) => Some(FirstAdmin::new(email, username)?),
-        (None, Some(_)) => {
-            return Err("Enter the first admin's email, or clear the username.".into())
-        }
-        (None, None) => None,
-    };
+    let first_admin = first_admin_from(&field)?;
 
     Ok(ProvisionRequest {
         backend,
@@ -227,6 +224,17 @@ fn request_from_form(
         first_admin,
         ..ProvisionRequest::new(slug, storage)
     })
+}
+
+/// The first admin the form asks for, if any.
+fn first_admin_from<'a>(
+    field: &impl Fn(&str) -> Option<&'a str>,
+) -> Result<Option<FirstAdmin>, String> {
+    match (field("admin_email"), field("admin_username")) {
+        (Some(email), username) => Ok(Some(FirstAdmin::new(email, username)?)),
+        (None, Some(_)) => Err("Enter the first admin's email, or clear the username.".into()),
+        (None, None) => Ok(None),
+    }
 }
 
 /// An existing database: the URL given, or a database name derived on
@@ -275,13 +283,16 @@ pub(super) async fn org_new_submit(
     let registry_url = provisioner.registry_url();
     let request = match request_from_form(&form, Some(&registry_url)) {
         Ok(r) => r,
-        Err(msg) => return render_form(&state, &op, &form, Some(&msg)).await,
+        Err(msg) => return render_form(&state, &op, &form, Some(&msg), None).await,
     };
     let handover = provisioner.first_admin_handover();
     if request.first_admin.is_some() && handover.is_none() {
         let msg = "This console cannot hand over a first admin; leave the admin email empty.";
-        return render_form(&state, &op, &form, Some(msg)).await;
+        return render_form(&state, &op, &form, Some(msg), None).await;
     }
+
+    // Was the slug already resumable? Then a failure is "taken", not ours.
+    let resumable_before = resumable(&state.registry, &request.slug).await;
 
     // Provisioning runs inline. It is slower than a request should be
     // — the migrate step is seconds — but the alternative is spawning
@@ -304,43 +315,10 @@ pub(super) async fn org_new_submit(
     };
     super::emit_op_audit(&state.registry, &request.slug, operator_id, verb, extra).await;
     match outcome {
-        Ok((run, mut outcome)) => {
+        Ok((run, outcome)) => {
             let run_id = run.id.get().copied().unwrap_or_default();
-            let (Some(handover), Some(_)) = (handover, &outcome.first_admin) else {
-                return Redirect::to(&format!("provision/{run_id}")).into_response();
-            };
-            let host = headers
-                .get(axum::http::header::HOST)
-                .and_then(|v| v.to_str().ok());
-            if let Err(e) = handover
-                .hand_over_outcome(&state.registry, &mut outcome, host)
-                .await
-            {
-                tracing::warn!(target: "rustango::tenancy::operator_console", run_id, error = %e, "first admin handover failed");
-            }
-            // Rendered here, not redirected: the link is shown this once.
-            let shown = outcome.first_admin.as_ref().map(|admin| HandoverView {
-                username: admin.username.clone(),
-                mailed_to: match &admin.handover {
-                    Some(Handover::Mailed { to }) => Some(to.clone()),
-                    _ => None,
-                },
-                mail_failed: matches!(admin.handover, Some(Handover::MailFailed(_))),
-                link: admin
-                    .handover
-                    .as_ref()
-                    .and_then(Handover::link)
-                    .map(|l| l.expose().to_owned()),
-                hours: handover.ttl_hours(),
-            });
-            let mut resp = render_run(&state, &op, run_id, shown.as_ref()).await;
-            crate::tenancy::first_admin::guard_link_page(resp.headers_mut());
-            resp
+            show_outcome(&state, &op, &headers, run_id, outcome, "provision/").await
         }
-        // A failure before the row lands — a taken slug, an unreachable
-        // database — comes back here rather than as a run to watch,
-        // because there is nothing to watch. Re-render with the
-        // operator's input intact so they can fix one field.
         Err(e) => {
             let msg = e.user_facing().unwrap_or_else(|| {
                 withheld(
@@ -350,8 +328,219 @@ pub(super) async fn org_new_submit(
                     &e,
                 )
             });
-            render_form(&state, &op, &form, Some(&msg)).await
+            match (
+                resumable_before,
+                resumable(&state.registry, &request.slug).await,
+            ) {
+                // The row landed and this run failed after it: show the run.
+                (None, Some(run_id)) => {
+                    Redirect::to(&format!("provision/{run_id}")).into_response()
+                }
+                // Re-render with the operator's input intact.
+                (_, resume) => render_form(&state, &op, &form, Some(&msg), resume).await,
+            }
         }
+    }
+}
+
+/// A finished run: its page, with a first admin's link shown this once.
+async fn show_outcome(
+    state: &ConsoleState,
+    op: &auth::Operator,
+    headers: &HeaderMap,
+    run_id: i64,
+    mut outcome: provision::ProvisionOutcome,
+    run_path: &str,
+) -> Response<Body> {
+    let handover = state
+        .provisioner
+        .as_ref()
+        .and_then(|p| p.first_admin_handover());
+    let (Some(handover), Some(_)) = (handover, &outcome.first_admin) else {
+        return Redirect::to(&format!("{run_path}{run_id}")).into_response();
+    };
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok());
+    if let Err(e) = handover
+        .hand_over_outcome(&state.registry, &mut outcome, host)
+        .await
+    {
+        tracing::warn!(target: "rustango::tenancy::operator_console", run_id, error = %e, "first admin handover failed");
+    }
+    // Rendered here, not redirected: the link is shown this once.
+    let shown = outcome.first_admin.as_ref().map(|admin| HandoverView {
+        username: admin.username.clone(),
+        mailed_to: match &admin.handover {
+            Some(Handover::Mailed { to }) => Some(to.clone()),
+            _ => None,
+        },
+        mail_failed: matches!(admin.handover, Some(Handover::MailFailed(_))),
+        link: admin
+            .handover
+            .as_ref()
+            .and_then(Handover::link)
+            .map(|l| l.expose().to_owned()),
+        hours: handover.ttl_hours(),
+    });
+    let mut resp = render_run(state, op, run_id, shown.as_ref(), None).await;
+    crate::tenancy::first_admin::guard_link_page(resp.headers_mut());
+    resp
+}
+
+/// The failed create run that left `slug` inactive, if a resume can
+/// finish it.
+pub(super) async fn resumable(registry: &crate::sql::Pool, slug: &str) -> Option<i64> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let org = super::super::Org::objects()
+        .where_(super::super::Org::slug.eq(slug.to_owned()))
+        .fetch(registry)
+        .await
+        .ok()?
+        .into_iter()
+        .next()?;
+    if org.active {
+        return None;
+    }
+    let run = store::failed_creator_run(registry, *org.id.get()?)
+        .await
+        .ok()??;
+    run.id.get().copied()
+}
+
+/// Slugs with a resume in flight in this process: the old failed run stays
+/// the latest until the new one is linked, so a second click would pass
+/// [`resumable`] too.
+static RESUMING: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Holds `slug` in [`RESUMING`] until dropped; `None` when already held.
+struct ResumeSlot(String);
+
+impl ResumeSlot {
+    fn take(slug: &str) -> Option<Self> {
+        let mut busy = RESUMING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        busy.insert(slug.to_owned()).then(|| Self(slug.to_owned()))
+    }
+}
+
+impl Drop for ResumeSlot {
+    fn drop(&mut self) {
+        RESUMING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
+/// Finish a tenant its failed create left inactive, from that run's page.
+pub(super) async fn provision_resume(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    Path(run_id): Path<i64>,
+    headers: HeaderMap,
+    Form(form): Form<HashMap<String, String>>,
+) -> Response<Body> {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let provisioner = state
+        .provisioner
+        .as_ref()
+        .expect("provisioning routes are only mounted when a provisioner is supplied");
+    let back = |msg: &str| {
+        let msg = msg.to_owned();
+        let (state, op) = (&state, &op);
+        async move { render_run(state, op, run_id, None, Some(&msg)).await }
+    };
+    let run = match store::run_by_id(&state.registry, run_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return (StatusCode::NOT_FOUND, format!("no run {run_id}")).into_response(),
+        Err(e) => return super::server_error("operator_console", &e),
+    };
+    let Some(slot) = ResumeSlot::take(&run.slug) else {
+        return back("A resume of this tenant is already running.").await;
+    };
+    if resumable(&state.registry, &run.slug).await != Some(run_id) {
+        return back("This run's tenant cannot be resumed any more.").await;
+    }
+    let org = match super::super::Org::objects()
+        .where_(super::super::Org::slug.eq(run.slug.clone()))
+        .fetch(&state.registry)
+        .await
+    {
+        Ok(rows) => rows.into_iter().next(),
+        Err(e) => return super::server_error("operator_console", &e),
+    };
+    let Some(org) = org else {
+        return back("This run's tenant cannot be resumed any more.").await;
+    };
+    let field = |k: &str| form.get(k).map(|v| v.trim()).filter(|v| !v.is_empty());
+    let first_admin = match first_admin_from(&field) {
+        Ok(a) => a,
+        Err(msg) => return back(&msg).await,
+    };
+    if first_admin.is_some() && provisioner.first_admin_handover().is_none() {
+        return back("This console cannot hand over a first admin; leave the admin email empty.")
+            .await;
+    }
+    // Only the slug and mode matter: a resume keeps the row's storage.
+    let storage = match StorageMode::parse(&org.storage_mode) {
+        Ok(StorageMode::Schema) => provision::TenantStorage::Schema(org.schema_name.clone()),
+        _ => provision::TenantStorage::Database(DatabaseSource::Url(
+            org.database_url.clone().unwrap_or_default(),
+        )),
+    };
+    let request = ProvisionRequest {
+        first_admin,
+        ..ProvisionRequest::new(run.slug.clone(), storage)
+    };
+    // The slot lives in the task, which outlives a dropped request: the
+    // resume keeps running, so a second click must still be refused.
+    let (provisioner, by) = (provisioner.clone(), op.username.clone());
+    let outcome = tokio::spawn(async move {
+        let _slot = slot;
+        provisioner.resume(&request, Some(&by)).await
+    })
+    .await
+    .unwrap_or_else(|e| {
+        Err(crate::tenancy::TenancyError::Validation(format!(
+            "the resume task stopped: {e}"
+        )))
+    });
+    let operator_id = op.id.get().copied().unwrap_or_default();
+    let mut extra = serde_json::Map::new();
+    extra.insert("resumed_run_id".into(), serde_json::json!(run_id));
+    let verb = if outcome.is_ok() {
+        "resume"
+    } else {
+        "resume_failed"
+    };
+    super::emit_op_audit(&state.registry, &run.slug, operator_id, verb, extra).await;
+    match outcome {
+        Ok((new_run, outcome)) => {
+            let new_id = new_run.id.get().copied().unwrap_or_default();
+            show_outcome(&state, &op, &headers, new_id, outcome, "/orgs/provision/").await
+        }
+        Err(e) => match resumable(&state.registry, &run.slug).await {
+            // The resume's own run failed: show it.
+            Some(new_id) if new_id != run_id => {
+                Redirect::to(&format!("/orgs/provision/{new_id}")).into_response()
+            }
+            _ => {
+                let msg = e.user_facing().unwrap_or_else(|| {
+                    withheld(
+                        "operator_console::provision",
+                        &run.slug,
+                        "Could not resume the tenant",
+                        &e,
+                    )
+                });
+                back(&msg).await
+            }
+        },
     }
 }
 
@@ -406,13 +595,8 @@ pub(super) async fn test_connection(
                 .map_or_else(crate::tenancy::TenantSecrets::standard, |p| {
                     p.tenant_secrets()
                 });
-            let dry = provision::dry_run_on_server(
-                &state.registry,
-                &secrets,
-                &p.registry_url(),
-                &request,
-            )
-            .await;
+            let dry =
+                provision::dry_run(&state.registry, &secrets, &p.registry_url(), &request).await;
             if let Err(e) = dry {
                 let msg = e.user_facing().unwrap_or_else(|| {
                     withheld(
@@ -428,33 +612,13 @@ pub(super) async fn test_connection(
         return axum::Json(probe).into_response();
     }
 
-    // Probe exactly what a submit would use — an explicit URL, or the
-    // one derived from the database name. Probing a different target
-    // from the one about to be provisioned is worse than not probing
-    // at all, because it reports confidence in the wrong thing.
-    let target = if let Some(explicit) = field("database_url") {
-        Some(explicit.to_owned())
-    } else {
-        {
-            let db = field("database_name")
-                .map(ToOwned::to_owned)
-                .or_else(|| field("slug").map(|s| format!("tenant_{s}")));
-            match (state.provisioner.as_ref(), db) {
-                (Some(p), Some(db)) => {
-                    provision::tenant_url_on_registry_server(&p.registry_url(), &db)
-                }
-                _ => None,
-            }
-        }
+    // Probe exactly what a submit would use, read from the same fields.
+    // Probing a different target from the one about to be provisioned
+    // is worse than not probing at all.
+    let Some(p) = state.provisioner.as_ref() else {
+        return probe_bad("This console cannot create tenants.");
     };
-    let Some(url) = target else {
-        return probe_bad("Enter a slug, a database name, or a full URL first.");
-    };
-    // Answer the same question the submit will: resolve the reference,
-    // then the refusals that have nothing to do with reachability. The
-    // registry's own database is reachable and this role *can* create
-    // tables in it, so the probe used to bless the one target
-    // provisioning refuses outright.
+    let registry_url = p.registry_url();
     // Checks only: a probe stores nothing, so it neither seals nor warns.
     let secrets = state
         .pools
@@ -462,12 +626,29 @@ pub(super) async fn test_connection(
         .map_or_else(crate::tenancy::TenantSecrets::standard, |p| {
             p.tenant_secrets()
         });
-    let registry_url = state.provisioner.as_ref().map(|p| p.registry_url());
-    let resolved =
-        provision::check_database_url(&url, &secrets, &state.registry, registry_url.as_deref())
-            .await;
+    let resolved = if field("slug").is_some() {
+        // Everything a submit checks before it writes, dry.
+        let request = match request_from_form(&form, Some(&registry_url)) {
+            Ok(r) => r,
+            Err(msg) => return probe_bad(&msg),
+        };
+        provision::dry_run(&state.registry, &secrets, &registry_url, &request).await
+    } else {
+        // No slug yet: only an explicit URL can be probed.
+        let url = match field("database_source") {
+            Some("registry") => None,
+            _ => field("database_url"),
+        };
+        let Some(url) = url else {
+            return probe_bad("Enter a slug, or the existing database's URL, first.");
+        };
+        provision::check_database_url(url, &secrets, &state.registry, Some(&registry_url))
+            .await
+            .map(Some)
+    };
     let url = match resolved {
-        Ok(u) => u,
+        Ok(Some(u)) => u,
+        Ok(None) => return probe_bad("Choose where the tenant's database comes from."),
         Err(crate::tenancy::TenancyError::Validation(msg)) => return probe_bad(&msg),
         Err(_) => return probe_bad("Could not check this database URL."),
     };
@@ -677,7 +858,7 @@ pub(super) async fn provision_run_view(
     Extension(op): Extension<auth::Operator>,
     Path(run_id): Path<i64>,
 ) -> Response<Body> {
-    render_run(&state, &op, run_id, None).await
+    render_run(&state, &op, run_id, None, None).await
 }
 
 /// A first admin's handover, for the one render that shows it.
@@ -695,6 +876,7 @@ async fn render_run(
     op: &auth::Operator,
     run_id: i64,
     handover: Option<&HandoverView>,
+    resume_error: Option<&str>,
 ) -> Response<Body> {
     let Some(mut run) = (match store::run_by_id(&state.registry, run_id).await {
         Ok(r) => r,
@@ -750,6 +932,21 @@ async fn render_run(
             .collect::<Vec<_>>(),
     );
     ctx.insert("handover", &handover);
+    // A failed create whose tenant is still inactive can be finished.
+    let resume = kind == store::RunKind::Provision
+        && parsed == RunState::Failed
+        && state.provisioner.is_some()
+        && resumable(&state.registry, &run.slug).await == Some(run_id);
+    ctx.insert("resume", &resume);
+    ctx.insert("resume_error", &resume_error);
+    let handover_mode = state
+        .provisioner
+        .as_ref()
+        .and_then(|p| p.first_admin_handover());
+    ctx.insert(
+        "first_admin",
+        &handover_mode.map(|h| if h.mails() { "mail" } else { "link" }),
+    );
     render(state, "op_provision_run.html", &ctx)
 }
 
@@ -827,6 +1024,7 @@ pub(super) async fn provision_run_stream(
     Extension(_op): Extension<auth::Operator>,
     Path(run_id): Path<i64>,
     Query(q): Query<StreamQuery>,
+    shutdown: crate::shutdown::Shutdown,
     headers: HeaderMap,
     // `impl IntoResponse` rather than naming `Sse<impl Stream<…>>`:
     // the `Stream` trait lives in `futures-core`, which is in the tree
@@ -921,7 +1119,8 @@ pub(super) async fn provision_run_stream(
         }
     };
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    // A watcher reconnects with `Last-Event-ID`, so shutdown just ends it.
+    Sse::new(shutdown.cut(stream)).keep_alive(KeepAlive::default())
 }
 
 #[cfg(test)]

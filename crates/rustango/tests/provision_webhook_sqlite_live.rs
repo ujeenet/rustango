@@ -879,27 +879,26 @@ async fn set_active_raw(b: &Booted, org_id: i64, active: bool) {
         .unwrap();
 }
 
-/// Activated through the console's edit path: a replay after a later
-/// suspension leaves it suspended (#2292).
+/// The console's edit path cannot activate a tenant its failed create left
+/// inactive: that run must be resumed instead.
 #[tokio::test]
-async fn a_retry_does_not_revive_a_tenant_the_console_activated() {
+async fn the_console_cannot_activate_a_half_made_tenant() {
     use rustango::tenancy::org_edit::{apply, OrgPatch};
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
     let slug = unique("activated");
-    let org_id = half_made(&b, &holder, &slug, "evt-activated", true).await;
+    half_made(&b, &holder, &slug, "evt-activated", true).await;
     let registry = b.pools.registry_pool();
     let patch = OrgPatch {
         active: Some(true),
         ..OrgPatch::default()
     };
-    apply(&registry, &slug, &patch).await.expect("console edit");
-    set_active_raw(&b, org_id, false).await;
-
-    let run = replay(&b, &slug, "evt-activated").await;
-    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
+    let err = apply(&registry, &slug, &patch)
+        .await
+        .expect_err("activating a half-made tenant");
+    assert!(err.to_string().contains("resume"), "{err}");
     let orgs: Vec<Org> = Org::objects().fetch(&registry).await.unwrap();
-    assert!(!orgs[0].active, "a replay revived a suspended tenant");
+    assert!(!orgs[0].active, "the refused edit activated the tenant");
 }
 
 /// Any console edit of an active org unlinks it too (#2292).

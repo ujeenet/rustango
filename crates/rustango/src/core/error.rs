@@ -274,7 +274,7 @@ pub enum BoundedDmlReason {
     /// Never returned: a set operation is now [`QueryError::SetOperationDml`].
     #[deprecated(
         since = "0.60.6",
-        note = "match `QueryError::SetOperationDml`; removed in 0.61.0"
+        note = "match `QueryError::SetOperationDml`; removed in 0.62.0"
     )]
     #[error("the queryset has a set operation")]
     SetOperation,

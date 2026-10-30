@@ -404,6 +404,7 @@ jobs:
             --test system_migration_scopes \
             --test tracing_targets \
             --test every_test_suite_compiles_in_ci \
+            --test framework_tables_are_never_hand_built \
             --test logging_fields_agree
       # The #1464 datetime suites, which the list above cannot run.
       #
@@ -571,13 +572,15 @@ jobs:
       # PG suites gated on `postgres` alone that import more (#1835).
       - run: cargo test -p rustango --no-default-features --features postgres,sqlite,tenancy --no-run
       # `oauth2_router_standalone`, gated on `not(feature = "admin")`. The
-      # only shape that compiles it; nothing else in CI did.
+      # only shape that compiles it, so it runs here too.
       #
       # `--test` on purpose, unlike the two commands above: the whole test
       # surface under this narrow feature set is not a gate this job owns.
       # Under-gated suites (e.g. `forms_prepare_save_sqlite_live`, now
       # `sqlite` + `forms`) were fixed in #1594 and #2313.
-      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone --no-run
+      - run: cargo test -p rustango --no-default-features --features oauth2,manage,sqlite --test oauth2_router_standalone
+      # The `not(feature = "tenancy")` half; `guards` runs the tenancy half.
+      - run: cargo test -p rustango --no-default-features --features sqlite --test system_migration_scopes
       # `sso` without `admin-sso`: literals gated on the wrong one broke here (#1737).
       - run: cargo test -p rustango --features tenancy,sso --no-run --test non_superuser_admin_visibility_live --test permissions_upsert_live --test admin_user_roles_panel_live
 
@@ -712,7 +715,7 @@ jobs:
       # The derive under a renamed dependency (`orm`, and `rgo` with `#[rgo(...)]`), on the smokes' own features.
       - run: cargo nextest run --profile ci -p rustango-renamed-smoke -p rustango-rgo-smoke
       # A `Decimal` model needs a build without `sqlite`.
-      - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri decimal
+      - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test orm_core_counts_tri --test macro_decimal_time_binary decimal
       - run: cargo nextest run --profile live -p rustango --no-default-features --features postgres,testkit --test values_tri decimal
 
   # Ungated too. At ~62s it is two billed minutes, and the reasoning that
@@ -1392,6 +1395,7 @@ jobs:
             --test viewset_sqlite_live \
             --test viewset_natural_pk_tri \
             --test viewset_write_allowlist_tri \
+            --test viewset_json_values_tri \
             --test viewset_filters_tri \
             --test viewset_serializer_patch_tri \
             --test inserted_pk_readback_tri \
@@ -1417,6 +1421,8 @@ jobs:
           --test tenant_admin_state_tri
           --test operator_last_active_tri
           --test basic_auth_cache_tri
+          --test tenant_login_field_tri
+          --test tenant_sign_in_page_sqlite_live
           --test api_key_hmac_tri
           --test system_chain_order_tri
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy,mcp,testkit --test agent_grants_unique_tri
@@ -1691,6 +1697,7 @@ jobs:
           binary(=admin_row_scope_tri) |
           binary(=admin_list_state_tri) |
           binary(=admin_write_errors_tri) |
+          binary(=admin_write_targets_tri) |
           binary(=admin_edit_tri) |
           binary(=crud_refusals_tri) |
           binary(=admin_audit_writes_tri) |
@@ -1708,6 +1715,7 @@ jobs:
           binary(=testkit_matrix_forms_tri) |
           binary(=viewset_natural_pk_tri) |
           binary(=viewset_write_allowlist_tri) |
+          binary(=viewset_json_values_tri) |
           binary(=viewset_filters_tri) |
           binary(=viewset_serializer_patch_tri) |
           binary(=unique_together_validator_tri) |
@@ -1726,6 +1734,7 @@ jobs:
           binary(=tenant_admin_state_tri) |
           binary(=operator_last_active_tri) |
           binary(=basic_auth_cache_tri) |
+          binary(=tenant_login_field_tri) |
           binary(=api_key_hmac_tri) |
           binary(=system_chain_order_tri) |
           binary(=agent_grants_unique_tri) |
@@ -2097,7 +2106,7 @@ jobs:
   # class of drift these examples were added to catch).
   #
   # getting_started_blog runs `migrate` first to create its schema;
-  # orm_cookbook resets the `public` schema inside the test itself.
+  # orm_cookbook recreates its tables inside the test itself.
   doc_examples:
     # Service images come from the GHCR mirror (#1688).
     permissions:
@@ -2125,11 +2134,10 @@ jobs:
             test_args: "-- --test-threads=1"
           - example: admin_demo
             migrate: true
-          # Authentication deep-dive docs (docs/auth-*.md). `migrate: false` for
-          # now — the current flow tests (passwords, sessions) are pure /
-          # in-memory; flips to true once DB-backed flow tests land.
+          # Authentication deep-dive docs (docs/auth-*.md). Its committed
+          # migrations create `auth_users`; migrate them so they stay valid.
           - example: auth_demo
-            migrate: false
+            migrate: true
           # These two were compiled by **nothing** until #1592 — they
           # appeared in `ci.yml` only as `deny-examples` and `lockfiles`
           # matrix rows, which read a manifest and never build the crate.

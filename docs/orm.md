@@ -1781,6 +1781,15 @@ async fn handler(mut t: Tenant) -> Result<...> {
 Schema-mode tenants share the registry pool but rely on a per-checkout
 `SET search_path`, so passing `&PgPool` would silently hit the wrong schema.
 
+In database-per-tenant mode (SQLite, MySQL or Postgres, with a
+`DatabaseTenantContext`), take `TenantScope` for the ORM (or `Tenant<DB>` on
+SQLite and MySQL). Its `t.pool()` is the tenant's own pool, so every pool method works, writes
+included, and no connection is held until a query runs. The `DatabaseTenant`
+extractor's `t.conn()` takes the `_on` reads only.
+
+For example `post.insert_pool(t.pool())` and `Post::objects().count(t.pool())`;
+the `sqlite_tenant_demo` example does exactly this.
+
 ## One connection per request
 
 Each `fetch(&pool)` checks out its own connection. To run a handler's queries

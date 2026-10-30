@@ -156,6 +156,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::tenancy::admin` | Tenant admin |
 | `rustango::tenancy::decommission` | Tenant decommission and purge |
 | `rustango::tenancy::first_admin` | A new tenant's first admin and its link |
+| `rustango::tenancy::login` | Tenant user sign-in field and email checks |
 | `rustango::tenancy::migrate_run` | Per-tenant migrations |
 | `rustango::tenancy::operation` | Tenant purge and password rotation runs |
 | `rustango::tenancy::operator_console` | Operator console |

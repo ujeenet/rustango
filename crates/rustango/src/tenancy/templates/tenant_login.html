@@ -132,10 +132,10 @@
       <h1>{{ brand_name | default(value=tenant_name) }}</h1>
     </div>
     {% if brand_tagline %}<div class="tagline">{{ brand_tagline }}</div>{% endif %}
-    <p class="sub">Sign in to <strong>{{ tenant_slug }}</strong></p>
+    <p class="sub">Sign in to <strong>{{ tenant_name | default(value=tenant_slug) }}</strong></p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    <label for="username">Username</label>
-    <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+    <label for="username">{{ login_label | default(value="Username") }}</label>
+    <input type="{{ login_input_type | default(value="text") }}" id="username" name="username" autocomplete="{{ login_autocomplete | default(value="username") }}" autofocus required>
     <label for="password">Password</label>
     <input type="password" id="password" name="password" autocomplete="current-password" required>
     <input type="hidden" name="next" value="{{ next }}">

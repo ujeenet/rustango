@@ -166,7 +166,8 @@ where
 {
     let parsed = parse(args, &slug_host_spec("add-host"))?;
     let (slug, host) = slug_and_host(&parsed, "add-host")?;
-    let row = org_host::add_host(&pools.registry_pool(), &slug, &host)
+    let apex = crate::tenancy::server::apex_domain();
+    let row = org_host::add_host(&pools.registry_pool(), &slug, &host, &apex)
         .await
         .map_err(explain)?;
     // The engine normalizes; echo what was stored, not what was typed.

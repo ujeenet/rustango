@@ -37,7 +37,14 @@ pub mod pagination;
 pub mod progress;
 pub mod resources;
 mod router;
-pub(crate) use router::{post_endpoints, DEFAULT_PREFIX};
+#[cfg(all(feature = "manage", feature = "csrf"))]
+pub(crate) use router::post_endpoints;
+// Read by the manage CSRF layer and its settings test.
+#[cfg(all(
+    feature = "manage",
+    any(feature = "csrf", all(test, feature = "config"))
+))]
+pub(crate) use router::DEFAULT_PREFIX;
 pub mod tools;
 mod transport;
 mod types;

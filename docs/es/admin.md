@@ -342,6 +342,8 @@ resistente a manipulaciones. Dos lugares lo exponen:
 - La **página de detalle** del modelo gana una tarjeta **Audit trail** que lista los
   cambios recientes (quién, cuándo y el diff), con un enlace **View full history**
   (mostrado en la [captura de detalle](#inlines) de arriba).
+- Las entradas de una fila se guardan bajo el texto canónico de su clave: `/posts/007`
+  y `/posts/7` comparten un historial.
 - La vista **Activity** de la barra lateral (`GET /<prefix>/__audit`) es un feed que
   cruza filas, del más reciente al más antiguo, con tarjetas de faceta para entidad /
   operación / fuente y un formulario de limpieza para purgar entradas de más de N días
@@ -403,7 +405,9 @@ Tres macros de registro más se enganchan al comportamiento de un modelo registr
 - **Acotación de querysets** —
   `register_admin_queryset!("posts", hook)` donde `hook: fn(&Parts) -> Vec<Filter>`
   restringe lo que una petición puede ver (por ejemplo, solo las filas del usuario
-  actual). Varios hooks sobre una tabla se componen.
+  actual). Varios hooks sobre una tabla se componen. Una creación, edición o fila inline
+  cuya FK apunta a una fila destino que sus hooks, el soft delete o el hook `view` ocultan
+  se rechaza con "no such object".
 - **Permisos a nivel de fila** —
   `register_admin_object_permission!("posts", "change", check)` donde
   `check: fn(&Parts, Option<&Value>) -> bool` permite o deniega por fila. Los manejadores
@@ -608,7 +612,7 @@ Todas las rutas son relativas a `admin_prefix`:
 | `/<table>/<pk>` | GET | Vista de detalle (solo lectura), con inlines + tarjeta de auditoría. |
 | `/<table>/<pk>` | POST | Envío de actualización. |
 | `/<table>/<pk>/edit` | GET | Formulario de edición. |
-| `/<table>/<pk>/delete` | POST | Eliminación (tras confirmación). |
+| `/<table>/<pk>/delete` | POST | Eliminación (tras confirmación). Una fila a la que otras aún apuntan responde 409: una página para el navegador, JSON en otro caso. |
 | `/<table>/__action` | POST | Ejecuta una acción masiva sobre los PK seleccionados. |
 | `/<table>/__autocomplete` | GET | JSON de autocompletado de FK (`?q=`). |
 | `/__docs` | GET | Referencia de modelos. |

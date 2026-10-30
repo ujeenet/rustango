@@ -4303,6 +4303,7 @@ impl<T: Model> AggregateBuilder<T> {
             joins,
             where_clause,
             group_by,
+            group_by_exprs: Vec::new(),
             aggregates: self.aggregates,
             aliases: self.aliases,
             having: self.having,

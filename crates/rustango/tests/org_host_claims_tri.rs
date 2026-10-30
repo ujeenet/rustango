@@ -179,7 +179,10 @@ async fn two_extra_claims_at_once_one_wins(pool: &Pool) {
     org(pool, &b).await;
     for i in 0..5 {
         let host = format!("{}-{i}.example.test", name("extra"));
-        let (ra, rb) = tokio::join!(add_host(pool, &a, &host), add_host(pool, &b, &host));
+        let (ra, rb) = tokio::join!(
+            add_host(pool, &a, &host, "apex.invalid"),
+            add_host(pool, &b, &host, "apex.invalid")
+        );
         one_wins(&ra, &rb, |e| matches!(e, HostError::Taken(_)));
     }
 }

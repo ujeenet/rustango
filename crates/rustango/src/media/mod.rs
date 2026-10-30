@@ -1549,19 +1549,29 @@ impl MediaManager {
 
     /// The delete + insert half of [`Self::set_tags`], in one transaction.
     async fn replace_links(&self, media_id: i64, tag_ids: &[i64]) -> Result<(), MediaError> {
-        let p1 = self.pool.dialect().placeholder(1);
-        let delete_sql = format!("DELETE FROM rustango_media_tag_links WHERE media_id = {p1}");
+        use crate::core::{DeleteQuery, Filter, Model as _, Op, SqlValue, WhereExpr};
+        // Without the media row lock two PG sets under READ COMMITTED keep both inserts.
+        let lock = crate::sql::m2m::source_lock(Media::SCHEMA, &SqlValue::I64(media_id))
+            .map(|q| self.pool.dialect().compile_select(&q))
+            .transpose()
+            .map_err(|e| media_err_from_exec(e.into()))?;
+        let delete = DeleteQuery::new(
+            MediaTagLink::SCHEMA,
+            WhereExpr::Predicate(Filter::new("media_id", Op::Eq, SqlValue::I64(media_id))),
+        );
 
-        let mut tx = crate::sql::transaction_pool(&self.pool)
+        // SQLite has no row lock: take its write lock at BEGIN instead.
+        let mut tx = crate::sql::write_transaction(&self.pool)
             .await
             .map_err(media_err_from_exec)?;
-        crate::sql::raw_execute_tx(
-            &mut tx,
-            &delete_sql,
-            vec![crate::core::SqlValue::I64(media_id)],
-        )
-        .await
-        .map_err(media_err_from_exec)?;
+        if let Some(lock) = lock {
+            crate::sql::raw_execute_tx(&mut tx, &lock.sql, lock.params)
+                .await
+                .map_err(media_err_from_exec)?;
+        }
+        crate::sql::delete_tx(&mut tx, &delete)
+            .await
+            .map_err(media_err_from_exec)?;
         crate::sql::bulk_insert_tx(&mut tx, &tag_links(media_id, tag_ids))
             .await
             .map_err(media_err_from_exec)?;

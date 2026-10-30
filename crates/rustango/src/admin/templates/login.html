@@ -6,6 +6,8 @@
 <head>
 <meta charset="utf-8">
 <title>{{ title }} — {{ admin_title }}</title>
+{% if brand_favicon_url %}<link rel="icon" href="{{ brand_favicon_url }}">
+{% else %}<link rel="icon" type="image/png" href="{{ static_url }}/icon.png">{% endif %}
 {% include "_theme_tokens.html" %}
 {% include "_admin_styles.html" %}
 <style nonce="{{ csp_nonce }}">

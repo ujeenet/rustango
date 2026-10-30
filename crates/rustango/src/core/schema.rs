@@ -153,8 +153,46 @@ pub struct FieldSchema {
     /// Each name maps to a function in the `validators` module, such
     /// as [`crate::validators::validate_email`], `validate_url`,
     /// `validate_slug`, `validate_uuid`, `validate_ipv4` or
-    /// `validate_filepath`. An unknown name errors at runtime with
-    /// [`crate::core::QueryError::UnknownValidator`].
+    /// `validate_filepath`. The derive refuses an unknown name, and
+    /// `validators` on a non-`String` field, at compile time; a
+    /// hand-built schema with an unknown name gets
+    /// [`crate::core::QueryError::UnknownValidator`] at write time.
+    ///
+    /// ```
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_contact")]
+    /// pub struct Contact {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(max_length = 254, validators = "email")]
+    ///     pub email: Option<String>,
+    /// }
+    /// # fn main() {}
+    /// ```
+    ///
+    /// ```compile_fail
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_contact")]
+    /// pub struct Contact {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(max_length = 254, validators = "emial")]
+    ///     pub email: String,
+    /// }
+    /// # fn main() {}
+    /// ```
+    ///
+    /// ```compile_fail
+    /// #[derive(rustango::Model)]
+    /// #[rustango(table = "doc_contact")]
+    /// pub struct Contact {
+    ///     #[rustango(primary_key)]
+    ///     pub id: i64,
+    ///     #[rustango(validators = "integer")]
+    ///     pub age: i32,
+    /// }
+    /// # fn main() {}
+    /// ```
     pub validators: &'static [&'static str],
     /// The cast of a `Cast<C>` field; `None` for any other field.
     pub cast: Option<FieldCast>,
