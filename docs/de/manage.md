@@ -116,6 +116,8 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | `clear-cache [--table <name>]` / `clearsessions` | Leert ihn; gibt die Anzahl gelöschter Zeilen zurück. Ohne Tabelle meldet er, dass nichts zu leeren ist |
 | `sendtestemail --to <addr>` | Sendet eine feste Test-Mail über das konfigurierte Backend |
 
+Die beiden Cache-Verben brauchen das `cache`-Feature; ohne es fehlen sie in `--help` und sagen das beim Aufruf.
+
 ### Introspektion
 
 | Verb | Was es tut |
@@ -751,7 +753,7 @@ cargo run -- make:test post_smoke
 
 Zeigt, mit welcher Datenbank dieser Build zu sprechen konfiguriert ist, ohne
 sich zu verbinden. Es gibt die Framework-Version aus, welche
-Datenbanktreiber (`postgres`/`mysql` Cargo-Features) einkompiliert sind, die
+Datenbanktreiber (`postgres`/`mysql`/`sqlite` Cargo-Features) einkompiliert sind, die
 Verbindungs-URL mit verstecktem Passwort und das erkannte Backend. Da es nie
 eine Verbindung öffnet, ist es praktisch in CI oder Containern, in denen die
 Datenbank noch nicht läuft, Sie aber bestätigen wollen, dass die Einstellungen

@@ -59,6 +59,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `InMemoryCache` no longer evicts the entry just written when reads race the write.
 - `RateLimitLayer` at its bucket cap sweeps down to seven eighths of it, so the full scan runs once per eighth of new keys instead of on every one.
 - `/ready` reports the database ready when every pool connection is busy within 30 seconds of a passed ping, instead of queuing behind requests and timing out.
+- An unknown `[logging]` `format`, `color` or `file_rotation` is logged once logging is installed; the warning used to fire before any subscriber and was lost.
+- `manage db:info` drops its stale MySQL notes and shows the `sqlite` feature, warning when a `sqlite:` URL meets a build without it.
+- Without the `cache` feature, `--help` no longer lists `clear-cache` and `createcachetable`, and running them names the missing feature.
+- `cargo rustango new --rustango-path` reads a relative path from the current directory, writes it absolute, and refuses a folder with no `Cargo.toml`.
+- Pagination links (`page_number_links`, `cursor_links`, `LinkHeaderBuilder`) keep every value of a repeated query key such as `?tag=a&tag=b`.
+- A NaN sitemap priority is left out instead of rendering `<priority>NaN</priority>`.
+- Operator console pages no longer tell operators to run build commands; inactive tenants hide the impersonate button, and impersonate refusals come back to the edit page as a message.
 
 ### Deprecated
 

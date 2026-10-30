@@ -115,6 +115,8 @@ alcanzan mediante `Cli::tenancy()`.
 | `clear-cache [--table <name>]` / `clearsessions` | La vacía; devuelve el número de filas borradas. Sin tabla, avisa de que no hay nada que vaciar |
 | `sendtestemail --to <addr>` | Envía un correo de prueba fijo por el backend configurado |
 
+Los dos verbos de caché necesitan la característica `cache`; sin ella no aparecen en `--help` y lo dicen al ejecutarlos.
+
 ### Introspección
 
 | Verbo | Qué hace |
@@ -741,7 +743,7 @@ cargo run -- make:test post_smoke
 
 Muestra con qué base de datos está configurada esta build para hablar, sin
 conectarse. Imprime la versión del framework, qué drivers de base de datos
-(características de Cargo `postgres`/`mysql`) están compilados, la URL de conexión
+(características de Cargo `postgres`/`mysql`/`sqlite`) están compilados, la URL de conexión
 con la contraseña oculta y el backend detectado. Como nunca abre una conexión,
 resulta práctico en CI o contenedores donde la base de datos aún no está
 levantada pero quieres confirmar que la configuración es correcta.
