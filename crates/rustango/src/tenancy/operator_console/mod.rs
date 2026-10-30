@@ -988,7 +988,7 @@ fn router_unlogged(
             )
             .route(
                 at("/orgs/provision/{run_id}/resume"),
-                post(provisioning::provision_resume),
+                get(op_post_only_redirect).post(provisioning::provision_resume),
             );
     }
     if impersonation_enabled {

@@ -1457,7 +1457,7 @@ mod tests {
         assert_eq!(redact_url("just-a-string"), "just-a-string");
     }
 
-    /// psql's error is shown, not the NOTICE lines before it.
+    /// `script` run by `sh -c`.
     fn sh(script: &str) -> std::process::Command {
         let mut cmd = std::process::Command::new("sh");
         cmd.args(["-c", script]);
@@ -1480,6 +1480,8 @@ mod tests {
 
     /// SIGTERM during the dump stops it and kills both children, so the
     /// move can bring the tenant back before the supervisor kills us.
+    /// It signals the whole test process, so it needs nextest's one
+    /// process per test.
     #[cfg(unix)]
     #[tokio::test]
     async fn sigterm_during_the_dump_kills_it() {
@@ -1521,6 +1523,7 @@ mod tests {
         panic!("the dump outlived the interrupt");
     }
 
+    /// psql's error is shown, not the NOTICE lines before it.
     #[test]
     fn a_failure_shows_the_error_behind_the_notices() {
         let mut stderr = String::new();

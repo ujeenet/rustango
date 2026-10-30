@@ -409,6 +409,33 @@ pub(super) async fn resumable(registry: &crate::sql::Pool, slug: &str) -> Option
     run.id.get().copied()
 }
 
+/// Slugs with a resume in flight in this process: the old failed run stays
+/// the latest until the new one is linked, so a second click would pass
+/// [`resumable`] too.
+static RESUMING: std::sync::Mutex<std::collections::BTreeSet<String>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Holds `slug` in [`RESUMING`] until dropped; `None` when already held.
+struct ResumeSlot(String);
+
+impl ResumeSlot {
+    fn take(slug: &str) -> Option<Self> {
+        let mut busy = RESUMING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        busy.insert(slug.to_owned()).then(|| Self(slug.to_owned()))
+    }
+}
+
+impl Drop for ResumeSlot {
+    fn drop(&mut self) {
+        RESUMING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 /// Finish a tenant its failed create left inactive, from that run's page.
 pub(super) async fn provision_resume(
     State(state): State<ConsoleState>,
@@ -432,6 +459,9 @@ pub(super) async fn provision_resume(
         Ok(Some(r)) => r,
         Ok(None) => return (StatusCode::NOT_FOUND, format!("no run {run_id}")).into_response(),
         Err(e) => return super::server_error("operator_console", &e),
+    };
+    let Some(_slot) = ResumeSlot::take(&run.slug) else {
+        return back("A resume of this tenant is already running.").await;
     };
     if resumable(&state.registry, &run.slug).await != Some(run_id) {
         return back("This run's tenant cannot be resumed any more.").await;
