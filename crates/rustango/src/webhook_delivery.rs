@@ -40,7 +40,8 @@
 //! - `X-Webhook-Signature: <signature>` over the body only, for receivers
 //!   not yet on v2. It does not stop a replay under a new id or event:
 //!   move receivers to v2. Both are in your chosen [`SignatureFormat`].
-//! - Any extra headers from [`WebhookSubscription::header`].
+//! - Any extra headers from [`WebhookSubscription::header`]. One replaces
+//!   a default such as `Content-Type`; it never replaces an `X-Webhook-*` header.
 //!
 //! ## Retry policy
 //!
@@ -306,6 +307,35 @@ fn retry_after(
     Some(wait.min(MAX_RETRY_AFTER))
 }
 
+/// The headers sent: a subscription header replaces a default, and
+/// never one the framework signs or owns.
+fn delivery_headers(event: &WebhookEvent) -> Result<reqwest::header::HeaderMap, JobError> {
+    use reqwest::header::{HeaderMap, HeaderName, HeaderValue, CONTENT_TYPE, USER_AGENT as UA};
+    // A bad header never builds: retrying cannot fix it.
+    let bad = |what: &str| JobError::Fatal(format!("request: invalid header {what}"));
+    let value = |v: &str| HeaderValue::from_str(v).map_err(|_| bad("value"));
+    let mut map = HeaderMap::new();
+    map.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    map.insert(UA, HeaderValue::from_static(USER_AGENT));
+    // Sorted: two spellings of one name in an older row pick a stable winner.
+    let mut extra: Vec<_> = event.headers.iter().collect();
+    extra.sort();
+    for (k, v) in extra {
+        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|_| bad("name"))?;
+        if [HEADER_ID, HEADER_EVENT, HEADER_SIGNATURE]
+            .iter()
+            .any(|own| name.as_str().eq_ignore_ascii_case(own))
+        {
+            continue;
+        }
+        map.insert(name, value(v)?);
+    }
+    map.insert(HEADER_ID, value(&event.id)?);
+    map.insert(HEADER_EVENT, value(&event.event)?);
+    map.insert(HEADER_SIGNATURE, value(&event.signature)?);
+    Ok(map)
+}
+
 async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
     // Only the subscription opts in: the operator's allowlist is for SSO
     // and Slack, and a tenant may own this URL.
@@ -321,25 +351,11 @@ async fn deliver(event: &WebhookEvent) -> Result<(), JobError> {
         _ => JobError::Fatal(e.to_string()),
     })?;
 
-    let mut req = target
+    let req = target
         .request(reqwest::Method::POST)
         .timeout(Duration::from_secs(event.timeout_secs.max(1)))
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .header(HEADER_ID, &event.id)
-        .header(HEADER_EVENT, &event.event)
-        .header(HEADER_SIGNATURE, &event.signature)
+        .headers(delivery_headers(event)?)
         .body(event.body.clone());
-    for (k, v) in &event.headers {
-        req = req.header(k.as_str(), v.as_str());
-    }
-    // A default, as the per-call client had: a subscription header wins.
-    if !event
-        .headers
-        .keys()
-        .any(|k| k.eq_ignore_ascii_case("user-agent"))
-    {
-        req = req.header(reqwest::header::USER_AGENT, USER_AGENT);
-    }
 
     let resp = match req.send().await {
         Ok(r) => r,
@@ -437,8 +453,10 @@ impl WebhookSubscription {
         self
     }
 
-    /// Add a header to every delivery. An invalid name or value is
-    /// dropped and makes [`Self::dispatch`] fail with [`JobError::Fatal`].
+    /// Add a header to every delivery. It replaces a default such as
+    /// `Content-Type`; the `X-Webhook-*` names the framework sets are
+    /// ignored. An invalid name or value is dropped and makes
+    /// [`Self::dispatch`] fail with [`JobError::Fatal`].
     #[must_use]
     pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let (name, value) = (name.into(), value.into());
@@ -449,6 +467,8 @@ impl WebhookSubscription {
             // The value often carries auth: name only.
             format!("invalid value for header {name:?}")
         } else {
+            // Names are case-insensitive: the later call wins.
+            self.headers.retain(|k, _| !k.eq_ignore_ascii_case(&name));
             self.headers.insert(name, value);
             return self;
         };
@@ -604,10 +624,16 @@ mod tests {
                     let bytes = axum::body::to_bytes(body, 1 << 20)
                         .await
                         .unwrap_or_default();
-                    let mut hdrs = HashMap::new();
+                    // A repeated header shows as its values joined by `\n`.
+                    let mut hdrs: HashMap<String, String> = HashMap::new();
                     for (k, v) in parts.headers.iter() {
                         if let Ok(s) = v.to_str() {
-                            hdrs.insert(k.as_str().to_owned(), s.to_owned());
+                            hdrs.entry(k.as_str().to_owned())
+                                .and_modify(|e| {
+                                    e.push('\n');
+                                    e.push_str(s);
+                                })
+                                .or_insert_with(|| s.to_owned());
                         }
                     }
                     received.lock().unwrap().push((
@@ -669,6 +695,47 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_slice(body).unwrap();
         assert_eq!(parsed["order_id"], 42);
 
+        srv.abort();
+        q.shutdown().await;
+    }
+
+    /// A subscription header replaces a default; the framework's own
+    /// `X-Webhook-*` names are never sent twice.
+    #[tokio::test]
+    async fn subscription_headers_never_duplicate_defaults() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (url, srv) = start_server(200, received.clone()).await;
+        let q = InMemoryJobQueue::with_workers(1);
+        WebhookSubscription::register(&q).await;
+        q.start().await;
+
+        let id = WebhookSubscription::new(url, "secret")
+            .allow_private_targets(true)
+            .header("Content-Type", "application/cloudevents+json")
+            .header("x-webhook-event", "spoofed")
+            .header("X-Webhook-Id", "spoofed")
+            .header("X-Webhook-Signature", "spoofed")
+            .header("X-Tenant", "a")
+            .header("x-tenant", "b")
+            .dispatch(&q, "order.created", &serde_json::json!({"a": 1}))
+            .await
+            .unwrap();
+        for _ in 0..50 {
+            if !received.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let recv = received.lock().unwrap();
+        let hdrs = &recv[0].1;
+        let get = |n: &str| hdrs.get(n).map(String::as_str);
+        assert_eq!(get("content-type"), Some("application/cloudevents+json"));
+        assert_eq!(get("x-webhook-event"), Some("order.created"));
+        assert_eq!(get("x-webhook-id"), Some(id.as_str()));
+        assert!(!get("x-webhook-signature").unwrap().contains("spoofed"));
+        // The later call wins, whatever its case.
+        assert_eq!(get("x-tenant"), Some("b"));
+        drop(recv);
         srv.abort();
         q.shutdown().await;
     }
