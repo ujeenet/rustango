@@ -48,6 +48,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The bare admin login page links the admin favicon.
 - `translate_plural`, `ngettext` and `ngettext_fmt` pick the plural form by the rule of the locale the text comes from; untranslated `ngettext` source strings use the default locale's rule.
 - `naturalday` counts days in the active timezone and accepts a bare date; `dateformat` and `timeformat` render a datetime in the active timezone, and `O`/`T`/`e`/`Z` show its offset.
+- A webhook `Retry-After` no longer delays a retry past two minutes after dispatch, so a receiver checking the signed timestamp with a five-minute `max_age` still accepts it.
+- A webhook subscription header named `Host`, `Content-Length` or `Transfer-Encoding` is refused: `dispatch` fails, and an already queued row dead-letters.
+- `InMemoryCache` no longer evicts the entry just written when reads race the write.
+- `RateLimitLayer` at its bucket cap sweeps down to seven eighths of it, so the full scan runs once per eighth of new keys instead of on every one.
+- `/ready` reports the database ready when every pool connection is busy instead of queuing behind requests and timing out.
 
 ### Deprecated
 
