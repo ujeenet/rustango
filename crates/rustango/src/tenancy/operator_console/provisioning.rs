@@ -460,7 +460,7 @@ pub(super) async fn provision_resume(
         Ok(None) => return (StatusCode::NOT_FOUND, format!("no run {run_id}")).into_response(),
         Err(e) => return super::server_error("operator_console", &e),
     };
-    let Some(_slot) = ResumeSlot::take(&run.slug) else {
+    let Some(slot) = ResumeSlot::take(&run.slug) else {
         return back("A resume of this tenant is already running.").await;
     };
     if resumable(&state.registry, &run.slug).await != Some(run_id) {
@@ -497,7 +497,19 @@ pub(super) async fn provision_resume(
         first_admin,
         ..ProvisionRequest::new(run.slug.clone(), storage)
     };
-    let outcome = provisioner.resume(&request, Some(&op.username)).await;
+    // The slot lives in the task, which outlives a dropped request: the
+    // resume keeps running, so a second click must still be refused.
+    let (provisioner, by) = (provisioner.clone(), op.username.clone());
+    let outcome = tokio::spawn(async move {
+        let _slot = slot;
+        provisioner.resume(&request, Some(&by)).await
+    })
+    .await
+    .unwrap_or_else(|e| {
+        Err(crate::tenancy::TenancyError::Validation(format!(
+            "the resume task stopped: {e}"
+        )))
+    });
     let operator_id = op.id.get().copied().unwrap_or_default();
     let mut extra = serde_json::Map::new();
     extra.insert("resumed_run_id".into(), serde_json::json!(run_id));

@@ -22,7 +22,7 @@ use super::helpers::{
     url_filterable, FormLayout, ListQuery,
 };
 use super::object_permissions::AdminWrite;
-use super::queryset_hooks::RowScope;
+use super::queryset_hooks::{LinkedWrite, RowScope};
 use super::render;
 use super::templates::render_with_chrome;
 use super::urls::{ActionHandler, ActionPerm, AppState, CREATE_SEGMENT};
@@ -2203,7 +2203,12 @@ pub(crate) async fn create_submit(
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
         return Ok(refused(e.as_str().to_owned()).await);
     }
-    if let Some(msg) = hidden_fk_refusal(&state, &parts, model, &collected, None).await? {
+    let write = LinkedWrite {
+        values: &collected,
+        stored: None,
+        held: None,
+    };
+    if let Some((_, msg)) = hidden_fk_refusal(&state, &parts, model, &[write]).await? {
         return Ok(refused(msg).await);
     }
     // A tenant's host, path prefix and port, claimed as the console does.
@@ -2713,8 +2718,12 @@ pub(crate) async fn update_submit(
     {
         return Ok(refused(e.as_str().to_owned()).await);
     }
-    let stored = Some((pk_field, &pk_value));
-    if let Some(msg) = hidden_fk_refusal(&state, &parts, model, &collected, stored).await? {
+    let write = LinkedWrite {
+        values: &collected,
+        stored: Some((pk_field, &pk_value)),
+        held: pre_update_row.as_ref(),
+    };
+    if let Some((_, msg)) = hidden_fk_refusal(&state, &parts, model, &[write]).await? {
         return Ok(refused(msg).await);
     }
     #[cfg(feature = "tenancy")]
@@ -2967,17 +2976,16 @@ pub(super) async fn admits_written(
     }))
 }
 
-/// The form error when `values` link an FK to a row this request cannot see.
+/// The form error when a write links an FK to a row this request cannot
+/// see, with that write's index.
 pub(super) async fn hidden_fk_refusal(
     state: &AppState,
     parts: &axum::http::request::Parts,
     model: &'static crate::core::ModelSchema,
-    values: &[(&'static str, SqlValue)],
-    stored: Option<(&'static FieldSchema, &SqlValue)>,
-) -> Result<Option<String>, crate::sql::ExecError> {
-    let hidden =
-        super::queryset_hooks::hidden_fk_target(&state.pool, parts, model, values, stored).await?;
-    Ok(hidden.map(|f| format!("field `{}`: no such object", f.name)))
+    writes: &[super::queryset_hooks::LinkedWrite<'_>],
+) -> Result<Option<(usize, String)>, crate::sql::ExecError> {
+    let hidden = super::queryset_hooks::hidden_fk_target(&state.pool, parts, model, writes).await?;
+    Ok(hidden.map(|(i, f)| (i, format!("field `{}`: no such object", f.name))))
 }
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping

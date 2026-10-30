@@ -139,21 +139,32 @@ impl RowScope {
     }
 }
 
-/// The first FK among `values` naming a target row this request cannot see:
-/// outside its [`RowScope`] or refused by its "view" hook. Read on the pool;
-/// on update, `stored` is the owner row's pk, so a link it holds is kept.
+/// One admin write [`hidden_fk_target`] checks. On update, `stored` is the
+/// row's pk and `held` the row as read, so a link it holds is kept.
+pub(crate) struct LinkedWrite<'a> {
+    pub(crate) values: &'a [(&'static str, SqlValue)],
+    pub(crate) stored: Option<(&'static crate::core::FieldSchema, &'a SqlValue)>,
+    pub(crate) held: Option<&'a serde_json::Value>,
+}
+
+/// The first of `writes` with an FK naming a target row this request cannot
+/// see — outside its [`RowScope`] or refused by its "view" hook — as
+/// `(index, field)`. Read on the pool, one read per target for all writes.
 pub(crate) async fn hidden_fk_target(
     pool: &crate::sql::Pool,
     parts: &Parts,
     owner: &'static ModelSchema,
-    values: &[(&'static str, SqlValue)],
-    stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
-) -> Result<Option<&'static crate::core::FieldSchema>, crate::sql::ExecError> {
+    writes: &[LinkedWrite<'_>],
+) -> Result<Option<(usize, &'static crate::core::FieldSchema)>, crate::sql::ExecError> {
     use crate::admin::object_permissions::{has_hook, is_allowed};
-    use crate::viewset::fk_target::{first_hidden, FkTarget};
+    use crate::viewset::fk_target::{first_hidden_in, FkTarget, FkWrite};
     let targets: Vec<FkTarget> = owner
         .scalar_fields()
-        .filter(|f| values.iter().any(|(c, _)| *c == f.column))
+        .filter(|f| {
+            writes
+                .iter()
+                .any(|w| w.values.iter().any(|(c, _)| *c == f.column))
+        })
         .filter_map(|f| {
             FkTarget::of(f, |target| {
                 let scope = RowScope::of(target, parts).0;
@@ -162,9 +173,46 @@ pub(crate) async fn hidden_fk_target(
             })
         })
         .collect();
+    if targets.is_empty() {
+        return Ok(None);
+    }
+    // A value the read row already holds is no new link: no query for it.
+    let fresh: Vec<Vec<(&'static str, SqlValue)>> = writes
+        .iter()
+        .map(|w| {
+            w.values
+                .iter()
+                .filter(|(column, value)| {
+                    !w.held.is_some_and(|row| holds(owner, row, column, value))
+                })
+                .cloned()
+                .collect()
+        })
+        .collect();
+    let checks: Vec<FkWrite<'_>> = writes
+        .iter()
+        .zip(&fresh)
+        .map(|(w, values)| FkWrite {
+            values,
+            stored: w.stored,
+        })
+        .collect();
     let admits =
         |t: &FkTarget, row: &serde_json::Value| is_allowed(t.model.table, "view", parts, Some(row));
-    first_hidden(pool, None, owner, &targets, values, stored, admits).await
+    first_hidden_in(pool, None, owner, &targets, &checks, admits).await
+}
+
+/// `row` stores `value` in `column`, read the way the edit form shows it.
+fn holds(
+    owner: &'static ModelSchema,
+    row: &serde_json::Value,
+    column: &str,
+    value: &SqlValue,
+) -> bool {
+    owner.field_by_column(column).is_some_and(|f| {
+        let shown = crate::forms::input_value::render_value_for_input_json(row, f);
+        crate::forms::parse_form_value(f, Some(&shown)).is_ok_and(|v| v == *value)
+    })
 }
 
 /// Register an admin queryset hook for one model.

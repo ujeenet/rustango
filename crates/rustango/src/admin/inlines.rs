@@ -1436,6 +1436,15 @@ fn pk_key(row: &serde_json::Value, pk: &FieldSchema) -> String {
         .unwrap_or_default()
 }
 
+/// An inline row's FK values, checked after the plan loop.
+struct PendingLink {
+    /// How the refusal names the row: its slot number or its PK.
+    row: String,
+    values: Vec<(&'static str, SqlValue)>,
+    /// An update's PK and stored row.
+    stored: Option<(SqlValue, serde_json::Value)>,
+}
+
 /// Why [`plan_post`] refused the inline rows.
 pub(crate) enum InlinePlanError {
     /// A gate or lookup error: the response is the error's own.
@@ -1787,181 +1796,210 @@ async fn plan_target(
         .await?;
     // Distinct PKs: a repeated DELETE slot removes one row (#1717).
     let mut deleted: HashSet<String> = HashSet::new();
-    for (idx, row) in rows.into_iter().enumerate() {
-        let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
-        let delete_flag = row
-            .get("DELETE")
-            .is_some_and(|s| s == "on" || s == "true" || s == "1");
+    // FK links to check, in row order: one read per target after the loop.
+    let mut links: Vec<PendingLink> = Vec::new();
+    let plan_rows = || -> Result<(), InlinePlanError> {
+        for (idx, row) in rows.into_iter().enumerate() {
+            let raw_pk = row.get(target.pk.name).cloned().unwrap_or_default();
+            let delete_flag = row
+                .get("DELETE")
+                .is_some_and(|s| s == "on" || s == "true" || s == "1");
 
-        if is_new(idx, &raw_pk) {
-            // Blank extra rows stay blank.
-            let has_content = target
-                .writable
-                .iter()
-                .chain(&natural_pk)
-                .any(|f| row.get(f.name).is_some_and(|s| !s.trim().is_empty()));
-            if !has_content || delete_flag {
-                continue;
-            }
-            if !state.can_add(table) {
-                return Err(read_only().into());
-            }
-            if !crate::admin::object_permissions::is_allowed(table, "add", parts, None) {
-                return Err(refused("add").into());
-            }
-            let mut values = target.values(&row, false).map_err(|e| bad_row(idx, e))?;
-            #[cfg(feature = "tenancy")]
-            let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, None)
-                .map_err(|e| InlinePlanError::Rejected(format!("{name} row {}: {e}", idx + 1)))?;
-            if let Some(pk) = natural_pk {
-                let value =
-                    crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
-                values.push((pk.column, value));
-            }
-            super::object_permissions::default_locked_flags(
-                target.child,
-                &target.add_locked,
-                &mut values,
-            );
-            if let Some(msg) =
-                super::views::hidden_fk_refusal(state, parts, target.child, &values, None).await?
-            {
-                return Err(InlinePlanError::Rejected(format!(
-                    "{name} row {}: {msg}",
-                    idx + 1
-                )));
-            }
-            let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
-                values.into_iter().unzip();
-            for (column, value) in &target.scope.0 {
-                columns.push(column);
-                sql_values.push(value.clone());
-            }
-            // Schema-driven INSERT: nothing else supplies these (#1464).
-            crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
-            // MySQL cannot read back a DB-default UUID key; the scope re-read needs it.
-            if target.pk.auto && !columns.contains(&target.pk.column) {
-                if let crate::core::FieldType::Uuid = target.pk.ty {
-                    columns.push(target.pk.column);
-                    sql_values.push(SqlValue::Uuid(uuid::Uuid::now_v7()));
-                }
-            }
-            let audit = {
-                let written: Vec<(&'static str, SqlValue)> = columns
+            if is_new(idx, &raw_pk) {
+                // Blank extra rows stay blank.
+                let has_content = target
+                    .writable
                     .iter()
-                    .copied()
-                    .zip(sql_values.iter().cloned())
-                    .collect();
-                // The pins are not form input; the snapshot still names the parent.
-                let mut row = row.clone();
+                    .chain(&natural_pk)
+                    .any(|f| row.get(f.name).is_some_and(|s| !s.trim().is_empty()));
+                if !has_content || delete_flag {
+                    continue;
+                }
+                if !state.can_add(table) {
+                    return Err(read_only().into());
+                }
+                if !crate::admin::object_permissions::is_allowed(table, "add", parts, None) {
+                    return Err(refused("add").into());
+                }
+                let mut values = target.values(&row, false).map_err(|e| bad_row(idx, e))?;
+                #[cfg(feature = "tenancy")]
+                let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, None)
+                    .map_err(|e| {
+                        InlinePlanError::Rejected(format!("{name} row {}: {e}", idx + 1))
+                    })?;
+                if let Some(pk) = natural_pk {
+                    let value =
+                        crate::forms::parse_pk_string(pk, &raw_pk).map_err(|e| bad_row(idx, e))?;
+                    values.push((pk.column, value));
+                }
+                super::object_permissions::default_locked_flags(
+                    target.child,
+                    &target.add_locked,
+                    &mut values,
+                );
+                links.push(PendingLink {
+                    row: (idx + 1).to_string(),
+                    values: values.clone(),
+                    stored: None,
+                });
+                let (mut columns, mut sql_values): (Vec<&'static str>, Vec<SqlValue>) =
+                    values.into_iter().unzip();
                 for (column, value) in &target.scope.0 {
-                    if let Some(f) = target.child.field_by_column(column) {
-                        row.insert(f.name.to_owned(), value.to_display_string());
+                    columns.push(column);
+                    sql_values.push(value.clone());
+                }
+                // Schema-driven INSERT: nothing else supplies these (#1464).
+                crate::forms::stamp_auto_timestamps(target.child, &mut columns, &mut sql_values);
+                // MySQL cannot read back a DB-default UUID key; the scope re-read needs it.
+                if target.pk.auto && !columns.contains(&target.pk.column) {
+                    if let crate::core::FieldType::Uuid = target.pk.ty {
+                        columns.push(target.pk.column);
+                        sql_values.push(SqlValue::Uuid(uuid::Uuid::now_v7()));
                     }
                 }
-                super::audit::audit_form(target.child, &cfg, &row, &written)
+                let audit = {
+                    let written: Vec<(&'static str, SqlValue)> = columns
+                        .iter()
+                        .copied()
+                        .zip(sql_values.iter().cloned())
+                        .collect();
+                    // The pins are not form input; the snapshot still names the parent.
+                    let mut row = row.clone();
+                    for (column, value) in &target.scope.0 {
+                        if let Some(f) = target.child.field_by_column(column) {
+                            row.insert(f.name.to_owned(), value.to_display_string());
+                        }
+                    }
+                    super::audit::audit_form(target.child, &cfg, &row, &written)
+                };
+                // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
+                let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
+                query.returning = vec![target.pk.column];
+                out.inserts.push(InlineInsert {
+                    query,
+                    audit,
+                    #[cfg(feature = "tenancy")]
+                    claims,
+                });
+                continue;
+            }
+
+            let pk = match stored.get(raw_pk.as_str()) {
+                Some(key) => key.clone(),
+                None => crate::forms::parse_pk_string(target.pk, &raw_pk)
+                    .map_err(|e| bad_row(idx, e))?,
             };
-            // The new PK feeds the scope re-read, audit entry and `admin_post_save`.
-            let mut query = crate::core::InsertQuery::new(target.child, columns, sql_values);
-            query.returning = vec![target.pk.column];
-            out.inserts.push(InlineInsert {
-                query,
+
+            if delete_flag {
+                if !state.can_delete(table) {
+                    return Err(read_only().into());
+                }
+                if !deleted.insert(pk.to_display_string()) {
+                    continue;
+                }
+                let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
+                    continue;
+                };
+                if !crate::admin::object_permissions::is_allowed(
+                    table,
+                    "delete",
+                    parts,
+                    Some(&before),
+                ) {
+                    return Err(refused("delete").into());
+                }
+                // `row_where` holds the live-rows scope, so a stamp lands once.
+                let pk_text = pk.to_display_string();
+                let query = match target.child.soft_delete_column {
+                    Some(col) => {
+                        let stamp = SqlValue::DateTime(chrono::Utc::now());
+                        let set = vec![crate::core::Assignment::new(col, stamp)];
+                        InlineRemove::Soft(crate::core::UpdateQuery::new(
+                            target.child,
+                            set,
+                            target.row_where(pk),
+                        ))
+                    }
+                    None => InlineRemove::Hard(crate::core::DeleteQuery::new(
+                        target.child,
+                        target.row_where(pk),
+                    )),
+                };
+                out.existing
+                    .push(InlineWrite::Delete { query, pk: pk_text });
+                continue;
+            }
+
+            let mut values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
+            if values.is_empty() {
+                continue;
+            }
+            let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
+                return Err(InlinePlanError::Rejected(format!(
+                "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
+            )));
+            };
+            #[cfg(feature = "tenancy")]
+            let claims =
+                crate::tenancy::org_host::AdminClaims::of(table, &mut values, Some(&before))
+                    .map_err(|e| InlinePlanError::Rejected(format!("{name} row {raw_pk}: {e}")))?;
+            if target.unchanged(&before, &values) {
+                continue;
+            }
+            super::views::keep_echoed_lossy(target.child, &row, Some(&before), &mut values);
+            if state.is_read_only(table) {
+                return Err(read_only().into());
+            }
+            if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before))
+            {
+                return Err(refused("change").into());
+            }
+            links.push(PendingLink {
+                row: raw_pk.clone(),
+                values: values.clone(),
+                stored: Some((pk.clone(), before)),
+            });
+            let audit = ChildAudit {
+                pk: pk.to_display_string(),
+                form: super::audit::audit_form(target.child, &cfg, &row, &values),
+            };
+            let set = values
+                .into_iter()
+                .map(|(column, value)| crate::core::Assignment::new(column, value))
+                .collect();
+            out.existing.push(InlineWrite::Update {
+                query: crate::core::UpdateQuery::new(
+                    target.child,
+                    set,
+                    target.row_where(pk.clone()),
+                ),
+                pk,
                 audit,
                 #[cfg(feature = "tenancy")]
                 claims,
             });
-            continue;
         }
-
-        let pk = match stored.get(raw_pk.as_str()) {
-            Some(key) => key.clone(),
-            None => {
-                crate::forms::parse_pk_string(target.pk, &raw_pk).map_err(|e| bad_row(idx, e))?
-            }
-        };
-
-        if delete_flag {
-            if !state.can_delete(table) {
-                return Err(read_only().into());
-            }
-            if !deleted.insert(pk.to_display_string()) {
-                continue;
-            }
-            let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
-                continue;
-            };
-            if !crate::admin::object_permissions::is_allowed(table, "delete", parts, Some(&before))
-            {
-                return Err(refused("delete").into());
-            }
-            // `row_where` holds the live-rows scope, so a stamp lands once.
-            let pk_text = pk.to_display_string();
-            let query = match target.child.soft_delete_column {
-                Some(col) => {
-                    let stamp = SqlValue::DateTime(chrono::Utc::now());
-                    let set = vec![crate::core::Assignment::new(col, stamp)];
-                    InlineRemove::Soft(crate::core::UpdateQuery::new(
-                        target.child,
-                        set,
-                        target.row_where(pk),
-                    ))
-                }
-                None => InlineRemove::Hard(crate::core::DeleteQuery::new(
-                    target.child,
-                    target.row_where(pk),
-                )),
-            };
-            out.existing
-                .push(InlineWrite::Delete { query, pk: pk_text });
-            continue;
-        }
-
-        let mut values = target.values(&row, true).map_err(|e| bad_row(idx, e))?;
-        if values.is_empty() {
-            continue;
-        }
-        let Some(before) = own.get(target.child, &pk, &raw_pk)? else {
-            return Err(InlinePlanError::Rejected(format!(
-                "{name} row {raw_pk} was deleted after this page loaded. Reload the page and try again."
-            )));
-        };
-        #[cfg(feature = "tenancy")]
-        let claims = crate::tenancy::org_host::AdminClaims::of(table, &mut values, Some(&before))
-            .map_err(|e| InlinePlanError::Rejected(format!("{name} row {raw_pk}: {e}")))?;
-        if target.unchanged(&before, &values) {
-            continue;
-        }
-        super::views::keep_echoed_lossy(target.child, &row, Some(&before), &mut values);
-        if state.is_read_only(table) {
-            return Err(read_only().into());
-        }
-        if !crate::admin::object_permissions::is_allowed(table, "change", parts, Some(&before)) {
-            return Err(refused("change").into());
-        }
-        let stored = Some((target.pk, &pk));
-        if let Some(msg) =
-            super::views::hidden_fk_refusal(state, parts, target.child, &values, stored).await?
-        {
-            return Err(InlinePlanError::Rejected(format!(
-                "{name} row {raw_pk}: {msg}"
-            )));
-        }
-        let audit = ChildAudit {
-            pk: pk.to_display_string(),
-            form: super::audit::audit_form(target.child, &cfg, &row, &values),
-        };
-        let set = values
-            .into_iter()
-            .map(|(column, value)| crate::core::Assignment::new(column, value))
-            .collect();
-        out.existing.push(InlineWrite::Update {
-            query: crate::core::UpdateQuery::new(target.child, set, target.row_where(pk.clone())),
-            pk,
-            audit,
-            #[cfg(feature = "tenancy")]
-            claims,
-        });
+        Ok(())
+    };
+    let planned = plan_rows();
+    // Rows before a refused one were checked first, so check their links first.
+    let writes: Vec<super::queryset_hooks::LinkedWrite<'_>> = links
+        .iter()
+        .map(|l| super::queryset_hooks::LinkedWrite {
+            values: &l.values,
+            stored: l.stored.as_ref().map(|(pk, _)| (target.pk, pk)),
+            held: l.stored.as_ref().map(|(_, row)| row),
+        })
+        .collect();
+    if let Some((i, msg)) =
+        super::views::hidden_fk_refusal(state, parts, target.child, &writes).await?
+    {
+        return Err(InlinePlanError::Rejected(format!(
+            "{name} row {}: {msg}",
+            links[i].row
+        )));
     }
+    planned?;
     // `max_num` caps the rows a POST that adds any may leave (#1717):
     // every live row of the parent, not only those the hooks show.
     if let Some(max) = target.max_num.filter(|_| !out.inserts.is_empty()) {

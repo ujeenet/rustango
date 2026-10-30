@@ -294,6 +294,54 @@ async fn inline_refuses_hidden_fk_targets(pool: &Pool) {
     assert_eq!(tasks(pool).await, [("t".to_owned(), mine)]);
 }
 
+/// Inline FK checks read each target once, not twice per changed row.
+async fn inline_fk_checks_read_each_target_once(pool: &Pool) {
+    use rustango::test_assertions::QueryCounter;
+    let s = sprint(pool, "s").await;
+    let mine = project(pool, "mine", 1, false).await;
+    let next = project(pool, "next", 1, false).await;
+    let mut ids = Vec::new();
+    for i in 0..3 {
+        ids.push(task(pool, s, mine, &format!("t{i}")).await);
+    }
+    let form = |project: i64, title: &str| {
+        let mut f = String::from("name=s&wt_task-TOTAL_FORMS=3&wt_task-INITIAL_FORMS=3");
+        for (i, id) in ids.iter().enumerate() {
+            f.push_str(&format!(
+                "&wt_task-{i}-id={id}&wt_task-{i}-project_id={project}&wt_task-{i}-title={title}{i}"
+            ));
+        }
+        f
+    };
+    let counted = |body: String| async move {
+        QueryCounter::scope(async {
+            let r = post(pool, &format!("/wt_sprint/{s}"), &body).await;
+            assert!(r.status.is_redirection(), "{}: {}", r.status, r.body);
+            QueryCounter::current()
+        })
+        .await
+    };
+    // Same writes either way; only the FK checks differ.
+    let kept = counted(form(mine, "a")).await;
+    let moved = counted(form(next, "b")).await;
+    assert_eq!(moved - kept, 1, "kept {kept}, moved {moved}");
+    assert_eq!(
+        tasks(pool).await.iter().filter(|(_, p)| *p == next).count(),
+        3
+    );
+    // The refusal still names the row that links a hidden target.
+    let theirs = project(pool, "theirs", 77, false).await;
+    let mixed = format!(
+        "name=s&wt_task-TOTAL_FORMS=2&wt_task-INITIAL_FORMS=2\
+         &wt_task-0-id={}&wt_task-0-project_id={mine}&wt_task-0-title=c\
+         &wt_task-1-id={}&wt_task-1-project_id={theirs}&wt_task-1-title=c",
+        ids[0], ids[1]
+    );
+    let r = post(pool, &format!("/wt_sprint/{s}"), &mixed).await;
+    assert_refused(&r, "mixed");
+    assert!(r.body.contains(&format!("row {}", ids[1])), "{}", r.body);
+}
+
 /// Autocomplete reads a renamed PK and display column.
 async fn autocomplete_reads_renamed_columns(pool: &Pool) {
     let mut tag = Tag {
@@ -388,6 +436,7 @@ tri_dialect_test! {
         create_refuses_hidden_fk_targets,
         update_refuses_a_new_hidden_fk_target,
         inline_refuses_hidden_fk_targets,
+        inline_fk_checks_read_each_target_once,
         autocomplete_reads_renamed_columns,
         audit_files_the_canonical_key,
         blocked_delete_is_a_page_for_a_browser,

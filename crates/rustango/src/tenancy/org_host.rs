@@ -713,6 +713,7 @@ pub async fn generation(registry: &Pool) -> Result<Generation, HostError> {
         joins: Vec::new(),
         where_clause: WhereExpr::And(Vec::new()),
         group_by: Vec::new(),
+        group_by_exprs: Vec::new(),
         aggregates: vec![
             ("n".into(), count_all().into()),
             (

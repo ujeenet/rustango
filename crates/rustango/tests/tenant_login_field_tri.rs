@@ -160,11 +160,22 @@ async fn the_lock_follows_the_email(pool: &Pool) {
 }
 
 /// Users the email sign-in leaves out are counted for the boot warning.
+/// Other suites share the table, so counts are compared as growth.
 async fn gaps_count_missing_and_shared_emails(pool: &Pool) {
+    let before = rustango::tenancy::email_gaps(pool).await.unwrap();
     let name = unique(pool, "gap");
     seed(pool, &name, None).await;
+    // Email is unique, so a blank left by an earlier run blocks this one.
+    let mut spaces = User {
+        username: format!("{name}s"),
+        email: Some("   ".to_owned()),
+        ..rustango::testkit::user()
+    };
+    let blank_saved = usize::from(spaces.insert_pool(pool).await.is_ok());
     let shared = format!("{name}@example.test");
     seed(pool, &format!("{name}a"), Some(&shared)).await;
+    // Spaces around it: the same address to sign-in, a new value to the index.
+    seed(pool, &format!("{name}p"), Some(&format!("  {shared} "))).await;
     // MySQL's unique index ignores case, so the second one cannot exist there.
     let mut twin = User {
         username: format!("{name}b"),
@@ -174,9 +185,16 @@ async fn gaps_count_missing_and_shared_emails(pool: &Pool) {
     let twin_saved = twin.insert_pool(pool).await.is_ok();
 
     let gaps = rustango::tenancy::email_gaps(pool).await.unwrap();
-    assert!(gaps.without_email >= 1, "{gaps:?}");
+    assert!(
+        gaps.without_email >= before.without_email + 1 + blank_saved,
+        "{before:?} -> {gaps:?}"
+    );
+    let sharing = if twin_saved { 3 } else { 2 };
+    assert!(
+        gaps.shared_email >= before.shared_email + sharing,
+        "{before:?} -> {gaps:?}"
+    );
     if twin_saved {
-        assert!(gaps.shared_email >= 2, "{gaps:?}");
         // A shared email signs nobody in.
         let found = find_login_user(pool, LoginField::Email, &shared)
             .await

@@ -1995,6 +1995,9 @@ pub struct AggregateQuery {
     /// `model`; a dotted name (`"author.name"`) points at a JOINed
     /// alias, is emitted qualified, and skips model validation.
     pub group_by: Vec<&'static str>,
+    /// Expressions grouped after [`Self::group_by`], such as
+    /// `LOWER(email)`. Not projected; base-table columns only.
+    pub group_by_exprs: Vec<Expr>,
     /// `(alias, expr)` pairs — the alias is the key in each result
     /// row.
     ///
@@ -2035,6 +2038,7 @@ impl AggregateQuery {
             joins: Vec::new(),
             where_clause: WhereExpr::And(Vec::new()),
             group_by: Vec::new(),
+            group_by_exprs: Vec::new(),
             aggregates,
             aliases: Vec::new(),
             having: None,
@@ -2078,6 +2082,7 @@ impl PartialEq for AggregateQuery {
             && self.joins == other.joins
             && self.where_clause == other.where_clause
             && self.group_by == other.group_by
+            && self.group_by_exprs == other.group_by_exprs
             && self.aggregates == other.aggregates
             && self.aliases == other.aliases
             && self.having == other.having
