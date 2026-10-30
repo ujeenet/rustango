@@ -33,6 +33,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `find_many` and `where_in` split past the bind cap return each row once, even when MySQL's collation matches it from keys in two batches.
 - `DatabaseCache` and `clearsessions --table` accept a `schema.table` name: each part is quoted, so the table is found.
 - Two concurrent media `set_tags` on one row on Postgres leave one caller's set, not both merged: the media row is locked first.
+- Admin inline add rows leave a defaulted field optional, and a blank one takes the column default.
+- Two admin inlines of one child table post under their own formset prefixes (`<child>-<fk>`), so each saves its own rows.
+- Admin inline read-only and superuser-only fields render as text instead of inputs whose edits were dropped.
+- The admin list's "show all" facet keeps an active value past the 200 cap and shows "+N more" for the rest.
+- The bare admin login page links the admin favicon.
 
 ## [0.61.13] — 2026-10-30
 

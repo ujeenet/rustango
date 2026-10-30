@@ -223,7 +223,7 @@ pub struct Xfer {
     pub amount: i64,
     #[rustango(default = "5")]
     pub rank: i64,
-    #[rustango(max_length = 16)]
+    #[rustango(max_length = 16, default = "''")]
     pub note: String,
 }
 
