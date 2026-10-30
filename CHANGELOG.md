@@ -23,6 +23,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An `unresolved_tenant` router with its own `/health` builds instead of panicking, and gets the api layers (CORS from `[security]`).
 - A tenant host row equal to the apex no longer makes the apex resolve to that tenant, and adding one is refused.
 - `server::Builder::from_env` returns the env error when the database vars are unset or invalid instead of connecting to a built-in URL.
+- Tenancy `downgrade` (registry, `--tenant`, `--all-tenants`) rolls back `<app>/migrations/` files too, newest first.
+- `migrate <target>` plans the system chain around only the files it moves, so a later project file that creates a framework table no longer fails the move; the "already applied" check is repeated under the migrate lock.
+- Tenancy `migrate <target>` and `downgrade <target>` refuse a name found in two migrations folders instead of picking one.
+- A tenant whose stored path prefix is now a console route can be edited (console and admin) while that prefix is unchanged.
 
 ## [0.61.13] — 2026-10-30
 
