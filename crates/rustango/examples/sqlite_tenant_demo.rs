@@ -27,7 +27,6 @@ use std::sync::Arc;
 
 use axum::extract::Request;
 use axum::middleware;
-use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use rustango::extractors::{DatabaseTenant, DatabaseTenantContext};
@@ -88,23 +87,25 @@ impl OrgResolver for HostResolver {
 /// Per-request handler — counts posts in the tenant's DB and
 /// reports the count. Bootstraps an empty schema on first hit so
 /// every tenant lands on the same starting point.
-async fn whoami(mut t: DatabaseTenant<sqlx::Sqlite>) -> impl IntoResponse {
+async fn whoami(
+    mut t: DatabaseTenant<sqlx::Sqlite>,
+) -> Result<String, (axum::http::StatusCode, String)> {
     // Idempotent bootstrap. Real apps would run this via migrations;
     // the demo keeps it inline to stay single-file.
     sqlx::query("CREATE TABLE IF NOT EXISTS posts (id INTEGER PRIMARY KEY, title TEXT NOT NULL)")
         .execute(&mut ***t.conn())
         .await
-        .expect("create");
+        .map_err(rustango::server_error)?;
     sqlx::query("INSERT INTO posts (title) VALUES ('hello')")
         .execute(&mut ***t.conn())
         .await
-        .expect("insert");
+        .map_err(rustango::server_error)?;
     let row = sqlx::query("SELECT COUNT(*) as n FROM posts")
         .fetch_one(&mut ***t.conn())
         .await
-        .expect("count");
-    let n: i64 = row.try_get("n").expect("n");
-    format!("{}: {n} post(s)\n", t.org.slug)
+        .map_err(rustango::server_error)?;
+    let n: i64 = row.try_get("n").map_err(rustango::server_error)?;
+    Ok(format!("{}: {n} post(s)\n", t.org.slug))
 }
 
 #[rustango::main]
