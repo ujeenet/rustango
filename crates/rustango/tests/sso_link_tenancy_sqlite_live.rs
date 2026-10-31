@@ -365,6 +365,18 @@ async fn set_policy(pool: &Pool, slug: &str, column: &'static str, value: &str) 
         .unwrap();
 }
 
+/// Write one integer policy column of provider `slug`.
+async fn set_number(pool: &Pool, slug: &str, column: &'static str, value: i64) {
+    use rustango::sql::UpdaterPool as _;
+    SsoProvider::objects()
+        .filter("slug", slug.to_owned())
+        .update()
+        .set(column, value)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+}
+
 /// The rules of the `sso_refused` audit rows for `provider:subject`.
 async fn refused_rules(pool: &Pool, provider: &str, subject: &str) -> Vec<String> {
     rustango::audit::fetch_for_entity_pool(
@@ -2644,9 +2656,10 @@ async fn a_disabled_tenant_provider_never_falls_through_to_the_shared_one() {
         .execute_pool(env.pool())
         .await
         .unwrap();
+    // Refused at the start: never sent to the shared provider's IdP.
     assert_eq!(
-        env.sso("corp", "sub-ann", "ann@example.com").await,
-        Err("disabled".into())
+        location(&env.get("/__login/sso/corp").await),
+        "/__login?sso_error=disabled"
     );
     let page = body_of(env.get("/__login").await).await;
     assert!(!page.contains("/__login/sso/corp"), "{page}");
@@ -2724,9 +2737,8 @@ async fn the_tenant_session_ttl_is_the_shortest() {
     let env = boot().await;
     let ann = env.user("ann", "ann@example.com", false).await;
     env.tenant_provider("corp", true).await;
-    env.set_policy("corp", "session_ttl_secs", "600").await;
-    env.set_policy("corp", "superuser_session_ttl_secs", "300")
-        .await;
+    set_number(env.pool(), "corp", "session_ttl_secs", 600).await;
+    set_number(env.pool(), "corp", "superuser_session_ttl_secs", 300).await;
     env.idp.assert("sub-ann", "ann@example.com");
     let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
     let cookie = resp
@@ -2758,7 +2770,7 @@ async fn the_member_session_ttl_is_the_shortest() {
     let _g = SUITE.lock().await;
     let env = boot().await;
     env.tenant_provider("corp", false).await;
-    env.set_policy("corp", "session_ttl_secs", "900").await;
+    set_number(env.pool(), "corp", "session_ttl_secs", 900).await;
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
         pools: env._pools.clone(),
         resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
@@ -2789,7 +2801,7 @@ async fn the_bare_admin_session_ttl_is_the_shortest() {
     use base64::Engine as _;
     let _g = SUITE.lock().await;
     let (app, pool, idp) = bare_admin().await;
-    set_policy(&pool, "corp", "session_ttl_secs", "120").await;
+    set_number(&pool, "corp", "session_ttl_secs", 120).await;
     let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
         .await
         .unwrap()

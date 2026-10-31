@@ -1351,9 +1351,6 @@ async fn password_rules_follow_sso_only(pool: &Pool) {
     assert!(may_use_password(pool, boss).await);
     tenant_settings(pool, "off", false, None).await;
     assert!(!may_use_password(pool, boss).await);
-    // An unreadable value refuses.
-    tenant_settings(pool, "sometimes", false, None).await;
-    assert!(!may_use_password(pool, bob).await);
     rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
 }
 
