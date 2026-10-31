@@ -366,7 +366,17 @@ once a minute, so a dropped session cannot loop.
 **Shared providers.** A tenant's `SsoSharedOverride` (one row, bound to
 the shared provider) adds its own rules on top: it can block more
 domains, narrow sign-up, set `sso_only` or shorter sessions, never loosen. A shared provider grants only the roles its `allowed_roles` names;
-with no override, none.
+with no override, none. The override can also switch email linking off
+(`allow_email_link`, `allow_email_link_staff`). It binds to the shared
+provider row on its first sign-in: a renamed row keeps it, a new row with
+the old slug does not, and a row moved to another issuer refuses sign-in
+until the override is re-added.
+
+**Multi-tenant Microsoft.** A `microsoft` provider (or `oidc` on
+`/common` or `/organizations`) accepts users from any Entra directory.
+Its `role_map` and `required_claims` count only when `allowed_idp_tenants`
+pins the token's `tid`; otherwise roles are not granted and required
+claims refuse. `check --deploy` warns about such rows.
 
 **Throttle and audit.** SSO callbacks have their own per-IP limit (a 429
 past it), apart from the password one. Email links, sign-ups, re-links and

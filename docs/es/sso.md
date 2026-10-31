@@ -364,7 +364,9 @@ abierto, y avisa de `signup_mode = open` sin `allowed_email_domains`,
 Un superusuario solo sigue `password_login`; `sso_only` nunca lo bloquea.
 Una contraseña rechazada parece incorrecta. Una regla ilegible rechaza; una configuración ilegible solo deja entrar a superusuarios. Un proveedor desactivado mantiene a sus usuarios `sso_only`, un vínculo a uno borrado cuenta como `sso_only` hasta que un admin lo quite. `sso_only` cubre los logins con contraseña (tenant y bare admin) y los restablecimientos, no las claves API ni los secretos de agentes MCP. `sso-deactivate-idle` solo desactiva a usuarios que no pueden usar contraseña. Cerrar sesión lleva a `?local=1`, y la redirección automática ocurre como mucho una vez por minuto, para que una sesión perdida no cree un bucle.
 
-**Proveedores compartidos.** El `SsoSharedOverride` de un tenant endurece un proveedor compartido, nunca lo relaja, y nombra en `allowed_roles` los roles que puede otorgar (sin override: ninguno).
+**Proveedores compartidos.** El `SsoSharedOverride` de un tenant endurece un proveedor compartido, nunca lo relaja, y nombra en `allowed_roles` los roles que puede otorgar (sin override: ninguno). El override también puede desactivar la vinculación por correo (`allow_email_link`, `allow_email_link_staff`). Se vincula a la fila del proveedor compartido en el primer inicio de sesión: una fila renombrada lo conserva, una fila nueva con el slug antiguo no, y una fila que cambia de issuer rechaza el inicio de sesión hasta que se vuelva a crear el override.
+
+**Microsoft multiinquilino.** Un proveedor `microsoft` (u `oidc` en `/common` u `/organizations`) acepta usuarios de cualquier directorio de Entra. Su `role_map` y sus `required_claims` solo cuentan si `allowed_idp_tenants` fija el `tid` del token; si no, no se conceden roles y las claims obligatorias rechazan. `check --deploy` avisa de estas filas.
 
 **Límite y auditoría.** Los callbacks SSO tienen su propio límite por IP (429), aparte del de contraseñas. Vínculos, registros, re-vínculos y cambios de roles van al registro de auditoría; los rechazos como mucho cinco veces por sujeto en diez minutos.
 

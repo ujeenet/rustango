@@ -367,7 +367,9 @@ blockierend und warnt bei `signup_mode = open` ohne
 Ein Superuser folgt nur `password_login`; `sso_only` sperrt ihn nie aus.
 Ein abgelehntes Passwort sieht aus wie ein falsches. Eine unlesbare Regel lehnt ab; unlesbare Mandanteneinstellungen lassen nur Superuser herein. Ein deaktivierter Anbieter bindet seine Benutzer weiter, eine Verknüpfung zu einem gelöschten zählt als `sso_only`, bis ein Admin sie entfernt. `sso_only` gilt für Passwort-Logins (Mandant und Bare-Admin) und Resets, nicht für API-Schlüssel und MCP-Agenten-Secrets. `sso-deactivate-idle` deaktiviert nur Benutzer, die kein Passwort nutzen können. Logout landet auf `?local=1`, und die automatische Weiterleitung geschieht höchstens einmal pro Minute, damit eine verlorene Sitzung keine Schleife erzeugt.
 
-**Gemeinsame Anbieter.** `SsoSharedOverride` eines Mandanten verschärft einen gemeinsamen Anbieter, lockert ihn nie, und nennt in `allowed_roles` die Rollen, die er vergeben darf (ohne Override: keine).
+**Gemeinsame Anbieter.** `SsoSharedOverride` eines Mandanten verschärft einen gemeinsamen Anbieter, lockert ihn nie, und nennt in `allowed_roles` die Rollen, die er vergeben darf (ohne Override: keine). Der Override kann auch die Verknüpfung per E-Mail abschalten (`allow_email_link`, `allow_email_link_staff`). Er bindet sich bei der ersten Anmeldung an die Zeile des gemeinsamen Anbieters: eine umbenannte Zeile behält ihn, eine neue Zeile mit dem alten Slug nicht, und eine Zeile mit anderem Issuer verweigert die Anmeldung, bis der Override neu angelegt wird.
+
+**Microsoft mit mehreren Verzeichnissen.** Ein `microsoft`-Anbieter (oder `oidc` auf `/common` bzw. `/organizations`) nimmt Nutzer aus jedem Entra-Verzeichnis an. `role_map` und `required_claims` zählen nur, wenn `allowed_idp_tenants` die `tid` des Tokens festlegt; sonst werden keine Rollen vergeben und Pflicht-Claims verweigern. `check --deploy` warnt bei solchen Zeilen.
 
 **Drosselung und Audit.** SSO-Callbacks haben ein eigenes Limit pro IP (429), getrennt vom Passwort-Limit. Verknüpfungen, Registrierungen, Re-Links und Rollenänderungen landen im Audit-Log; Ablehnungen höchstens fünfmal pro Subjekt in zehn Minuten.
 
