@@ -165,6 +165,8 @@ impl From<&crate::extractors::TenantScope> for LinkScope {
 pub struct LinkTarget<'a> {
     pool: &'a crate::sql::Pool,
     scope: LinkScope,
+    /// The tenancy registry, so SSO rules of shared providers can be read.
+    registry: Option<&'a crate::sql::Pool>,
 }
 
 #[cfg(feature = "passwords")]
@@ -175,7 +177,16 @@ impl<'a> LinkTarget<'a> {
         Self {
             pool,
             scope: LinkScope::audience(audience),
+            registry: None,
         }
+    }
+
+    /// The tenancy registry: a reset then reads shared SSO providers'
+    /// rules. Without it a user linked through one is refused a reset.
+    #[must_use]
+    pub fn with_registry(mut self, registry: &'a crate::sql::Pool) -> Self {
+        self.registry = Some(registry);
+        self
     }
 }
 
@@ -186,6 +197,7 @@ impl<'a> LinkTarget<'a> {
         Self {
             pool,
             scope: LinkScope::from(org),
+            registry: None,
         }
     }
 }
@@ -198,6 +210,7 @@ impl<'a, DB: crate::sql::sqlx::Database> From<&'a crate::extractors::Tenant<DB>>
         Self {
             pool: tenant.pool(),
             scope: LinkScope::from(tenant),
+            registry: None,
         }
     }
 }
@@ -209,6 +222,7 @@ impl<'a> From<&'a crate::extractors::TenantScope> for LinkTarget<'a> {
         Self {
             pool: tenant.pool(),
             scope: LinkScope::from(tenant),
+            registry: None,
         }
     }
 }
@@ -362,10 +376,14 @@ pub async fn confirm_password_reset_pool(
     new_password: &str,
     secret: &[u8],
 ) -> Result<i64, AuthFlowError> {
-    let LinkTarget { pool, scope } = target.into();
+    let LinkTarget {
+        pool,
+        scope,
+        registry,
+    } = target.into();
     let (user_id, iat) = PasswordReset::verify_issued(&scope, url, secret)?;
     check_password_strength(new_password)?;
-    sso_allows_password(pool, user_id).await?;
+    sso_allows_password(pool, registry, user_id).await?;
     // Not a delegation to `_into`: this form owns `rustango_users`, so it
     // also stamps `password_changed_at` and ends existing sessions (#1449).
     write_password_hash(
@@ -402,7 +420,11 @@ pub async fn confirm_password_reset_pool_into(
     pk_column: &str,
     password_column: &str,
 ) -> Result<i64, AuthFlowError> {
-    let LinkTarget { pool, scope } = target.into();
+    let LinkTarget {
+        pool,
+        scope,
+        registry: _,
+    } = target.into();
     let user_id = PasswordReset::verify(&scope, url, secret)?;
     check_password_strength(new_password)?;
     write_password_hash(
@@ -439,10 +461,14 @@ pub async fn confirm_password_reset_single_use(
     secret: &[u8],
     cache: &std::sync::Arc<dyn crate::cache::Cache>,
 ) -> Result<i64, AuthFlowError> {
-    let LinkTarget { pool, scope } = target.into();
+    let LinkTarget {
+        pool,
+        scope,
+        registry,
+    } = target.into();
     let (user_id, iat) = PasswordReset::verify_issued(&scope, url, secret)?;
     check_password_strength(new_password)?;
-    sso_allows_password(pool, user_id).await?;
+    sso_allows_password(pool, registry, user_id).await?;
     consume_single_use(url, cache).await?;
     // As with the non-single-use form: this one owns `rustango_users`,
     // so it stamps `password_changed_at` too (#1449).
@@ -475,7 +501,11 @@ pub async fn confirm_password_reset_single_use_into(
     pk_column: &str,
     password_column: &str,
 ) -> Result<i64, AuthFlowError> {
-    let LinkTarget { pool, scope } = target.into();
+    let LinkTarget {
+        pool,
+        scope,
+        registry: _,
+    } = target.into();
     let user_id = PasswordReset::verify(&scope, url, secret)?;
     // Policy before consumption: a weak password must not cost the user
     // their link, but a replay must not reach the write.
@@ -495,7 +525,11 @@ pub async fn confirm_password_reset_single_use_into(
 
 /// A tenant user an SSO rule keeps off passwords gets no reset either.
 #[cfg(feature = "passwords")]
-async fn sso_allows_password(pool: &crate::sql::Pool, user_id: i64) -> Result<(), AuthFlowError> {
+async fn sso_allows_password(
+    pool: &crate::sql::Pool,
+    registry: Option<&crate::sql::Pool>,
+    user_id: i64,
+) -> Result<(), AuthFlowError> {
     #[cfg(all(feature = "sso", feature = "tenancy"))]
     {
         use crate::sql::FetcherPool as _;
@@ -505,13 +539,13 @@ async fn sso_allows_password(pool: &crate::sql::Pool, user_id: i64) -> Result<()
             .await
             .map_err(|e| AuthFlowError::Database(e.to_string()))?;
         if let Some(user) = found.first() {
-            if !crate::sso::lifecycle::password_login_allowed(pool, None, user).await {
+            if !crate::sso::lifecycle::password_login_allowed(pool, registry, user).await {
                 return Err(AuthFlowError::PasswordLoginDisabled);
             }
         }
     }
     #[cfg(not(all(feature = "sso", feature = "tenancy")))]
-    let _ = (pool, user_id);
+    let _ = (pool, registry, user_id);
     Ok(())
 }
 

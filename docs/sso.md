@@ -347,7 +347,14 @@ as refusing everyone, and warns about `signup_mode = open` with no
 | `SsoTenantPolicy` | `signups_per_hour` | SSO sign-ups per hour (empty: 100, `0`: no limit). |
 
 A superuser follows only `password_login`; `sso_only` never locks one out.
-A refused password looks like a wrong one. An unreadable rule refuses.
+A refused password looks like a wrong one. An unreadable rule refuses;
+unreadable tenant settings still let a superuser in. A provider binds its
+users while disabled too; a link to a deleted provider counts as
+`sso_only` until an admin removes it. `sso_only` covers password logins
+(tenant and bare admin) and resets, not API keys or MCP agent secrets.
+`sso-deactivate-idle` only switches off users who cannot use a password.
+Logout lands on `?local=1`, and the automatic redirect happens at most
+once a minute, so a dropped session cannot loop.
 
 **Shared providers.** A tenant's `SsoSharedOverride` (one row per shared
 slug) adds its own rules on top: it can block more domains, require a

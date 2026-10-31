@@ -30,7 +30,7 @@
 //! Opt in with `TenantAdminBuilder::with_session(SessionSecret)`:
 //!
 //! * Anonymous traffic is redirected to `/__login`.
-//! * `POST /__login` calls `auth::authenticate_user` on the resolved
+//! * `POST /__login` checks the password on the resolved
 //!   tenant's pool and issues a signed cookie.
 //! * Superusers get the full read/write admin.
 //! * Everyone else gets a read-only admin: lists and detail pages
@@ -568,6 +568,7 @@ where
                     &org,
                     cfg,
                     &pool,
+                    &pools.registry_pool(),
                     brand_storage,
                     routes,
                     &method,
@@ -754,9 +755,9 @@ where
         // visitors are bounced to the login page.
         if path == routes.change_password_url {
             // An impersonation has no tenant user; 0 matches no row.
-            let user_id = match &actor {
-                Some(SessionActor::User { id, .. }) => *id,
-                _ => 0,
+            let (user_id, session_exp) = match &actor {
+                Some(SessionActor::User { id, exp, .. }) => (*id, *exp),
+                _ => (0, 0),
             };
             return match parts.method {
                 axum::http::Method::GET => {
@@ -775,6 +776,7 @@ where
                         routes,
                         cookie_path,
                         user_id,
+                        session_exp,
                         &ip,
                         body,
                     )
@@ -880,6 +882,8 @@ enum SessionActor {
         is_superuser: bool,
         /// The user's cut-off, for logout (#1855).
         sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+        /// When this session expires, Unix seconds.
+        exp: i64,
     },
     /// An operator from the console's "Open admin as superuser" (#78).
     Operator { id: i64 },
@@ -1038,6 +1042,7 @@ async fn validate_session(
             username: user.username,
             is_superuser: user.is_superuser,
             sessions_revoked_at: user.sessions_revoked_at,
+            exp: payload.exp,
         },
         iat: payload.iat,
     }
@@ -1120,14 +1125,24 @@ async fn login_form(
     // `SsoProvider` rows merged with the registry-wide shared set).
     #[cfg(feature = "admin-sso")]
     {
+        // Unreadable: the server lets only superusers use a password, so
+        // show the form as for `superusers_only`, and never auto-redirect.
         let settings = crate::sso::policy::TenantSettings::load(tenant_pool)
             .await
-            .unwrap_or_default();
+            .unwrap_or_else(|_| crate::sso::policy::TenantSettings::break_glass());
         let local = query.is_some_and(|q| q.split('&').any(|p| p == "local=1"));
         ctx.insert("password_form", &settings.shows_password_form(local));
         let providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
-        if let Some(to) = super::sso::auto_redirect(&settings, &providers, query, error.is_some()) {
-            return Redirect::to(&to).into_response();
+        let marked =
+            crate::cookies::cookie_from_headers(headers, super::sso::AUTO_COOKIE).is_some();
+        if let Some(to) =
+            super::sso::auto_redirect(&settings, &providers, query, error.is_some() || marked)
+        {
+            let mut resp = Redirect::to(&to).into_response();
+            if let Ok(v) = HeaderValue::from_str(&super::sso::auto_cookie(cookie_path)) {
+                resp.headers_mut().append(header::SET_COOKIE, v);
+            }
+            return resp;
         }
         ctx.insert("sso_enabled", &!providers.is_empty());
         ctx.insert("sso_providers", &providers);
@@ -1309,7 +1324,8 @@ async fn login_submit(
         Err(_) => false,
     };
 
-    // After the verify, so a refused password takes the same time.
+    // Only after a right password, so the refusal reads as a wrong one.
+    // Its extra reads are not timing-hidden; the caller knew the password.
     let ok =
         ok && super::auth::password_login_allowed(tenant_pool, Some(registry_pool), &user).await;
     if !user.active || !ok || uid == 0 {
@@ -1335,7 +1351,13 @@ async fn login_submit(
     let mut resp = Redirect::to(&next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        user_session_cookie(&cfg.secret, routes, &org.slug, cookie_path, &user),
+        user_session_cookie(
+            &cfg.secret,
+            &org.slug,
+            cookie_path,
+            &user,
+            route_ttl(routes),
+        ),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
@@ -1352,13 +1374,11 @@ async fn login_submit(
 /// A new tenant session cookie for the saved `user`, bound to its current hash.
 fn user_session_cookie(
     secret: &tenant_console::SessionSecret,
-    routes: &super::routes::RouteConfig,
     slug: &str,
     cookie_path: &str,
     user: &super::auth::User,
+    ttl_secs: i64,
 ) -> HeaderValue {
-    let ttl_secs = i64::try_from(routes.tenant_session_ttl.as_secs())
-        .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let mut payload = TenantSessionPayload::new(
         user.id.get().copied().unwrap_or_default(),
         slug,
@@ -1378,6 +1398,11 @@ fn user_session_cookie(
     HeaderValue::from_str(&cookie.to_string()).expect("cookie is ascii")
 }
 
+/// The route's tenant session lifetime, in seconds.
+fn route_ttl(routes: &super::routes::RouteConfig) -> i64 {
+    i64::try_from(routes.tenant_session_ttl.as_secs()).unwrap_or(tenant_console::SESSION_TTL_SECS)
+}
+
 fn logout_response(routes: &super::routes::RouteConfig, cookie_path: &str) -> Response {
     let clear = Cookie::build((tenant_console::COOKIE_NAME, ""))
         .path(cookie_path.to_owned())
@@ -1388,7 +1413,8 @@ fn logout_response(routes: &super::routes::RouteConfig, cookie_path: &str) -> Re
         .secure(crate::session::secure_cookies())
         .max_age(CookieDuration::seconds(0))
         .build();
-    let mut resp = Redirect::to(&routes.login_url).into_response();
+    // `?local=1`: a live IdP session must not sign the user straight back in.
+    let mut resp = Redirect::to(&format!("{}?local=1", routes.login_url)).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_str(&clear.to_string()).expect("cookie is ascii"),
@@ -1690,6 +1716,7 @@ async fn change_password_submit(
     routes: &super::routes::RouteConfig,
     cookie_path: &str,
     user_id: i64,
+    session_exp: i64,
     ip: &crate::login_throttle::ClientIp,
     body: Body,
 ) -> Response {
@@ -1803,7 +1830,16 @@ async fn change_password_submit(
     );
     resp.headers_mut().append(
         header::SET_COOKIE,
-        user_session_cookie(secret, routes, &org.slug, cookie_path, &user),
+        // The same session, re-bound to the new hash: it keeps its expiry.
+        user_session_cookie(
+            secret,
+            &org.slug,
+            cookie_path,
+            &user,
+            route_ttl(routes)
+                .min(session_exp - chrono::Utc::now().timestamp())
+                .max(1),
+        ),
     );
     resp
 }
@@ -1823,6 +1859,7 @@ async fn set_password(
     org: &Org,
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
+    registry_pool: &crate::sql::Pool,
     brand_storage: &BoxedStorage,
     routes: &super::routes::RouteConfig,
     method: &axum::http::Method,
@@ -1863,7 +1900,7 @@ async fn set_password(
                         // The same rule as the change-password form.
                         Err(e) => Err(e.message),
                         Ok(()) => match crate::auth_flows::confirm_password_reset_pool(
-                            LinkTarget::tenant(tenant_pool, org),
+                            LinkTarget::tenant(tenant_pool, org).with_registry(registry_pool),
                             link,
                             &f.new_password,
                             &key,

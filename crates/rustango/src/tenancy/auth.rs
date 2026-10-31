@@ -435,9 +435,14 @@ pub(crate) async fn check_operator_password(
 /// [`crate::sql::Pool`] enum and works on PG / SQLite / MySQL.
 /// It matches `username` only, whatever `[auth] login_field` says.
 ///
+/// **Warning:** it does not apply the tenant's SSO password rules
+/// (`sso_only`, `password_login`), so a user meant to sign in only
+/// through SSO gets in with a password. Use [`authenticate_user_pool`].
+///
 /// # Errors
 /// As [`authenticate_operator`].
 #[cfg(feature = "postgres")]
+#[deprecated(note = "bypasses SSO password rules; use authenticate_user_pool")]
 pub async fn authenticate_user(
     conn: &mut PgConnection,
     username: &str,
@@ -470,6 +475,10 @@ pub async fn authenticate_user(
 ///
 /// `identifier` is matched by the active
 /// [`login_field`](super::login_field): a username, or an email ignoring case.
+///
+/// With `sso`, the tenant's SSO password rules apply too. It has no
+/// registry, so a user linked through a shared provider is refused here;
+/// the built-in logins pass the registry and are not.
 ///
 /// # Errors
 /// As [`authenticate_operator_pool`].

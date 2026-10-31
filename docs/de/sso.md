@@ -356,7 +356,7 @@ blockierend und warnt bei `signup_mode = open` ohne
 | `SsoTenantPolicy` | `signups_per_hour` | SSO-Registrierungen pro Stunde (leer: 100, `0`: unbegrenzt). |
 
 Ein Superuser folgt nur `password_login`; `sso_only` sperrt ihn nie aus.
-Ein abgelehntes Passwort sieht aus wie ein falsches. Eine unlesbare Regel lehnt ab.
+Ein abgelehntes Passwort sieht aus wie ein falsches. Eine unlesbare Regel lehnt ab; unlesbare Mandanteneinstellungen lassen nur Superuser herein. Ein deaktivierter Anbieter bindet seine Benutzer weiter, eine Verknüpfung zu einem gelöschten zählt als `sso_only`. API-Schlüssel und MCP-Agenten-Secrets sind nicht betroffen. Logout landet auf `?local=1`.
 
 **Gemeinsame Anbieter.** `SsoSharedOverride` eines Mandanten verschärft einen gemeinsamen Anbieter, lockert ihn nie, und nennt in `allowed_roles` die Rollen, die er vergeben darf (ohne Override: keine).
 

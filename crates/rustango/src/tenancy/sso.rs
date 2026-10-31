@@ -320,18 +320,31 @@ async fn denied_note(pool: &Pool) -> Option<String> {
     TenantSettings::load(pool).await.ok()?.access_denied_message
 }
 
+/// Set on the login page's automatic redirect; while it lives the page
+/// shows instead, so a session that does not stick cannot loop.
+pub(crate) const AUTO_COOKIE: &str = "rustango_sso_auto";
+
+/// The [`AUTO_COOKIE`] header value under `cookie_path`, for 60 seconds.
+pub(crate) fn auto_cookie(cookie_path: &str) -> String {
+    format!(
+        "{AUTO_COOKIE}=1; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=60{}",
+        secure_suffix()
+    )
+}
+
 /// Where the login page sends a visitor straight away: the tenant's
 /// default provider, or the only one when the password form is hidden.
 /// Never with `?local=1`, after an SSO error or with a flash message, so a
-/// refused sign-in does not loop.
+/// refused sign-in does not loop. `shown`: a flash message or a recent
+/// automatic redirect.
 pub(crate) fn auto_redirect(
     settings: &TenantSettings,
     providers: &[ProviderButton],
     query: Option<&str>,
-    has_flash: bool,
+    shown: bool,
 ) -> Option<String> {
     let pairs: Vec<&str> = query.unwrap_or("").split('&').collect();
-    if has_flash
+    if shown
         || pairs
             .iter()
             .any(|p| *p == "local=1" || p.starts_with("sso_error="))

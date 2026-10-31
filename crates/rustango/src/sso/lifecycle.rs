@@ -1,29 +1,48 @@
-//! What SSO decides outside the sign-in itself: whether a tenant user may
-//! use a password, and when an idle SSO-made account is switched off.
+//! What SSO decides outside the sign-in itself: whether a user may use a
+//! password, and when an idle SSO-made tenant account is switched off.
+//!
+//! `sso_only` covers password logins only. API keys and MCP agent secrets
+//! are separate credentials and keep working.
 
 use std::collections::HashMap;
 
 use crate::core::SqlValue;
 use crate::query::QuerySet;
 use crate::sql::{FetcherPool as _, Pool};
-use crate::tenancy::User;
 
 use super::link::{LinkSource, SsoLink};
-use super::policy::{Lifecycle, TenantSettings};
+use super::policy::Lifecycle;
 use super::provider::{load_rows, read_lifecycle, SsoProvider};
 
+/// The rules of a link whose provider row is gone: `sso_only`, until an
+/// admin removes the link.
+const GONE: Lifecycle = Lifecycle {
+    sso_only: true,
+    auto_deactivate_after_days: None,
+    session_ttl_secs: None,
+    superuser_session_ttl_secs: None,
+};
+
 /// Whether this tenant's SSO rules let `user` sign in with a password, or
-/// reset or set one. Call it after the password check, so a refusal takes
-/// the same time. A superuser follows only `password_login`; for anyone else
-/// `sso_only` (tenant-wide, or on a provider they are linked through) refuses.
-/// `registry` reads shared providers; without it a user linked through one
-/// is refused. An unreadable rule refuses.
-pub async fn password_login_allowed(pool: &Pool, registry: Option<&Pool>, user: &User) -> bool {
-    let settings = match TenantSettings::load(pool).await {
+/// reset or set one. Call it only after a right password, so the refusal
+/// reads as a wrong one; its reads are not timing-hidden.
+///
+/// A superuser follows only `password_login`, and when the settings cannot
+/// be read still gets in (break-glass); for anyone else `sso_only`
+/// (tenant-wide, or on a provider they are linked through, even a disabled
+/// or deleted one) refuses. `registry` reads shared providers; without it a
+/// user linked through one is refused. Any other unreadable rule refuses.
+#[cfg(feature = "tenancy")]
+pub async fn password_login_allowed(
+    pool: &Pool,
+    registry: Option<&Pool>,
+    user: &crate::tenancy::User,
+) -> bool {
+    let settings = match super::policy::TenantSettings::load(pool).await {
         Ok(s) => s,
         Err(e) => {
-            tracing::error!(target: "rustango::sso", "tenant SSO settings unreadable, password refused: {e}");
-            return false;
+            tracing::error!(target: "rustango::sso", "tenant SSO settings unreadable, only superusers use a password: {e}");
+            return user.is_superuser;
         }
     };
     if !settings.password_allowed(user.is_superuser) {
@@ -35,7 +54,24 @@ pub async fn password_login_allowed(pool: &Pool, registry: Option<&Pool>, user: 
     let Some(&user_id) = user.id.get() else {
         return false;
     };
-    match sso_only(pool, registry, user_id).await {
+    let sources = [LinkSource::Tenant, LinkSource::Shared];
+    match sso_only(pool, registry, user_id, &sources).await {
+        Ok(only) => !only,
+        Err(e) => {
+            tracing::error!(target: "rustango::sso", user_id, "SSO rules unreadable, password refused: {e}");
+            false
+        }
+    }
+}
+
+/// [`password_login_allowed`] for a bare-admin user: a non-superuser linked
+/// through an `sso_only` provider is refused.
+#[cfg(feature = "admin")]
+pub(crate) async fn admin_password_allowed(pool: &Pool, user_id: i64, superuser: bool) -> bool {
+    if superuser {
+        return true;
+    }
+    match sso_only(pool, None, user_id, &[LinkSource::Admin]).await {
         Ok(only) => !only,
         Err(e) => {
             tracing::error!(target: "rustango::sso", user_id, "SSO rules unreadable, password refused: {e}");
@@ -81,35 +117,34 @@ fn int(r: &HashMap<String, SqlValue>, c: &str) -> i64 {
     }
 }
 
-/// The rules of the enabled provider a link points at, with an override
-/// of a shared one. `None`: the provider is gone or disabled.
+/// The rules of the provider a link points at, enabled or not, with a
+/// tenant override of a shared one. A deleted provider is [`GONE`].
+/// `None`: the link names no provider (app links).
 async fn provider_rules(
     pool: &Pool,
     registry: Option<&Pool>,
     source: &str,
     id: i64,
 ) -> Result<Option<Lifecycle>, String> {
-    let err = |e: &dyn std::fmt::Display| e.to_string();
-    if source == LinkSource::Tenant.as_str() {
+    if source == LinkSource::Tenant.as_str() || source == LinkSource::Admin.as_str() {
         let rows = load_rows(QuerySet::<SsoProvider>::new().filter("id", id), pool)
             .await
-            .map_err(|e| err(&e))?;
-        if !rows.iter().any(|r| r.enabled) {
-            return Ok(None);
+            .map_err(|e| e.to_string())?;
+        if rows.is_empty() {
+            return Ok(Some(GONE));
         }
         return read_lifecycle::<SsoProvider>(pool, id)
             .await
             .map(Some)
-            .map_err(|e| err(&e.0));
+            .map_err(|e| e.0);
     }
     if source == LinkSource::Shared.as_str() {
         return shared_rules(pool, registry, id).await;
     }
-    // Admin and app links name no tenant provider.
     Ok(None)
 }
 
-#[cfg(feature = "admin-sso")]
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
 async fn shared_rules(
     pool: &Pool,
     registry: Option<&Pool>,
@@ -123,8 +158,8 @@ async fn shared_rules(
     )
     .await
     .map_err(|e| e.to_string())?;
-    let Some(row) = rows.iter().find(|r| r.enabled) else {
-        return Ok(None);
+    let Some(row) = rows.first() else {
+        return Ok(Some(GONE));
     };
     let own = read_lifecycle::<SharedSsoProvider>(registry, id)
         .await
@@ -138,15 +173,23 @@ async fn shared_rules(
     }))
 }
 
-#[cfg(not(feature = "admin-sso"))]
+#[cfg(not(all(feature = "tenancy", feature = "admin-sso")))]
 async fn shared_rules(_: &Pool, _: Option<&Pool>, _: i64) -> Result<Option<Lifecycle>, String> {
-    // No shared provider signs anyone in without `admin-sso`.
+    // No shared provider signs anyone in in this build.
     Ok(None)
 }
 
-/// Whether `user_id` is linked through an enabled `sso_only` provider.
-async fn sso_only(pool: &Pool, registry: Option<&Pool>, user_id: i64) -> Result<bool, String> {
+/// Whether `user_id` is linked, through one of `sources`, to an `sso_only` provider.
+async fn sso_only(
+    pool: &Pool,
+    registry: Option<&Pool>,
+    user_id: i64,
+    sources: &[LinkSource],
+) -> Result<bool, String> {
     for (source, id) in links_of(pool, user_id).await? {
+        if !sources.iter().any(|s| s.as_str() == source) {
+            continue;
+        }
         if provider_rules(pool, registry, &source, id)
             .await?
             .is_some_and(|l| l.sso_only)
@@ -157,15 +200,19 @@ async fn sso_only(pool: &Pool, registry: Option<&Pool>, user_id: i64) -> Result<
     Ok(false)
 }
 
-/// Switch off users whose every link was made by SSO sign-up and has not
-/// been used for its provider's `auto_deactivate_after_days`: `active` goes
-/// false and their sessions end. Never a superuser, nor a user with a link
-/// an admin made. A link through a shared provider is read through
-/// `registry`; without it that user is left alone. Returns the user ids.
+/// Switch off tenant users whose every link was made by SSO sign-up and
+/// has not been used for its provider's `auto_deactivate_after_days`, and
+/// who cannot use a password here ([`password_login_allowed`]): `active`
+/// goes false and their sessions end. Never a superuser, nor a user with a
+/// link an admin made. The write re-checks that no link was used since.
+/// A link through a shared provider is read through `registry`; without it
+/// that user is left alone. Returns the user ids.
 ///
 /// # Errors
 /// A read or write failed.
+#[cfg(feature = "tenancy")]
 pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec<i64>, String> {
+    use crate::tenancy::User;
     let links = match SsoLink::objects().fetch(pool).await {
         Ok(l) => l,
         Err(e) => {
@@ -181,8 +228,10 @@ pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec
     }
     let now = chrono::Utc::now();
     let mut rules: HashMap<(String, i64), Option<Lifecycle>> = HashMap::new();
+    // Each idle user with the earliest cutoff among its links.
     let mut idle = Vec::new();
     'users: for (user_id, links) in by_user {
+        let mut earliest = now;
         for l in &links {
             if !l.provisioned {
                 continue 'users;
@@ -191,14 +240,12 @@ pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec
             let rule = match rules.get(&key) {
                 Some(r) => *r,
                 None => {
-                    let r = match provider_rules(pool, registry, &key.0, key.1).await {
-                        Ok(r) => r,
-                        // Unreadable: leave the user alone.
-                        Err(e) => {
+                    let r = provider_rules(pool, registry, &key.0, key.1)
+                        .await
+                        .unwrap_or_else(|e| {
                             tracing::warn!(target: "rustango::sso", user_id, "idle check skipped: {e}");
                             None
-                        }
-                    };
+                        });
                     rules.insert(key, r);
                     r
                 }
@@ -206,21 +253,38 @@ pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec
             let Some(days) = rule.and_then(|r| r.auto_deactivate_after_days) else {
                 continue 'users;
             };
-            let last = l.last_used_at.or_else(|| l.created_at.get().copied());
             let cutoff = now - chrono::TimeDelta::days(i64::from(days));
+            let last = l.last_used_at.or_else(|| l.created_at.get().copied());
             if last.is_none_or(|at| at >= cutoff) {
                 continue 'users;
             }
+            earliest = earliest.min(cutoff);
         }
-        idle.push(user_id);
+        idle.push((user_id, earliest));
     }
     let mut done = Vec::new();
-    for user_id in idle {
+    for (user_id, cutoff) in idle {
         use crate::sql::UpdaterPool as _;
+        let Some(user) = crate::tenancy::member_auth::find_tenant_user(pool, user_id)
+            .await
+            .map_err(|e| format!("user {user_id}: {e}"))?
+        else {
+            continue;
+        };
+        // A user who may still use a password is not SSO-only: leave it.
+        if user.is_superuser || password_login_allowed(pool, registry, &user).await {
+            continue;
+        }
+        let used_since = SsoLink::objects()
+            .filter("last_used_at__gte", cutoff)
+            .values_list_flat("user_id")
+            .compile()
+            .map_err(|e| e.to_string())?;
         let n = User::objects()
             .filter("id", user_id)
             .filter("is_superuser", false)
             .filter("active", true)
+            .where_not_in_subquery("id", used_since)
             .update()
             .set("active", false)
             .set("sessions_revoked_at", now)

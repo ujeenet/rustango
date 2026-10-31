@@ -275,7 +275,7 @@ async fn sso_callback(
     match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
         Ok(None) => {}
         Ok(Some(_)) => {
-            return second_factor::prompt(&state, &extensions, &headers, secret, &user).await
+            return second_factor::prompt(&state, &extensions, &headers, secret, &user, ttl).await
         }
         Err(e) => {
             // Fail closed: an unreadable device is not "no second factor" (#1644).
@@ -364,12 +364,15 @@ mod second_factor {
         headers: &HeaderMap,
         secret: &session::AdminSessionSecret,
         user: &AdminUser,
+        session_ttl: i64,
     ) -> Response {
-        let pending = Pending::new(
+        let mut pending = Pending::new(
             secret,
             user.id.get().copied().unwrap_or_default(),
             &user.password_hash,
         );
+        // Signed with the rest, so the code step keeps the provider's lifetime.
+        pending.session_ttl = Some(session_ttl);
         let cookie = format!(
             "{PENDING_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={TTL_SECS}{s}",
             seal(secret, &pending),
@@ -478,8 +481,10 @@ mod second_factor {
         }
         attempt.succeeded().await;
         let meta = meta_from_parts(&extensions, &headers, Some("/login/sso-totp"));
-        // The provider's lifetime is not carried past the code prompt.
-        let mut resp = mint_session(&state, secret, &user, meta, session::DEFAULT_TTL_SECS).await;
+        let ttl = pending.session_ttl.map_or(session::DEFAULT_TTL_SECS, |t| {
+            t.min(session::DEFAULT_TTL_SECS)
+        });
+        let mut resp = mint_session(&state, secret, &user, meta, ttl).await;
         clear_cookie(&mut resp, PENDING_COOKIE);
         resp
     }

@@ -170,6 +170,11 @@ untouched.
 - `LoginScope` has a new `Sso` variant; `Refusal` a new `SignupRate`.
 - Schedule `sso-deactivate-idle` (tenancy manage) if a provider sets `auto_deactivate_after_days`.
 - A failed password lockout does not stop SSO sign-in; to stop a user, set `active = false`, which SSO refuses.
+- `tenancy::authenticate_user` is deprecated: it skips the SSO password rules. Move to `authenticate_user_pool` on the tenant's pool.
+- A provider's `sso_only` binds its users while the provider is disabled too, and a link to a deleted provider counts as `sso_only` until an admin removes the link. Unreadable tenant SSO settings let only superusers use a password.
+- The bare-admin password login honours `sso_only` on its providers. `sso_only` does not stop API keys or MCP agent secrets.
+- Tenant logout now lands on `login?local=1`. `sso-deactivate-idle` only switches off users who cannot use a password there.
+- `LinkTarget::with_registry` lets a reset read shared providers' rules; without it a user linked through one is refused a reset.
 
 ## 0.61.14
 

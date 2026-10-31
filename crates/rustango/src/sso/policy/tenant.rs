@@ -172,6 +172,16 @@ impl TenantSettings {
         }
     }
 
+    /// What an unreadable settings row means: only superusers use a
+    /// password, through `?local=1`.
+    #[must_use]
+    pub fn break_glass() -> Self {
+        Self {
+            password_login: PasswordLogin::SuperusersOnly,
+            ..Self::default()
+        }
+    }
+
     /// Sign-ups allowed per hour; `None`: no limit.
     #[must_use]
     pub fn signup_limit(&self) -> Option<u32> {

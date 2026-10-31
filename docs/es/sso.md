@@ -355,7 +355,7 @@ abierto, y avisa de `signup_mode = open` sin `allowed_email_domains`,
 | `SsoTenantPolicy` | `signups_per_hour` | Registros SSO por hora (vacío: 100, `0`: sin límite). |
 
 Un superusuario solo sigue `password_login`; `sso_only` nunca lo bloquea.
-Una contraseña rechazada parece incorrecta. Una regla ilegible rechaza.
+Una contraseña rechazada parece incorrecta. Una regla ilegible rechaza; una configuración ilegible solo deja entrar a superusuarios. Un proveedor desactivado mantiene a sus usuarios `sso_only`, un vínculo a uno borrado cuenta como `sso_only`. Las claves API y secretos de agentes MCP no se ven afectados. Cerrar sesión lleva a `?local=1`.
 
 **Proveedores compartidos.** El `SsoSharedOverride` de un tenant endurece un proveedor compartido, nunca lo relaja, y nombra en `allowed_roles` los roles que puede otorgar (sin override: ninguno).
 

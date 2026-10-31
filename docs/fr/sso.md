@@ -377,7 +377,7 @@ l'inscription n'est pas fermée, et avertit pour `signup_mode = open` sans
 | `SsoTenantPolicy` | `signups_per_hour` | Inscriptions SSO par heure (vide : 100, `0` : sans limite). |
 
 Un superutilisateur ne suit que `password_login` ; `sso_only` ne le bloque jamais.
-Un mot de passe refusé ressemble à un mauvais. Une règle illisible refuse.
+Un mot de passe refusé ressemble à un mauvais. Une règle illisible refuse ; des réglages illisibles ne laissent entrer que les superutilisateurs. Un provider désactivé garde ses utilisateurs `sso_only`, un lien vers un provider supprimé compte comme `sso_only`. Les clés API et secrets d'agents MCP ne sont pas concernés. La déconnexion mène à `?local=1`.
 
 **Providers partagés.** Le `SsoSharedOverride` d'un tenant resserre un provider partagé, sans jamais l'assouplir, et nomme dans `allowed_roles` les rôles qu'il peut donner (sans override : aucun).
 

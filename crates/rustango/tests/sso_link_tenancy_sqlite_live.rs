@@ -1864,6 +1864,7 @@ async fn a_bare_admin_sso_login_owes_the_totp_code() {
         .unwrap();
     totp_store::confirm(&pool, uid).await.unwrap();
 
+    set_number(&pool, "corp", "session_ttl_secs", 120).await;
     idp.assert("sub-root", "root@example.com");
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(!signed_in(&resp), "SSO alone must not mint the session");
@@ -1898,10 +1899,11 @@ async fn a_bare_admin_sso_login_owes_the_totp_code() {
         "forged pending cookie"
     );
     let code = rustango::totp::generate(&device, 30, 6);
-    assert!(
-        signed_in(&submit(code, pending).await),
-        "right code signs in"
-    );
+    let done = submit(code, pending).await;
+    assert!(signed_in(&done), "right code signs in");
+    // The provider's lifetime survives the code step.
+    let left = admin_session_left(&done);
+    assert!((110..=120).contains(&left), "{left}");
 }
 
 #[tokio::test]
@@ -2798,7 +2800,6 @@ async fn the_member_session_ttl_is_the_shortest() {
 /// The bare admin session is capped by the provider's lifetime.
 #[tokio::test]
 async fn the_bare_admin_session_ttl_is_the_shortest() {
-    use base64::Engine as _;
     let _g = SUITE.lock().await;
     let (app, pool, idp) = bare_admin().await;
     set_number(&pool, "corp", "session_ttl_secs", 120).await;
@@ -2819,10 +2820,17 @@ async fn the_bare_admin_session_ttl_is_the_shortest() {
     idp.assert("sub-root", "root@example.com");
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(signed_in(&resp), "{}", location(&resp));
-    let value = set_cookies(&resp)
+    let left = admin_session_left(&resp);
+    assert!((110..=120).contains(&left), "{left}");
+}
+
+/// Seconds the bare admin session set on `resp` has left.
+fn admin_session_left(resp: &axum::response::Response) -> i64 {
+    use base64::Engine as _;
+    let value = set_cookies(resp)
         .into_iter()
         .find_map(|c| c.strip_prefix("rustango_admin_session=").map(str::to_owned))
-        .unwrap();
+        .expect("admin session");
     let body = value.split('.').next().unwrap();
     let json: serde_json::Value = serde_json::from_slice(
         &base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -2830,6 +2838,153 @@ async fn the_bare_admin_session_ttl_is_the_shortest() {
             .unwrap(),
     )
     .unwrap();
-    let left = json["exp"].as_i64().unwrap() - chrono::Utc::now().timestamp();
-    assert!((110..=120).contains(&left), "{left}");
+    json["exp"].as_i64().unwrap() - chrono::Utc::now().timestamp()
+}
+
+/// Logout lands on `?local=1`, so a live IdP session does not sign the
+/// user straight back in; and a second visit within a minute of an
+/// automatic redirect shows the page, so a session that does not stick
+/// cannot loop.
+#[tokio::test]
+async fn logout_and_a_recent_redirect_do_not_bounce_to_the_idp() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    tenant_settings(&env, "on", Some("corp")).await;
+    let out = send(
+        &env.admin,
+        Request::builder()
+            .method("POST")
+            .uri("/__logout")
+            .header(header::HOST, &env.tenants[0].host)
+            .header(header::COOKIE, "rustango_csrf=t")
+            .header("x-csrf-token", "t")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("_csrf=t"))
+            .unwrap(),
+    )
+    .await;
+    let to = location(&out);
+    assert_eq!(to, "/__login?local=1");
+    assert_eq!(env.get(&to).await.status(), StatusCode::OK);
+    let first = env.get("/__login").await;
+    assert_eq!(location(&first), "/__login/sso/corp");
+    let marker = set_cookies(&first)
+        .into_iter()
+        .find(|c| c.starts_with("rustango_sso_auto="))
+        .expect("marker cookie");
+    let again = send(
+        &env.admin,
+        Request::builder()
+            .uri("/__login")
+            .header(header::HOST, &env.tenants[0].host)
+            .header(header::COOKIE, marker)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(again.status(), StatusCode::OK, "{}", location(&again));
+}
+
+/// A password change re-mints the session with its remaining lifetime,
+/// not a fresh full one.
+#[tokio::test]
+async fn a_password_change_keeps_the_session_expiry() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let uid = env.password_user("ann", false).await;
+    let hash = User::objects()
+        .filter("id", uid)
+        .fetch(env.pool())
+        .await
+        .unwrap()
+        .remove(0)
+        .password_hash;
+    let payload = TenantSessionPayload::new(
+        uid,
+        &env.tenants[0].slug,
+        600,
+        PasswordFingerprint::of(&env.secret, &hash),
+    );
+    let resp = send(
+        &env.admin,
+        Request::builder()
+            .method("POST")
+            .uri("/__change-password")
+            .header(header::HOST, &env.tenants[0].host)
+            .header(
+                header::COOKIE,
+                format!("{COOKIE_NAME}={}; rustango_csrf=t", encode(&env.secret, &payload)),
+            )
+            .header("x-csrf-token", "t")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from(
+                "_csrf=t&current_password=pw-123456789&new_password=Another-strong-pass-9!&confirm_password=Another-strong-pass-9!",
+            ))
+            .unwrap(),
+    )
+    .await;
+    let value = set_cookies(&resp)
+        .into_iter()
+        .find_map(|c| {
+            c.strip_prefix(&format!("{COOKIE_NAME}="))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| panic!("no new session: {}", location(&resp)));
+    let p = decode(&env.secret, &env.tenants[0].slug, &value).unwrap();
+    let left = p.exp - chrono::Utc::now().timestamp();
+    assert!((1..=600).contains(&left), "{left}");
+}
+
+/// A bare-admin user linked through an `sso_only` provider is refused a
+/// password; a superuser is not.
+#[tokio::test]
+async fn bare_admin_password_login_honours_sso_only() {
+    use rustango::admin::AdminUser;
+    let _g = SUITE.lock().await;
+    let (app, pool, _idp) = bare_admin().await;
+    let mut ed = AdminUser::new_with_password("ed", "pw-123456789", false).unwrap();
+    ed.insert_pool(&pool).await.unwrap();
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    let root = AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    for (sub, u) in [("sub-ed", &ed), ("sub-root", &root)] {
+        rustango::sso::link::create_link(&pool, &key, sub, u.id.get().copied().unwrap())
+            .await
+            .unwrap();
+    }
+    let login = |name: &'static str| {
+        let app = app.clone();
+        async move {
+            let resp = send(
+                &app,
+                Request::builder()
+                    .method("POST")
+                    .uri("/login")
+                    .header(header::HOST, "admin.test")
+                    .header(header::COOKIE, "rustango_csrf=t")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .body(Body::from(format!(
+                        "_csrf=t&username={name}&password=pw-123456789"
+                    )))
+                    .unwrap(),
+            )
+            .await;
+            set_cookies(&resp)
+                .iter()
+                .any(|c| c.starts_with("rustango_admin_session="))
+        }
+    };
+    assert!(login("ed").await, "before sso_only");
+    set_number(&pool, "corp", "sso_only", 1).await;
+    assert!(!login("ed").await, "sso_only refuses the password");
+    assert!(login("root").await, "a superuser is never locked out");
 }

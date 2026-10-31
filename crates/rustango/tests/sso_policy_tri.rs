@@ -1338,10 +1338,27 @@ async fn password_rules_follow_sso_only(pool: &Pool) {
         "a superuser is never locked out"
     );
     assert!(may_use_password(pool, bob).await, "not linked");
-    // A disabled provider no longer binds its users.
+    // Disabling the provider keeps its users off passwords; so does deleting it.
     set(pool, "strict", "enabled", SqlValue::Bool(false)).await;
-    assert!(may_use_password(pool, ann).await);
+    assert!(!may_use_password(pool, ann).await, "disabled");
     set(pool, "strict", "enabled", SqlValue::Bool(true)).await;
+    provider(pool, "gone", false).await;
+    let gone_key = resolve_by_slug(pool, "gone", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let cy = plain_user(pool, &format!("cy-{t}"), &format!("cy-{t}@x.org"), false).await;
+    create_link(pool, &gone_key, &format!("c-{t}"), cy)
+        .await
+        .unwrap();
+    assert!(may_use_password(pool, cy).await);
+    let q = SsoProvider::objects()
+        .filter("slug", "gone")
+        .compile_delete()
+        .unwrap();
+    rustango::sql::delete_pool(pool, &q).await.unwrap();
+    assert!(!may_use_password(pool, cy).await, "deleted");
     // Tenant-wide.
     tenant_settings(pool, "on", true, None).await;
     assert!(!may_use_password(pool, bob).await);
@@ -1351,6 +1368,17 @@ async fn password_rules_follow_sso_only(pool: &Pool) {
     assert!(may_use_password(pool, boss).await);
     tenant_settings(pool, "off", false, None).await;
     assert!(!may_use_password(pool, boss).await);
+    // Unreadable settings: only a superuser, the break-glass way in.
+    tenant_settings(pool, "on", false, None).await;
+    SsoTenantPolicy::objects()
+        .filter("name", "default")
+        .update()
+        .set("signups_per_hour", -5)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    assert!(may_use_password(pool, boss).await, "superuser break-glass");
+    assert!(!may_use_password(pool, bob).await, "everyone else refused");
     rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
 }
 
@@ -1557,6 +1585,15 @@ async fn idle_users_are_deactivated(pool: &Pool) {
     let t = tok();
     provider(pool, "idle", false).await;
     set(pool, "idle", "auto_deactivate_after_days", SqlValue::I32(2)).await;
+    set(pool, "idle", "sso_only", SqlValue::Bool(true)).await;
+    // Same idle rule, but its users may still use a password.
+    provider(pool, "soft", false).await;
+    set(pool, "soft", "auto_deactivate_after_days", SqlValue::I32(2)).await;
+    let soft_key = resolve_by_slug(pool, "soft", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
     let key = resolve_by_slug(pool, "idle", String::new())
         .await
         .unwrap()
@@ -1590,9 +1627,22 @@ async fn idle_users_are_deactivated(pool: &Pool) {
             .unwrap();
         ids.push(id);
     }
+    let pw = plain_user(pool, &format!("pw-{t}"), &format!("pw-{t}@x.org"), false).await;
+    create_link(pool, &soft_key, &format!("pw-{t}"), pw)
+        .await
+        .unwrap();
+    SsoLink::objects()
+        .filter("subject", format!("pw-{t}"))
+        .update()
+        .set("provisioned", true)
+        .set("last_used_at", Some(old))
+        .execute_pool(pool)
+        .await
+        .unwrap();
     let done = rustango::sso::lifecycle::deactivate_idle(pool, None)
         .await
         .unwrap();
+    assert!(user_by_id(pool, pw).await.active, "a password user stays");
     assert_eq!(done, [ids[0]]);
     let gone = user_by_id(pool, ids[0]).await;
     assert!(!gone.active && gone.sessions_revoked_at.is_some());

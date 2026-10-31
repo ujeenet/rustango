@@ -28,8 +28,8 @@
 
 #[cfg(any(feature = "tenancy", feature = "admin-sso"))]
 pub(crate) mod check;
-/// Password rules and idle deactivation for tenant users.
-#[cfg(feature = "tenancy")]
+/// Password rules and idle deactivation.
+#[cfg(any(feature = "tenancy", feature = "admin"))]
 pub mod lifecycle;
 pub mod link;
 pub mod policy;
