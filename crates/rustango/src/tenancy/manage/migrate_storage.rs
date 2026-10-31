@@ -69,10 +69,11 @@ use std::io::Write;
 use std::process::Stdio;
 
 use crate::core::Column as _;
+use crate::sql::Dialect as _;
 use crate::sql::UpdaterPool as _;
 use crate::tenancy::db_server::TenantDatabase;
 use crate::tenancy::error::TenancyError;
-use crate::tenancy::manage::args::{next_value, quote_ident};
+use crate::tenancy::manage::args::next_value;
 use crate::tenancy::org::{Org, StorageMode};
 use crate::tenancy::pools::TenantPools;
 
@@ -251,7 +252,10 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
             // `--no-acl` drops the default grant, which other app roles need.
             after.extend([
                 "DROP SCHEMA public".to_owned(),
-                format!("ALTER SCHEMA {} RENAME TO public", quote_ident(&schema.0)),
+                format!(
+                    "ALTER SCHEMA {} RENAME TO public",
+                    crate::sql::Postgres.quote_ident(&schema.0)
+                ),
                 "GRANT USAGE ON SCHEMA public TO PUBLIC".to_owned(),
             ]);
             Restore::Dump {
@@ -560,7 +564,10 @@ impl MoveCtx<'_> {
                     "smoke-check failed: {e}; recreate the target database before a rerun"
                 )));
             };
-            let drop = format!("DROP SCHEMA IF EXISTS {} CASCADE", quote_ident(s));
+            let drop = format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE",
+                crate::sql::Postgres.quote_ident(s)
+            );
             crate::sql::sqlx::query(&drop)
                 .execute(self.pools.registry())
                 .await?;
@@ -659,7 +666,7 @@ fn old_copy_advice(
             "schema `{s}` on the registry database ({}); once the new location is \
              healthy and no other tenant uses it, run `DROP SCHEMA {} CASCADE` there",
             shown(source_ref),
-            quote_ident(&s.0)
+            crate::sql::Postgres.quote_ident(&s.0)
         ),
         None => format!(
             "the database at {}; once the new location is healthy and no other tenant \
@@ -801,7 +808,7 @@ impl SchemaName {
 
     /// Quoted, so pg_dump's `--schema` neither folds case nor reads wildcards.
     fn dump_pattern(&self) -> String {
-        quote_ident(&self.0)
+        crate::sql::Postgres.quote_ident(&self.0)
     }
 }
 
@@ -821,22 +828,28 @@ struct Extension {
 impl Extension {
     fn create_in(&self, schema: &str) -> [String; 2] {
         [
-            format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
+            format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                crate::sql::Postgres.quote_ident(schema)
+            ),
             format!(
                 "CREATE EXTENSION IF NOT EXISTS {} WITH SCHEMA {} CASCADE",
-                quote_ident(&self.name),
-                quote_ident(schema)
+                crate::sql::Postgres.quote_ident(&self.name),
+                crate::sql::Postgres.quote_ident(schema)
             ),
         ]
     }
 
     fn move_to(&self, schema: &str) -> [String; 2] {
         [
-            format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(schema)),
+            format!(
+                "CREATE SCHEMA IF NOT EXISTS {}",
+                crate::sql::Postgres.quote_ident(schema)
+            ),
             format!(
                 "ALTER EXTENSION {} SET SCHEMA {}",
-                quote_ident(&self.name),
-                quote_ident(schema)
+                crate::sql::Postgres.quote_ident(&self.name),
+                crate::sql::Postgres.quote_ident(schema)
             ),
         ]
     }
@@ -1066,7 +1079,7 @@ async fn plan_into_schema(
     let mut creating = Vec::new();
     let mut moves = vec![format!(
         "ALTER SCHEMA public RENAME TO {}",
-        quote_ident(&schema.0)
+        crate::sql::Postgres.quote_ident(&schema.0)
     )];
     let mut fixed = Vec::new();
     let sql = format!("{EXTENSIONS} WHERE e.extname = $1");
@@ -1113,7 +1126,7 @@ async fn run_into_schema(
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
     let staging = format!("rustango_stage_{nanos}");
-    let quoted = quote_ident(&staging);
+    let quoted = crate::sql::Postgres.quote_ident(&staging);
     crate::sql::sqlx::query(&format!("CREATE DATABASE {quoted}"))
         .execute(registry)
         .await?;
@@ -1122,7 +1135,7 @@ async fn run_into_schema(
     // in the same transaction, so nobody else can take the name meanwhile.
     let mut before = vec![format!(
         "DROP SCHEMA {} RESTRICT",
-        quote_ident(&plan.schema.0)
+        crate::sql::Postgres.quote_ident(&plan.schema.0)
     )];
     before.extend(plan.create);
     let moved = interrupt
@@ -1162,7 +1175,10 @@ async fn pg_dump_to_psql(
     }
     // Quoted, so the pattern is the literal name.
     for e in extensions {
-        dump_cmd.arg(format!("--extension={}", quote_ident(e)));
+        dump_cmd.arg(format!(
+            "--extension={}",
+            crate::sql::Postgres.quote_ident(e)
+        ));
     }
 
     let mut restore_cmd = target.psql();
@@ -1314,7 +1330,7 @@ async fn smoke_check(target_url: &str, target_schema: Option<&str>) -> Result<()
         .await?;
     let stmt = format!(
         "SELECT 1 FROM {}.rustango_users LIMIT 1",
-        quote_ident(target_schema.unwrap_or("public"))
+        crate::sql::Postgres.quote_ident(target_schema.unwrap_or("public"))
     );
     let res = crate::sql::sqlx::query(&stmt).fetch_optional(&pool).await;
     pool.close().await;

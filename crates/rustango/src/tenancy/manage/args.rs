@@ -32,13 +32,6 @@ pub(super) fn no_args(args: &[String], verb: &str) -> Result<(), TenancyError> {
 
 pub(super) use crate::manage_interactive::{parse, Parsed, Spec};
 
-/// Quote a SQL identifier (table / schema / database name). Doubles
-/// any embedded `"` so the quoted form survives unmodified.
-#[cfg(feature = "postgres")]
-pub(super) fn quote_ident(name: &str) -> String {
-    crate::sql::quote_with(name, '"')
-}
-
 /// Reject `args.first()` if it looks like a flag (starts with `-`).
 /// Used by every verb that takes a positional `<slug>` (or `<username>`)
 /// as its first argument — without this check, `cargo run -- <verb>
