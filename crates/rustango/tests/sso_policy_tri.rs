@@ -591,10 +591,30 @@ async fn invite(pool: &Pool, target: &str, roles: Option<&str>, max: Option<i32>
         used_by: None,
         invited_by: None,
         link_user_id: None,
+        link_key: None,
         created_at: Auto::default(),
     };
     i.insert_pool(pool).await.unwrap();
     i
+}
+
+/// The link-key fingerprint of tenant provider `slug`.
+async fn key_of(pool: &Pool, slug: &str) -> String {
+    resolve_by_slug(pool, slug, String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant)
+        .fingerprint()
+}
+
+/// A one-use re-link invite for `user_id` through provider `slug`.
+async fn relink_invite(pool: &Pool, slug: &str, email: &str, user_id: i64) -> SsoInvite {
+    let mut inv = invite(pool, email, None, Some(1)).await;
+    inv.link_user_id = Some(user_id);
+    inv.link_key = Some(key_of(pool, slug).await);
+    inv.save_pool(pool).await.unwrap();
+    inv
 }
 
 async fn role(pool: &Pool, name: &str) -> i64 {
@@ -885,6 +905,21 @@ async fn one_use_admits_one_racer(pool: &Pool) {
         .unwrap()
         .len();
     assert_eq!((wins, made), (1, 1), "{runs:?}");
+
+    // An unlimited invite admits every racer.
+    let open = format!("o{t}.org");
+    invite(pool, &format!("@{open}"), None, None).await;
+    let ids: Vec<Identity> = (0..2)
+        .map(|n| {
+            member(
+                &format!("o{n}-{t}"),
+                &format!("u{n}@{open}"),
+                serde_json::json!({}),
+            )
+        })
+        .collect();
+    let runs = futures_util::future::join_all(ids.iter().map(|id| tenant(pool, "race", id))).await;
+    assert!(runs.iter().all(Result::is_ok), "{runs:?}");
 }
 
 /// A superuser is never linked by email, whatever the provider or an invite says;
@@ -918,9 +953,7 @@ async fn superusers_are_never_email_linked(pool: &Pool) {
         tenant(pool, "staff", &who).await,
         refused(Refusal::Privileged)
     );
-    let mut relink = invite(pool, &root_email, None, Some(1)).await;
-    relink.link_user_id = Some(root);
-    relink.save_pool(pool).await.unwrap();
+    relink_invite(pool, "staff", &root_email, root).await;
     assert_eq!(
         tenant(pool, "staff", &who).await,
         refused(Refusal::Privileged)
@@ -963,11 +996,29 @@ async fn superusers_are_never_email_linked(pool: &Pool) {
 async fn a_relink_invite_links_its_user_once(pool: &Pool) {
     let t = tok();
     provider(pool, "re", false).await;
+    provider(pool, "re2", false).await;
     let email = format!("rl-{t}@client.org");
     let uid = plain_user(pool, &format!("rl-{t}"), &email, false).await;
-    let mut inv = invite(pool, &email, None, Some(1)).await;
-    inv.link_user_id = Some(uid);
-    inv.save_pool(pool).await.unwrap();
+    relink_invite(pool, "re", &email, uid).await;
+    let linked_to_uid = || async {
+        SsoLink::objects()
+            .filter("user_id", uid)
+            .fetch(pool)
+            .await
+            .unwrap()
+            .len()
+    };
+    // Another provider of the tenant cannot use it.
+    assert_eq!(
+        tenant(
+            pool,
+            "re2",
+            &member(&format!("x-{t}"), &email, serde_json::json!({}))
+        )
+        .await,
+        refused(Refusal::EmailLinkDisabled)
+    );
+    assert_eq!(linked_to_uid().await, 0);
     let got = tenant(
         pool,
         "re",
@@ -986,6 +1037,41 @@ async fn a_relink_invite_links_its_user_once(pool: &Pool) {
         refused(Refusal::EmailLinkDisabled),
         "the invite is used up"
     );
+
+    // A role holder needs the staff opt-in, as for an email link.
+    let editor = role(pool, &format!("RE-{t}")).await;
+    rustango::tenancy::permissions::grant_role_perm_pool(editor, "post.change", pool)
+        .await
+        .unwrap();
+    let staff_email = format!("st-{t}@client.org");
+    let staff = plain_user(pool, &format!("st-{t}"), &staff_email, false).await;
+    rustango::tenancy::permissions::assign_role_pool(staff, editor, pool)
+        .await
+        .unwrap();
+    relink_invite(pool, "re", &staff_email, staff).await;
+    let who = member(&format!("st-{t}"), &staff_email, serde_json::json!({}));
+    assert_eq!(tenant(pool, "re", &who).await, refused(Refusal::Privileged));
+    set(pool, "re", "allow_email_link_staff", SqlValue::Bool(true)).await;
+    assert_eq!(tenant(pool, "re", &who).await.unwrap().user_id, staff);
+
+    // An invite whose user is gone is ignored and deleted.
+    let ghost = format!("gh-{t}@client.org");
+    let inv = relink_invite(pool, "re", &ghost, i64::from(i32::MAX)).await;
+    assert_eq!(
+        tenant(
+            pool,
+            "re",
+            &member(&format!("gh-{t}"), &ghost, serde_json::json!({}))
+        )
+        .await,
+        refused(Refusal::SignupClosed)
+    );
+    assert!(SsoInvite::objects()
+        .filter("id", *inv.id.get().unwrap())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// The role map grants on sign-up and, with sync on, adds and removes only
@@ -1039,6 +1125,15 @@ async fn role_sync_touches_only_mapped_roles(pool: &Pool) {
     let mut want = vec![editor, hand, viewer];
     want.sort();
     assert_eq!(roles_of(pool, uid).await, want);
+    // No groups claim at all: nothing to sync from, the roles stay.
+    tenant(pool, "map", &member(&sub, &email, serde_json::json!({})))
+        .await
+        .unwrap();
+    assert_eq!(
+        roles_of(pool, uid).await,
+        want,
+        "a missing claim strips nothing"
+    );
 }
 
 /// A taken username gets a suffix, or refuses.
@@ -1093,6 +1188,44 @@ async fn username_clash_suffix_or_refuse(pool: &Pool) {
     .user_id;
     let name = user_by_id(pool, uid).await.username;
     assert!(name.starts_with(&format!("gina-{t}-")), "{name}");
+
+    // A username that is someone's email is taken, in any case.
+    let theirs = format!("Mail-{t}@X.org");
+    plain_user(pool, &format!("mail-{t}"), &theirs.to_lowercase(), false).await;
+    set(
+        pool,
+        "clash",
+        "username_from",
+        SqlValue::String("preferred_username".into()),
+    )
+    .await;
+    let uid = tenant(
+        pool,
+        "clash",
+        &member(
+            &format!("p1-{t}"),
+            &format!("p1-{t}@client.org"),
+            serde_json::json!({"preferred_username": theirs}),
+        ),
+    )
+    .await
+    .unwrap()
+    .user_id;
+    assert_ne!(user_by_id(pool, uid).await.username, theirs);
+    // Characters a username may not hold refuse, with the generic answer.
+    assert_eq!(
+        tenant(
+            pool,
+            "clash",
+            &member(
+                &format!("p2-{t}"),
+                &format!("p2-{t}@client.org"),
+                serde_json::json!({"preferred_username": "Ann <b>"})
+            ),
+        )
+        .await,
+        refused(Refusal::UsernameTaken)
+    );
 }
 
 /// The member flow with no mode set follows `auto_provision`, as before.

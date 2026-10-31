@@ -303,8 +303,8 @@ email, and only after the sign-in rules above pass.
 |---|---|
 | `signup_mode` | `closed` (link only), `invite_only` (an `SsoInvite` for this email), `allowlist` (an invite for this email or its domain) or `open` (anyone the sign-in rules admit). Empty: closed on the tenant login; the member flow follows `MemberAuthConfig::auto_provision`. The bare admin never signs anyone up. |
 | `default_roles` | Tenant roles a new user gets, e.g. `Viewer`. An invite with roles replaces them. |
-| `role_map` | JSON `{"<group or app role>": "Editor"}` (or a list of roles). Read from the claims in `role_claims` (empty: `groups,roles`). |
-| `sync_roles_on_login` | Re-apply `role_map` on every sign-in. Only roles named in `role_map` are added or removed; roles granted by hand stay. |
+| `role_map` | JSON `{"<group or app role>": "Editor"}` (or a list of roles). Read from the claims in `role_claims` (empty: `groups,roles`). A provider with a JWKS (OIDC discovery, Microsoft, Google) takes them only from a verified id_token; a userinfo-only provider takes them from userinfo. |
+| `sync_roles_on_login` | Re-apply `role_map` on every sign-in. Only roles named in `role_map` are added or removed; roles granted by hand stay. A sign-in without any of the role claims changes nothing. |
 | `username_from` | `email_local` (default), `email`, or `preferred_username` (falls back to the email local part). |
 | `username_clash` | `suffix` (default: `ann-x7k2q9`) or `refuse`. |
 | `sync_profile` | Refresh the display name and email from the IdP on every sign-in (never for a superuser; an email another user has is kept). |
@@ -325,8 +325,10 @@ adds many at once from a pasted list or a CSV column.
 **Unlink and re-link.** On `SsoLink` rows, the admin actions *Unlink* and
 *Re-link on next sign-in* (superuser-only). Re-link deletes the link and
 leaves a one-use invite, good for 7 days, that links the same user again
-the next time they sign in with their verified email, even if the IdP
-gives them a new subject. It never re-links a superuser.
+the next time they sign in through the same provider with their verified
+email, even if the IdP gives them a new subject. The user must still have
+that email. It never re-links a superuser, and a role holder only with
+`allow_email_link_staff`.
 
 `check --deploy` does not report a provider whose sign-up is not closed
 as refusing everyone, and warns about `signup_mode = open` with no

@@ -1,6 +1,6 @@
 {
   "name": "0013_auto",
-  "created_at": "2026-10-31T00:06:55.718200+00:00",
+  "created_at": "2026-10-31T02:30:56.895539+00:00",
   "prev": "0011_create_index_rustango_sso_links_provider_source_provider_id_subject_idx",
   "atomic": true,
   "snapshot": {
@@ -630,6 +630,14 @@
             "ty": "i64",
             "nullable": true,
             "primary_key": false
+          },
+          {
+            "name": "link_key",
+            "column": "link_key",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 64
           },
           {
             "name": "link_user_id",

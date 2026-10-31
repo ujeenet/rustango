@@ -310,7 +310,7 @@ passt, und erst nachdem die Anmelderegeln oben bestanden sind.
 |---|---|
 | `signup_mode` | `closed` (nur Links), `invite_only` (eine `SsoInvite` für diese E-Mail), `allowlist` (eine Einladung für die E-Mail oder ihre Domain) oder `open` (jeder, den die Anmelderegeln zulassen). Leer: geschlossen auf dem Tenant-Login; der Member-Flow folgt `MemberAuthConfig::auto_provision`. Der Bare-Admin legt nie Konten an. |
 | `default_roles` | Tenant-Rollen für neue Benutzer, z. B. `Viewer`. Eine Einladung mit Rollen ersetzt sie. |
-| `role_map` | JSON `{"<Gruppe oder App-Rolle>": "Editor"}` (oder eine Liste). Gelesen aus den Claims in `role_claims` (leer: `groups,roles`). |
+| `role_map` | JSON `{"<Gruppe oder App-Rolle>": "Editor"}` (oder eine Liste). Gelesen aus den Claims in `role_claims` (leer: `groups,roles`); bei einem Anbieter mit JWKS nur aus einem verifizierten id_token. |
 | `sync_roles_on_login` | `role_map` bei jeder Anmeldung neu anwenden. Nur Rollen aus `role_map` werden vergeben oder entzogen; von Hand vergebene bleiben. |
 | `username_from` | `email_local` (Standard), `email` oder `preferred_username` (sonst der lokale Teil der E-Mail). |
 | `username_clash` | `suffix` (Standard: `ann-x7k2q9`) oder `refuse`. |
@@ -335,8 +335,9 @@ auf einmal an, aus einer eingefügten Liste oder einer CSV-Spalte.
 Admin-Aktionen *Unlink* und *Re-link on next sign-in* (nur Superuser).
 Re-link löscht den Link und hinterlässt eine einmalige Einladung, 7 Tage
 gültig, die denselben Benutzer bei der nächsten Anmeldung mit seiner
-verifizierten E-Mail wieder verknüpft, auch mit neuem Subject. Ein
-Superuser wird nie neu verknüpft.
+verifizierten E-Mail über denselben Anbieter wieder verknüpft, auch mit
+neuem Subject. Ein Superuser wird nie neu verknüpft, ein Rolleninhaber nur
+mit `allow_email_link_staff`.
 
 `check --deploy` meldet einen Anbieter mit offener Registrierung nicht als
 blockierend und warnt bei `signup_mode = open` ohne

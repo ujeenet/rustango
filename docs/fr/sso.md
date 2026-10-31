@@ -332,7 +332,7 @@ et seulement après les règles de connexion ci-dessus.
 |---|---|
 | `signup_mode` | `closed` (liens seulement), `invite_only` (une `SsoInvite` pour cet e-mail), `allowlist` (une invitation pour l'e-mail ou son domaine) ou `open` (toute personne admise par les règles). Vide : fermé sur la connexion tenant ; le flux membre suit `MemberAuthConfig::auto_provision`. L'admin nu ne crée jamais de compte. |
 | `default_roles` | Rôles du tenant donnés au nouvel utilisateur, par ex. `Viewer`. Une invitation avec des rôles les remplace. |
-| `role_map` | JSON `{"<groupe ou rôle d'app>": "Editor"}` (ou une liste). Lu dans les claims de `role_claims` (vide : `groups,roles`). |
+| `role_map` | JSON `{"<groupe ou rôle d'app>": "Editor"}` (ou une liste). Lu dans les claims de `role_claims` (vide : `groups,roles`) ; pour un provider avec JWKS, seulement depuis un id_token vérifié. |
 | `sync_roles_on_login` | Réappliquer `role_map` à chaque connexion. Seuls les rôles nommés dans `role_map` sont ajoutés ou retirés ; les rôles donnés à la main restent. |
 | `username_from` | `email_local` (défaut), `email` ou `preferred_username` (sinon la partie locale de l'e-mail). |
 | `username_clash` | `suffix` (défaut : `ann-x7k2q9`) ou `refuse`. |
@@ -356,8 +356,9 @@ en ajoute plusieurs d'un coup, depuis une liste collée ou une colonne CSV.
 **Délier et relier.** Sur les lignes `SsoLink`, les actions *Unlink* et
 *Re-link on next sign-in* (superusers seulement). Re-link supprime le lien
 et laisse une invitation à usage unique, valable 7 jours, qui relie le même
-utilisateur à sa prochaine connexion avec son e-mail vérifié, même avec un
-nouveau subject. Un superuser n'est jamais relié.
+utilisateur à sa prochaine connexion par le même provider avec son e-mail
+vérifié, même avec un nouveau subject. Un superuser n'est jamais relié ; un
+détenteur de rôles seulement avec `allow_email_link_staff`.
 
 `check --deploy` ne signale pas comme bloquant un provider dont
 l'inscription n'est pas fermée, et avertit pour `signup_mode = open` sans

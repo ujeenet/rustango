@@ -120,6 +120,7 @@ pub(crate) fn bulk_invites(
             used_by: None,
             invited_by,
             link_user_id: None,
+            link_key: None,
             created_at: crate::sql::Auto::Unset,
         });
     }
@@ -311,22 +312,12 @@ async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
                 .ok_or("the user has no email to re-link by")?
                 .parse()
                 .map_err(|e| format!("the user's email: {e}"))?;
-            // A tenant provider's invite names it; a shared one's is good for any.
-            let provider_slug = if link.provider_source == crate::sso::LinkSource::Tenant.as_str() {
-                crate::sso::SsoProvider::objects()
-                    .filter("id", link.provider_id)
-                    .values_list_flat("slug")
-                    .fetch::<String>(pool)
-                    .await
-                    .map_err(|e| e.to_string())?
-                    .into_iter()
-                    .next()
-            } else {
-                None
-            };
+            // Only a sign-in through the old link's provider may use the invite.
+            let key = crate::sso::ProviderKey::of_link(&link)
+                .ok_or("the link names an unknown provider source")?;
             let mut invite = SsoInvite {
                 id: crate::sql::Auto::Unset,
-                provider_slug,
+                provider_slug: None,
                 target: email.as_str().to_owned(),
                 roles: None,
                 expires_at: Some(chrono::Utc::now() + chrono::TimeDelta::days(RELINK_DAYS)),
@@ -336,6 +327,7 @@ async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
                 used_by: None,
                 invited_by,
                 link_user_id: Some(link.user_id),
+                link_key: Some(key.fingerprint()),
                 created_at: crate::sql::Auto::Unset,
             };
             let mut tx = crate::sql::transaction_pool(pool)

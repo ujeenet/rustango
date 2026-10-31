@@ -309,7 +309,7 @@ verificado, y solo después de pasar las reglas de inicio de sesión de arriba.
 |---|---|
 | `signup_mode` | `closed` (solo enlaces), `invite_only` (una `SsoInvite` para este email), `allowlist` (una invitación para el email o su dominio) u `open` (cualquiera que admitan las reglas). Vacío: cerrado en el login del tenant; el flujo de miembros sigue `MemberAuthConfig::auto_provision`. El admin simple nunca crea cuentas. |
 | `default_roles` | Roles del tenant para el usuario nuevo, p. ej. `Viewer`. Una invitación con roles los reemplaza. |
-| `role_map` | JSON `{"<grupo o rol de app>": "Editor"}` (o una lista). Se lee de los claims de `role_claims` (vacío: `groups,roles`). |
+| `role_map` | JSON `{"<grupo o rol de app>": "Editor"}` (o una lista). Se lee de los claims de `role_claims` (vacío: `groups,roles`); con un proveedor con JWKS, solo de un id_token verificado. |
 | `sync_roles_on_login` | Volver a aplicar `role_map` en cada inicio de sesión. Solo se añaden o quitan roles nombrados en `role_map`; los asignados a mano se quedan. |
 | `username_from` | `email_local` (por defecto), `email` o `preferred_username` (si no, la parte local del email). |
 | `username_clash` | `suffix` (por defecto: `ann-x7k2q9`) o `refuse`. |
@@ -333,9 +333,10 @@ lista pegada o una columna CSV.
 **Desenlazar y volver a enlazar.** En las filas `SsoLink`, las acciones
 *Unlink* y *Re-link on next sign-in* (solo superusuarios). Re-link borra el
 enlace y deja una invitación de un solo uso, válida 7 días, que vuelve a
-enlazar al mismo usuario en su próximo inicio de sesión con su email
-verificado, aunque tenga un subject nuevo. Nunca vuelve a enlazar a un
-superusuario.
+enlazar al mismo usuario en su próximo inicio de sesión por el mismo
+proveedor con su email verificado, aunque tenga un subject nuevo. Nunca
+vuelve a enlazar a un superusuario; a un usuario con roles, solo con
+`allow_email_link_staff`.
 
 `check --deploy` no marca como bloqueante a un proveedor con registro
 abierto, y avisa de `signup_mode = open` sin `allowed_email_domains`,

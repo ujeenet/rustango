@@ -162,6 +162,7 @@ untouched.
 - Sign-up follows a provider's `signup_mode`. Left empty, nothing changes: the tenant login never signs up, and the member flow follows `auto_provision`. A set `signup_mode` overrides `auto_provision` on the member flow.
 - A provider whose sign-up fields do not parse (`signup_mode`, `role_map`, ...) refuses every sign-in through it.
 - `ResolvedProvider` has a new `signup` field; `TenantAccounts` is now public.
+- `role_map` reads its claims only from a verified id_token when the provider has a JWKS; a userinfo-only provider keeps reading userinfo. A sign-in with none of the role claims leaves the mapped roles alone.
 
 ## 0.61.14
 

@@ -76,6 +76,33 @@ impl ProviderKey {
         })
     }
 
+    /// The key a stored link row was made under.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn of_link(link: &SsoLink) -> Option<Self> {
+        let source = [
+            LinkSource::Tenant,
+            LinkSource::Shared,
+            LinkSource::Admin,
+            LinkSource::App,
+        ]
+        .into_iter()
+        .find(|s| s.as_str() == link.provider_source)?;
+        Some(Self {
+            source,
+            provider_id: link.provider_id,
+            issuer: link.issuer.clone(),
+        })
+    }
+
+    /// Lowercase hex SHA-256 of source, provider id and issuer: the whole key.
+    #[must_use]
+    pub fn fingerprint(&self) -> String {
+        key_sha256(
+            &format!("{}\n{}", self.source.as_str(), self.provider_id),
+            &self.issuer,
+        )
+    }
+
     /// Which provider table the row came from.
     #[cfg_attr(not(all(feature = "tenancy", feature = "admin-sso")), allow(dead_code))]
     pub(crate) fn source(&self) -> LinkSource {

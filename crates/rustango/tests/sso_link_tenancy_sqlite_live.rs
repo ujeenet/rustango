@@ -1529,6 +1529,7 @@ async fn tenant_console_signs_up_an_invitee_only() {
         used_by: None,
         invited_by: None,
         link_user_id: None,
+        link_key: None,
         created_at: Auto::default(),
     }
     .insert_pool(env.pool())

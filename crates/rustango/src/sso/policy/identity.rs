@@ -37,6 +37,10 @@ pub struct Identity {
     email_verified: bool,
     /// A Microsoft directory: a pinned `tid` also vouches for the email.
     microsoft: bool,
+    /// The provider signs id_tokens (JWKS): role claims come only from a verified one.
+    jwks: bool,
+    /// The claims a verified id_token carried.
+    token_claims: Vec<String>,
     pub id_token: IdToken,
 }
 
@@ -56,7 +60,8 @@ impl Identity {
             provider.id_token_keys(),
             Some((_, IssuerRule::MicrosoftTenant))
         );
-        let identity = Self::assemble(profile, verified, microsoft);
+        let mut identity = Self::assemble(profile, verified, microsoft);
+        identity.jwks = provider.id_token_keys().is_some();
         if let IdToken::Invalid(e) = &identity.id_token {
             tracing::warn!(target: "rustango::sso", provider = %provider.name, "id_token not trusted: {e}");
         }
@@ -117,6 +122,10 @@ impl Identity {
             }
             None => (profile_email, profile.email_verified),
         };
+        let token_claims = token
+            .as_ref()
+            .map(|t| t.keys().cloned().collect())
+            .unwrap_or_default();
         if let Some(t) = token {
             claims.extend(t);
         }
@@ -126,6 +135,8 @@ impl Identity {
             email,
             email_verified,
             microsoft,
+            jwks: false,
+            token_claims,
             id_token,
         }
     }
@@ -156,6 +167,16 @@ impl Identity {
     #[must_use]
     pub fn claim(&self, name: &str) -> Option<&Value> {
         self.claims.get(name)
+    }
+
+    /// A claim roles are mapped from. When the provider signs id_tokens it
+    /// counts only from a verified one; otherwise userinfo counts too.
+    #[must_use]
+    pub fn role_claim(&self, name: &str) -> Option<&Value> {
+        if self.jwks && !self.token_claims.iter().any(|k| k == name) {
+            return None;
+        }
+        self.claim(name)
     }
 
     /// A claim that is a non-empty string.
@@ -236,6 +257,15 @@ pub(crate) fn test_identity(
 }
 
 #[cfg(test)]
+impl Identity {
+    /// As if the provider published a JWKS.
+    pub(crate) fn with_jwks(mut self) -> Self {
+        self.jwks = true;
+        self
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -302,6 +332,28 @@ mod tests {
         // No token: a pinned tid cannot be read.
         let id = test_identity(profile(serde_json::json!({})), None, true);
         assert!(id.verified_email(true).is_none());
+    }
+
+    #[test]
+    fn role_claims_come_only_from_a_verified_token_when_the_provider_has_jwks() {
+        let raw = serde_json::json!({"groups": ["forged"]});
+        let plain = test_identity(profile(raw.clone()), None, false);
+        assert!(
+            plain.role_claim("groups").is_some(),
+            "no JWKS: userinfo counts"
+        );
+        let signed = test_identity(profile(raw.clone()), None, false).with_jwks();
+        assert_eq!(signed.role_claim("groups"), None);
+        let signed = test_identity(
+            profile(raw),
+            Some(obj(serde_json::json!({"sub": "u1", "groups": ["real"]}))),
+            false,
+        )
+        .with_jwks();
+        assert_eq!(
+            signed.role_claim("groups"),
+            Some(&serde_json::json!(["real"]))
+        );
     }
 
     #[test]

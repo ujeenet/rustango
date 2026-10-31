@@ -163,22 +163,28 @@ impl RoleMap {
             .collect()
     }
 
-    /// The roles `identity`'s claims map to.
+    /// The roles `identity`'s claims map to; `None` when `identity` carries none of the role claims (or, for a
+    /// provider that signs id_tokens, no verified one): nothing to sync from.
     #[must_use]
-    pub fn wanted(&self, identity: &Identity) -> BTreeSet<String> {
+    pub fn wanted(&self, identity: &Identity) -> Option<BTreeSet<String>> {
         let mut values: Vec<&str> = Vec::new();
+        let mut seen = false;
         for claim in &self.claims {
-            match identity.claim(claim) {
+            match identity.role_claim(claim) {
                 Some(Value::String(s)) => values.push(s),
                 Some(Value::Array(list)) => values.extend(list.iter().filter_map(Value::as_str)),
-                _ => {}
+                Some(_) => {}
+                None => continue,
             }
+            seen = true;
         }
-        self.map
-            .iter()
-            .filter(|(v, _)| values.contains(&v.as_str()))
-            .flat_map(|(_, r)| r.names().iter().cloned())
-            .collect()
+        seen.then(|| {
+            self.map
+                .iter()
+                .filter(|(v, _)| values.contains(&v.as_str()))
+                .flat_map(|(_, r)| r.names().iter().cloned())
+                .collect()
+        })
     }
 }
 
@@ -338,20 +344,19 @@ mod store {
 
     /// Which invites a sign-in may use.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum InviteKind {
+    pub(crate) enum InviteKind<'a> {
         /// Sign-up by an invited email.
         Email,
         /// Sign-up by an invited email or domain.
         EmailOrDomain,
-        /// Re-link an existing user.
-        Relink,
+        /// Re-link an existing user, through the old link's provider only.
+        Relink(&'a ProviderKey),
     }
 
     /// An invite a sign-in may use, as read.
     #[derive(Debug, Clone)]
     pub(crate) struct Invite {
         id: i64,
-        uses: i32,
         max_uses: Option<i32>,
         pub(crate) roles: RoleNames,
         pub(crate) link_user_id: Option<i64>,
@@ -366,7 +371,7 @@ mod store {
         pool: &Pool,
         slug: &str,
         email: &EmailAddr,
-        kind: InviteKind,
+        kind: InviteKind<'_>,
     ) -> Result<Result<Invite, Refusal>, String> {
         let rows = match SsoInvite::objects()
             .filter(
@@ -394,10 +399,21 @@ mod store {
             }
         };
         let now = chrono::Utc::now();
+        let relink_key = match kind {
+            InviteKind::Relink(key) => Some(key.fingerprint()),
+            _ => None,
+        };
         let mut fits: Vec<(bool, &SsoInvite)> = rows
             .iter()
-            .filter(|r| r.provider_slug.as_deref().is_none_or(|s| s == slug))
-            .filter(|r| r.link_user_id.is_some() == (kind == InviteKind::Relink))
+            .filter(|r| match &relink_key {
+                // A re-link invite is good only through the old link's provider.
+                Some(key) => {
+                    r.link_user_id.is_some() && r.link_key.as_deref() == Some(key.as_str())
+                }
+                None => {
+                    r.link_user_id.is_none() && r.provider_slug.as_deref().is_none_or(|s| s == slug)
+                }
+            })
             .filter_map(|r| {
                 let target: InviteTarget = r.target.parse().ok()?;
                 let email_target = matches!(target, InviteTarget::Email(_));
@@ -412,7 +428,6 @@ mod store {
         if let Some((_, r)) = fits.iter().find(|(_, r)| !expired(r) && !used_up(r)) {
             return Ok(Ok(Invite {
                 id: r.id.get().copied().unwrap_or_default(),
-                uses: r.uses,
                 max_uses: r.max_uses,
                 roles: RoleNames::parse_opt(r.roles.as_deref()).unwrap_or_default(),
                 link_user_id: r.link_user_id,
@@ -427,15 +442,15 @@ mod store {
         }))
     }
 
-    /// Count one use of `invite` by `user_id`, only if nobody used it since
-    /// it was read. `false`: another sign-in got there first.
+    /// Count one use of `invite` by `user_id` in one statement: a limited
+    /// invite only while `uses < max_uses`. `false`: it is used up.
     async fn consume(tx: &mut PoolTx<'_>, invite: &Invite, user_id: i64) -> Result<bool, String> {
-        let qs = SsoInvite::objects()
-            .filter("id", invite.id)
-            .filter("uses", invite.uses);
+        use crate::core::Column as _;
+        let qs = SsoInvite::objects().filter("id", invite.id);
         let qs = match invite.max_uses {
+            // A limit set since the read applies too.
             None => qs.filter("max_uses__isnull", true),
-            Some(_) => qs.filter("max_uses__gt", invite.uses),
+            Some(_) => qs.where_(SsoInvite::uses.lt_expr(F("max_uses"))),
         };
         let query = qs
             .update()
@@ -448,6 +463,22 @@ mod store {
             .await
             .map_err(|e| format!("use invite: {e}"))?;
         Ok(n == 1)
+    }
+
+    /// Delete an invite that can never be used. Best effort.
+    pub(crate) async fn drop_invite(pool: &Pool, invite: &Invite) {
+        let deleted = match SsoInvite::objects()
+            .filter("id", invite.id)
+            .compile_delete()
+        {
+            Ok(q) => crate::sql::delete_pool(pool, &q)
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(e) = deleted {
+            tracing::warn!(target: "rustango::sso", invite = invite.id, "dangling re-link invite not deleted: {e}");
+        }
     }
 
     /// Link `subject` to the existing `user_id` named by a re-link invite,
@@ -476,6 +507,16 @@ mod store {
             .map_err(|e| Denied::Storage(format!("commit: {e}")))
     }
 
+    /// Whether `name` may be a username: letters, digits and `._@+-`, within
+    /// the column. Non-ASCII letters stay allowed: verified emails carry them.
+    fn valid_username(name: &str) -> bool {
+        !name.is_empty()
+            && name.chars().count() <= MAX_USERNAME
+            && name
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '@' | '+' | '-'))
+    }
+
     /// The username a new user starts from.
     fn base_username(from: UsernameFrom, email: &EmailAddr, identity: &Identity) -> String {
         let base = match from {
@@ -502,16 +543,23 @@ mod store {
         format!("{}-{suffix}", base.chars().take(keep).collect::<String>())
     }
 
-    /// Whether a user already has this username.
+    /// Whether a user has this username, or this email, ignoring case: a
+    /// sign-in by either must name one account.
     async fn username_taken(pool: &Pool, username: &str) -> Result<bool, Denied> {
-        use crate::core::Column as _;
-        User::objects()
-            .where_(User::username.eq(username.to_owned()))
-            .limit(1)
-            .fetch(pool)
-            .await
-            .map(|rows| !rows.is_empty())
-            .map_err(|e| Denied::Storage(format!("username lookup: {e}")))
+        let storage = |e: ExecError| Denied::Storage(format!("username lookup: {e}"));
+        for column in ["username__iexact", "email__iexact"] {
+            if !User::objects()
+                .filter(column, username.to_owned())
+                .limit(1)
+                .fetch(pool)
+                .await
+                .map_err(storage)?
+                .is_empty()
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     /// A real, unusable password hash: SSO users sign in through the IdP.
@@ -543,11 +591,15 @@ mod store {
         invite: Option<&Invite>,
     ) -> Result<SignedUp, Denied> {
         let base = base_username(policy.username_from, email, identity);
+        if !valid_username(&base) {
+            tracing::warn!(target: "rustango::sso", "sign-up: {base:?} is not a valid username");
+            return Err(Refusal::UsernameTaken.into());
+        }
         let mut roles: Vec<String> = match invite {
             Some(i) if !i.roles.is_empty() => i.roles.names().to_vec(),
             _ => policy.default_roles.names().to_vec(),
         };
-        for r in policy.role_map.wanted(identity) {
+        for r in policy.role_map.wanted(identity).unwrap_or_default() {
             if !roles.contains(&r) {
                 roles.push(r);
             }
@@ -673,7 +725,10 @@ mod store {
             return Ok(Vec::new());
         }
         let managed: Vec<String> = map.managed().into_iter().map(str::to_owned).collect();
-        let wanted = map.wanted(identity);
+        // No role claim to read: leave the mapped roles as they are.
+        let Some(wanted) = map.wanted(identity) else {
+            return Ok(Vec::new());
+        };
         let storage = |e: ExecError| Denied::Storage(format!("role sync: {e}"));
         let mut tx = crate::sql::transaction_pool(pool).await.map_err(storage)?;
         let roles = roles_named_tx(&mut tx, &managed).await.map_err(storage)?;
@@ -874,7 +929,7 @@ mod tests {
             false,
         );
         assert_eq!(
-            map.wanted(&id).into_iter().collect::<Vec<_>>(),
+            map.wanted(&id).unwrap().into_iter().collect::<Vec<_>>(),
             vec!["Editor".to_owned()]
         );
         for bad in [

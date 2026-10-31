@@ -13,7 +13,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
 - The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`); the lifecycle ones do nothing yet.
 - SSO sign-up per provider: `signup_mode` (closed, invite only, allowlist, open), `SsoInvite` for emails or domains with roles, expiry and atomic use limits (bulk add from a paste or CSV), `default_roles`, `role_map` with `sync_roles_on_login` (touches only mapped roles), `username_from`/`username_clash`, `sync_profile`, and `allow_email_link_staff`. A new user is never a superuser.
-- `SsoLink` admin actions: unlink, and re-link on next sign-in (a one-use invite; never for a superuser). `check --deploy` knows sign-up and warns on open sign-up with no domain rule.
+- `SsoLink` admin actions: unlink, and re-link on next sign-in (a one-use invite bound to the same provider; never for a superuser). `check --deploy` knows sign-up and warns on open sign-up with no domain rule.
 
 ### Fixed
 

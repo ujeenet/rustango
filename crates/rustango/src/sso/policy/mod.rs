@@ -536,7 +536,7 @@ pub async fn admit<A: AccountLookup>(
         .ok_or(Refusal::EmailUnverified)?;
     #[cfg(feature = "tenancy")]
     if tenant_users {
-        if let Some(admitted) = relink(&req, accounts, email).await? {
+        if let Some(admitted) = relink(&req, accounts, signup, email).await? {
             after_sign_in(&req, signup, admitted.user_id, true).await?;
             return Ok(admitted);
         }
@@ -602,36 +602,58 @@ async fn after_sign_in(
             signup::audit_unknown_roles(req.pool, req.provider, user_id, &unknown).await;
         }
         if signup.sync_profile {
+            // A profile refresh never fails the sign-in.
             let email = req.policy.link_email(req.identity);
-            signup::sync_profile(req.pool, user_id, req.identity, email).await?;
+            if let Err(e) = signup::sync_profile(req.pool, user_id, req.identity, email).await {
+                tracing::warn!(target: "rustango::sso", user_id, "profile sync skipped: {e}");
+            }
         }
     }
     Ok(())
 }
 
-/// A re-link invite for `email`: link its user, never a superuser.
+/// A re-link invite for `email` made for this very provider: link its user
+/// while that user still has this email. The email-link gate applies: never
+/// a superuser, a role holder only with `allow_email_link_staff`.
 #[cfg(feature = "tenancy")]
 async fn relink(
     req: &AdmitRequest<'_>,
     accounts: &impl AccountLookup,
+    signup: &SignupPolicy,
     email: &EmailAddr,
 ) -> Result<Option<Admitted>, Denied> {
-    let invite =
-        match signup::find_invite(req.pool, req.provider, email, signup::InviteKind::Relink)
-            .await
-            .map_err(Denied::Storage)?
-        {
-            Ok(i) => i,
-            // No usable re-link invite: carry on as an ordinary sign-in.
-            Err(_) => return Ok(None),
-        };
+    let kind = signup::InviteKind::Relink(req.key);
+    let invite = match signup::find_invite(req.pool, req.provider, email, kind)
+        .await
+        .map_err(Denied::Storage)?
+    {
+        Ok(i) => i,
+        // No usable re-link invite: carry on as an ordinary sign-in.
+        Err(_) => return Ok(None),
+    };
     let Some(user_id) = invite.link_user_id else {
         return Ok(None);
     };
-    let Some(account) = accounts.by_id(user_id).await.map_err(Denied::Storage)? else {
-        return Err(Refusal::NotInvited.into());
+    if accounts
+        .by_id(user_id)
+        .await
+        .map_err(Denied::Storage)?
+        .is_none()
+    {
+        // The user is gone: the invite can never be used.
+        signup::drop_invite(req.pool, &invite).await;
+        return Ok(None);
+    }
+    // The user's email must still be the invited one.
+    let account = match accounts
+        .by_email(email.as_str())
+        .await
+        .map_err(Denied::Storage)?
+    {
+        EmailLookup::Found(a) if a.user_id == user_id => a,
+        _ => return Ok(None),
     };
-    if account.superuser {
+    if account.superuser || (account.privileged && !signup.allow_email_link_staff) {
         return Err(Refusal::Privileged.into());
     }
     if !account.active {
