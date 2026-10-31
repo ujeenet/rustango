@@ -46,6 +46,38 @@ pub struct LegacyProvider {
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
+/// `rustango_sso_providers` with only one of the policy columns.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rustango_sso_providers", managed = false)]
+#[allow(dead_code)]
+pub struct PartialProvider {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64, unique)]
+    pub slug: String,
+    #[rustango(max_length = 150)]
+    pub label: String,
+    #[rustango(max_length = 32)]
+    pub kind: String,
+    #[rustango(max_length = 255)]
+    pub issuer_url: Option<String>,
+    #[rustango(max_length = 255)]
+    pub client_id: String,
+    #[rustango(max_length = 1024)]
+    pub client_secret: Cast<EncryptedString>,
+    pub enabled: bool,
+    pub sort_order: i32,
+    #[rustango(max_length = 255)]
+    pub scopes: Option<String>,
+    pub allow_email_link: bool,
+    #[rustango(max_length = 2000)]
+    pub allowed_email_domains: Option<String>,
+    #[rustango(auto_now_add)]
+    pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(auto_now)]
+    pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
+}
+
 /// `rustango_sso_links` before `provisioned` and `last_used_at`.
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "rustango_sso_links", managed = false)]
@@ -454,9 +486,52 @@ async fn pre_migration_tables_still_sign_in(pool: &Pool) {
     rustango::sso::link::ensure_table(pool).await.unwrap();
 }
 
+/// Some policy columns but not all: a missing one may hold a rule, so
+/// every sign-in through the row refuses until `migrate` runs.
+async fn a_partly_migrated_table_refuses(pool: &Pool) {
+    use rustango::testkit::matrix::fresh_table;
+    fresh_table::<PartialProvider>(pool).await;
+    PartialProvider {
+        id: Auto::default(),
+        slug: "half".into(),
+        label: "Half".into(),
+        kind: "oidc".into(),
+        issuer_url: Some("https://idp.example".into()),
+        client_id: "cid".into(),
+        client_secret: Cast::new("s3cret".into()),
+        enabled: true,
+        sort_order: 0,
+        scopes: None,
+        allow_email_link: false,
+        allowed_email_domains: Some("client.org".into()),
+        created_at: Auto::default(),
+        updated_at: Auto::default(),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    let p = resolve_by_slug(pool, "half", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(p.policy.is_err(), "{:?}", p.policy);
+    let key = p.key(LinkSource::Tenant);
+    create_link(pool, &key, "s-half", 4).await.unwrap();
+    let res = decide(
+        pool,
+        "half",
+        &person("s-half", "a@client.org", serde_json::json!({})),
+        &One(Some(Account::new(4, false, true))),
+    )
+    .await;
+    fresh_table::<SsoProvider>(pool).await;
+    assert_eq!(res, Err(Denied::Refused(Refusal::PolicyInvalid)));
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_partly_migrated_table_refuses,
         the_default_policy_keeps_link_outcomes,
         stored_rules_are_enforced,
         an_unparseable_rule_refuses,

@@ -276,6 +276,10 @@ The browser gets one generic message; on the tenant login page it also
 shows the tenant's `access_denied_message` (from `SsoTenantPolicy`),
 escaped.
 
+The member route (`member_sso_router`) resolves only the tenant's own
+providers, so shared providers, and any tenant tightening of them, do not
+apply there yet.
+
 ### id_token trust
 
 Profile data comes from `/userinfo` over TLS. Claims only an id_token

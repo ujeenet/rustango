@@ -251,9 +251,12 @@ fn check_claims(
         Some(Value::Array(list)) => list.iter().any(|a| a.as_str() == Some(client_id)),
         _ => false,
     };
-    let azp_ok = claims
-        .get("azp")
-        .is_none_or(|a| a.as_str() == Some(client_id));
+    // Several audiences: the token must name this client as its authorized party.
+    let many = matches!(claims.get("aud"), Some(Value::Array(l)) if l.len() > 1);
+    let azp_ok = match claims.get("azp") {
+        Some(a) => a.as_str() == Some(client_id),
+        None => !many,
+    };
     if !aud_ok || !azp_ok {
         return Err(IdTokenError::Audience);
     }
@@ -295,6 +298,27 @@ type CacheKey = (String, TargetPolicy);
 type Cached = (Instant, Result<Arc<KeySet>, String>);
 
 static SETS: LazyLock<Mutex<HashMap<CacheKey, Cached>>> = LazyLock::new(Mutex::default);
+
+/// When each set was last refetched for an unknown `kid`, success or not.
+static REFETCHED: LazyLock<Mutex<HashMap<CacheKey, Instant>>> = LazyLock::new(Mutex::default);
+
+/// Claim the one early refetch `key` may run now: none within
+/// [`REFETCH_GAP`] of the set's fetch or of the last attempt. Single-flight:
+/// concurrent callers see the claim and keep the cached set.
+fn claim_refetch(key: &CacheKey, set: &KeySet) -> bool {
+    if set.fetched.elapsed() < REFETCH_GAP {
+        return false;
+    }
+    let mut map = REFETCHED.lock().unwrap_or_else(PoisonError::into_inner);
+    if map.get(key).is_some_and(|at| at.elapsed() < REFETCH_GAP) {
+        return false;
+    }
+    if map.len() >= MAX_SETS {
+        map.retain(|_, at| at.elapsed() < REFETCH_GAP);
+    }
+    map.insert(key.clone(), Instant::now());
+    true
+}
 
 fn cached(key: &CacheKey) -> Option<Result<Arc<KeySet>, String>> {
     let map = SETS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -350,11 +374,15 @@ pub(crate) async fn verify(
         }
     }
     .map_err(IdTokenError::Keys)?;
-    // A key the set lacks may be a fresh rotation: refetch, at most once a minute.
-    if !set.knows(jws.kid.as_deref()) && set.fetched.elapsed() >= REFETCH_GAP {
-        if let Ok(fresh) = fetch(provider, url).await {
-            remember(key, Ok(Arc::clone(&fresh)));
-            set = fresh;
+    // A key the set lacks may be a fresh rotation: refetch, at most once a
+    // minute per set, failed attempts included; a failure keeps the old set.
+    if !set.knows(jws.kid.as_deref()) && claim_refetch(&key, &set) {
+        match fetch(provider, url).await {
+            Ok(fresh) => {
+                remember(key, Ok(Arc::clone(&fresh)));
+                set = fresh;
+            }
+            Err(e) => tracing::warn!(target: "rustango::sso", "JWKS refetch failed: {e}"),
         }
     }
     let now = chrono::Utc::now().timestamp();
@@ -504,7 +532,17 @@ mod tests {
             with(&|c| c["aud"] = "other".into()),
             Err(IdTokenError::Audience)
         );
-        assert!(with(&|c| c["aud"] = serde_json::json!(["x", CID])).is_ok());
+        assert_eq!(
+            with(&|c| c["aud"] = serde_json::json!(["x", CID])),
+            Err(IdTokenError::Audience),
+            "several audiences and no azp"
+        );
+        assert!(with(&|c| {
+            c["aud"] = serde_json::json!(["x", CID]);
+            c["azp"] = CID.into();
+        })
+        .is_ok());
+        assert!(with(&|c| c["aud"] = serde_json::json!([CID])).is_ok());
         assert_eq!(
             with(&|c| c["azp"] = "other".into()),
             Err(IdTokenError::Audience)
@@ -602,7 +640,11 @@ mod tests {
     }
 
     /// A key set server; `rotate` swaps in a second key.
-    async fn server(first: Value, later: Value) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+    /// `later: None` answers every refetch with a 502.
+    async fn server(
+        first: Value,
+        later: Option<Value>,
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         use std::sync::atomic::{AtomicUsize, Ordering};
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
@@ -610,8 +652,15 @@ mod tests {
             "/jwks",
             axum::routing::get(move || {
                 let n = h.fetch_add(1, Ordering::SeqCst);
-                let body = if n == 0 { first.clone() } else { later.clone() };
-                async move { axum::Json(body) }
+                let body = if n == 0 {
+                    Some(first.clone())
+                } else {
+                    later.clone()
+                };
+                async move {
+                    body.map(axum::Json)
+                        .ok_or(axum::http::StatusCode::BAD_GATEWAY)
+                }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -635,7 +684,7 @@ mod tests {
         let (old, new) = (Es256::new("old"), Es256::new("new"));
         let (url, hits) = server(
             serde_json::json!({"keys": [old.jwk()]}),
-            serde_json::json!({"keys": [old.jwk(), new.jwk()]}),
+            Some(serde_json::json!({"keys": [old.jwk(), new.jwk()]})),
         )
         .await;
         let p = provider(&url);
@@ -666,5 +715,45 @@ mod tests {
         }
         verify(&p, &new.sign(&claims(t))).await.unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    /// A failed refetch counts against the gap: unknown kids cannot make
+    /// every request fetch, and the cached set keeps working.
+    #[tokio::test]
+    async fn a_failed_refetch_is_not_retried_per_request() {
+        use std::sync::atomic::Ordering;
+        let (old, stranger) = (Es256::new("old"), Es256::new("stranger"));
+        let (url, hits) = server(serde_json::json!({"keys": [old.jwk()]}), None).await;
+        let p = provider(&url);
+        let t = now();
+        verify(&p, &old.sign(&claims(t))).await.unwrap();
+        let key = (url.clone(), p.egress_policy());
+        {
+            let mut aged = KeySet::parse(
+                serde_json::json!({"keys": [old.jwk()]})
+                    .to_string()
+                    .as_bytes(),
+                DEFAULT_TTL,
+            )
+            .unwrap();
+            aged.fetched = Instant::now().checked_sub(REFETCH_GAP).unwrap();
+            SETS.lock().unwrap().get_mut(&key).unwrap().1 = Ok(Arc::new(aged));
+        }
+        let tok = stranger.sign(&claims(t));
+        let runs = (0..5).map(|_| verify(&p, &tok));
+        for r in futures_util::future::join_all(runs).await {
+            assert_eq!(r, Err(IdTokenError::UnknownKey));
+        }
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            2,
+            "one refetch for five requests"
+        );
+        assert_eq!(
+            verify(&p, &stranger.sign(&claims(t))).await,
+            Err(IdTokenError::UnknownKey)
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "the failure is remembered");
+        verify(&p, &old.sign(&claims(t))).await.unwrap();
     }
 }

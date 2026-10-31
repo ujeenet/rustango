@@ -257,64 +257,130 @@ const SIGN_IN_COLUMNS: &[&str] = &[
     "require_verified_email",
 ];
 
-/// Whether `table` lacks any of `cols`: a schema not yet migrated.
-pub(crate) async fn lacks_columns(pool: &Pool, table: &str, cols: &[&str]) -> bool {
-    match crate::migrate::ensure::live_columns(pool, table).await {
-        Ok(have) => cols.iter().any(|c| !have.contains(*c)),
-        Err(_) => false,
-    }
+/// Which of some columns a table has, by the catalog.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Columns {
+    /// None of them: added by a migration not run yet.
+    None,
+    /// Some, named here.
+    Some(Vec<&'static str>),
+    All,
 }
 
-/// Row `id`'s sign-in policy. Columns not yet migrated give the default
-/// policy (with a warning); any other read error, or a value that does
-/// not parse, is an error, and sign-in through the row refuses.
+/// Which of `cols` `table` has.
+///
+/// # Errors
+/// The catalog cannot be read, or shows the table with no columns at all
+/// (another schema, missing privileges): nothing can be told from it.
+pub(crate) async fn columns_present(
+    pool: &Pool,
+    table: &str,
+    cols: &[&'static str],
+) -> Result<Columns, String> {
+    let have = crate::migrate::ensure::live_columns(pool, table)
+        .await
+        .map_err(|e| format!("catalog: {e}"))?;
+    if have.is_empty() {
+        return Err(format!("the catalog shows no columns for {table}"));
+    }
+    let present: Vec<&'static str> = cols.iter().copied().filter(|c| have.contains(*c)).collect();
+    Ok(match present.len() {
+        0 => Columns::None,
+        n if n == cols.len() => Columns::All,
+        _ => Columns::Some(present),
+    })
+}
+
+/// Row `id`'s sign-in policy. When none of the policy columns exist yet the
+/// policy is the default one (with a warning). Some but not all of them, an
+/// unreadable catalog, any other read error, or a value of the wrong type
+/// or that does not parse, is an error, and sign-in through the row refuses.
 async fn read_policy<T: Model>(
     pool: &Pool,
     id: i64,
 ) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
-    use super::policy::{PolicyError, SignInColumns, SignInPolicy};
-    let rows = match QuerySet::<T>::new()
+    use super::policy::PolicyError;
+    let err = match QuerySet::<T>::new()
         .filter("id", id)
         .only(SIGN_IN_COLUMNS)
         .fetch(pool)
         .await
     {
-        Ok(rows) => rows,
-        Err(e) if lacks_columns(pool, T::SCHEMA.table, SIGN_IN_COLUMNS).await => {
+        Ok(rows) => {
+            let r = rows
+                .first()
+                .ok_or_else(|| PolicyError("the provider row vanished".into()))?;
+            // SQLite can answer for columns it lacks: let the catalog decide.
+            if SIGN_IN_COLUMNS.iter().all(|c| r.contains_key(*c)) {
+                return policy_of_row(r);
+            }
+            "the read returned no policy columns".to_owned()
+        }
+        Err(e) => e.to_string(),
+    };
+    let present = columns_present(pool, T::SCHEMA.table, SIGN_IN_COLUMNS).await;
+    policy_after_read_error(present, T::SCHEMA.table, &err)
+}
+
+/// What a failed policy read means, by which policy columns exist: none is
+/// a schema not yet migrated (the default policy); anything else refuses.
+fn policy_after_read_error(
+    present: Result<Columns, String>,
+    table: &str,
+    err: &str,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    use super::policy::{PolicyError, SignInPolicy};
+    match present {
+        Ok(Columns::None) => {
             tracing::warn!(
                 target: "rustango::sso",
-                table = T::SCHEMA.table,
-                "SSO policy columns missing; run `migrate`. Using the default policy: {e}"
+                table,
+                "SSO policy columns missing; run `migrate`. Using the default policy: {err}"
             );
-            return Ok(SignInPolicy::default());
+            Ok(SignInPolicy::default())
         }
-        Err(e) => return Err(PolicyError(format!("read: {e}"))),
-    };
-    let Some(r) = rows.first() else {
-        return Err(PolicyError("the provider row vanished".into()));
+        // A missing column may hold a rule: refuse until migrated.
+        Ok(Columns::Some(have)) => Err(PolicyError(format!(
+            "only some policy columns exist ({}); run `migrate`",
+            have.join(", ")
+        ))),
+        Ok(Columns::All) => Err(PolicyError(format!("read: {err}"))),
+        Err(e) => Err(PolicyError(format!("read: {err}; {e}"))),
+    }
+}
+
+/// The policy in one row read with every [`SIGN_IN_COLUMNS`] column.
+fn policy_of_row(
+    r: &std::collections::HashMap<String, SqlValue>,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    use super::policy::{PolicyError, SignInColumns, SignInPolicy};
+    let bad = |c: &str, v: Option<&SqlValue>| PolicyError(format!("{c}: unexpected value {v:?}"));
+    let list = |c: &str| match r.get(c) {
+        Some(SqlValue::Null) => Ok(None),
+        Some(SqlValue::String(s)) => Ok(Some(s.as_str())),
+        other => Err(bad(c, other)),
     };
     let claims = match r.get("required_claims") {
-        Some(SqlValue::Json(v)) => Some(v.clone()),
-        Some(SqlValue::String(s)) => Some(
-            serde_json::from_str(s).map_err(|e| PolicyError(format!("required_claims: {e}")))?,
-        ),
-        _ => None,
+        Some(SqlValue::Json(v)) => v.clone(),
+        Some(SqlValue::String(s)) => {
+            serde_json::from_str(s).map_err(|e| PolicyError(format!("required_claims: {e}")))?
+        }
+        other => return Err(bad("required_claims", other)),
     };
-    let (a, b, c, d) = (
-        text(r.get("allowed_email_domains")),
-        text(r.get("blocked_email_domains")),
-        text(r.get("allowed_idp_tenants")),
-        text(r.get("allowed_hosted_domains")),
-    );
+    let verified = match r.get("require_verified_email") {
+        Some(SqlValue::Bool(b)) => *b,
+        Some(SqlValue::I64(n)) => *n != 0,
+        Some(SqlValue::I32(n)) => *n != 0,
+        Some(SqlValue::I16(n)) => *n != 0,
+        other => return Err(bad("require_verified_email", other)),
+    };
     SignInPolicy::parse(&SignInColumns {
-        allowed_email_domains: a.as_deref(),
-        blocked_email_domains: b.as_deref(),
-        allowed_idp_tenants: c.as_deref(),
-        allowed_hosted_domains: d.as_deref(),
-        required_claims: claims.as_ref(),
-        require_verified_email: r
-            .get("require_verified_email")
-            .is_none_or(|v| int(Some(v)) != 0),
+        allowed_email_domains: list("allowed_email_domains")?,
+        blocked_email_domains: list("blocked_email_domains")?,
+        allowed_idp_tenants: list("allowed_idp_tenants")?,
+        allowed_hosted_domains: list("allowed_hosted_domains")?,
+        required_claims: Some(&claims),
+        require_verified_email: verified,
     })
 }
 
@@ -485,4 +551,80 @@ pub async fn resolve_by_slug(
     redirect_uri: String,
 ) -> Result<Option<ResolvedProvider>, SsoError> {
     resolve_row::<SsoProvider>(pool, slug, redirect_uri).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sso::policy::SignInPolicy;
+    use std::collections::HashMap;
+
+    /// Only a schema with none of the policy columns falls back to no rules.
+    #[test]
+    fn a_read_error_falls_back_only_when_no_policy_column_exists() {
+        let t = "rustango_sso_providers";
+        assert_eq!(
+            policy_after_read_error(Ok(Columns::None), t, "e"),
+            Ok(SignInPolicy::default())
+        );
+        for refused in [
+            Ok(Columns::Some(vec!["allowed_email_domains"])),
+            Ok(Columns::All),
+            Err("the catalog shows no columns".to_owned()),
+        ] {
+            assert!(policy_after_read_error(refused, t, "e").is_err());
+        }
+    }
+
+    fn row(over: &[(&str, SqlValue)]) -> HashMap<String, SqlValue> {
+        let mut r: HashMap<String, SqlValue> = [
+            (
+                "allowed_email_domains",
+                SqlValue::String("client.org".into()),
+            ),
+            ("blocked_email_domains", SqlValue::Null),
+            ("allowed_idp_tenants", SqlValue::Null),
+            ("allowed_hosted_domains", SqlValue::Null),
+            ("required_claims", SqlValue::String("{}".into())),
+            ("require_verified_email", SqlValue::I64(1)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        for (k, v) in over {
+            r.insert((*k).to_owned(), v.clone());
+        }
+        r
+    }
+
+    /// A value of the wrong type, or a NULL flag, refuses rather than reading as "no rule".
+    #[test]
+    fn an_unexpected_value_refuses() {
+        let p = policy_of_row(&row(&[])).unwrap();
+        assert!(p.allowed_email_domains.is_some() && p.require_verified_email);
+        for bad in [
+            ("allowed_email_domains", SqlValue::I64(5)),
+            ("blocked_email_domains", SqlValue::Bool(true)),
+            ("required_claims", SqlValue::Null),
+            ("require_verified_email", SqlValue::Null),
+            ("require_verified_email", SqlValue::String("yes".into())),
+        ] {
+            assert!(policy_of_row(&row(&[bad.clone()])).is_err(), "{bad:?}");
+        }
+        let mut gone = row(&[]);
+        gone.remove("allowed_idp_tenants");
+        assert!(policy_of_row(&gone).is_err(), "a column the read lacks");
+    }
+
+    /// A table the catalog cannot see tells nothing: an error, not "no columns".
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_empty_catalog_is_an_error() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        assert!(
+            columns_present(&pool, "rustango_sso_providers", SIGN_IN_COLUMNS)
+                .await
+                .is_err()
+        );
+    }
 }

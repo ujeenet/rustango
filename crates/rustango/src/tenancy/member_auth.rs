@@ -750,14 +750,8 @@ async fn sso_callback_in(
                 path: parts.uri.path(),
             };
             refuse(&ctx, &r).await;
-            let failure = match MemberSignIn::of(&r) {
-                MemberSignIn::NotLinked => SsoFailure::NotLinked,
-                MemberSignIn::NoAccount => SsoFailure::NoAccount,
-                MemberSignIn::Inactive => SsoFailure::Inactive,
-                MemberSignIn::Unverified => SsoFailure::Unverified,
-                _ => SsoFailure::Refused,
-            };
-            return clear_flow(sso_error(failure, &mount));
+            // One answer for every refusal: the rule stays in the log and audit.
+            return clear_flow(sso_error(SsoFailure::Refused, &mount));
         }
         Err(e) => {
             tracing::error!(error = %e, "find-or-provision member failed");
@@ -765,9 +759,16 @@ async fn sso_callback_in(
         }
     };
 
-    let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
-        tracing::warn!(member_id, "member missing or inactive after sign-in");
-        return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
+    let member = match tenant_user(pool, member_id).await {
+        Some(u) if u.active => u,
+        Some(_) => {
+            tracing::warn!(member_id, "member deactivated during sign-in");
+            return clear_flow(sso_error(SsoFailure::Refused, &mount));
+        }
+        None => {
+            tracing::warn!(member_id, "member missing after sign-in");
+            return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
+        }
     };
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
@@ -1130,10 +1131,7 @@ enum SsoFailure {
     Expired,
     /// The code exchange or userinfo call failed.
     Upstream,
-    NotLinked,
-    NoAccount,
-    Inactive,
-    Unverified,
+    /// Any refused sign-in; which rule refused it is never shown.
     Refused,
     /// Our own read or write failed after the IdP answered.
     Incomplete,
@@ -1146,12 +1144,7 @@ impl SsoFailure {
             Self::UnknownProvider => StatusCode::NOT_FOUND,
             Self::Malformed | Self::Expired => StatusCode::BAD_REQUEST,
             Self::Upstream => StatusCode::BAD_GATEWAY,
-            Self::Denied
-            | Self::NotLinked
-            | Self::NoAccount
-            | Self::Inactive
-            | Self::Unverified
-            | Self::Refused => StatusCode::FORBIDDEN,
+            Self::Denied | Self::Refused => StatusCode::FORBIDDEN,
             Self::Incomplete => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -1163,15 +1156,10 @@ impl SsoFailure {
             Self::Denied => "Sign-in was cancelled or denied.",
             Self::Malformed => "Malformed sign-in response.",
             Self::Expired => "Your sign-in session expired. Please try again.",
-            Self::Upstream | Self::Refused => "Sign-in failed. Please try again.",
-            Self::NotLinked => {
-                "This sign-in is not linked to your account. Please contact your administrator."
+            Self::Upstream => "Sign-in failed. Please try again.",
+            Self::Refused => {
+                "You can't sign in with this account. Please contact your administrator."
             }
-            Self::NoAccount => {
-                "There is no account for this sign-in. Please contact your administrator."
-            }
-            Self::Inactive => "This account is disabled. Please contact your administrator.",
-            Self::Unverified => "Your identity provider did not return a verified email.",
             Self::Incomplete => "Could not complete sign-in.",
         }
     }

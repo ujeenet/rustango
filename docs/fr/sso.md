@@ -305,6 +305,10 @@ Une connexion refusée va dans le log serveur et dans le journal d'audit
 Le navigateur voit un message générique ; la page de connexion du tenant
 affiche aussi le `access_denied_message` du tenant (de `SsoTenantPolicy`), échappé.
 
+La route membre (`member_sso_router`) ne résout que les providers propres
+au tenant ; les providers partagés, et leur restriction par le tenant, ne
+s'y appliquent pas encore.
+
 ### Confiance dans l'id_token
 
 Les données de profil viennent de `/userinfo` via TLS. Les claims que seul

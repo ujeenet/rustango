@@ -282,6 +282,10 @@ Un inicio de sesión rechazado va al log del servidor y al log de auditoría
 El navegador ve un mensaje genérico; la página de login del tenant muestra
 además el `access_denied_message` del tenant (de `SsoTenantPolicy`), escapado.
 
+La ruta de miembros (`member_sso_router`) solo resuelve los proveedores
+propios del tenant; los proveedores compartidos, y su endurecimiento por
+el tenant, aún no se aplican ahí.
+
 ### Confianza en el id_token
 
 Los datos del perfil vienen de `/userinfo` sobre TLS. Los claims que solo

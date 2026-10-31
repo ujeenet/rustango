@@ -253,7 +253,7 @@ async fn sso_callback(
             state.config.tenant.clone(),
         )
         .await;
-        return login_error(&state, "inactive");
+        return login_error(&state, "nouser");
     }
     // A confirmed device owes its code first, as on the password login (#2249).
     #[cfg(feature = "totp")]

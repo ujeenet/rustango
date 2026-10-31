@@ -1445,6 +1445,72 @@ async fn member_domain_rule_refuses_before_provisioning() {
     );
 }
 
+/// A rule's refusal and an unknown account look the same to the browser.
+#[tokio::test]
+async fn tenant_refusals_look_like_no_account() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    env.set_policy("corp", "allowed_email_domains", "example.com")
+        .await;
+    let callback = |sub: &'static str, email: &'static str| {
+        let env = &env;
+        async move {
+            env.idp.assert(sub, email);
+            let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+            (resp.status(), location(&resp))
+        }
+    };
+    let unknown = callback("sub-x", "nobody@example.com").await;
+    let refused = callback("sub-y", "eve@gmail.com").await;
+    assert_eq!(refused, unknown);
+}
+
+/// The member flow: a domain refusal and a missing account get
+/// byte-identical error pages.
+#[cfg(not(feature = "postgres"))]
+#[tokio::test]
+async fn member_refusals_look_like_no_account() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::{member_sso_router, MemberAuthConfig};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.set_policy("corp", "allowed_email_domains", "client.org")
+        .await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx));
+    let page = |sub: &'static str, email: &'static str| {
+        let app = app.clone();
+        let env = &env;
+        async move {
+            env.idp.assert(sub, email);
+            let resp = handshake(&app, &env.tenants[0].host, "/auth", "corp").await;
+            let status = resp.status();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .filter(|(k, _)| *k != header::DATE)
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_owned()))
+                .collect();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, headers, body)
+        }
+    };
+    let no_account = page("sub-x", "nobody@client.org").await;
+    let refused = page("sub-y", "eve@gmail.com").await;
+    assert_eq!(refused, no_account);
+    assert!(!String::from_utf8_lossy(&refused.2).contains("domain"));
+}
+
 /// The bare admin refuses a linked admin outside the allowed domains.
 #[tokio::test]
 async fn bare_admin_domain_rule_refuses_a_linked_admin() {

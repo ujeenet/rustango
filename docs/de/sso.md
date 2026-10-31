@@ -283,6 +283,10 @@ Eine abgelehnte Anmeldung landet im Server-Log und im Audit-Log
 Der Browser sieht eine allgemeine Meldung; die Tenant-Login-Seite zeigt
 zusätzlich die `access_denied_message` des Tenants (aus `SsoTenantPolicy`), escaped.
 
+Die Member-Route (`member_sso_router`) löst nur die eigenen Anbieter des
+Tenants auf; geteilte Anbieter und ihre Verschärfung durch den Tenant
+gelten dort noch nicht.
+
 ### id_token-Vertrauen
 
 Profildaten kommen von `/userinfo` über TLS. Claims, die nur ein id_token

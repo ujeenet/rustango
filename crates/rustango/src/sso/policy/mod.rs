@@ -600,22 +600,26 @@ pub(crate) fn admin_normalise<'a>(
     let out = (|| {
         for (col, v) in values.iter_mut() {
             if LIST_COLUMNS.iter().any(|(c, _)| c == col) {
-                if let SqlValue::String(raw) = v {
-                    *v = match normalise_list(col, raw)? {
+                *v = match v {
+                    SqlValue::Null => SqlValue::Null,
+                    SqlValue::String(raw) => match normalise_list(col, raw)? {
                         Some(s) => SqlValue::String(s),
                         None => SqlValue::Null,
-                    };
-                }
+                    },
+                    _ => return Err(format!("{}: expected text", col.replace('_', " "))),
+                };
             } else if *col == "required_claims" {
                 let parsed = match v {
                     SqlValue::Json(j) => j.clone(),
+                    SqlValue::Null => serde_json::json!({}),
                     SqlValue::String(s) if s.trim().is_empty() => serde_json::json!({}),
                     SqlValue::String(s) => {
                         serde_json::from_str(s).map_err(|e| format!("required claims: {e}"))?
                     }
-                    _ => continue,
+                    _ => return Err("required claims: expected JSON".into()),
                 };
                 RequiredClaims::parse(&parsed).map_err(|e| e.to_string())?;
+                *v = SqlValue::Json(parsed);
             }
         }
         Ok(())
@@ -927,6 +931,34 @@ mod tests {
             }
         }
         assert!(checked > 10_000);
+    }
+
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn the_admin_hook_normalises_and_refuses() {
+        use crate::core::SqlValue as V;
+        let mut ok = vec![
+            (
+                "allowed_email_domains",
+                V::String(" Client.org,\n*.client.org ".into()),
+            ),
+            ("blocked_email_domains", V::String("  ".into())),
+            ("required_claims", V::Null),
+        ];
+        admin_normalise(&mut ok, None).await.unwrap();
+        assert_eq!(ok[0].1, V::String("client.org, *.client.org".into()));
+        assert_eq!(ok[1].1, V::Null);
+        assert_eq!(ok[2].1, V::Json(serde_json::json!({})));
+        for bad in [
+            vec![("allowed_email_domains", V::I64(1))],
+            vec![("allowed_idp_tenants", V::Bool(true))],
+            vec![("allowed_email_domains", V::String("gmail".into()))],
+            vec![("required_claims", V::I64(3))],
+            vec![("required_claims", V::String("[1]".into()))],
+        ] {
+            let mut v = bad.clone();
+            assert!(admin_normalise(&mut v, None).await.is_err(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -274,15 +274,13 @@ pub(crate) async fn login_notice(
         .split('&')
         .find_map(|p| p.strip_prefix("sso_error="))?;
     let notice = match code {
-        REFUSED | "inactive" => {
-            "You can't sign in with this account. Ask your administrator for access."
-        }
+        REFUSED => "You can't sign in with this account. Ask your administrator for access.",
         "denied" => "The sign-in was cancelled.",
         "expired" | "callback" | "handshake" => "The sign-in did not finish. Please try again.",
         "config" | "disabled" => "This sign-in option is not available right now.",
         _ => return None,
     };
-    let note = if matches!(code, REFUSED | "inactive") {
+    let note = if code == REFUSED {
         denied_note(tenant_pool).await
     } else {
         None
@@ -463,7 +461,7 @@ pub(super) async fn tenant_sso_callback(
         }
     };
     let Some(user) = member_auth::tenant_user(tenant_pool, uid).await else {
-        return login_error(routes, "nouser");
+        return login_error(routes, REFUSED);
     };
     if !user.active {
         signal_refused(
@@ -474,7 +472,7 @@ pub(super) async fn tenant_sso_callback(
             Some(org.slug.clone()),
         )
         .await;
-        return login_error(routes, "inactive");
+        return login_error(routes, REFUSED);
     }
 
     // Mint the tenant session — same shape as a password login.

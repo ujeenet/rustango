@@ -129,3 +129,9 @@ crate::register_admin_object_permission!("rustango_sso_tenant_policy", "add", su
 crate::register_admin_object_permission!("rustango_sso_tenant_policy", "change", superuser_only);
 #[cfg(feature = "admin")]
 crate::register_admin_object_permission!("rustango_sso_tenant_policy", "delete", superuser_only);
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_sso_invites", "view", superuser_only);
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_sso_shared_overrides", "view", superuser_only);
+#[cfg(feature = "admin")]
+crate::register_admin_object_permission!("rustango_sso_tenant_policy", "view", superuser_only);

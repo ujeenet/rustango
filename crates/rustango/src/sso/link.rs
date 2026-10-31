@@ -258,12 +258,21 @@ async fn links_for(pool: &Pool, key: &ProviderKey, subject: &str) -> Result<Vec<
         Ok(rows) => return Ok(rows),
         Err(e) => e,
     };
-    if !super::provider::lacks_columns(pool, "rustango_sso_links", LATER_COLUMNS).await {
-        return Err(err.to_string());
-    }
+    use super::provider::{columns_present, Columns};
+    let missing: Vec<&'static str> =
+        match columns_present(pool, "rustango_sso_links", LATER_COLUMNS).await {
+            Ok(Columns::None) => LATER_COLUMNS.to_vec(),
+            Ok(Columns::Some(have)) => LATER_COLUMNS
+                .iter()
+                .copied()
+                .filter(|c| !have.contains(c))
+                .collect(),
+            Ok(Columns::All) => return Err(err.to_string()),
+            Err(e) => return Err(format!("{err}; {e}")),
+        };
     tracing::warn!(target: "rustango::sso", "rustango_sso_links is not migrated; run `migrate`: {err}");
     let rows = qs()
-        .defer(LATER_COLUMNS)
+        .defer(&missing)
         .fetch(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -290,8 +299,15 @@ async fn links_for(pool: &Pool, key: &ProviderKey, subject: &str) -> Result<Vec<
                 Some(SqlValue::DateTime(at)) => Auto::Set(*at),
                 _ => Auto::Unset,
             },
-            provisioned: false,
-            last_used_at: None,
+            provisioned: matches!(r.get("provisioned"), Some(SqlValue::Bool(true)))
+                || matches!(
+                    r.get("provisioned"),
+                    Some(SqlValue::I64(1) | SqlValue::I32(1))
+                ),
+            last_used_at: match r.get("last_used_at") {
+                Some(SqlValue::DateTime(at)) => Some(*at),
+                _ => None,
+            },
         })
         .collect())
 }
