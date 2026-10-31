@@ -281,6 +281,47 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > `SharedSsoProvider` à l'échelle du registry et un hook `provision`
 > personnalisé sont des suites.
 
+## Qui peut se connecter
+
+Chaque provider (et chaque provider partagé de la console opérateur) a des
+règles de connexion. Des règles vides admettent toute personne que l'IdP
+authentifie.
+
+| Champ | Règle |
+|---|---|
+| `allowed_email_domains` | Seulement ces domaines : `client.org` ne correspond qu'à lui-même, `*.client.org` qu'à ses sous-domaines. Séparés par des virgules ou des retours à la ligne. |
+| `blocked_email_domains` | Jamais ces domaines, même autorisés ci-dessus. Vérifié sur tout email, vérifié ou non. |
+| `allowed_idp_tenants` | Identifiants d'annuaire Microsoft (`tid`). Lus uniquement depuis un id_token vérifié. |
+| `allowed_hosted_domains` | Domaines Google Workspace (claim `hd`). |
+| `required_claims` | JSON `{"claim": ["valeur", ...]}` : le claim (texte ou liste) doit contenir une des valeurs. `{"iss": [...]}` fixe l'émetteur. Un claim absent refuse. |
+| `require_verified_email` | Activé par défaut : la liste autorisée n'accepte qu'un email vérifié par l'IdP. |
+
+L'admin et la console opérateur enregistrent les listes sous une forme
+canonique et refusent une valeur illisible. Une valeur invalide écrite par
+un autre chemin refuse toute connexion via ce provider.
+
+Une connexion refusée va dans le log serveur et dans le journal d'audit
+(`source = sso:<surface>`, `changes.rule`, p. ex. `domain_not_allowed`).
+Le navigateur voit un message générique ; la page de connexion du tenant
+affiche aussi le `access_denied_message` du tenant (de `SsoTenantPolicy`), échappé.
+
+La route membre (`member_sso_router`) ne résout que les providers propres
+au tenant ; les providers partagés, et leur restriction par le tenant, ne
+s'y appliquent pas encore.
+
+### Confiance dans l'id_token
+
+Les données de profil viennent de `/userinfo` via TLS. Les claims que seul
+l'id_token porte (`tid`, `iss`, `xms_edov`) ne servent que si l'id_token
+passe : signature contre le JWKS de l'émetteur (RS256 ou ES256 ; mis en
+cache selon son `max-age`, rechargé au plus une fois par minute pour une clé
+inconnue), `aud` contient le client id, `exp`/`nbf` avec une minute de
+tolérance, l'émetteur (Microsoft : `https://login.microsoftonline.com/{tid}/v2.0`)
+et le même `sub` que userinfo. Sinon ces claims sont absents, et une règle
+qui en a besoin refuse. Un email Microsoft compte comme vérifié si
+`xms_edov` est vrai, ou si le provider fixe `allowed_idp_tenants` et que le
+`tid` du token y figure.
+
 ## Stockage des secrets
 
 `client_secret` est stocké **chiffré au repos** avec XChaCha20-Poly1305
@@ -330,8 +371,9 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
 - Les sessions SSO sont la session admin ordinaire — faire tourner ou
   désactiver l'utilisateur lié les invalide via le garde-fou en direct
   existant.
-- Le modèle de confiance repose sur `/userinfo` via TLS (l'id_token n'est
-  pas vérifié indépendamment) ; placez l'admin derrière HTTPS.
+- Le modèle de confiance repose sur `/userinfo` via TLS ; les claims de
+  l'id_token ne comptent qu'après la vérification JWKS (voir
+  [confiance dans l'id_token](#confiance-dans-lid_token)). Placez l'admin derrière HTTPS.
 
 ## Voir aussi
 

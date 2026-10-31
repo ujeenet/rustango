@@ -40,6 +40,12 @@ pub(super) struct SharedSsoForm {
     sort_order: String,
     enabled: String,
     allow_email_link: String,
+    allowed_email_domains: String,
+    blocked_email_domains: String,
+    allowed_idp_tenants: String,
+    allowed_hosted_domains: String,
+    required_claims: String,
+    require_verified_email: String,
 }
 
 fn on(b: bool) -> String {
@@ -57,6 +63,7 @@ impl SharedSsoForm {
             kind: "oidc".into(),
             sort_order: "0".into(),
             enabled: on(true),
+            require_verified_email: on(true),
             ..Self::default()
         }
     }
@@ -74,6 +81,16 @@ impl SharedSsoForm {
             sort_order: row.sort_order.to_string(),
             enabled: on(row.enabled),
             allow_email_link: on(row.allow_email_link),
+            allowed_email_domains: row.allowed_email_domains.clone().unwrap_or_default(),
+            blocked_email_domains: row.blocked_email_domains.clone().unwrap_or_default(),
+            allowed_idp_tenants: row.allowed_idp_tenants.clone().unwrap_or_default(),
+            allowed_hosted_domains: row.allowed_hosted_domains.clone().unwrap_or_default(),
+            required_claims: match &row.required_claims {
+                serde_json::Value::Object(o) if o.is_empty() => String::new(),
+                serde_json::Value::Null => String::new(),
+                v => v.to_string(),
+            },
+            require_verified_email: on(row.require_verified_email),
         }
     }
 
@@ -110,6 +127,26 @@ impl SharedSsoForm {
         if creating && self.client_secret.is_empty() {
             return Err("the client secret is required".into());
         }
+        // The same parsers as the admin, so a saved row always parses.
+        let list = |col: &str, raw: &str, max: usize| {
+            let v = crate::sso::policy::normalise_list(col, raw)?;
+            match &v {
+                Some(s) if s.len() > max => Err(format!(
+                    "{} must be at most {max} characters",
+                    col.replace('_', " ")
+                )),
+                _ => Ok(v),
+            }
+        };
+        let allowed = list("allowed_email_domains", &self.allowed_email_domains, 2000)?;
+        let blocked = list("blocked_email_domains", &self.blocked_email_domains, 2000)?;
+        let tenants = list("allowed_idp_tenants", &self.allowed_idp_tenants, 1000)?;
+        let hosted = list("allowed_hosted_domains", &self.allowed_hosted_domains, 1000)?;
+        let claims = match self.required_claims.trim() {
+            "" => serde_json::json!({}),
+            s => serde_json::from_str(s).map_err(|e| format!("required claims: {e}"))?,
+        };
+        crate::sso::policy::RequiredClaims::parse(&claims).map_err(|e| e.to_string())?;
         row.label = label.to_owned();
         row.kind = kind.to_owned();
         row.issuer_url = issuer_url;
@@ -121,6 +158,12 @@ impl SharedSsoForm {
         row.sort_order = sort_order;
         row.enabled = self.enabled == "on";
         row.allow_email_link = self.allow_email_link == "on";
+        row.allowed_email_domains = allowed;
+        row.blocked_email_domains = blocked;
+        row.allowed_idp_tenants = tenants;
+        row.allowed_hosted_domains = hosted;
+        row.required_claims = claims;
+        row.require_verified_email = self.require_verified_email == "on";
         Ok(())
     }
 }
@@ -284,6 +327,25 @@ pub(super) async fn create(
         sort_order: 0,
         scopes: None,
         allow_email_link: false,
+        allowed_email_domains: None,
+        blocked_email_domains: None,
+        allowed_idp_tenants: None,
+        allowed_hosted_domains: None,
+        required_claims: serde_json::json!({}),
+        require_verified_email: true,
+        signup_mode: None,
+        default_roles: None,
+        role_map: serde_json::json!({}),
+        role_claims: None,
+        sync_roles_on_login: false,
+        username_from: "email_local".into(),
+        username_clash: "suffix".into(),
+        sync_profile: false,
+        allow_email_link_staff: false,
+        sso_only: false,
+        auto_deactivate_after_days: None,
+        session_ttl_secs: None,
+        superuser_session_ttl_secs: None,
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
     };
@@ -347,6 +409,19 @@ fn detail(
     d.insert(
         "allow_email_link".into(),
         serde_json::json!(row.allow_email_link),
+    );
+    for (k, v) in [
+        ("allowed_email_domains", &row.allowed_email_domains),
+        ("blocked_email_domains", &row.blocked_email_domains),
+        ("allowed_idp_tenants", &row.allowed_idp_tenants),
+        ("allowed_hosted_domains", &row.allowed_hosted_domains),
+    ] {
+        d.insert(k.into(), serde_json::json!(v));
+    }
+    d.insert("required_claims".into(), row.required_claims.clone());
+    d.insert(
+        "require_verified_email".into(),
+        serde_json::json!(row.require_verified_email),
     );
     if let Some(replaced) = secret_replaced {
         d.insert("issuer_url".into(), serde_json::json!(row.issuer_url));

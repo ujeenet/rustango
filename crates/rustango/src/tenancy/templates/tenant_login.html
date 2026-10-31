@@ -134,6 +134,7 @@
     {% if brand_tagline %}<div class="tagline">{{ brand_tagline }}</div>{% endif %}
     <p class="sub">Sign in to <strong>{{ tenant_name | default(value=tenant_slug) }}</strong></p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    {% if sso_notice %}<div class="error">{{ sso_notice }}{% if sso_denied_note %}<br>{{ sso_denied_note }}{% endif %}</div>{% endif %}
     <label for="username">{{ login_label | default(value="Username") }}</label>
     <input type="{{ login_input_type | default(value="text") }}" id="username" name="username" autocomplete="{{ login_autocomplete | default(value="username") }}" autofocus required>
     <label for="password">Password</label>

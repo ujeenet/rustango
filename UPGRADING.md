@@ -148,6 +148,18 @@ untouched.
 
 ---
 
+## Unreleased
+
+### SSO
+
+- Run `makemigrations` and `migrate`: the SSO provider and link tables get new columns, and three tables are new. Until then sign-in keeps working with no rules (a warning is logged), but a new email link cannot be saved.
+- `SsoProvider`, `SharedSsoProvider` and `SsoLink` struct literals must set the new fields; the defaults are `None`, `false`, `{}`, `require_verified_email: true`, `username_from: "email_local"`, `username_clash: "suffix"`.
+- A provider field that does not parse (written past the admin) refuses every sign-in through it until fixed.
+- An email link to an existing account still needs an IdP-verified email; a Microsoft email now counts as verified when the id_token says `xms_edov` or the provider pins its `tid`.
+- Matches on `LinkRefusal` need a wildcard arm (new `Policy` variant).
+- Every refused SSO sign-in now looks the same to the browser: the member flow shows one "You can't sign in with this account" page (403) instead of separate not-linked / no-account / inactive / unverified pages, and the tenant and admin logins redirect with `sso_error=nouser` (no more `sso_error=inactive`). The reason is in the server log and the audit log.
+- A provider table with only some of the policy columns refuses SSO sign-in until `migrate` runs.
+
 ## 0.61.14
 
 ### Forms and ViewSets

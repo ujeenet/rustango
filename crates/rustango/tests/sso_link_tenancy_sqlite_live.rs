@@ -23,11 +23,49 @@ use tower::ServiceExt as _;
 
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// A fake OIDC IdP: discovery, token, and a userinfo the test sets.
+/// An ES256 key the fake IdP signs id_tokens with.
+struct Signer(ring::signature::EcdsaKeyPair);
+
+impl Signer {
+    fn new() -> Self {
+        use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_FIXED_SIGNING as ALG};
+        let rng = ring::rand::SystemRandom::new();
+        let doc = EcdsaKeyPair::generate_pkcs8(&ALG, &rng).unwrap();
+        Self(EcdsaKeyPair::from_pkcs8(&ALG, doc.as_ref(), &rng).unwrap())
+    }
+
+    fn jwk(&self) -> serde_json::Value {
+        use ring::signature::KeyPair as _;
+        let p = self.0.public_key().as_ref();
+        serde_json::json!({"kty": "EC", "crv": "P-256", "kid": "k1",
+            "x": b64(&p[1..33]), "y": b64(&p[33..65])})
+    }
+
+    fn sign(&self, claims: &serde_json::Value) -> String {
+        let head = b64(br#"{"alg":"ES256","kid":"k1"}"#);
+        let input = format!("{head}.{}", b64(claims.to_string().as_bytes()));
+        let sig = self
+            .0
+            .sign(&ring::rand::SystemRandom::new(), input.as_bytes())
+            .unwrap();
+        format!("{input}.{}", b64(sig.as_ref()))
+    }
+}
+
+fn b64(v: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v)
+}
+
+/// The id_token the fake IdP returns: extra claims, and whether its own key signs it.
+type IdTokenPlan = Option<(serde_json::Value, bool)>;
+
+/// A fake OIDC IdP: discovery, token, a userinfo the test sets, and a JWKS.
 #[derive(Clone)]
 struct Idp {
     issuer: String,
     claims: Arc<Mutex<serde_json::Value>>,
+    id_token: Arc<Mutex<IdTokenPlan>>,
 }
 
 impl Idp {
@@ -40,21 +78,40 @@ impl Idp {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let issuer = format!("http://{}", listener.local_addr().unwrap());
         let claims = Arc::new(Mutex::new(serde_json::json!({})));
+        let id_token: Arc<Mutex<IdTokenPlan>> = Arc::new(Mutex::new(None));
         let doc = serde_json::json!({
+            "issuer": issuer,
             "authorization_endpoint": format!("{issuer}/auth"),
             "token_endpoint": format!("{issuer}/token"),
             "userinfo_endpoint": format!("{issuer}/userinfo"),
+            "jwks_uri": format!("{issuer}/jwks"),
         });
+        let (key, rogue) = (Arc::new(Signer::new()), Arc::new(Signer::new()));
+        let jwks = serde_json::json!({"keys": [key.jwk()]});
         let c = claims.clone();
+        let (plan, user, iss) = (id_token.clone(), claims.clone(), issuer.clone());
         let app = Router::new()
             .route(
                 "/.well-known/openid-configuration",
                 get(move || async move { Json(doc) }),
             )
+            .route("/jwks", get(move || async move { Json(jwks) }))
             .route(
                 "/token",
-                post(|| async {
-                    Json(serde_json::json!({"access_token": "at", "token_type": "Bearer"}))
+                post(move || async move {
+                    let mut body =
+                        serde_json::json!({"access_token": "at", "token_type": "Bearer"});
+                    if let Some((extra, genuine)) = plan.lock().unwrap().clone() {
+                        let now = chrono::Utc::now().timestamp();
+                        let mut c = serde_json::json!({"iss": iss, "aud": "cid", "exp": now + 300,
+                            "sub": user.lock().unwrap()["sub"].clone()});
+                        for (k, v) in extra.as_object().unwrap() {
+                            c[k] = v.clone();
+                        }
+                        let signer = if genuine { &key } else { &rogue };
+                        body["id_token"] = signer.sign(&c).into();
+                    }
+                    Json(body)
                 }),
             )
             .route(
@@ -62,7 +119,16 @@ impl Idp {
                 get(move || async move { Json(c.lock().unwrap().clone()) }),
             );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        Self { issuer, claims }
+        Self {
+            issuer,
+            claims,
+            id_token,
+        }
+    }
+
+    /// Return an id_token with `extra` claims, signed by the IdP's key or another.
+    fn id_token(&self, plan: IdTokenPlan) {
+        *self.id_token.lock().unwrap() = plan;
     }
 
     fn assert(&self, sub: &str, email: &str) {
@@ -258,6 +324,32 @@ fn assert_check_ran<E: std::fmt::Display>(res: Result<(), E>, out: &str) {
     );
 }
 
+async fn set_policy(pool: &Pool, slug: &str, column: &'static str, value: &str) {
+    use rustango::sql::UpdaterPool as _;
+    SsoProvider::objects()
+        .filter("slug", slug.to_owned())
+        .update()
+        .set(column, value.to_owned())
+        .execute_pool(pool)
+        .await
+        .unwrap();
+}
+
+/// The rules of the `sso_refused` audit rows for `provider:subject`.
+async fn refused_rules(pool: &Pool, provider: &str, subject: &str) -> Vec<String> {
+    rustango::audit::fetch_for_entity_pool(
+        pool,
+        "rustango_sso_links",
+        &format!("{provider}:{subject}"),
+    )
+    .await
+    .unwrap()
+    .into_iter()
+    .filter(|e| e.changes["event"] == "sso_refused")
+    .map(|e| e.changes["rule"].as_str().unwrap_or("").to_owned())
+    .collect()
+}
+
 fn provider_row(issuer: &str, slug: &str, allow_email_link: bool) -> SsoProvider {
     SsoProvider {
         id: Auto::default(),
@@ -271,6 +363,25 @@ fn provider_row(issuer: &str, slug: &str, allow_email_link: bool) -> SsoProvider
         sort_order: 0,
         scopes: None,
         allow_email_link,
+        allowed_email_domains: None,
+        blocked_email_domains: None,
+        allowed_idp_tenants: None,
+        allowed_hosted_domains: None,
+        required_claims: serde_json::json!({}),
+        require_verified_email: true,
+        signup_mode: None,
+        default_roles: None,
+        role_map: serde_json::json!({}),
+        role_claims: None,
+        sync_roles_on_login: false,
+        username_from: "email_local".into(),
+        username_clash: "suffix".into(),
+        sync_profile: false,
+        allow_email_link_staff: false,
+        sso_only: false,
+        auto_deactivate_after_days: None,
+        session_ttl_secs: None,
+        superuser_session_ttl_secs: None,
         created_at: Auto::default(),
         updated_at: Auto::default(),
     }
@@ -317,6 +428,11 @@ impl Env {
 
     async fn tenant_provider(&self, slug: &str, allow_email_link: bool) {
         self.provider_in(0, slug, allow_email_link).await;
+    }
+
+    /// Write one policy column of tenant 0's provider `slug`.
+    async fn set_policy(&self, slug: &str, column: &'static str, value: &str) {
+        set_policy(self.pool(), slug, column, value).await;
     }
 
     /// Operator console session cookies (plus the CSRF pair).
@@ -1177,6 +1293,258 @@ async fn real_tenant_migrations_create_the_link_table() {
 
 // ---- bare admin ---------------------------------------------------------
 
+/// A pinned IdP tenant is read only from an id_token the IdP's JWKS
+/// verifies. The browser sees one generic code; the audit log the rule.
+#[tokio::test]
+async fn idp_tenant_pinning_trusts_only_a_verified_id_token() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    env.set_policy("corp", "allowed_idp_tenants", "t1").await;
+    let signed = |tid: &str, genuine| Some((serde_json::json!({ "tid": tid }), genuine));
+
+    env.idp.id_token(signed("t1", true));
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+    env.idp.id_token(signed("t2", true));
+    assert_eq!(
+        env.sso("corp", "sub-ann", "ann@example.com").await,
+        Err("nouser".into())
+    );
+    // Signed by a key the JWKS lacks.
+    env.idp.id_token(signed("t1", false));
+    assert_eq!(
+        env.sso("corp", "sub-ann", "ann@example.com").await,
+        Err("nouser".into())
+    );
+    // No id_token: a `tid` in userinfo vouches for nothing.
+    env.idp.id_token(None);
+    env.idp.assert("sub-ann", "ann@example.com");
+    env.idp.claims.lock().unwrap()["tid"] = "t1".into();
+    let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+    assert_eq!(location(&resp), "/__login?sso_error=nouser");
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-ann").await,
+        ["idp_tenant", "idp_tenant", "idp_tenant"]
+    );
+}
+
+/// The tenant console refuses a linked user outside the allowed domains;
+/// the login page shows a fixed message and the tenant's escaped note only.
+#[tokio::test]
+async fn tenant_domain_rule_refuses_a_linked_user() {
+    use rustango::sso::policy::SsoTenantPolicy;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    rustango::testkit::create_tables_for::<SsoTenantPolicy>(env.pool())
+        .await
+        .unwrap();
+    SsoTenantPolicy {
+        id: Auto::default(),
+        name: "default".into(),
+        access_denied_message: Some("<b>Ask IT</b>".into()),
+        password_login: "on".into(),
+        sso_only: false,
+        default_provider: None,
+    }
+    .insert_pool(env.pool())
+    .await
+    .unwrap();
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+    env.set_policy("corp", "allowed_email_domains", "client.org")
+        .await;
+    assert_eq!(
+        env.sso("corp", "sub-ann", "ann@example.com").await,
+        Err("nouser".into())
+    );
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-ann").await,
+        ["domain_not_allowed"]
+    );
+    let page = send(
+        &env.admin,
+        Request::builder()
+            .uri("/__login?sso_error=nouser")
+            .header(header::HOST, &env.tenants[0].host)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = axum::body::to_bytes(page.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body.contains("Ask your administrator for access"), "{body}");
+    assert!(
+        body.contains("&lt;b&gt;Ask IT&lt;&#x2F;b&gt;")
+            || body.contains("&lt;b&gt;Ask IT&lt;/b&gt;"),
+        "{body}"
+    );
+    assert!(!body.contains("domain_not_allowed") && !body.contains("client.org"));
+}
+
+/// The member flow applies the rules before it provisions anyone.
+#[cfg(not(feature = "postgres"))]
+#[tokio::test]
+async fn member_domain_rule_refuses_before_provisioning() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::{member_sso_router, MemberAuthConfig, MEMBER_COOKIE};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    env.tenant_provider("corp", false).await;
+    env.set_policy("corp", "allowed_email_domains", "client.org")
+        .await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    let member = |sub: &'static str, email: &'static str| {
+        let app = app.clone();
+        let env = &env;
+        async move {
+            env.idp.assert(sub, email);
+            let resp = handshake(&app, &env.tenants[0].host, "/auth", "corp").await;
+            assert!(!location(&resp).contains("domain"), "{}", location(&resp));
+            set_cookies(&resp)
+                .iter()
+                .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}=")))
+        }
+    };
+    assert!(
+        !member("sub-eve", "eve@gmail.com").await,
+        "outside the domains"
+    );
+    assert!(User::objects()
+        .filter("email", "eve@gmail.com")
+        .fetch(env.pool())
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(member("sub-new", "new@client.org").await, "provisioned");
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-eve").await,
+        ["domain_not_allowed"]
+    );
+}
+
+/// A rule's refusal and an unknown account look the same to the browser.
+#[tokio::test]
+async fn tenant_refusals_look_like_no_account() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    env.set_policy("corp", "allowed_email_domains", "example.com")
+        .await;
+    let callback = |sub: &'static str, email: &'static str| {
+        let env = &env;
+        async move {
+            env.idp.assert(sub, email);
+            let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+            (resp.status(), location(&resp))
+        }
+    };
+    let unknown = callback("sub-x", "nobody@example.com").await;
+    let refused = callback("sub-y", "eve@gmail.com").await;
+    assert_eq!(refused, unknown);
+}
+
+/// The member flow: a domain refusal and a missing account get
+/// byte-identical error pages.
+#[cfg(not(feature = "postgres"))]
+#[tokio::test]
+async fn member_refusals_look_like_no_account() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::{member_sso_router, MemberAuthConfig};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.set_policy("corp", "allowed_email_domains", "client.org")
+        .await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx));
+    let page = |sub: &'static str, email: &'static str| {
+        let app = app.clone();
+        let env = &env;
+        async move {
+            env.idp.assert(sub, email);
+            let resp = handshake(&app, &env.tenants[0].host, "/auth", "corp").await;
+            let status = resp.status();
+            let headers: Vec<(String, String)> = resp
+                .headers()
+                .iter()
+                .filter(|(k, _)| *k != header::DATE)
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_owned()))
+                .collect();
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, headers, body)
+        }
+    };
+    let no_account = page("sub-x", "nobody@client.org").await;
+    let refused = page("sub-y", "eve@gmail.com").await;
+    assert_eq!(refused, no_account);
+    assert!(!String::from_utf8_lossy(&refused.2).contains("domain"));
+}
+
+/// The bare admin refuses a linked admin outside the allowed domains.
+#[tokio::test]
+async fn bare_admin_domain_rule_refuses_a_linked_admin() {
+    use rustango::admin::AdminUser;
+    let _g = SUITE.lock().await;
+    let (app, pool, idp) = bare_admin().await;
+    let root = AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", root.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    idp.assert("sub-root", "root@example.com");
+    assert!(signed_in(
+        &handshake(&app, "admin.test", "/login", "corp").await
+    ));
+    set_policy(&pool, "corp", "allowed_email_domains", "client.org").await;
+    let resp = handshake(&app, "admin.test", "/login", "corp").await;
+    assert!(!signed_in(&resp));
+    assert!(
+        location(&resp).ends_with("/login?sso_error=nouser"),
+        "{}",
+        location(&resp)
+    );
+}
+
 async fn bare_admin() -> (Router, Pool, Idp) {
     use rustango::admin::AdminUser;
     std::env::set_var("RUSTANGO_SECRET_KEY", "sso-link-test-key");
@@ -1848,7 +2216,7 @@ async fn upgrading_adds_the_framework_column_once() {
             .filter(|e| {
                 std::fs::read_to_string(e.as_ref().unwrap().path())
                     .unwrap()
-                    .contains("allow_email_link")
+                    .contains("\"allow_email_link\"")
             })
             .count()
     };

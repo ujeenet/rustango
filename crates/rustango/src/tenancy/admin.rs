@@ -1122,6 +1122,10 @@ async fn login_form(
         let providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
         ctx.insert("sso_enabled", &!providers.is_empty());
         ctx.insert("sso_providers", &providers);
+        if let Some((notice, note)) = super::sso::login_notice(tenant_pool, query).await {
+            ctx.insert("sso_notice", notice);
+            ctx.insert("sso_denied_note", &note);
+        }
     }
     // Seed the double-submit CSRF token so the first GET already
     // carries one; without it the first POST would always fail

@@ -94,6 +94,93 @@ pub struct SsoProvider {
     #[rustango(default = "false")]
     pub allow_email_link: bool,
 
+    /// Only emails in these domains sign in: `client.org`, `*.client.org`
+    /// (subdomains only), comma or newline separated. Empty: any domain.
+    #[rustango(max_length = 2000)]
+    pub allowed_email_domains: Option<String>,
+
+    /// Emails in these domains never sign in; beats the allowed list.
+    #[rustango(max_length = 2000)]
+    pub blocked_email_domains: Option<String>,
+
+    /// Microsoft directory ids (`tid`) allowed to sign in. Needs a verified id_token.
+    #[rustango(max_length = 1000)]
+    pub allowed_idp_tenants: Option<String>,
+
+    /// Google Workspace domains (`hd`) allowed to sign in.
+    #[rustango(max_length = 1000)]
+    pub allowed_hosted_domains: Option<String>,
+
+    /// `{"claim": ["value", ...]}`: each claim must hold one of its values.
+    /// `{"iss": [...]}` pins the issuer.
+    #[rustango(default = "'{}'")]
+    pub required_claims: serde_json::Value,
+
+    /// The email domain rules only accept an IdP-verified email.
+    #[rustango(default = "true")]
+    pub require_verified_email: bool,
+
+    /// Who may sign up: `closed`, `invite_only`, `allowlist` or `open`.
+    /// Empty: the sign-in surface's default.
+    #[rustango(
+        max_length = 16,
+        choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
+    )]
+    pub signup_mode: Option<String>,
+
+    /// Roles granted to a user created through this provider.
+    #[rustango(max_length = 1000)]
+    pub default_roles: Option<String>,
+
+    /// `{"<IdP group or role>": "<tenant role>"}`.
+    #[rustango(default = "'{}'")]
+    pub role_map: serde_json::Value,
+
+    /// Claims [`Self::role_map`] reads. Empty: `groups,roles`.
+    #[rustango(max_length = 255)]
+    pub role_claims: Option<String>,
+
+    /// Re-apply [`Self::role_map`] on every sign-in, not just the first.
+    #[rustango(default = "false")]
+    pub sync_roles_on_login: bool,
+
+    /// Where a new user's username comes from.
+    #[rustango(
+        max_length = 24,
+        default = "'email_local'",
+        choices = "email_local:Email local part, email:Email, preferred_username:Preferred username"
+    )]
+    pub username_from: String,
+
+    /// What a taken username does on sign-up.
+    #[rustango(
+        max_length = 16,
+        default = "'suffix'",
+        choices = "suffix:Add a suffix, refuse:Refuse"
+    )]
+    pub username_clash: String,
+
+    /// Refresh name and email from the IdP on every sign-in.
+    #[rustango(default = "false")]
+    pub sync_profile: bool,
+
+    /// Email linking may also link role holders (never superusers).
+    #[rustango(default = "false")]
+    pub allow_email_link_staff: bool,
+
+    /// Users of this provider may not sign in with a password.
+    #[rustango(default = "false")]
+    pub sso_only: bool,
+
+    /// Deactivate users this provider created after this many idle days.
+    pub auto_deactivate_after_days: Option<i32>,
+
+    /// Session lifetime after a sign-in through this provider.
+    pub session_ttl_secs: Option<i64>,
+
+    /// Session lifetime for a superuser.
+    pub superuser_session_ttl_secs: Option<i64>,
+
     /// Set on INSERT via `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
@@ -133,9 +220,169 @@ inventory::submit! {
     }
 }
 
-/// Columns provider reads leave out. `allow_email_link` is read on its own,
-/// so a table not yet migrated still serves logins.
-const DEFERRED: &[&str] = &["allow_email_link", "created_at", "updated_at"];
+/// Columns provider reads leave out. `allow_email_link` and the policy are
+/// read on their own, so a table not yet migrated still serves logins.
+const DEFERRED: &[&str] = &[
+    "allow_email_link",
+    "created_at",
+    "updated_at",
+    "allowed_email_domains",
+    "blocked_email_domains",
+    "allowed_idp_tenants",
+    "allowed_hosted_domains",
+    "required_claims",
+    "require_verified_email",
+    "signup_mode",
+    "default_roles",
+    "role_map",
+    "role_claims",
+    "sync_roles_on_login",
+    "username_from",
+    "username_clash",
+    "sync_profile",
+    "allow_email_link_staff",
+    "sso_only",
+    "auto_deactivate_after_days",
+    "session_ttl_secs",
+    "superuser_session_ttl_secs",
+];
+
+/// The sign-in policy columns.
+const SIGN_IN_COLUMNS: &[&str] = &[
+    "allowed_email_domains",
+    "blocked_email_domains",
+    "allowed_idp_tenants",
+    "allowed_hosted_domains",
+    "required_claims",
+    "require_verified_email",
+];
+
+/// Which of some columns a table has, by the catalog.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Columns {
+    /// None of them: added by a migration not run yet.
+    None,
+    /// Some, named here.
+    Some(Vec<&'static str>),
+    All,
+}
+
+/// Which of `cols` `table` has.
+///
+/// # Errors
+/// The catalog cannot be read, or shows the table with no columns at all
+/// (another schema, missing privileges): nothing can be told from it.
+pub(crate) async fn columns_present(
+    pool: &Pool,
+    table: &str,
+    cols: &[&'static str],
+) -> Result<Columns, String> {
+    let have = crate::migrate::ensure::live_columns(pool, table)
+        .await
+        .map_err(|e| format!("catalog: {e}"))?;
+    if have.is_empty() {
+        return Err(format!("the catalog shows no columns for {table}"));
+    }
+    let present: Vec<&'static str> = cols.iter().copied().filter(|c| have.contains(*c)).collect();
+    Ok(match present.len() {
+        0 => Columns::None,
+        n if n == cols.len() => Columns::All,
+        _ => Columns::Some(present),
+    })
+}
+
+/// Row `id`'s sign-in policy. When none of the policy columns exist yet the
+/// policy is the default one (with a warning). Some but not all of them, an
+/// unreadable catalog, any other read error, or a value of the wrong type
+/// or that does not parse, is an error, and sign-in through the row refuses.
+async fn read_policy<T: Model>(
+    pool: &Pool,
+    id: i64,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    use super::policy::PolicyError;
+    let err = match QuerySet::<T>::new()
+        .filter("id", id)
+        .only(SIGN_IN_COLUMNS)
+        .fetch(pool)
+        .await
+    {
+        Ok(rows) => {
+            let r = rows
+                .first()
+                .ok_or_else(|| PolicyError("the provider row vanished".into()))?;
+            // SQLite can answer for columns it lacks: let the catalog decide.
+            if SIGN_IN_COLUMNS.iter().all(|c| r.contains_key(*c)) {
+                return policy_of_row(r);
+            }
+            "the read returned no policy columns".to_owned()
+        }
+        Err(e) => e.to_string(),
+    };
+    let present = columns_present(pool, T::SCHEMA.table, SIGN_IN_COLUMNS).await;
+    policy_after_read_error(present, T::SCHEMA.table, &err)
+}
+
+/// What a failed policy read means, by which policy columns exist: none is
+/// a schema not yet migrated (the default policy); anything else refuses.
+fn policy_after_read_error(
+    present: Result<Columns, String>,
+    table: &str,
+    err: &str,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    use super::policy::{PolicyError, SignInPolicy};
+    match present {
+        Ok(Columns::None) => {
+            tracing::warn!(
+                target: "rustango::sso",
+                table,
+                "SSO policy columns missing; run `migrate`. Using the default policy: {err}"
+            );
+            Ok(SignInPolicy::default())
+        }
+        // A missing column may hold a rule: refuse until migrated.
+        Ok(Columns::Some(have)) => Err(PolicyError(format!(
+            "only some policy columns exist ({}); run `migrate`",
+            have.join(", ")
+        ))),
+        Ok(Columns::All) => Err(PolicyError(format!("read: {err}"))),
+        Err(e) => Err(PolicyError(format!("read: {err}; {e}"))),
+    }
+}
+
+/// The policy in one row read with every [`SIGN_IN_COLUMNS`] column.
+fn policy_of_row(
+    r: &std::collections::HashMap<String, SqlValue>,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    use super::policy::{PolicyError, SignInColumns, SignInPolicy};
+    let bad = |c: &str, v: Option<&SqlValue>| PolicyError(format!("{c}: unexpected value {v:?}"));
+    let list = |c: &str| match r.get(c) {
+        Some(SqlValue::Null) => Ok(None),
+        Some(SqlValue::String(s)) => Ok(Some(s.as_str())),
+        other => Err(bad(c, other)),
+    };
+    let claims = match r.get("required_claims") {
+        Some(SqlValue::Json(v)) => v.clone(),
+        Some(SqlValue::String(s)) => {
+            serde_json::from_str(s).map_err(|e| PolicyError(format!("required_claims: {e}")))?
+        }
+        other => return Err(bad("required_claims", other)),
+    };
+    let verified = match r.get("require_verified_email") {
+        Some(SqlValue::Bool(b)) => *b,
+        Some(SqlValue::I64(n)) => *n != 0,
+        Some(SqlValue::I32(n)) => *n != 0,
+        Some(SqlValue::I16(n)) => *n != 0,
+        other => return Err(bad("require_verified_email", other)),
+    };
+    SignInPolicy::parse(&SignInColumns {
+        allowed_email_domains: list("allowed_email_domains")?,
+        blocked_email_domains: list("blocked_email_domains")?,
+        allowed_idp_tenants: list("allowed_idp_tenants")?,
+        allowed_hosted_domains: list("allowed_hosted_domains")?,
+        required_claims: Some(&claims),
+        require_verified_email: verified,
+    })
+}
 
 /// A provider row, shared by [`SsoProvider`] and `SharedSsoProvider`.
 /// `client_secret` is still encrypted.
@@ -205,6 +452,8 @@ pub struct ResolvedProvider {
     pub id: i64,
     /// The row's `allow_email_link`; `false` when it can't be read.
     pub allow_email_link: bool,
+    /// The row's sign-in rules; an error refuses every sign-in.
+    pub policy: Result<super::policy::SignInPolicy, super::policy::PolicyError>,
 }
 
 impl ResolvedProvider {
@@ -217,6 +466,12 @@ impl ResolvedProvider {
             &self.sso.provider,
             self.sso.issuer_url.as_deref(),
         )
+    }
+
+    /// The policy a sign-in through this row runs under.
+    #[must_use]
+    pub fn effective_policy(&self) -> super::policy::EffectivePolicy {
+        super::policy::EffectivePolicy::new(self.policy.clone(), self.allow_email_link)
     }
 }
 
@@ -249,7 +504,9 @@ pub(crate) async fn resolve_row<T: Model>(
             false
         }
     };
+    let policy = read_policy::<T>(pool, r.id).await;
     Ok(Some(ResolvedProvider {
+        policy,
         sso: ResolvedSso {
             provider: r.kind,
             issuer_url: r.issuer_url,
@@ -294,4 +551,80 @@ pub async fn resolve_by_slug(
     redirect_uri: String,
 ) -> Result<Option<ResolvedProvider>, SsoError> {
     resolve_row::<SsoProvider>(pool, slug, redirect_uri).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sso::policy::SignInPolicy;
+    use std::collections::HashMap;
+
+    /// Only a schema with none of the policy columns falls back to no rules.
+    #[test]
+    fn a_read_error_falls_back_only_when_no_policy_column_exists() {
+        let t = "rustango_sso_providers";
+        assert_eq!(
+            policy_after_read_error(Ok(Columns::None), t, "e"),
+            Ok(SignInPolicy::default())
+        );
+        for refused in [
+            Ok(Columns::Some(vec!["allowed_email_domains"])),
+            Ok(Columns::All),
+            Err("the catalog shows no columns".to_owned()),
+        ] {
+            assert!(policy_after_read_error(refused, t, "e").is_err());
+        }
+    }
+
+    fn row(over: &[(&str, SqlValue)]) -> HashMap<String, SqlValue> {
+        let mut r: HashMap<String, SqlValue> = [
+            (
+                "allowed_email_domains",
+                SqlValue::String("client.org".into()),
+            ),
+            ("blocked_email_domains", SqlValue::Null),
+            ("allowed_idp_tenants", SqlValue::Null),
+            ("allowed_hosted_domains", SqlValue::Null),
+            ("required_claims", SqlValue::String("{}".into())),
+            ("require_verified_email", SqlValue::I64(1)),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+        for (k, v) in over {
+            r.insert((*k).to_owned(), v.clone());
+        }
+        r
+    }
+
+    /// A value of the wrong type, or a NULL flag, refuses rather than reading as "no rule".
+    #[test]
+    fn an_unexpected_value_refuses() {
+        let p = policy_of_row(&row(&[])).unwrap();
+        assert!(p.allowed_email_domains.is_some() && p.require_verified_email);
+        for bad in [
+            ("allowed_email_domains", SqlValue::I64(5)),
+            ("blocked_email_domains", SqlValue::Bool(true)),
+            ("required_claims", SqlValue::Null),
+            ("require_verified_email", SqlValue::Null),
+            ("require_verified_email", SqlValue::String("yes".into())),
+        ] {
+            assert!(policy_of_row(&row(&[bad.clone()])).is_err(), "{bad:?}");
+        }
+        let mut gone = row(&[]);
+        gone.remove("allowed_idp_tenants");
+        assert!(policy_of_row(&gone).is_err(), "a column the read lacks");
+    }
+
+    /// A table the catalog cannot see tells nothing: an error, not "no columns".
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_empty_catalog_is_an_error() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        assert!(
+            columns_present(&pool, "rustango_sso_providers", SIGN_IN_COLUMNS)
+                .await
+                .is_err()
+        );
+    }
 }

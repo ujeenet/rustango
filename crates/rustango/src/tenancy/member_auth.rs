@@ -62,8 +62,11 @@ use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::sqlx::Database;
 use crate::sql::{Auto, Pool};
 use crate::sso::link::{
-    create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
-    ProviderKey,
+    create_link_tx, Account, AccountLookup, EmailLookup, LinkSource, ProviderKey,
+};
+use crate::sso::policy::{
+    admit, refuse, AdmitRequest, Denied, EffectivePolicy, Identity, Refusal, RefusalContext,
+    Surface,
 };
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{
@@ -708,8 +711,8 @@ async fn sso_callback_in(
         }
     };
 
-    let normalized = match provider.complete(&flow, &code, &state).await {
-        Ok((user, _tokens)) => user,
+    let identity = match provider.complete(&flow, &code, &state).await {
+        Ok((user, tokens)) => Identity::from_handshake(&provider, user, &tokens).await,
         Err(e) => {
             tracing::error!(error = %e, "oauth2 complete failed");
             let failure = match e {
@@ -729,50 +732,25 @@ async fn sso_callback_in(
             Some(parts.uri.path()),
         )
     };
-    let outcome = find_or_provision_member(
-        pool,
-        &key,
-        resolved.allow_email_link,
-        &normalized,
-        config.auto_provision,
-    )
-    .await;
-    if let Ok(signed) = &outcome {
-        use crate::signals::auth::AuthFailureReason as R;
-        let reason = match signed {
-            MemberSignIn::Member(_) => None,
-            MemberSignIn::Inactive => Some(R::Inactive),
-            MemberSignIn::NotLinked
-            | MemberSignIn::NoAccount
-            | MemberSignIn::Unverified
-            | MemberSignIn::Refused => Some(R::InvalidCredentials),
-        };
-        if let Some(reason) = reason {
-            crate::sso::link::signal_refused(
-                MEMBER_SIGNAL_SOURCE,
-                &normalized,
-                reason,
-                meta(),
-                Some(t.org.slug.clone()),
-            )
-            .await;
-        }
-    }
+    let policy = resolved.effective_policy();
+    let outcome = admit_member(pool, &key, &policy, &identity, config.auto_provision).await;
     let member_id = match outcome {
-        Ok(MemberSignIn::Member(id)) => id,
-        Ok(MemberSignIn::NotLinked) => {
-            return clear_flow(sso_error(SsoFailure::NotLinked, &mount));
-        }
-        Ok(MemberSignIn::NoAccount) => {
-            return clear_flow(sso_error(SsoFailure::NoAccount, &mount));
-        }
-        Ok(MemberSignIn::Inactive) => {
-            return clear_flow(sso_error(SsoFailure::Inactive, &mount));
-        }
-        Ok(MemberSignIn::Unverified) => {
-            return clear_flow(sso_error(SsoFailure::Unverified, &mount));
-        }
-        Ok(_) => {
+        Ok(id) => id,
+        Err(Denied::Refused(r)) => {
+            let ctx = RefusalContext {
+                pool,
+                surface: Surface::Member,
+                signal_source: MEMBER_SIGNAL_SOURCE,
+                provider: slug,
+                key: &key,
+                identity: &identity,
+                tenant: Some(t.org.slug.clone()),
+                extensions: &parts.extensions,
+                headers: &parts.headers,
+                path: parts.uri.path(),
+            };
+            refuse(&ctx, &r).await;
+            // One answer for every refusal: the rule stays in the log and audit.
             return clear_flow(sso_error(SsoFailure::Refused, &mount));
         }
         Err(e) => {
@@ -781,9 +759,16 @@ async fn sso_callback_in(
         }
     };
 
-    let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
-        tracing::warn!(member_id, "member missing or inactive after sign-in");
-        return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
+    let member = match tenant_user(pool, member_id).await {
+        Some(u) if u.active => u,
+        Some(_) => {
+            tracing::warn!(member_id, "member deactivated during sign-in");
+            return clear_flow(sso_error(SsoFailure::Refused, &mount));
+        }
+        None => {
+            tracing::warn!(member_id, "member missing after sign-in");
+            return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
+        }
     };
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
@@ -826,8 +811,9 @@ pub enum MemberSignIn {
     Refused,
 }
 
-/// The member linked to `(provider, profile.provider_user_id)`; else see
-/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked member.
+/// The member linked to `(provider, profile.provider_user_id)`, or linked by
+/// verified email ([`crate::sso::policy::admit`]); else, with
+/// `auto_provision`, a new linked member.
 ///
 /// Public so a native sign-in that verified its own ID token uses the same rule.
 ///
@@ -840,34 +826,55 @@ pub async fn find_or_provision_member(
     profile: &NormalizedUser,
     auto_provision: bool,
 ) -> Result<MemberSignIn, String> {
-    let refusal = match sign_in(
-        pool,
-        provider,
-        allow_email_link,
-        profile,
-        &TenantAccounts(pool),
-    )
-    .await
-    {
-        Ok(id) => return Ok(MemberSignIn::Member(id)),
-        Err(LinkRefusal::NoAccount(email)) if auto_provision => {
-            return provision_member(pool, provider, &email, profile)
+    let identity = Identity::from_profile(profile.clone());
+    let policy = EffectivePolicy::legacy(allow_email_link);
+    match admit_member(pool, provider, &policy, &identity, auto_provision).await {
+        Ok(id) => Ok(MemberSignIn::Member(id)),
+        Err(Denied::Refused(r)) => {
+            tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {r}");
+            Ok(MemberSignIn::of(&r))
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+impl MemberSignIn {
+    /// What a refusal looks like to the member flow.
+    fn of(r: &Refusal) -> Self {
+        match r {
+            Refusal::EmailLinkDisabled | Refusal::Privileged | Refusal::EmailCollides => {
+                Self::NotLinked
+            }
+            Refusal::SignupClosed => Self::NoAccount,
+            Refusal::Inactive => Self::Inactive,
+            Refusal::EmailUnverified => Self::Unverified,
+            _ => Self::Refused,
+        }
+    }
+}
+
+/// [`admit`] for the member flow; with `auto_provision`, an unknown
+/// verified email gets a new linked member.
+async fn admit_member(
+    pool: &Pool,
+    key: &ProviderKey,
+    policy: &EffectivePolicy,
+    identity: &Identity,
+    auto_provision: bool,
+) -> Result<i64, Denied> {
+    let request = AdmitRequest::new(pool, Surface::Member, key, policy, identity);
+    match admit(request, &TenantAccounts(pool)).await {
+        Ok(a) => Ok(a.user_id),
+        Err(Denied::Refused(Refusal::SignupClosed)) if auto_provision => {
+            let email = policy
+                .link_email(identity)
+                .ok_or(Refusal::EmailUnverified)?;
+            provision_member(pool, key, email.as_str(), &identity.profile)
                 .await
-                .map(MemberSignIn::Member);
+                .map_err(Denied::Storage)
         }
-        Err(LinkRefusal::Storage(e)) => return Err(e),
-        Err(e) => e,
-    };
-    tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
-    Ok(match refusal {
-        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged | LinkRefusal::EmailCollides => {
-            MemberSignIn::NotLinked
-        }
-        LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
-        LinkRefusal::Inactive => MemberSignIn::Inactive,
-        LinkRefusal::Unverified => MemberSignIn::Unverified,
-        _ => MemberSignIn::Refused,
-    })
+        Err(e) => Err(e),
+    }
 }
 
 /// A tenant's users. Privileged = superuser, or holds any admin permission;
@@ -881,7 +888,9 @@ impl TenantAccounts<'_> {
         };
         let privileged = user.is_superuser || holds_permissions(self.0, user_id).await;
         Ok(Some(
-            Account::new(user_id, privileged, user.active).with_created_at(user.created_at),
+            Account::new(user_id, privileged, user.active)
+                .with_superuser(user.is_superuser)
+                .with_created_at(user.created_at),
         ))
     }
 }
@@ -1122,10 +1131,7 @@ enum SsoFailure {
     Expired,
     /// The code exchange or userinfo call failed.
     Upstream,
-    NotLinked,
-    NoAccount,
-    Inactive,
-    Unverified,
+    /// Any refused sign-in; which rule refused it is never shown.
     Refused,
     /// Our own read or write failed after the IdP answered.
     Incomplete,
@@ -1138,12 +1144,7 @@ impl SsoFailure {
             Self::UnknownProvider => StatusCode::NOT_FOUND,
             Self::Malformed | Self::Expired => StatusCode::BAD_REQUEST,
             Self::Upstream => StatusCode::BAD_GATEWAY,
-            Self::Denied
-            | Self::NotLinked
-            | Self::NoAccount
-            | Self::Inactive
-            | Self::Unverified
-            | Self::Refused => StatusCode::FORBIDDEN,
+            Self::Denied | Self::Refused => StatusCode::FORBIDDEN,
             Self::Incomplete => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -1155,15 +1156,10 @@ impl SsoFailure {
             Self::Denied => "Sign-in was cancelled or denied.",
             Self::Malformed => "Malformed sign-in response.",
             Self::Expired => "Your sign-in session expired. Please try again.",
-            Self::Upstream | Self::Refused => "Sign-in failed. Please try again.",
-            Self::NotLinked => {
-                "This sign-in is not linked to your account. Please contact your administrator."
+            Self::Upstream => "Sign-in failed. Please try again.",
+            Self::Refused => {
+                "You can't sign in with this account. Please contact your administrator."
             }
-            Self::NoAccount => {
-                "There is no account for this sign-in. Please contact your administrator."
-            }
-            Self::Inactive => "This account is disabled. Please contact your administrator.",
-            Self::Unverified => "Your identity provider did not return a verified email.",
             Self::Incomplete => "Could not complete sign-in.",
         }
     }

@@ -2061,6 +2061,7 @@ dependencies = [
  "rand 0.8.8",
  "redis",
  "reqwest",
+ "ring",
  "rpassword",
  "rust_decimal",
  "rustango-macros",

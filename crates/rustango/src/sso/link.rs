@@ -125,9 +125,15 @@ pub struct SsoLink {
     #[rustango(max_length = 64)]
     pub key_sha256: String,
     /// Local user id, in the user table [`LinkSource`] names.
+    #[rustango(index)]
     pub user_id: i64,
     #[rustango(auto_now_add)]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    /// Sign-up made this link along with its user.
+    #[rustango(default = "false")]
+    pub provisioned: bool,
+    /// The last sign-in through this link.
+    pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[cfg(feature = "admin")]
@@ -208,14 +214,8 @@ pub async fn linked_user(
     key: &ProviderKey,
     subject: &str,
 ) -> Result<Option<SsoLink>, String> {
-    use crate::sql::{FetcherPool as _, UpdaterPool as _};
-    let rows: Vec<SsoLink> = SsoLink::objects()
-        .filter("provider_source", key.source.as_str())
-        .filter("provider_id", key.provider_id)
-        .filter("subject", subject.to_owned())
-        .fetch(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    use crate::sql::UpdaterPool as _;
+    let rows = links_for(pool, key, subject).await?;
     let mut exact = rows
         .into_iter()
         .filter(|l| l.issuer == key.issuer && l.subject == subject);
@@ -238,6 +238,106 @@ pub async fn linked_user(
         link.key_sha256 = want;
     }
     Ok(Some(link))
+}
+
+/// Columns added after the table first shipped.
+const LATER_COLUMNS: &[&str] = &["provisioned", "last_used_at"];
+
+/// The links of `(key, subject)`. A table without [`LATER_COLUMNS`] still
+/// reads, with their defaults; any other error is an error.
+async fn links_for(pool: &Pool, key: &ProviderKey, subject: &str) -> Result<Vec<SsoLink>, String> {
+    use crate::core::SqlValue;
+    use crate::sql::FetcherPool as _;
+    let qs = || {
+        SsoLink::objects()
+            .filter("provider_source", key.source.as_str())
+            .filter("provider_id", key.provider_id)
+            .filter("subject", subject.to_owned())
+    };
+    let err = match qs().fetch(pool).await {
+        Ok(rows) => return Ok(rows),
+        Err(e) => e,
+    };
+    use super::provider::{columns_present, Columns};
+    let missing: Vec<&'static str> =
+        match columns_present(pool, "rustango_sso_links", LATER_COLUMNS).await {
+            Ok(Columns::None) => LATER_COLUMNS.to_vec(),
+            Ok(Columns::Some(have)) => LATER_COLUMNS
+                .iter()
+                .copied()
+                .filter(|c| !have.contains(c))
+                .collect(),
+            Ok(Columns::All) => return Err(err.to_string()),
+            Err(e) => return Err(format!("{err}; {e}")),
+        };
+    tracing::warn!(target: "rustango::sso", "rustango_sso_links is not migrated; run `migrate`: {err}");
+    let rows = qs()
+        .defer(&missing)
+        .fetch(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let text = |r: &std::collections::HashMap<String, SqlValue>, c: &str| match r.get(c) {
+        Some(SqlValue::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+    let int = |r: &std::collections::HashMap<String, SqlValue>, c: &str| match r.get(c) {
+        Some(SqlValue::I64(n)) => *n,
+        Some(SqlValue::I32(n)) => i64::from(*n),
+        _ => 0,
+    };
+    Ok(rows
+        .iter()
+        .map(|r| SsoLink {
+            id: Auto::Set(int(r, "id")),
+            provider_source: text(r, "provider_source"),
+            provider_id: int(r, "provider_id"),
+            issuer: text(r, "issuer"),
+            subject: text(r, "subject"),
+            key_sha256: text(r, "key_sha256"),
+            user_id: int(r, "user_id"),
+            created_at: match r.get("created_at") {
+                Some(SqlValue::DateTime(at)) => Auto::Set(*at),
+                _ => Auto::Unset,
+            },
+            provisioned: matches!(r.get("provisioned"), Some(SqlValue::Bool(true)))
+                || matches!(
+                    r.get("provisioned"),
+                    Some(SqlValue::I64(1) | SqlValue::I32(1))
+                ),
+            last_used_at: match r.get("last_used_at") {
+                Some(SqlValue::DateTime(at)) => Some(*at),
+                _ => None,
+            },
+        })
+        .collect())
+}
+
+/// Stamp `last_used_at`. Best effort: a table not yet migrated only warns.
+pub(crate) async fn touch(pool: &Pool, link: &SsoLink) {
+    use crate::sql::UpdaterPool as _;
+    let id = link.id.get().copied().unwrap_or_default();
+    if let Err(e) = SsoLink::objects()
+        .filter("id", id)
+        .update()
+        .set("last_used_at", chrono::Utc::now())
+        .execute_pool(pool)
+        .await
+    {
+        tracing::warn!(target: "rustango::sso", link_id = id, "last_used_at not stamped: {e}");
+    }
+}
+
+/// Delete one link by id (works on a table not yet migrated).
+pub(crate) async fn drop_link(pool: &Pool, link: &SsoLink) -> Result<(), String> {
+    let id = link.id.get().copied().unwrap_or_default();
+    let query = SsoLink::objects()
+        .filter("id", id)
+        .compile_delete()
+        .map_err(|e| e.to_string())?;
+    crate::sql::delete_pool(pool, &query)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("delete link {id}: {e}"))
 }
 
 /// Whether any identity is linked through `key`. The issuer is compared
@@ -277,6 +377,8 @@ fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
         key_sha256: key_sha256(&key.issuer, subject),
         user_id,
         created_at: Auto::Unset,
+        provisioned: false,
+        last_used_at: None,
     }
 }
 
@@ -313,6 +415,8 @@ pub struct Account {
     pub user_id: i64,
     /// Superuser or staff: never linked by email.
     pub privileged: bool,
+    /// A superuser: never linked by email, whatever else allows it.
+    pub superuser: bool,
     pub active: bool,
     /// When the account was made. A link older than its account may be an
     /// earlier user's with the same id (a reset sequence, a restore); see [`StaleLinks`].
@@ -325,9 +429,17 @@ impl Account {
         Self {
             user_id,
             privileged,
+            superuser: false,
             active,
             created_at: None,
         }
+    }
+
+    /// Mark a superuser.
+    #[must_use]
+    pub const fn with_superuser(mut self, superuser: bool) -> Self {
+        self.superuser = superuser;
+        self
     }
 
     /// Set [`Self::created_at`], so a link older than the account is noticed.
@@ -381,7 +493,7 @@ pub fn stale_links() -> StaleLinks {
 }
 
 /// Apply [`stale_links`] to a link older than `account`: `true` when it was deleted.
-async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Result<bool, LinkRefusal> {
+pub(crate) async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Result<bool, String> {
     if !account.outlived_by(link) {
         return Ok(false);
     }
@@ -398,7 +510,7 @@ async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Result<bool, L
     if policy != StaleLinks::Drop {
         return Ok(false);
     }
-    link.delete_pool(pool).await.map_err(storage)?;
+    drop_link(pool, link).await?;
     Ok(true)
 }
 
@@ -467,6 +579,8 @@ pub enum LinkRefusal {
     Inactive,
     /// A storage error.
     Storage(String),
+    /// A sign-in policy rule, named by its audit token.
+    Policy(&'static str),
 }
 
 impl std::fmt::Display for LinkRefusal {
@@ -484,24 +598,7 @@ impl std::fmt::Display for LinkRefusal {
             Self::EmailCollides => write!(f, "no link; the email collides with another account"),
             Self::Inactive => write!(f, "the account is inactive"),
             Self::Storage(e) => write!(f, "storage: {e}"),
-        }
-    }
-}
-
-#[cfg(all(feature = "signals", feature = "admin-sso"))]
-impl LinkRefusal {
-    /// The `user_login_failed` reason; `None` for a storage error, which is no refusal.
-    pub(crate) fn failure_reason(&self) -> Option<crate::signals::auth::AuthFailureReason> {
-        use crate::signals::auth::AuthFailureReason as R;
-        match self {
-            Self::Storage(_) => None,
-            Self::Inactive => Some(R::Inactive),
-            Self::NoSubject
-            | Self::Unverified
-            | Self::NoAccount(_)
-            | Self::EmailLinkDisabled
-            | Self::Privileged
-            | Self::EmailCollides => Some(R::InvalidCredentials),
+            Self::Policy(rule) => write!(f, "refused by the sign-in policy: {rule}"),
         }
     }
 }
@@ -531,12 +628,9 @@ pub(crate) async fn signal_refused(
     .await;
 }
 
-fn storage(e: impl std::fmt::Display) -> LinkRefusal {
-    LinkRefusal::Storage(e.to_string())
-}
-
 /// Sign in by link; else link by verified email when `allow_email_link` and
-/// the account is not privileged. Returns the active local user id.
+/// the account is not privileged. Returns the active local user id. Runs
+/// [`super::policy::admit`] with no sign-in rules.
 ///
 /// # Errors
 /// [`LinkRefusal`]; the caller refuses the login.
@@ -547,66 +641,7 @@ pub async fn sign_in(
     profile: &NormalizedUser,
     accounts: &impl AccountLookup,
 ) -> Result<i64, LinkRefusal> {
-    let subject = profile.provider_user_id.as_str();
-    if subject.is_empty() {
-        return Err(LinkRefusal::NoSubject);
-    }
-    if let Some(link) = linked_user(pool, key, subject)
-        .await
-        .map_err(LinkRefusal::Storage)?
-    {
-        match accounts
-            .by_id(link.user_id)
-            .await
-            .map_err(LinkRefusal::Storage)?
-        {
-            Some(a) if !stale(pool, &link, &a).await? => {
-                return if a.active {
-                    Ok(a.user_id)
-                } else {
-                    Err(LinkRefusal::Inactive)
-                };
-            }
-            // Dropped as stale: sign in as if unlinked.
-            Some(_) => {}
-            // The user is gone (a clean miss, not an error): drop the stale link.
-            None => {
-                link.delete_pool(pool).await.map_err(storage)?;
-            }
-        }
-    }
-    let email = super::verified_email(profile)
-        .map_err(|_| LinkRefusal::Unverified)?
-        .to_ascii_lowercase();
-    let found = match accounts
-        .by_email(&email)
-        .await
-        .map_err(LinkRefusal::Storage)?
-    {
-        EmailLookup::Found(a) => a,
-        EmailLookup::Missing => return Err(LinkRefusal::NoAccount(email)),
-        EmailLookup::Collides => return Err(LinkRefusal::EmailCollides),
-    };
-    if !allow_email_link {
-        return Err(LinkRefusal::EmailLinkDisabled);
-    }
-    if found.privileged {
-        return Err(LinkRefusal::Privileged);
-    }
-    if !found.active {
-        return Err(LinkRefusal::Inactive);
-    }
-    if let Err(e) = create_link(pool, key, subject, found.user_id).await {
-        // A concurrent first login may have linked it already.
-        return match linked_user(pool, key, subject)
-            .await
-            .map_err(LinkRefusal::Storage)?
-        {
-            Some(link) if link.user_id == found.user_id => Ok(found.user_id),
-            _ => Err(storage(e)),
-        };
-    }
-    Ok(found.user_id)
+    super::policy::legacy_sign_in(pool, key, allow_email_link, profile, accounts).await
 }
 
 #[cfg(test)]

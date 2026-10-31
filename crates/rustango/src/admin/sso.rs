@@ -194,56 +194,66 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     };
-    let normalized = match provider.complete(&flow, &code, &cb_state).await {
-        Ok((u, _tokens)) => u,
+    let identity = match provider.complete(&flow, &code, &cb_state).await {
+        Ok((u, tokens)) => {
+            crate::sso::policy::Identity::from_handshake(&provider, u, &tokens).await
+        }
         Err(e) => {
             tracing::warn!(target: "rustango::admin::sso", "handshake: {e}");
             return login_error(&state, "handshake");
         }
     };
+    let normalized = &identity.profile;
     // Sign in by (provider, sub) link only: every admin account is staff,
     // so a verified email never creates a link here.
     let key = cfg.key(LinkSource::Admin);
     let accounts = AdminAccounts(&state.pool);
-    let meta = || meta_from_parts(&extensions, &headers, Some(&format!("/login/sso/{slug}")));
-    let uid =
-        match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, &accounts).await {
-            Ok(uid) => uid,
-            Err(e) => {
-                tracing::warn!(
-                    target: "rustango::admin::sso",
-                    slug,
-                    provider_id = cfg.id,
-                    issuer = key.issuer(),
-                    subject = %normalized.provider_user_id,
-                    "sso refused: {e}"
-                );
-                if let Some(reason) = e.failure_reason() {
-                    signal_refused(
-                        SIGNAL_SOURCE,
-                        &normalized,
-                        reason,
-                        meta(),
-                        state.config.tenant.clone(),
-                    )
-                    .await;
-                }
-                return login_error(&state, "nouser");
-            }
-        };
+    let path = format!("/login/sso/{slug}");
+    let meta = || meta_from_parts(&extensions, &headers, Some(&path));
+    let policy = crate::sso::policy::EffectivePolicy::new(cfg.policy.clone(), false);
+    let request = crate::sso::policy::AdmitRequest::new(
+        &state.pool,
+        crate::sso::policy::Surface::BareAdmin,
+        &key,
+        &policy,
+        &identity,
+    );
+    let uid = match crate::sso::policy::admit(request, &accounts).await {
+        Ok(a) => a.user_id,
+        Err(crate::sso::policy::Denied::Refused(r)) => {
+            let ctx = crate::sso::policy::RefusalContext {
+                pool: &state.pool,
+                surface: crate::sso::policy::Surface::BareAdmin,
+                signal_source: SIGNAL_SOURCE,
+                provider: &slug,
+                key: &key,
+                identity: &identity,
+                tenant: state.config.tenant.clone(),
+                extensions: &extensions,
+                headers: &headers,
+                path: &path,
+            };
+            crate::sso::policy::refuse(&ctx, &r).await;
+            return login_error(&state, "nouser");
+        }
+        Err(e) => {
+            tracing::error!(target: "rustango::admin::sso", slug, "sso sign-in failed: {e}");
+            return login_error(&state, "nouser");
+        }
+    };
     let Ok(Some(user)) = accounts.user(uid).await else {
         return login_error(&state, "nouser");
     };
     if !user.active {
         signal_refused(
             SIGNAL_SOURCE,
-            &normalized,
+            normalized,
             AuthFailureReason::Inactive,
             meta(),
             state.config.tenant.clone(),
         )
         .await;
-        return login_error(&state, "inactive");
+        return login_error(&state, "nouser");
     }
     // A confirmed device owes its code first, as on the password login (#2249).
     #[cfg(feature = "totp")]
@@ -475,7 +485,11 @@ impl AdminAccounts<'_> {
 }
 
 fn admin_account(u: &AdminUser) -> Option<Account> {
-    Some(Account::new(u.id.get().copied()?, true, u.active).with_created_at(u.created_at))
+    Some(
+        Account::new(u.id.get().copied()?, true, u.active)
+            .with_superuser(u.is_superuser)
+            .with_created_at(u.created_at),
+    )
 }
 
 impl AccountLookup for AdminAccounts<'_> {
