@@ -103,6 +103,7 @@ impl ProviderKey {
         search_fields = "subject",
         ordering = "user_id",
         readonly_fields = "key_sha256, created_at",
+        actions = "unlink, relink",
     )
 )]
 #[allow(dead_code)]

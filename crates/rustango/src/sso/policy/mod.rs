@@ -6,6 +6,8 @@
 //! a shared provider). A sign-in passes only if every layer passes it on its
 //! own, so a layer can only tighten.
 
+#[cfg(feature = "admin")]
+pub(crate) mod admin;
 pub mod domain;
 pub mod identity;
 pub mod jwks;
@@ -775,6 +777,40 @@ pub(crate) fn admin_normalise<'a>(
                     },
                     _ => return Err(format!("{}: expected text", col.replace('_', " "))),
                 };
+            } else if *col == "default_roles" || *col == "role_claims" {
+                *v = match v {
+                    SqlValue::Null => SqlValue::Null,
+                    SqlValue::String(raw) if *col == "default_roles" => {
+                        let r: RoleNames =
+                            raw.parse().map_err(|e| format!("default roles: {e}"))?;
+                        if r.is_empty() {
+                            SqlValue::Null
+                        } else {
+                            SqlValue::String(r.to_string())
+                        }
+                    }
+                    SqlValue::String(raw) => {
+                        RoleMap::parse(None, Some(raw)).map_err(|e| format!("role claims: {e}"))?;
+                        if raw.trim().is_empty() {
+                            SqlValue::Null
+                        } else {
+                            SqlValue::String(raw.trim().to_owned())
+                        }
+                    }
+                    _ => return Err(format!("{}: expected text", col.replace('_', " "))),
+                };
+            } else if *col == "role_map" {
+                let parsed = match v {
+                    SqlValue::Json(j) => j.clone(),
+                    SqlValue::Null => serde_json::json!({}),
+                    SqlValue::String(s) if s.trim().is_empty() => serde_json::json!({}),
+                    SqlValue::String(s) => {
+                        serde_json::from_str(s).map_err(|e| format!("role map: {e}"))?
+                    }
+                    _ => return Err("role map: expected JSON".into()),
+                };
+                RoleMap::parse(Some(&parsed), None).map_err(|e| e.to_string())?;
+                *v = SqlValue::Json(parsed);
             } else if *col == "required_claims" {
                 let parsed = match v {
                     SqlValue::Json(j) => j.clone(),

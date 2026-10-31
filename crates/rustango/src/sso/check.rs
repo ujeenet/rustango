@@ -2,7 +2,7 @@
 //!
 //! SSO signs in by link only. A provider with no link rows signs in nobody
 //! already in its user table unless email linking is on and some user may use
-//! it: privileged accounts never link by email.
+//! it (privileged accounts never link by email), or sign-up is not closed.
 
 use crate::core::Model;
 use crate::migrate::try_table_exists_here;
@@ -21,6 +21,8 @@ pub enum Refusal {
     LinkingOff,
     /// Email linking is on, but every active user is privileged.
     OnlyPrivileged,
+    /// Not a refusal: sign-up is open and no domain rule narrows it.
+    OpenSignup,
 }
 
 /// A provider that refuses every existing user.
@@ -40,6 +42,53 @@ struct Candidate {
     /// Only tenant users link by email; the admin never does.
     #[cfg(feature = "tenancy")]
     allow_email_link: bool,
+    /// The row's sign-up mode; unreadable reads as closed.
+    #[cfg(feature = "tenancy")]
+    signup: super::policy::SignupMode,
+    /// Open sign-up with no email domain, hosted domain or IdP tenant rule.
+    #[cfg(feature = "tenancy")]
+    open_to_anyone: bool,
+}
+
+/// Each `P` row's sign-up mode and whether a domain rule narrows it. A table
+/// without the columns, or a value that does not parse, reads as closed.
+#[cfg(feature = "tenancy")]
+async fn signup_modes<P: Model + Send>(
+    pool: &Pool,
+) -> std::collections::HashMap<i64, (super::policy::SignupMode, bool)> {
+    use crate::core::SqlValue;
+    let cols = [
+        "id",
+        "signup_mode",
+        "allowed_email_domains",
+        "allowed_hosted_domains",
+        "allowed_idp_tenants",
+    ];
+    let rows = match QuerySet::<P>::new().only(&cols).fetch(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(target: "rustango::sso", "signup_mode unreadable, treated as closed: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    let set = |r: &std::collections::HashMap<String, SqlValue>, c: &str| matches!(r.get(c), Some(SqlValue::String(s)) if !s.trim().is_empty());
+    rows.iter()
+        .filter_map(|r| {
+            let id = match r.get("id") {
+                Some(SqlValue::I64(n)) => *n,
+                Some(SqlValue::I32(n)) => i64::from(*n),
+                _ => return None,
+            };
+            let mode = match r.get("signup_mode") {
+                Some(SqlValue::String(m)) => m.parse().unwrap_or(super::policy::SignupMode::Closed),
+                _ => super::policy::SignupMode::Closed,
+            };
+            let narrowed = set(r, "allowed_email_domains")
+                || set(r, "allowed_hosted_domains")
+                || set(r, "allowed_idp_tenants");
+            Some((id, (mode, narrowed)))
+        })
+        .collect()
 }
 
 /// Ids of the `P` rows with email linking on. Read apart from the row, as at
@@ -68,18 +117,32 @@ async fn candidates<P: Model + Send>(
     }
     // The admin never links by email, whatever the row says.
     #[cfg(feature = "tenancy")]
-    let linking = if source == LinkSource::Admin {
-        Vec::new()
+    let (linking, modes) = if source == LinkSource::Admin {
+        (Vec::new(), std::collections::HashMap::new())
     } else {
-        email_linking::<P>(pool).await
+        (
+            email_linking::<P>(pool).await,
+            signup_modes::<P>(pool).await,
+        )
     };
     Ok(rows
         .into_iter()
-        .map(|r| Candidate {
-            key: ProviderKey::for_row(source, r.id, &r.kind, r.issuer_url.as_deref()),
+        .map(|r| {
             #[cfg(feature = "tenancy")]
-            allow_email_link: linking.contains(&r.id),
-            slug: r.slug,
+            let (signup, narrowed) = modes
+                .get(&r.id)
+                .copied()
+                .unwrap_or((super::policy::SignupMode::Closed, false));
+            Candidate {
+                key: ProviderKey::for_row(source, r.id, &r.kind, r.issuer_url.as_deref()),
+                #[cfg(feature = "tenancy")]
+                allow_email_link: linking.contains(&r.id),
+                #[cfg(feature = "tenancy")]
+                signup,
+                #[cfg(feature = "tenancy")]
+                open_to_anyone: signup == super::policy::SignupMode::Open && !narrowed,
+                slug: r.slug,
+            }
         })
         .collect())
 }
@@ -116,7 +179,19 @@ async fn refusing_tenant_users(
     tenant: &Pool,
 ) -> Result<Vec<Stranded>, ExecError> {
     let mut linkable = None;
-    let mut out = Vec::new();
+    let mut out: Vec<Stranded> = rows
+        .iter()
+        .filter(|r| r.open_to_anyone)
+        .map(|r| Stranded {
+            slug: r.slug.clone(),
+            why: Refusal::OpenSignup,
+        })
+        .collect();
+    // A provider that signs users up is not stranded.
+    let rows = rows
+        .into_iter()
+        .filter(|r| r.signup == super::policy::SignupMode::Closed)
+        .collect();
     for row in unlinked::<crate::tenancy::User>(rows, tenant).await? {
         let why = if row.allow_email_link {
             if linkable.is_none() {
@@ -204,6 +279,10 @@ fn refusal_text(why: Refusal) -> &'static str {
         Refusal::OnlyPrivileged => {
             "has no SsoLink rows and every active user is privileged, so it refuses every \
              existing user — privileged accounts never link by email, add SsoLink rows"
+        }
+        Refusal::OpenSignup => {
+            "has signup_mode open and no allowed_email_domains, allowed_hosted_domains or \
+             allowed_idp_tenants, so anyone the IdP signs in gets an account — add a domain rule"
         }
     }
 }
