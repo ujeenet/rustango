@@ -118,8 +118,20 @@ impl SharedSsoForm {
     }
 
     /// Check the form and write it onto `row`. A blank secret keeps the
-    /// saved one (create requires one); the slug is the caller's.
-    fn apply(&self, row: &mut SharedSsoProvider, creating: bool) -> Result<(), String> {
+    /// saved one (create requires one); the slug is the caller's. `can_seal`:
+    /// a secret key is set, without which saving the encrypted secret panics.
+    fn apply(
+        &self,
+        row: &mut SharedSsoProvider,
+        creating: bool,
+        can_seal: bool,
+    ) -> Result<(), String> {
+        if !can_seal {
+            return Err(format!(
+                "{} is not set, so the client secret cannot be stored",
+                crate::aead::KEY_VAR
+            ));
+        }
         let label = self.label.trim();
         let client_id = self.client_id.trim();
         if label.is_empty() {
@@ -343,16 +355,11 @@ pub(super) async fn list(
     .await
 }
 
-pub(super) async fn create(
-    State(state): State<ConsoleState>,
-    Extension(op): Extension<auth::Operator>,
-    apex: Option<Extension<LinkApex>>,
-    headers: HeaderMap,
-    Form(form): Form<SharedSsoForm>,
-) -> Response<Body> {
-    let mut row = SharedSsoProvider {
+/// A new row with every column at its default.
+fn new_row(slug: String) -> SharedSsoProvider {
+    SharedSsoProvider {
         id: crate::sql::Auto::Unset,
-        slug: form.slug.trim().to_owned(),
+        slug,
         label: String::new(),
         kind: String::new(),
         issuer_url: None,
@@ -383,12 +390,22 @@ pub(super) async fn create(
         superuser_session_ttl_secs: None,
         created_at: crate::sql::Auto::Unset,
         updated_at: crate::sql::Auto::Unset,
-    };
+    }
+}
+
+pub(super) async fn create(
+    State(state): State<ConsoleState>,
+    Extension(op): Extension<auth::Operator>,
+    apex: Option<Extension<LinkApex>>,
+    headers: HeaderMap,
+    Form(form): Form<SharedSsoForm>,
+) -> Response<Body> {
+    let mut row = new_row(form.slug.trim().to_owned());
     let outcome = async {
         if row.slug.len() > 64 || crate::validators::validate_slug(&row.slug).is_err() {
             return Err("slug must be 1-64 letters, digits, `_` or `-`".to_owned());
         }
-        form.apply(&mut row, true)?;
+        form.apply(&mut row, true, crate::aead::env_key().is_some())?;
         let taken = format!("a shared provider `{}` already exists", row.slug);
         use crate::sql::ExistsPool as _;
         let exists = SharedSsoProvider::objects()
@@ -538,7 +555,7 @@ pub(super) async fn edit_submit(
         Err(resp) => return resp,
     };
     form.slug = row.slug.clone();
-    if let Err(msg) = form.apply(&mut row, false) {
+    if let Err(msg) = form.apply(&mut row, false, crate::aead::env_key().is_some()) {
         let callbacks = Callbacks::load(&state, &headers, apex.map(|Extension(a)| a)).await;
         return render_edit(
             &state,
@@ -644,4 +661,25 @@ pub(super) async fn delete(
         "/sso-shared",
         Flash::Notice(&format!("deleted `{}`", r.slug)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Without a secret key the form is refused, not saved (which would panic).
+    #[test]
+    fn saving_needs_a_secret_key() {
+        let form = SharedSsoForm {
+            label: "Corp".into(),
+            kind: "google".into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            ..SharedSsoForm::blank()
+        };
+        let mut row = new_row("corp".into());
+        let err = form.apply(&mut row, true, false).unwrap_err();
+        assert!(err.contains("RUSTANGO_SECRET_KEY"), "{err}");
+        assert!(form.apply(&mut row, true, true).is_ok());
+    }
 }

@@ -72,19 +72,37 @@ fn login_path(state: &AppState) -> String {
 /// Per-provider callback URL built from the request host:
 /// `{scheme}://{host}{login_path}/sso/{slug}/callback`. The scheme
 /// comes from `X-Forwarded-Proto` sent by a trusted proxy, else `https`.
+/// `None` for a host the admin's allowed hosts do not list.
 fn derive_bare_redirect(
     headers: &HeaderMap,
     extensions: &axum::http::Extensions,
     state: &AppState,
     slug: &str,
 ) -> Option<String> {
+    redirect_for(
+        headers,
+        extensions,
+        &login_path(state),
+        state.config.allowed_hosts.as_ref(),
+        slug,
+    )
+}
+
+fn redirect_for(
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    login_path: &str,
+    allowed: Option<&crate::host_validation::AllowedHostsLayer>,
+    slug: &str,
+) -> Option<String> {
     let host = crate::urls::HostAuthority::parse(headers.get(header::HOST)?.to_str().ok()?)?;
+    if allowed.is_some_and(|a| !a.permits(&host.to_string())) {
+        tracing::warn!(target: "rustango::admin::sso", %host, "SSO refused: the Host is not an allowed host");
+        return None;
+    }
     let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .unwrap_or("https");
-    Some(format!(
-        "{scheme}://{host}{}/sso/{slug}/callback",
-        login_path(state)
-    ))
+    Some(format!("{scheme}://{host}{login_path}/sso/{slug}/callback"))
 }
 
 /// Redirect back to the login page with a generic `?sso_error=` marker.
@@ -139,10 +157,7 @@ async fn sso_begin(
         FlowScope::new(FlowPurpose::Admin, "", &slug),
         secret.key(),
     );
-    let cookie = format!(
-        "{SSO_FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{s}",
-        s = cookie_attrs(state.config.secure_cookies),
-    );
+    let cookie = flow_cookie(&state).set(&sealed, 600);
     let mut resp = Redirect::to(&url).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
@@ -169,7 +184,7 @@ async fn sso_callback(
         return login_error(&state, "callback");
     };
     // Recover + verify the sealed flow from its cookie.
-    let Some(sealed) = crate::cookies::cookie_from_headers(&headers, SSO_FLOW_COOKIE) else {
+    let Some(sealed) = flow_cookie(&state).read(&headers) else {
         return login_error(&state, "expired");
     };
     let flow = match open_flow(
@@ -185,6 +200,10 @@ async fn sso_callback(
         Ok(a) => a,
         Err(refused) => return refused,
     };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        return login_error(&state, "expired");
+    }
     let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
@@ -205,7 +224,7 @@ async fn sso_callback(
     };
     let identity = match provider.complete(&flow, &code, &cb_state).await {
         Ok((u, tokens)) => {
-            crate::sso::policy::Identity::from_handshake(&provider, u, &tokens).await
+            crate::sso::policy::Identity::from_handshake(&provider, u, &tokens, &flow).await
         }
         Err(e) => {
             tracing::warn!(target: "rustango::admin::sso", "handshake: {e}");
@@ -317,7 +336,7 @@ async fn mint_session(
     if let Ok(v) = HeaderValue::from_str(&session_cookie) {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
-    clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+    clear_flow(&mut resp, state);
     send_user_logged_in(UserLoggedInContext {
         source: SIGNAL_SOURCE,
         user_id: uid,
@@ -330,7 +349,22 @@ async fn mint_session(
     resp
 }
 
+/// The bare admin's flow cookie: at `/`, so `__Host-` over HTTPS.
+fn flow_cookie(state: &AppState) -> crate::sso::FlowCookie<'static> {
+    crate::sso::FlowCookie::new(SSO_FLOW_COOKIE, "/", state.config.secure_cookies)
+}
+
+/// Expire the flow cookie.
+fn clear_flow(resp: &mut Response, state: &AppState) {
+    for c in flow_cookie(state).clear() {
+        if let Ok(v) = HeaderValue::from_str(&c) {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
+}
+
 /// Expire the transient cookie `name`.
+#[cfg(feature = "totp")]
 fn clear_cookie(resp: &mut Response, name: &str) {
     if let Ok(v) = HeaderValue::from_str(&format!("{name}=; Path=/; HttpOnly; Max-Age=0")) {
         resp.headers_mut().append(header::SET_COOKIE, v);
@@ -383,7 +417,7 @@ mod second_factor {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
             resp.headers_mut().append(header::SET_COOKIE, v);
         }
-        clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+        clear_flow(&mut resp, state);
         resp
     }
 
@@ -534,6 +568,29 @@ impl AccountLookup for AdminAccounts<'_> {
                 Err(()) => EmailLookup::Collides,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    /// The redirect URI uses only a Host the allowed hosts list.
+    #[test]
+    fn the_redirect_uri_needs_an_allowed_host() {
+        let headers = |host: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(axum::http::header::HOST, host.parse().unwrap());
+            h
+        };
+        let ext = axum::http::Extensions::new();
+        let allowed = crate::host_validation::AllowedHostsLayer::new(["admin.example.com"]);
+        let go = |host: &str, a| super::redirect_for(&headers(host), &ext, "/login", a, "g");
+        assert_eq!(
+            go("admin.example.com:8443", Some(&allowed)).as_deref(),
+            Some("https://admin.example.com:8443/login/sso/g/callback")
+        );
+        assert_eq!(go("evil.example", Some(&allowed)), None);
+        // No list: any plain host, as before.
+        assert!(go("evil.example", None).is_some());
     }
 }
 

@@ -506,6 +506,13 @@ impl Mount {
         }
     }
 
+    /// A post-login `?next` this mount may land on: same-origin, and under
+    /// the prefix on a path-prefix tenant (another tenant shares the origin).
+    fn next(&self, raw: &str) -> Option<String> {
+        crate::auth_decorators::safe_next(raw)
+            .filter(|n| self.path == "/" || super::routes::path_is_under(n, &self.path))
+    }
+
     fn login_url(&self) -> String {
         match self.url(&self.login) {
             u if u.is_empty() => "/".to_owned(),
@@ -524,13 +531,18 @@ impl Mount {
     }
 }
 
-/// Query params on the IdP callback (`?code=…&state=…` or `?error=…`),
-/// plus an optional post-login `?next` (honored only when same-origin).
+/// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
+/// A `?next` here is ignored: the landing was sealed into the flow at begin.
 #[derive(Deserialize)]
 struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+}
+
+/// The post-login `?next` on the begin URL (honored only when same-origin).
+#[derive(Deserialize, Default)]
+struct BeginParams {
     next: Option<String>,
 }
 
@@ -633,17 +645,17 @@ async fn sso_begin_in(
         }
     };
 
-    let (authorize_url, flow) = provider.begin();
+    let (authorize_url, mut flow) = provider.begin();
+    // Sealed with the flow, so the unauthenticated callback cannot choose it.
+    let begin: BeginParams =
+        serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
+    flow.next = begin.next.as_deref().and_then(|n| mount.next(n));
     let sealed = seal_flow(
         &flow,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     );
-    let flow_cookie = format!(
-        "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
-        path = mount.path,
-        s = secure_suffix(),
-    );
+    let flow_cookie = flow_cookie(&mount.path).set(&sealed, FLOW_TTL_SECS);
     redirect_with_cookie(&authorize_url, &flow_cookie)
 }
 
@@ -684,11 +696,11 @@ async fn sso_callback_in(
         return sso_error(SsoFailure::Malformed, &mount);
     };
 
-    let Some(sealed) = extract_cookie(&parts, FLOW_COOKIE) else {
+    let Some(sealed) = flow_cookie(&mount.path).read(&parts.headers) else {
         return sso_error(SsoFailure::Expired, &mount);
     };
     let flow = match open_flow(
-        &sealed,
+        sealed,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     ) {
@@ -706,6 +718,11 @@ async fn sso_callback_in(
             Ok(a) => a,
             Err(refused) => return clear_flow(refused),
         };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        tracing::warn!(slug, "SSO flow already used");
+        return clear_flow(sso_error(SsoFailure::Expired, &mount));
+    }
 
     let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
         return clear_flow(sso_error(SsoFailure::Unavailable, &mount));
@@ -723,7 +740,7 @@ async fn sso_callback_in(
     };
 
     let identity = match provider.complete(&flow, &code, &state).await {
-        Ok((user, tokens)) => Identity::from_handshake(&provider, user, &tokens).await,
+        Ok((user, tokens)) => Identity::from_handshake(&provider, user, &tokens, &flow).await,
         Err(e) => {
             tracing::error!(error = %e, "oauth2 complete failed");
             let failure = match e {
@@ -790,7 +807,7 @@ async fn sso_callback_in(
     attempt.succeeded().await;
     let ttl = policy.session_ttl(config.session_ttl, member.is_superuser);
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, ttl);
-    let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
+    let landing = safe_landing(flow.next.as_deref(), &mount.url(&config.landing_url));
     crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
         source: MEMBER_SIGNAL_SOURCE,
         user_id: member_id,
@@ -896,8 +913,8 @@ async fn admit_member(
         .map(|a| a.user_id)
 }
 
-/// A tenant's users. Privileged = superuser, or holds any admin permission;
-/// a permission read error counts as privileged.
+/// A tenant's users. Privileged = superuser, or holds any role or admin
+/// permission; a read error counts as privileged.
 pub struct TenantAccounts<'a>(pub &'a Pool);
 
 impl TenantAccounts<'_> {
@@ -914,8 +931,17 @@ impl TenantAccounts<'_> {
     }
 }
 
-/// Whether `user_id` holds any permission; a read error counts as yes.
+/// Whether `user_id` holds any role (even one with no permission yet) or
+/// permission; a read error counts as yes.
 async fn holds_permissions(pool: &Pool, user_id: i64) -> bool {
+    use crate::sql::ExistsPool as _;
+    let has_role = crate::tenancy::permissions::UserRole::objects()
+        .filter("user_id", user_id)
+        .exists(pool)
+        .await;
+    if !matches!(has_role, Ok(false)) {
+        return true;
+    }
     crate::tenancy::permissions::user_permissions_pool(user_id, pool)
         .await
         .map_or(true, |perms| !perms.is_empty())
@@ -1025,13 +1051,17 @@ fn redirect_with_cookie(location: &str, cookie: &str) -> Response {
 
 /// Append a flow-cookie-clearing `Set-Cookie` to a response.
 fn clear_flow(mut resp: Response, path: &str) -> Response {
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        format!("{FLOW_COOKIE}=; HttpOnly; SameSite=Lax; Path={path}; Max-Age=0")
-            .parse()
-            .expect("valid cookie"),
-    );
+    for c in flow_cookie(path).clear() {
+        if let Ok(v) = c.parse() {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
     resp
+}
+
+/// The member flow cookie under `path`: `__Host-` at `/` over HTTPS.
+fn flow_cookie(path: &str) -> crate::sso::FlowCookie<'_> {
+    crate::sso::FlowCookie::new(FLOW_COOKIE, path, secure_cookies())
 }
 
 /// Minimal self-contained HTML error page for SSO failures — no
@@ -1388,6 +1418,27 @@ mod tests {
         let cleared = logout_at(&pool, &user, &org, "/acme/logout").await.unwrap();
         assert_eq!(path_of(&minted).as_deref(), Some("/acme"));
         assert_eq!(path_of(&cleared), path_of(&minted));
+    }
+
+    /// Under a path prefix, `?next` must stay under it.
+    #[test]
+    fn a_prefix_mount_lands_only_under_its_prefix() {
+        let at = |path: &str| Mount {
+            path: path.into(),
+            login: "/auth".into(),
+        };
+        assert_eq!(
+            at("/acme").next("/acme/dash").as_deref(),
+            Some("/acme/dash")
+        );
+        assert_eq!(at("/acme").next("/acme").as_deref(), Some("/acme"));
+        assert_eq!(at("/acme").next("/globex/dash"), None);
+        assert_eq!(at("/acme").next("/acmex"), None);
+        assert_eq!(
+            at("/").next("/globex/dash").as_deref(),
+            Some("/globex/dash")
+        );
+        assert_eq!(at("/").next("//evil.example"), None);
     }
 
     // ---- safe_landing -----------------------------------------------

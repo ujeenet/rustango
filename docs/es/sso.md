@@ -276,7 +276,7 @@ que el IdP autentique.
 | `allowed_idp_tenants` | IDs de directorio de Microsoft (`tid`). Solo se leen de un id_token verificado. |
 | `allowed_hosted_domains` | Dominios de Google Workspace (claim `hd`). |
 | `required_claims` | JSON `{"claim": ["valor", ...]}`: el claim (texto o lista) debe contener uno de los valores. `{"iss": [...]}` fija el emisor. Un claim ausente rechaza. |
-| `require_verified_email` | Activado por defecto: la lista permitida solo acepta un email verificado por el IdP. |
+| `require_verified_email` | Se mantiene por las filas guardadas: la lista permitida siempre acepta solo un email verificado por el IdP. |
 
 El admin y la consola del operador guardan las listas en una forma canónica
 y rechazan valores que no se pueden interpretar. Un valor inválido escrito
@@ -420,6 +420,43 @@ emisor y hora).
 - El modelo de confianza es `/userinfo` sobre TLS; los claims del id_token
   cuentan solo tras la verificación JWKS (ver [confianza en el id_token](#confianza-en-el-id_token)).
   Antepón HTTPS al admin.
+
+## Endurecimiento
+
+- **Vincular por email bloquea la contraseña.** Cuando el SSO vincula una
+  cuenta de tenant existente por email (o por una invitación de re-vínculo), su
+  contraseña queda inutilizable, sus sesiones terminan, sus claves API se
+  borran y sus claves de agente se desactivan, en la misma transacción. Quien registró el email antes que su dueño pierde la cuenta; el
+  dueño restablece la contraseña para volver a usar una. Cualquier rol, incluso
+  sin permisos, cuenta como privilegiado para vincular por email.
+- **Un flujo, un uso.** Un callback completa un flujo una sola vez (por
+  proceso; el código de un solo uso del IdP cubre otras réplicas). Los inicios
+  de sesión OIDC envían un `nonce`; un id_token verificado sin él, o con otro,
+  se rechaza (`id_token_replayed`). El destino del flujo de miembros es el
+  `?next` de la URL de inicio, sellado en el flujo; un `?next` en el callback se
+  ignora.
+- **Cookies de flujo `__Host-`** en HTTPS con `Path=/` (admin simple, tenant en
+  su propio host); allí solo se lee ese nombre. Un tenant con prefijo de ruta
+  mantiene el nombre simple, y el `?next` de miembros debe quedar bajo el prefijo.
+- **Invitaciones.** Una invitación de dominio para un sufijo público o un correo
+  gratuito (`@gmail.com`, `*.co.uk`) se rechaza, y una invitación de dominio
+  necesita `max_uses` o `expires_at`. Los nombres visibles del IdP se limitan a
+  150 caracteres.
+- **Host del admin simple.** Con `security.allowed_hosts` (o
+  `Builder::allowed_hosts`), la URI de redirección SSO solo se construye para un
+  host de la lista. Sin lista acepta cualquier host, y el admin avisa al arrancar.
+
+### Tenants en su propio host y bajo un prefijo
+
+Un tenant se alcanza en su propio host (cookies en `Path=/`) y en el host apex
+bajo su prefijo (`app.example.com/acme`, cookies en `Path=/acme`). Los tenants
+con prefijo comparten un origen con la consola del operador y entre sí: el
+`Path` de una cookie no es allí una frontera de seguridad. Sesiones y flujos
+están ligados al slug del tenant por su MAC, así que la cookie de un tenant
+nunca abre la de otro. Para un tenant alcanzable de ambas formas, registre las
+dos URL de callback en el IdP:
+`https://acme.example.com/__login/sso/<slug>/callback` y
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## Véase también
 

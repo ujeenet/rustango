@@ -23,6 +23,18 @@ use tower::ServiceExt as _;
 
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The `nonce` of the last begin, which the fake IdP echoes in its id_token
+/// like a real one (tests hold `SUITE`).
+static LAST_NONCE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Remember the `nonce` a begin redirect sends to the IdP.
+fn note_nonce(to: &str) {
+    *LAST_NONCE.lock().unwrap() = to
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("nonce="))
+        .map(str::to_owned);
+}
+
 /// An ES256 key the fake IdP signs id_tokens with.
 struct Signer(ring::signature::EcdsaKeyPair);
 
@@ -104,7 +116,8 @@ impl Idp {
                     if let Some((extra, genuine)) = plan.lock().unwrap().clone() {
                         let now = chrono::Utc::now().timestamp();
                         let mut c = serde_json::json!({"iss": iss, "aud": "cid", "exp": now + 300,
-                            "sub": user.lock().unwrap()["sub"].clone()});
+                            "sub": user.lock().unwrap()["sub"].clone(),
+                            "nonce": LAST_NONCE.lock().unwrap().clone()});
                         for (k, v) in extra.as_object().unwrap() {
                             c[k] = v.clone();
                         }
@@ -322,6 +335,7 @@ async fn handshake_from(
     )
     .await;
     let to = location(&begin);
+    note_nonce(&to);
     let state = to
         .split(['?', '&'])
         .find_map(|kv| kv.strip_prefix("state="))
@@ -3008,4 +3022,297 @@ async fn bare_admin_password_login_honours_sso_only() {
     }
     assert!(!login("ed").await, "sso_only refuses the password");
     assert!(login("root").await, "a superuser is never locked out");
+}
+
+/// Full `Set-Cookie` values (attributes kept).
+fn raw_cookies(resp: &axum::response::Response) -> Vec<String> {
+    resp.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The `Set-Cookie` value for cookie `name`.
+fn cookie_named(resp: &axum::response::Response, name: &str) -> String {
+    raw_cookies(resp)
+        .into_iter()
+        .find(|c| c.starts_with(&format!("{name}=")) && !c.starts_with(&format!("{name}=;")))
+        .unwrap_or_else(|| panic!("no {name} cookie in {:?}", raw_cookies(resp)))
+}
+
+impl Env {
+    /// Tenant 0 (`acme`) reachable on its own host and as `app.test/acme`,
+    /// with a tenant admin that resolves both.
+    async fn both_ways(&self) -> Router {
+        use rustango::tenancy::PathPrefixResolver;
+        let registry = self._pools.registry_pool();
+        let mut org = Org::objects()
+            .filter("slug", "acme")
+            .fetch(&registry)
+            .await
+            .unwrap()
+            .remove(0);
+        org.path_prefix = Some("/acme".into());
+        org.save_pool(&registry).await.unwrap();
+        rustango::testkit::reset_org_cache();
+        let reg_url = format!(
+            "sqlite://{}?mode=rwc",
+            self._dir.path().join("reg.db").display()
+        );
+        TenantAdminBuilder::new(
+            self._pools.clone(),
+            reg_url,
+            ChainResolver::new()
+                .push(SubdomainResolver::new("app.test"))
+                .push(PathPrefixResolver),
+        )
+        .routes(RouteConfig::legacy())
+        .with_session(self.secret.clone())
+        .build()
+    }
+}
+
+/// One tenant on its own host and under its prefix on the apex: each
+/// handshake keeps its own callback URL and cookie path, and both sign in
+/// the same user through the same link.
+#[tokio::test]
+async fn tenant_console_sso_works_on_its_host_and_under_its_prefix() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    let app = env.both_ways().await;
+    env.idp.assert("sub-ann", "ann@example.com");
+    for (host, login, path, callback) in [
+        ("acme.app.test", "/__login", "/", "acme.app.test%2F__login"),
+        (
+            "app.test",
+            "/acme/__login",
+            "/acme",
+            "app.test%2Facme%2F__login",
+        ),
+    ] {
+        let begin = send(
+            &app,
+            Request::builder()
+                .uri(format!("{login}/sso/corp"))
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let to = location(&begin);
+        assert!(
+            to.contains(&format!(
+                "redirect_uri=https%3A%2F%2F{callback}%2Fsso%2Fcorp%2Fcallback"
+            )),
+            "{host}: {to}"
+        );
+        let flow = cookie_named(&begin, "rustango_admin_sso_flow");
+        assert!(flow.contains(&format!("; Path={path};")), "{flow}");
+        let resp = handshake(&app, host, login, "corp").await;
+        let session = cookie_named(&resp, COOKIE_NAME);
+        assert!(session.contains(&format!("; Path={path};")), "{session}");
+        let value = session
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_owned();
+        assert_eq!(
+            decode(&env.secret, "acme", &value).unwrap().uid,
+            ann,
+            "{host}"
+        );
+    }
+    let links = rustango::sso::SsoLink::objects()
+        .filter("subject", "sub-ann")
+        .fetch(env.pool())
+        .await
+        .unwrap();
+    assert_eq!(links.len(), 1, "one link for both ways in");
+}
+
+/// Under a prefix the automatic redirect, its marker cookie, the logout
+/// landing and `?local=1` all keep the prefix.
+#[tokio::test]
+async fn sso_login_page_pieces_keep_the_prefix() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.password_user("boss", true).await;
+    tenant_settings(&env, "superusers_only", Some("corp")).await;
+    let app = env.both_ways().await;
+    let get = |uri: &str| {
+        send(
+            &app,
+            Request::builder()
+                .uri(uri)
+                .header(header::HOST, "app.test")
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let first = get("/acme/__login").await;
+    assert_eq!(location(&first), "/acme/__login/sso/corp");
+    let marker = cookie_named(&first, "rustango_sso_auto");
+    assert!(marker.contains("Path=/acme;"), "{marker}");
+    let local = body_of(get("/acme/__login?local=1").await).await;
+    assert!(
+        local.contains("name=\"password\""),
+        "break-glass form: {local}"
+    );
+    let out = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/acme/__logout")
+            .header(header::HOST, "app.test")
+            .header(header::COOKIE, "rustango_csrf=t")
+            .header("x-csrf-token", "t")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(Body::from("_csrf=t"))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(location(&out), "/acme/__login?local=1");
+}
+
+/// A callback completes once, on either way in, and a signed id_token must
+/// carry this sign-in's nonce.
+#[tokio::test]
+async fn a_flow_completes_once_and_needs_its_nonce() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    let app = env.both_ways().await;
+    env.idp.assert("sub-ann", "ann@example.com");
+    env.idp.id_token(Some((serde_json::json!({}), true)));
+    for (host, login) in [("acme.app.test", "/__login"), ("app.test", "/acme/__login")] {
+        let begin = send(
+            &app,
+            Request::builder()
+                .uri(format!("{login}/sso/corp"))
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let to = location(&begin);
+        note_nonce(&to);
+        let state = to
+            .split(['?', '&'])
+            .find_map(|kv| kv.strip_prefix("state="))
+            .unwrap()
+            .to_owned();
+        let flow = set_cookies(&begin).join("; ");
+        let callback = || {
+            send(
+                &app,
+                Request::builder()
+                    .uri(format!("{login}/sso/corp/callback?code=c&state={state}"))
+                    .header(header::HOST, host)
+                    .header(header::COOKIE, &flow)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        let first = callback().await;
+        assert!(
+            set_cookies(&first)
+                .iter()
+                .any(|c| c.starts_with(&format!("{COOKIE_NAME}="))),
+            "{host}: {}",
+            location(&first)
+        );
+        let again = callback().await;
+        assert!(
+            location(&again).ends_with("sso_error=expired"),
+            "{host} replay: {}",
+            location(&again)
+        );
+    }
+    // Another sign-in's nonce in a genuine token refuses.
+    env.idp
+        .id_token(Some((serde_json::json!({"nonce": "not-this-one"}), true)));
+    assert_eq!(
+        env.sso("corp", "sub-ann", "ann@example.com").await,
+        Err("nouser".into())
+    );
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-ann").await,
+        ["id_token_replayed"]
+    );
+    env.idp.id_token(Some((serde_json::json!({}), true)));
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+}
+
+/// The member landing comes from the `?next` sealed at begin; a `?next`
+/// on the callback is ignored.
+#[tokio::test]
+async fn the_member_landing_is_sealed_at_begin() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    env.idp.assert("sub-m", "m@example.com");
+    let host = &env.tenants[0].host;
+    let run = |begin_next: &'static str, cb_next: &'static str| {
+        let app = app.clone();
+        let host = host.clone();
+        async move {
+            let begin = send(
+                &app,
+                Request::builder()
+                    .uri(format!("/auth/sso/corp{begin_next}"))
+                    .header(header::HOST, &host)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            let to = location(&begin);
+            note_nonce(&to);
+            let state = to
+                .split(['?', '&'])
+                .find_map(|kv| kv.strip_prefix("state="))
+                .unwrap()
+                .to_owned();
+            let resp = send(
+                &app,
+                Request::builder()
+                    .uri(format!(
+                        "/auth/sso/corp/callback?code=c&state={state}{cb_next}"
+                    ))
+                    .header(header::HOST, &host)
+                    .header(header::COOKIE, set_cookies(&begin).join("; "))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            location(&resp)
+        }
+    };
+    assert_eq!(run("?next=/dash", "&next=/elsewhere").await, "/dash");
+    assert_eq!(run("", "&next=/elsewhere").await, "/");
+    assert_eq!(run("?next=//evil.example", "").await, "/");
 }

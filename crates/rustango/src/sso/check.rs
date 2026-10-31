@@ -155,7 +155,7 @@ pub enum Risk {
     EmailLinkOnCustomIdp,
     /// A plain `http://` issuer that is not loopback.
     InsecureIssuer,
-    /// Email domain rules with `require_verified_email` off.
+    /// Email domain rules with `require_verified_email` off (no effect: the allowlist needs a verified email).
     UnverifiedDomainRule,
     /// A shared row that signs users up, in every tenant that uses it.
     SharedSignup,
@@ -167,21 +167,6 @@ pub enum Risk {
 pub struct Risky {
     pub slug: String,
     pub why: Risk,
-}
-
-/// `http://` to a host other than loopback.
-fn insecure_url(url: &str) -> bool {
-    let url = url.trim();
-    let Some(rest) = url
-        .get(..7)
-        .filter(|s| s.eq_ignore_ascii_case("http://"))
-        .map(|_| &url[7..])
-    else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = authority.rsplit('@').next().unwrap_or("");
-    !crate::urls::is_loopback_host(host)
 }
 
 /// The enabled `P` rows' risky settings. A missing table holds none.
@@ -223,7 +208,7 @@ async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<R
         {
             push(Risk::EmailLinkOnCustomIdp);
         }
-        if text(r.get("issuer_url")).is_some_and(|u| insecure_url(&u)) {
+        if text(r.get("issuer_url")).is_some_and(|u| super::insecure_url(&u)) {
             push(Risk::InsecureIssuer);
         }
         if int(r.get("require_verified_email")) == 0
@@ -280,8 +265,8 @@ fn risk_text(why: Risk) -> &'static str {
             "has an http:// issuer_url, so discovery and tokens travel in clear — use https"
         }
         Risk::UnverifiedDomainRule => {
-            "has email domain rules with require_verified_email off, so an unverified email \
-             can pass them — turn require_verified_email on"
+            "has email domain rules with require_verified_email off; the allowlist still \
+             needs a verified email, so turn require_verified_email on to match"
         }
         Risk::SharedSignup => {
             "is shared and signs users up, in every tenant that uses it — set signup_mode \

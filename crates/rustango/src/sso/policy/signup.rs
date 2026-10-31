@@ -283,6 +283,17 @@ impl SignupPolicy {
     }
 }
 
+/// Longest IdP display name stored.
+const MAX_DISPLAY_NAME: usize = 150;
+
+/// The IdP's name, trimmed and cut to [`MAX_DISPLAY_NAME`]; `None` when blank.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+fn display_name(raw: &str) -> Option<String> {
+    let name: String = raw.trim().chars().take(MAX_DISPLAY_NAME).collect();
+    let name = name.trim_end().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Who an invite is for: one email, or a whole domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -316,23 +327,143 @@ impl InviteTarget {
     }
 }
 
+/// Public suffixes and free mail domains a domain invite would open to anyone.
+/// A short built-in list of common ones: NOT the full public suffix list, so
+/// an invite for an unlisted shared domain still goes through.
+const OPEN_DOMAINS: &[&str] = &[
+    // Second-level public suffixes.
+    "edu.au",
+    "gov.au",
+    "co.th",
+    "com.vn",
+    "com.eg",
+    "com.ng",
+    "co.ke",
+    "ac.jp",
+    // Hosting suffixes anyone can register under.
+    "blogspot.com",
+    "onmicrosoft.com",
+    "workers.dev",
+    "ngrok.io",
+    "s3.amazonaws.com",
+    "myshopify.com",
+    "wordpress.com",
+    // Free mail.
+    "yahoo.co.uk",
+    "yahoo.fr",
+    "hotmail.co.uk",
+    "hotmail.fr",
+    "outlook.de",
+    "live.co.uk",
+    "gmx.at",
+    "co.uk",
+    "org.uk",
+    "me.uk",
+    "ltd.uk",
+    "plc.uk",
+    "ac.uk",
+    "gov.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "co.nz",
+    "org.nz",
+    "co.jp",
+    "ne.jp",
+    "or.jp",
+    "co.kr",
+    "com.br",
+    "com.cn",
+    "com.hk",
+    "com.sg",
+    "com.tw",
+    "com.mx",
+    "com.ar",
+    "com.tr",
+    "com.ua",
+    "co.in",
+    "co.za",
+    "co.il",
+    "com.pl",
+    "co.id",
+    "com.my",
+    "com.ph",
+    // Hosting suffixes anyone can register under.
+    "github.io",
+    "gitlab.io",
+    "herokuapp.com",
+    "vercel.app",
+    "netlify.app",
+    "pages.dev",
+    "web.app",
+    "firebaseapp.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "appspot.com",
+    // Free mail.
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "yahoo.com",
+    "ymail.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "pm.me",
+    "gmx.com",
+    "gmx.net",
+    "gmx.de",
+    "web.de",
+    "mail.com",
+    "mail.ru",
+    "yandex.ru",
+    "yandex.com",
+    "qq.com",
+    "163.com",
+    "126.com",
+    "zoho.com",
+    "fastmail.com",
+    "tutanota.com",
+];
+
+/// Whether a domain invite for `domain` (or its subdomains) admits the public.
+fn open_domain(domain: &str) -> bool {
+    OPEN_DOMAINS.contains(&domain)
+}
+
 impl FromStr for InviteTarget {
     type Err = PolicyError;
 
     /// `ann@client.org`; `@client.org` or `client.org` for the domain;
-    /// `*.client.org` for its subdomains.
+    /// `*.client.org` for its subdomains. A public suffix or free mail
+    /// domain is refused: it would invite anyone.
     fn from_str(s: &str) -> Result<Self, PolicyError> {
         let s = s.trim();
-        if let Some(domain) = s.strip_prefix('@') {
-            if domain.starts_with("*.") {
-                return Err(PolicyError(format!("`{s}`: write `{domain}`")));
+        let domain = |d: &str| {
+            let rule: DomainRule = d.parse()?;
+            if open_domain(rule.domain()) {
+                return Err(PolicyError(format!(
+                    "`{s}` would invite anyone; invite emails instead"
+                )));
             }
-            return domain.parse().map(Self::Domain);
+            Ok(Self::Domain(rule))
+        };
+        if let Some(d) = s.strip_prefix('@') {
+            if d.starts_with("*.") {
+                return Err(PolicyError(format!("`{s}`: write `{d}`")));
+            }
+            return domain(d);
         }
         if s.contains('@') {
             return s.parse().map(Self::Email);
         }
-        s.parse().map(Self::Domain)
+        domain(s)
     }
 }
 
@@ -544,7 +675,8 @@ mod store {
         subject: &str,
         invite: &Invite,
         user_id: i64,
-    ) -> Result<(), Denied> {
+    ) -> Result<Revoked, Denied> {
+        let lock = Lock::prepare(pool).await?;
         let mut tx = crate::sql::transaction_pool(pool)
             .await
             .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
@@ -557,9 +689,114 @@ mod store {
         link::insert_link_tx(&mut tx, key, subject, user_id, false)
             .await
             .map_err(|e| Denied::Storage(format!("link: {e}")))?;
+        let revoked = lock.apply_tx(&mut tx, user_id).await?;
         tx.commit()
             .await
-            .map_err(|e| Denied::Storage(format!("commit: {e}")))
+            .map_err(|e| Denied::Storage(format!("commit: {e}")))?;
+        Ok(revoked)
+    }
+
+    /// Link `subject` to the existing `user_id` its verified email matched.
+    /// The account is locked in the same transaction ([`Lock`]).
+    pub(crate) async fn link_by_email(
+        pool: &Pool,
+        key: &ProviderKey,
+        subject: &str,
+        user_id: i64,
+    ) -> Result<Revoked, Denied> {
+        let lock = Lock::prepare(pool).await?;
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
+        link::insert_link_tx(&mut tx, key, subject, user_id, false)
+            .await
+            .map_err(|e| Denied::Storage(format!("link: {e}")))?;
+        let revoked = lock.apply_tx(&mut tx, user_id).await?;
+        tx.commit()
+            .await
+            .map_err(|e| Denied::Storage(format!("commit: {e}")))?;
+        Ok(revoked)
+    }
+
+    /// What an email link takes from the account it attaches to, so whoever
+    /// registered the email before its owner loses it: the password, every
+    /// session, API keys and user-owned agent keys. Tenant users have no
+    /// second-factor devices. Prepared outside the transaction: the hash is
+    /// slow, and a missing table must not abort it.
+    pub(crate) struct Lock {
+        hash: String,
+        api_keys: bool,
+        #[cfg(feature = "mcp")]
+        agents: bool,
+    }
+
+    /// What [`Lock`] revoked, for the audit row.
+    #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+    pub(crate) struct Revoked {
+        pub(crate) api_keys: u64,
+        pub(crate) agent_keys: u64,
+    }
+
+    impl Lock {
+        async fn prepare(pool: &Pool) -> Result<Self, Denied> {
+            let here = |table: &'static str| async move {
+                crate::migrate::try_table_exists_here(pool, table)
+                    .await
+                    .map_err(|e| Denied::Storage(format!("probe {table}: {e}")))
+            };
+            Ok(Self {
+                hash: unusable_hash().await?,
+                api_keys: here("rustango_api_keys").await?,
+                #[cfg(feature = "mcp")]
+                agents: here("rustango_agents").await?,
+            })
+        }
+
+        async fn apply_tx(&self, tx: &mut PoolTx<'_>, user_id: i64) -> Result<Revoked, Denied> {
+            use crate::core::Column as _;
+            let storage = |e: ExecError| Denied::Storage(format!("lock account: {e}"));
+            let bad = |e: crate::core::QueryError| Denied::Storage(e.to_string());
+            let user = || User::objects().filter("id", user_id);
+            let q = user()
+                .update()
+                .set("password_hash", self.hash.clone())
+                .compile()
+                .map_err(bad)?;
+            crate::sql::update_tx(tx, &q).await.map_err(storage)?;
+            // Only ever later: a concurrent logout may have set a later cut-off.
+            let now = chrono::Utc::now();
+            for older in [
+                user().filter("sessions_revoked_at__isnull", true),
+                user().where_(User::sessions_revoked_at.lt(now)),
+            ] {
+                let q = older
+                    .update()
+                    .set("sessions_revoked_at", now)
+                    .compile()
+                    .map_err(bad)?;
+                crate::sql::update_tx(tx, &q).await.map_err(storage)?;
+            }
+            let mut revoked = Revoked::default();
+            if self.api_keys {
+                let q = crate::tenancy::auth_backends::ApiKey::objects()
+                    .filter("user_id", user_id)
+                    .compile_delete()
+                    .map_err(bad)?;
+                revoked.api_keys = crate::sql::delete_tx(tx, &q).await.map_err(storage)?;
+            }
+            #[cfg(feature = "mcp")]
+            if self.agents {
+                let q = crate::tenancy::agents::Agent::objects()
+                    .filter("user_id", user_id)
+                    .filter("active", true)
+                    .update()
+                    .set("active", false)
+                    .compile()
+                    .map_err(bad)?;
+                revoked.agent_keys = crate::sql::update_tx(tx, &q).await.map_err(storage)?;
+            }
+            Ok(revoked)
+        }
     }
 
     /// Whether `name` may be a username: letters, digits and `._@+-`, within
@@ -662,8 +899,8 @@ mod store {
         let display_name = identity
             .profile
             .name
-            .clone()
-            .filter(|n| !n.trim().is_empty())
+            .as_deref()
+            .and_then(super::display_name)
             .unwrap_or_else(|| base.clone());
         let data = serde_json::json!({
             "display_name": display_name,
@@ -859,15 +1096,14 @@ mod store {
             .profile
             .name
             .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
+            .and_then(super::display_name)
         {
-            if user.data.get("display_name").and_then(|v| v.as_str()) != Some(name) {
+            if user.data.get("display_name").and_then(|v| v.as_str()) != Some(name.as_str()) {
                 let mut data = user.data.clone();
                 if !data.is_object() {
                     data = serde_json::json!({});
                 }
-                data["display_name"] = serde_json::Value::String(name.to_owned());
+                data["display_name"] = serde_json::Value::String(name);
                 update = update.set("data", data);
                 changed = true;
             }
@@ -960,6 +1196,34 @@ mod tests {
             .parse::<InviteTarget>()
             .unwrap()
             .matches(&email));
+    }
+
+    #[test]
+    fn display_names_are_trimmed_and_capped() {
+        assert_eq!(display_name("  Ann  ").as_deref(), Some("Ann"));
+        assert_eq!(display_name("   "), None);
+        let long = "é".repeat(400);
+        assert_eq!(display_name(&long).unwrap().chars().count(), 150);
+    }
+
+    /// A domain invite for a public suffix or free mail would invite anyone.
+    #[test]
+    fn open_domains_are_refused_as_invite_targets() {
+        for bad in [
+            "@gmail.com",
+            "gmail.com",
+            "*.co.uk",
+            "@co.uk",
+            "*.github.io",
+            "*.onmicrosoft.com",
+            "@yahoo.co.uk",
+            "*.s3.amazonaws.com",
+            "@edu.au",
+        ] {
+            assert!(bad.parse::<InviteTarget>().is_err(), "{bad}");
+        }
+        assert!("ann@gmail.com".parse::<InviteTarget>().is_ok());
+        assert!("*.client.co.uk".parse::<InviteTarget>().is_ok());
     }
 
     #[test]

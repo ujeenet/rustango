@@ -277,7 +277,7 @@ Anmelderegeln. Leere Regeln lassen jeden zu, den der IdP anmeldet.
 | `allowed_idp_tenants` | Microsoft-Verzeichnis-IDs (`tid`). Nur aus einem verifizierten id_token gelesen. |
 | `allowed_hosted_domains` | Google-Workspace-Domains (Claim `hd`). |
 | `required_claims` | JSON `{"claim": ["wert", ...]}`: der Claim (String oder Liste) muss einen der Werte enthalten. `{"iss": [...]}` legt den Issuer fest. Ein fehlender Claim lehnt ab. |
-| `require_verified_email` | Standardmäßig an: die Allowlist akzeptiert nur eine vom IdP verifizierte E-Mail. |
+| `require_verified_email` | Bleibt für gespeicherte Zeilen: die Allowlist akzeptiert immer nur eine vom IdP verifizierte E-Mail. |
 
 Admin und Operator-Konsole speichern Listen in einer festen Form und
 lehnen Werte ab, die sich nicht parsen lassen. Ein trotzdem ungültiger Wert
@@ -418,6 +418,44 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 - Das Vertrauensmodell ist `/userinfo` über TLS; id_token-Claims zählen erst
   nach der JWKS-Prüfung (siehe [id_token-Vertrauen](#id_token-vertrauen)).
   Stellen Sie dem Admin HTTPS voran.
+
+## Härtung
+
+- **E-Mail-Verknüpfung sperrt das Passwort.** Verknüpft SSO ein bestehendes
+  Tenant-Konto per E-Mail (oder per Re-Link-Einladung), wird sein Passwort
+  unbrauchbar, seine Sitzungen enden, seine API-Schlüssel werden gelöscht und
+  eigene Agent-Schlüssel abgeschaltet, in derselben Transaktion. Wer die
+  E-Mail vor ihrem Besitzer registriert hat, verliert das Konto; der Besitzer
+  setzt das Passwort zurück, um wieder eines zu nutzen. Jede Rolle, auch ohne
+  Rechte, gilt bei der E-Mail-Verknüpfung als privilegiert.
+- **Ein Flow, eine Nutzung.** Ein Callback schließt einen Flow nur einmal ab
+  (pro Prozess; der Einmal-Code des IdP deckt andere Repliken). OIDC-Anmeldungen
+  senden eine `nonce`; ein verifiziertes id_token ohne sie oder mit einer
+  anderen wird abgelehnt (`id_token_replayed`). Das Ziel nach der Member-Anmeldung
+  ist das `?next` der Begin-URL, im Flow versiegelt; ein `?next` am Callback
+  wird ignoriert.
+- **`__Host-`-Flow-Cookies** über HTTPS bei `Path=/` (Bare Admin, Tenant auf
+  eigenem Host); dort wird nur dieser Name gelesen. Ein Pfadpräfix-Tenant
+  behält den einfachen Namen, und das Member-`?next` muss unter dem Präfix bleiben.
+- **Einladungen.** Eine Domain-Einladung für ein Public Suffix oder einen
+  Freemail-Anbieter (`@gmail.com`, `*.co.uk`) wird abgelehnt, und eine
+  Domain-Einladung braucht `max_uses` oder `expires_at`. Gespeicherte
+  IdP-Anzeigenamen sind auf 150 Zeichen begrenzt.
+- **Host des Bare Admin.** Mit `security.allowed_hosts` (oder
+  `Builder::allowed_hosts`) wird die SSO-Redirect-URI nur für einen gelisteten
+  Host gebaut. Ohne Liste nimmt sie jeden Host, und der Admin warnt beim Start.
+
+### Tenants auf eigenem Host und unter einem Präfix
+
+Ein Tenant ist auf seinem eigenen Host (Cookies bei `Path=/`) und auf dem
+Apex-Host unter seinem Präfix erreichbar (`app.example.com/acme`, Cookies bei
+`Path=/acme`). Präfix-Tenants teilen einen Origin mit der Operator-Konsole und
+miteinander: der Cookie-`Path` ist dort keine Sicherheitsgrenze. Sitzungen und
+Flows sind per MAC an den Tenant-Slug gebunden, das Cookie eines Tenants öffnet
+also nie einen anderen. Für einen auf beiden Wegen erreichbaren Tenant beide
+Callback-URLs beim IdP registrieren:
+`https://acme.example.com/__login/sso/<slug>/callback` und
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## Siehe auch
 

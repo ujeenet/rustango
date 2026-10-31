@@ -169,6 +169,16 @@ inventory::submit! {
     }
 }
 
+fn superuser_only(parts: &Parts, _: Option<&serde_json::Value>) -> bool {
+    crate::admin::session::is_superuser(parts)
+}
+
+// A shared row decides sign-in for every tenant.
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "add", superuser_only);
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "change", superuser_only);
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "delete", superuser_only);
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "view", superuser_only);
+
 /// Enabled providers for this tenant's login page: the tenant's own
 /// [`SsoProvider`] rows merged with the registry-wide [`SharedSsoProvider`]
 /// set, **tenant-wins** on a slug clash, sorted by `sort_order`. Each button
@@ -374,6 +384,16 @@ fn secure_suffix() -> &'static str {
     }
 }
 
+/// The tenant console's flow cookie under `cookie_path`: `__Host-` on the
+/// tenant's own host over HTTPS, the plain name under a path prefix.
+fn flow_cookie(cookie_path: &str) -> crate::sso::FlowCookie<'_> {
+    crate::sso::FlowCookie::new(
+        SSO_FLOW_COOKIE,
+        cookie_path,
+        crate::session::secure_cookies(),
+    )
+}
+
 fn set_cookie(resp: &mut Response, value: &str) {
     if let Ok(v) = HeaderValue::from_str(value) {
         resp.headers_mut().append(header::SET_COOKIE, v);
@@ -422,12 +442,8 @@ pub(super) async fn tenant_sso_begin(
         FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
         secret.key(),
     );
-    let flow_cookie = format!(
-        "{SSO_FLOW_COOKIE}={sealed}; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=600{}",
-        secure_suffix()
-    );
     let mut resp = Redirect::to(&url).into_response();
-    set_cookie(&mut resp, &flow_cookie);
+    set_cookie(&mut resp, &flow_cookie(cookie_path).set(&sealed, 600));
     resp
 }
 
@@ -451,7 +467,7 @@ pub(super) async fn tenant_sso_callback(
     let (Some(code), Some(cb_state)) = (params.code, params.state) else {
         return login_error(routes, "callback");
     };
-    let Some(sealed) = crate::cookies::cookie_from_headers(&parts.headers, SSO_FLOW_COOKIE) else {
+    let Some(sealed) = flow_cookie(cookie_path).read(&parts.headers) else {
         return login_error(routes, "expired");
     };
     let flow = match open_flow(
@@ -468,6 +484,10 @@ pub(super) async fn tenant_sso_callback(
             Ok(a) => a,
             Err(refused) => return refused,
         };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        return login_error(routes, "expired");
+    }
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
@@ -487,7 +507,7 @@ pub(super) async fn tenant_sso_callback(
         }
     };
     let identity = match provider.complete(&flow, &code, &cb_state).await {
-        Ok((u, tokens)) => Identity::from_handshake(&provider, u, &tokens).await,
+        Ok((u, tokens)) => Identity::from_handshake(&provider, u, &tokens, &flow).await,
         Err(e) => {
             tracing::warn!(target: "rustango::tenancy::sso", "handshake: {e}");
             attempt.failed().await;
@@ -557,13 +577,11 @@ pub(super) async fn tenant_sso_callback(
         tenant_console::COOKIE_NAME,
         secure_suffix()
     );
-    let clear_flow = format!(
-        "{SSO_FLOW_COOKIE}=; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=0{}",
-        secure_suffix()
-    );
     let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();
     set_cookie(&mut resp, &session_cookie);
-    set_cookie(&mut resp, &clear_flow);
+    for c in flow_cookie(cookie_path).clear() {
+        set_cookie(&mut resp, &c);
+    }
     send_user_logged_in(UserLoggedInContext {
         source: SIGNAL_SOURCE,
         user_id: uid,
@@ -660,6 +678,27 @@ mod tests {
             assert_eq!(go(&default, &two, Some(q), false), None, "{q}");
         }
         assert_eq!(go(&default, &two, None, true), None);
+    }
+
+    /// Only a superuser adds, changes, deletes or views a shared provider in the admin.
+    #[test]
+    fn shared_providers_are_superuser_only_in_the_admin() {
+        use crate::admin::object_permissions::is_allowed;
+        let parts = |scoped: bool| {
+            let mut p = axum::http::Request::builder()
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0;
+            p.extensions
+                .insert(crate::admin::session::PermsScoped(scoped));
+            p
+        };
+        for action in ["add", "change", "delete", "view"] {
+            let t = "rustango_shared_sso_providers";
+            assert!(!is_allowed(t, action, &parts(true), None), "{action}");
+            assert!(is_allowed(t, action, &parts(false), None), "{action}");
+        }
     }
 
     #[test]

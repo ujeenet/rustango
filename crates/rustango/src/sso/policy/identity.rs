@@ -7,7 +7,7 @@ use serde_json::{Map, Value};
 use super::domain::{EmailAddr, PolicyError};
 use super::jwks::{self, IdTokenError};
 use super::Refusal;
-use crate::oauth2::{IssuerRule, NormalizedUser, OAuth2Provider, TokenResponse};
+use crate::oauth2::{IssuerRule, NormalizedUser, OAuth2Flow, OAuth2Provider, TokenResponse};
 
 /// Claims trusted only from a verified id_token.
 const ID_TOKEN_ONLY: &[&str] = &[
@@ -46,16 +46,19 @@ pub struct Identity {
 
 impl Identity {
     /// From a completed handshake: the profile, plus the id_token's claims
-    /// once its signature, audience, lifetime and issuer check out.
+    /// once its signature, audience, lifetime, issuer and the `nonce` of
+    /// `flow` check out.
     pub async fn from_handshake(
         provider: &OAuth2Provider,
         profile: NormalizedUser,
         tokens: &TokenResponse,
+        flow: &OAuth2Flow,
     ) -> Self {
         let verified = match tokens.id_token.as_deref() {
             None => Err(None),
             Some(t) => jwks::verify(provider, t).await.map_err(Some),
         };
+        let verified = verified.and_then(|t| check_nonce(t, flow.nonce.as_deref()));
         let microsoft = matches!(
             provider.id_token_keys(),
             Some((_, IssuerRule::MicrosoftTenant))
@@ -141,6 +144,12 @@ impl Identity {
         }
     }
 
+    /// A signed id_token answered another sign-in: refuse, it was injected.
+    #[must_use]
+    pub fn replayed(&self) -> bool {
+        self.id_token == IdToken::Invalid(IdTokenError::Nonce)
+    }
+
     /// The IdP's subject.
     #[must_use]
     pub fn subject(&self) -> &str {
@@ -185,6 +194,19 @@ impl Identity {
         self.claim(name)
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
+    }
+}
+
+/// A verified token must carry the `nonce` the sign-in sent, if it sent one.
+fn check_nonce(
+    token: Map<String, Value>,
+    sent: Option<&str>,
+) -> Result<Map<String, Value>, Option<IdTokenError>> {
+    match sent {
+        Some(n) if token.get("nonce").and_then(Value::as_str) != Some(n) => {
+            Err(Some(IdTokenError::Nonce))
+        }
+        _ => Ok(token),
     }
 }
 
@@ -301,6 +323,36 @@ mod tests {
             true,
         );
         assert_eq!(id.claim_str("tid"), Some("real"));
+    }
+
+    /// A verified token with another sign-in's nonce, or none, is refused.
+    #[test]
+    fn the_nonce_must_be_this_sign_ins() {
+        let token = |nonce: Option<&str>| {
+            let mut t = obj(serde_json::json!({"sub": "u1", "tid": "t"}));
+            if let Some(n) = nonce {
+                t.insert("nonce".into(), n.into());
+            }
+            t
+        };
+        let run = |nonce, sent| {
+            let checked = check_nonce(token(nonce), sent);
+            Identity::assemble(profile(serde_json::json!({})), checked, true)
+        };
+        let ok = run(Some("n1"), Some("n1"));
+        assert_eq!(ok.id_token, IdToken::Verified);
+        assert!(!ok.replayed());
+        for (nonce, sent) in [(Some("n2"), Some("n1")), (None, Some("n1"))] {
+            let bad = run(nonce, sent);
+            assert!(bad.replayed(), "{nonce:?} vs {sent:?}");
+            assert_eq!(bad.claim("tid"), None);
+            assert_eq!(
+                super::super::EffectivePolicy::legacy(true).check(&bad),
+                Err(Refusal::IdTokenReplayed)
+            );
+        }
+        // A flow sealed before nonces were sent checks nothing.
+        assert_eq!(run(None, None).id_token, IdToken::Verified);
     }
 
     #[test]

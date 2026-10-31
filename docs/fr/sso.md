@@ -297,7 +297,7 @@ authentifie.
 | `allowed_idp_tenants` | Identifiants d'annuaire Microsoft (`tid`). Lus uniquement depuis un id_token vérifié. |
 | `allowed_hosted_domains` | Domaines Google Workspace (claim `hd`). |
 | `required_claims` | JSON `{"claim": ["valeur", ...]}` : le claim (texte ou liste) doit contenir une des valeurs. `{"iss": [...]}` fixe l'émetteur. Un claim absent refuse. |
-| `require_verified_email` | Activé par défaut : la liste autorisée n'accepte qu'un email vérifié par l'IdP. |
+| `require_verified_email` | Conservé pour les lignes existantes : la liste autorisée n'accepte toujours qu'un email vérifié par l'IdP. |
 
 L'admin et la console opérateur enregistrent les listes sous une forme
 canonique et refusent une valeur illisible. Une valeur invalide écrite par
@@ -440,6 +440,43 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
 - Le modèle de confiance repose sur `/userinfo` via TLS ; les claims de
   l'id_token ne comptent qu'après la vérification JWKS (voir
   [confiance dans l'id_token](#confiance-dans-lid_token)). Placez l'admin derrière HTTPS.
+
+## Durcissement
+
+- **La liaison par email verrouille le mot de passe.** Quand le SSO lie un
+  compte tenant existant par email (ou par une invitation de re-liaison), son
+  mot de passe devient inutilisable, ses sessions prennent fin, ses clés API
+  sont supprimées et ses clés d'agent désactivées, dans la même transaction. Celui qui a enregistré l'email avant son propriétaire perd le
+  compte ; le propriétaire réinitialise le mot de passe pour en utiliser un.
+  Tout rôle, même sans permission, compte comme privilégié pour la liaison par email.
+- **Un flow, un usage.** Un callback termine un flow une seule fois (par
+  processus ; le code à usage unique de l'IdP couvre les autres réplicas). Les
+  connexions OIDC envoient un `nonce` ; un id_token vérifié sans lui, ou avec un
+  autre, est refusé (`id_token_replayed`). La destination du flux membre est le
+  `?next` donné à l'URL de début, scellé dans le flow ; un `?next` sur le
+  callback est ignoré.
+- **Cookies de flow `__Host-`** en HTTPS avec `Path=/` (admin nu, tenant sur
+  son propre hôte) ; seul ce nom y est lu. Un tenant à préfixe de chemin garde
+  le nom simple, et le `?next` membre doit rester sous le préfixe.
+- **Invitations.** Une invitation de domaine pour un suffixe public ou un
+  webmail gratuit (`@gmail.com`, `*.co.uk`) est refusée, et une invitation de
+  domaine exige `max_uses` ou `expires_at`. Les noms affichés de l'IdP sont
+  limités à 150 caractères.
+- **Hôte de l'admin nu.** Avec `security.allowed_hosts` (ou
+  `Builder::allowed_hosts`), l'URI de redirection SSO n'est construite que pour
+  un hôte listé. Sans liste elle accepte tout hôte, et l'admin l'avertit au démarrage.
+
+### Tenants sur leur propre hôte et sous un préfixe
+
+Un tenant est joignable sur son propre hôte (cookies en `Path=/`) et sur
+l'hôte apex sous son préfixe (`app.example.com/acme`, cookies en
+`Path=/acme`). Les tenants à préfixe partagent une origine avec la console
+opérateur et entre eux : le `Path` d'un cookie n'y est pas une frontière de
+sécurité. Sessions et flows sont liés au slug du tenant par leur MAC : le
+cookie d'un tenant n'ouvre jamais celui d'un autre. Pour un tenant joignable
+des deux façons, enregistrez les deux URL de callback chez l'IdP :
+`https://acme.example.com/__login/sso/<slug>/callback` et
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## Voir aussi
 
