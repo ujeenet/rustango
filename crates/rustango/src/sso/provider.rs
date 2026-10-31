@@ -638,7 +638,6 @@ pub async fn resolve_by_slug(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sso::policy::SignInPolicy;
     use std::collections::HashMap;
 
     /// Only a schema with none of the policy columns falls back to no rules.
