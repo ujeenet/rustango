@@ -308,8 +308,30 @@ impl AzureBlobStorage {
         Ok(self.sas_url_until(key, permissions, &expiry))
     }
 
+    /// A read SAS URL; a type a browser would run comes back as a download.
+    fn read_sas_url(&self, key: &str, ttl: std::time::Duration) -> Result<String, StorageError> {
+        validate_key(key)?;
+        let secs = ttl.as_secs().clamp(1, MAX_PRESIGN_SECS);
+        let secs = i64::try_from(secs).unwrap_or(i64::MAX);
+        let expiry = (chrono::Utc::now() + chrono::Duration::seconds(secs))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        Ok(self.sas_url_with(key, "r", &expiry, download_override(key)))
+    }
+
     /// [`Self::sas_url`] expiring at `expiry` (`%Y-%m-%dT%H:%M:%SZ`).
     fn sas_url_until(&self, key: &str, permissions: &str, expiry: &str) -> String {
+        self.sas_url_with(key, permissions, expiry, None)
+    }
+
+    /// [`Self::sas_url_until`] with optional `(rscd, rsct)` response overrides.
+    fn sas_url_with(
+        &self,
+        key: &str,
+        permissions: &str,
+        expiry: &str,
+        overrides: Option<(&str, &str)>,
+    ) -> String {
         // Refuse plain http when the endpoint is https.
         let protocol = if self.origin.starts_with("https://") {
             "https"
@@ -317,7 +339,13 @@ impl AzureBlobStorage {
             ""
         };
         let resource = format!("/blob/{}/{}/{key}", self.account, self.container);
-        let sig = self.sign(&sas_string(permissions, expiry, &resource, protocol));
+        let sig = self.sign(&sas_string_with(
+            permissions,
+            expiry,
+            &resource,
+            protocol,
+            overrides,
+        ));
         let mut query = vec![
             ("sv", API_VERSION),
             ("sr", "b"),
@@ -326,6 +354,10 @@ impl AzureBlobStorage {
         ];
         if !protocol.is_empty() {
             query.push(("spr", protocol));
+        }
+        if let Some((rscd, rsct)) = overrides {
+            query.push(("rscd", rscd));
+            query.push(("rsct", rsct));
         }
         query.push(("sig", sig.as_str()));
         let query: Vec<String> = query
@@ -516,9 +548,22 @@ fn shared_key_string(
     format!("{method}\n\n\n{len}\n\n{ct}\n\n\n\n{inm}\n\n\n{headers}{resource}")
 }
 
-/// The service SAS string-to-sign (versions 2020-12-06 and later) with
-/// no start, identifier, IP, snapshot, scope or response overrides.
+/// [`sas_string_with`] without response overrides.
+#[cfg(test)]
 fn sas_string(permissions: &str, expiry: &str, resource: &str, protocol: &str) -> String {
+    sas_string_with(permissions, expiry, resource, protocol, None)
+}
+
+/// The service SAS string-to-sign (versions 2020-12-06 and later) with
+/// no start, identifier, IP, snapshot or scope; `overrides` sets `(rscd, rsct)`.
+fn sas_string_with(
+    permissions: &str,
+    expiry: &str,
+    resource: &str,
+    protocol: &str,
+    overrides: Option<(&str, &str)>,
+) -> String {
+    let (rscd, rsct) = overrides.unwrap_or(("", ""));
     [
         permissions,
         "",
@@ -532,12 +577,23 @@ fn sas_string(permissions: &str, expiry: &str, resource: &str, protocol: &str) -
         "",
         "",
         "",
+        rscd,
         "",
         "",
-        "",
-        "",
+        rsct,
     ]
     .join("\n")
+}
+
+/// `(rscd, rsct)` for a blob a browser would run or load as code when
+/// opened from the storage origin: served as an untyped download.
+fn download_override(key: &str) -> Option<(&'static str, &'static str)> {
+    let ext = key.rsplit_once('.')?.1.to_ascii_lowercase();
+    matches!(
+        ext.as_str(),
+        "html" | "htm" | "xhtml" | "svg" | "xml" | "js" | "mjs" | "css" | "wasm"
+    )
+    .then_some(("attachment", "application/octet-stream"))
 }
 
 #[async_trait]
@@ -640,7 +696,7 @@ impl Storage for AzureBlobStorage {
     }
 
     async fn presigned_get_url(&self, key: &str, ttl: std::time::Duration) -> Option<String> {
-        self.sas_url(key, "r", ttl).ok()
+        self.read_sas_url(key, ttl).ok()
     }
 
     async fn presigned_put_url(
@@ -873,6 +929,37 @@ mod tests {
             "https",
         ));
         assert_eq!(query(&url, "sig").unwrap(), want);
+    }
+
+    /// A blob a browser would run downloads from the storage origin; others
+    /// keep their stored type.
+    #[tokio::test]
+    async fn sas_get_downloads_active_types() {
+        let s = AzureBlobStorage::new(cfg()).unwrap();
+        let url = s
+            .presigned_get_url("up/page.HTML", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(query(&url, "rscd").as_deref(), Some("attachment"));
+        assert_eq!(
+            query(&url, "rsct").as_deref(),
+            Some("application/octet-stream")
+        );
+        let se = query(&url, "se").unwrap();
+        let want = s.sign(&sas_string_with(
+            "r",
+            &se,
+            "/blob/acct/media/up/page.HTML",
+            "https",
+            Some(("attachment", "application/octet-stream")),
+        ));
+        assert_eq!(query(&url, "sig").unwrap(), want);
+        let csv = s
+            .presigned_get_url("up/a.csv", std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(query(&csv, "rscd"), None);
+        assert_eq!(query(&csv, "rsct"), None);
     }
 
     #[tokio::test]

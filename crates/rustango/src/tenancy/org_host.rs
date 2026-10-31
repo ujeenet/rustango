@@ -392,9 +392,35 @@ async fn claim_routing_once(
     keys: &[ClaimKey],
     claimant: &mut Claimant<'_>,
 ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    claim_routing_holding_once(registry, keys, &[], claimant).await
+}
+
+/// [`claim_routing`] that also takes the lock rows of `held` hosts, which
+/// a later write in the same transaction checks itself.
+#[cfg(feature = "admin")]
+async fn claim_routing_holding(
+    registry: &Pool,
+    keys: &[ClaimKey],
+    held: &[ClaimKey],
+    mut claimant: Claimant<'_>,
+) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+    match claim_routing_holding_once(registry, keys, held, &mut claimant).await {
+        Err(ClaimError::Driver(e)) if e.is_deadlock() => {
+            claim_routing_holding_once(registry, keys, held, &mut claimant).await
+        }
+        r => r,
+    }
+}
+
+async fn claim_routing_holding_once(
+    registry: &Pool,
+    keys: &[ClaimKey],
+    held: &[ClaimKey],
+    claimant: &mut Claimant<'_>,
+) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
     let mut tx = crate::sql::write_transaction(registry).await?;
     let org_id = claimant.begin(&mut tx).await?;
-    claim_routing_tx(&mut tx, keys, org_id).await?;
+    lock_and_claim(&mut tx, keys, held, org_id).await?;
     Ok(tx)
 }
 
@@ -408,16 +434,33 @@ pub(crate) async fn claim_routing_tx(
     keys: &[ClaimKey],
     org_id: i64,
 ) -> Result<(), ClaimError> {
-    let mut keys = keys.to_vec();
+    lock_and_claim(tx, keys, &[], org_id).await
+}
+
+/// Lock `keys` and `held`, then check `keys` only. The lock rows go first:
+/// MySQL's snapshot must start after a racing claimer commits, not before.
+async fn lock_and_claim(
+    tx: &mut crate::sql::PoolTx<'_>,
+    keys: &[ClaimKey],
+    held: &[ClaimKey],
+    org_id: i64,
+) -> Result<(), ClaimError> {
+    // `true` = claimed; a held key that is also claimed is claimed.
+    let mut all: Vec<(ClaimKey, bool)> = keys.iter().map(|k| (k.clone(), true)).collect();
+    all.extend(held.iter().map(|k| (k.clone(), false)));
     // One order for every claimant, so two cannot wait on each other.
-    keys.sort();
-    keys.dedup();
-    let mut locked = Vec::with_capacity(keys.len());
-    for key in &keys {
-        locked.push(lock_key(tx, key, org_id, true).await?);
+    all.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
+    all.dedup_by(|b, a| a.0 == b.0);
+    let mut locked = Vec::with_capacity(all.len());
+    for (key, claimed) in &all {
+        locked.push(if *claimed {
+            lock_key(tx, key, org_id, true).await?
+        } else {
+            hold_key(tx, key, org_id).await?
+        });
     }
-    for (key, (row, _)) in keys.iter().zip(&locked) {
-        if held_elsewhere(tx, key, row.id.get().copied(), Some(org_id)).await? {
+    for ((key, claimed), (row, _)) in all.iter().zip(&locked) {
+        if *claimed && held_elsewhere(tx, key, row.id.get().copied(), Some(org_id)).await? {
             return Err(ClaimError::Taken(key.clone()));
         }
     }
@@ -429,6 +472,19 @@ pub(crate) async fn claim_routing_tx(
     Ok(())
 }
 
+/// Take `key`'s lock row without judging it: an existing row is only
+/// locked, and the write that follows checks it. `(row, inserted)`.
+async fn hold_key(
+    tx: &mut crate::sql::PoolTx<'_>,
+    key: &ClaimKey,
+    org_id: i64,
+) -> Result<(OrgHost, bool), ClaimError> {
+    match locked_row(tx, key).await? {
+        Some(row) => Ok((row, false)),
+        None => Ok((insert_lock_row(tx, key, org_id).await?, true)),
+    }
+}
+
 /// Take `key`'s lock row in `tx`: a waiting writer of the same row
 /// blocks here until it commits. `(row, inserted)`.
 async fn lock_key(
@@ -437,35 +493,48 @@ async fn lock_key(
     org_id: i64,
     base: bool,
 ) -> Result<(OrgHost, bool), ClaimError> {
-    use crate::sql::FetcherTx as _;
-    let name = key.lock_name();
-    // A locking read: waits for a writer holding the row, takes no snapshot.
-    let held: Vec<OrgHost> = OrgHost::objects()
-        .where_(OrgHost::hostname.eq(name.clone()))
-        .select_for_update()
-        .silent_on_sqlite()
-        .fetch_tx(tx)
-        .await?;
-    match held.into_iter().next() {
+    match locked_row(tx, key).await? {
         // Promoting the tenant's own extra host: that row is the claim.
         Some(own) if base && own.org_id == org_id && matches!(key, ClaimKey::Host(_)) => {
             Ok((own, false))
         }
         Some(_) => Err(ClaimError::Taken(key.clone())),
-        None => {
-            let mut row = OrgHost {
-                id: crate::sql::Auto::Unset,
-                org_id,
-                hostname: name,
-                enabled: true,
-                created_at: crate::sql::Auto::Unset,
-            };
-            match row.insert_tx(tx).await {
-                Err(e) if e.is_unique_violation() => return Err(ClaimError::Taken(key.clone())),
-                r => r?,
-            }
-            Ok((row, true))
-        }
+        None => Ok((insert_lock_row(tx, key, org_id).await?, true)),
+    }
+}
+
+/// `key`'s row, by a locking read: waits for a writer holding the row,
+/// takes no snapshot.
+async fn locked_row(
+    tx: &mut crate::sql::PoolTx<'_>,
+    key: &ClaimKey,
+) -> Result<Option<OrgHost>, crate::sql::ExecError> {
+    use crate::sql::FetcherTx as _;
+    let held: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::hostname.eq(key.lock_name()))
+        .select_for_update()
+        .silent_on_sqlite()
+        .fetch_tx(tx)
+        .await?;
+    Ok(held.into_iter().next())
+}
+
+/// Insert `key`'s lock row; a racing insert's commit means it is taken.
+async fn insert_lock_row(
+    tx: &mut crate::sql::PoolTx<'_>,
+    key: &ClaimKey,
+    org_id: i64,
+) -> Result<OrgHost, ClaimError> {
+    let mut row = OrgHost {
+        id: crate::sql::Auto::Unset,
+        org_id,
+        hostname: key.lock_name(),
+        enabled: true,
+        created_at: crate::sql::Auto::Unset,
+    };
+    match row.insert_tx(tx).await {
+        Err(e) if e.is_unique_violation() => Err(ClaimError::Taken(key.clone())),
+        r => r.map(|_| row).map_err(Into::into),
     }
 }
 
@@ -996,11 +1065,38 @@ impl AdminClaims {
         registry: &Pool,
         pk: &crate::core::SqlValue,
     ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
-        match (self, pk_id(pk)) {
-            (Self::OrgBefore(keys), Some(id)) => {
-                claim_routing(registry, keys, Claimant::Base(id)).await
+        self.begin_holding(registry, pk, &[]).await
+    }
+
+    /// [`Self::begin`] that first locks the extra `hosts` inline rows will
+    /// write, so their later check reads past any claim that raced them.
+    ///
+    /// # Errors
+    /// As [`claim_routing`].
+    pub(crate) async fn begin_holding(
+        &self,
+        registry: &Pool,
+        pk: &crate::core::SqlValue,
+        hosts: &[String],
+    ) -> Result<crate::sql::PoolTx<'static>, ClaimError> {
+        let keys: &[ClaimKey] = match self {
+            Self::OrgBefore(keys) => keys,
+            _ => &[],
+        };
+        let held: Vec<ClaimKey> = hosts.iter().cloned().map(ClaimKey::Host).collect();
+        match pk_id(pk) {
+            Some(id) if !keys.is_empty() || !held.is_empty() => {
+                claim_routing_holding(registry, keys, &held, Claimant::Base(id)).await
             }
             _ => Ok(crate::sql::write_transaction(registry).await?),
+        }
+    }
+
+    /// The extra host this write claims, if any.
+    pub(crate) fn extra_host(&self) -> Option<&str> {
+        match self {
+            Self::HostAfter(h) => Some(h),
+            _ => None,
         }
     }
 

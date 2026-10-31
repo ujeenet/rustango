@@ -1545,6 +1545,25 @@ impl ChildSignal {
 }
 
 impl InlinePlan {
+    /// Extra hosts the plan writes, locked before the save reads anything.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn extra_hosts(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in &self.targets {
+            for w in &t.existing {
+                if let InlineWrite::Update { claims, .. } = w {
+                    out.extend(claims.extra_host().map(str::to_owned));
+                }
+            }
+            out.extend(
+                t.inserts
+                    .iter()
+                    .filter_map(|i| i.claims.extra_host().map(str::to_owned)),
+            );
+        }
+        out
+    }
+
     /// The rows this plan will write, for `admin_pre_*`; a new row's PK is
     /// empty unless the form typed it.
     pub(crate) fn planned_rows(&self) -> Vec<ChildSignal> {

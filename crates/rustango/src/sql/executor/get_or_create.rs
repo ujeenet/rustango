@@ -6,8 +6,8 @@
 //! closure.
 
 use super::{
-    ExecError, FetcherPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated, MaybePgFromRow,
-    MaybeSqliteFromRow, MaybeSqliteLoadRelated,
+    ExecError, FetcherPool, FetcherTx, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
+    MaybePgFromRow, MaybeSqliteFromRow, MaybeSqliteLoadRelated, PoolTx,
 };
 use crate::core::Model;
 use crate::sql::Pool;
@@ -78,6 +78,50 @@ where
     }
 }
 
+/// [`get_or_create`] inside an open transaction: the read and `create_fn`
+/// both run on `tx`. A unique violation from `create_fn` is returned, not
+/// retried, as on PostgreSQL it has already aborted `tx`.
+///
+/// ```ignore
+/// let (post, created) = rustango::sql::get_or_create_tx(
+///     Post::objects().filter("slug", "hello"),
+///     |tx| Box::pin(async move {
+///         rustango::sql::insert_tx(tx, &query).await?;
+///         Ok(post)
+///     }),
+///     &mut tx,
+/// ).await?;
+/// ```
+///
+/// # Errors
+/// As [`get_or_create`].
+pub async fn get_or_create_tx<'t, T, F>(
+    qs: crate::query::QuerySet<T>,
+    create_fn: F,
+    tx: &mut PoolTx<'t>,
+) -> Result<(T, bool), ExecError>
+where
+    T: Model
+        + MaybePgFromRow
+        + MaybeMyFromRow
+        + MaybeSqliteFromRow
+        + LoadRelated
+        + MaybeMyLoadRelated
+        + MaybeSqliteLoadRelated
+        + Send
+        + Unpin,
+    F: for<'a> FnOnce(
+        &'a mut PoolTx<'t>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<T, ExecError>> + Send + 'a>,
+    >,
+{
+    match at_most_one(qs.fetch_tx(tx).await?, "get_or_create")? {
+        Some(row) => Ok((row, false)),
+        None => Ok((create_fn(tx).await?, true)),
+    }
+}
+
 /// The one row `qs` matches, if any.
 async fn fetch_at_most_one<T>(
     qs: crate::query::QuerySet<T>,
@@ -95,7 +139,11 @@ where
         + Send
         + Unpin,
 {
-    let mut rows = qs.fetch(pool).await?;
+    at_most_one(qs.fetch(pool).await?, op)
+}
+
+/// The only row of `rows`, if any; more than one is an error.
+fn at_most_one<T: Model>(mut rows: Vec<T>, op: &'static str) -> Result<Option<T>, ExecError> {
     match rows.len() {
         0 => Ok(None),
         1 => Ok(Some(rows.remove(0))),

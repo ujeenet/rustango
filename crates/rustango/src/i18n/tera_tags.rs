@@ -67,7 +67,17 @@ use super::Translator;
 /// the same translator instance; clone it cheaply on each call via
 /// the `Arc`.
 pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
-    let t_fn = Arc::clone(&translator);
+    register_with(tera, move || Arc::clone(&translator));
+}
+
+/// [`register`] with the translator looked up on every call, so one `Tera`
+/// can render each tenant's catalog (e.g. from a task-local set per request).
+pub fn register_with(
+    tera: &mut Tera,
+    resolve: impl Fn() -> Arc<Translator> + Send + Sync + 'static,
+) {
+    let resolve: Arc<dyn Fn() -> Arc<Translator> + Send + Sync> = Arc::new(resolve);
+    let t_fn = Arc::clone(&resolve);
     tera.register_function(
         "translate",
         move |args: &HashMap<String, Value>| -> tera::Result<Value> {
@@ -75,18 +85,18 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
                 .get("key")
                 .and_then(Value::as_str)
                 .ok_or_else(|| tera::Error::msg("translate(): missing required `key` argument"))?;
-            Ok(Value::String(do_translate(&t_fn, key, args)))
+            Ok(Value::String(do_translate(&t_fn(), key, args)))
         },
     );
 
-    let t_filter = Arc::clone(&translator);
+    let t_filter = Arc::clone(&resolve);
     tera.register_filter(
         "translate",
         move |value: &Value, args: &HashMap<String, Value>| -> tera::Result<Value> {
             let key = value.as_str().ok_or_else(|| {
                 tera::Error::msg("translate filter: input must be a string (the translation key)")
             })?;
-            Ok(Value::String(do_translate(&t_filter, key, args)))
+            Ok(Value::String(do_translate(&t_filter(), key, args)))
         },
     );
 
@@ -99,7 +109,7 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
     //
     // A missing plural entry falls back to the scalar source string (with
     // `{count}` interpolated), so English / untranslated keys still render.
-    let t_plural = Arc::clone(&translator);
+    let t_plural = resolve;
     tera.register_function(
         "translate_plural",
         move |args: &HashMap<String, Value>| -> tera::Result<Value> {
@@ -115,7 +125,7 @@ pub fn register(tera: &mut Tera, translator: Arc<Translator>) {
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
-            Ok(Value::String(t_plural.translate_plural(
+            Ok(Value::String(t_plural().translate_plural(
                 locale,
                 key,
                 n,
@@ -452,6 +462,44 @@ mod tests {
         assert!(
             joined.contains("key"),
             "expected error chain to mention `key`, got: {joined}"
+        );
+    }
+
+    /// Each render asks the resolver, so one `Tera` serves every tenant's
+    /// catalog: the function, the filter and the plural form alike.
+    #[test]
+    fn register_with_resolves_the_translator_per_render() {
+        use std::sync::Mutex;
+        let tenant = |word: &str| {
+            let mut en = HashMap::new();
+            en.insert("plain".to_owned(), word.to_owned());
+            let mut plural = HashMap::new();
+            plural.insert("other".to_owned(), format!("{word} {{count}}"));
+            let mut plurals = HashMap::new();
+            plurals.insert("n".to_owned(), plural);
+            Arc::new(
+                Translator::new(Locale::new("en"))
+                    .add_locale(Locale::new("en"), en)
+                    .add_plural_locale(Locale::new("en"), plurals),
+            )
+        };
+        let current = Arc::new(Mutex::new(tenant("acme")));
+        let mut tera = Tera::default();
+        let pick = Arc::clone(&current);
+        register_with(&mut tera, move || Arc::clone(&pick.lock().unwrap()));
+        tera.add_raw_template(
+            "t",
+            r#"{{ translate(key="plain", locale="en") }}|{{ "plain" | translate(locale="en") }}|{{ translate_plural(key="n", n=2, locale="en", count=2) }}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            tera.render("t", &Context::new()).unwrap(),
+            "acme|acme|acme 2"
+        );
+        *current.lock().unwrap() = tenant("globex");
+        assert_eq!(
+            tera.render("t", &Context::new()).unwrap(),
+            "globex|globex|globex 2"
         );
     }
 

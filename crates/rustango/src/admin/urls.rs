@@ -30,33 +30,39 @@ pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminErr
 /// selected rows. Return `Ok(())`, or `AdminError::Internal(...)` to
 /// fail. The built-in `delete_selected` uses this signature.
 ///
-/// The handler takes `&Pool`, not a backend-specific pool. The
-/// example shows the older raw-SQL shape and the ORM shape that
-/// replaced it:
+/// The handler takes `&Pool`, not a backend-specific pool, and writes
+/// through the ORM. Register it with [`Builder::register_action`]:
 ///
-/// ```ignore
-/// // Pre-v0.36:
-/// register_admin_action!("post", "publish", "Publish selected", |pool, pks| {
-///     Box::pin(async move {
-///         sqlx::query("UPDATE post SET published_at = NOW() WHERE id = ANY($1)")
-///             .bind(pks).execute(pool).await?;
-///         Ok(())
-///     })
-/// });
+/// ```no_run
+/// use rustango::admin::{AdminActionFuture, Builder};
+/// use rustango::core::{Op, SqlValue};
+/// use rustango::sql::{Pool, UpdaterPool as _};
+/// use rustango::Model;
 ///
-/// // v0.36+: route through the bi-dialect ORM:
-/// register_admin_action!("post", "publish", "Publish selected", |pool, pks| {
+/// #[derive(Model)]
+/// #[rustango(table = "post")]
+/// pub struct Post {
+///     #[rustango(primary_key)]
+///     pub id: i64,
+///     pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+/// }
+///
+/// fn publish<'a>(pool: &'a Pool, pks: &'a [SqlValue]) -> AdminActionFuture<'a> {
 ///     Box::pin(async move {
-///         use rustango::sql::{UpdaterPool as _, Pool};
 ///         Post::objects()
-///             .filter_op("id", rustango::core::Op::In, pks.into())
+///             .filter_op("id", Op::In, SqlValue::List(pks.to_vec()))
 ///             .update()
 ///             .set("published_at", chrono::Utc::now())
 ///             .execute_pool(pool)
 ///             .await?;
 ///         Ok(())
 ///     })
-/// });
+/// }
+///
+/// fn admin(pool: Pool) -> Builder {
+///     Builder::new(pool).register_action("post", "publish", publish)
+/// }
+/// # fn main() {}
 /// ```
 pub type AdminActionFn = Arc<
     dyn for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync,

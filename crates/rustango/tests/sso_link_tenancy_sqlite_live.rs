@@ -17,7 +17,7 @@ use rustango::tenancy::tenant_console::{
 };
 use rustango::tenancy::{
     admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, Operator, Org,
-    SubdomainResolver, TenantPools, User,
+    PathPrefixResolver, SubdomainResolver, TenantPools, User,
 };
 use tower::ServiceExt as _;
 
@@ -236,7 +236,10 @@ async fn boot_with(permissions: bool) -> Env {
     let admin = TenantAdminBuilder::new(
         pools.clone(),
         reg_url,
-        ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        // A tenant's own host, else the apex with its path prefix.
+        ChainResolver::new()
+            .push(SubdomainResolver::new("app.test"))
+            .push(PathPrefixResolver),
     )
     .routes(RouteConfig::legacy())
     .with_session(secret.clone())
@@ -591,9 +594,23 @@ impl Env {
 
     /// SSO into tenant `t`'s admin as `(sub, email)`: the user id, or the `sso_error`.
     async fn sso_in(&self, t: usize, slug: &str, sub: &str, email: &str) -> Result<i64, String> {
+        self.sso_at(t, &self.tenants[t].host, "/__login", slug, sub, email)
+            .await
+    }
+
+    /// [`Self::sso_in`] on `host` under `login`.
+    async fn sso_at(
+        &self,
+        t: usize,
+        host: &str,
+        login: &str,
+        slug: &str,
+        sub: &str,
+        email: &str,
+    ) -> Result<i64, String> {
         self.idp.assert(sub, email);
         let tenant = &self.tenants[t];
-        let resp = handshake(&self.admin, &tenant.host, "/__login", slug).await;
+        let resp = handshake(&self.admin, host, login, slug).await;
         let to = location(&resp);
         if let Some((_, code)) = to.split_once("sso_error=") {
             return Err(code.to_owned());
@@ -682,6 +699,65 @@ async fn opt_in_links_then_sub_wins_over_a_changed_email() {
     assert_eq!(env.sso("corp", "sub-ann", "ann@new.example").await, Ok(ann));
     assert_eq!(env.sso("corp", "sub-ann", "bob@example.com").await, Ok(ann));
     assert_ne!(ann, bob);
+}
+
+/// A client hook reaches providers built from tenant rows, on the tenant's
+/// host and on the apex under its path prefix.
+#[tokio::test]
+async fn the_client_hook_reaches_tenant_providers_on_host_and_prefix() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    let mut org = Org::objects()
+        .filter("slug", "acme")
+        .fetch(&env._pools.registry_pool())
+        .await
+        .unwrap()
+        .remove(0);
+    org.path_prefix = Some("/acme".into());
+    org.save_pool(&env._pools.registry_pool()).await.unwrap();
+    rustango::tenancy::invalidate_org_cache();
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (c, s, issuer) = (calls.clone(), seen.clone(), env.idp.issuer.clone());
+    rustango::sso::set_client_config(move |t| {
+        if t.issuer_url != Some(issuer.as_str()) {
+            return None;
+        }
+        s.lock().unwrap().push((t.source, t.provider.to_owned()));
+        let c = c.clone();
+        Some(Arc::new(move |b: reqwest::ClientBuilder| {
+            c.fetch_add(1, Ordering::SeqCst);
+            b
+        }) as rustango::oauth2::ClientConfig)
+    });
+
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+    let on_host = calls.load(Ordering::SeqCst);
+    assert!(on_host > 0, "the hook never built a client on the host");
+    let via_prefix = env
+        .sso_at(
+            0,
+            "app.test",
+            "/acme/__login",
+            "corp",
+            "sub-ann",
+            "ann@example.com",
+        )
+        .await;
+    assert_eq!(via_prefix, Ok(ann));
+    assert!(
+        calls.load(Ordering::SeqCst) > on_host,
+        "the hook never built a client under the prefix"
+    );
+    assert!(seen
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(src, p)| *src == LinkSource::Tenant && p == "oidc"));
 }
 
 /// A tenant SSO login gets `iat` = the logout cut-off + 1 (#1855).
