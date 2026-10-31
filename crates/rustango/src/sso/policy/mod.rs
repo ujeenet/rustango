@@ -1019,12 +1019,13 @@ pub(crate) fn admin_normalise<'a>(
                     },
                     _ => return Err(format!("{}: expected text", col.replace('_', " "))),
                 };
-            } else if *col == "default_roles" || *col == "role_claims" {
+            } else if matches!(*col, "default_roles" | "allowed_roles" | "role_claims") {
                 *v = match v {
                     SqlValue::Null => SqlValue::Null,
-                    SqlValue::String(raw) if *col == "default_roles" => {
-                        let r: RoleNames =
-                            raw.parse().map_err(|e| format!("default roles: {e}"))?;
+                    SqlValue::String(raw) if *col != "role_claims" => {
+                        let r: RoleNames = raw
+                            .parse()
+                            .map_err(|e| format!("{}: {e}", col.replace('_', " ")))?;
                         if r.is_empty() {
                             SqlValue::Null
                         } else {
@@ -1431,6 +1432,157 @@ mod tests {
             }
         }
         assert!(checked > 10_000);
+    }
+
+    /// A shared provider with every rule set to something to loosen.
+    fn shared_base() -> EffectivePolicy {
+        let sign_in = SignInPolicy::parse(&SignInColumns {
+            allowed_email_domains: Some("client.org"),
+            require_verified_email: false,
+            ..SignInColumns::default()
+        });
+        let signup = SignupPolicy::parse(&SignupColumns {
+            signup_mode: Some("invite_only"),
+            default_roles: Some("Viewer, Editor"),
+            ..SignupColumns::default()
+        });
+        EffectivePolicy::new(sign_in, true)
+            .with_signup(signup)
+            .with_lifecycle(Lifecycle::parse(true, Some(30), Some(3600), Some(600)))
+    }
+
+    fn people() -> Vec<Identity> {
+        let mut out = Vec::new();
+        for email in ["a@client.org", "a@other.org"] {
+            for verified in [true, false] {
+                out.push(person(email, verified, serde_json::json!({})));
+            }
+        }
+        out
+    }
+
+    /// Over every override field: the loosest value admits nobody the
+    /// shared provider refuses, and grants nothing it would not.
+    #[test]
+    fn an_override_never_loosens_any_field() {
+        let roles = |p: &EffectivePolicy| p.signup().unwrap().default_roles.clone();
+        let loosest = [
+            SharedOverride::default(),
+            SharedOverride {
+                require_verified_email: Some(false),
+                ..SharedOverride::default()
+            },
+            SharedOverride {
+                signup_mode: Some(SignupMode::Open),
+                ..SharedOverride::default()
+            },
+            SharedOverride {
+                lifecycle: Lifecycle::parse(false, None, Some(999_999), Some(999_999)).unwrap(),
+                ..SharedOverride::default()
+            },
+            SharedOverride {
+                allowed_roles: "Viewer, Editor, Admin".parse().unwrap(),
+                ..SharedOverride::default()
+            },
+        ];
+        let base = shared_base();
+        for ov in loosest {
+            let both = shared_base().shared_override(Ok(Some(ov.clone())));
+            for id in people() {
+                if both.check(&id).is_ok() {
+                    assert!(base.check(&id).is_ok(), "{ov:?} admitted {id:?}");
+                }
+            }
+            let sp = both.signup().unwrap();
+            for surface in [Surface::TenantAdmin, Surface::Member] {
+                assert!(
+                    both.signup_mode(surface, sp)
+                        <= base.signup_mode(surface, base.signup().unwrap()),
+                    "{ov:?}"
+                );
+            }
+            assert!(both.lifecycle().unwrap().sso_only, "{ov:?}");
+            for su in [false, true] {
+                assert!(both.session_ttl(86_400, su) <= base.session_ttl(86_400, su));
+            }
+            let granted = roles(&both);
+            assert!(
+                granted
+                    .names()
+                    .iter()
+                    .all(|r| roles(&base).names().contains(r)),
+                "{ov:?} granted {granted:?}"
+            );
+        }
+    }
+
+    /// Each override field does tighten.
+    #[test]
+    fn an_override_tightens_every_field() {
+        let tight = SharedOverride {
+            sign_in: SignInPolicy::parse(&SignInColumns {
+                blocked_email_domains: Some("client.org"),
+                ..SignInColumns::default()
+            })
+            .unwrap(),
+            ..SharedOverride::default()
+        };
+        let p = shared_base().shared_override(Ok(Some(tight)));
+        assert_eq!(
+            p.check(&person("a@client.org", true, serde_json::json!({})))
+                .unwrap_err()
+                .rule(),
+            "domain_blocked"
+        );
+        // The shared provider takes unverified emails; the override does not.
+        let verified = SharedOverride {
+            require_verified_email: Some(true),
+            ..SharedOverride::default()
+        };
+        let unverified = person("a@client.org", false, serde_json::json!({}));
+        assert!(shared_base().check(&unverified).is_ok());
+        let p = shared_base().shared_override(Ok(Some(verified)));
+        assert_eq!(p.check(&unverified), Err(Refusal::EmailUnverified));
+        let closed = SharedOverride {
+            signup_mode: Some(SignupMode::Closed),
+            lifecycle: Lifecycle::parse(false, None, Some(60), Some(30)).unwrap(),
+            allowed_roles: "Viewer".parse().unwrap(),
+            ..SharedOverride::default()
+        };
+        let p = shared_base().shared_override(Ok(Some(closed)));
+        let sp = p.signup().unwrap();
+        assert_eq!(p.signup_mode(Surface::TenantAdmin, sp), SignupMode::Closed);
+        assert_eq!(p.session_ttl(86_400, false), 60);
+        assert_eq!(p.session_ttl(86_400, true), 30);
+        assert_eq!(sp.default_roles.names(), ["Viewer"]);
+        // No override: the shared provider grants no role here.
+        let none = shared_base().shared_override(Ok(None));
+        assert!(none.signup().unwrap().default_roles.is_empty());
+        // An unreadable override refuses.
+        let bad = shared_base().shared_override(Err(PolicyError("x".into())));
+        assert_eq!(
+            bad.check(&person("a@client.org", true, serde_json::json!({}))),
+            Err(Refusal::PolicyInvalid)
+        );
+    }
+
+    #[test]
+    fn session_ttl_is_the_shortest_and_bad_numbers_refuse() {
+        let p = shared_base();
+        assert_eq!(p.session_ttl(86_400, false), 3600);
+        assert_eq!(p.session_ttl(86_400, true), 600);
+        assert_eq!(p.session_ttl(100, true), 100);
+        assert!(Lifecycle::parse(false, None, Some(0), None).is_err());
+        let bad = EffectivePolicy::legacy(true).with_lifecycle(Lifecycle::parse(
+            false,
+            Some(-1),
+            None,
+            None,
+        ));
+        assert_eq!(
+            bad.check(&person("a@b.org", true, serde_json::json!({}))),
+            Err(Refusal::PolicyInvalid)
+        );
     }
 
     #[cfg(feature = "admin")]

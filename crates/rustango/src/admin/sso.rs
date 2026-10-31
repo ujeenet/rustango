@@ -111,6 +111,10 @@ async fn sso_begin(
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
+    let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
+    if let Err(refused) = crate::sso::policy::throttle_check(&scope, &extensions, &headers).await {
+        return refused;
+    }
     let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
@@ -176,6 +180,11 @@ async fn sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
+    let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
+    let attempt = match crate::sso::policy::throttle_begin(&scope, &extensions, &headers).await {
+        Ok(a) => a,
+        Err(refused) => return refused,
+    };
     let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
@@ -200,6 +209,7 @@ async fn sso_callback(
         }
         Err(e) => {
             tracing::warn!(target: "rustango::admin::sso", "handshake: {e}");
+            attempt.failed().await;
             return login_error(&state, "handshake");
         }
     };
@@ -210,7 +220,8 @@ async fn sso_callback(
     let accounts = AdminAccounts(&state.pool);
     let path = format!("/login/sso/{slug}");
     let meta = || meta_from_parts(&extensions, &headers, Some(&path));
-    let policy = crate::sso::policy::EffectivePolicy::new(cfg.policy.clone(), false);
+    let policy = crate::sso::policy::EffectivePolicy::new(cfg.policy.clone(), false)
+        .with_lifecycle(cfg.lifecycle.clone());
     let request = crate::sso::policy::AdmitRequest::new(
         &state.pool,
         crate::sso::policy::Surface::BareAdmin,
@@ -235,6 +246,7 @@ async fn sso_callback(
                 path: &path,
             };
             crate::sso::policy::refuse(&ctx, &r).await;
+            attempt.failed().await;
             return login_error(&state, "nouser");
         }
         Err(e) => {
@@ -256,6 +268,8 @@ async fn sso_callback(
         .await;
         return login_error(&state, "nouser");
     }
+    attempt.succeeded().await;
+    let ttl = policy.session_ttl(session::DEFAULT_TTL_SECS, user.is_superuser);
     // A confirmed device owes its code first, as on the password login (#2249).
     #[cfg(feature = "totp")]
     match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
@@ -269,7 +283,7 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     }
-    mint_session(&state, secret, &user, meta()).await
+    mint_session(&state, secret, &user, meta(), ttl).await
 }
 
 /// Mint the normal admin session, bound to the user's stored password
@@ -279,14 +293,16 @@ async fn mint_session(
     secret: &session::AdminSessionSecret,
     user: &AdminUser,
     request: AuthRequestMeta,
+    ttl_secs: i64,
 ) -> Response {
     let uid = user.id.get().copied().unwrap_or_default();
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
-    let cookie_value = session::encode(
+    let cookie_value = session::encode_for(
         secret,
         AdminSession::new(uid, user.username.clone(), user.is_superuser),
         &auth_hash,
         user.sessions_revoked_at,
+        ttl_secs,
     );
     let session_cookie = format!(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",
@@ -462,7 +478,8 @@ mod second_factor {
         }
         attempt.succeeded().await;
         let meta = meta_from_parts(&extensions, &headers, Some("/login/sso-totp"));
-        let mut resp = mint_session(&state, secret, &user, meta).await;
+        // The provider's lifetime is not carried past the code prompt.
+        let mut resp = mint_session(&state, secret, &user, meta, session::DEFAULT_TTL_SECS).await;
         clear_cookie(&mut resp, PENDING_COOKIE);
         resp
     }

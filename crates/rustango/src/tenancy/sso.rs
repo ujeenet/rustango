@@ -599,6 +599,56 @@ mod tests {
         );
     }
 
+    /// A disabled tenant row still hides the shared provider with its slug.
+    #[test]
+    fn a_disabled_tenant_row_hides_the_shared_one() {
+        let buttons = merge_provider_buttons(
+            "/login",
+            vec![row("corp", "Tenant Corp", 0, false)],
+            vec![row("corp", "Shared Corp", 0, true)],
+        );
+        assert!(buttons.is_empty(), "{:?}", buttons.len());
+    }
+
+    /// The default provider, or the only one with the password form
+    /// hidden; never with `?local=1`, an SSO error or a flash.
+    #[test]
+    fn auto_redirect_picks_and_never_loops() {
+        use crate::sso::policy::{PasswordLogin, TenantSettings};
+        let one = merge_provider_buttons("/login", vec![row("corp", "C", 0, true)], vec![]);
+        let two = merge_provider_buttons(
+            "/login",
+            vec![row("corp", "C", 0, true), row("b", "B", 1, true)],
+            vec![],
+        );
+        let on = TenantSettings::default();
+        let off = TenantSettings {
+            password_login: PasswordLogin::SuperusersOnly,
+            ..TenantSettings::default()
+        };
+        let default = TenantSettings {
+            default_provider: Some("corp".into()),
+            ..TenantSettings::default()
+        };
+        let go = |s: &TenantSettings, p: &[super::ProviderButton], q: Option<&str>, f| {
+            super::auto_redirect(s, p, q, f)
+        };
+        assert_eq!(go(&on, &one, None, false), None);
+        assert_eq!(
+            go(&off, &one, None, false).as_deref(),
+            Some("/login/sso/corp")
+        );
+        assert_eq!(go(&off, &two, None, false), None);
+        assert_eq!(
+            go(&default, &two, None, false).as_deref(),
+            Some("/login/sso/corp")
+        );
+        for q in ["local=1", "sso_error=nouser", "next=/x&local=1"] {
+            assert_eq!(go(&default, &two, Some(q), false), None, "{q}");
+        }
+        assert_eq!(go(&default, &two, None, true), None);
+    }
+
     #[test]
     fn shared_only_when_no_tenant_providers() {
         let buttons = merge_provider_buttons(
