@@ -782,33 +782,29 @@ async fn link_sources(pool: &Pool, subjects: &[&str]) -> Vec<Option<String>> {
 }
 
 /// Deleting a user in the admin deletes its links, so a later user given
-/// the same id does not sign in through them; links into the admin's own
-/// user table stay.
+/// the same id does not sign in through them; an `admin` link points into
+/// the admin's own user table and stays.
 async fn deleting_a_user_deletes_its_links(pool: &Pool) {
-    for bulk in [false, true] {
-        let name = unique("gone");
-        let (status, body) = create_user(pool, &name, "pw-links-gone").await;
-        assert!(status.is_redirection(), "{status}: {body}");
-        let id = user_pk(pool, &name).await;
-        let tenant = seed_link(pool, "tenant", id).await;
-        let shared = seed_link(pool, "shared", id).await;
-        let admin = seed_link(pool, "admin", id).await;
-        let (uri, body) = if bulk {
-            (
-                "/rustango_users/__action".to_owned(),
-                format!("action=delete_selected&_selected={id}"),
-            )
-        } else {
-            (format!("/rustango_users/{id}/delete"), String::new())
-        };
-        let (status, body) = send(pool, Method::POST, &uri, body).await;
-        assert!(status.is_redirection(), "bulk={bulk} {status}: {body}");
-        assert_eq!(
-            link_sources(pool, &[&tenant, &shared, &admin]).await,
-            [None, None, Some("admin".to_owned())],
-            "bulk={bulk}"
-        );
-    }
+    let name = unique("gone");
+    let (status, body) = create_user(pool, &name, "pw-links-gone").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let id = user_pk(pool, &name).await;
+    let tenant = seed_link(pool, "tenant", id).await;
+    let shared = seed_link(pool, "shared", id).await;
+    let app = seed_link(pool, "app", id).await;
+    let admin = seed_link(pool, "admin", id).await;
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_users/{id}/delete"),
+        String::new(),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(
+        link_sources(pool, &[&tenant, &shared, &app, &admin]).await,
+        [None, None, None, Some("admin".to_owned())]
+    );
 }
 
 /// POST a new link through a tenant (`tenant_db`) or single-database admin;

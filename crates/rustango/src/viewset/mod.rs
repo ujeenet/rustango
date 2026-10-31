@@ -5153,6 +5153,7 @@ mod sso_table_tests {
 
     #[test]
     fn viewset_refuses_every_sso_table() {
+        #[allow(unused_mut)]
         let mut schemas: Vec<&'static ModelSchema> = vec![
             crate::sso::SsoProvider::SCHEMA,
             crate::sso::SsoLink::SCHEMA,

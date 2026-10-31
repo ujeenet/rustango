@@ -102,6 +102,7 @@ pub use sso_provider::SsoProvider;
 #[doc(hidden)]
 pub use urls::__router_builds;
 pub(crate) use urls::ungated_admin_built;
+#[cfg(feature = "sso")]
 pub(crate) use urls::AdminDatabase;
 #[cfg(feature = "tenancy")]
 pub(crate) use urls::{per_request_router, RequestState};
