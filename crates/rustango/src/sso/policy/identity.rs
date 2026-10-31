@@ -41,6 +41,8 @@ pub struct Identity {
     jwks: bool,
     /// The claims a verified id_token carried.
     token_claims: Vec<String>,
+    /// The policy pins this token's Microsoft `tid`: its directory's claims count.
+    tid_pinned: bool,
     pub id_token: IdToken,
 }
 
@@ -140,6 +142,7 @@ impl Identity {
             microsoft,
             jwks: false,
             token_claims,
+            tid_pinned: false,
             id_token,
         }
     }
@@ -185,7 +188,29 @@ impl Identity {
         if self.jwks && !self.token_claims.iter().any(|k| k == name) {
             return None;
         }
+        self.directory_claim(name)
+    }
+
+    /// A claim a rule or role reads. Any Microsoft directory signs for a
+    /// multi-tenant app, so its claims count only once the policy pins its `tid`.
+    #[must_use]
+    pub fn directory_claim(&self, name: &str) -> Option<&Value> {
+        if self.microsoft && !(self.tid_pinned && self.claim_str("tid").is_some()) {
+            return None;
+        }
         self.claim(name)
+    }
+
+    /// This identity under a policy that does (or does not) pin its `tid`.
+    #[must_use]
+    pub(crate) fn pinned(mut self, tid_pinned: bool) -> Self {
+        self.tid_pinned = tid_pinned;
+        self
+    }
+
+    /// Whether the policy this identity runs under pins its `tid`.
+    pub(crate) fn tid_pinned(&self) -> bool {
+        self.tid_pinned
     }
 
     /// A claim that is a non-empty string.
@@ -256,7 +281,7 @@ impl RequiredClaims {
                 Value::Bool(_) | Value::Number(_) => want.contains(&v.to_string()),
                 _ => false,
             };
-            let ok = match identity.claim(name) {
+            let ok = match identity.directory_claim(name) {
                 Some(Value::Array(list)) => list.iter().any(has),
                 Some(v) => has(v),
                 None => false,

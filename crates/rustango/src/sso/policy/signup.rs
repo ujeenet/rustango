@@ -1023,7 +1023,8 @@ mod store {
         };
         let mut out = RoleSync::default();
         let storage = |e: ExecError| Denied::Storage(format!("role sync: {e}"));
-        let mut tx = crate::sql::transaction_pool(pool).await.map_err(storage)?;
+        // Reads first: on SQLite take the write lock up front.
+        let mut tx = crate::sql::write_transaction(pool).await.map_err(storage)?;
         let roles = roles_named_tx(&mut tx, &managed).await.map_err(storage)?;
         let role_ids: Vec<SqlValue> = roles
             .iter()
@@ -1146,9 +1147,17 @@ mod store {
             return;
         }
         tracing::warn!(target: "rustango::sso", user_id, provider, roles = ?names, "SSO role names with no role row were skipped");
+        // Every sign-in repeats it: capped like refusals.
+        let table = "rustango_user_roles";
+        let pk = user_id.to_string();
+        if crate::sso::policy::recent_audit_rows(pool, table, &pk).await
+            >= crate::sso::policy::MAX_REFUSAL_ROWS
+        {
+            return;
+        }
         let entry = crate::audit::PendingEntry {
-            entity_table: "rustango_user_roles",
-            entity_pk: user_id.to_string(),
+            entity_table: table,
+            entity_pk: pk,
             operation: crate::audit::AuditOp::Action,
             source: crate::audit::AuditSource::Custom("sso".into()),
             changes: serde_json::json!({

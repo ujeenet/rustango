@@ -219,7 +219,7 @@ impl std::fmt::Display for Denied {
 }
 
 /// One layer's sign-in rules. The default has none.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub struct SignInPolicy {
     pub allowed_email_domains: Option<DomainList>,
@@ -227,21 +227,6 @@ pub struct SignInPolicy {
     pub allowed_idp_tenants: Option<TokenList>,
     pub allowed_hosted_domains: Option<DomainList>,
     pub required_claims: RequiredClaims,
-    /// Kept for stored rows; the domain allowlist always needs an IdP-verified email.
-    pub require_verified_email: bool,
-}
-
-impl Default for SignInPolicy {
-    fn default() -> Self {
-        Self {
-            allowed_email_domains: None,
-            blocked_email_domains: None,
-            allowed_idp_tenants: None,
-            allowed_hosted_domains: None,
-            required_claims: RequiredClaims::default(),
-            require_verified_email: true,
-        }
-    }
 }
 
 /// A provider row's stored sign-in columns, unparsed.
@@ -253,7 +238,6 @@ pub struct SignInColumns<'a> {
     pub allowed_idp_tenants: Option<&'a str>,
     pub allowed_hosted_domains: Option<&'a str>,
     pub required_claims: Option<&'a serde_json::Value>,
-    pub require_verified_email: bool,
 }
 
 impl SignInPolicy {
@@ -279,7 +263,6 @@ impl SignInPolicy {
                 .map(RequiredClaims::parse)
                 .transpose()?
                 .unwrap_or_default(),
-            require_verified_email: c.require_verified_email,
         })
     }
 
@@ -308,8 +291,8 @@ impl SignInPolicy {
             }
         }
         if let Some(allowed) = &self.allowed_email_domains {
-            // Only a verified email, whatever `require_verified_email` says:
-            // an unverified one is whatever the user typed at the IdP.
+            // Only a verified email: an unverified one is whatever the
+            // user typed at the IdP.
             let email = identity
                 .verified_email(self.pins(identity))
                 .ok_or(Refusal::EmailUnverified)?;
@@ -329,6 +312,9 @@ impl SignInPolicy {
             {
                 return Err(Refusal::HostedDomain);
             }
+        }
+        if !identity.tid_pinned() && self.pins(identity) {
+            return self.required_claims.check(&identity.clone().pinned(true));
         }
         self.required_claims.check(identity)
     }
@@ -411,6 +397,8 @@ pub struct EffectivePolicy {
     roles_allowed: Option<RoleNames>,
     /// Sign-ups per hour; `None`: no limit.
     signups_per_hour: Option<u32>,
+    /// A tenant override turned off email-linking role holders.
+    staff_link_off: bool,
 }
 
 impl EffectivePolicy {
@@ -435,6 +423,7 @@ impl EffectivePolicy {
             lifecycle: Ok(Lifecycle::default()),
             roles_allowed: None,
             signups_per_hour: None,
+            staff_link_off: false,
         }
     }
 
@@ -476,6 +465,8 @@ impl EffectivePolicy {
             (a, b) => a.or(b),
         };
         self.lifecycle = self.lifecycle.map(|l| l.tighten(ov.lifecycle));
+        self.allow_email_link &= !ov.email_link_off;
+        self.staff_link_off |= ov.email_link_staff_off;
         self.roles_allowed = Some(match self.roles_allowed.take() {
             Some(prev) => ov.allowed_roles.only(&prev),
             None => ov.allowed_roles,
@@ -494,6 +485,9 @@ impl EffectivePolicy {
     fn restrict_roles(&mut self) {
         if let (Some(allowed), Ok(signup)) = (&self.roles_allowed, &mut self.signup) {
             signup.restrict_roles(allowed);
+        }
+        if let (true, Ok(signup)) = (self.staff_link_off, &mut self.signup) {
+            signup.allow_email_link_staff = false;
         }
     }
 
@@ -567,6 +561,7 @@ impl EffectivePolicy {
             tracing::error!(target: "rustango::sso", "SSO session rules do not parse: {e}");
             return Err(Refusal::PolicyInvalid);
         }
+        let identity = &self.scope(identity);
         for layer in &self.layers {
             match layer {
                 Ok(p) => p.check(identity)?,
@@ -577,6 +572,16 @@ impl EffectivePolicy {
             }
         }
         Ok(())
+    }
+
+    /// `identity` with its directory's claims trusted when a layer pins its
+    /// `tid`; every layer must pass, so one pin bounds the directory.
+    pub(crate) fn scope(&self, identity: &Identity) -> Identity {
+        let pinned = self
+            .layers
+            .iter()
+            .any(|l| l.as_ref().is_ok_and(|p| p.pins(identity)));
+        identity.clone().pinned(pinned)
     }
 
     /// The email to link by. A pinned `tid` vouches only when every layer pins it.
@@ -658,6 +663,13 @@ pub async fn admit<A: AccountLookup>(
         ..
     } = req;
     policy.check(identity)?;
+    // Role sync and sign-up read the directory's claims only under a `tid` pin.
+    let scoped = policy.scope(identity);
+    let req = AdmitRequest {
+        identity: &scoped,
+        ..req
+    };
+    let identity = &scoped;
     let signup = policy.signup.as_ref().map_err(|e| {
         tracing::error!(target: "rustango::sso", "SSO sign-up policy does not parse: {e}");
         Refusal::PolicyInvalid
@@ -1212,7 +1224,7 @@ pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
             "email": email,
         }),
     };
-    if refusal_rows_recently(ctx.pool, &entry.entity_pk).await < MAX_REFUSAL_ROWS {
+    if recent_audit_rows(ctx.pool, entry.entity_table, &entry.entity_pk).await < MAX_REFUSAL_ROWS {
         if let Err(e) = crate::audit::emit_one_pool(ctx.pool, &entry).await {
             tracing::error!(target: "rustango::sso", error = %e, "an SSO refusal was NOT written to the audit log");
         }
@@ -1229,18 +1241,15 @@ pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
     .await;
 }
 
-/// Audit rows one `(provider, subject)` gets per [`REFUSAL_WINDOW`].
-#[cfg(feature = "admin")]
-const MAX_REFUSAL_ROWS: i64 = 5;
-#[cfg(feature = "admin")]
+/// Repeated SSO audit rows one subject gets per [`REFUSAL_WINDOW`].
+pub(crate) const MAX_REFUSAL_ROWS: i64 = 5;
 const REFUSAL_WINDOW: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
-/// SSO audit rows for `entity_pk` in the last [`REFUSAL_WINDOW`]; 0 when unreadable.
-#[cfg(feature = "admin")]
-async fn refusal_rows_recently(pool: &Pool, entity_pk: &str) -> i64 {
+/// Audit rows for `table`/`entity_pk` in the last [`REFUSAL_WINDOW`]; 0 when unreadable.
+pub(crate) async fn recent_audit_rows(pool: &Pool, table: &'static str, entity_pk: &str) -> i64 {
     use crate::sql::CounterPool as _;
     crate::audit::AuditLog::objects()
-        .filter("entity_table", "rustango_sso_links")
+        .filter("entity_table", table)
         .filter("entity_pk", entity_pk.to_owned())
         .filter("occurred_at__gte", chrono::Utc::now() - REFUSAL_WINDOW)
         .count(pool)
@@ -1318,7 +1327,6 @@ mod tests {
         SignInPolicy::parse(&SignInColumns {
             allowed_email_domains: allowed,
             blocked_email_domains: blocked,
-            require_verified_email: true,
             ..SignInColumns::default()
         })
         .unwrap()
@@ -1360,27 +1368,6 @@ mod tests {
             .is_err());
     }
 
-    /// The allowlist never matches an unverified email, even with
-    /// `require_verified_email` off.
-    #[test]
-    fn the_allowlist_needs_a_verified_email_whatever_the_flag() {
-        let off = SignInPolicy::parse(&SignInColumns {
-            allowed_email_domains: Some("client.org"),
-            require_verified_email: false,
-            ..SignInColumns::default()
-        })
-        .unwrap();
-        let unverified = person("ann@client.org", false, serde_json::json!({}));
-        assert_eq!(off.check(&unverified), Err(Refusal::EmailUnverified));
-        assert_eq!(
-            shared_base().check(&unverified),
-            Err(Refusal::EmailUnverified)
-        );
-        assert!(off
-            .check(&person("ann@client.org", true, serde_json::json!({})))
-            .is_ok());
-    }
-
     #[test]
     fn the_default_policy_admits_anyone_with_a_subject() {
         let p = SignInPolicy::default();
@@ -1400,7 +1387,6 @@ mod tests {
         let p = SignInPolicy::parse(&SignInColumns {
             allowed_idp_tenants: Some("T1"),
             allowed_hosted_domains: Some("client.org"),
-            require_verified_email: true,
             ..SignInColumns::default()
         })
         .unwrap();
@@ -1438,6 +1424,68 @@ mod tests {
         );
     }
 
+    /// Any directory signs for a multi-tenant Microsoft app: its roles and
+    /// claims count only once a layer pins its `tid`.
+    #[test]
+    fn microsoft_claims_count_only_under_a_tid_pin() {
+        let token = |tid: &str| {
+            serde_json::json!({"sub": "sub-1", "tid": tid, "roles": ["Admin"], "groups": ["Admin"]})
+                .as_object()
+                .unwrap()
+                .clone()
+        };
+        let ms = |tid: &str| {
+            test_identity(
+                NormalizedUser {
+                    provider: "microsoft".into(),
+                    provider_user_id: "sub-1".into(),
+                    email: None,
+                    email_verified: false,
+                    name: None,
+                    avatar_url: None,
+                    raw: serde_json::json!({}),
+                },
+                Some(token(tid)),
+                true,
+            )
+            .with_jwks()
+        };
+        let layer = |pin: Option<&str>| {
+            SignInPolicy::parse(&SignInColumns {
+                allowed_idp_tenants: pin,
+                required_claims: Some(&serde_json::json!({"roles": ["Admin"]})),
+                ..SignInColumns::default()
+            })
+        };
+        let map = RoleMap::parse(Some(&serde_json::json!({"Admin": "Editor"})), None).unwrap();
+        let unpinned = EffectivePolicy::new(layer(None), false);
+        assert_eq!(
+            unpinned.check(&ms("t1")),
+            Err(Refusal::Claim {
+                name: "roles".into()
+            })
+        );
+        assert_eq!(map.wanted(&unpinned.scope(&ms("t1"))), None);
+        let pinned = EffectivePolicy::new(layer(Some("t1")), false);
+        assert!(pinned.check(&ms("t1")).is_ok());
+        assert_eq!(
+            map.wanted(&pinned.scope(&ms("t1"))),
+            Some(["Editor".to_owned()].into())
+        );
+        assert_eq!(pinned.check(&ms("t2")), Err(Refusal::IdpTenant));
+        assert_eq!(map.wanted(&pinned.scope(&ms("t2"))), None);
+        // A pin on another layer bounds the directory too.
+        let shared =
+            EffectivePolicy::new(layer(None), false).tighten(SignInPolicy::parse(&SignInColumns {
+                allowed_idp_tenants: Some("t1"),
+                ..SignInColumns::default()
+            }));
+        assert!(shared.check(&ms("t1")).is_ok());
+        // Not Microsoft: claims count as before.
+        let plain = person("a@b.org", true, serde_json::json!({"roles": ["Admin"]}));
+        assert!(unpinned.check(&plain).is_ok());
+    }
+
     #[test]
     fn an_unparseable_layer_refuses() {
         let bad = SignInPolicy::parse(&SignInColumns {
@@ -1467,15 +1515,12 @@ mod tests {
         for allowed in lists {
             for blocked in lists {
                 for tid in tenants {
-                    for verified in [true, false] {
-                        layers.push(SignInPolicy::parse(&SignInColumns {
-                            allowed_email_domains: allowed,
-                            blocked_email_domains: blocked,
-                            allowed_idp_tenants: tid,
-                            require_verified_email: verified,
-                            ..SignInColumns::default()
-                        }));
-                    }
+                    layers.push(SignInPolicy::parse(&SignInColumns {
+                        allowed_email_domains: allowed,
+                        blocked_email_domains: blocked,
+                        allowed_idp_tenants: tid,
+                        ..SignInColumns::default()
+                    }));
                 }
             }
         }
@@ -1531,7 +1576,6 @@ mod tests {
     fn shared_base() -> EffectivePolicy {
         let sign_in = SignInPolicy::parse(&SignInColumns {
             allowed_email_domains: Some("client.org"),
-            require_verified_email: false,
             ..SignInColumns::default()
         });
         let signup = SignupPolicy::parse(&SignupColumns {
@@ -1561,10 +1605,6 @@ mod tests {
         let roles = |p: &EffectivePolicy| p.signup().unwrap().default_roles.clone();
         let loosest = [
             SharedOverride::default(),
-            SharedOverride {
-                require_verified_email: Some(false),
-                ..SharedOverride::default()
-            },
             SharedOverride {
                 signup_mode: Some(SignupMode::Open),
                 ..SharedOverride::default()
@@ -1639,6 +1679,27 @@ mod tests {
         assert_eq!(p.session_ttl(86_400, false), 60);
         assert_eq!(p.session_ttl(86_400, true), 30);
         assert_eq!(sp.default_roles.names(), ["Viewer"]);
+        // Email linking: an override turns it off, never on.
+        let staffy = || {
+            shared_base().with_signup(SignupPolicy::parse(&SignupColumns {
+                allow_email_link_staff: true,
+                ..SignupColumns::default()
+            }))
+        };
+        let off = SharedOverride {
+            email_link_off: true,
+            email_link_staff_off: true,
+            ..SharedOverride::default()
+        };
+        let p = staffy().shared_override(Ok(Some(off)));
+        assert!(!p.allow_email_link);
+        assert!(!p.signup().unwrap().allow_email_link_staff);
+        let kept = staffy().shared_override(Ok(Some(SharedOverride::default())));
+        assert!(kept.allow_email_link);
+        assert!(kept.signup().unwrap().allow_email_link_staff);
+        let mut row_off = EffectivePolicy::new(Ok(SignInPolicy::default()), false);
+        row_off = row_off.shared_override(Ok(Some(SharedOverride::default())));
+        assert!(!row_off.allow_email_link, "an override never turns it on");
         // No override: the shared provider grants no role here.
         let none = shared_base().shared_override(Ok(None));
         assert!(none.signup().unwrap().default_roles.is_empty());

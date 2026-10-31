@@ -424,7 +424,6 @@ fn provider_row(issuer: &str, slug: &str, allow_email_link: bool) -> SsoProvider
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),
@@ -1297,6 +1296,8 @@ async fn only_a_superuser_writes_links_and_providers() {
 }
 
 #[tokio::test]
+// The legacy helper, kept until it is removed.
+#[allow(deprecated)]
 async fn a_failed_link_insert_leaves_no_member_behind() {
     use rustango::sso::ProviderKey;
     use rustango::tenancy::member_auth::find_or_provision_member;
@@ -1977,6 +1978,8 @@ fn profile(sub: &str, email: &str) -> rustango::oauth2::NormalizedUser {
 }
 
 #[tokio::test]
+// The legacy helper, kept until it is removed.
+#[allow(deprecated)]
 async fn member_flow_provisions_with_a_link_and_tells_not_linked_apart() {
     use rustango::sso::ProviderKey;
     use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};
@@ -2366,6 +2369,14 @@ async fn upgrading_adds_the_framework_column_once() {
     rustango::sql::raw_execute_pool(
         &pool,
         "ALTER TABLE rustango_sso_providers DROP COLUMN allow_email_link",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    // The strip above also took the tenant override's column of that name.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "ALTER TABLE rustango_sso_shared_overrides DROP COLUMN allow_email_link",
         Vec::new(),
     )
     .await

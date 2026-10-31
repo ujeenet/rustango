@@ -164,7 +164,13 @@ async fn shared_rules(
     let own = read_lifecycle::<SharedSsoProvider>(registry, id)
         .await
         .map_err(|e| e.0)?;
-    let tenant = super::policy::SharedOverride::load(pool, &row.slug)
+    let key = super::link::ProviderKey::for_row(
+        LinkSource::Shared,
+        row.id,
+        &row.kind,
+        row.issuer_url.as_deref(),
+    );
+    let tenant = super::policy::SharedOverride::load(pool, &key, &row.slug)
         .await
         .map_err(|e| e.0)?;
     Ok(Some(match tenant {
@@ -200,39 +206,55 @@ async fn sso_only(
     Ok(false)
 }
 
+/// What one [`deactivate_idle`] run did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct IdleSweep {
+    /// The users switched off.
+    pub deactivated: Vec<i64>,
+    /// Users skipped on a read or write error; the next run retries them.
+    pub failed: usize,
+}
+
 /// Switch off tenant users whose every link was made by SSO sign-up and
 /// has not been used for its provider's `auto_deactivate_after_days`, and
 /// who cannot use a password here ([`password_login_allowed`]): `active`
 /// goes false and their sessions end. Never a superuser, nor a user with a
 /// link an admin made. The write re-checks that no link was used since.
 /// A link through a shared provider is read through `registry`; without it
-/// that user is left alone. Returns the user ids.
+/// that user is left alone. One user's error skips only that user.
 ///
 /// # Errors
-/// A read or write failed.
+/// The links or the tenant settings could not be read.
 #[cfg(feature = "tenancy")]
-pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec<i64>, String> {
+pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<IdleSweep, String> {
     use crate::sql::FetcherPool as _;
     use crate::tenancy::User;
     let links = match SsoLink::objects().fetch(pool).await {
         Ok(l) => l,
         Err(e) => {
             return match crate::migrate::try_table_exists_here(pool, "rustango_sso_links").await {
-                Ok(false) => Ok(Vec::new()),
+                Ok(false) => Ok(IdleSweep::default()),
                 _ => Err(format!("links: {e}")),
             }
         }
     };
+    // An unreadable settings row would read as "no passwords": stop instead.
+    let settings = super::policy::TenantSettings::load(pool)
+        .await
+        .map_err(|e| format!("settings: {e}"))?;
     let mut by_user: HashMap<i64, Vec<&SsoLink>> = HashMap::new();
     for l in &links {
         by_user.entry(l.user_id).or_default().push(l);
     }
     let now = chrono::Utc::now();
     let mut rules: HashMap<(String, i64), Option<Lifecycle>> = HashMap::new();
-    // Each idle user with the earliest cutoff among its links.
-    let mut idle = Vec::new();
+    // Each idle user with the earliest cutoff among its links, and whether
+    // a provider it is linked through is `sso_only`.
+    let mut idle: HashMap<i64, (chrono::DateTime<chrono::Utc>, bool)> = HashMap::new();
     'users: for (user_id, links) in by_user {
         let mut earliest = now;
+        let mut sso_only = false;
         for l in &links {
             if !l.provisioned {
                 continue 'users;
@@ -260,52 +282,96 @@ pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec
                 continue 'users;
             }
             earliest = earliest.min(cutoff);
+            // As `password_login_allowed`: only tenant and shared links count.
+            sso_only |= rule.is_some_and(|r| r.sso_only)
+                && [LinkSource::Tenant, LinkSource::Shared]
+                    .iter()
+                    .any(|s| s.as_str() == l.provider_source);
         }
-        idle.push((user_id, earliest));
+        idle.insert(user_id, (earliest, sso_only));
     }
-    let mut done = Vec::new();
-    for (user_id, cutoff) in idle {
-        use crate::sql::UpdaterPool as _;
-        let Some(user) = crate::tenancy::member_auth::find_tenant_user(pool, user_id)
-            .await
-            .map_err(|e| format!("user {user_id}: {e}"))?
-        else {
-            continue;
-        };
-        // A user who may still use a password is not SSO-only: leave it.
-        if user.is_superuser || password_login_allowed(pool, registry, &user).await {
-            continue;
-        }
-        let used_since = SsoLink::objects()
-            .filter("last_used_at__gte", cutoff)
-            .values_list_flat("user_id")
-            .compile()
-            .map_err(|e| e.to_string())?;
-        let n = User::objects()
-            .filter("id", user_id)
+    let mut out = IdleSweep::default();
+    let ids: Vec<i64> = idle.keys().copied().collect();
+    for chunk in ids.chunks(crate::list_params::MAX_IN_VALUES) {
+        let list = chunk.iter().copied().map(SqlValue::I64).collect();
+        let users = match User::objects()
+            .filter("id__in", SqlValue::List(list))
             .filter("is_superuser", false)
             .filter("active", true)
-            .where_not_in_subquery("id", used_since)
-            .update()
-            .set("active", false)
-            .set("sessions_revoked_at", now)
-            .execute_pool(pool)
+            .fetch(pool)
             .await
-            .map_err(|e| format!("deactivate user {user_id}: {e}"))?;
-        if n == 0 {
-            continue;
-        }
-        let entry = crate::audit::PendingEntry {
-            entity_table: "rustango_users",
-            entity_pk: user_id.to_string(),
-            operation: crate::audit::AuditOp::Action,
-            source: crate::audit::AuditSource::Custom("sso".into()),
-            changes: serde_json::json!({"event": "sso_deactivated_idle", "active": false}),
+        {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::error!(target: "rustango::sso", error = %e, "idle users unreadable, skipped");
+                out.failed += chunk.len();
+                continue;
+            }
         };
-        if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
-            tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
+        for user in users {
+            let Some(&user_id) = user.id.get() else {
+                continue;
+            };
+            let Some(&(cutoff, sso_only)) = idle.get(&user_id) else {
+                continue;
+            };
+            // A user who may still use a password is not SSO-only: leave it.
+            if settings.password_allowed(false) && !sso_only {
+                continue;
+            }
+            match deactivate(pool, user_id, cutoff, now).await {
+                Ok(true) => out.deactivated.push(user_id),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::error!(target: "rustango::sso", user_id, "idle deactivation failed: {e}");
+                    out.failed += 1;
+                }
+            }
         }
-        done.push(user_id);
     }
-    Ok(done)
+    Ok(out)
+}
+
+/// Switch off `user_id` unless one of its links was used since `cutoff`;
+/// audit it. `false`: nothing changed.
+#[cfg(feature = "tenancy")]
+async fn deactivate(
+    pool: &Pool,
+    user_id: i64,
+    cutoff: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<bool, String> {
+    use crate::sql::UpdaterPool as _;
+    use crate::tenancy::User;
+    let used_since = SsoLink::objects()
+        .filter("user_id", user_id)
+        .filter("last_used_at__gte", cutoff)
+        .values_list_flat("user_id")
+        .compile()
+        .map_err(|e| e.to_string())?;
+    let n = User::objects()
+        .filter("id", user_id)
+        .filter("is_superuser", false)
+        .filter("active", true)
+        .where_not_in_subquery("id", used_since)
+        .update()
+        .set("active", false)
+        .set("sessions_revoked_at", now)
+        .execute_pool(pool)
+        .await
+        .map_err(|e| format!("deactivate user {user_id}: {e}"))?;
+    if n == 0 {
+        return Ok(false);
+    }
+    let entry = crate::audit::PendingEntry {
+        entity_table: "rustango_users",
+        entity_pk: user_id.to_string(),
+        operation: crate::audit::AuditOp::Action,
+        source: crate::audit::AuditSource::Custom("sso".into()),
+        changes: serde_json::json!({"event": "sso_deactivated_idle", "active": false}),
+    };
+    if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
+        tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
+    }
+    Ok(true)
 }

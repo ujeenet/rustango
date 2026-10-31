@@ -45,7 +45,6 @@ pub(super) struct SharedSsoForm {
     allowed_idp_tenants: String,
     allowed_hosted_domains: String,
     required_claims: String,
-    require_verified_email: String,
     sso_only: String,
     auto_deactivate_after_days: String,
     session_ttl_secs: String,
@@ -82,7 +81,6 @@ impl SharedSsoForm {
             kind: "oidc".into(),
             sort_order: "0".into(),
             enabled: on(true),
-            require_verified_email: on(true),
             ..Self::default()
         }
     }
@@ -109,7 +107,6 @@ impl SharedSsoForm {
                 serde_json::Value::Null => String::new(),
                 v => v.to_string(),
             },
-            require_verified_email: on(row.require_verified_email),
             sso_only: on(row.sso_only),
             auto_deactivate_after_days: num(row.auto_deactivate_after_days.map(i64::from)),
             session_ttl_secs: num(row.session_ttl_secs),
@@ -206,7 +203,6 @@ impl SharedSsoForm {
         row.allowed_idp_tenants = tenants;
         row.allowed_hosted_domains = hosted;
         row.required_claims = claims;
-        row.require_verified_email = self.require_verified_email == "on";
         row.sso_only = self.sso_only == "on";
         row.auto_deactivate_after_days = days;
         row.session_ttl_secs = ttl;
@@ -374,7 +370,6 @@ fn new_row(slug: String) -> SharedSsoProvider {
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),
@@ -471,10 +466,6 @@ fn detail(
         d.insert(k.into(), serde_json::json!(v));
     }
     d.insert("required_claims".into(), row.required_claims.clone());
-    d.insert(
-        "require_verified_email".into(),
-        serde_json::json!(row.require_verified_email),
-    );
     if let Some(replaced) = secret_replaced {
         d.insert("issuer_url".into(), serde_json::json!(row.issuer_url));
         d.insert("client_id".into(), serde_json::json!(row.client_id));

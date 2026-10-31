@@ -407,6 +407,9 @@ pub async fn confirm_password_reset_pool(
 /// hash; a session check your app writes itself must compare the hash too,
 /// or stamp its own column in the same transaction (#1736).
 ///
+/// SSO rules (`sso_only`, `password_login`) apply only when `user_table` is
+/// the tenant or bare-admin user table; any other table is not checked.
+///
 /// # Errors
 /// Same shape as [`confirm_password_reset_pool`].
 #[cfg(feature = "passwords")]
@@ -423,10 +426,11 @@ pub async fn confirm_password_reset_pool_into(
     let LinkTarget {
         pool,
         scope,
-        registry: _,
+        registry,
     } = target.into();
     let user_id = PasswordReset::verify(&scope, url, secret)?;
     check_password_strength(new_password)?;
+    sso_allows_password_into(pool, registry, user_id, user_table).await?;
     write_password_hash(
         pool,
         user_id,
@@ -485,7 +489,8 @@ pub async fn confirm_password_reset_single_use(
 }
 
 /// As [`confirm_password_reset_single_use`] but writes into a
-/// caller-named table / columns.
+/// caller-named table / columns. SSO rules apply as in
+/// [`confirm_password_reset_pool_into`].
 ///
 /// # Errors
 /// Same shape as [`confirm_password_reset_single_use`].
@@ -504,12 +509,13 @@ pub async fn confirm_password_reset_single_use_into(
     let LinkTarget {
         pool,
         scope,
-        registry: _,
+        registry,
     } = target.into();
     let user_id = PasswordReset::verify(&scope, url, secret)?;
     // Policy before consumption: a weak password must not cost the user
     // their link, but a replay must not reach the write.
     check_password_strength(new_password)?;
+    sso_allows_password_into(pool, registry, user_id, user_table).await?;
     consume_single_use(url, cache).await?;
     write_password_hash(
         pool,
@@ -546,6 +552,39 @@ async fn sso_allows_password(
     }
     #[cfg(not(all(feature = "sso", feature = "tenancy")))]
     let _ = (pool, registry, user_id);
+    Ok(())
+}
+
+/// [`sso_allows_password`] for a caller-named table: only the tenant and
+/// bare-admin user tables carry SSO rules.
+#[cfg(feature = "passwords")]
+#[allow(unused_variables)]
+async fn sso_allows_password_into(
+    pool: &crate::sql::Pool,
+    registry: Option<&crate::sql::Pool>,
+    user_id: i64,
+    user_table: &str,
+) -> Result<(), AuthFlowError> {
+    #[cfg(all(feature = "sso", feature = "tenancy"))]
+    if user_table == <crate::tenancy::User as crate::core::Model>::SCHEMA.table {
+        return sso_allows_password(pool, registry, user_id).await;
+    }
+    #[cfg(all(feature = "sso", feature = "admin"))]
+    if user_table == <crate::admin::AdminUser as crate::core::Model>::SCHEMA.table {
+        use crate::sql::FetcherPool as _;
+        let found = crate::admin::AdminUser::objects()
+            .filter("id", user_id)
+            .fetch(pool)
+            .await
+            .map_err(|e| AuthFlowError::Database(e.to_string()))?;
+        if let Some(user) = found.first() {
+            if !crate::sso::lifecycle::admin_password_allowed(pool, user_id, user.is_superuser)
+                .await
+            {
+                return Err(AuthFlowError::PasswordLoginDisabled);
+            }
+        }
+    }
     Ok(())
 }
 

@@ -155,10 +155,11 @@ pub enum Risk {
     EmailLinkOnCustomIdp,
     /// A plain `http://` issuer that is not loopback.
     InsecureIssuer,
-    /// Email domain rules with `require_verified_email` off (no effect: the allowlist needs a verified email).
-    UnverifiedDomainRule,
     /// A shared row that signs users up, in every tenant that uses it.
     SharedSignup,
+    /// A multi-tenant Microsoft row with a role map or required claims and
+    /// no `allowed_idp_tenants`: those claims are ignored until it pins one.
+    UnpinnedDirectoryClaims,
 }
 
 /// An enabled provider with a [`Risk`].
@@ -181,10 +182,10 @@ async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<R
         "issuer_url",
         "allow_email_link",
         "allow_email_link_staff",
-        "require_verified_email",
-        "allowed_email_domains",
-        "blocked_email_domains",
         "signup_mode",
+        "allowed_idp_tenants",
+        "role_map",
+        "required_claims",
     ];
     let rows = QuerySet::<P>::new()
         .filter("enabled", true)
@@ -211,10 +212,16 @@ async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<R
         if text(r.get("issuer_url")).is_some_and(|u| super::insecure_url(&u)) {
             push(Risk::InsecureIssuer);
         }
-        if int(r.get("require_verified_email")) == 0
-            && (set("allowed_email_domains") || set("blocked_email_domains"))
+        let kind = text(r.get("kind")).unwrap_or_default();
+        let multi_tenant = kind == "microsoft"
+            || (kind == "oidc"
+                && text(r.get("issuer_url"))
+                    .is_some_and(|u| crate::oauth2::is_microsoft_multi_tenant(&u)));
+        if multi_tenant
+            && !set("allowed_idp_tenants")
+            && (claims_set(r.get("role_map")) || claims_set(r.get("required_claims")))
         {
-            push(Risk::UnverifiedDomainRule);
+            push(Risk::UnpinnedDirectoryClaims);
         }
         let signs_up = text(r.get("signup_mode"))
             .and_then(|m| m.parse::<super::policy::SignupMode>().ok())
@@ -224,6 +231,17 @@ async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<R
         }
     }
     Ok(out)
+}
+
+/// Whether a stored JSON map holds an entry.
+fn claims_set(v: Option<&crate::core::SqlValue>) -> bool {
+    use crate::core::SqlValue;
+    let parsed = match v {
+        Some(SqlValue::Json(j)) => j.clone(),
+        Some(SqlValue::String(s)) => serde_json::from_str(s).unwrap_or_default(),
+        _ => serde_json::Value::Null,
+    };
+    parsed.as_object().is_some_and(|o| !o.is_empty())
 }
 
 /// The tenant's own providers with a [`Risk`].
@@ -264,13 +282,14 @@ fn risk_text(why: Risk) -> &'static str {
         Risk::InsecureIssuer => {
             "has an http:// issuer_url, so discovery and tokens travel in clear — use https"
         }
-        Risk::UnverifiedDomainRule => {
-            "has email domain rules with require_verified_email off; the allowlist still \
-             needs a verified email, so turn require_verified_email on to match"
-        }
         Risk::SharedSignup => {
             "is shared and signs users up, in every tenant that uses it — set signup_mode \
              closed or invite_only, or give tenants their own provider"
+        }
+        Risk::UnpinnedDirectoryClaims => {
+            "is multi-tenant Microsoft with role_map or required_claims but no \
+             allowed_idp_tenants; any directory can assert those claims, so they are ignored \
+             (no roles synced, required claims refuse) — set allowed_idp_tenants"
         }
     }
 }

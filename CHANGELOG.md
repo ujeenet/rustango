@@ -8,7 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
-- SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, required claims, and `require_verified_email`. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
+- SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, and required claims. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
 - The SSO callbacks read claims only an id_token carries (`tid`, `iss`) after checking its signature against the issuer's JWKS (RS256, ES256), its `aud`, `exp` and issuer. A Microsoft email counts as verified when `xms_edov` is true or the provider pins the token's `tid`.
 - Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
 - The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`).
@@ -23,23 +23,35 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
 - `ViewSet::for_model` refuses the SSO tables: a ViewSet skipped their superuser-only admin checks.
-- `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback, email domain rules with `require_verified_email` off, and a shared provider that signs users up.
+- `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback a shared provider that signs users up, and a multi-tenant Microsoft provider with a role map or required claims but no `allowed_idp_tenants`.
 - OIDC discovery refuses a document with no `issuer` or another issuer than the configured one.
 - Deleting a user in the admin deletes its SSO links; a link older than its account is now dropped by default.
 - The admin no longer saves an SSO link with an `admin` source outside the bare admin's database, or a source that database does not hold.
 - A disabled tenant SSO provider no longer falls through to the shared provider with the same slug.
 - A refused SSO sign-in no longer counts against the IP's password-login limit.
-- An SSO email domain allowlist matches only an IdP-verified email, whatever `require_verified_email` says.
+- An SSO email domain allowlist matches only an IdP-verified email.
 - Shared SSO providers are superuser-only in the admin, and a role holder (any role) counts as privileged for email linking.
 - An SSO email link or re-link to an existing tenant account locks its password, ends its sessions and revokes its API and agent keys, so whoever registered the email first loses access.
 - A tenant's own SSO provider is checked like the operator console's (slug, kind, issuer, `https` outside dev); the console shows an error instead of panicking when `RUSTANGO_SECRET_KEY` is unset.
 - SSO flows are single-use, OIDC sign-ins send a `nonce` the verified id_token must echo, flow cookies take the `__Host-` prefix at `/` over HTTPS, and the member landing (`?next`) is sealed at begin.
 - SSO invites refuse public suffix and free mail domains, a domain invite needs max uses or an expiry, and the stored IdP display name is capped at 150 characters.
 - The bare admin builds its SSO redirect URI only for a host on `security.allowed_hosts` (when set).
+- A multi-tenant Microsoft provider reads roles and required claims only when `allowed_idp_tenants` pins the token's `tid`.
+- OIDC discovery accepts Microsoft's `{tenantid}` issuer for `/common` and `/organizations` and checks each token's `iss` against its signed `tid`.
+- `SsoSharedOverride` is bound to the shared provider row on first use: a renamed row keeps it, a new row with the old slug does not.
+- `SsoSharedOverride` can turn off `allow_email_link` and `allow_email_link_staff` of a shared provider (never on).
+- Role sync takes SQLite's write lock up front, so concurrent sign-ins no longer fail with "database is locked".
+- The tenant SSO settings row is matched as exactly `default` on every backend.
+- The idle sweep reads users in batches and skips only the user that fails; resolving a provider reads its policy once.
+- Unknown mapped roles are audited at most 5 times per user per 10 minutes; the hourly sign-up count has an index.
+- The `SsoLink` re-link action checks every selected link (the staff rule included) before it changes any.
+- A bare-admin password change keeps the session's expiry instead of resetting it to 8 hours.
+- `confirm_password_reset_*_into` apply the SSO password rules when they write the tenant or bare-admin user table.
 
 ### Deprecated
 
 - `tenancy::authenticate_user` (raw Postgres connection): it skips the SSO password rules. Use `authenticate_user_pool`.
+- `tenancy::member_auth::find_or_provision_member`: it applies none of the provider's policy. Use `sso::policy::admit`.
 
 ## [0.61.14] — 2026-10-30
 

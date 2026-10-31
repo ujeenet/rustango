@@ -52,15 +52,24 @@ pub struct SsoInvite {
     table = "rustango_sso_shared_overrides",
     admin(
         list_display = "shared_slug, signup_mode, sso_only, allowed_roles",
-        ordering = "shared_slug"
+        ordering = "shared_slug",
+        readonly_fields = "shared_provider_id, shared_issuer",
     )
 )]
 #[allow(dead_code)]
 pub struct SsoSharedOverride {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
-    #[rustango(max_length = 64, unique)]
+    /// The shared provider's slug when the override was bound, for display.
+    #[rustango(max_length = 64, index)]
     pub shared_slug: String,
+    /// The shared provider row this override is bound to: set on its first
+    /// use, so a renamed row keeps it and a new row with the slug does not.
+    #[rustango(unique)]
+    pub shared_provider_id: Option<i64>,
+    /// That row's issuer when bound: a repointed row refuses until re-bound.
+    #[rustango(max_length = 300)]
+    pub shared_issuer: Option<String>,
     #[rustango(max_length = 2000)]
     pub allowed_email_domains: Option<String>,
     #[rustango(max_length = 2000)]
@@ -71,12 +80,15 @@ pub struct SsoSharedOverride {
     pub allowed_hosted_domains: Option<String>,
     #[rustango(default = "'{}'")]
     pub required_claims: serde_json::Value,
-    pub require_verified_email: Option<bool>,
     #[rustango(
         max_length = 16,
         choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
     )]
     pub signup_mode: Option<String>,
+    /// Off: no email linking here. On or empty: the shared value.
+    pub allow_email_link: Option<bool>,
+    /// Off: email linking never links a role holder here.
+    pub allow_email_link_staff: Option<bool>,
     pub sso_only: Option<bool>,
     pub session_ttl_secs: Option<i64>,
     pub superuser_session_ttl_secs: Option<i64>,

@@ -23,7 +23,19 @@ where
     let mut failed = 0;
     for outcome in &sweep.outcomes {
         match &outcome.result {
-            Ok(ids) => writeln!(w, "{}: {} deactivated", outcome.slug, ids.len())?,
+            Ok(run) if run.failed == 0 => {
+                writeln!(w, "{}: {} deactivated", outcome.slug, run.deactivated.len())?
+            }
+            Ok(run) => {
+                failed += 1;
+                writeln!(
+                    w,
+                    "{}: {} deactivated, {} failed",
+                    outcome.slug,
+                    run.deactivated.len(),
+                    run.failed
+                )?;
+            }
             Err(e) => {
                 failed += 1;
                 writeln!(w, "{}: failed: {e}", outcome.slug)?;

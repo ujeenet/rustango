@@ -115,13 +115,6 @@
       </td>
     </tr>
     <tr>
-      <th><label for="sso_require_verified_email">verified email</label></th>
-      <td>
-        <input type="checkbox" id="sso_require_verified_email" name="require_verified_email"{% if f.require_verified_email == "on" %} checked{% endif %}>
-        <div class="field-helper">The domain allowlist only accepts an email the IdP verified.</div>
-      </td>
-    </tr>
-    <tr>
       <th><label for="sso_sso_only">SSO only</label></th>
       <td>
         <input type="checkbox" id="sso_sso_only" name="sso_only"{% if f.sso_only == "on" %} checked{% endif %}>

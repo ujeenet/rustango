@@ -1,6 +1,8 @@
 //! SSO link table, provider reads and exact matching on every backend.
 
 #![cfg(all(feature = "sso", feature = "tenancy"))]
+// Covers the legacy member helper until it is removed.
+#![allow(deprecated)]
 
 use rustango::casts::{Cast, EncryptedString};
 use rustango::oauth2::NormalizedUser;
@@ -134,7 +136,6 @@ async fn provider(pool: &Pool, slug: &str, allow_email_link: bool) {
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),
@@ -693,7 +694,6 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
                 allowed_idp_tenants: None,
                 allowed_hosted_domains: None,
                 required_claims: serde_json::json!({}),
-                require_verified_email: true,
                 signup_mode: None,
                 default_roles: None,
                 role_map: serde_json::json!({}),
@@ -779,12 +779,25 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
         p.issuer_url = Some("http://127.0.0.1:8080".into())
     })
     .await;
+    // Multi-tenant Microsoft: claims are read only under a tid pin.
     edit("loose", |p| {
-        p.require_verified_email = false;
-        p.allowed_email_domains = Some("example.com".into());
+        p.kind = "microsoft".into();
+        p.issuer_url = None;
+        p.role_map = serde_json::json!({"Admin": "Editor"});
     })
     .await;
-    edit("lax", |p| p.require_verified_email = false).await;
+    edit("lax", |p| {
+        p.kind = "microsoft".into();
+        p.issuer_url = None;
+        p.role_map = serde_json::json!({"Admin": "Editor"});
+        p.allowed_idp_tenants = Some("t1".into());
+    })
+    .await;
+    edit("safe", |p| {
+        p.issuer_url = Some("https://login.microsoftonline.com/organizations/v2.0".into());
+        p.required_claims = serde_json::json!({"roles": ["Member"]});
+    })
+    .await;
     edit("preset", |p| {
         p.kind = "google".into();
         p.issuer_url = None;
@@ -804,8 +817,9 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
         risks(tenant_risks(pool).await.unwrap()),
         want(&[
             ("linky", Risk::EmailLinkOnCustomIdp),
-            ("loose", Risk::UnverifiedDomainRule),
+            ("loose", Risk::UnpinnedDirectoryClaims),
             ("plain", Risk::InsecureIssuer),
+            ("safe", Risk::UnpinnedDirectoryClaims),
             ("staffy", Risk::EmailLinkOnCustomIdp),
         ])
     );
@@ -817,8 +831,9 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
         assert_eq!(
             risks(admin_risks(pool).await.unwrap()),
             want(&[
-                ("loose", Risk::UnverifiedDomainRule),
+                ("loose", Risk::UnpinnedDirectoryClaims),
                 ("plain", Risk::InsecureIssuer),
+                ("safe", Risk::UnpinnedDirectoryClaims),
             ])
         );
         rustango::testkit::matrix::fresh_table::<SharedSsoProvider>(pool).await;
@@ -845,7 +860,6 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
                 allowed_idp_tenants: None,
                 allowed_hosted_domains: None,
                 required_claims: serde_json::json!({}),
-                require_verified_email: true,
                 signup_mode: signup.map(str::to_owned),
                 default_roles: None,
                 role_map: serde_json::json!({}),

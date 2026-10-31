@@ -159,7 +159,6 @@ async fn provider(pool: &Pool, slug: &str, allow_email_link: bool) {
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),
@@ -1074,6 +1073,69 @@ async fn a_relink_invite_links_its_user_once(pool: &Pool) {
         .is_empty());
 }
 
+/// The admin re-link action applies the sign-in's staff rule to every
+/// link before it changes any, and then re-links them all.
+async fn the_relink_action_checks_every_link_first(pool: &Pool) {
+    use rustango::testkit::sso_admin::relink;
+    let t = tok();
+    provider(pool, "ra", false).await;
+    let key = resolve_by_slug(pool, "ra", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let ann = plain_user(
+        pool,
+        &format!("ra-{t}"),
+        &format!("ra-{t}@client.org"),
+        false,
+    )
+    .await;
+    let bob = plain_user(
+        pool,
+        &format!("rb-{t}"),
+        &format!("rb-{t}@client.org"),
+        false,
+    )
+    .await;
+    let editor = role(pool, &format!("RA-{t}")).await;
+    rustango::tenancy::permissions::assign_role_pool(bob, editor, pool)
+        .await
+        .unwrap();
+    for (sub, uid) in [(format!("ra-{t}"), ann), (format!("rb-{t}"), bob)] {
+        create_link(pool, &key, &sub, uid).await.unwrap();
+    }
+    let link_of = |uid: i64| async move {
+        SsoLink::objects()
+            .filter("user_id", uid)
+            .fetch(pool)
+            .await
+            .unwrap()
+    };
+    let invites_for = |uid: i64| async move {
+        SsoInvite::objects()
+            .filter("link_user_id", uid)
+            .fetch(pool)
+            .await
+            .unwrap()
+            .len()
+    };
+    let pk = |l: &SsoLink| SqlValue::I64(*l.id.get().unwrap());
+    let (a, b) = (pk(&link_of(ann).await[0]), pk(&link_of(bob).await[0]));
+    // Bob holds a role and the provider does not link staff: nothing changes.
+    let err = relink(pool, &[a.clone(), b.clone()]).await.unwrap_err();
+    assert!(err.contains("role"), "{err}");
+    assert_eq!(link_of(ann).await.len(), 1, "ann's link was kept");
+    assert_eq!(invites_for(ann).await, 0);
+    relink(pool, &[a]).await.unwrap();
+    assert!(link_of(ann).await.is_empty());
+    assert_eq!(invites_for(ann).await, 1);
+    set(pool, "ra", "allow_email_link_staff", SqlValue::Bool(true)).await;
+    relink(pool, &[b]).await.unwrap();
+    assert!(link_of(bob).await.is_empty());
+    assert_eq!(invites_for(bob).await, 1);
+}
+
 /// The role map grants on sign-up and, with sync on, adds and removes only
 /// the roles it names.
 async fn role_sync_touches_only_mapped_roles(pool: &Pool) {
@@ -1134,6 +1196,28 @@ async fn role_sync_touches_only_mapped_roles(pool: &Pool) {
         want,
         "a missing claim strips nothing"
     );
+    // A mapped role with no row is audited, but not on every sign-in.
+    rustango::audit::ensure_table_pool(pool).await.unwrap();
+    set(
+        pool,
+        "map",
+        "role_map",
+        SqlValue::Json(serde_json::json!({"g-ghost": format!("Ghost-{t}")})),
+    )
+    .await;
+    for _ in 0..8 {
+        tenant(pool, "map", &with(serde_json::json!(["g-ghost"])))
+            .await
+            .unwrap();
+    }
+    let unknown = rustango::audit::AuditLog::objects()
+        .filter("entity_table", "rustango_user_roles")
+        .filter("entity_pk", uid.to_string())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .len();
+    assert!((1..=5).contains(&unknown), "{unknown} unknown-role rows");
 }
 
 /// A taken username gets a suffix, or refuses.
@@ -1228,7 +1312,31 @@ async fn username_clash_suffix_or_refuse(pool: &Pool) {
     );
 }
 
+/// Only a row named exactly `default` holds the tenant settings, on every
+/// backend (MySQL's `=` alone would match `Default`).
+async fn the_settings_row_name_is_exact(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<SsoTenantPolicy>(pool).await;
+    SsoTenantPolicy {
+        id: Auto::default(),
+        name: "Default".into(),
+        access_denied_message: None,
+        password_login: "off".into(),
+        sso_only: true,
+        default_provider: None,
+        signups_per_hour: None,
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        TenantSettings::load(pool).await.unwrap(),
+        TenantSettings::default()
+    );
+    rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
+}
+
 /// The member flow with no mode set follows `auto_provision`, as before.
+#[allow(deprecated)]
 async fn member_auto_provision_is_unchanged(pool: &Pool) {
     use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};
     let t = tok();
@@ -1543,28 +1651,35 @@ async fn shared_roles_need_tenant_approval(pool: &Pool) {
     }
     // A stored override row parses into the same rule.
     rustango::testkit::matrix::fresh_table::<SsoSharedOverride>(pool).await;
-    SsoSharedOverride {
+    let row = |slug: &str| SsoSharedOverride {
         id: Auto::default(),
-        shared_slug: "sh".into(),
+        shared_slug: slug.into(),
+        shared_provider_id: None,
+        shared_issuer: None,
         allowed_email_domains: None,
         blocked_email_domains: Some("x.org".into()),
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: None,
         signup_mode: Some("closed".into()),
+        allow_email_link: Some(false),
+        allow_email_link_staff: None,
         sso_only: Some(true),
         session_ttl_secs: Some(60),
         superuser_session_ttl_secs: None,
         allowed_roles: Some(viewer.clone()),
-    }
-    .insert_pool(pool)
-    .await
-    .unwrap();
-    let loaded = SharedOverride::load(pool, "sh").await.unwrap().unwrap();
+    };
+    row("sh").insert_pool(pool).await.unwrap();
+    // The shared row as a sign-in sees it.
+    let shared = p.key(LinkSource::Shared);
+    let loaded = SharedOverride::load(pool, &shared, "sh")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(loaded.lifecycle.sso_only);
+    assert!(loaded.email_link_off && !loaded.email_link_staff_off);
     assert_eq!(loaded.signup_mode, Some(SignupMode::Closed));
-    assert_eq!(loaded.allowed_roles.names(), [viewer]);
+    assert_eq!(loaded.allowed_roles.names(), [viewer.clone()]);
     let policy = p.effective_policy().shared_override(Ok(Some(loaded)));
     assert_eq!(policy.session_ttl(3600, false), 60);
     assert_eq!(
@@ -1574,7 +1689,41 @@ async fn shared_roles_need_tenant_approval(pool: &Pool) {
             .rule(),
         "domain_blocked"
     );
-    assert!(SharedOverride::load(pool, "other").await.unwrap().is_none());
+    // First use bound it to the row: a rename keeps it.
+    assert!(SharedOverride::load(pool, &shared, "renamed")
+        .await
+        .unwrap()
+        .is_some());
+    // A new row under the old slug does not inherit it.
+    provider(pool, "sh-new", false).await;
+    let newer = resolve_by_slug(pool, "sh-new", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Shared);
+    assert_ne!(newer, shared);
+    assert!(SharedOverride::load(pool, &newer, "sh")
+        .await
+        .unwrap()
+        .is_none());
+    // The same row repointed at another IdP refuses until made again.
+    set(
+        pool,
+        "sh",
+        "issuer_url",
+        SqlValue::String("https://other-idp.example".into()),
+    )
+    .await;
+    let repointed = resolve_by_slug(pool, "sh", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Shared);
+    assert!(SharedOverride::load(pool, &repointed, "sh").await.is_err());
+    // Two unbound overrides of one slug are ambiguous.
+    row("sh-new").insert_pool(pool).await.unwrap();
+    row("sh-new").insert_pool(pool).await.unwrap();
+    assert!(SharedOverride::load(pool, &newer, "sh-new").await.is_err());
     rustango::testkit::matrix::drop_table(pool, "rustango_sso_shared_overrides").await;
 }
 
@@ -1643,7 +1792,7 @@ async fn idle_users_are_deactivated(pool: &Pool) {
         .await
         .unwrap();
     assert!(user_by_id(pool, pw).await.active, "a password user stays");
-    assert_eq!(done, [ids[0]]);
+    assert_eq!((done.deactivated, done.failed), (vec![ids[0]], 0));
     let gone = user_by_id(pool, ids[0]).await;
     assert!(!gone.active && gone.sessions_revoked_at.is_some());
     for id in &ids[1..] {
@@ -1653,6 +1802,7 @@ async fn idle_users_are_deactivated(pool: &Pool) {
     assert!(rustango::sso::lifecycle::deactivate_idle(pool, None)
         .await
         .unwrap()
+        .deactivated
         .is_empty());
 }
 
@@ -1762,10 +1912,12 @@ tri_dialect_test!(
         one_use_admits_one_racer,
         superusers_are_never_email_linked,
         a_relink_invite_links_its_user_once,
+        the_relink_action_checks_every_link_first,
         role_sync_touches_only_mapped_roles,
         username_clash_suffix_or_refuse,
         member_auto_provision_is_unchanged,
         password_rules_follow_sso_only,
+        the_settings_row_name_is_exact,
         successes_are_audited_and_signups_capped,
         shared_roles_need_tenant_approval,
         idle_users_are_deactivated,
