@@ -147,6 +147,156 @@ async fn candidates<P: Model + Send>(
         .collect())
 }
 
+/// A provider setting that weakens sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Risk {
+    /// Email linking on `kind = oidc`: whoever runs that IdP can assert any email.
+    EmailLinkOnCustomIdp,
+    /// A plain `http://` issuer that is not loopback.
+    InsecureIssuer,
+    /// Email domain rules with `require_verified_email` off.
+    UnverifiedDomainRule,
+    /// A shared row that signs users up, in every tenant that uses it.
+    SharedSignup,
+}
+
+/// An enabled provider with a [`Risk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Risky {
+    pub slug: String,
+    pub why: Risk,
+}
+
+/// `http://` to a host other than loopback.
+fn insecure_url(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .get(..7)
+        .filter(|s| s.eq_ignore_ascii_case("http://"))
+        .map(|_| &url[7..])
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    !crate::urls::is_loopback_host(host)
+}
+
+/// The enabled `P` rows' risky settings. A missing table holds none.
+async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<Risky>, ExecError> {
+    use super::provider::{int, text};
+    if !try_table_exists_here(pool, P::SCHEMA.table).await? {
+        return Ok(Vec::new());
+    }
+    let cols = [
+        "slug",
+        "kind",
+        "issuer_url",
+        "allow_email_link",
+        "allow_email_link_staff",
+        "require_verified_email",
+        "allowed_email_domains",
+        "blocked_email_domains",
+        "signup_mode",
+    ];
+    let rows = QuerySet::<P>::new()
+        .filter("enabled", true)
+        .only(&cols)
+        .fetch(pool)
+        .await?;
+    let mut out = Vec::new();
+    for r in &rows {
+        let slug = text(r.get("slug")).unwrap_or_default();
+        let set = |c: &str| text(r.get(c)).is_some_and(|s| !s.trim().is_empty());
+        let mut push = |why| {
+            out.push(Risky {
+                slug: slug.clone(),
+                why,
+            });
+        };
+        // The admin never links by email.
+        if source != LinkSource::Admin
+            && text(r.get("kind")).as_deref() == Some("oidc")
+            && (int(r.get("allow_email_link")) != 0 || int(r.get("allow_email_link_staff")) != 0)
+        {
+            push(Risk::EmailLinkOnCustomIdp);
+        }
+        if text(r.get("issuer_url")).is_some_and(|u| insecure_url(&u)) {
+            push(Risk::InsecureIssuer);
+        }
+        if int(r.get("require_verified_email")) == 0
+            && (set("allowed_email_domains") || set("blocked_email_domains"))
+        {
+            push(Risk::UnverifiedDomainRule);
+        }
+        let signs_up = text(r.get("signup_mode"))
+            .and_then(|m| m.parse::<super::policy::SignupMode>().ok())
+            .is_some_and(|m| m >= super::policy::SignupMode::Allowlist);
+        if source == LinkSource::Shared && signs_up {
+            push(Risk::SharedSignup);
+        }
+    }
+    Ok(out)
+}
+
+/// The tenant's own providers with a [`Risk`].
+///
+/// # Errors
+/// Driver failures, or a table missing the policy columns.
+#[cfg(feature = "tenancy")]
+pub async fn tenant_risks(tenant: &Pool) -> Result<Vec<Risky>, ExecError> {
+    risks::<super::SsoProvider>(tenant, LinkSource::Tenant).await
+}
+
+/// The registry's shared providers with a [`Risk`].
+///
+/// # Errors
+/// Driver failures, or a table missing the policy columns.
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+pub async fn shared_risks(registry: &Pool) -> Result<Vec<Risky>, ExecError> {
+    risks::<crate::tenancy::sso::SharedSsoProvider>(registry, LinkSource::Shared).await
+}
+
+/// The bare admin's providers with a [`Risk`].
+///
+/// # Errors
+/// Driver failures, or a table missing the policy columns.
+#[cfg(feature = "admin-sso")]
+pub async fn admin_risks(pool: &Pool) -> Result<Vec<Risky>, ExecError> {
+    risks::<super::SsoProvider>(pool, LinkSource::Admin).await
+}
+
+/// What to do about `why`, for the warning lines.
+fn risk_text(why: Risk) -> &'static str {
+    match why {
+        Risk::EmailLinkOnCustomIdp => {
+            "is a custom OIDC IdP with email linking on, so whoever runs that IdP can sign in \
+             as any user by asserting their email — turn off allow_email_link and \
+             allow_email_link_staff, or add SsoLink rows"
+        }
+        Risk::InsecureIssuer => {
+            "has an http:// issuer_url, so discovery and tokens travel in clear — use https"
+        }
+        Risk::UnverifiedDomainRule => {
+            "has email domain rules with require_verified_email off, so an unverified email \
+             can pass them — turn require_verified_email on"
+        }
+        Risk::SharedSignup => {
+            "is shared and signs users up, in every tenant that uses it — set signup_mode \
+             closed or invite_only, or give tenants their own provider"
+        }
+    }
+}
+
+/// `check --deploy` line for a provider with a [`Risk`]; `whose` names the
+/// table, e.g. ``tenant `acme`: provider`` or `shared provider`.
+#[must_use]
+pub(crate) fn risk_warning(whose: &str, r: &Risky) -> String {
+    format!("[sso] {whose} `{}` {}", r.slug, risk_text(r.why))
+}
+
 /// The `rows` with no link on `users`; none when `U` has no rows. Missing
 /// tables count as empty.
 async fn unlinked<U: Model + Send>(

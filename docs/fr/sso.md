@@ -166,13 +166,13 @@ l'authentification par session de l'admin (`Builder::with_session_auth`,
 ou `with_session` de l'admin tenant) ; sans elle, personne ne peut ajouter
 de liens.
 
-Un lien créé plus de 5 minutes avant le compte vers lequel il pointe (un id
-réutilisé après une restauration, par exemple) journalise un avertissement et
-connecte quand même l'utilisateur. Un lien dont l'utilisateur n'existe plus est
-supprimé à la connexion suivante.
-`rustango::sso::link::set_stale_links(StaleLinks::Drop)` supprime plutôt un tel
-lien. Ne l'utilisez que si les valeurs `created_at` des comptes ne sont jamais
-importées ni remplies après coup.
+Un lien créé plus d'une heure avant le compte vers lequel il pointe (un id
+réutilisé après une restauration, par exemple) est supprimé, et la connexion
+continue comme sans lien. Un lien dont l'utilisateur n'existe plus est supprimé
+à la connexion suivante, et supprimer un utilisateur dans l'admin supprime ses
+liens. Si les valeurs `created_at` des comptes sont importées ou remplies après
+leurs liens, `rustango::sso::link::set_stale_links(StaleLinks::Warn)` se
+contente de journaliser un avertissement et connecte quand même.
 
 Avec la fonctionnalité `totp`, un utilisateur du bare admin qui a un appareil
 TOTP confirmé doit encore saisir un code après le SSO. L'admin affiche le
@@ -183,7 +183,10 @@ d'étape TOTP.
 `manage check --deploy` avertit pour un provider activé qui refuserait tout
 utilisateur existant : aucune ligne `SsoLink`, et liaison par email désactivée
 ou seulement des utilisateurs privilégiés. Dans le bare admin, c'est tout
-provider sans lien.
+provider sans lien. Il avertit aussi pour la liaison par email sur un provider
+`kind = "oidc"`, un issuer `http://` hors loopback, des règles de domaine email
+avec `require_verified_email` désactivé, et un provider partagé qui inscrit des
+utilisateurs.
 
 ## SSO membre (utilisateur final)
 

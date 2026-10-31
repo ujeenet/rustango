@@ -152,12 +152,13 @@ Añadir una fila requiere la autenticación por sesión del admin
 (`Builder::with_session_auth`, o `with_session` del admin de tenant); sin ella,
 nadie puede añadir enlaces.
 
-Un enlace creado más de 5 minutos antes que la cuenta a la que apunta (un id
-reutilizado tras una restauración, por ejemplo) registra un aviso y aun así inicia
-sesión. Un enlace cuyo usuario ya no existe se borra en el siguiente inicio de
-sesión. `rustango::sso::link::set_stale_links(StaleLinks::Drop)` borra ese enlace en
-su lugar. Úsalo solo si los valores `created_at` de las cuentas nunca se importan ni
-se rellenan a posteriori.
+Un enlace creado más de una hora antes que la cuenta a la que apunta (un id
+reutilizado tras una restauración, por ejemplo) se borra, y el inicio de sesión
+sigue como sin enlace. Un enlace cuyo usuario ya no existe se borra en el
+siguiente inicio de sesión, y borrar un usuario en el admin borra sus enlaces.
+Si los valores `created_at` de las cuentas se importan o se rellenan después de
+sus enlaces, `rustango::sso::link::set_stale_links(StaleLinks::Warn)` solo
+registra un aviso y aun así inicia sesión.
 
 Con la funcionalidad `totp`, un usuario del bare admin con un dispositivo TOTP
 confirmado aún debe escribir un código tras el SSO. El admin muestra el
@@ -168,6 +169,10 @@ tiene paso TOTP.
 `manage check --deploy` avisa de un proveedor activado que rechazaría a todo
 usuario existente: sin filas `SsoLink`, y enlace por correo desactivado o solo
 usuarios privilegiados. En el bare admin, es cualquier proveedor sin enlaces.
+También avisa del enlace por correo en un proveedor `kind = "oidc"`, un issuer
+`http://` que no es loopback, reglas de dominio de correo con
+`require_verified_email` desactivado, y un proveedor compartido que registra
+usuarios.
 
 ## SSO de miembro (usuario final)
 

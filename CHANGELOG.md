@@ -13,11 +13,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
 - The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`); the lifecycle ones do nothing yet.
 - SSO sign-up per provider: `signup_mode` (closed, invite only, allowlist, open), `SsoInvite` for emails or domains with roles, expiry and atomic use limits (bulk add from a paste or CSV), `default_roles`, `role_map` with `sync_roles_on_login` (touches only mapped roles), `username_from`/`username_clash`, `sync_profile`, and `allow_email_link_staff`. A new user is never a superuser.
+- `check --deploy` SSO risk scan types: `Risk`, `Risky`, and `admin_risks` / `tenant_risks` / `shared_risks` (via `testkit::sso_check`).
 - `SsoLink` admin actions: unlink, and re-link on next sign-in (a one-use invite bound to the same provider; never for a superuser). `check --deploy` knows sign-up and warns on open sign-up with no domain rule.
 
 ### Fixed
 
 - A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
+- `ViewSet::for_model` refuses the SSO tables: a ViewSet skipped their superuser-only admin checks.
+- `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback, email domain rules with `require_verified_email` off, and a shared provider that signs users up.
+- OIDC discovery refuses a document with no `issuer` or another issuer than the configured one.
+- Deleting a user in the admin deletes its SSO links; a link older than its account is now dropped by default.
+- The admin no longer saves an SSO link with an `admin` source outside the bare admin's database, or a source that database does not hold.
 
 ## [0.61.14] — 2026-10-30
 

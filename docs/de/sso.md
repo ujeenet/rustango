@@ -152,13 +152,15 @@ Zeile anzulegen erfordert die Session-Authentifizierung des Admins
 (`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
 kann niemand Verknüpfungen anlegen.
 
-Eine Verknüpfung, die mehr als 5 Minuten vor dem Konto angelegt wurde, auf das
-sie zeigt (etwa eine nach einem Restore wiederverwendete ID), loggt eine Warnung
-und meldet trotzdem an. Eine Verknüpfung, deren Benutzer nicht mehr existiert,
-wird bei der nächsten Anmeldung gelöscht.
-`rustango::sso::link::set_stale_links(StaleLinks::Drop)` löscht eine solche
-Verknüpfung stattdessen. Nutze das nur, wenn `created_at`-Werte von Konten nie
-importiert oder nachträglich befüllt werden.
+Eine Verknüpfung, die mehr als eine Stunde vor dem Konto angelegt wurde, auf das
+sie zeigt (etwa eine nach einem Restore wiederverwendete ID), wird gelöscht, und
+die Anmeldung läuft weiter wie ohne Verknüpfung. Eine Verknüpfung, deren
+Benutzer nicht mehr existiert, wird bei der nächsten Anmeldung gelöscht, und wer
+einen Benutzer im Admin löscht, löscht auch seine Verknüpfungen.
+Werden `created_at`-Werte von Konten nach ihren Verknüpfungen importiert oder
+nachträglich befüllt, loggt
+`rustango::sso::link::set_stale_links(StaleLinks::Warn)` nur eine Warnung und
+meldet trotzdem an.
 
 Mit dem Feature `totp` muss ein Bare-Admin-Benutzer mit bestätigtem
 TOTP-Gerät nach SSO noch einen Code eingeben. Der Admin zeigt das Code-Formular
@@ -168,7 +170,10 @@ Formular sendet an `<login>/sso-totp`. Der Tenant-Admin hat keinen TOTP-Schritt.
 `manage check --deploy` warnt vor einem aktivierten Anbieter, der jeden
 bestehenden Benutzer abweisen würde: keine `SsoLink`-Zeilen, und E-Mail-Verknüpfung
 aus oder nur privilegierte Benutzer. Im Bare-Admin ist das jeder Anbieter ohne
-Verknüpfungen.
+Verknüpfungen. Er warnt auch vor E-Mail-Verknüpfung bei einem Anbieter mit
+`kind = "oidc"`, einem `http://`-Issuer außer Loopback, E-Mail-Domain-Regeln mit
+ausgeschaltetem `require_verified_email` und einem geteilten Anbieter, der
+Benutzer registriert.
 
 ## Member (Endbenutzer) SSO
 
