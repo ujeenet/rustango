@@ -332,6 +332,30 @@ impl InviteTarget {
 /// an invite for an unlisted shared domain still goes through.
 const OPEN_DOMAINS: &[&str] = &[
     // Second-level public suffixes.
+    "edu.au",
+    "gov.au",
+    "co.th",
+    "com.vn",
+    "com.eg",
+    "com.ng",
+    "co.ke",
+    "ac.jp",
+    // Hosting suffixes anyone can register under.
+    "blogspot.com",
+    "onmicrosoft.com",
+    "workers.dev",
+    "ngrok.io",
+    "s3.amazonaws.com",
+    "myshopify.com",
+    "wordpress.com",
+    // Free mail.
+    "yahoo.co.uk",
+    "yahoo.fr",
+    "hotmail.co.uk",
+    "hotmail.fr",
+    "outlook.de",
+    "live.co.uk",
+    "gmx.at",
     "co.uk",
     "org.uk",
     "me.uk",
@@ -1191,6 +1215,10 @@ mod tests {
             "*.co.uk",
             "@co.uk",
             "*.github.io",
+            "*.onmicrosoft.com",
+            "@yahoo.co.uk",
+            "*.s3.amazonaws.com",
+            "@edu.au",
         ] {
             assert!(bad.parse::<InviteTarget>().is_err(), "{bad}");
         }
