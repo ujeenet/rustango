@@ -651,6 +651,7 @@ pub(crate) async fn resolve_row<T: Model>(
 ///
 /// # Errors
 /// A driver error.
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
 pub(crate) async fn has_slug<T: Model>(pool: &Pool, slug: &str) -> Result<bool, ExecError> {
     Ok(
         load_rows(QuerySet::<T>::new().filter("slug", slug.to_owned()), pool)
