@@ -2016,34 +2016,30 @@ mod file_cache_tests {
         path
     }
 
-    /// Feed a valid entry into the FIFO after `after`, unblocking its reader.
+    /// Run `op` beside a probe task on a current-thread runtime and report
+    /// whether the probe ran while `op` waited on the FIFO. The FIFO is fed
+    /// only after the probe runs, so an `op` that blocks the only worker
+    /// (#1530) starves the probe until the feeder gives up.
     #[cfg(unix)]
-    fn feed_fifo(
-        path: std::path::PathBuf,
-        key: &str,
-        after: Duration,
-    ) -> std::thread::JoinHandle<()> {
-        let bytes = FileCache::encode(key, b"v", None);
-        std::thread::spawn(move || {
-            std::thread::sleep(after);
-            std::fs::write(&path, bytes).unwrap();
-        })
-    }
-
-    /// Run `op` on a current-thread runtime and return how long a 20 ms
-    /// sleep beside it took: long if `op` blocked the only worker (#1530).
-    #[cfg(unix)]
-    async fn worker_stall<F>(op: F) -> Duration
+    async fn worker_stays_free<F>(path: std::path::PathBuf, key: &str, op: F) -> bool
     where
         F: std::future::Future + Send + 'static,
         F::Output: Send + 'static,
     {
+        let bytes = FileCache::encode(key, b"v", None);
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let feeder = std::thread::spawn(move || {
+            let probed = rx.recv_timeout(Duration::from_secs(10)).is_ok();
+            std::fs::write(&path, bytes).unwrap();
+            probed
+        });
         let task = tokio::spawn(op);
-        let start = std::time::Instant::now();
-        tokio::time::sleep(Duration::from_millis(20)).await;
-        let waited = start.elapsed();
+        let probe = tokio::spawn(async move {
+            let _ = tx.send(());
+        });
         task.await.unwrap();
-        waited
+        probe.await.unwrap();
+        feeder.join().unwrap()
     }
 
     /// A slow read leaves the worker free.
@@ -2052,15 +2048,11 @@ mod file_cache_tests {
     async fn a_slow_read_leaves_the_worker_free() {
         let dir = tmp_dir("fifo-get");
         let cache = std::sync::Arc::new(FileCache::new(&dir));
-        let feeder = feed_fifo(plant_fifo(&cache, "k"), "k", Duration::from_millis(300));
+        let fifo = plant_fifo(&cache, "k");
         let c = cache.clone();
-        let waited = worker_stall(async move { c.get("k").await.unwrap() }).await;
-        feeder.join().unwrap();
+        let free = worker_stays_free(fifo, "k", async move { c.get("k").await.unwrap() }).await;
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            waited < Duration::from_millis(200),
-            "worker blocked {waited:?}"
-        );
+        assert!(free, "the read blocked the worker");
     }
 
     /// The `delete_prefix` scan reads off the worker too.
@@ -2069,15 +2061,16 @@ mod file_cache_tests {
     async fn a_slow_scan_leaves_the_worker_free() {
         let dir = tmp_dir("fifo-scan");
         let cache = std::sync::Arc::new(FileCache::new(&dir));
-        let feeder = feed_fifo(plant_fifo(&cache, "k"), "k", Duration::from_millis(300));
+        let fifo = plant_fifo(&cache, "k");
         let c = cache.clone();
-        let waited = worker_stall(async move { c.delete_prefix("x").await.unwrap() }).await;
-        feeder.join().unwrap();
+        let free = worker_stays_free(
+            fifo,
+            "k",
+            async move { c.delete_prefix("x").await.unwrap() },
+        )
+        .await;
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(
-            waited < Duration::from_millis(200),
-            "worker blocked {waited:?}"
-        );
+        assert!(free, "the scan blocked the worker");
     }
 
     /// Poll `f` to completion with no runtime at all.

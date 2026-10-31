@@ -144,6 +144,8 @@ proc-macro2  = "1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# A `cfg(feature = "...")` naming no real feature compiles the code out silently.
+unexpected_cfgs = "deny"
 # missing_docs lints are deferred to week 8 hardening.
 
 [workspace.lints.clippy]
