@@ -122,8 +122,8 @@ pub enum LoginScope {
     TenantApiKey(String),
     /// MCP agent secrets against a tenant, as for API keys.
     TenantAgent(String),
-    /// SSO callbacks: `admin`, `tenant/<slug>` or `app/<tenant>`. Its own
-    /// per-IP bucket, so refused SSO sign-ins never slow a password login.
+    /// SSO callbacks: `admin`, `tenant/<slug>` (console and member flow
+    /// share it) or `app/<tenant>` (OAuth2 router). Its own per-IP bucket, so refused SSO sign-ins never slow a password login.
     /// No account lock.
     Sso(String),
 }

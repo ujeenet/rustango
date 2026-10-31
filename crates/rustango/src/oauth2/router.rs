@@ -8,7 +8,8 @@
 //!
 //! The router is **transport-agnostic for flow state**: it seals the
 //! `OAuth2Flow` with HMAC and stuffs it into a cookie. No server-side
-//! session needed, but works fine alongside one.
+//! session needed, but works fine alongside one. The flow is not
+//! single-use: the IdP's one-time code and PKCE stop a replayed callback.
 //!
 //! ## Quick start
 //!

@@ -115,7 +115,7 @@ pub(crate) fn bulk_invites(
         .map(|n| n.ok_or("expires in days: 1 to 3650"))
         .transpose()?;
     let provider = field("provider_slug").map(str::to_owned);
-    let mut seen = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     // Paste or CSV: one target per line or cell; a header line is skipped.
     for raw in field("targets")
@@ -131,10 +131,9 @@ pub(crate) fn bulk_invites(
             return Err(format!("`{raw}`: {DOMAIN_LIMIT}"));
         }
         let target = target.to_string();
-        if seen.contains(&target) {
+        if !seen.insert(target.clone()) {
             continue;
         }
-        seen.push(target.clone());
         out.push(SsoInvite {
             id: crate::sql::Auto::Unset,
             provider_slug: provider.clone(),
