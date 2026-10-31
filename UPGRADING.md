@@ -148,7 +148,7 @@ untouched.
 
 ---
 
-## Unreleased
+## 0.61.16
 
 - `HeaderResolver` and `PortResolver` now cache for 30 s like the host resolvers. A tenant created, suspended or re-slugged by another process is seen within the fingerprint poll (`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 s by default); writes through rustango in the same process are seen at once.
 

@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.16] — 2026-10-31
+
 ### Added
 
 - `i18n::tera_tags::register_with` looks the translator up on every render, so one `Tera` can serve each tenant's overrides.
