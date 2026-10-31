@@ -4,6 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `i18n::tera_tags::register_with` looks the translator up on every render, so one `Tera` can serve each tenant's overrides.
+- `sso::set_client_config` adjusts the HTTP client (e.g. a private root CA) of SSO providers built from tenant, shared or admin rows, discovery included.
+
+### Fixed
+
+- `HeaderResolver` and `PortResolver` cache their lookups, misses included, like the host and path-prefix resolvers; a page-cache hit no longer costs a registry query.
+- An extra host added inline on the Org page can no longer take a base host another tenant claimed during the save on MySQL.
+
 ## [0.61.15] — 2026-10-31
 
 **Breaking:** run `makemigrations` and `migrate` (new SSO columns and tables). `SsoProvider`, `SharedSsoProvider`, `SsoLink` and `OAuth2Flow` have new fields (struct literals must set them); `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`; `sso_only` is enforced. `sso_error=inactive` is gone (every refusal is `nouser`); OIDC discovery needs the exact issuer and IdPs must echo the `nonce`; flow cookies are named `__Host-…` on HTTPS at `/` (sign-ins in flight fail once); an SSO email link locks the account's password and deletes its API keys; SSO sign-up is capped at 100 per tenant per hour. See UPGRADING.
