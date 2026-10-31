@@ -13,8 +13,8 @@ El SSO inicia sesión con el usuario **enlazado** a la identidad del IdP: una fi
 `rustango_sso_links` por `(provider, sub)`. El correo que envía el IdP nunca basta
 por sí solo. Un usuario que entra por primera vez se enlaza por su correo verificado
 solo si el proveedor tiene **`allow_email_link`** activado (desactivado por
-defecto), y nunca si la cuenta es superusuario o staff (tenant: tiene algún
-permiso; bare-admin: cualquier cuenta). Esas cuentas las enlaza un administrador,
+defecto), y nunca si la cuenta es superusuario o, sin `allow_email_link_staff`,
+staff (tenant: tiene algún rol; bare-admin: cualquier cuenta). Esas cuentas las enlaza un administrador,
 que añade la fila `SsoLink` en el admin; la línea de log del rechazo indica el
 subject. (El flujo de miembro, más abajo, también puede crear una cuenta para un
 correo desconocido; está desactivado por defecto.)
@@ -104,7 +104,7 @@ redespliegue. Campos:
 | `enabled` | Si el botón aparece en la página de inicio de sesión. |
 | `sort_order` | Orden de los botones (ascendente). |
 | `scopes` | Anulación opcional de scopes separados por espacios (por defecto `openid email profile`). |
-| `allow_email_link` | Enlazar a un usuario que entra por primera vez por su correo verificado (desactivado por defecto). Nunca enlaza una cuenta de superusuario o staff; el bare-admin lo ignora. |
+| `allow_email_link` | Enlazar a un usuario que entra por primera vez por su correo verificado (desactivado por defecto). Nunca enlaza a un superusuario, y a quien tiene roles solo con `allow_email_link_staff`; el bare-admin lo ignora. |
 
 Solo un superusuario puede añadir, cambiar o borrar filas `SsoProvider` y
 `SsoLink` en el admin; el resto del staff solo puede listarlas.
@@ -152,12 +152,13 @@ Añadir una fila requiere la autenticación por sesión del admin
 (`Builder::with_session_auth`, o `with_session` del admin de tenant); sin ella,
 nadie puede añadir enlaces.
 
-Un enlace creado más de 5 minutos antes que la cuenta a la que apunta (un id
-reutilizado tras una restauración, por ejemplo) registra un aviso y aun así inicia
-sesión. Un enlace cuyo usuario ya no existe se borra en el siguiente inicio de
-sesión. `rustango::sso::link::set_stale_links(StaleLinks::Drop)` borra ese enlace en
-su lugar. Úsalo solo si los valores `created_at` de las cuentas nunca se importan ni
-se rellenan a posteriori.
+Un enlace creado más de una hora antes que la cuenta a la que apunta (un id
+reutilizado tras una restauración, por ejemplo) se borra, y el inicio de sesión
+sigue como sin enlace. Un enlace cuyo usuario ya no existe se borra en el
+siguiente inicio de sesión, y borrar un usuario en el admin borra sus enlaces.
+Si los valores `created_at` de las cuentas se importan o se rellenan después de
+sus enlaces, `rustango::sso::link::set_stale_links(StaleLinks::Warn)` solo
+registra un aviso y aun así inicia sesión.
 
 Con la funcionalidad `totp`, un usuario del bare admin con un dispositivo TOTP
 confirmado aún debe escribir un código tras el SSO. El admin muestra el
@@ -168,6 +169,8 @@ tiene paso TOTP.
 `manage check --deploy` avisa de un proveedor activado que rechazaría a todo
 usuario existente: sin filas `SsoLink`, y enlace por correo desactivado o solo
 usuarios privilegiados. En el bare admin, es cualquier proveedor sin enlaces.
+También avisa del enlace por correo en un proveedor `kind = "oidc"`, un issuer
+`http://` que no es loopback, y un proveedor compartido que registra usuarios.
 
 ## SSO de miembro (usuario final)
 
@@ -188,7 +191,7 @@ use rustango::tenancy::member_auth::{member_sso_router, MemberAuthConfig};
 
 let members = member_sso_router(MemberAuthConfig {
     login_base:     "/auth".into(),   // buttons link to /auth/sso/<slug>
-    landing_url:    "/".into(),       // post-login destination (honors a same-origin ?next)
+    landing_url:    "/".into(),       // post-login destination (a same-origin ?next on the begin URL wins)
     auto_provision: true,             // create a user from a verified email on first sign-in
     session_ttl:    7 * 24 * 60 * 60, // 7 days
     ..Default::default()
@@ -258,6 +261,117 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > propias filas `SsoProvider` del tenant — la fusión de `SharedSsoProvider` a nivel
 > de registro y un hook `provision` personalizado son seguimientos futuros.
 
+## Quién puede iniciar sesión
+
+Cada proveedor (y cada proveedor compartido en la consola del operador)
+tiene reglas de inicio de sesión. Las reglas vacías admiten a cualquiera
+que el IdP autentique.
+
+| Campo | Regla |
+|---|---|
+| `allowed_email_domains` | Solo estos dominios: `client.org` coincide solo consigo mismo, `*.client.org` solo con sus subdominios. Separados por comas o saltos de línea. |
+| `blocked_email_domains` | Nunca estos dominios, aunque estén permitidos arriba. Se comprueba con cualquier email, verificado o no. |
+| `allowed_idp_tenants` | IDs de directorio de Microsoft (`tid`). Solo se leen de un id_token verificado. |
+| `allowed_hosted_domains` | Dominios de Google Workspace (claim `hd`). |
+| `required_claims` | JSON `{"claim": ["valor", ...]}`: el claim (texto o lista) debe contener uno de los valores. `{"iss": [...]}` fija el emisor. Un claim ausente rechaza. |
+
+El admin y la consola del operador guardan las listas en una forma canónica
+y rechazan valores que no se pueden interpretar. Un valor inválido escrito
+por otra vía rechaza todo inicio de sesión con ese proveedor.
+
+Un inicio de sesión rechazado va al log del servidor y al log de auditoría
+(`source = sso:<surface>`, `changes.rule`, p. ej. `domain_not_allowed`).
+El navegador ve un mensaje genérico; la página de login del tenant muestra
+además el `access_denied_message` del tenant (de `SsoTenantPolicy`), escapado.
+
+La ruta de miembros (`member_sso_router`) solo resuelve los proveedores
+propios del tenant; los proveedores compartidos, y su endurecimiento por
+el tenant, aún no se aplican ahí.
+
+### Confianza en el id_token
+
+Los datos del perfil vienen de `/userinfo` sobre TLS. Los claims que solo
+trae el id_token (`tid`, `iss`, `xms_edov`) se usan solo si el id_token
+pasa: firma contra el JWKS del emisor (RS256 o ES256; en caché según su
+`max-age` y recargado como mucho una vez por minuto ante una clave
+desconocida), `aud` contiene el client id, `exp`/`nbf` con un minuto de
+margen, el emisor (Microsoft: `https://login.microsoftonline.com/{tid}/v2.0`)
+y el mismo `sub` que userinfo. Si no, esos claims faltan y una regla que los
+necesita rechaza. Un email de Microsoft cuenta como verificado si `xms_edov`
+es verdadero, o si el proveedor fija `allowed_idp_tenants` y el `tid` del
+token está en la lista.
+
+## Quién puede registrarse
+
+Un proveedor también puede crear la cuenta en el primer inicio de sesión.
+Solo ocurre si ningún enlace ni ninguna cuenta coincide con el email
+verificado, y solo después de pasar las reglas de inicio de sesión de arriba.
+
+| Campo | Significado |
+|---|---|
+| `signup_mode` | `closed` (solo enlaces), `invite_only` (una `SsoInvite` para este email), `allowlist` (una invitación para el email o su dominio) u `open` (cualquiera que admitan las reglas). Vacío: cerrado en el login del tenant; el flujo de miembros sigue `MemberAuthConfig::auto_provision`. El admin simple nunca crea cuentas. |
+| `default_roles` | Roles del tenant para el usuario nuevo, p. ej. `Viewer`. Una invitación con roles los reemplaza. |
+| `role_map` | JSON `{"<grupo o rol de app>": "Editor"}` (o una lista). Se lee de los claims de `role_claims` (vacío: `groups,roles`); con un proveedor con JWKS, solo de un id_token verificado. |
+| `sync_roles_on_login` | Volver a aplicar `role_map` en cada inicio de sesión. Solo se añaden o quitan roles nombrados en `role_map`; los asignados a mano se quedan. |
+| `username_from` | `email_local` (por defecto), `email` o `preferred_username` (si no, la parte local del email). |
+| `username_clash` | `suffix` (por defecto: `ann-x7k2q9`) o `refuse`. |
+| `sync_profile` | Actualizar nombre visible y email desde el IdP en cada inicio de sesión (nunca para un superusuario; un email de otro usuario no se copia). |
+| `allow_email_link_staff` | Con `allow_email_link`, enlazar también a usuarios con roles. Un superusuario nunca se enlaza por email. |
+
+Un usuario nuevo nunca es superusuario. Los roles pasan por el motor de
+permisos (`UserRole`); un nombre de rol sin fila `Role` se omite y se anota
+en el registro de auditoría (`sso_role_unknown`). El usuario, su enlace
+(`provisioned = true`), sus roles y el uso de la invitación se escriben en
+una sola transacción.
+
+**Invitaciones** (`SsoInvite`, solo superusuarios en el admin del tenant):
+un email (`ann@client.org`) o un dominio (`@client.org`, o `*.client.org`
+para sus subdominios). Pueden nombrar un proveedor, llevar roles, caducar
+(`expires_at`) y limitar usos (`max_uses`). Un uso se cuenta de forma
+atómica: dos registros que compiten por el último uso crean una sola
+cuenta. `.../rustango_sso_invites/bulk` añade muchas a la vez desde una
+lista pegada o una columna CSV.
+
+**Desenlazar y volver a enlazar.** En las filas `SsoLink`, las acciones
+*Unlink* y *Re-link on next sign-in* (solo superusuarios). Re-link borra el
+enlace y deja una invitación de un solo uso, válida 7 días, que vuelve a
+enlazar al mismo usuario en su próximo inicio de sesión por el mismo
+proveedor con su email verificado, aunque tenga un subject nuevo. Nunca
+vuelve a enlazar a un superusuario; a un usuario con roles, solo con
+`allow_email_link_staff`.
+
+Las colisiones de nombre de usuario y correo ignoran mayúsculas como el
+backend: PostgreSQL pliega Unicode, SQLite solo letras ASCII y MySQL sigue la
+collation de la columna (por defecto también los acentos, `ané` y `ane`
+colisionan). Con nombres de usuario ASCII la respuesta es igual en todas partes.
+
+`check --deploy` no marca como bloqueante a un proveedor con registro
+abierto, y avisa de `signup_mode = open` sin `allowed_email_domains`,
+`allowed_hosted_domains` ni `allowed_idp_tenants`.
+
+## Contraseñas, sesiones y ciclo de vida
+
+| Dónde | Campo | Significado |
+|---|---|---|
+| Proveedor | `sso_only` | Sus usuarios vinculados no pueden usar contraseña (formulario, login JSON, HTTP Basic, enlace de restablecimiento), aunque el proveedor esté desactivado o borrado. |
+| Proveedor | `session_ttl_secs`, `superuser_session_ttl_secs` | La sesión dura lo más corto de estos valores y el de la ruta. |
+| Proveedor | `auto_deactivate_after_days` | `sso-deactivate-idle` desactiva a los usuarios que registró y llevan ese tiempo sin uso. Nunca un superusuario ni un usuario vinculado por un admin. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off` o `superusers_only`: el formulario solo aparece con `?local=1`, para superusuarios. |
+| `SsoTenantPolicy` | `sso_only` | Solo los superusuarios usan contraseña. |
+| `SsoTenantPolicy` | `default_provider` | La página de login redirige directamente (o al único proveedor si el formulario de contraseña está oculto), salvo con `?local=1` o tras un error. |
+| `SsoTenantPolicy` | `signups_per_hour` | Registros SSO por hora (vacío: 100, `0`: sin límite). |
+
+Un superusuario solo sigue `password_login`; `sso_only` nunca lo bloquea.
+Una contraseña rechazada parece incorrecta. Una regla ilegible rechaza; una configuración ilegible solo deja entrar a superusuarios. Un proveedor desactivado mantiene a sus usuarios `sso_only`, un vínculo a uno borrado cuenta como `sso_only` hasta que un admin lo quite. `sso_only` cubre los logins con contraseña (tenant y bare admin) y los restablecimientos, no las claves API ni los secretos de agentes MCP. `sso-deactivate-idle` solo desactiva a usuarios que no pueden usar contraseña. Cerrar sesión lleva a `?local=1`, y la redirección automática ocurre como mucho una vez por minuto, para que una sesión perdida no cree un bucle.
+
+**Proveedores compartidos.** El `SsoSharedOverride` de un tenant endurece un proveedor compartido, nunca lo relaja, y nombra en `allowed_roles` los roles que puede otorgar (sin override: ninguno). El override también puede desactivar la vinculación por correo (`allow_email_link`, `allow_email_link_staff`). Se vincula a la fila del proveedor compartido en el primer inicio de sesión: una fila renombrada lo conserva, una fila nueva con el slug antiguo no, y una fila que cambia de issuer rechaza el inicio de sesión hasta que se vuelva a crear el override.
+
+**Microsoft multiinquilino.** Un proveedor `microsoft` (u `oidc` en `/common` u `/organizations`) acepta usuarios de cualquier directorio de Entra. Su `role_map` y sus `required_claims` solo cuentan si `allowed_idp_tenants` fija el `tid` del token; si no, no se conceden roles y las claims obligatorias rechazan. `check --deploy` avisa de estas filas.
+
+**Límite y auditoría.** Los callbacks SSO tienen su propio límite por IP (429), aparte del de contraseñas. Vínculos, registros, re-vínculos y cambios de roles van al registro de auditoría; los rechazos como mucho cinco veces por sujeto en diez minutos.
+
+**Bloqueo de cuenta.** El bloqueo tras contraseñas fallidas no detiene el SSO. Para detener a un usuario, ponga `active = false`.
+
 ## Almacenamiento de secretos
 
 `client_secret` se almacena **cifrado en reposo** con XChaCha20-Poly1305
@@ -290,8 +404,8 @@ emisor y hora).
 
 - **Primero el enlace** — decide el enlace `(provider, sub)`; el correo solo lo
   usa el enlace opcional por correo, y solo si está verificado.
-- **Sin enlaces privilegiados por correo** — a superusuarios y staff solo los
-  enlaza un superusuario. Un enlace creado por correo sigue funcionando después
+- **Sin enlaces privilegiados por correo** — un superusuario nunca se enlaza
+  por correo, y quien tiene roles solo con `allow_email_link_staff`. Un enlace creado por correo sigue funcionando después
   de ascender al usuario; bórralo si no se desea.
 - **Sin aprovisionamiento automático** para los admins — un correo desconocido
   no puede entrar.
@@ -307,8 +421,46 @@ emisor y hora).
 - Las sesiones de SSO son la sesión de administrador corriente — rotar o
   desactivar al usuario vinculado las invalida a través del control en vivo
   existente.
-- El modelo de confianza es `/userinfo` sobre TLS (el id_token no se verifica de
-  forma independiente); antepón HTTPS al admin.
+- El modelo de confianza es `/userinfo` sobre TLS; los claims del id_token
+  cuentan solo tras la verificación JWKS (ver [confianza en el id_token](#confianza-en-el-id_token)).
+  Antepón HTTPS al admin.
+
+## Endurecimiento
+
+- **Vincular por email bloquea la contraseña.** Cuando el SSO vincula una
+  cuenta de tenant existente por email (o por una invitación de re-vínculo), su
+  contraseña queda inutilizable, sus sesiones terminan, sus claves API se
+  borran y sus claves de agente se desactivan, en la misma transacción. Quien registró el email antes que su dueño pierde la cuenta; el
+  dueño restablece la contraseña para volver a usar una. Cualquier rol, incluso
+  sin permisos, cuenta como privilegiado para vincular por email.
+- **Un flujo, un uso.** Un callback completa un flujo una sola vez (por
+  proceso; el código de un solo uso del IdP cubre otras réplicas). Los inicios
+  de sesión OIDC envían un `nonce`; un id_token verificado sin él, o con otro,
+  se rechaza (`id_token_replayed`). El destino del flujo de miembros es el
+  `?next` de la URL de inicio, sellado en el flujo; un `?next` en el callback se
+  ignora.
+- **Cookies de flujo `__Host-`** en HTTPS con `Path=/` (admin simple, tenant en
+  su propio host); allí solo se lee ese nombre. Un tenant con prefijo de ruta
+  mantiene el nombre simple, y el `?next` de miembros debe quedar bajo el prefijo.
+- **Invitaciones.** Una invitación de dominio para un sufijo público o un correo
+  gratuito (`@gmail.com`, `*.co.uk`) se rechaza, y una invitación de dominio
+  necesita `max_uses` o `expires_at`. Los nombres visibles del IdP se limitan a
+  150 caracteres.
+- **Host del admin simple.** Con `security.allowed_hosts` (o
+  `Builder::allowed_hosts`), la URI de redirección SSO solo se construye para un
+  host de la lista. Sin lista acepta cualquier host, y el admin avisa al arrancar.
+
+### Tenants en su propio host y bajo un prefijo
+
+Un tenant se alcanza en su propio host (cookies en `Path=/`) y en el host apex
+bajo su prefijo (`app.example.com/acme`, cookies en `Path=/acme`). Los tenants
+con prefijo comparten un origen con la consola del operador y entre sí: el
+`Path` de una cookie no es allí una frontera de seguridad. Sesiones y flujos
+están ligados al slug del tenant por su MAC, así que la cookie de un tenant
+nunca abre la de otro. Para un tenant alcanzable de ambas formas, registre las
+dos URL de callback en el IdP:
+`https://acme.example.com/__login/sso/<slug>/callback` y
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## Véase también
 

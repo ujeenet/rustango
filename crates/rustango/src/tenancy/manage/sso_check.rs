@@ -61,6 +61,17 @@ where
         }
     };
     #[cfg(feature = "admin-sso")]
+    match check::shared_risks(&registry).await {
+        Ok(found) => out.warnings.extend(
+            found
+                .iter()
+                .map(|r| check::risk_warning("shared provider", r)),
+        ),
+        Err(e) => out.warnings.push(format!(
+            "[sso] could not check the shared SSO providers: {e}"
+        )),
+    }
+    #[cfg(feature = "admin-sso")]
     let shared_rows: Shared = match check::SharedProviders::load(&registry).await {
         Ok(rows) => Some(rows),
         Err(e) => {
@@ -134,7 +145,6 @@ where
             Err(e) => return TenantFindings::failed(&org.slug, e),
         }
     }
-    #[cfg_attr(not(feature = "admin-sso"), allow(unused_mut))]
     let mut out = match check::tenant_providers(&tenant).await {
         Ok(found) => TenantFindings {
             warnings: found
@@ -145,6 +155,14 @@ where
         },
         Err(e) => TenantFindings::failed(&org.slug, e),
     };
+    match check::tenant_risks(&tenant).await {
+        Ok(found) => {
+            let whose = format!("tenant `{}`: provider", org.slug);
+            out.warnings
+                .extend(found.iter().map(|r| check::risk_warning(&whose, r)));
+        }
+        Err(e) => out.warnings.push(check::tenant_error(&org.slug, e)),
+    }
     #[cfg(feature = "admin-sso")]
     if let Some(rows) = shared {
         match check::shared_providers(rows, &tenant).await {

@@ -72,19 +72,37 @@ fn login_path(state: &AppState) -> String {
 /// Per-provider callback URL built from the request host:
 /// `{scheme}://{host}{login_path}/sso/{slug}/callback`. The scheme
 /// comes from `X-Forwarded-Proto` sent by a trusted proxy, else `https`.
+/// `None` for a host the admin's allowed hosts do not list.
 fn derive_bare_redirect(
     headers: &HeaderMap,
     extensions: &axum::http::Extensions,
     state: &AppState,
     slug: &str,
 ) -> Option<String> {
+    redirect_for(
+        headers,
+        extensions,
+        &login_path(state),
+        state.config.allowed_hosts.as_ref(),
+        slug,
+    )
+}
+
+fn redirect_for(
+    headers: &HeaderMap,
+    extensions: &axum::http::Extensions,
+    login_path: &str,
+    allowed: Option<&crate::host_validation::AllowedHostsLayer>,
+    slug: &str,
+) -> Option<String> {
     let host = crate::urls::HostAuthority::parse(headers.get(header::HOST)?.to_str().ok()?)?;
+    if allowed.is_some_and(|a| !a.permits(&host.to_string())) {
+        tracing::warn!(target: "rustango::admin::sso", %host, "SSO refused: the Host is not an allowed host");
+        return None;
+    }
     let scheme = crate::real_ip::trusted_forwarded(headers, extensions, "x-forwarded-proto")
         .unwrap_or("https");
-    Some(format!(
-        "{scheme}://{host}{}/sso/{slug}/callback",
-        login_path(state)
-    ))
+    Some(format!("{scheme}://{host}{login_path}/sso/{slug}/callback"))
 }
 
 /// Redirect back to the login page with a generic `?sso_error=` marker.
@@ -111,6 +129,10 @@ async fn sso_begin(
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
+    let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
+    if let Err(refused) = crate::sso::policy::throttle_check(&scope, &extensions, &headers).await {
+        return refused;
+    }
     let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
@@ -135,10 +157,7 @@ async fn sso_begin(
         FlowScope::new(FlowPurpose::Admin, "", &slug),
         secret.key(),
     );
-    let cookie = format!(
-        "{SSO_FLOW_COOKIE}={sealed}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600{s}",
-        s = cookie_attrs(state.config.secure_cookies),
-    );
+    let cookie = flow_cookie(&state).set(&sealed, 600);
     let mut resp = Redirect::to(&url).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
@@ -165,7 +184,7 @@ async fn sso_callback(
         return login_error(&state, "callback");
     };
     // Recover + verify the sealed flow from its cookie.
-    let Some(sealed) = crate::cookies::cookie_from_headers(&headers, SSO_FLOW_COOKIE) else {
+    let Some(sealed) = flow_cookie(&state).read(&headers) else {
         return login_error(&state, "expired");
     };
     let flow = match open_flow(
@@ -176,6 +195,15 @@ async fn sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
+    let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
+    let attempt = match crate::sso::policy::throttle_begin(&scope, &extensions, &headers).await {
+        Ok(a) => a,
+        Err(refused) => return refused,
+    };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        return login_error(&state, "expired");
+    }
     let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };
@@ -194,63 +222,79 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     };
-    let normalized = match provider.complete(&flow, &code, &cb_state).await {
-        Ok((u, _tokens)) => u,
+    let identity = match provider.complete(&flow, &code, &cb_state).await {
+        Ok((u, tokens)) => {
+            crate::sso::policy::Identity::from_handshake(&provider, u, &tokens, &flow).await
+        }
         Err(e) => {
             tracing::warn!(target: "rustango::admin::sso", "handshake: {e}");
+            attempt.failed().await;
             return login_error(&state, "handshake");
         }
     };
+    let normalized = &identity.profile;
     // Sign in by (provider, sub) link only: every admin account is staff,
     // so a verified email never creates a link here.
     let key = cfg.key(LinkSource::Admin);
     let accounts = AdminAccounts(&state.pool);
-    let meta = || meta_from_parts(&extensions, &headers, Some(&format!("/login/sso/{slug}")));
-    let uid =
-        match crate::sso::link::sign_in(&state.pool, &key, false, &normalized, &accounts).await {
-            Ok(uid) => uid,
-            Err(e) => {
-                tracing::warn!(
-                    target: "rustango::admin::sso",
-                    slug,
-                    provider_id = cfg.id,
-                    issuer = key.issuer(),
-                    subject = %normalized.provider_user_id,
-                    "sso refused: {e}"
-                );
-                if let Some(reason) = e.failure_reason() {
-                    signal_refused(
-                        SIGNAL_SOURCE,
-                        &normalized,
-                        reason,
-                        meta(),
-                        state.config.tenant.clone(),
-                    )
-                    .await;
-                }
-                return login_error(&state, "nouser");
-            }
-        };
+    let path = format!("/login/sso/{slug}");
+    let meta = || meta_from_parts(&extensions, &headers, Some(&path));
+    let policy = crate::sso::policy::EffectivePolicy::new(cfg.policy.clone(), false)
+        .with_lifecycle(cfg.lifecycle.clone());
+    let request = crate::sso::policy::AdmitRequest::new(
+        &state.pool,
+        crate::sso::policy::Surface::BareAdmin,
+        &key,
+        &policy,
+        &identity,
+    )
+    .provider(&slug);
+    let uid = match crate::sso::policy::admit(request, &accounts).await {
+        Ok(a) => a.user_id,
+        Err(crate::sso::policy::Denied::Refused(r)) => {
+            let ctx = crate::sso::policy::RefusalContext {
+                pool: &state.pool,
+                surface: crate::sso::policy::Surface::BareAdmin,
+                signal_source: SIGNAL_SOURCE,
+                provider: &slug,
+                key: &key,
+                identity: &identity,
+                tenant: state.config.tenant.clone(),
+                extensions: &extensions,
+                headers: &headers,
+                path: &path,
+            };
+            crate::sso::policy::refuse(&ctx, &r).await;
+            attempt.failed().await;
+            return login_error(&state, "nouser");
+        }
+        Err(e) => {
+            tracing::error!(target: "rustango::admin::sso", slug, "sso sign-in failed: {e}");
+            return login_error(&state, "nouser");
+        }
+    };
     let Ok(Some(user)) = accounts.user(uid).await else {
         return login_error(&state, "nouser");
     };
     if !user.active {
         signal_refused(
             SIGNAL_SOURCE,
-            &normalized,
+            normalized,
             AuthFailureReason::Inactive,
             meta(),
             state.config.tenant.clone(),
         )
         .await;
-        return login_error(&state, "inactive");
+        return login_error(&state, "nouser");
     }
+    attempt.succeeded().await;
+    let ttl = policy.session_ttl(session::DEFAULT_TTL_SECS, user.is_superuser);
     // A confirmed device owes its code first, as on the password login (#2249).
     #[cfg(feature = "totp")]
     match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
         Ok(None) => {}
         Ok(Some(_)) => {
-            return second_factor::prompt(&state, &extensions, &headers, secret, &user).await
+            return second_factor::prompt(&state, &extensions, &headers, secret, &user, ttl).await
         }
         Err(e) => {
             // Fail closed: an unreadable device is not "no second factor" (#1644).
@@ -258,7 +302,7 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     }
-    mint_session(&state, secret, &user, meta()).await
+    mint_session(&state, secret, &user, meta(), ttl).await
 }
 
 /// Mint the normal admin session, bound to the user's stored password
@@ -268,14 +312,16 @@ async fn mint_session(
     secret: &session::AdminSessionSecret,
     user: &AdminUser,
     request: AuthRequestMeta,
+    ttl_secs: i64,
 ) -> Response {
     let uid = user.id.get().copied().unwrap_or_default();
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
-    let cookie_value = session::encode(
+    let cookie_value = session::encode_for(
         secret,
         AdminSession::new(uid, user.username.clone(), user.is_superuser),
         &auth_hash,
         user.sessions_revoked_at,
+        ttl_secs,
     );
     let session_cookie = format!(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",
@@ -290,7 +336,7 @@ async fn mint_session(
     if let Ok(v) = HeaderValue::from_str(&session_cookie) {
         resp.headers_mut().append(header::SET_COOKIE, v);
     }
-    clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+    clear_flow(&mut resp, state);
     send_user_logged_in(UserLoggedInContext {
         source: SIGNAL_SOURCE,
         user_id: uid,
@@ -303,7 +349,22 @@ async fn mint_session(
     resp
 }
 
+/// The bare admin's flow cookie: at `/`, so `__Host-` over HTTPS.
+fn flow_cookie(state: &AppState) -> crate::sso::FlowCookie<'static> {
+    crate::sso::FlowCookie::new(SSO_FLOW_COOKIE, "/", state.config.secure_cookies)
+}
+
+/// Expire the flow cookie.
+fn clear_flow(resp: &mut Response, state: &AppState) {
+    for c in flow_cookie(state).clear() {
+        if let Ok(v) = HeaderValue::from_str(&c) {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
+}
+
 /// Expire the transient cookie `name`.
+#[cfg(feature = "totp")]
 fn clear_cookie(resp: &mut Response, name: &str) {
     if let Ok(v) = HeaderValue::from_str(&format!("{name}=; Path=/; HttpOnly; Max-Age=0")) {
         resp.headers_mut().append(header::SET_COOKIE, v);
@@ -337,12 +398,15 @@ mod second_factor {
         headers: &HeaderMap,
         secret: &session::AdminSessionSecret,
         user: &AdminUser,
+        session_ttl: i64,
     ) -> Response {
-        let pending = Pending::new(
+        let mut pending = Pending::new(
             secret,
             user.id.get().copied().unwrap_or_default(),
             &user.password_hash,
         );
+        // Signed with the rest, so the code step keeps the provider's lifetime.
+        pending.session_ttl = Some(session_ttl);
         let cookie = format!(
             "{PENDING_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={TTL_SECS}{s}",
             seal(secret, &pending),
@@ -353,7 +417,7 @@ mod second_factor {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
             resp.headers_mut().append(header::SET_COOKIE, v);
         }
-        clear_cookie(&mut resp, SSO_FLOW_COOKIE);
+        clear_flow(&mut resp, state);
         resp
     }
 
@@ -451,7 +515,10 @@ mod second_factor {
         }
         attempt.succeeded().await;
         let meta = meta_from_parts(&extensions, &headers, Some("/login/sso-totp"));
-        let mut resp = mint_session(&state, secret, &user, meta).await;
+        let ttl = pending.session_ttl.map_or(session::DEFAULT_TTL_SECS, |t| {
+            t.min(session::DEFAULT_TTL_SECS)
+        });
+        let mut resp = mint_session(&state, secret, &user, meta, ttl).await;
         clear_cookie(&mut resp, PENDING_COOKIE);
         resp
     }
@@ -475,7 +542,11 @@ impl AdminAccounts<'_> {
 }
 
 fn admin_account(u: &AdminUser) -> Option<Account> {
-    Some(Account::new(u.id.get().copied()?, true, u.active).with_created_at(u.created_at))
+    Some(
+        Account::new(u.id.get().copied()?, true, u.active)
+            .with_superuser(u.is_superuser)
+            .with_created_at(u.created_at),
+    )
 }
 
 impl AccountLookup for AdminAccounts<'_> {
@@ -497,6 +568,29 @@ impl AccountLookup for AdminAccounts<'_> {
                 Err(()) => EmailLookup::Collides,
             },
         )
+    }
+}
+
+#[cfg(test)]
+mod redirect_tests {
+    /// The redirect URI uses only a Host the allowed hosts list.
+    #[test]
+    fn the_redirect_uri_needs_an_allowed_host() {
+        let headers = |host: &str| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(axum::http::header::HOST, host.parse().unwrap());
+            h
+        };
+        let ext = axum::http::Extensions::new();
+        let allowed = crate::host_validation::AllowedHostsLayer::new(["admin.example.com"]);
+        let go = |host: &str, a| super::redirect_for(&headers(host), &ext, "/login", a, "g");
+        assert_eq!(
+            go("admin.example.com:8443", Some(&allowed)).as_deref(),
+            Some("https://admin.example.com:8443/login/sso/g/callback")
+        );
+        assert_eq!(go("evil.example", Some(&allowed)), None);
+        // No list: any plain host, as before.
+        assert!(go("evil.example", None).is_some());
     }
 }
 

@@ -122,6 +122,10 @@ pub enum LoginScope {
     TenantApiKey(String),
     /// MCP agent secrets against a tenant, as for API keys.
     TenantAgent(String),
+    /// SSO callbacks: `admin`, `tenant/<slug>` (console and member flow
+    /// share it) or `app/<tenant>` (OAuth2 router). Its own per-IP bucket, so refused SSO sign-ins never slow a password login.
+    /// No account lock.
+    Sso(String),
 }
 
 impl LoginScope {
@@ -133,11 +137,15 @@ impl LoginScope {
             Self::TenantBasic(slug) => format!("tenant-basic:{slug}"),
             Self::TenantApiKey(slug) => format!("tenant-apikey:{slug}"),
             Self::TenantAgent(slug) => format!("tenant-agent:{slug}"),
+            Self::Sso(on) => format!("sso:{on}"),
         }
     }
 
     fn locks_accounts(&self) -> bool {
-        !matches!(self, Self::TenantApiKey(_) | Self::TenantAgent(_))
+        !matches!(
+            self,
+            Self::TenantApiKey(_) | Self::TenantAgent(_) | Self::Sso(_)
+        )
     }
 
     /// The per-IP bucket key. Agent secrets count apart, so a looping
@@ -145,6 +153,7 @@ impl LoginScope {
     fn ip_bucket(&self, ip: &str) -> String {
         match self {
             Self::TenantAgent(_) => format!("agent/{ip}"),
+            Self::Sso(_) => format!("sso/{ip}"),
             _ => ip.to_owned(),
         }
     }

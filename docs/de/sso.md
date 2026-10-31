@@ -13,8 +13,9 @@ SSO meldet den Benutzer an, der mit der IdP-Identität **verknüpft** ist: eine
 `rustango_sso_links`-Zeile pro `(provider, sub)`. Die E-Mail, die der IdP sendet,
 reicht allein nie aus. Ein Erstbenutzer wird nur dann über seine verifizierte
 E-Mail verknüpft, wenn beim Anbieter **`allow_email_link`** eingeschaltet ist
-(Standard: aus), und nie, wenn das Konto ein Superuser oder Staff ist (Tenant:
-besitzt irgendeine Berechtigung; Bare-Admin: jedes Konto). Solche Konten
+(Standard: aus), und nie, wenn das Konto ein Superuser oder, ohne
+`allow_email_link_staff`, Staff ist (Tenant: besitzt irgendeine Rolle;
+Bare-Admin: jedes Konto). Solche Konten
 verknüpft ein Admin, der die `SsoLink`-Zeile im Admin anlegt; die Log-Zeile der
 Abweisung nennt das Subject. (Der Member-Ablauf, weiter unten, kann für eine
 unbekannte E-Mail auch ein Konto anlegen; das ist standardmäßig aus.)
@@ -104,7 +105,7 @@ Felder:
 | `enabled` | Ob der Button auf der Anmeldeseite erscheint. |
 | `sort_order` | Button-Reihenfolge (aufsteigend). |
 | `scopes` | Optionale, durch Leerzeichen getrennte Scope-Überschreibung (Standard `openid email profile`). |
-| `allow_email_link` | Einen Erstbenutzer über seine verifizierte E-Mail verknüpfen (Standard: aus). Verknüpft nie ein Superuser- oder Staff-Konto; vom Bare-Admin ignoriert. |
+| `allow_email_link` | Einen Erstbenutzer über seine verifizierte E-Mail verknüpfen (Standard: aus). Verknüpft nie einen Superuser, einen Rolleninhaber nur mit `allow_email_link_staff`; vom Bare-Admin ignoriert. |
 
 Nur ein Superuser kann `SsoProvider`- und `SsoLink`-Zeilen im Admin anlegen,
 ändern oder löschen; anderes Staff kann sie nur auflisten.
@@ -152,13 +153,15 @@ Zeile anzulegen erfordert die Session-Authentifizierung des Admins
 (`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
 kann niemand Verknüpfungen anlegen.
 
-Eine Verknüpfung, die mehr als 5 Minuten vor dem Konto angelegt wurde, auf das
-sie zeigt (etwa eine nach einem Restore wiederverwendete ID), loggt eine Warnung
-und meldet trotzdem an. Eine Verknüpfung, deren Benutzer nicht mehr existiert,
-wird bei der nächsten Anmeldung gelöscht.
-`rustango::sso::link::set_stale_links(StaleLinks::Drop)` löscht eine solche
-Verknüpfung stattdessen. Nutze das nur, wenn `created_at`-Werte von Konten nie
-importiert oder nachträglich befüllt werden.
+Eine Verknüpfung, die mehr als eine Stunde vor dem Konto angelegt wurde, auf das
+sie zeigt (etwa eine nach einem Restore wiederverwendete ID), wird gelöscht, und
+die Anmeldung läuft weiter wie ohne Verknüpfung. Eine Verknüpfung, deren
+Benutzer nicht mehr existiert, wird bei der nächsten Anmeldung gelöscht, und wer
+einen Benutzer im Admin löscht, löscht auch seine Verknüpfungen.
+Werden `created_at`-Werte von Konten nach ihren Verknüpfungen importiert oder
+nachträglich befüllt, loggt
+`rustango::sso::link::set_stale_links(StaleLinks::Warn)` nur eine Warnung und
+meldet trotzdem an.
 
 Mit dem Feature `totp` muss ein Bare-Admin-Benutzer mit bestätigtem
 TOTP-Gerät nach SSO noch einen Code eingeben. Der Admin zeigt das Code-Formular
@@ -168,7 +171,9 @@ Formular sendet an `<login>/sso-totp`. Der Tenant-Admin hat keinen TOTP-Schritt.
 `manage check --deploy` warnt vor einem aktivierten Anbieter, der jeden
 bestehenden Benutzer abweisen würde: keine `SsoLink`-Zeilen, und E-Mail-Verknüpfung
 aus oder nur privilegierte Benutzer. Im Bare-Admin ist das jeder Anbieter ohne
-Verknüpfungen.
+Verknüpfungen. Er warnt auch vor E-Mail-Verknüpfung bei einem Anbieter mit
+`kind = "oidc"`, einem `http://`-Issuer außer Loopback und einem geteilten
+Anbieter, der Benutzer registriert.
 
 ## Member (Endbenutzer) SSO
 
@@ -189,7 +194,7 @@ use rustango::tenancy::member_auth::{member_sso_router, MemberAuthConfig};
 
 let members = member_sso_router(MemberAuthConfig {
     login_base:     "/auth".into(),   // buttons link to /auth/sso/<slug>
-    landing_url:    "/".into(),       // post-login destination (honors a same-origin ?next)
+    landing_url:    "/".into(),       // post-login destination (a same-origin ?next on the begin URL wins)
     auto_provision: true,             // create a user from a verified email on first sign-in
     session_ttl:    7 * 24 * 60 * 60, // 7 days
     ..Default::default()
@@ -260,6 +265,116 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > `SsoProvider`-Zeilen des Tenants auf — der registry-weite
 > `SharedSsoProvider`-Merge und ein eigener `provision`-Hook sind Folgeaufgaben.
 
+## Wer sich anmelden darf
+
+Jeder Anbieter (und jeder geteilte Anbieter in der Operator-Konsole) hat
+Anmelderegeln. Leere Regeln lassen jeden zu, den der IdP anmeldet.
+
+| Feld | Regel |
+|---|---|
+| `allowed_email_domains` | Nur diese Domains: `client.org` passt nur auf sich selbst, `*.client.org` nur auf Subdomains. Durch Komma oder Zeilenumbruch getrennt. |
+| `blocked_email_domains` | Nie diese Domains, auch wenn oben erlaubt. Gilt für jede E-Mail, verifiziert oder nicht. |
+| `allowed_idp_tenants` | Microsoft-Verzeichnis-IDs (`tid`). Nur aus einem verifizierten id_token gelesen. |
+| `allowed_hosted_domains` | Google-Workspace-Domains (Claim `hd`). |
+| `required_claims` | JSON `{"claim": ["wert", ...]}`: der Claim (String oder Liste) muss einen der Werte enthalten. `{"iss": [...]}` legt den Issuer fest. Ein fehlender Claim lehnt ab. |
+
+Admin und Operator-Konsole speichern Listen in einer festen Form und
+lehnen Werte ab, die sich nicht parsen lassen. Ein trotzdem ungültiger Wert
+lehnt jede Anmeldung über den Anbieter ab.
+
+Eine abgelehnte Anmeldung landet im Server-Log und im Audit-Log
+(`source = sso:<surface>`, `changes.rule`, z. B. `domain_not_allowed`).
+Der Browser sieht eine allgemeine Meldung; die Tenant-Login-Seite zeigt
+zusätzlich die `access_denied_message` des Tenants (aus `SsoTenantPolicy`), escaped.
+
+Die Member-Route (`member_sso_router`) löst nur die eigenen Anbieter des
+Tenants auf; geteilte Anbieter und ihre Verschärfung durch den Tenant
+gelten dort noch nicht.
+
+### id_token-Vertrauen
+
+Profildaten kommen von `/userinfo` über TLS. Claims, die nur ein id_token
+trägt (`tid`, `iss`, `xms_edov`), werden erst genutzt, wenn das id_token
+besteht: Signatur gegen das JWKS des Issuers (RS256 oder ES256; gecacht
+gemäß `max-age`, bei unbekanntem Schlüssel höchstens einmal pro Minute neu
+geladen), `aud` enthält die Client-ID, `exp`/`nbf` mit einer Minute
+Toleranz, der Issuer (Microsoft: `https://login.microsoftonline.com/{tid}/v2.0`)
+und dasselbe `sub` wie userinfo. Sonst fehlen diese Claims, und eine Regel,
+die sie braucht, lehnt ab. Eine Microsoft-E-Mail gilt als verifiziert, wenn
+`xms_edov` wahr ist oder der Anbieter `allowed_idp_tenants` festlegt und die
+`tid` des Tokens darin steht.
+
+## Wer sich registrieren darf
+
+Ein Anbieter kann das Konto auch bei der ersten Anmeldung anlegen. Das
+passiert nur, wenn weder ein Link noch ein Konto zur verifizierten E-Mail
+passt, und erst nachdem die Anmelderegeln oben bestanden sind.
+
+| Feld | Bedeutung |
+|---|---|
+| `signup_mode` | `closed` (nur Links), `invite_only` (eine `SsoInvite` für diese E-Mail), `allowlist` (eine Einladung für die E-Mail oder ihre Domain) oder `open` (jeder, den die Anmelderegeln zulassen). Leer: geschlossen auf dem Tenant-Login; der Member-Flow folgt `MemberAuthConfig::auto_provision`. Der Bare-Admin legt nie Konten an. |
+| `default_roles` | Tenant-Rollen für neue Benutzer, z. B. `Viewer`. Eine Einladung mit Rollen ersetzt sie. |
+| `role_map` | JSON `{"<Gruppe oder App-Rolle>": "Editor"}` (oder eine Liste). Gelesen aus den Claims in `role_claims` (leer: `groups,roles`); bei einem Anbieter mit JWKS nur aus einem verifizierten id_token. |
+| `sync_roles_on_login` | `role_map` bei jeder Anmeldung neu anwenden. Nur Rollen aus `role_map` werden vergeben oder entzogen; von Hand vergebene bleiben. |
+| `username_from` | `email_local` (Standard), `email` oder `preferred_username` (sonst der lokale Teil der E-Mail). |
+| `username_clash` | `suffix` (Standard: `ann-x7k2q9`) oder `refuse`. |
+| `sync_profile` | Anzeigename und E-Mail bei jeder Anmeldung vom IdP übernehmen (nie für Superuser; eine E-Mail eines anderen Benutzers wird nicht übernommen). |
+| `allow_email_link_staff` | Zusammen mit `allow_email_link` auch Benutzer mit Rollen verknüpfen. Ein Superuser wird nie per E-Mail verknüpft. |
+
+Ein neuer Benutzer ist nie Superuser. Rollen laufen über die
+Berechtigungs-Engine (`UserRole`); ein Rollenname ohne `Role`-Zeile wird
+übersprungen und im Audit-Log vermerkt (`sso_role_unknown`). Benutzer,
+Link (`provisioned = true`), Rollen und die Nutzung der Einladung werden in
+einer Transaktion geschrieben.
+
+**Einladungen** (`SsoInvite`, im Tenant-Admin nur für Superuser) gelten für
+eine E-Mail (`ann@client.org`) oder eine Domain (`@client.org`, oder
+`*.client.org` für Subdomains). Sie können einen Anbieter nennen, Rollen
+tragen, ablaufen (`expires_at`) und Nutzungen begrenzen (`max_uses`). Eine
+Nutzung wird atomar gezählt: Zwei gleichzeitige Registrierungen um die
+letzte Nutzung ergeben ein Konto. `.../rustango_sso_invites/bulk` legt viele
+auf einmal an, aus einer eingefügten Liste oder einer CSV-Spalte.
+
+**Trennen und neu verknüpfen.** Auf `SsoLink`-Zeilen gibt es die
+Admin-Aktionen *Unlink* und *Re-link on next sign-in* (nur Superuser).
+Re-link löscht den Link und hinterlässt eine einmalige Einladung, 7 Tage
+gültig, die denselben Benutzer bei der nächsten Anmeldung mit seiner
+verifizierten E-Mail über denselben Anbieter wieder verknüpft, auch mit
+neuem Subject. Ein Superuser wird nie neu verknüpft, ein Rolleninhaber nur
+mit `allow_email_link_staff`.
+
+Benutzername- und E-Mail-Kollisionen ignorieren die Groß-/Kleinschreibung so
+wie das Backend: PostgreSQL faltet Unicode, SQLite nur ASCII-Buchstaben, MySQL
+folgt der Spalten-Collation (standardmäßig auch Akzente, `ané` und `ane`
+kollidieren). Mit ASCII-Benutzernamen ist die Antwort überall gleich.
+
+`check --deploy` meldet einen Anbieter mit offener Registrierung nicht als
+blockierend und warnt bei `signup_mode = open` ohne
+`allowed_email_domains`, `allowed_hosted_domains` oder `allowed_idp_tenants`.
+
+## Passwörter, Sitzungen und Lebenszyklus
+
+| Wo | Feld | Bedeutung |
+|---|---|---|
+| Anbieter | `sso_only` | Darüber verknüpfte Benutzer dürfen kein Passwort nutzen (Login, JSON-Login, HTTP Basic, Reset-Link), auch wenn der Anbieter deaktiviert oder gelöscht ist. |
+| Anbieter | `session_ttl_secs`, `superuser_session_ttl_secs` | Die Sitzung dauert das Kürzeste davon und der Lebensdauer der Route. |
+| Anbieter | `auto_deactivate_after_days` | `sso-deactivate-idle` deaktiviert so lange ungenutzte, per SSO registrierte Benutzer. Nie Superuser, nie Benutzer mit einer Verknüpfung, die ein Admin angelegt hat. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off` oder `superusers_only`: das Passwortformular erscheint nur unter `?local=1`, für Superuser. |
+| `SsoTenantPolicy` | `sso_only` | Nur Superuser nutzen ein Passwort. |
+| `SsoTenantPolicy` | `default_provider` | Die Login-Seite leitet direkt dorthin weiter (oder zum einzigen Anbieter, wenn das Passwortformular verborgen ist), außer bei `?local=1` oder nach einem Fehler. |
+| `SsoTenantPolicy` | `signups_per_hour` | SSO-Registrierungen pro Stunde (leer: 100, `0`: unbegrenzt). |
+
+Ein Superuser folgt nur `password_login`; `sso_only` sperrt ihn nie aus.
+Ein abgelehntes Passwort sieht aus wie ein falsches. Eine unlesbare Regel lehnt ab; unlesbare Mandanteneinstellungen lassen nur Superuser herein. Ein deaktivierter Anbieter bindet seine Benutzer weiter, eine Verknüpfung zu einem gelöschten zählt als `sso_only`, bis ein Admin sie entfernt. `sso_only` gilt für Passwort-Logins (Mandant und Bare-Admin) und Resets, nicht für API-Schlüssel und MCP-Agenten-Secrets. `sso-deactivate-idle` deaktiviert nur Benutzer, die kein Passwort nutzen können. Logout landet auf `?local=1`, und die automatische Weiterleitung geschieht höchstens einmal pro Minute, damit eine verlorene Sitzung keine Schleife erzeugt.
+
+**Gemeinsame Anbieter.** `SsoSharedOverride` eines Mandanten verschärft einen gemeinsamen Anbieter, lockert ihn nie, und nennt in `allowed_roles` die Rollen, die er vergeben darf (ohne Override: keine). Der Override kann auch die Verknüpfung per E-Mail abschalten (`allow_email_link`, `allow_email_link_staff`). Er bindet sich bei der ersten Anmeldung an die Zeile des gemeinsamen Anbieters: eine umbenannte Zeile behält ihn, eine neue Zeile mit dem alten Slug nicht, und eine Zeile mit anderem Issuer verweigert die Anmeldung, bis der Override neu angelegt wird.
+
+**Microsoft mit mehreren Verzeichnissen.** Ein `microsoft`-Anbieter (oder `oidc` auf `/common` bzw. `/organizations`) nimmt Nutzer aus jedem Entra-Verzeichnis an. `role_map` und `required_claims` zählen nur, wenn `allowed_idp_tenants` die `tid` des Tokens festlegt; sonst werden keine Rollen vergeben und Pflicht-Claims verweigern. `check --deploy` warnt bei solchen Zeilen.
+
+**Drosselung und Audit.** SSO-Callbacks haben ein eigenes Limit pro IP (429), getrennt vom Passwort-Limit. Verknüpfungen, Registrierungen, Re-Links und Rollenänderungen landen im Audit-Log; Ablehnungen höchstens fünfmal pro Subjekt in zehn Minuten.
+
+**Kontosperre.** Die Sperre nach falschen Passwörtern stoppt SSO nicht. Um einen Benutzer zu stoppen, `active = false` setzen.
+
 ## Secret-Speicherung
 
 `client_secret` wird **im Ruhezustand verschlüsselt** mit XChaCha20-Poly1305
@@ -292,8 +407,8 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 - **Zuerst die Verknüpfung** — die `(provider, sub)`-Verknüpfung entscheidet;
   die E-Mail wird nur vom optionalen Verknüpfen per E-Mail genutzt, und nur
   wenn sie verifiziert ist.
-- **Keine privilegierten E-Mail-Verknüpfungen** — Superuser und Staff
-  verknüpft nur ein Superuser. Eine per E-Mail angelegte Verknüpfung
+- **Keine privilegierten E-Mail-Verknüpfungen** — ein Superuser wird nie
+  per E-Mail verknüpft, ein Rolleninhaber nur mit `allow_email_link_staff`. Eine per E-Mail angelegte Verknüpfung
   funktioniert weiter, nachdem der Benutzer befördert wurde; löschen Sie sie,
   wenn das nicht gewollt ist.
 - **Keine Auto-Provisionierung** für die Admins — eine unbekannte E-Mail
@@ -306,8 +421,47 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 - SSO-Sessions sind die gewöhnliche Admin-Session — das Rotieren oder
   Deaktivieren des verknüpften Benutzers invalidiert sie über das bestehende
   Live-Gate.
-- Das Vertrauensmodell ist `/userinfo` über TLS (das id_token wird nicht
-  unabhängig verifiziert); stellen Sie dem Admin HTTPS voran.
+- Das Vertrauensmodell ist `/userinfo` über TLS; id_token-Claims zählen erst
+  nach der JWKS-Prüfung (siehe [id_token-Vertrauen](#id_token-vertrauen)).
+  Stellen Sie dem Admin HTTPS voran.
+
+## Härtung
+
+- **E-Mail-Verknüpfung sperrt das Passwort.** Verknüpft SSO ein bestehendes
+  Tenant-Konto per E-Mail (oder per Re-Link-Einladung), wird sein Passwort
+  unbrauchbar, seine Sitzungen enden, seine API-Schlüssel werden gelöscht und
+  eigene Agent-Schlüssel abgeschaltet, in derselben Transaktion. Wer die
+  E-Mail vor ihrem Besitzer registriert hat, verliert das Konto; der Besitzer
+  setzt das Passwort zurück, um wieder eines zu nutzen. Jede Rolle, auch ohne
+  Rechte, gilt bei der E-Mail-Verknüpfung als privilegiert.
+- **Ein Flow, eine Nutzung.** Ein Callback schließt einen Flow nur einmal ab
+  (pro Prozess; der Einmal-Code des IdP deckt andere Repliken). OIDC-Anmeldungen
+  senden eine `nonce`; ein verifiziertes id_token ohne sie oder mit einer
+  anderen wird abgelehnt (`id_token_replayed`). Das Ziel nach der Member-Anmeldung
+  ist das `?next` der Begin-URL, im Flow versiegelt; ein `?next` am Callback
+  wird ignoriert.
+- **`__Host-`-Flow-Cookies** über HTTPS bei `Path=/` (Bare Admin, Tenant auf
+  eigenem Host); dort wird nur dieser Name gelesen. Ein Pfadpräfix-Tenant
+  behält den einfachen Namen, und das Member-`?next` muss unter dem Präfix bleiben.
+- **Einladungen.** Eine Domain-Einladung für ein Public Suffix oder einen
+  Freemail-Anbieter (`@gmail.com`, `*.co.uk`) wird abgelehnt, und eine
+  Domain-Einladung braucht `max_uses` oder `expires_at`. Gespeicherte
+  IdP-Anzeigenamen sind auf 150 Zeichen begrenzt.
+- **Host des Bare Admin.** Mit `security.allowed_hosts` (oder
+  `Builder::allowed_hosts`) wird die SSO-Redirect-URI nur für einen gelisteten
+  Host gebaut. Ohne Liste nimmt sie jeden Host, und der Admin warnt beim Start.
+
+### Tenants auf eigenem Host und unter einem Präfix
+
+Ein Tenant ist auf seinem eigenen Host (Cookies bei `Path=/`) und auf dem
+Apex-Host unter seinem Präfix erreichbar (`app.example.com/acme`, Cookies bei
+`Path=/acme`). Präfix-Tenants teilen einen Origin mit der Operator-Konsole und
+miteinander: der Cookie-`Path` ist dort keine Sicherheitsgrenze. Sitzungen und
+Flows sind per MAC an den Tenant-Slug gebunden, das Cookie eines Tenants öffnet
+also nie einen anderen. Für einen auf beiden Wegen erreichbaren Tenant beide
+Callback-URLs beim IdP registrieren:
+`https://acme.example.com/__login/sso/<slug>/callback` und
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## Siehe auch
 

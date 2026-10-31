@@ -186,6 +186,7 @@ cela marche donc avant le premier démarrage du serveur.
 |---|---|
 | `audit-log` | Lit la piste d'audit |
 | `audit-cleanup` | L'élague |
+| `sso-deactivate-idle` | Désactiver les utilisateurs SSO inactifs de chaque tenant |
 
 ### MCP **T**
 
@@ -827,7 +828,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.14
+rustango 0.61.15
 ```
 
 ### `about`
@@ -840,7 +841,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.14
+  version:        0.61.15
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

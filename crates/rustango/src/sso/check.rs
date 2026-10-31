@@ -2,7 +2,7 @@
 //!
 //! SSO signs in by link only. A provider with no link rows signs in nobody
 //! already in its user table unless email linking is on and some user may use
-//! it: privileged accounts never link by email.
+//! it (privileged accounts never link by email), or sign-up is not closed.
 
 use crate::core::Model;
 use crate::migrate::try_table_exists_here;
@@ -21,6 +21,8 @@ pub enum Refusal {
     LinkingOff,
     /// Email linking is on, but every active user is privileged.
     OnlyPrivileged,
+    /// Not a refusal: sign-up is open and no domain rule narrows it.
+    OpenSignup,
 }
 
 /// A provider that refuses every existing user.
@@ -40,6 +42,53 @@ struct Candidate {
     /// Only tenant users link by email; the admin never does.
     #[cfg(feature = "tenancy")]
     allow_email_link: bool,
+    /// The row's sign-up mode; unreadable reads as closed.
+    #[cfg(feature = "tenancy")]
+    signup: super::policy::SignupMode,
+    /// Open sign-up with no email domain, hosted domain or IdP tenant rule.
+    #[cfg(feature = "tenancy")]
+    open_to_anyone: bool,
+}
+
+/// Each `P` row's sign-up mode and whether a domain rule narrows it. A table
+/// without the columns, or a value that does not parse, reads as closed.
+#[cfg(feature = "tenancy")]
+async fn signup_modes<P: Model + Send>(
+    pool: &Pool,
+) -> std::collections::HashMap<i64, (super::policy::SignupMode, bool)> {
+    use crate::core::SqlValue;
+    let cols = [
+        "id",
+        "signup_mode",
+        "allowed_email_domains",
+        "allowed_hosted_domains",
+        "allowed_idp_tenants",
+    ];
+    let rows = match QuerySet::<P>::new().only(&cols).fetch(pool).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(target: "rustango::sso", "signup_mode unreadable, treated as closed: {e}");
+            return std::collections::HashMap::new();
+        }
+    };
+    let set = |r: &std::collections::HashMap<String, SqlValue>, c: &str| matches!(r.get(c), Some(SqlValue::String(s)) if !s.trim().is_empty());
+    rows.iter()
+        .filter_map(|r| {
+            let id = match r.get("id") {
+                Some(SqlValue::I64(n)) => *n,
+                Some(SqlValue::I32(n)) => i64::from(*n),
+                _ => return None,
+            };
+            let mode = match r.get("signup_mode") {
+                Some(SqlValue::String(m)) => m.parse().unwrap_or(super::policy::SignupMode::Closed),
+                _ => super::policy::SignupMode::Closed,
+            };
+            let narrowed = set(r, "allowed_email_domains")
+                || set(r, "allowed_hosted_domains")
+                || set(r, "allowed_idp_tenants");
+            Some((id, (mode, narrowed)))
+        })
+        .collect()
 }
 
 /// Ids of the `P` rows with email linking on. Read apart from the row, as at
@@ -68,20 +117,188 @@ async fn candidates<P: Model + Send>(
     }
     // The admin never links by email, whatever the row says.
     #[cfg(feature = "tenancy")]
-    let linking = if source == LinkSource::Admin {
-        Vec::new()
+    let (linking, modes) = if source == LinkSource::Admin {
+        (Vec::new(), std::collections::HashMap::new())
     } else {
-        email_linking::<P>(pool).await
+        (
+            email_linking::<P>(pool).await,
+            signup_modes::<P>(pool).await,
+        )
     };
     Ok(rows
         .into_iter()
-        .map(|r| Candidate {
-            key: ProviderKey::for_row(source, r.id, &r.kind, r.issuer_url.as_deref()),
+        .map(|r| {
             #[cfg(feature = "tenancy")]
-            allow_email_link: linking.contains(&r.id),
-            slug: r.slug,
+            let (signup, narrowed) = modes
+                .get(&r.id)
+                .copied()
+                .unwrap_or((super::policy::SignupMode::Closed, false));
+            Candidate {
+                key: ProviderKey::for_row(source, r.id, &r.kind, r.issuer_url.as_deref()),
+                #[cfg(feature = "tenancy")]
+                allow_email_link: linking.contains(&r.id),
+                #[cfg(feature = "tenancy")]
+                signup,
+                #[cfg(feature = "tenancy")]
+                open_to_anyone: signup == super::policy::SignupMode::Open && !narrowed,
+                slug: r.slug,
+            }
         })
         .collect())
+}
+
+/// A provider setting that weakens sign-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum Risk {
+    /// Email linking on `kind = oidc`: whoever runs that IdP can assert any email.
+    EmailLinkOnCustomIdp,
+    /// A plain `http://` issuer that is not loopback.
+    InsecureIssuer,
+    /// A shared row that signs users up, in every tenant that uses it.
+    SharedSignup,
+    /// A multi-tenant Microsoft row with a role map or required claims and
+    /// no `allowed_idp_tenants`: those claims are ignored until it pins one.
+    UnpinnedDirectoryClaims,
+}
+
+/// An enabled provider with a [`Risk`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Risky {
+    pub slug: String,
+    pub why: Risk,
+}
+
+/// The enabled `P` rows' risky settings. A missing table holds none.
+async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<Risky>, ExecError> {
+    use super::provider::{int, text};
+    if !try_table_exists_here(pool, P::SCHEMA.table).await? {
+        return Ok(Vec::new());
+    }
+    let cols = [
+        "slug",
+        "kind",
+        "issuer_url",
+        "allow_email_link",
+        "allow_email_link_staff",
+        "signup_mode",
+        "allowed_idp_tenants",
+        "role_map",
+        "required_claims",
+    ];
+    let rows = QuerySet::<P>::new()
+        .filter("enabled", true)
+        .only(&cols)
+        .fetch(pool)
+        .await?;
+    let mut out = Vec::new();
+    for r in &rows {
+        let slug = text(r.get("slug")).unwrap_or_default();
+        let set = |c: &str| text(r.get(c)).is_some_and(|s| !s.trim().is_empty());
+        let mut push = |why| {
+            out.push(Risky {
+                slug: slug.clone(),
+                why,
+            });
+        };
+        // The admin never links by email.
+        if source != LinkSource::Admin
+            && text(r.get("kind")).as_deref() == Some("oidc")
+            && (int(r.get("allow_email_link")) != 0 || int(r.get("allow_email_link_staff")) != 0)
+        {
+            push(Risk::EmailLinkOnCustomIdp);
+        }
+        if text(r.get("issuer_url")).is_some_and(|u| super::insecure_url(&u)) {
+            push(Risk::InsecureIssuer);
+        }
+        let kind = text(r.get("kind")).unwrap_or_default();
+        let multi_tenant = kind == "microsoft"
+            || (kind == "oidc"
+                && text(r.get("issuer_url"))
+                    .is_some_and(|u| crate::oauth2::is_microsoft_multi_tenant(&u)));
+        if multi_tenant
+            && !set("allowed_idp_tenants")
+            && (claims_set(r.get("role_map")) || claims_set(r.get("required_claims")))
+        {
+            push(Risk::UnpinnedDirectoryClaims);
+        }
+        let signs_up = text(r.get("signup_mode"))
+            .and_then(|m| m.parse::<super::policy::SignupMode>().ok())
+            .is_some_and(|m| m >= super::policy::SignupMode::Allowlist);
+        if source == LinkSource::Shared && signs_up {
+            push(Risk::SharedSignup);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether a stored JSON map holds an entry.
+fn claims_set(v: Option<&crate::core::SqlValue>) -> bool {
+    use crate::core::SqlValue;
+    let parsed = match v {
+        Some(SqlValue::Json(j)) => j.clone(),
+        Some(SqlValue::String(s)) => serde_json::from_str(s).unwrap_or_default(),
+        _ => serde_json::Value::Null,
+    };
+    parsed.as_object().is_some_and(|o| !o.is_empty())
+}
+
+/// The tenant's own providers with a [`Risk`].
+///
+/// # Errors
+/// Driver failures, or a table missing the policy columns.
+#[cfg(feature = "tenancy")]
+pub async fn tenant_risks(tenant: &Pool) -> Result<Vec<Risky>, ExecError> {
+    risks::<super::SsoProvider>(tenant, LinkSource::Tenant).await
+}
+
+/// The registry's shared providers with a [`Risk`].
+///
+/// # Errors
+/// Driver failures, or a table missing the policy columns.
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+pub async fn shared_risks(registry: &Pool) -> Result<Vec<Risky>, ExecError> {
+    risks::<crate::tenancy::sso::SharedSsoProvider>(registry, LinkSource::Shared).await
+}
+
+/// The bare admin's providers with a [`Risk`].
+///
+/// # Errors
+/// Driver failures, or a table missing the policy columns.
+#[cfg(feature = "admin-sso")]
+pub async fn admin_risks(pool: &Pool) -> Result<Vec<Risky>, ExecError> {
+    risks::<super::SsoProvider>(pool, LinkSource::Admin).await
+}
+
+/// What to do about `why`, for the warning lines.
+fn risk_text(why: Risk) -> &'static str {
+    match why {
+        Risk::EmailLinkOnCustomIdp => {
+            "is a custom OIDC IdP with email linking on, so whoever runs that IdP can sign in \
+             as any user by asserting their email — turn off allow_email_link and \
+             allow_email_link_staff, or add SsoLink rows"
+        }
+        Risk::InsecureIssuer => {
+            "has an http:// issuer_url, so discovery and tokens travel in clear — use https"
+        }
+        Risk::SharedSignup => {
+            "is shared and signs users up, in every tenant that uses it — set signup_mode \
+             closed or invite_only, or give tenants their own provider"
+        }
+        Risk::UnpinnedDirectoryClaims => {
+            "is multi-tenant Microsoft with role_map or required_claims but no \
+             allowed_idp_tenants; any directory can assert those claims, so they are ignored \
+             (no roles synced, required claims refuse) — set allowed_idp_tenants"
+        }
+    }
+}
+
+/// `check --deploy` line for a provider with a [`Risk`]; `whose` names the
+/// table, e.g. ``tenant `acme`: provider`` or `shared provider`.
+#[must_use]
+pub(crate) fn risk_warning(whose: &str, r: &Risky) -> String {
+    format!("[sso] {whose} `{}` {}", r.slug, risk_text(r.why))
 }
 
 /// The `rows` with no link on `users`; none when `U` has no rows. Missing
@@ -116,7 +333,19 @@ async fn refusing_tenant_users(
     tenant: &Pool,
 ) -> Result<Vec<Stranded>, ExecError> {
     let mut linkable = None;
-    let mut out = Vec::new();
+    let mut out: Vec<Stranded> = rows
+        .iter()
+        .filter(|r| r.open_to_anyone)
+        .map(|r| Stranded {
+            slug: r.slug.clone(),
+            why: Refusal::OpenSignup,
+        })
+        .collect();
+    // A provider that signs users up is not stranded.
+    let rows = rows
+        .into_iter()
+        .filter(|r| r.signup == super::policy::SignupMode::Closed)
+        .collect();
     for row in unlinked::<crate::tenancy::User>(rows, tenant).await? {
         let why = if row.allow_email_link {
             if linkable.is_none() {
@@ -204,6 +433,10 @@ fn refusal_text(why: Refusal) -> &'static str {
         Refusal::OnlyPrivileged => {
             "has no SsoLink rows and every active user is privileged, so it refuses every \
              existing user — privileged accounts never link by email, add SsoLink rows"
+        }
+        Refusal::OpenSignup => {
+            "has signup_mode open and no allowed_email_domains, allowed_hosted_domains or \
+             allowed_idp_tenants, so anyone the IdP signs in gets an account — add a domain rule"
         }
     }
 }

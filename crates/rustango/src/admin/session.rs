@@ -105,7 +105,7 @@ pub fn current_csrf_token() -> Option<String> {
 }
 
 /// Session lifetime: 8 hours, so an operator signs in once a workday.
-const DEFAULT_TTL_SECS: i64 = 8 * 60 * 60;
+pub(crate) const DEFAULT_TTL_SECS: i64 = 8 * 60 * 60;
 
 /// Cookie name the admin session is stored under. Distinct from any
 /// `tenancy` cookies so the two layers can coexist on one host.
@@ -195,6 +195,8 @@ pub(crate) struct CookieAuth {
     pub(crate) auth_hash: PasswordFingerprint,
     /// Issued-at, Unix seconds.
     pub(crate) iat: i64,
+    /// Expiry, Unix seconds: a re-minted cookie keeps it.
+    pub(crate) exp: i64,
 }
 
 impl CookiePayload {
@@ -213,11 +215,40 @@ pub(crate) fn encode(
     auth_hash: &PasswordFingerprint,
     sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
+    encode_for(
+        secret,
+        session,
+        auth_hash,
+        sessions_revoked_at,
+        DEFAULT_TTL_SECS,
+    )
+}
+
+/// [`encode`] for a cookie expiring at `exp` (Unix seconds), at most 8 hours out.
+pub(crate) fn encode_until(
+    secret: &AdminSessionSecret,
+    session: AdminSession,
+    auth_hash: &PasswordFingerprint,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    exp: i64,
+) -> String {
+    let left = (exp - chrono::Utc::now().timestamp()).clamp(1, DEFAULT_TTL_SECS);
+    encode_for(secret, session, auth_hash, sessions_revoked_at, left)
+}
+
+/// [`encode`] with a lifetime of `ttl_secs`.
+pub(crate) fn encode_for(
+    secret: &AdminSessionSecret,
+    session: AdminSession,
+    auth_hash: &PasswordFingerprint,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    ttl_secs: i64,
+) -> String {
     let payload = CookiePayload {
         user_id: session.user_id,
         username: session.username,
         is_superuser: session.is_superuser,
-        exp: chrono::Utc::now().timestamp() + DEFAULT_TTL_SECS,
+        exp: chrono::Utc::now().timestamp() + ttl_secs,
         auth_hash: auth_hash.clone(),
         iat: crate::session::issued_at(sessions_revoked_at),
     };
@@ -260,6 +291,7 @@ pub(crate) fn decode_full(
         CookieAuth {
             auth_hash: payload.auth_hash,
             iat: payload.iat,
+            exp: payload.exp,
         },
     ))
 }
@@ -323,6 +355,21 @@ mod tests {
         assert!(s.is_superuser);
         assert_eq!(auth.auth_hash, fp);
         assert!(auth.iat > 0);
+    }
+
+    /// A re-minted cookie keeps a short SSO expiry and never outlives 8 hours.
+    #[test]
+    fn a_reminted_cookie_keeps_its_expiry() {
+        let secret = AdminSessionSecret::from_bytes(vec![42u8; 32]);
+        let fp = PasswordFingerprint::of(&secret, "$argon2id$fake-hash");
+        let short = encode_for(&secret, session(7, "alice", true), &fp, None, 600);
+        let exp = decode_full(&secret, &short).unwrap().1.exp;
+        let again = encode_until(&secret, session(7, "alice", true), &fp, None, exp);
+        assert!((decode_full(&secret, &again).unwrap().1.exp - exp).abs() <= 1);
+        let far = chrono::Utc::now().timestamp() + 10 * DEFAULT_TTL_SECS;
+        let capped = encode_until(&secret, session(7, "alice", true), &fp, None, far);
+        let left = decode_full(&secret, &capped).unwrap().1.exp - chrono::Utc::now().timestamp();
+        assert!(left <= DEFAULT_TTL_SECS);
     }
 
     #[test]

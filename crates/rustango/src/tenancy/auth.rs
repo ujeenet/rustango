@@ -16,7 +16,7 @@
 //!
 //! The hard wall is enforced by middleware: operator routes call
 //! [`authenticate_operator`] against the registry; tenant routes
-//! call [`authenticate_user`] against the resolved tenant's pool.
+//! call [`authenticate_user_pool`] against the resolved tenant's pool.
 //! An operator's `Authorization: Basic …` header sent to a tenant
 //! URL won't authenticate (the username doesn't exist in the
 //! tenant's `rustango_users`); a user's header sent to `/operator`
@@ -435,9 +435,17 @@ pub(crate) async fn check_operator_password(
 /// [`crate::sql::Pool`] enum and works on PG / SQLite / MySQL.
 /// It matches `username` only, whatever `[auth] login_field` says.
 ///
+/// **Warning:** it does not apply the tenant's SSO password rules
+/// (`sso_only`, `password_login`), so a user meant to sign in only
+/// through SSO gets in with a password. Use [`authenticate_user_pool`].
+///
 /// # Errors
 /// As [`authenticate_operator`].
 #[cfg(feature = "postgres")]
+#[deprecated(
+    since = "0.61.15",
+    note = "bypasses SSO password rules; use authenticate_user_pool"
+)]
 pub async fn authenticate_user(
     conn: &mut PgConnection,
     username: &str,
@@ -448,10 +456,10 @@ pub async fn authenticate_user(
         .where_(User::username.eq(username.to_owned()))
         .fetch_on(&mut *conn)
         .await?;
-    check_user_password(rows.into_iter().next(), password).await
+    check_user_password(None, rows.into_iter().next(), password).await
 }
 
-/// Tri-dialect counterpart of [`authenticate_user`] (v0.38). Takes the
+/// Tri-dialect tenant user login, with the SSO password rules (v0.38). Takes the
 /// unified [`crate::sql::Pool`] enum so the same body runs on PG,
 /// SQLite, and MySQL — the underlying ORM `_pool` helper picks the
 /// right placeholder + identifier-quoting rules per dialect.
@@ -471,6 +479,10 @@ pub async fn authenticate_user(
 /// `identifier` is matched by the active
 /// [`login_field`](super::login_field): a username, or an email ignoring case.
 ///
+/// With `sso`, the tenant's SSO password rules apply too. It has no
+/// registry, so a user linked through a shared provider is refused here;
+/// the built-in logins pass the registry and are not.
+///
 /// # Errors
 /// As [`authenticate_operator_pool`].
 pub async fn authenticate_user_pool(
@@ -479,11 +491,30 @@ pub async fn authenticate_user_pool(
     password: &str,
 ) -> Result<Option<PasswordVerified<User>>, TenancyError> {
     let user = super::login::find_login_user(pool, super::login_field(), identifier).await?;
-    check_user_password(user, password).await
+    check_user_password(Some(pool), user, password).await
 }
 
-/// [`check_operator_password`] for a tenant user.
+/// Whether the tenant's SSO rules let `user` use a password (always without `sso`).
+pub(crate) async fn password_login_allowed(
+    pool: &crate::sql::Pool,
+    registry: Option<&crate::sql::Pool>,
+    user: &User,
+) -> bool {
+    #[cfg(feature = "sso")]
+    {
+        crate::sso::lifecycle::password_login_allowed(pool, registry, user).await
+    }
+    #[cfg(not(feature = "sso"))]
+    {
+        let _ = (pool, registry, user);
+        true
+    }
+}
+
+/// [`check_operator_password`] for a tenant user. With `pool`, the
+/// tenant's SSO rules may refuse the password too.
 async fn check_user_password(
+    pool: Option<&crate::sql::Pool>,
     user: Option<User>,
     password: &str,
 ) -> Result<Option<PasswordVerified<User>>, TenancyError> {
@@ -495,6 +526,11 @@ async fn check_user_password(
     let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
+    }
+    if let Some(pool) = pool {
+        if !password_login_allowed(pool, None, &user).await {
+            return Ok(None);
+        }
     }
     let upgrade = crate::passwords::rehash_async(password, &user.password_hash).await;
     Ok(Some(PasswordVerified { row: user, upgrade }))
