@@ -1,6 +1,6 @@
 {
   "name": "0013_auto",
-  "created_at": "2026-10-31T02:30:56.895539+00:00",
+  "created_at": "2026-10-31T13:31:39.837089+00:00",
   "prev": "0011_create_index_rustango_sso_links_provider_source_provider_id_subject_idx",
   "atomic": true,
   "snapshot": {
@@ -1078,6 +1078,14 @@
             "max_length": 1000
           },
           {
+            "name": "allowed_roles",
+            "column": "allowed_roles",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 1000
+          },
+          {
             "name": "blocked_email_domains",
             "column": "blocked_email_domains",
             "ty": "string",
@@ -1194,6 +1202,13 @@
             "primary_key": false,
             "max_length": 16,
             "default": "'on'"
+          },
+          {
+            "name": "signups_per_hour",
+            "column": "signups_per_hour",
+            "ty": "i32",
+            "nullable": true,
+            "primary_key": false
           },
           {
             "name": "sso_only",

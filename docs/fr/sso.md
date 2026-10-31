@@ -364,6 +364,27 @@ détenteur de rôles seulement avec `allow_email_link_staff`.
 l'inscription n'est pas fermée, et avertit pour `signup_mode = open` sans
 `allowed_email_domains`, `allowed_hosted_domains` ni `allowed_idp_tenants`.
 
+## Mots de passe, sessions et cycle de vie
+
+| Où | Champ | Sens |
+|---|---|---|
+| Provider | `sso_only` | Ses utilisateurs liés ne peuvent pas utiliser de mot de passe (formulaire, login JSON, HTTP Basic, lien de réinitialisation). Seulement tant qu'il est activé. |
+| Provider | `session_ttl_secs`, `superuser_session_ttl_secs` | La session dure le plus court de ces valeurs et de celle de la route. |
+| Provider | `auto_deactivate_after_days` | `sso-deactivate-idle` désactive les utilisateurs inscrits par lui et inactifs depuis ce délai. Jamais un superutilisateur, jamais un utilisateur lié par un admin. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off` ou `superusers_only` : le formulaire n'apparaît qu'avec `?local=1`, pour les superutilisateurs. |
+| `SsoTenantPolicy` | `sso_only` | Seuls les superutilisateurs utilisent un mot de passe. |
+| `SsoTenantPolicy` | `default_provider` | La page de connexion y redirige directement, sauf avec `?local=1` ou après une erreur. |
+| `SsoTenantPolicy` | `signups_per_hour` | Inscriptions SSO par heure (vide : 100, `0` : sans limite). |
+
+Un superutilisateur ne suit que `password_login` ; `sso_only` ne le bloque jamais.
+Un mot de passe refusé ressemble à un mauvais. Une règle illisible refuse.
+
+**Providers partagés.** Le `SsoSharedOverride` d'un tenant resserre un provider partagé, sans jamais l'assouplir, et nomme dans `allowed_roles` les rôles qu'il peut donner (sans override : aucun).
+
+**Limitation et audit.** Les callbacks SSO ont leur propre limite par IP (429), séparée de celle des mots de passe. Liaisons, inscriptions, re-liaisons et changements de rôles vont au journal d'audit ; les refus au plus cinq fois par sujet en dix minutes.
+
+**Verrouillage.** Le verrouillage après des mots de passe faux n'arrête pas le SSO. Pour arrêter un utilisateur, mettez `active = false`.
+
 ## Stockage des secrets
 
 `client_secret` est stocké **chiffré au repos** avec XChaCha20-Poly1305

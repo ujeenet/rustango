@@ -163,6 +163,13 @@ untouched.
 - A provider whose sign-up fields do not parse (`signup_mode`, `role_map`, ...) refuses every sign-in through it.
 - `ResolvedProvider` has a new `signup` field; `TenantAccounts` is now public.
 - `role_map` reads its claims only from a verified id_token when the provider has a JWKS; a userinfo-only provider keeps reading userinfo. A sign-in with none of the role claims leaves the mapped roles alone.
+- `sso_only`, `password_login`, session lifetimes and `auto_deactivate_after_days` are now enforced. An `sso_only` user's password is refused on every login and by `confirm_password_reset_pool` (new `AuthFlowError::PasswordLoginDisabled`); `authenticate_user_pool` returns `None` for them. Without the registry, a user linked through a shared provider is refused a password there.
+- A shared provider grants no roles in a tenant until the tenant's `SsoSharedOverride.allowed_roles` names them. `SsoSharedOverride` and `SsoTenantPolicy` have new fields (`allowed_roles`, `signups_per_hour`).
+- `sync_roles_on_login = false` now also skips the role map on a first email link or re-link.
+- SSO sign-up is limited to 100 per tenant per hour unless `signups_per_hour` says otherwise (`0`: no limit).
+- `LoginScope` has a new `Sso` variant; `Refusal` a new `SignupRate`.
+- Schedule `sso-deactivate-idle` (tenancy manage) if a provider sets `auto_deactivate_after_days`.
+- A failed password lockout does not stop SSO sign-in; to stop a user, set `active = false`, which SSO refuses.
 
 ## 0.61.14
 

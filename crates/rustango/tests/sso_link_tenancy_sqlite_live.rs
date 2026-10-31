@@ -288,13 +288,37 @@ async fn send(app: &Router, req: Request<Body>) -> axum::response::Response {
 
 /// Run begin + callback on `app` under `login`; return the callback response.
 async fn handshake(app: &Router, host: &str, login: &str, slug: &str) -> axum::response::Response {
+    handshake_from(app, host, login, slug, None).await
+}
+
+/// `req` from client address `ip`.
+fn from_ip(mut req: Request<Body>, ip: Option<&str>) -> Request<Body> {
+    if let Some(ip) = ip {
+        let addr: std::net::SocketAddr = format!("{ip}:4000").parse().unwrap();
+        req.extensions_mut()
+            .insert(axum::extract::ConnectInfo(addr));
+    }
+    req
+}
+
+/// [`handshake`] from client address `ip`.
+async fn handshake_from(
+    app: &Router,
+    host: &str,
+    login: &str,
+    slug: &str,
+    ip: Option<&str>,
+) -> axum::response::Response {
     let begin = send(
         app,
-        Request::builder()
-            .uri(format!("{login}/sso/{slug}"))
-            .header(header::HOST, host)
-            .body(Body::empty())
-            .unwrap(),
+        from_ip(
+            Request::builder()
+                .uri(format!("{login}/sso/{slug}"))
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap(),
+            ip,
+        ),
     )
     .await;
     let to = location(&begin);
@@ -306,12 +330,15 @@ async fn handshake(app: &Router, host: &str, login: &str, slug: &str) -> axum::r
     let flow = set_cookies(&begin).join("; ");
     send(
         app,
-        Request::builder()
-            .uri(format!("{login}/sso/{slug}/callback?code=c&state={state}"))
-            .header(header::HOST, host)
-            .header(header::COOKIE, flow)
-            .body(Body::empty())
-            .unwrap(),
+        from_ip(
+            Request::builder()
+                .uri(format!("{login}/sso/{slug}/callback?code=c&state={state}"))
+                .header(header::HOST, host)
+                .header(header::COOKIE, flow)
+                .body(Body::empty())
+                .unwrap(),
+            ip,
+        ),
     )
     .await
 }
@@ -2483,4 +2510,314 @@ async fn member_sso_failures_have_an_error_status_and_no_store() {
         assert_eq!(resp.status().as_u16(), want, "{what}");
         assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-store", "{what}");
     }
+}
+
+/// A tenant settings row in tenant 0.
+async fn tenant_settings(env: &Env, password_login: &str, default_provider: Option<&str>) {
+    use rustango::sso::policy::SsoTenantPolicy;
+    rustango::testkit::create_tables_for::<SsoTenantPolicy>(env.pool())
+        .await
+        .unwrap();
+    SsoTenantPolicy {
+        id: Auto::default(),
+        name: "default".into(),
+        access_denied_message: None,
+        password_login: password_login.into(),
+        sso_only: false,
+        default_provider: default_provider.map(str::to_owned),
+        signups_per_hour: None,
+    }
+    .insert_pool(env.pool())
+    .await
+    .unwrap();
+}
+
+impl Env {
+    /// A tenant 0 user with a real password.
+    async fn password_user(&self, name: &str, superuser: bool) -> i64 {
+        let mut u = User {
+            username: name.into(),
+            password_hash: rustango::tenancy::password::hash("pw-123456789").unwrap(),
+            email: Some(format!("{name}@example.com")),
+            is_superuser: superuser,
+            ..rustango::testkit::user()
+        };
+        u.insert_pool(self.pool()).await.unwrap();
+        u.id.get().copied().unwrap()
+    }
+
+    /// GET a tenant 0 page.
+    async fn get(&self, uri: &str) -> axum::response::Response {
+        send(
+            &self.admin,
+            Request::builder()
+                .uri(uri)
+                .header(header::HOST, &self.tenants[0].host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    /// Whether `name` signs in with the tenant 0 password form.
+    async fn password_login(&self, name: &str) -> bool {
+        let resp = send(
+            &self.admin,
+            Request::builder()
+                .method("POST")
+                .uri("/__login")
+                .header(header::HOST, &self.tenants[0].host)
+                .header(header::COOKIE, "rustango_csrf=t")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "_csrf=t&username={name}&password=pw-123456789"
+                )))
+                .unwrap(),
+        )
+        .await;
+        set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{COOKIE_NAME}=")))
+    }
+}
+
+async fn body_of(resp: axum::response::Response) -> String {
+    let b = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8(b.to_vec()).unwrap()
+}
+
+/// `superusers_only` hides the password form unless `?local=1`, and only a
+/// superuser signs in with it: the break-glass way in.
+#[tokio::test]
+async fn superusers_only_is_a_break_glass_password_form() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.password_user("boss", true).await;
+    env.password_user("ann", false).await;
+    assert!(env.password_login("ann").await, "password_login on");
+    tenant_settings(&env, "superusers_only", None).await;
+    let page = body_of(env.get("/__login").await).await;
+    assert!(!page.contains("name=\"password\""), "{page}");
+    let local = body_of(env.get("/__login?local=1").await).await;
+    assert!(local.contains("name=\"password\""), "{local}");
+    assert!(env.password_login("boss").await, "break-glass");
+    assert!(!env.password_login("ann").await);
+}
+
+/// The login page goes straight to the default provider, but not with
+/// `?local=1` nor after a refusal: no redirect loop.
+#[tokio::test]
+async fn the_login_page_redirects_to_the_default_provider_once() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    tenant_settings(&env, "on", Some("corp")).await;
+    let resp = env.get("/__login").await;
+    assert!(resp.status().is_redirection());
+    assert_eq!(location(&resp), "/__login/sso/corp");
+    // A refused sign-in lands on the page, which stays put.
+    env.idp.assert("sub-stranger", "stranger@example.com");
+    let refused = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+    let back = location(&refused);
+    assert_eq!(back, "/__login?sso_error=nouser");
+    assert_eq!(env.get(&back).await.status(), StatusCode::OK);
+    assert_eq!(env.get("/__login?local=1").await.status(), StatusCode::OK);
+}
+
+/// A disabled tenant provider shadows the shared one with its slug: no
+/// button, and its sign-in is refused instead of falling through.
+#[tokio::test]
+async fn a_disabled_tenant_provider_never_falls_through_to_the_shared_one() {
+    use rustango::sql::UpdaterPool as _;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.shared_provider("corp", true).await;
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+    env.tenant_provider("corp", true).await;
+    SsoProvider::objects()
+        .filter("slug", "corp")
+        .update()
+        .set("enabled", false)
+        .execute_pool(env.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        env.sso("corp", "sub-ann", "ann@example.com").await,
+        Err("disabled".into())
+    );
+    let page = body_of(env.get("/__login").await).await;
+    assert!(!page.contains("/__login/sso/corp"), "{page}");
+}
+
+/// Refused SSO sign-ins spend their own per-IP bucket: past it the SSO
+/// start answers 429, and the password form from that IP still works. A
+/// subject's refusals are audited a few times, not every time.
+#[tokio::test]
+async fn sso_refusals_are_throttled_apart_from_passwords() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    env.password_user("ann", false).await;
+    env.tenant_provider("corp", false).await;
+    env.idp.assert("sub-eve", "eve@example.com");
+    let ip = "10.250.7.9";
+    let limit = rustango::login_throttle::shared().limits().ip_limit;
+    for _ in 0..limit {
+        let r = handshake_from(
+            &env.admin,
+            &env.tenants[0].host,
+            "/__login",
+            "corp",
+            Some(ip),
+        )
+        .await;
+        assert_eq!(location(&r), "/__login?sso_error=nouser");
+    }
+    let begin = send(
+        &env.admin,
+        from_ip(
+            Request::builder()
+                .uri("/__login/sso/corp")
+                .header(header::HOST, &env.tenants[0].host)
+                .body(Body::empty())
+                .unwrap(),
+            Some(ip),
+        ),
+    )
+    .await;
+    assert_eq!(begin.status(), StatusCode::TOO_MANY_REQUESTS);
+    let login = send(
+        &env.admin,
+        from_ip(
+            Request::builder()
+                .method("POST")
+                .uri("/__login")
+                .header(header::HOST, &env.tenants[0].host)
+                .header(header::COOKIE, "rustango_csrf=t")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("_csrf=t&username=ann&password=pw-123456789"))
+                .unwrap(),
+            Some(ip),
+        ),
+    )
+    .await;
+    assert!(
+        set_cookies(&login)
+            .iter()
+            .any(|c| c.starts_with(&format!("{COOKIE_NAME}="))),
+        "the password bucket is untouched"
+    );
+    let rows = refused_rules(env.pool(), "corp", "sub-eve").await;
+    assert_eq!(rows.len(), 5, "{rows:?}");
+}
+
+/// The tenant session lasts the shortest of the route, the provider and,
+/// for a superuser, the superuser lifetime.
+#[tokio::test]
+async fn the_tenant_session_ttl_is_the_shortest() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    env.set_policy("corp", "session_ttl_secs", "600").await;
+    env.set_policy("corp", "superuser_session_ttl_secs", "300")
+        .await;
+    env.idp.assert("sub-ann", "ann@example.com");
+    let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+    let cookie = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with(&format!("{COOKIE_NAME}=")))
+        .unwrap_or_else(|| panic!("no session: {}", location(&resp)))
+        .to_owned();
+    assert!(cookie.contains("Max-Age=600"), "{cookie}");
+    let value = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .trim_start_matches(&format!("{COOKIE_NAME}="));
+    let p = decode(&env.secret, &env.tenants[0].slug, value).unwrap();
+    assert_eq!(p.uid, ann);
+    let left = p.exp - chrono::Utc::now().timestamp();
+    assert!((590..=600).contains(&left), "{left}");
+}
+
+/// The member session is capped by the provider's lifetime too.
+#[cfg(not(feature = "postgres"))]
+#[tokio::test]
+async fn the_member_session_ttl_is_the_shortest() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::{member_sso_router, MemberAuthConfig, MEMBER_COOKIE};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.set_policy("corp", "session_ttl_secs", "900").await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    env.idp.assert("sub-new", "new@example.com");
+    let resp = handshake(&app, &env.tenants[0].host, "/auth", "corp").await;
+    let cookie = resp
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with(&format!("{MEMBER_COOKIE}=")))
+        .expect("member cookie")
+        .to_owned();
+    assert!(cookie.contains("Max-Age=900"), "{cookie}");
+}
+
+/// The bare admin session is capped by the provider's lifetime.
+#[tokio::test]
+async fn the_bare_admin_session_ttl_is_the_shortest() {
+    use base64::Engine as _;
+    let _g = SUITE.lock().await;
+    let (app, pool, idp) = bare_admin().await;
+    set_policy(&pool, "corp", "session_ttl_secs", "120").await;
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    let root = rustango::admin::AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", root.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    idp.assert("sub-root", "root@example.com");
+    let resp = handshake(&app, "admin.test", "/login", "corp").await;
+    assert!(signed_in(&resp), "{}", location(&resp));
+    let value = set_cookies(&resp)
+        .into_iter()
+        .find_map(|c| c.strip_prefix("rustango_admin_session=").map(str::to_owned))
+        .unwrap();
+    let body = value.split('.').next().unwrap();
+    let json: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .unwrap(),
+    )
+    .unwrap();
+    let left = json["exp"].as_i64().unwrap() - chrono::Utc::now().timestamp();
+    assert!((110..=120).contains(&left), "{left}");
 }

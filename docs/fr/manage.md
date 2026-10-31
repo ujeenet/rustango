@@ -186,6 +186,7 @@ cela marche donc avant le premier démarrage du serveur.
 |---|---|
 | `audit-log` | Lit la piste d'audit |
 | `audit-cleanup` | L'élague |
+| `sso-deactivate-idle` | Désactiver les utilisateurs SSO inactifs de chaque tenant |
 
 ### MCP **T**
 

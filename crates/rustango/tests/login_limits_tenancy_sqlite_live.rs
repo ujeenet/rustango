@@ -1336,3 +1336,111 @@ async fn a_full_hash_queue_answers_503_everywhere() {
         StatusCode::OK
     );
 }
+
+/// Whether a tenant admin login set a session cookie.
+#[cfg(feature = "sso")]
+fn has_session(r: &axum::response::Response) -> bool {
+    r.headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .any(|c| c.starts_with(&format!("{COOKIE_NAME}=")))
+}
+
+/// Tenant-wide `sso_only` refuses a user's password on the form, the JSON
+/// login, HTTP Basic and a reset link, after the verify; a superuser still
+/// signs in. `password_login = off` refuses the superuser too.
+#[cfg(feature = "sso")]
+#[tokio::test]
+async fn sso_only_refuses_every_password_path_but_a_superuser() {
+    use rustango::sso::policy::SsoTenantPolicy;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::tenancy::permissions::ensure_tables_pool(&env.tenant)
+        .await
+        .unwrap();
+    let boss = unique("boss");
+    env.user(&boss).await;
+    let ann = unique("ann");
+    let mut u = User {
+        username: ann.clone(),
+        password_hash: rustango::tenancy::password::hash(PASS).unwrap(),
+        is_superuser: false,
+        ..rustango::testkit::user()
+    };
+    u.insert_pool(&env.tenant).await.unwrap();
+    let ann_id = u.id.get().copied().unwrap();
+    rustango::testkit::create_tables_for::<SsoTenantPolicy>(&env.tenant)
+        .await
+        .unwrap();
+    let mut policy = SsoTenantPolicy {
+        id: Auto::default(),
+        name: "default".into(),
+        access_denied_message: None,
+        password_login: "on".into(),
+        sso_only: false,
+        default_provider: None,
+        signups_per_hour: None,
+    };
+    policy.insert_pool(&env.tenant).await.unwrap();
+    // Before the rule both sign in.
+    assert!(has_session(&env.admin_login(&next_ip(), &ann, PASS).await));
+    policy.sso_only = true;
+    policy.save_pool(&env.tenant).await.unwrap();
+
+    // Every path, so one run names each one that lets the password through.
+    let mut through = Vec::new();
+    if has_session(&env.admin_login(&next_ip(), &ann, PASS).await) {
+        through.push("form");
+    }
+    if env.jwt_login(&next_ip(), &ann, PASS).await.status() != StatusCode::UNAUTHORIZED {
+        through.push("json");
+    }
+    if env.basic(&next_ip(), &ann, PASS).await.status() != StatusCode::UNAUTHORIZED {
+        through.push("basic");
+    }
+    if rustango::tenancy::authenticate_user_pool(&env.tenant, &ann, PASS)
+        .await
+        .unwrap()
+        .is_some()
+    {
+        through.push("authenticate_user_pool");
+    }
+    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+    let secret = b"reset-secret-reset-secret-32byte";
+    let url = PasswordReset::issue(
+        &LinkScope::audience("t"),
+        "https://x/reset",
+        ann_id,
+        secret,
+        Duration::from_secs(600),
+    );
+    if rustango::auth_flows::confirm_password_reset_pool(
+        LinkTarget::audience(&env.tenant, "t"),
+        &url,
+        "Another-strong-pass-9!",
+        secret,
+    )
+    .await
+        != Err(AuthFlowError::PasswordLoginDisabled)
+    {
+        through.push("reset");
+    }
+    assert!(through.is_empty(), "the password got through: {through:?}");
+    // A superuser is never locked out by sso_only.
+    assert!(has_session(&env.admin_login(&next_ip(), &boss, PASS).await));
+    assert_eq!(
+        env.jwt_login(&next_ip(), &boss, PASS).await.status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        env.basic(&next_ip(), &boss, PASS).await.status(),
+        StatusCode::OK
+    );
+
+    policy.password_login = "off".into();
+    policy.save_pool(&env.tenant).await.unwrap();
+    assert!(!has_session(
+        &env.admin_login(&next_ip(), &boss, PASS).await
+    ));
+}
