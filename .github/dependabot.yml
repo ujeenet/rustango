@@ -1,0 +1,20 @@
+# Weekly version updates. Minor and patch bumps come grouped in one PR per
+# ecosystem; majors come one per crate so each can be judged on its own.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      cargo-minor:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: develop
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
