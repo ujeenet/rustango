@@ -2110,12 +2110,12 @@ pub async fn truncate(
     .await
 }
 
-/// Validated multi-row `INSERT` inside an open transaction, split to fit
-/// the backend's bind-parameter limit like [`bulk_insert_pool`].
-pub(crate) async fn bulk_insert_tx(
-    tx: &mut PoolTx<'_>,
-    query: &BulkInsertQuery,
-) -> Result<(), ExecError> {
+/// [`bulk_insert_pool`] inside an open transaction, split to fit the
+/// backend's bind-parameter limit the same way.
+///
+/// # Errors
+/// As [`bulk_insert_pool`].
+pub async fn bulk_insert_tx(tx: &mut PoolTx<'_>, query: &BulkInsertQuery) -> Result<(), ExecError> {
     let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
     execute_batches_tx(tx, stmts).await.map(drop)
 }
@@ -2141,6 +2141,14 @@ where
         + Unpin,
 {
     select_rows_with_related_on(tx, query).await
+}
+
+/// [`count_rows_pool`] inside an open transaction.
+///
+/// # Errors
+/// As [`count_rows_pool`].
+pub async fn count_tx(tx: &mut PoolTx<'_>, query: &CountQuery) -> Result<i64, ExecError> {
+    count_rows_on(tx, query).await
 }
 
 /// [`count_rows_pool`] on any [`SqlExecutor`].
@@ -3295,7 +3303,7 @@ where
 }
 
 mod get_or_create;
-pub use get_or_create::{get_or_create, update_or_create};
+pub use get_or_create::{get_or_create, get_or_create_tx, update_or_create};
 
 /// Give the queryset a deterministic order before taking one row.
 /// An existing `order_by` is kept, or flipped when `reverse`;

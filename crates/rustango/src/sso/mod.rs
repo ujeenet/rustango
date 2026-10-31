@@ -37,10 +37,10 @@ pub mod provider;
 pub use link::{LinkSource, ProviderKey, SsoLink, StaleLinks};
 pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
 
-use crate::oauth2::{providers, OAuth2Provider, OAuthError};
+use crate::oauth2::{providers, ClientConfig, OAuth2Provider, OAuthError};
 use crate::outbound::TargetPolicy;
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 pub use crate::oauth2::{open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser, OAuth2Flow};
@@ -258,6 +258,41 @@ pub(crate) fn insecure_url(url: &str) -> bool {
     !crate::urls::is_loopback_host(host)
 }
 
+/// The provider row a [`set_client_config`] hook is asked about.
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct ProviderTarget<'a> {
+    /// Which table the row is from; [`build_provider`] reports [`LinkSource::Admin`].
+    pub source: LinkSource,
+    /// The row's provider key (`"google"`, `"oidc"`, …).
+    pub provider: &'a str,
+    pub issuer_url: Option<&'a str>,
+}
+
+type ClientConfigHook = Arc<dyn Fn(&ProviderTarget<'_>) -> Option<ClientConfig> + Send + Sync>;
+
+static CLIENT_CONFIG: RwLock<Option<ClientConfigHook>> = RwLock::new(None);
+
+/// Set the process-wide HTTP client hook for providers built from rows,
+/// e.g. a private root CA per issuer. `None` from it keeps the default
+/// client. Runs for discovery and every later call, as
+/// [`OAuth2Provider::with_client_config`].
+pub fn set_client_config(
+    hook: impl Fn(&ProviderTarget<'_>) -> Option<ClientConfig> + Send + Sync + 'static,
+) {
+    *CLIENT_CONFIG
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(hook));
+}
+
+fn client_config_for(target: &ProviderTarget<'_>) -> Option<ClientConfig> {
+    let hook = CLIENT_CONFIG
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()?;
+    hook(target)
+}
+
 /// Build an [`OAuth2Provider`] from a resolved config. Known keys use the
 /// built-in presets; `"oidc"` runs OpenID Connect discovery against
 /// `issuer_url`, reusing the result for an hour.
@@ -267,7 +302,7 @@ pub(crate) fn insecure_url(url: &str) -> bool {
 /// [`SsoError::MissingIssuer`] for `oidc` without an issuer, or a
 /// wrapped [`OAuthError`] if discovery fails.
 pub async fn build_provider(cfg: &ResolvedSso) -> Result<OAuth2Provider, SsoError> {
-    build_provider_with(cfg, &TargetPolicy::from_env()).await
+    build_provider_with(cfg, LinkSource::Admin, &TargetPolicy::from_env()).await
 }
 
 /// [`build_provider`] for a row from `source`. A tenant admin owns its
@@ -282,16 +317,22 @@ pub(crate) async fn build_provider_for(
         LinkSource::Tenant => TargetPolicy::tenant_from_env(),
         LinkSource::Shared | LinkSource::Admin | LinkSource::App => TargetPolicy::from_env(),
     };
-    build_provider_with(cfg, &policy).await
+    build_provider_with(cfg, source, &policy).await
 }
 
 async fn build_provider_with(
     cfg: &ResolvedSso,
+    source: LinkSource,
     policy: &TargetPolicy,
 ) -> Result<OAuth2Provider, SsoError> {
     if cfg.client_id.trim().is_empty() {
         return Err(SsoError::Config("client_id is empty".into()));
     }
+    let client = client_config_for(&ProviderTarget {
+        source,
+        provider: &cfg.provider,
+        issuer_url: cfg.issuer_url.as_deref(),
+    });
     let (id, secret, redirect) = (
         cfg.client_id.clone(),
         cfg.client_secret.clone(),
@@ -305,7 +346,7 @@ async fn build_provider_with(
         "discord" => providers::discord(id, secret, redirect),
         "oidc" => {
             let issuer = cfg.issuer_url.as_deref().ok_or(SsoError::MissingIssuer)?;
-            discovered(issuer, id, secret, redirect, policy).await?
+            discovered(issuer, id, secret, redirect, policy, client.clone()).await?
         }
         other => return Err(SsoError::UnknownProvider(other.to_owned())),
     };
@@ -313,6 +354,10 @@ async fn build_provider_with(
     let provider = match &cfg.scopes {
         Some(s) if !s.is_empty() => provider.with_scopes(s.iter().cloned()),
         _ => provider,
+    };
+    let provider = match client {
+        Some(c) => provider.with_client_config(move |b| c(b)),
+        None => provider,
     };
     Ok(provider.with_egress(policy.clone()))
 }
@@ -337,9 +382,9 @@ struct Endpoints {
 /// A discovery outcome: the endpoints, or the failure's message.
 type Discovered = Result<Endpoints, String>;
 
-/// Issuer URL and the outbound policy it was fetched under: an outcome under
-/// one policy says nothing about another.
-type DiscoveryKey = (String, TargetPolicy);
+/// Issuer URL, the outbound policy it was fetched under and whether a client
+/// hook ran: an outcome under one says nothing about another.
+type DiscoveryKey = (String, TargetPolicy, bool);
 
 type Gate = std::sync::Arc<tokio::sync::Mutex<()>>;
 
@@ -387,8 +432,13 @@ async fn discovered(
     secret: String,
     redirect: String,
     policy: &TargetPolicy,
+    client: Option<ClientConfig>,
 ) -> Result<OAuth2Provider, OAuthError> {
-    let key: DiscoveryKey = (issuer.trim_end_matches('/').to_owned(), policy.clone());
+    let key: DiscoveryKey = (
+        issuer.trim_end_matches('/').to_owned(),
+        policy.clone(),
+        client.is_some(),
+    );
     let found = match cached(&key) {
         Some(found) => found,
         None => {
@@ -403,9 +453,11 @@ async fn discovered(
                 Some(found) => found,
                 None => {
                     let _in_flight = InFlight(&key, &gate);
-                    let fetched = OAuth2Provider::new("oidc", "", "", "", "", "")
-                        .discover(&key.0, policy)
-                        .await;
+                    let mut probe = OAuth2Provider::new("oidc", "", "", "", "", "");
+                    if let Some(c) = client {
+                        probe = probe.with_client_config(move |b| c(b));
+                    }
+                    let fetched = probe.discover(&key.0, policy).await;
                     let found = fetched
                         .as_ref()
                         .map_err(ToString::to_string)
@@ -658,12 +710,16 @@ mod tests {
     #[tokio::test]
     async fn discovery_is_cached_per_issuer() {
         let (base, hits) = issuer(0).await;
-        let a = build_provider_with(&oidc(&base, "a"), &loopback())
+        let a = build_provider_with(&oidc(&base, "a"), LinkSource::Admin, &loopback())
             .await
             .unwrap();
-        let b = build_provider_with(&oidc(&format!("{base}/"), "b"), &loopback())
-            .await
-            .unwrap();
+        let b = build_provider_with(
+            &oidc(&format!("{base}/"), "b"),
+            LinkSource::Admin,
+            &loopback(),
+        )
+        .await
+        .unwrap();
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         assert_eq!((a.client_id.as_str(), b.client_id.as_str()), ("a", "b"));
         assert_eq!(b.token_url, "https://idp.test/token");
@@ -694,9 +750,11 @@ mod tests {
     async fn failed_discovery_is_cached_briefly() {
         let (base, hits) = issuer(1).await;
         for _ in 0..3 {
-            assert!(build_provider_with(&oidc(&base, "a"), &loopback())
-                .await
-                .is_err());
+            assert!(
+                build_provider_with(&oidc(&base, "a"), LinkSource::Admin, &loopback())
+                    .await
+                    .is_err()
+            );
         }
         assert_eq!(hits.load(Ordering::SeqCst), 1, "a failure is cached");
         // Age the failure past its TTL.
@@ -704,12 +762,14 @@ mod tests {
         DISCOVERED
             .lock()
             .unwrap()
-            .get_mut(&(base.clone(), loopback()))
+            .get_mut(&(base.clone(), loopback(), false))
             .unwrap()
             .0 = aged;
-        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
-            .await
-            .is_ok());
+        assert!(
+            build_provider_with(&oidc(&base, "a"), LinkSource::Admin, &loopback())
+                .await
+                .is_ok()
+        );
         assert_eq!(hits.load(Ordering::SeqCst), 2);
     }
 
@@ -718,22 +778,28 @@ mod tests {
     async fn the_policy_is_part_of_the_cache_key() {
         let (base, hits) = issuer(1).await;
         let strict = TargetPolicy::Public(crate::outbound::Allowlist::default());
-        assert!(build_provider_with(&oidc(&base, "a"), &strict)
-            .await
-            .is_err());
-        assert!(build_provider_with(&oidc(&base, "a"), &loopback())
-            .await
-            .is_err());
+        assert!(
+            build_provider_with(&oidc(&base, "a"), LinkSource::Admin, &strict)
+                .await
+                .is_err()
+        );
+        assert!(
+            build_provider_with(&oidc(&base, "a"), LinkSource::Admin, &loopback())
+                .await
+                .is_err()
+        );
         assert!(
             !IN_FLIGHT
                 .lock()
                 .unwrap()
-                .contains_key(&(base.clone(), loopback())),
+                .contains_key(&(base.clone(), loopback(), false)),
             "a finished fetch leaves no gate"
         );
-        assert!(build_provider_with(&oidc(&base, "a"), &strict)
-            .await
-            .is_err());
+        assert!(
+            build_provider_with(&oidc(&base, "a"), LinkSource::Admin, &strict)
+                .await
+                .is_err()
+        );
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
@@ -747,7 +813,7 @@ mod tests {
         let (base, hits) = issuer(0).await;
         let cfg = oidc(&base, "a");
         let policy = loopback();
-        let runs = (0..8).map(|_| build_provider_with(&cfg, &policy));
+        let runs = (0..8).map(|_| build_provider_with(&cfg, LinkSource::Admin, &policy));
         for r in futures_util::future::join_all(runs).await {
             r.unwrap();
         }
@@ -782,6 +848,37 @@ mod tests {
         assert_eq!(hits.load(Ordering::SeqCst), 1);
         let err = done.err().map(|e| e.to_string()).unwrap_or_default();
         assert!(err.contains("blocked"), "token POST not refused: {err}");
+    }
+
+    /// A row's provider gets the hook's client: discovery runs through it,
+    /// and the provider keeps it for the token calls.
+    #[tokio::test]
+    async fn the_client_hook_reaches_discovery_and_the_provider() {
+        let (base, _) = issuer(0).await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let (c, s, iss) = (calls.clone(), seen.clone(), base.clone());
+        set_client_config(move |t| {
+            if t.issuer_url != Some(iss.as_str()) {
+                return None;
+            }
+            s.lock().unwrap().push(t.source);
+            let c = c.clone();
+            Some(Arc::new(move |b: reqwest::ClientBuilder| {
+                c.fetch_add(1, Ordering::SeqCst);
+                b
+            }) as ClientConfig)
+        });
+        let p = build_provider_with(&oidc(&base, "t"), LinkSource::Tenant, &loopback())
+            .await
+            .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "discovery skipped the hook"
+        );
+        assert!(format!("{p:?}").contains("client_config: true"), "{p:?}");
+        assert_eq!(*seen.lock().unwrap(), [LinkSource::Tenant]);
     }
 
     #[tokio::test]

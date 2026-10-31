@@ -400,6 +400,7 @@ jobs:
             --test one_redirect_sanitizer \
             --test one_html_escaper \
             --test pool_construction \
+            --test public_errors_are_non_exhaustive \
             --test sqlite_datetime_ddl_is_consistent \
             --test system_migration_scopes \
             --test tracing_targets \
@@ -924,12 +925,16 @@ jobs:
   # a broader vuln DB (GHSA), plus committed-secret and IaC/misconfig
   # scanning. The git hooks run the same checks opt-in locally
   # (PRECOMMIT_TRIVY / PREPUSH_TRIVY). Vulns + secrets block on
-  # HIGH/CRITICAL (fixable only); misconfig is report-only so a
-  # pre-existing finding never silently blocks a release.
+  # HIGH/CRITICAL (fixable only). Misconfig and unfixed vulns are
+  # report-only: they go to code scanning as SARIF, so a finding stays
+  # on record without blocking a release.
   trivy:
     needs: already_green
     if: needs.already_green.outputs.skip != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v7
       # A pinned release, checked against its published sha256: never a
@@ -954,15 +959,24 @@ jobs:
             --skip-dirs target \
             --no-progress \
             .
-      - name: Misconfigurations (report-only)
+      - name: Misconfigurations + unfixed vulnerabilities (report-only)
         run: |
           trivy fs \
-            --scanners misconfig \
+            --scanners vuln,misconfig \
             --severity HIGH,CRITICAL \
             --exit-code 0 \
             --skip-dirs target \
             --no-progress \
+            --format sarif \
+            --output trivy.sarif \
             .
+      # Fork PRs get a read-only token, so only upload where it can write.
+      - name: Upload to code scanning
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy.sarif
+          category: trivy
 
   # v0.40 tri-dialect litmus — proves a non-PG build of rustango with
   # tenancy still compiles. Catches regressions where PG-only types,
@@ -1758,6 +1772,8 @@ jobs:
           binary(=m2m_changed_noop_tri) |
           binary(=update_validation_tri) |
           binary(=uuid_v7_pk_writes_tri) |
+          binary(=orm_tx_helpers_tri) |
+          binary(=fk_on_delete_tri) |
           binary(=manage_data_verbs_tri) |
           binary(=boot_races_tri) |
           binary(=test_db_tri) |
