@@ -4,14 +4,16 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has a `policy` field. See UPGRADING.
+**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant. See UPGRADING.
 
 ### Added
 
 - SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, required claims, and `require_verified_email`. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
 - The SSO callbacks read claims only an id_token carries (`tid`, `iss`) after checking its signature against the issuer's JWKS (RS256, ES256), its `aud`, `exp` and issuer. A Microsoft email counts as verified when `xms_edov` is true or the provider pins the token's `tid`.
 - Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
-- The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`); these do nothing yet.
+- The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`); the lifecycle ones do nothing yet.
+- SSO sign-up per provider: `signup_mode` (closed, invite only, allowlist, open), `SsoInvite` for emails or domains with roles, expiry and atomic use limits (bulk add from a paste or CSV), `default_roles`, `role_map` with `sync_roles_on_login` (touches only mapped roles), `username_from`/`username_clash`, `sync_profile`, and `allow_email_link_staff`. A new user is never a superuser.
+- `SsoLink` admin actions: unlink, and re-link on next sign-in (a one-use invite; never for a superuser). `check --deploy` knows sign-up and warns on open sign-up with no domain rule.
 
 ### Fixed
 

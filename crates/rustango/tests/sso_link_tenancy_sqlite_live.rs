@@ -873,6 +873,29 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
     assert!(!out.contains("[sso]"), "{out}");
 }
 
+/// A provider that signs users up is not stranded; open sign-up with no
+/// domain rule gets its own warning.
+#[tokio::test]
+async fn check_deploy_knows_sign_up() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.user("ann", "ann@example.com", false).await;
+    env.set_policy("corp", "signup_mode", "invite_only").await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "invite_only is not stranded: {out}");
+    env.set_policy("corp", "signup_mode", "open").await;
+    let out = env.check_deploy().await;
+    assert!(
+        out.contains("provider `corp` has signup_mode open and no allowed_email_domains"),
+        "{out}"
+    );
+    env.set_policy("corp", "allowed_email_domains", "example.com")
+        .await;
+    let out = env.check_deploy().await;
+    assert!(!out.contains("[sso]"), "{out}");
+}
+
 /// A shared provider names every active tenant it refuses; a tenant without
 /// the links table has no links (#2359).
 #[tokio::test]
