@@ -163,6 +163,11 @@ untouched.
 - A provider whose sign-up fields do not parse (`signup_mode`, `role_map`, ...) refuses every sign-in through it.
 - `ResolvedProvider` has a new `signup` field; `TenantAccounts` is now public.
 - `role_map` reads its claims only from a verified id_token when the provider has a JWKS; a userinfo-only provider keeps reading userinfo. A sign-in with none of the role claims leaves the mapped roles alone.
+- `ViewSet::for_model` panics on an SSO table (`rustango_sso_*`, `rustango_shared_sso_providers`); manage those rows through the admin.
+- A link created before its account is now deleted at sign-in (`StaleLinks::Drop` is the default). If account `created_at` values were imported or backfilled after their links, call `set_stale_links(StaleLinks::Warn)` at startup.
+- Deleting a user in the admin (single or bulk) deletes its SSO links in the same transaction; a soft delete keeps them.
+- OIDC discovery fails when the document's `issuer` differs from the configured one (a trailing `/` is ignored). Set `issuer_url` to the IdP's exact issuer.
+- The admin refuses an SSO link whose `provider_source` its database does not hold: `admin` and `shared` are valid only in the bare admin's and a tenant's database respectively.
 
 ## 0.61.14
 

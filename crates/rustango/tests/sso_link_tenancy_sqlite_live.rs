@@ -870,7 +870,12 @@ async fn check_deploy_names_providers_that_refuse_every_user() {
         .unwrap();
     env.set_shared_email_link(true).await;
     let out = env.check_deploy().await;
-    assert!(!out.contains("[sso]"), "{out}");
+    assert!(!out.contains("refuses every"), "{out}");
+    // Email linking on a custom IdP is a warning of its own.
+    assert!(
+        out.contains("[sso] shared provider `team` is a custom OIDC IdP with email linking on"),
+        "{out}"
+    );
 }
 
 /// A provider that signs users up is not stranded; open sign-up with no
@@ -1027,7 +1032,14 @@ async fn check_deploy_names_an_email_linking_provider_with_only_privileged_users
     );
     env.user("ann", "ann@example.com", false).await;
     let out = env.check_deploy().await;
-    assert!(!out.contains("[sso]"), "ann can link by email: {out}");
+    assert!(
+        !out.contains("refuses every"),
+        "ann can link by email: {out}"
+    );
+    assert!(
+        out.contains("[sso] tenant `acme`: provider `corp` is a custom OIDC IdP"),
+        "{out}"
+    );
 }
 
 #[tokio::test]

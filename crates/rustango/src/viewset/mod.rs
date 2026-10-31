@@ -692,6 +692,17 @@ where
     }
 }
 
+/// SSO tables: their admin hooks are superuser-only, which a ViewSet
+/// does not run, so [`ViewSet::for_model`] refuses them.
+const ADMIN_ONLY_TABLES: &[&str] = &[
+    "rustango_sso_providers",
+    "rustango_shared_sso_providers",
+    "rustango_sso_links",
+    "rustango_sso_invites",
+    "rustango_sso_shared_overrides",
+    "rustango_sso_tenant_policy",
+];
+
 /// Builder for a set of REST CRUD endpoints over a single
 /// [`Model`](crate::core::Model) table.
 ///
@@ -757,9 +768,16 @@ impl ViewSet {
     ///
     /// If a name in `fields` is not a field of the model. The same holds
     /// for `filter_fields`, `search_fields`, `ordering_fields`, `ordering`
-    /// and `related_filter`.
+    /// and `related_filter`. Also if `schema` is an SSO table: only the
+    /// admin, with its superuser-only hooks, may write those.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
+        assert!(
+            !ADMIN_ONLY_TABLES.contains(&schema.table),
+            "ViewSet::for_model: `{}` holds SSO configuration and is managed through the admin \
+             only; a ViewSet would skip its superuser-only checks",
+            schema.table
+        );
         let vs = Self {
             schema,
             fields: fields.iter().map(|&s| s.to_owned()).collect(),
@@ -5117,6 +5135,35 @@ mod cursor_tests {
             FieldType::Binary,
         ] {
             assert!(!cursor_field_supported(bad), "{bad:?} must not be usable");
+        }
+    }
+}
+
+#[cfg(all(test, feature = "sso"))]
+mod sso_table_tests {
+    use super::ViewSet;
+    use crate::core::{Model as _, ModelSchema};
+
+    fn refused(schema: &'static ModelSchema) -> bool {
+        let r = std::panic::catch_unwind(|| ViewSet::for_model(schema, &["id"]));
+        let Err(e) = r else { return false };
+        let msg = e.downcast_ref::<String>().cloned().unwrap_or_default();
+        msg.contains(schema.table) && msg.contains("admin only")
+    }
+
+    #[test]
+    fn viewset_refuses_every_sso_table() {
+        let mut schemas: Vec<&'static ModelSchema> = vec![
+            crate::sso::SsoProvider::SCHEMA,
+            crate::sso::SsoLink::SCHEMA,
+            crate::sso::policy::SsoInvite::SCHEMA,
+            crate::sso::policy::SsoSharedOverride::SCHEMA,
+            crate::sso::policy::SsoTenantPolicy::SCHEMA,
+        ];
+        #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+        schemas.push(crate::tenancy::sso::SharedSsoProvider::SCHEMA);
+        for s in schemas {
+            assert!(refused(s), "{} must be refused", s.table);
         }
     }
 }

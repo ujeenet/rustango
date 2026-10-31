@@ -209,6 +209,40 @@ inventory::submit! {
     }
 }
 
+/// Why an admin write to `table` may not store its `provider_source` in the
+/// admin's database: an `admin` link outside the bare admin's own database
+/// would sign someone into the bare admin; a `shared` one lives only in tenant storage.
+#[cfg(feature = "admin")]
+pub(crate) fn admin_source_refusal(
+    table: &str,
+    db: crate::admin::AdminDatabase,
+    values: &[(&'static str, crate::core::SqlValue)],
+    before: Option<&serde_json::Value>,
+) -> Option<String> {
+    use crate::admin::AdminDatabase;
+    if table != "rustango_sso_links" {
+        return None;
+    }
+    let raw =
+        crate::admin::derived_fields::text(values, before, "provider_source").unwrap_or_default();
+    let allowed = match db {
+        AdminDatabase::Tenant => {
+            [LinkSource::Tenant, LinkSource::Shared, LinkSource::App].as_slice()
+        }
+        AdminDatabase::Single | AdminDatabase::Registry => {
+            [LinkSource::Admin, LinkSource::Tenant, LinkSource::App].as_slice()
+        }
+    };
+    if allowed.iter().any(|s| s.as_str() == raw) {
+        return None;
+    }
+    let names: Vec<&str> = allowed.iter().map(|s| s.as_str()).collect();
+    Some(format!(
+        "provider_source must be one of {} in this admin's database",
+        names.join(", ")
+    ))
+}
+
 /// Lowercase hex SHA-256 of `issuer`, a newline and `subject`, as stored in
 /// [`SsoLink::key_sha256`].
 #[must_use]
@@ -368,6 +402,52 @@ pub(crate) async fn drop_link(pool: &Pool, link: &SsoLink) -> Result<(), String>
         .map_err(|e| format!("delete link {id}: {e}"))
 }
 
+/// The links an admin hard delete of users removes with them, so a later
+/// user given the same id does not inherit them.
+#[cfg(feature = "admin")]
+pub(crate) struct UserLinks(&'static [LinkSource]);
+
+#[cfg(feature = "admin")]
+impl UserLinks {
+    /// `None` unless `user_table` is a user table links point into and the
+    /// links table exists on `pool`.
+    pub(crate) async fn of(pool: &Pool, user_table: &str) -> Result<Option<Self>, ExecError> {
+        let sources: &'static [LinkSource] = match user_table {
+            "rustango_users" => &[LinkSource::Tenant, LinkSource::Shared, LinkSource::App],
+            "rustango_admin_users" => &[LinkSource::Admin],
+            _ => return Ok(None),
+        };
+        use crate::core::Model as _;
+        let here = crate::migrate::try_table_exists_here(pool, SsoLink::SCHEMA.table).await?;
+        Ok(here.then_some(Self(sources)))
+    }
+
+    /// Delete the links to users `ids`, in the delete's transaction.
+    pub(crate) async fn drop_tx(
+        &self,
+        tx: &mut crate::sql::PoolTx<'_>,
+        ids: &[crate::core::SqlValue],
+    ) -> Result<u64, ExecError> {
+        use crate::core::{Column as _, SqlValue};
+        let ids: Vec<i64> = ids
+            .iter()
+            .filter_map(|v| match v {
+                SqlValue::I64(n) => Some(*n),
+                SqlValue::I32(n) => Some(i64::from(*n)),
+                _ => None,
+            })
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let query = SsoLink::objects()
+            .where_(SsoLink::user_id.is_in(ids))
+            .where_(SsoLink::provider_source.is_in(self.0.iter().map(|s| s.as_str().to_owned())))
+            .compile_delete()?;
+        crate::sql::delete_tx(tx, &query).await
+    }
+}
+
 /// Whether any identity is linked through `key`. The issuer is compared
 /// exactly, as in [`linked_user`]: SQL `=` is case-blind on MySQL `_ci`.
 #[cfg(any(feature = "tenancy", feature = "admin-sso"))]
@@ -503,24 +583,26 @@ impl Account {
 }
 
 /// What sign-in does with a link made before the account it points at.
-/// An imported or backfilled `created_at` looks the same, so the default only warns.
+/// Dropping fails closed: a wrong drop only asks for a relink, while signing
+/// in through an earlier user's link hands over the account.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
 pub enum StaleLinks {
-    /// Log a warning and sign in through the link.
-    #[default]
+    /// Log a warning and sign in through the link. For imported or
+    /// backfilled `created_at` values that postdate their links.
     Warn,
-    /// Delete the link and sign in as if unlinked. Only when account
-    /// creation times are trustworthy.
+    /// Delete the link and sign in as if unlinked.
+    #[default]
     Drop,
 }
 
-static STALE_LINKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// `true` once [`StaleLinks::Warn`] is set; the default is `Drop`.
+static WARN_STALE_LINKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Set the process-wide [`StaleLinks`] policy, normally once at startup.
 pub fn set_stale_links(policy: StaleLinks) {
-    STALE_LINKS.store(
-        policy == StaleLinks::Drop,
+    WARN_STALE_LINKS.store(
+        policy == StaleLinks::Warn,
         std::sync::atomic::Ordering::Relaxed,
     );
 }
@@ -528,10 +610,10 @@ pub fn set_stale_links(policy: StaleLinks) {
 /// The current [`StaleLinks`] policy.
 #[must_use]
 pub fn stale_links() -> StaleLinks {
-    if STALE_LINKS.load(std::sync::atomic::Ordering::Relaxed) {
-        StaleLinks::Drop
-    } else {
+    if WARN_STALE_LINKS.load(std::sync::atomic::Ordering::Relaxed) {
         StaleLinks::Warn
+    } else {
+        StaleLinks::Drop
     }
 }
 

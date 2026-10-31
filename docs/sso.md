@@ -150,11 +150,12 @@ users), or by a superuser adding an `SsoLink` row: `provider_source`
 without it nobody can add links.
 
 A link created more than 5 minutes before the account it points at (an id
-reused after a restore, say) logs a warning and still signs in.
-A link whose user no longer exists is deleted at the next sign-in.
-`rustango::sso::link::set_stale_links(StaleLinks::Drop)` deletes such a link
-instead. Use it only when account `created_at` values are never imported or
-backfilled.
+reused after a restore, say) is deleted, and sign-in goes on as if unlinked.
+A link whose user no longer exists is deleted at the next sign-in, and
+deleting a user in the admin deletes its links.
+When account `created_at` values are imported or backfilled after their
+links, `rustango::sso::link::set_stale_links(StaleLinks::Warn)` only logs a
+warning and still signs in.
 
 With the `totp` feature, a bare-admin user with a confirmed TOTP device
 must still enter a code after SSO. The admin shows the code form and
@@ -164,6 +165,9 @@ posts to `<login>/sso-totp`. The tenant admin has no TOTP step.
 `manage check --deploy` warns about an enabled provider that would refuse
 every existing user: no `SsoLink` rows, and email linking off or only
 privileged users. In the bare admin that means any provider with no links.
+It also warns about email linking on a `kind = "oidc"` provider, an `http://`
+issuer that is not loopback, email domain rules with `require_verified_email`
+off, and a shared provider that signs users up.
 
 ## Member (end-user) SSO
 

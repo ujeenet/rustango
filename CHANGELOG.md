@@ -18,6 +18,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
+- `ViewSet::for_model` refuses the SSO tables: a ViewSet skipped their superuser-only admin checks.
+- `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback, email domain rules with `require_verified_email` off, and a shared provider that signs users up.
+- OIDC discovery refuses a document whose `issuer` is not the configured issuer.
+- Deleting a user in the admin deletes its SSO links; a link older than its account is now dropped by default.
+- The admin no longer saves an SSO link with an `admin` source outside the bare admin's database, or a source that database does not hold.
 
 ## [0.61.14] — 2026-10-30
 

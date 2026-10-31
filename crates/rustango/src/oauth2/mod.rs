@@ -51,6 +51,9 @@
 //! [`OAuth2Provider::from_discovery`] fetches `.well-known/openid-configuration`
 //! and populates `auth_url`, `token_url`, `userinfo_url` automatically. Use it
 //! for any conformant OIDC provider — Keycloak, Auth0, Okta, etc.
+//! A doc naming another `issuer` is refused. A doc with no `issuer` or
+//! `jwks_uri` is accepted, but then no id_token is verified: identity comes
+//! from the userinfo endpoint only.
 //!
 //! [`OAuth2Registry`]: crate::oauth2::OAuth2Registry
 //! [`OAuth2Provider`]: crate::oauth2::OAuth2Provider
@@ -455,6 +458,14 @@ impl OAuth2Provider {
             .map_err(|e| OAuthError::Discovery(format!("GET {url}: {e}")))?;
         let doc: DiscoveryDoc = serde_json::from_slice(&bytes)
             .map_err(|e| OAuthError::Discovery(format!("decode discovery doc: {e}")))?;
+        // A doc for another issuer would pin its keys and endpoints to ours.
+        if let Some(iss) = doc.issuer.as_deref() {
+            if iss.trim_end_matches('/') != issuer {
+                return Err(OAuthError::Discovery(format!(
+                    "discovery doc issuer `{iss}` is not `{issuer}`"
+                )));
+            }
+        }
         self.auth_url = doc.authorization_endpoint;
         self.token_url = doc.token_endpoint;
         self.userinfo_url = doc.userinfo_endpoint;
@@ -1032,6 +1043,39 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("blocked address"), "{err}");
+    }
+
+    /// A discovery doc naming another issuer is refused; a trailing `/` is not a difference.
+    #[tokio::test]
+    async fn discovery_refuses_another_issuer() {
+        async fn doc_for(iss: Option<&'static str>) -> Result<OAuth2Provider, OAuthError> {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let iss = iss.map(|i| i.replace("{base}", &base));
+            let mut doc = serde_json::json!({
+                "authorization_endpoint": format!("{base}/auth"),
+                "token_endpoint": format!("{base}/token"),
+            });
+            if let Some(i) = iss {
+                doc["issuer"] = i.into();
+                doc["jwks_uri"] = format!("{base}/jwks").into();
+            }
+            let app = axum::Router::new().route(
+                "/.well-known/openid-configuration",
+                axum::routing::get(move || async move { axum::Json(doc) }),
+            );
+            tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            OAuth2Provider::new("x", "c", "s", "https://app/cb", "", "")
+                .discover(&format!("{base}/"), &loopback())
+                .await
+        }
+        let err = doc_for(Some("https://evil.example")).await.err().unwrap();
+        assert!(err.to_string().contains("is not"), "{err}");
+        let err = doc_for(Some("{base}/other")).await.err().unwrap();
+        assert!(err.to_string().contains("is not"), "{err}");
+        assert!(doc_for(Some("{base}")).await.is_ok());
+        assert!(doc_for(Some("{base}/")).await.is_ok());
+        assert!(doc_for(None).await.is_ok());
     }
 
     /// A provider whose token URL redirects to `/internal`; returns the hit count.

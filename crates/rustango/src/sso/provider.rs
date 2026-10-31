@@ -476,14 +476,14 @@ pub(crate) struct ProviderRow {
     pub scopes: Option<String>,
 }
 
-fn text(v: Option<&SqlValue>) -> Option<String> {
+pub(super) fn text(v: Option<&SqlValue>) -> Option<String> {
     match v {
         Some(SqlValue::String(s)) => Some(s.clone()),
         _ => None,
     }
 }
 
-fn int(v: Option<&SqlValue>) -> i64 {
+pub(super) fn int(v: Option<&SqlValue>) -> i64 {
     match v {
         Some(SqlValue::I64(n)) => *n,
         Some(SqlValue::I32(n)) => i64::from(*n),
