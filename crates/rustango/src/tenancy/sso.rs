@@ -4,7 +4,7 @@
 //! Reuses the shared handshake core in [`crate::admin::sso`]
 //! ([`build_provider`], flow sealing) and mints the tenant session
 //! (`rustango_tenant_session`) for the tenant user linked to the IdP
-//! subject ([`crate::sso::link`]). SSO never auto-provisions a tenant user.
+//! subject ([`crate::sso::link`]). Sign-up follows the provider's `signup_mode` (default closed).
 //!
 //! Providers are rows, managed from the admin UI: each tenant's own
 //! [`crate::admin::sso_provider::SsoProvider`] table (per-tenant, granular)
@@ -436,7 +436,8 @@ pub(super) async fn tenant_sso_callback(
     let normalized = &identity.profile;
     let meta = || meta_from_parts(&parts.extensions, &parts.headers, Some(parts.uri.path()));
     let policy = cfg.effective_policy();
-    let request = AdmitRequest::new(tenant_pool, Surface::TenantAdmin, &key, &policy, &identity);
+    let request = AdmitRequest::new(tenant_pool, Surface::TenantAdmin, &key, &policy, &identity)
+        .provider(slug);
     let uid = match admit(request, &member_auth::TenantAccounts(tenant_pool)).await {
         Ok(a) => a.user_id,
         Err(Denied::Refused(r)) => {

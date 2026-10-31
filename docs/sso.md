@@ -208,7 +208,7 @@ Differences from the admin flow:
   `X-Forwarded-Host`), else `http` on a loopback host
   (`localhost`, `*.localhost`, a loopback IP) and `https` everywhere else,
   so `localhost.example.com` gets `https`.
-- **Auto-provisioning.** With `auto_provision = true` (opt-in; the default is `false`), a
+- **Auto-provisioning.** A provider's `signup_mode` ([Who may sign up](#who-may-sign-up)) wins; with none set, `auto_provision = true` (opt-in; the default is `false`) works as `open`: a
   verified IdP email with no matching `rustango_users` row **creates**
   one — username from the email local-part (deduped on a clash), a real
   but unusable random password hash (SSO users can't password-login) —
@@ -292,6 +292,47 @@ and the same `sub` as userinfo. Otherwise those claims are absent, and a
 rule that needs them refuses. A Microsoft email counts as verified when
 `xms_edov` is true, or when the provider pins `allowed_idp_tenants` and
 the token's `tid` is one of them.
+
+## Who may sign up
+
+A provider can also create the account the first time someone signs in.
+Sign-up runs only when no link and no account match the IdP's verified
+email, and only after the sign-in rules above pass.
+
+| Field | Meaning |
+|---|---|
+| `signup_mode` | `closed` (link only), `invite_only` (an `SsoInvite` for this email), `allowlist` (an invite for this email or its domain) or `open` (anyone the sign-in rules admit). Empty: closed on the tenant login; the member flow follows `MemberAuthConfig::auto_provision`. The bare admin never signs anyone up. |
+| `default_roles` | Tenant roles a new user gets, e.g. `Viewer`. An invite with roles replaces them. |
+| `role_map` | JSON `{"<group or app role>": "Editor"}` (or a list of roles). Read from the claims in `role_claims` (empty: `groups,roles`). A provider with a JWKS (OIDC discovery, Microsoft, Google) takes them only from a verified id_token; a userinfo-only provider takes them from userinfo. |
+| `sync_roles_on_login` | Re-apply `role_map` on every sign-in. Only roles named in `role_map` are added or removed; roles granted by hand stay. A sign-in without any of the role claims changes nothing. |
+| `username_from` | `email_local` (default), `email`, or `preferred_username` (falls back to the email local part). |
+| `username_clash` | `suffix` (default: `ann-x7k2q9`) or `refuse`. |
+| `sync_profile` | Refresh the display name and email from the IdP on every sign-in (never for a superuser; an email another user has is kept). |
+| `allow_email_link_staff` | With `allow_email_link`, also link a user who holds roles. A superuser is never linked by email. |
+
+A new user is never a superuser. Roles go through the permission engine
+(`UserRole`); a role name with no `Role` row is skipped and written to the
+audit log (`sso_role_unknown`). The user, its link (`provisioned = true`),
+its roles and the invite's use commit in one transaction.
+
+**Invites** (`SsoInvite`, superuser-only in the tenant admin) target one
+email (`ann@client.org`) or a domain (`@client.org`, or `*.client.org` for
+its subdomains). They can name one provider, carry roles, expire
+(`expires_at`) and limit uses (`max_uses`). A use is counted atomically:
+two sign-ups racing for the last use make one account. `.../rustango_sso_invites/bulk`
+adds many at once from a pasted list or a CSV column.
+
+**Unlink and re-link.** On `SsoLink` rows, the admin actions *Unlink* and
+*Re-link on next sign-in* (superuser-only). Re-link deletes the link and
+leaves a one-use invite, good for 7 days, that links the same user again
+the next time they sign in through the same provider with their verified
+email, even if the IdP gives them a new subject. The user must still have
+that email. It never re-links a superuser, and a role holder only with
+`allow_email_link_staff`.
+
+`check --deploy` does not report a provider whose sign-up is not closed
+as refusing everyone, and warns about `signup_mode = open` with no
+`allowed_email_domains`, `allowed_hosted_domains` or `allowed_idp_tenants`.
 
 ## Secret storage
 

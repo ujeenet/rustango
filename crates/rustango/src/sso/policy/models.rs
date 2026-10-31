@@ -37,6 +37,10 @@ pub struct SsoInvite {
     pub invited_by: Option<i64>,
     /// Re-link: the next sign-in links this existing user instead of creating one.
     pub link_user_id: Option<i64>,
+    /// Re-link: [`crate::sso::ProviderKey::fingerprint`] of the old link's
+    /// provider; only a sign-in through that provider may use the invite.
+    #[rustango(max_length = 64)]
+    pub link_key: Option<String>,
     #[rustango(auto_now_add)]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
 }

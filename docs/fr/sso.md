@@ -322,6 +322,48 @@ qui en a besoin refuse. Un email Microsoft compte comme vérifié si
 `xms_edov` est vrai, ou si le provider fixe `allowed_idp_tenants` et que le
 `tid` du token y figure.
 
+## Qui peut s'inscrire
+
+Un provider peut aussi créer le compte à la première connexion. Cela
+n'arrive que si aucun lien ni aucun compte ne correspond à l'e-mail vérifié,
+et seulement après les règles de connexion ci-dessus.
+
+| Champ | Sens |
+|---|---|
+| `signup_mode` | `closed` (liens seulement), `invite_only` (une `SsoInvite` pour cet e-mail), `allowlist` (une invitation pour l'e-mail ou son domaine) ou `open` (toute personne admise par les règles). Vide : fermé sur la connexion tenant ; le flux membre suit `MemberAuthConfig::auto_provision`. L'admin nu ne crée jamais de compte. |
+| `default_roles` | Rôles du tenant donnés au nouvel utilisateur, par ex. `Viewer`. Une invitation avec des rôles les remplace. |
+| `role_map` | JSON `{"<groupe ou rôle d'app>": "Editor"}` (ou une liste). Lu dans les claims de `role_claims` (vide : `groups,roles`) ; pour un provider avec JWKS, seulement depuis un id_token vérifié. |
+| `sync_roles_on_login` | Réappliquer `role_map` à chaque connexion. Seuls les rôles nommés dans `role_map` sont ajoutés ou retirés ; les rôles donnés à la main restent. |
+| `username_from` | `email_local` (défaut), `email` ou `preferred_username` (sinon la partie locale de l'e-mail). |
+| `username_clash` | `suffix` (défaut : `ann-x7k2q9`) ou `refuse`. |
+| `sync_profile` | Reprendre le nom affiché et l'e-mail de l'IdP à chaque connexion (jamais pour un superuser ; un e-mail déjà pris est ignoré). |
+| `allow_email_link_staff` | Avec `allow_email_link`, lier aussi un utilisateur qui a des rôles. Un superuser n'est jamais lié par e-mail. |
+
+Un nouvel utilisateur n'est jamais superuser. Les rôles passent par le
+moteur de permissions (`UserRole`) ; un nom de rôle sans ligne `Role` est
+ignoré et noté dans le journal d'audit (`sso_role_unknown`). L'utilisateur,
+son lien (`provisioned = true`), ses rôles et l'usage de l'invitation sont
+écrits dans une seule transaction.
+
+**Invitations** (`SsoInvite`, réservées aux superusers dans l'admin du
+tenant) : un e-mail (`ann@client.org`) ou un domaine (`@client.org`, ou
+`*.client.org` pour ses sous-domaines). Elles peuvent viser un provider,
+porter des rôles, expirer (`expires_at`) et limiter les usages (`max_uses`).
+Un usage est compté de façon atomique : deux inscriptions qui se disputent
+le dernier usage créent un seul compte. `.../rustango_sso_invites/bulk`
+en ajoute plusieurs d'un coup, depuis une liste collée ou une colonne CSV.
+
+**Délier et relier.** Sur les lignes `SsoLink`, les actions *Unlink* et
+*Re-link on next sign-in* (superusers seulement). Re-link supprime le lien
+et laisse une invitation à usage unique, valable 7 jours, qui relie le même
+utilisateur à sa prochaine connexion par le même provider avec son e-mail
+vérifié, même avec un nouveau subject. Un superuser n'est jamais relié ; un
+détenteur de rôles seulement avec `allow_email_link_staff`.
+
+`check --deploy` ne signale pas comme bloquant un provider dont
+l'inscription n'est pas fermée, et avertit pour `signup_mode = open` sans
+`allowed_email_domains`, `allowed_hosted_domains` ni `allowed_idp_tenants`.
+
 ## Stockage des secrets
 
 `client_secret` est stocké **chiffré au repos** avec XChaCha20-Poly1305

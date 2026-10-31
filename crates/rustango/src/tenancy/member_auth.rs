@@ -39,7 +39,7 @@
 //! ## v1 scope / trims
 //!
 //! * The `provision` closure hook is intentionally **not** exposed —
-//!   v1 uses the built-in default provisioning in `provision_member`.
+//!   v1 uses the built-in provisioning in `crate::sso::policy::signup`.
 //! * Providers are resolved from the tenant's own [`SsoProvider`] rows
 //!   only; the registry-wide shared-provider merge
 //!   ([`crate::tenancy::sso::SharedSsoProvider`]) is a follow-up.
@@ -60,13 +60,11 @@ use subtle::ConstantTimeEq;
 use crate::extractors::{Tenant, TenantScope};
 use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::sqlx::Database;
-use crate::sql::{Auto, Pool};
-use crate::sso::link::{
-    create_link_tx, Account, AccountLookup, EmailLookup, LinkSource, ProviderKey,
-};
+use crate::sql::Pool;
+use crate::sso::link::{Account, AccountLookup, EmailLookup, LinkSource, ProviderKey};
 use crate::sso::policy::{
     admit, refuse, AdmitRequest, Denied, EffectivePolicy, Identity, Refusal, RefusalContext,
-    Surface,
+    SignupMode, Surface,
 };
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{
@@ -403,6 +401,7 @@ pub struct MemberAuthConfig {
     /// Auto-create a tenant user from a verified IdP email the first
     /// time it's seen. When `false`, an unknown email is refused.
     /// Default `false`: the provider rows are shared with the tenant console.
+    /// A provider's own `signup_mode` overrides it.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -732,8 +731,10 @@ async fn sso_callback_in(
             Some(parts.uri.path()),
         )
     };
-    let policy = resolved.effective_policy();
-    let outcome = admit_member(pool, &key, &policy, &identity, config.auto_provision).await;
+    let policy = resolved
+        .effective_policy()
+        .default_signup(member_default_signup(config.auto_provision));
+    let outcome = admit_member(pool, &key, &policy, &identity, slug).await;
     let member_id = match outcome {
         Ok(id) => id,
         Err(Denied::Refused(r)) => {
@@ -827,8 +828,9 @@ pub async fn find_or_provision_member(
     auto_provision: bool,
 ) -> Result<MemberSignIn, String> {
     let identity = Identity::from_profile(profile.clone());
-    let policy = EffectivePolicy::legacy(allow_email_link);
-    match admit_member(pool, provider, &policy, &identity, auto_provision).await {
+    let policy = EffectivePolicy::legacy(allow_email_link)
+        .default_signup(member_default_signup(auto_provision));
+    match admit_member(pool, provider, &policy, &identity, "").await {
         Ok(id) => Ok(MemberSignIn::Member(id)),
         Err(Denied::Refused(r)) => {
             tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {r}");
@@ -853,33 +855,32 @@ impl MemberSignIn {
     }
 }
 
-/// [`admit`] for the member flow; with `auto_provision`, an unknown
-/// verified email gets a new linked member.
+/// The member flow's sign-up mode when the provider sets none.
+fn member_default_signup(auto_provision: bool) -> SignupMode {
+    if auto_provision {
+        SignupMode::Open
+    } else {
+        SignupMode::Closed
+    }
+}
+
+/// [`admit`] for the member flow.
 async fn admit_member(
     pool: &Pool,
     key: &ProviderKey,
     policy: &EffectivePolicy,
     identity: &Identity,
-    auto_provision: bool,
+    slug: &str,
 ) -> Result<i64, Denied> {
-    let request = AdmitRequest::new(pool, Surface::Member, key, policy, identity);
-    match admit(request, &TenantAccounts(pool)).await {
-        Ok(a) => Ok(a.user_id),
-        Err(Denied::Refused(Refusal::SignupClosed)) if auto_provision => {
-            let email = policy
-                .link_email(identity)
-                .ok_or(Refusal::EmailUnverified)?;
-            provision_member(pool, key, email.as_str(), &identity.profile)
-                .await
-                .map_err(Denied::Storage)
-        }
-        Err(e) => Err(e),
-    }
+    let request = AdmitRequest::new(pool, Surface::Member, key, policy, identity).provider(slug);
+    admit(request, &TenantAccounts(pool))
+        .await
+        .map(|a| a.user_id)
 }
 
 /// A tenant's users. Privileged = superuser, or holds any admin permission;
 /// a permission read error counts as privileged.
-pub(crate) struct TenantAccounts<'a>(pub &'a Pool);
+pub struct TenantAccounts<'a>(pub &'a Pool);
 
 impl TenantAccounts<'_> {
     async fn account(&self, user: &User) -> Result<Option<Account>, String> {
@@ -923,6 +924,8 @@ pub(crate) async fn any_email_linkable(pool: &Pool) -> Result<bool, crate::sql::
 }
 
 impl AccountLookup for TenantAccounts<'_> {
+    const TENANT_USERS: bool = true;
+
     async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
         match find_tenant_user(self.0, id)
             .await
@@ -969,108 +972,6 @@ pub(crate) async fn find_tenant_user(
 /// The tenant user with this id, if it can be read.
 pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
     find_tenant_user(pool, id).await.ok().flatten()
-}
-
-/// Auto-create a tenant user from a verified IdP email. `password_hash`
-/// is a **real, unusable** random Argon2 hash (never an empty string —
-/// empty is a login footgun); SSO users can't password-login anyway.
-/// The username is the email local-part, deduped on unique clash.
-async fn provision_member(
-    pool: &Pool,
-    provider: &ProviderKey,
-    email: &str,
-    profile: &NormalizedUser,
-) -> Result<i64, String> {
-    let base = email
-        .split('@')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(email)
-        .to_owned();
-
-    let display_name = profile.name.clone().unwrap_or_else(|| base.clone());
-    let data = serde_json::json!({
-        "display_name": display_name,
-        "avatar_url": profile.avatar_url,
-    });
-
-    // Two attempts: the plain local-part first (query-then-pick), then a
-    // suffixed variant if it's taken or lost an insert race.
-    for attempt in 0..2 {
-        let username = if attempt == 0 && !username_taken(pool, &base).await? {
-            base.clone()
-        } else {
-            format!("{base}-{}", short_suffix())
-        };
-
-        let mut user = User {
-            id: Auto::Unset,
-            username,
-            password_hash: crate::tenancy::password::hash_async(&random_unusable_secret())
-                .await
-                .map_err(|e| format!("hash: {e}"))?,
-            email: Some(email.to_owned()),
-            is_superuser: false,
-            active: true,
-            created_at: chrono::Utc::now(),
-            data: data.clone(),
-            password_changed_at: None,
-            sessions_revoked_at: None,
-        };
-
-        // The user and its link commit together, or neither does.
-        let mut tx = crate::sql::transaction_pool(pool)
-            .await
-            .map_err(|e| format!("begin: {e}"))?;
-        match user.insert_tx(&mut tx).await {
-            Ok(()) => {
-                let id = user
-                    .id
-                    .get()
-                    .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned())?;
-                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
-                    .await
-                    .map_err(|e| format!("link: {e}"))?;
-                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
-                return Ok(id);
-            }
-            Err(e) if attempt == 0 => {
-                // Likely a username/email unique clash — retry once with
-                // a suffixed username.
-                tracing::debug!(error = %e, "member insert retry after conflict");
-            }
-            Err(e) => return Err(format!("insert: {e}")),
-        }
-    }
-    Err("could not allocate a unique username".to_owned())
-}
-
-/// `true` when a `rustango_users.username` row already exists.
-async fn username_taken(pool: &Pool, username: &str) -> Result<bool, String> {
-    use crate::core::Column as _;
-    use crate::sql::FetcherPool as _;
-    let rows = User::objects()
-        .where_(User::username.eq(username.to_owned()))
-        .limit(1)
-        .fetch(pool)
-        .await
-        .map_err(|e| format!("username lookup: {e}"))?;
-    Ok(!rows.is_empty())
-}
-
-/// A short, URL-safe suffix for username de-duplication.
-fn short_suffix() -> String {
-    crate::tenancy::password::generate(6).to_ascii_lowercase()
-}
-
-/// A real 32-byte random secret (base64) to seed an *unusable* Argon2
-/// hash for an SSO-only account.
-fn random_unusable_secret() -> String {
-    use rand::RngCore;
-    let mut buf = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
-    base64::engine::general_purpose::STANDARD.encode(buf)
 }
 
 /// Sanitize a `?next` redirect target: only a same-origin absolute

@@ -717,16 +717,45 @@ pub async fn assign_role_pool(
     role_id: i64,
     pool: &crate::sql::Pool,
 ) -> Result<(), TenancyError> {
-    let query = InsertQuery {
+    crate::sql::insert_pool(pool, &assign_role_query(user_id, role_id)).await?;
+    Ok(())
+}
+
+fn assign_role_query(user_id: i64, role_id: i64) -> InsertQuery {
+    InsertQuery {
         model: UserRole::SCHEMA,
         columns: vec!["user_id", "role_id"],
         values: vec![SqlValue::from(user_id), SqlValue::from(role_id)],
         returning: vec![],
         on_conflict: Some(ConflictClause::DoNothing),
         generated: vec![],
-    };
-    crate::sql::insert_pool(pool, &query).await?;
-    Ok(())
+    }
+}
+
+/// [`assign_role_pool`] inside an open transaction.
+///
+/// # Errors
+/// Driver failures.
+pub async fn assign_role_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    user_id: i64,
+    role_id: i64,
+) -> Result<(), crate::sql::ExecError> {
+    crate::sql::insert_tx(tx, &assign_role_query(user_id, role_id)).await
+}
+
+/// [`remove_role_pool`] inside an open transaction.
+///
+/// # Errors
+/// Driver failures.
+pub async fn remove_role_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    user_id: i64,
+    role_id: i64,
+) -> Result<(), crate::sql::ExecError> {
+    crate::sql::delete_tx(tx, &remove_role_query(user_id, role_id))
+        .await
+        .map(|_| ())
 }
 
 /// Remove a user from a role.
@@ -743,26 +772,26 @@ pub async fn remove_role_pool(
     role_id: i64,
     pool: &crate::sql::Pool,
 ) -> Result<(), TenancyError> {
-    crate::sql::delete_pool(
-        pool,
-        &DeleteQuery {
-            model: UserRole::SCHEMA,
-            where_clause: WhereExpr::and_predicates(vec![
-                Filter {
-                    column: "user_id",
-                    op: Op::Eq,
-                    value: SqlValue::from(user_id),
-                },
-                Filter {
-                    column: "role_id",
-                    op: Op::Eq,
-                    value: SqlValue::from(role_id),
-                },
-            ]),
-        },
-    )
-    .await?;
+    crate::sql::delete_pool(pool, &remove_role_query(user_id, role_id)).await?;
     Ok(())
+}
+
+fn remove_role_query(user_id: i64, role_id: i64) -> DeleteQuery {
+    DeleteQuery {
+        model: UserRole::SCHEMA,
+        where_clause: WhereExpr::and_predicates(vec![
+            Filter {
+                column: "user_id",
+                op: Op::Eq,
+                value: SqlValue::from(user_id),
+            },
+            Filter {
+                column: "role_id",
+                op: Op::Eq,
+                value: SqlValue::from(role_id),
+            },
+        ]),
+    }
 }
 
 /// Set a per-user permission override. Updates `granted` if a row already exists.

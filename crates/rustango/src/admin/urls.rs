@@ -301,7 +301,10 @@ impl Builder {
         config.static_url = "/__static__".to_owned();
         // The process policy: `[security].secure_cookies`, else the prod tier.
         config.secure_cookies = crate::session::secure_cookies();
-        Self { pool, config }
+        let b = Self { pool, config };
+        #[cfg(feature = "sso")]
+        let b = crate::sso::policy::admin::register_link_actions(b);
+        b
     }
 
     /// The mount prefix `settings` asks for, without a trailing slash:

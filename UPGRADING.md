@@ -159,6 +159,10 @@ untouched.
 - Matches on `LinkRefusal` need a wildcard arm (new `Policy` variant).
 - Every refused SSO sign-in now looks the same to the browser: the member flow shows one "You can't sign in with this account" page (403) instead of separate not-linked / no-account / inactive / unverified pages, and the tenant and admin logins redirect with `sso_error=nouser` (no more `sso_error=inactive`). The reason is in the server log and the audit log.
 - A provider table with only some of the policy columns refuses SSO sign-in until `migrate` runs.
+- Sign-up follows a provider's `signup_mode`. Left empty, nothing changes: the tenant login never signs up, and the member flow follows `auto_provision`. A set `signup_mode` overrides `auto_provision` on the member flow.
+- A provider whose sign-up fields do not parse (`signup_mode`, `role_map`, ...) refuses every sign-in through it.
+- `ResolvedProvider` has a new `signup` field; `TenantAccounts` is now public.
+- `role_map` reads its claims only from a verified id_token when the provider has a JWKS; a userinfo-only provider keeps reading userinfo. A sign-in with none of the role claims leaves the mapped roles alone.
 
 ## 0.61.14
 
