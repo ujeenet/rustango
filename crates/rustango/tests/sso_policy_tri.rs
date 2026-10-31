@@ -226,7 +226,8 @@ fn legacy_rule(e: &LinkRefusal) -> &'static str {
     }
 }
 
-/// With no stored rules, `admit` decides exactly what `sign_in` did.
+/// With no stored rules, `sign_in` and `admit` keep the link outcomes:
+/// only a plain, active, verified account links, and only with opt-in.
 async fn the_default_policy_keeps_link_outcomes(pool: &Pool) {
     provider(pool, "plain", true).await;
     provider(pool, "nolink", false).await;
@@ -236,14 +237,38 @@ async fn the_default_policy_keeps_link_outcomes(pool: &Pool) {
         .unwrap();
     assert_eq!(p.policy, Ok(SignInPolicy::default()));
     let mut n = 0;
-    for slug in ["plain", "nolink"] {
-        for (privileged, active, verified, superuser) in [
+    for (slug, want) in [
+        (
+            "plain",
+            [
+                Ok(7),
+                Err("privileged"),
+                Err("inactive"),
+                Err("email_unverified"),
+                Err("privileged"),
+            ],
+        ),
+        (
+            "nolink",
+            [
+                Err("email_link_disabled"),
+                Err("email_link_disabled"),
+                Err("email_link_disabled"),
+                Err("email_unverified"),
+                Err("email_link_disabled"),
+            ],
+        ),
+    ] {
+        for ((privileged, active, verified, superuser), want) in [
             (false, true, true, false),
             (true, true, true, false),
             (false, false, true, false),
             (false, true, false, false),
             (false, true, true, true),
-        ] {
+        ]
+        .into_iter()
+        .zip(want)
+        {
             n += 1;
             let acct = One(Some(
                 Account::new(7, privileged, active).with_superuser(superuser),
@@ -273,7 +298,8 @@ async fn the_default_policy_keeps_link_outcomes(pool: &Pool) {
                     Denied::Storage(e) => panic!("storage: {e}"),
                     _ => "other",
                 });
-            assert_eq!(old, new, "{slug} case {n}");
+            assert_eq!(old, want, "sign_in: {slug} case {n}");
+            assert_eq!(new, want, "admit: {slug} case {n}");
         }
     }
 }
@@ -430,9 +456,57 @@ async fn an_unparseable_rule_refuses(pool: &Pool) {
     );
 }
 
+/// Run `body` on its own task, then `restore` even when it panicked, so a
+/// failing scenario never leaves a framework table changed for later suites.
+async fn restoring<B, R>(pool: &Pool, body: impl FnOnce(Pool) -> B, restore: impl FnOnce(Pool) -> R)
+where
+    B: std::future::Future<Output = ()> + Send + 'static,
+    R: std::future::Future<Output = ()>,
+{
+    let res = tokio::spawn(body(pool.clone())).await;
+    restore(pool.clone()).await;
+    if let Err(e) = res {
+        std::panic::resume_unwind(e.into_panic());
+    }
+}
+
+/// The current provider and link tables, after a scenario swapped in old shapes.
+async fn current_sso_tables(pool: Pool) {
+    use rustango::testkit::matrix::{drop_table, fresh_table};
+    fresh_table::<SsoProvider>(&pool).await;
+    drop_table(&pool, "rustango_sso_links").await;
+    rustango::sso::link::ensure_table(&pool).await.unwrap();
+}
+
+/// A scenario that panics still gets its tables back.
+async fn a_failed_scenario_restores_its_tables(pool: &Pool) {
+    use rustango::testkit::matrix::fresh_table;
+    let inner = pool.clone();
+    let run = tokio::spawn(async move {
+        restoring(
+            &inner,
+            |pool| async move {
+                fresh_table::<LegacyProvider>(&pool).await;
+                panic!("scenario failed");
+            },
+            current_sso_tables,
+        )
+        .await;
+    })
+    .await;
+    assert!(run.unwrap_err().is_panic(), "the panic reaches the test");
+    // The current shape is back: a full provider row inserts.
+    provider(pool, "back", false).await;
+}
+
 /// Provider and link tables from before this release still sign a linked user in.
 async fn pre_migration_tables_still_sign_in(pool: &Pool) {
+    restoring(pool, pre_migration_body, current_sso_tables).await;
+}
+
+async fn pre_migration_body(pool: Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
+    let pool = &pool;
     fresh_table::<LegacyProvider>(pool).await;
     drop_table(pool, "rustango_sso_links").await;
     fresh_table::<LegacyLink>(pool).await;
@@ -488,16 +562,17 @@ async fn pre_migration_tables_still_sign_in(pool: &Pool) {
         .await,
         Ok(9)
     );
-    // The legacy shapes must not outlive the test in the shared database.
-    fresh_table::<SsoProvider>(pool).await;
-    drop_table(pool, "rustango_sso_links").await;
-    rustango::sso::link::ensure_table(pool).await.unwrap();
 }
 
 /// Some policy columns but not all: a missing one may hold a rule, so
 /// every sign-in through the row refuses until `migrate` runs.
 async fn a_partly_migrated_table_refuses(pool: &Pool) {
+    restoring(pool, partly_migrated_body, current_sso_tables).await;
+}
+
+async fn partly_migrated_body(pool: Pool) {
     use rustango::testkit::matrix::fresh_table;
+    let pool = &pool;
     fresh_table::<PartialProvider>(pool).await;
     PartialProvider {
         id: Auto::default(),
@@ -532,7 +607,6 @@ async fn a_partly_migrated_table_refuses(pool: &Pool) {
         &One(Some(Account::new(4, false, true))),
     )
     .await;
-    fresh_table::<SsoProvider>(pool).await;
     assert_eq!(res, Err(Denied::Refused(Refusal::PolicyInvalid)));
 }
 
@@ -1307,6 +1381,14 @@ async fn may_use_password(pool: &Pool, id: i64) -> bool {
 /// `sso_only` on a provider or the tenant keeps its users off passwords;
 /// a superuser follows only `password_login`.
 async fn password_rules_follow_sso_only(pool: &Pool) {
+    restoring(pool, password_rules_body, |pool| async move {
+        rustango::testkit::matrix::drop_table(&pool, "rustango_sso_tenant_policy").await;
+    })
+    .await;
+}
+
+async fn password_rules_body(pool: Pool) {
+    let pool = &pool;
     let t = tok();
     rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
     provider(pool, "strict", false).await;
@@ -1379,7 +1461,6 @@ async fn password_rules_follow_sso_only(pool: &Pool) {
         .unwrap();
     assert!(may_use_password(pool, boss).await, "superuser break-glass");
     assert!(!may_use_password(pool, bob).await, "everyone else refused");
-    rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
 }
 
 /// The SSO audit rows for subject `sub` of provider `slug`, by event.
@@ -1751,6 +1832,7 @@ tri_dialect_test!(
         an_email_link_locks_the_password,
         a_role_without_permissions_is_privileged,
         a_partly_migrated_table_refuses,
+        a_failed_scenario_restores_its_tables,
         the_default_policy_keeps_link_outcomes,
         stored_rules_are_enforced,
         an_unparseable_rule_refuses,
@@ -1772,10 +1854,91 @@ tri_dialect_test!(
     ],
 );
 
+/// The paths a `use` item imports, e.g. `crate::sso::link::sign_in`.
+fn use_paths(item: &str) -> Vec<String> {
+    type Toks = std::iter::Peekable<std::vec::IntoIter<String>>;
+    fn tree(prefix: &str, toks: &mut Toks, out: &mut Vec<String>) {
+        let mut path = prefix.to_owned();
+        while let Some(t) = toks.next() {
+            if t == "{" {
+                loop {
+                    tree(&path, toks, out);
+                    match toks.next().as_deref() {
+                        Some(",") if toks.peek().is_some_and(|t| t == "}") => {
+                            toks.next();
+                            return;
+                        }
+                        Some(",") => {}
+                        _ => return,
+                    }
+                }
+            }
+            if t == "as" {
+                toks.next();
+            } else if t != "," && t != "}" {
+                path = format!("{path}::{t}");
+            }
+            if matches!(toks.peek().map(String::as_str), None | Some("," | "}")) {
+                break;
+            }
+        }
+        out.push(path);
+    }
+    let mut toks = Vec::new();
+    let mut word = String::new();
+    for c in item.chars() {
+        if c.is_alphanumeric() || c == '_' {
+            word.push(c);
+            continue;
+        }
+        if !word.is_empty() {
+            toks.push(std::mem::take(&mut word));
+        }
+        if matches!(c, '{' | '}' | ',') {
+            toks.push(c.to_string());
+        }
+    }
+    if !word.is_empty() {
+        toks.push(word);
+    }
+    let mut out = Vec::new();
+    tree("", &mut toks.into_iter().peekable(), &mut out);
+    out
+}
+
+/// Whether `text` calls the old sign-in entry point by path or imports it.
+fn reaches_legacy_sign_in(text: &str) -> bool {
+    if text.contains("link::sign_in(") || text.contains("legacy_sign_in(") {
+        return true;
+    }
+    text.split("use ").skip(1).any(|rest| {
+        let item = rest.split(';').next().unwrap_or("");
+        use_paths(item)
+            .iter()
+            .any(|p| p.ends_with("::link::sign_in") || p.ends_with("::legacy_sign_in"))
+    })
+}
+
 /// Every SSO surface signs in through `sso::policy::admit`; only the
 /// legacy wrapper in `sso/link.rs` may reach the old entry point.
 #[test]
 fn no_callback_bypasses_admit() {
+    for caught in [
+        "use crate::sso::link::sign_in;",
+        "use super::link::{sign_in};",
+        "use super::link::{self, sign_in as s};",
+        "use crate::sso::{\n    link::{ProviderKey, sign_in},\n    policy,\n};",
+        "let r = link::sign_in(pool, &key);",
+    ] {
+        assert!(reaches_legacy_sign_in(caught), "missed: {caught}");
+    }
+    for fine in [
+        "use crate::sso::link::{sign_in_url, SsoLink};",
+        "use crate::sso::{link::ProviderKey, policy::admit};",
+        "fn sign_in() {}",
+    ] {
+        assert!(!reaches_legacy_sign_in(fine), "false alarm: {fine}");
+    }
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap().flatten() {
             let p = e.path();
@@ -1800,12 +1963,7 @@ fn no_callback_bypasses_admit() {
             continue;
         }
         let text = std::fs::read_to_string(&f).unwrap();
-        let imports_it = text.split("sso::link::{").skip(1).any(|rest| {
-            rest.split('}')
-                .next()
-                .is_some_and(|names| names.split([',', ' ', '\n']).any(|n| n == "sign_in"))
-        });
-        if imports_it || text.contains("link::sign_in(") || text.contains("legacy_sign_in(") {
+        if reaches_legacy_sign_in(&text) {
             offenders.push(rel);
         }
     }
