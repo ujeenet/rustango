@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant. See UPGRADING.
+**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant; `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`. See UPGRADING.
 
 ### Added
 
