@@ -68,38 +68,52 @@ where
     Ok(row)
 }
 
-/// Rows per Postgres `bulk_insert` statement at `columns` columns, under
-/// the bind cap; the derive's pool `bulk_insert` chunks by it.
-#[doc(hidden)]
-#[must_use]
-pub fn bulk_insert_rows_per_statement(columns: usize) -> usize {
-    super::rows_per_batch(&Postgres, columns, usize::MAX)
-}
-
-/// Like [`bulk_insert_pool`](crate::sql::bulk_insert_pool) but accepts
-/// any sqlx executor. One statement, so past the bind cap the driver
-/// refuses it: use the model's pool `bulk_insert`, which chunks.
+/// Like [`bulk_insert_pool`](crate::sql::bulk_insert_pool) on a pool,
+/// `&mut PgConnection` or transaction. Past the bind cap it writes one
+/// statement per chunk inside a transaction (a savepoint when already in
+/// one), so the insert stays all-or-nothing. Returned rows keep row order.
 ///
 /// # Errors
 /// [`ExecError`] if the query is invalid or the driver rejects it.
-pub async fn bulk_insert_on<'c, E>(
-    executor: E,
+pub async fn bulk_insert_on<'c, A>(
+    conn: A,
     query: &BulkInsertQuery,
 ) -> Result<Vec<PgRow>, ExecError>
 where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
+    A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
 {
-    query.validate()?;
-    let stmt = Postgres.compile_bulk_insert(&query.last_per_conflict_key())?;
+    let mut stmts = super::compile_bulk_insert_batches(&Postgres, query)?;
+    let returning = !query.returning.is_empty();
+    let mut conn = conn.acquire().await?;
+    match stmts.len() {
+        0 => Ok(Vec::new()),
+        1 => run_bulk_insert(&mut *conn, stmts.remove(0), returning).await,
+        _ => {
+            let mut tx = sqlx::Connection::begin(&mut *conn).await?;
+            let mut rows = Vec::new();
+            for stmt in stmts {
+                rows.extend(run_bulk_insert(&mut *tx, stmt, returning).await?);
+            }
+            tx.commit().await?;
+            Ok(rows)
+        }
+    }
+}
+
+async fn run_bulk_insert(
+    conn: &mut sqlx::PgConnection,
+    stmt: crate::sql::CompiledStatement,
+    returning: bool,
+) -> Result<Vec<PgRow>, ExecError> {
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);
     }
-    if query.returning.is_empty() {
-        q.execute(executor).await?;
-        Ok(Vec::new())
+    if returning {
+        Ok(q.fetch_all(conn).await?)
     } else {
-        Ok(q.fetch_all(executor).await?)
+        q.execute(conn).await?;
+        Ok(Vec::new())
     }
 }
 

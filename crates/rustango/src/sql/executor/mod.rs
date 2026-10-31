@@ -467,8 +467,7 @@ use page::{paginated_statement, total_statement};
 mod pg_on;
 #[cfg(feature = "postgres")]
 pub use pg_on::{
-    bulk_insert_on, bulk_insert_rows_per_statement, delete_on, insert_on, insert_returning_on,
-    select_rows_on, update_on,
+    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_rows_on, update_on,
 };
 
 mod row_to_json;

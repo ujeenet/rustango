@@ -1392,8 +1392,9 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 ## Bulk operations
 
 > **Postgres only.** `bulk_insert` / `bulk_insert_on` and `upsert` / `upsert_on`
-> are emitted under `#[cfg(feature = "postgres")]` and take a `&PgPool` or a
-> Postgres executor — on a MySQL or SQLite build they do not exist. There is no
+> are emitted under `#[cfg(feature = "postgres")]` — on a MySQL or SQLite build
+> they do not exist. `bulk_insert_on` takes a `&PgPool`, `&mut PgConnection` or
+> transaction; past the bind cap it writes in chunks inside one transaction. There is no
 > tri-dialect plain bulk insert; the multi-backend batch writers are
 > `bulk_upsert_pool` and `bulk_insert_or_ignore_pool`, both taking `&Pool`.
 > This is part of the same known naming split.

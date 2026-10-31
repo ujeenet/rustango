@@ -3304,31 +3304,27 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.delete_on(pool).await)
     };
-    // Past the bind cap one statement per chunk, all in one transaction.
-    let bulk_columns = fields.bulk_columns_all.len();
-    let one_statement = if audited_fields.is_some() {
-        quote!()
-    } else {
+    // `bulk_insert_on` chunks past the bind cap itself; audited models
+    // still need a connection for the audit rows.
+    let pool_to_bulk_insert_on = if audited_fields.is_some() {
         quote! {
-            if rows.len() <= _per {
-                return Self::bulk_insert_on(rows, pool).await;
-            }
-        }
-    };
-    let pool_to_bulk_insert_on = |chunks: TokenStream2| {
-        quote! {
-            let _per = #root::sql::__macro_internals::bulk_insert_rows_per_statement(#bulk_columns);
-            #one_statement
             let mut _tx = pool.begin().await?;
-            for _chunk in rows.#chunks(_per) {
-                Self::bulk_insert_on(_chunk, &mut *_tx).await?;
-            }
+            Self::bulk_insert_on(rows, &mut *_tx).await?;
             _tx.commit().await?;
             ::core::result::Result::Ok(())
         }
+    } else {
+        quote!(Self::bulk_insert_on(rows, pool).await)
     };
-    let pool_to_bulk_insert_mut = pool_to_bulk_insert_on(quote!(chunks_mut));
-    let pool_to_bulk_insert_on = pool_to_bulk_insert_on(quote!(chunks));
+    // `bulk_insert_on` takes anything it can acquire a connection from.
+    let bulk_executor_where = if audited_fields.is_some() {
+        quote!()
+    } else {
+        quote! {
+            where
+                _E: #root::sql::sqlx::Acquire<'_c, Database = #root::sql::sqlx::Postgres>,
+        }
+    };
     // Pre-existing bug surfaced by batch 22's first audited Auto<T>
     // PK test model: `upsert(&PgPool)` body called `self.upsert_on(pool)`
     // directly, but `upsert_on` for audited models takes
@@ -7677,7 +7673,7 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 pool: &#root::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_mut
+                #pool_to_bulk_insert_on
             }
 
             /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
@@ -7690,7 +7686,7 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 #executor_param,
             ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
+            #bulk_executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
@@ -7772,7 +7768,7 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 #executor_param,
             ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
+            #bulk_executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());

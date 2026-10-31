@@ -148,6 +148,12 @@ untouched.
 
 ---
 
+## Unreleased
+
+- `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
+
+---
+
 ## 0.61.16
 
 - `HeaderResolver` and `PortResolver` now cache for 30 s like the host resolvers. A tenant created, suspended or re-slugged by another process is seen within the fingerprint poll (`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 s by default); writes through rustango in the same process are seen at once.
