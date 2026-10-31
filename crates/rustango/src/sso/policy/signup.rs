@@ -557,9 +557,46 @@ mod store {
         link::insert_link_tx(&mut tx, key, subject, user_id, false)
             .await
             .map_err(|e| Denied::Storage(format!("link: {e}")))?;
+        lock_password_tx(&mut tx, user_id).await?;
         tx.commit()
             .await
             .map_err(|e| Denied::Storage(format!("commit: {e}")))
+    }
+
+    /// Link `subject` to the existing `user_id` its verified email matched.
+    /// The account's password is locked in the same transaction.
+    pub(crate) async fn link_by_email(
+        pool: &Pool,
+        key: &ProviderKey,
+        subject: &str,
+        user_id: i64,
+    ) -> Result<(), Denied> {
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
+        link::insert_link_tx(&mut tx, key, subject, user_id, false)
+            .await
+            .map_err(|e| Denied::Storage(format!("link: {e}")))?;
+        lock_password_tx(&mut tx, user_id).await?;
+        tx.commit()
+            .await
+            .map_err(|e| Denied::Storage(format!("commit: {e}")))
+    }
+
+    /// Make the password unusable and end every session: whoever registered
+    /// the email before its owner linked the IdP loses the account.
+    async fn lock_password_tx(tx: &mut PoolTx<'_>, user_id: i64) -> Result<(), Denied> {
+        let query = User::objects()
+            .filter("id", user_id)
+            .update()
+            .set("password_hash", unusable_hash().await?)
+            .set("sessions_revoked_at", chrono::Utc::now())
+            .compile()
+            .map_err(|e| Denied::Storage(e.to_string()))?;
+        crate::sql::update_tx(tx, &query)
+            .await
+            .map(|_| ())
+            .map_err(|e| Denied::Storage(format!("lock password: {e}")))
     }
 
     /// Whether `name` may be a username: letters, digits and `._@+-`, within

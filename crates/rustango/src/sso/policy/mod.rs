@@ -224,7 +224,7 @@ pub struct SignInPolicy {
     pub allowed_idp_tenants: Option<TokenList>,
     pub allowed_hosted_domains: Option<DomainList>,
     pub required_claims: RequiredClaims,
-    /// The domain allowlist accepts only an IdP-verified email.
+    /// Kept for stored rows; the domain allowlist always needs an IdP-verified email.
     pub require_verified_email: bool,
 }
 
@@ -305,12 +305,11 @@ impl SignInPolicy {
             }
         }
         if let Some(allowed) = &self.allowed_email_domains {
-            let email = if self.require_verified_email {
-                identity.verified_email(self.pins(identity))
-            } else {
-                identity.email()
-            };
-            let email = email.ok_or(Refusal::EmailUnverified)?;
+            // Only a verified email, whatever `require_verified_email` says:
+            // an unverified one is whatever the user typed at the IdP.
+            let email = identity
+                .verified_email(self.pins(identity))
+                .ok_or(Refusal::EmailUnverified)?;
             if allowed.find(email.domain()).is_none() {
                 return Err(Refusal::DomainNotAllowed {
                     domain: email.domain().to_owned(),
@@ -468,16 +467,7 @@ impl EffectivePolicy {
                 return self.tighten(Err(e));
             }
         };
-        let base = self.layers.first().map_or(true, |l| {
-            l.as_ref().map_or(true, |p| p.require_verified_email)
-        });
-        if ov.require_verified_email == Some(true) {
-            for layer in self.layers.iter_mut().flatten() {
-                layer.require_verified_email = true;
-            }
-        }
-        let mut layer = ov.sign_in;
-        layer.require_verified_email = ov.require_verified_email.map_or(base, |o| o || base);
+        let layer = ov.sign_in;
         self.signup_cap = match (self.signup_cap, ov.signup_mode) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -735,7 +725,7 @@ pub async fn admit<A: AccountLookup>(
     if !found.active {
         return Err(Refusal::Inactive.into());
     }
-    if let Err(e) = link::create_link(pool, key, subject, found.user_id).await {
+    if let Err(e) = link_by_email(pool, key, subject, found.user_id, tenant_users).await {
         // A concurrent first login may have linked it already.
         return match link::linked_user(pool, key, subject)
             .await
@@ -745,10 +735,11 @@ pub async fn admit<A: AccountLookup>(
                 user_id: found.user_id,
                 created: false,
             }),
-            _ => Err(Denied::Storage(e.to_string())),
+            _ => Err(Denied::Storage(e)),
         };
     }
-    audit_success(&req, "sso_linked", found.user_id, serde_json::json!({})).await;
+    let locked = serde_json::json!({"password_locked": tenant_users});
+    audit_success(&req, "sso_linked", found.user_id, locked).await;
     if tenant_users {
         after_sign_in(&req, signup, found.user_id, signup.sync_roles_on_login).await?;
     }
@@ -759,6 +750,27 @@ pub async fn admit<A: AccountLookup>(
         user_id: found.user_id,
         created: false,
     })
+}
+
+/// Link `subject` to an account its verified email matched. On the tenant
+/// user table the account's password is locked in the same transaction.
+#[allow(unused_variables)]
+async fn link_by_email(
+    pool: &Pool,
+    key: &ProviderKey,
+    subject: &str,
+    user_id: i64,
+    tenant_users: bool,
+) -> Result<(), String> {
+    #[cfg(feature = "tenancy")]
+    if tenant_users {
+        return signup::link_by_email(pool, key, subject, user_id)
+            .await
+            .map_err(|e| e.to_string());
+    }
+    link::create_link(pool, key, subject, user_id)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 /// Sync a tenant user's mapped roles (when `roles`) and profile after a sign-in.
@@ -838,7 +850,7 @@ async fn relink(
         return Err(Refusal::Inactive.into());
     }
     signup::relink(req.pool, req.key, req.identity.subject(), &invite, user_id).await?;
-    let used = serde_json::json!({"invite": invite.id()});
+    let used = serde_json::json!({"invite": invite.id(), "password_locked": true});
     audit_success(req, "sso_relinked", user_id, used).await;
     Ok(Some(Admitted {
         user_id,
@@ -1288,6 +1300,27 @@ mod tests {
             .is_err());
     }
 
+    /// The allowlist never matches an unverified email, even with
+    /// `require_verified_email` off.
+    #[test]
+    fn the_allowlist_needs_a_verified_email_whatever_the_flag() {
+        let off = SignInPolicy::parse(&SignInColumns {
+            allowed_email_domains: Some("client.org"),
+            require_verified_email: false,
+            ..SignInColumns::default()
+        })
+        .unwrap();
+        let unverified = person("ann@client.org", false, serde_json::json!({}));
+        assert_eq!(off.check(&unverified), Err(Refusal::EmailUnverified));
+        assert_eq!(
+            shared_base().check(&unverified),
+            Err(Refusal::EmailUnverified)
+        );
+        assert!(off
+            .check(&person("ann@client.org", true, serde_json::json!({})))
+            .is_ok());
+    }
+
     #[test]
     fn the_default_policy_admits_anyone_with_a_subject() {
         let p = SignInPolicy::default();
@@ -1534,15 +1567,6 @@ mod tests {
                 .rule(),
             "domain_blocked"
         );
-        // The shared provider takes unverified emails; the override does not.
-        let verified = SharedOverride {
-            require_verified_email: Some(true),
-            ..SharedOverride::default()
-        };
-        let unverified = person("a@client.org", false, serde_json::json!({}));
-        assert!(shared_base().check(&unverified).is_ok());
-        let p = shared_base().shared_override(Ok(Some(verified)));
-        assert_eq!(p.check(&unverified), Err(Refusal::EmailUnverified));
         let closed = SharedOverride {
             signup_mode: Some(SignupMode::Closed),
             lifecycle: Lifecycle::parse(false, None, Some(60), Some(30)).unwrap(),

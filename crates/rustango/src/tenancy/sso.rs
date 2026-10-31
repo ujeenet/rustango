@@ -169,6 +169,16 @@ inventory::submit! {
     }
 }
 
+fn superuser_only(parts: &Parts, _: Option<&serde_json::Value>) -> bool {
+    crate::admin::session::is_superuser(parts)
+}
+
+// A shared row decides sign-in for every tenant.
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "add", superuser_only);
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "change", superuser_only);
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "delete", superuser_only);
+crate::register_admin_object_permission!("rustango_shared_sso_providers", "view", superuser_only);
+
 /// Enabled providers for this tenant's login page: the tenant's own
 /// [`SsoProvider`] rows merged with the registry-wide [`SharedSsoProvider`]
 /// set, **tenant-wins** on a slug clash, sorted by `sort_order`. Each button
@@ -660,6 +670,27 @@ mod tests {
             assert_eq!(go(&default, &two, Some(q), false), None, "{q}");
         }
         assert_eq!(go(&default, &two, None, true), None);
+    }
+
+    /// Only a superuser adds, changes, deletes or views a shared provider in the admin.
+    #[test]
+    fn shared_providers_are_superuser_only_in_the_admin() {
+        use crate::admin::object_permissions::is_allowed;
+        let parts = |scoped: bool| {
+            let mut p = axum::http::Request::builder()
+                .body(())
+                .unwrap()
+                .into_parts()
+                .0;
+            p.extensions
+                .insert(crate::admin::session::PermsScoped(scoped));
+            p
+        };
+        for action in ["add", "change", "delete", "view"] {
+            let t = "rustango_shared_sso_providers";
+            assert!(!is_allowed(t, action, &parts(true), None), "{action}");
+            assert!(is_allowed(t, action, &parts(false), None), "{action}");
+        }
     }
 
     #[test]

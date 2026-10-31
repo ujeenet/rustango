@@ -896,8 +896,8 @@ async fn admit_member(
         .map(|a| a.user_id)
 }
 
-/// A tenant's users. Privileged = superuser, or holds any admin permission;
-/// a permission read error counts as privileged.
+/// A tenant's users. Privileged = superuser, or holds any role or admin
+/// permission; a read error counts as privileged.
 pub struct TenantAccounts<'a>(pub &'a Pool);
 
 impl TenantAccounts<'_> {
@@ -914,8 +914,17 @@ impl TenantAccounts<'_> {
     }
 }
 
-/// Whether `user_id` holds any permission; a read error counts as yes.
+/// Whether `user_id` holds any role (even one with no permission yet) or
+/// permission; a read error counts as yes.
 async fn holds_permissions(pool: &Pool, user_id: i64) -> bool {
+    use crate::sql::ExistsPool as _;
+    let has_role = crate::tenancy::permissions::UserRole::objects()
+        .filter("user_id", user_id)
+        .exists(pool)
+        .await;
+    if !matches!(has_role, Ok(false)) {
+        return true;
+    }
     crate::tenancy::permissions::user_permissions_pool(user_id, pool)
         .await
         .map_or(true, |perms| !perms.is_empty())

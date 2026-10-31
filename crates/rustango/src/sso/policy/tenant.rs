@@ -21,7 +21,7 @@ fn named(col: &'static str) -> impl Fn(PolicyError) -> PolicyError {
 pub struct SharedOverride {
     /// One more layer of sign-in rules.
     pub sign_in: SignInPolicy,
-    /// `Some(true)`: every layer accepts only a verified email.
+    /// Kept for stored rows; the domain allowlist always needs a verified email.
     pub require_verified_email: Option<bool>,
     pub signup_mode: Option<SignupMode>,
     pub lifecycle: Lifecycle,
