@@ -72,6 +72,7 @@ impl PkSet {
     }
 
     /// Parse raw keys (form or URL values) with the PK field's type.
+    /// Misses a TEXT-stored SQLite UUID key; [`Self::parse_on`] finds it.
     ///
     /// # Errors
     /// [`BulkActionError::InvalidPk`] when the model has no PK, a key
@@ -86,6 +87,34 @@ impl PkSet {
                 .map_err(|e| BulkActionError::InvalidPk(e.to_string()))
         });
         Self::capped(model, keys)
+    }
+
+    /// [`Self::parse`], with each key bound as `pool`'s rows store it: a
+    /// SQLite UUID key a column default wrote is TEXT, not a BLOB. A key
+    /// stored in more than one form names several rows and is dropped.
+    ///
+    /// # Errors
+    /// As [`Self::parse`]; [`BulkActionError::Database`] when the key read fails.
+    pub async fn parse_on<S: AsRef<str>>(
+        pool: &Pool,
+        model: &'static ModelSchema,
+        raw: impl IntoIterator<Item = S>,
+    ) -> Result<Self, BulkActionError> {
+        let raw: Vec<S> = raw.into_iter().take(Self::MAX_KEYS + 1).collect();
+        let parsed = Self::parse(model, &raw)?;
+        let pk = pk_field(model)?;
+        let pairs = parsed
+            .keys
+            .into_iter()
+            .zip(raw.iter().map(AsRef::as_ref))
+            .collect();
+        let keys = crate::sql::stored_keys(pool, model, pk, pairs)
+            .await
+            .map_err(db_err)?;
+        Ok(Self {
+            model,
+            keys: keys.into_iter().flatten().collect(),
+        })
     }
 
     /// Typed keys. Integers are narrowed to the PK's width; any other

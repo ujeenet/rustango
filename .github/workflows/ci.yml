@@ -1758,6 +1758,8 @@ jobs:
           binary(=m2m_changed_noop_tri) |
           binary(=update_validation_tri) |
           binary(=uuid_v7_pk_writes_tri) |
+          binary(=orm_tx_helpers_tri) |
+          binary(=fk_on_delete_tri) |
           binary(=manage_data_verbs_tri) |
           binary(=boot_races_tri) |
           binary(=test_db_tri) |

@@ -374,6 +374,58 @@ mod bulk {
         scenarios: [bulk_actions_are_audited],
     }
 
+    /// A UUID key a SQLite column default writes as TEXT, not a bound BLOB.
+    #[cfg(feature = "sqlite")]
+    mod text_uuid {
+        use super::*;
+
+        #[derive(Model, Debug, Clone)]
+        #[rustango(table = "bulk_textkey", app = "audit1794")]
+        #[allow(dead_code)]
+        pub struct TextKey {
+            #[rustango(primary_key, auto_uuid, default = "(lower(hex(randomblob(16))))")]
+            pub id: Auto<uuid::Uuid>,
+            #[rustango(soft_delete)]
+            pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
+        }
+
+        #[tokio::test]
+        async fn parse_on_finds_a_text_stored_uuid_key() {
+            use rustango::testkit::matrix::{fresh_table, live_lock, Backend};
+            let _guard = live_lock().lock().await;
+            let pool = Backend::Sqlite.pool().await.expect("sqlite pool");
+            fresh_table::<TextKey>(&pool).await;
+            for _ in 0..2 {
+                let mut row = TextKey {
+                    id: Auto::default(),
+                    deleted_at: None,
+                };
+                row.insert_pool(&pool).await.expect("insert");
+            }
+            let keys = TextKey::objects()
+                .values_list_flat("id")
+                .fetch::<String>(&pool)
+                .await
+                .expect("read keys");
+            assert_eq!(keys[0].len(), 32, "the default stores text: {}", keys[0]);
+            let one = PkSet::parse_on(&pool, TextKey::SCHEMA, &keys[..1])
+                .await
+                .expect("parse");
+            let soft = BulkSoftDeleteAction {
+                column: "deleted_at",
+            };
+            assert_eq!(soft.run(&one, &pool).await.unwrap().affected, 1);
+            let trashed = TextKey::objects()
+                .fetch(&pool)
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|r| r.deleted_at.is_some())
+                .count();
+            assert_eq!(trashed, 1, "only the selected row is soft-deleted");
+        }
+    }
+
     /// A text PK not named `id` (#1817).
     mod text_pk {
         use super::*;
