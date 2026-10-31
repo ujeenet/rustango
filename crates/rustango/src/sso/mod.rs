@@ -143,6 +143,22 @@ pub(crate) fn check_provider(provider: &str, issuer_url: Option<&str>) -> Result
     }
 }
 
+/// `http://` to a host other than loopback.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+pub(crate) fn insecure_url(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .get(..7)
+        .filter(|s| s.eq_ignore_ascii_case("http://"))
+        .map(|_| &url[7..])
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    !crate::urls::is_loopback_host(host)
+}
+
 /// Build an [`OAuth2Provider`] from a resolved config. Known keys use the
 /// built-in presets; `"oidc"` runs OpenID Connect discovery against
 /// `issuer_url`, reusing the result for an hour.

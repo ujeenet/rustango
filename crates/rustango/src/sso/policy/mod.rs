@@ -1093,6 +1093,52 @@ inventory::submit! {
     }
 }
 
+/// The slug, kind and issuer of a provider row, as the operator console
+/// checks them. `dev`: a plain `http://` issuer is allowed.
+#[cfg(feature = "admin")]
+pub(crate) fn check_provider_fields(
+    values: &[(&'static str, crate::core::SqlValue)],
+    before: Option<&serde_json::Value>,
+    dev: bool,
+) -> Result<(), String> {
+    use crate::core::SqlValue;
+    let field = |col: &str| match values.iter().find(|(c, _)| *c == col) {
+        Some((_, SqlValue::String(s))) => Some(s.trim().to_owned()).filter(|s| !s.is_empty()),
+        Some(_) => None,
+        None => before?.get(col)?.as_str().map(str::to_owned),
+    };
+    let slug = field("slug").unwrap_or_default();
+    if slug.len() > 64 || crate::validators::validate_slug(&slug).is_err() {
+        return Err("slug must be 1-64 letters, digits, `_` or `-`".into());
+    }
+    let issuer = field("issuer_url");
+    super::check_provider(&field("kind").unwrap_or_default(), issuer.as_deref())
+        .map_err(|e| e.to_string())?;
+    if !dev && issuer.as_deref().is_some_and(super::insecure_url) {
+        return Err("issuer URL must use https".into());
+    }
+    Ok(())
+}
+
+/// Admin hook: [`check_provider_fields`] on a tenant's own provider row.
+#[cfg(feature = "admin")]
+fn admin_check_provider<'a>(
+    values: &'a mut Vec<(&'static str, crate::core::SqlValue)>,
+    before: Option<&'a serde_json::Value>,
+) -> crate::admin::derived_fields::DeriveFuture<'a> {
+    let dev = matches!(crate::env::tier_from_env().as_str(), "dev" | "test");
+    let out = check_provider_fields(values, before, dev);
+    Box::pin(async move { out })
+}
+
+#[cfg(feature = "admin")]
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_sso_providers",
+        derive: admin_check_provider,
+    }
+}
+
 #[cfg(feature = "admin")]
 inventory::submit! {
     crate::admin::derived_fields::AdminDerivedField {
@@ -1635,6 +1681,43 @@ mod tests {
             let mut v = bad.clone();
             assert!(admin_normalise(&mut v, None).await.is_err(), "{bad:?}");
         }
+    }
+
+    /// A tenant's own provider row gets the operator console's checks.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn provider_rows_need_a_slug_a_kind_and_an_https_issuer() {
+        use crate::core::SqlValue as V;
+        let row = |slug: &str, kind: &str, issuer: Option<&str>| {
+            vec![
+                ("slug", V::String(slug.into())),
+                ("kind", V::String(kind.into())),
+                (
+                    "issuer_url",
+                    issuer.map_or(V::Null, |i| V::String(i.into())),
+                ),
+            ]
+        };
+        let ok = |v: Vec<_>, dev| check_provider_fields(&v, None, dev).is_ok();
+        assert!(ok(row("corp", "google", None), false));
+        assert!(ok(row("corp", "oidc", Some("https://idp.example")), false));
+        assert!(ok(row("corp", "oidc", Some("http://127.0.0.1:9")), false));
+        assert!(ok(row("corp", "oidc", Some("http://idp.example")), true));
+        for bad in [
+            row("a b", "google", None),
+            row("", "google", None),
+            row("corp", "myspace", None),
+            row("corp", "oidc", None),
+            row("corp", "oidc", Some("http://idp.example")),
+        ] {
+            assert!(!ok(bad.clone(), false), "{bad:?}");
+        }
+        // An edit that leaves the slug out keeps the stored one.
+        let before = serde_json::json!({"slug": "corp", "kind": "google"});
+        assert!(
+            check_provider_fields(&[("label", V::String("x".into()))], Some(&before), false)
+                .is_ok()
+        );
     }
 
     #[test]

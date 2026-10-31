@@ -283,6 +283,17 @@ impl SignupPolicy {
     }
 }
 
+/// Longest IdP display name stored.
+const MAX_DISPLAY_NAME: usize = 150;
+
+/// The IdP's name, trimmed and cut to [`MAX_DISPLAY_NAME`]; `None` when blank.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+fn display_name(raw: &str) -> Option<String> {
+    let name: String = raw.trim().chars().take(MAX_DISPLAY_NAME).collect();
+    let name = name.trim_end().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
 /// Who an invite is for: one email, or a whole domain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -316,23 +327,118 @@ impl InviteTarget {
     }
 }
 
+/// Public suffixes and free mail domains a domain invite would open to anyone.
+/// A short built-in list of the common ones, not the full public suffix list.
+const OPEN_DOMAINS: &[&str] = &[
+    // Second-level public suffixes.
+    "co.uk",
+    "org.uk",
+    "me.uk",
+    "ltd.uk",
+    "plc.uk",
+    "ac.uk",
+    "gov.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "co.nz",
+    "org.nz",
+    "co.jp",
+    "ne.jp",
+    "or.jp",
+    "co.kr",
+    "com.br",
+    "com.cn",
+    "com.hk",
+    "com.sg",
+    "com.tw",
+    "com.mx",
+    "com.ar",
+    "com.tr",
+    "com.ua",
+    "co.in",
+    "co.za",
+    "co.il",
+    "com.pl",
+    "co.id",
+    "com.my",
+    "com.ph",
+    // Hosting suffixes anyone can register under.
+    "github.io",
+    "gitlab.io",
+    "herokuapp.com",
+    "vercel.app",
+    "netlify.app",
+    "pages.dev",
+    "web.app",
+    "firebaseapp.com",
+    "azurewebsites.net",
+    "cloudfront.net",
+    "appspot.com",
+    // Free mail.
+    "gmail.com",
+    "googlemail.com",
+    "outlook.com",
+    "hotmail.com",
+    "live.com",
+    "msn.com",
+    "yahoo.com",
+    "ymail.com",
+    "icloud.com",
+    "me.com",
+    "mac.com",
+    "aol.com",
+    "proton.me",
+    "protonmail.com",
+    "pm.me",
+    "gmx.com",
+    "gmx.net",
+    "gmx.de",
+    "web.de",
+    "mail.com",
+    "mail.ru",
+    "yandex.ru",
+    "yandex.com",
+    "qq.com",
+    "163.com",
+    "126.com",
+    "zoho.com",
+    "fastmail.com",
+    "tutanota.com",
+];
+
+/// Whether a domain invite for `domain` (or its subdomains) admits the public.
+fn open_domain(domain: &str) -> bool {
+    OPEN_DOMAINS.contains(&domain)
+}
+
 impl FromStr for InviteTarget {
     type Err = PolicyError;
 
     /// `ann@client.org`; `@client.org` or `client.org` for the domain;
-    /// `*.client.org` for its subdomains.
+    /// `*.client.org` for its subdomains. A public suffix or free mail
+    /// domain is refused: it would invite anyone.
     fn from_str(s: &str) -> Result<Self, PolicyError> {
         let s = s.trim();
-        if let Some(domain) = s.strip_prefix('@') {
-            if domain.starts_with("*.") {
-                return Err(PolicyError(format!("`{s}`: write `{domain}`")));
+        let domain = |d: &str| {
+            let rule: DomainRule = d.parse()?;
+            if open_domain(rule.domain()) {
+                return Err(PolicyError(format!(
+                    "`{s}` would invite anyone; invite emails instead"
+                )));
             }
-            return domain.parse().map(Self::Domain);
+            Ok(Self::Domain(rule))
+        };
+        if let Some(d) = s.strip_prefix('@') {
+            if d.starts_with("*.") {
+                return Err(PolicyError(format!("`{s}`: write `{d}`")));
+            }
+            return domain(d);
         }
         if s.contains('@') {
             return s.parse().map(Self::Email);
         }
-        s.parse().map(Self::Domain)
+        domain(s)
     }
 }
 
@@ -699,8 +805,8 @@ mod store {
         let display_name = identity
             .profile
             .name
-            .clone()
-            .filter(|n| !n.trim().is_empty())
+            .as_deref()
+            .and_then(super::display_name)
             .unwrap_or_else(|| base.clone());
         let data = serde_json::json!({
             "display_name": display_name,
@@ -896,15 +1002,14 @@ mod store {
             .profile
             .name
             .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
+            .and_then(super::display_name)
         {
-            if user.data.get("display_name").and_then(|v| v.as_str()) != Some(name) {
+            if user.data.get("display_name").and_then(|v| v.as_str()) != Some(name.as_str()) {
                 let mut data = user.data.clone();
                 if !data.is_object() {
                     data = serde_json::json!({});
                 }
-                data["display_name"] = serde_json::Value::String(name.to_owned());
+                data["display_name"] = serde_json::Value::String(name);
                 update = update.set("data", data);
                 changed = true;
             }
@@ -997,6 +1102,30 @@ mod tests {
             .parse::<InviteTarget>()
             .unwrap()
             .matches(&email));
+    }
+
+    #[test]
+    fn display_names_are_trimmed_and_capped() {
+        assert_eq!(display_name("  Ann  ").as_deref(), Some("Ann"));
+        assert_eq!(display_name("   "), None);
+        let long = "é".repeat(400);
+        assert_eq!(display_name(&long).unwrap().chars().count(), 150);
+    }
+
+    /// A domain invite for a public suffix or free mail would invite anyone.
+    #[test]
+    fn open_domains_are_refused_as_invite_targets() {
+        for bad in [
+            "@gmail.com",
+            "gmail.com",
+            "*.co.uk",
+            "@co.uk",
+            "*.github.io",
+        ] {
+            assert!(bad.parse::<InviteTarget>().is_err(), "{bad}");
+        }
+        assert!("ann@gmail.com".parse::<InviteTarget>().is_ok());
+        assert!("*.client.co.uk".parse::<InviteTarget>().is_ok());
     }
 
     #[test]

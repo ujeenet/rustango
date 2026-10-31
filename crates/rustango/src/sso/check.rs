@@ -169,21 +169,6 @@ pub struct Risky {
     pub why: Risk,
 }
 
-/// `http://` to a host other than loopback.
-fn insecure_url(url: &str) -> bool {
-    let url = url.trim();
-    let Some(rest) = url
-        .get(..7)
-        .filter(|s| s.eq_ignore_ascii_case("http://"))
-        .map(|_| &url[7..])
-    else {
-        return false;
-    };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    let host = authority.rsplit('@').next().unwrap_or("");
-    !crate::urls::is_loopback_host(host)
-}
-
 /// The enabled `P` rows' risky settings. A missing table holds none.
 async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<Risky>, ExecError> {
     use super::provider::{int, text};
@@ -223,7 +208,7 @@ async fn risks<P: Model + Send>(pool: &Pool, source: LinkSource) -> Result<Vec<R
         {
             push(Risk::EmailLinkOnCustomIdp);
         }
-        if text(r.get("issuer_url")).is_some_and(|u| insecure_url(&u)) {
+        if text(r.get("issuer_url")).is_some_and(|u| super::insecure_url(&u)) {
             push(Risk::InsecureIssuer);
         }
         if int(r.get("require_verified_email")) == 0

@@ -30,6 +30,12 @@ pub struct DomainRule {
 }
 
 impl DomainRule {
+    /// The domain, without the `*.`.
+    #[must_use]
+    pub fn domain(&self) -> &str {
+        &self.domain
+    }
+
     /// Whether `host` (any ASCII case, trailing dot allowed) is covered.
     #[must_use]
     pub fn matches(&self, host: &str) -> bool {

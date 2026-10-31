@@ -25,10 +25,12 @@ pub(crate) fn admin_invite<'a>(
     before: Option<&'a serde_json::Value>,
 ) -> DeriveFuture<'a> {
     let out = (|| {
+        let mut domain = false;
         for (col, v) in values.iter_mut() {
             match (*col, &*v) {
                 ("target", SqlValue::String(raw)) => {
                     let t: InviteTarget = raw.parse().map_err(|e| format!("target: {e}"))?;
+                    domain = matches!(t, InviteTarget::Domain(_));
                     *v = SqlValue::String(t.to_string());
                 }
                 ("target", _) => return Err("target: expected an email or a domain".into()),
@@ -43,6 +45,12 @@ pub(crate) fn admin_invite<'a>(
                 _ => {}
             }
         }
+        if domain
+            && !has_value(values, before, "max_uses")
+            && !has_value(values, before, "expires_at")
+        {
+            return Err(DOMAIN_LIMIT.into());
+        }
         if before.is_none() {
             values.retain(|(c, _)| *c != "invited_by" && *c != "uses");
             if let Some(id) = current_user_id() {
@@ -52,6 +60,25 @@ pub(crate) fn admin_invite<'a>(
         Ok(())
     })();
     Box::pin(async move { out })
+}
+
+/// A domain invite admits a whole domain: it must run out.
+const DOMAIN_LIMIT: &str = "a domain invite needs max uses or an expiry";
+
+/// Whether the write (else the stored row) sets `column`.
+fn has_value(
+    values: &[(&'static str, SqlValue)],
+    before: Option<&serde_json::Value>,
+    column: &str,
+) -> bool {
+    match values.iter().find(|(c, _)| *c == column) {
+        Some((_, SqlValue::Null)) => false,
+        Some((_, SqlValue::String(s))) => !s.trim().is_empty(),
+        Some(_) => true,
+        None => before
+            .and_then(|b| b.get(column))
+            .is_some_and(|v| !v.is_null()),
+    }
 }
 
 inventory::submit! {
@@ -100,6 +127,9 @@ pub(crate) fn bulk_invites(
         })
     {
         let target: InviteTarget = raw.parse().map_err(|e| format!("`{raw}`: {e}"))?;
+        if matches!(target, InviteTarget::Domain(_)) && max_uses.is_none() && days.is_none() {
+            return Err(format!("`{raw}`: {DOMAIN_LIMIT}"));
+        }
         let target = target.to_string();
         if seen.contains(&target) {
             continue;
@@ -408,5 +438,35 @@ mod tests {
         assert!(bulk_invites(&form("gmail", &[]), None).is_err());
         assert!(bulk_invites(&form("a@b.org", &[("max_uses", "0")]), None).is_err());
         assert!(bulk_invites(&form("", &[]), None).is_err());
+    }
+
+    /// A domain invite must run out: max uses or an expiry, in the form and in bulk.
+    #[tokio::test]
+    async fn a_domain_invite_needs_a_limit() {
+        let target = |t: &str| ("target", SqlValue::String(t.into()));
+        let mut open = vec![target("@client.org"), ("max_uses", SqlValue::Null)];
+        assert!(admin_invite(&mut open, None).await.is_err());
+        let mut limited = vec![target("@client.org"), ("max_uses", SqlValue::I32(5))];
+        admin_invite(&mut limited, None).await.unwrap();
+        let mut email = vec![target("ann@client.org")];
+        admin_invite(&mut email, None).await.unwrap();
+        // An edit keeps the stored expiry.
+        let before = serde_json::json!({"expires_at": "2030-01-01T00:00:00Z", "max_uses": null});
+        let mut edit = vec![target("*.client.org")];
+        admin_invite(&mut edit, Some(&before)).await.unwrap();
+        let mut gmail = vec![target("@gmail.com"), ("max_uses", SqlValue::I32(5))];
+        assert!(admin_invite(&mut gmail, None).await.is_err());
+
+        let form = |extra: &[(&str, &str)]| {
+            let mut f = vec![("targets".to_owned(), "@client.org".to_owned())];
+            f.extend(
+                extra
+                    .iter()
+                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned())),
+            );
+            f
+        };
+        assert!(bulk_invites(&form(&[]), None).is_err());
+        assert!(bulk_invites(&form(&[("expires_in_days", "7")]), None).is_ok());
     }
 }

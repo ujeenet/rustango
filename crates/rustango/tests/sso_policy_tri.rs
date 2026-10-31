@@ -1656,9 +1656,74 @@ async fn idle_users_are_deactivated(pool: &Pool) {
         .is_empty());
 }
 
+/// An email link locks the account's password and ends its sessions, once,
+/// and says so in the audit row; a re-link does the same.
+async fn an_email_link_locks_the_password(pool: &Pool) {
+    rustango::audit::ensure_table_pool(pool).await.unwrap();
+    let t = tok();
+    provider(pool, "lock", true).await;
+    let email = format!("pat-{t}@client.org");
+    let id = plain_user(pool, &format!("pat-{t}"), &email, false).await;
+    let hash = rustango::tenancy::password::hash("squatter-pass").unwrap();
+    User::objects()
+        .filter("id", id)
+        .update()
+        .set("password_hash", hash.clone())
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    let who = member(&format!("p-{t}"), &email, serde_json::json!({}));
+    assert_eq!(tenant(pool, "lock", &who).await.unwrap().user_id, id);
+    let after = user_by_id(pool, id).await;
+    assert_ne!(after.password_hash, hash);
+    assert!(!rustango::tenancy::password::verify("squatter-pass", &after.password_hash).unwrap());
+    assert!(after.sessions_revoked_at.is_some());
+    let events = sso_events(pool, "lock", &format!("p-{t}")).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "sso_linked" && e["password_locked"] == true),
+        "{events:?}"
+    );
+    // Signing in by the link again changes nothing.
+    tenant(pool, "lock", &who).await.unwrap();
+    assert_eq!(
+        user_by_id(pool, id).await.password_hash,
+        after.password_hash
+    );
+
+    // A re-link invite locks too.
+    provider(pool, "lock2", false).await;
+    let email2 = format!("rex-{t}@client.org");
+    let rex = plain_user(pool, &format!("rex-{t}"), &email2, false).await;
+    relink_invite(pool, "lock2", &email2, rex).await;
+    let before = user_by_id(pool, rex).await.password_hash;
+    let who2 = member(&format!("r-{t}"), &email2, serde_json::json!({}));
+    assert_eq!(tenant(pool, "lock2", &who2).await.unwrap().user_id, rex);
+    let rex_after = user_by_id(pool, rex).await;
+    assert_ne!(rex_after.password_hash, before);
+    assert!(rex_after.sessions_revoked_at.is_some());
+}
+
+/// Any role makes an account privileged, even one with no permission.
+async fn a_role_without_permissions_is_privileged(pool: &Pool) {
+    let t = tok();
+    let empty = role(pool, &format!("Empty-{t}")).await;
+    provider(pool, "rl", true).await;
+    let email = format!("rho-{t}@client.org");
+    let id = plain_user(pool, &format!("rho-{t}"), &email, false).await;
+    rustango::tenancy::permissions::assign_role_pool(id, empty, pool)
+        .await
+        .unwrap();
+    let who = member(&format!("rho-{t}"), &email, serde_json::json!({}));
+    assert_eq!(tenant(pool, "rl", &who).await, refused(Refusal::Privileged));
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        an_email_link_locks_the_password,
+        a_role_without_permissions_is_privileged,
         a_partly_migrated_table_refuses,
         the_default_policy_keeps_link_outcomes,
         stored_rules_are_enforced,
