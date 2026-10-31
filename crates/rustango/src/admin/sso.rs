@@ -217,7 +217,8 @@ async fn sso_callback(
         &key,
         &policy,
         &identity,
-    );
+    )
+    .provider(&slug);
     let uid = match crate::sso::policy::admit(request, &accounts).await {
         Ok(a) => a.user_id,
         Err(crate::sso::policy::Denied::Refused(r)) => {

@@ -367,7 +367,7 @@ pub(crate) async fn any_link(pool: &Pool, key: &ProviderKey) -> Result<bool, Exe
     }
 }
 
-fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
+fn link_row(key: &ProviderKey, subject: &str, user_id: i64, provisioned: bool) -> SsoLink {
     SsoLink {
         id: Auto::Unset,
         provider_source: key.source.as_str().to_owned(),
@@ -377,7 +377,7 @@ fn link_row(key: &ProviderKey, subject: &str, user_id: i64) -> SsoLink {
         key_sha256: key_sha256(&key.issuer, subject),
         user_id,
         created_at: Auto::Unset,
-        provisioned: false,
+        provisioned,
         last_used_at: None,
     }
 }
@@ -392,7 +392,9 @@ pub async fn create_link(
     subject: &str,
     user_id: i64,
 ) -> Result<(), ExecError> {
-    link_row(key, subject, user_id).insert_pool(pool).await
+    link_row(key, subject, user_id, false)
+        .insert_pool(pool)
+        .await
 }
 
 /// [`create_link`] inside an open transaction.
@@ -405,7 +407,20 @@ pub async fn create_link_tx(
     subject: &str,
     user_id: i64,
 ) -> Result<(), ExecError> {
-    link_row(key, subject, user_id).insert_tx(tx).await
+    insert_link_tx(tx, key, subject, user_id, false).await
+}
+
+/// [`create_link_tx`]; `provisioned` marks a link sign-up made with its user.
+pub(crate) async fn insert_link_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    key: &ProviderKey,
+    subject: &str,
+    user_id: i64,
+    provisioned: bool,
+) -> Result<(), ExecError> {
+    link_row(key, subject, user_id, provisioned)
+        .insert_tx(tx)
+        .await
 }
 
 /// A local account, as the link step needs to see it.
@@ -516,6 +531,8 @@ pub(crate) async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Res
 
 /// The user table a sign-in resolves against.
 pub trait AccountLookup: Sync {
+    /// The tenant `User` table: SSO sign-up, role and profile sync write to it.
+    const TENANT_USERS: bool = false;
     /// The account with this id.
     fn by_id(
         &self,

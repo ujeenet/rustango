@@ -257,6 +257,19 @@ const SIGN_IN_COLUMNS: &[&str] = &[
     "require_verified_email",
 ];
 
+/// The sign-up policy columns.
+const SIGNUP_COLUMNS: &[&str] = &[
+    "signup_mode",
+    "default_roles",
+    "role_map",
+    "role_claims",
+    "sync_roles_on_login",
+    "username_from",
+    "username_clash",
+    "sync_profile",
+    "allow_email_link_staff",
+];
+
 /// Which of some columns a table has, by the catalog.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Columns {
@@ -291,45 +304,68 @@ pub(crate) async fn columns_present(
     })
 }
 
-/// Row `id`'s sign-in policy. When none of the policy columns exist yet the
-/// policy is the default one (with a warning). Some but not all of them, an
-/// unreadable catalog, any other read error, or a value of the wrong type
-/// or that does not parse, is an error, and sign-in through the row refuses.
-async fn read_policy<T: Model>(
+/// Row `id`'s `cols`. `None` when none of them exist yet: the defaults
+/// apply (with a warning). Some but not all of them, an unreadable catalog,
+/// or any other read error, is an error, and sign-in through the row refuses.
+async fn read_columns<T: Model>(
     pool: &Pool,
     id: i64,
-) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    cols: &'static [&'static str],
+) -> Result<Option<std::collections::HashMap<String, SqlValue>>, super::policy::PolicyError> {
     use super::policy::PolicyError;
     let err = match QuerySet::<T>::new()
         .filter("id", id)
-        .only(SIGN_IN_COLUMNS)
+        .only(cols)
         .fetch(pool)
         .await
     {
-        Ok(rows) => {
-            let r = rows
-                .first()
-                .ok_or_else(|| PolicyError("the provider row vanished".into()))?;
+        Ok(mut rows) => {
+            if rows.is_empty() {
+                return Err(PolicyError("the provider row vanished".into()));
+            }
+            let r = rows.swap_remove(0);
             // SQLite can answer for columns it lacks: let the catalog decide.
-            if SIGN_IN_COLUMNS.iter().all(|c| r.contains_key(*c)) {
-                return policy_of_row(r);
+            if cols.iter().all(|c| r.contains_key(*c)) {
+                return Ok(Some(r));
             }
             "the read returned no policy columns".to_owned()
         }
         Err(e) => e.to_string(),
     };
-    let present = columns_present(pool, T::SCHEMA.table, SIGN_IN_COLUMNS).await;
-    policy_after_read_error(present, T::SCHEMA.table, &err)
+    let present = columns_present(pool, T::SCHEMA.table, cols).await;
+    columns_after_read_error(present, T::SCHEMA.table, &err).map(|()| None)
+}
+
+/// Row `id`'s sign-in policy; see [`read_columns`].
+async fn read_policy<T: Model>(
+    pool: &Pool,
+    id: i64,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    match read_columns::<T>(pool, id, SIGN_IN_COLUMNS).await? {
+        Some(r) => policy_of_row(&r),
+        None => Ok(super::policy::SignInPolicy::default()),
+    }
+}
+
+/// Row `id`'s sign-up policy; see [`read_columns`].
+async fn read_signup<T: Model>(
+    pool: &Pool,
+    id: i64,
+) -> Result<super::policy::SignupPolicy, super::policy::PolicyError> {
+    match read_columns::<T>(pool, id, SIGNUP_COLUMNS).await? {
+        Some(r) => signup_of_row(&r),
+        None => Ok(super::policy::SignupPolicy::default()),
+    }
 }
 
 /// What a failed policy read means, by which policy columns exist: none is
-/// a schema not yet migrated (the default policy); anything else refuses.
-fn policy_after_read_error(
+/// a schema not yet migrated (`Ok`: the defaults); anything else refuses.
+fn columns_after_read_error(
     present: Result<Columns, String>,
     table: &str,
     err: &str,
-) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
-    use super::policy::{PolicyError, SignInPolicy};
+) -> Result<(), super::policy::PolicyError> {
+    use super::policy::PolicyError;
     match present {
         Ok(Columns::None) => {
             tracing::warn!(
@@ -337,7 +373,7 @@ fn policy_after_read_error(
                 table,
                 "SSO policy columns missing; run `migrate`. Using the default policy: {err}"
             );
-            Ok(SignInPolicy::default())
+            Ok(())
         }
         // A missing column may hold a rule: refuse until migrated.
         Ok(Columns::Some(have)) => Err(PolicyError(format!(
@@ -347,6 +383,58 @@ fn policy_after_read_error(
         Ok(Columns::All) => Err(PolicyError(format!("read: {err}"))),
         Err(e) => Err(PolicyError(format!("read: {err}; {e}"))),
     }
+}
+
+/// A stored flag: a bool, or an integer on backends without one. NULL is no value.
+fn flag(r: &std::collections::HashMap<String, SqlValue>, c: &str) -> Option<bool> {
+    match r.get(c) {
+        Some(SqlValue::Bool(b)) => Some(*b),
+        Some(SqlValue::I64(n)) => Some(*n != 0),
+        Some(SqlValue::I32(n)) => Some(*n != 0),
+        Some(SqlValue::I16(n)) => Some(*n != 0),
+        _ => None,
+    }
+}
+
+/// A stored JSON column, as JSON or as its text.
+fn json_of(
+    r: &std::collections::HashMap<String, SqlValue>,
+    c: &str,
+) -> Result<serde_json::Value, super::policy::PolicyError> {
+    use super::policy::PolicyError;
+    match r.get(c) {
+        Some(SqlValue::Json(v)) => Ok(v.clone()),
+        Some(SqlValue::String(s)) => {
+            serde_json::from_str(s).map_err(|e| PolicyError(format!("{c}: {e}")))
+        }
+        other => Err(PolicyError(format!("{c}: unexpected value {other:?}"))),
+    }
+}
+
+/// The sign-up policy in one row read with every [`SIGNUP_COLUMNS`] column.
+fn signup_of_row(
+    r: &std::collections::HashMap<String, SqlValue>,
+) -> Result<super::policy::SignupPolicy, super::policy::PolicyError> {
+    use super::policy::{PolicyError, SignupColumns, SignupPolicy};
+    let bad = |c: &str| PolicyError(format!("{c}: unexpected value {:?}", r.get(c)));
+    let text = |c: &str| match r.get(c) {
+        Some(SqlValue::Null) => Ok(None),
+        Some(SqlValue::String(s)) => Ok(Some(s.as_str())),
+        _ => Err(bad(c)),
+    };
+    let on = |c: &str| flag(r, c).ok_or_else(|| bad(c));
+    let role_map = json_of(r, "role_map")?;
+    SignupPolicy::parse(&SignupColumns {
+        signup_mode: text("signup_mode")?,
+        default_roles: text("default_roles")?,
+        role_map: Some(&role_map),
+        role_claims: text("role_claims")?,
+        sync_roles_on_login: on("sync_roles_on_login")?,
+        username_from: text("username_from")?,
+        username_clash: text("username_clash")?,
+        sync_profile: on("sync_profile")?,
+        allow_email_link_staff: on("allow_email_link_staff")?,
+    })
 }
 
 /// The policy in one row read with every [`SIGN_IN_COLUMNS`] column.
@@ -360,20 +448,9 @@ fn policy_of_row(
         Some(SqlValue::String(s)) => Ok(Some(s.as_str())),
         other => Err(bad(c, other)),
     };
-    let claims = match r.get("required_claims") {
-        Some(SqlValue::Json(v)) => v.clone(),
-        Some(SqlValue::String(s)) => {
-            serde_json::from_str(s).map_err(|e| PolicyError(format!("required_claims: {e}")))?
-        }
-        other => return Err(bad("required_claims", other)),
-    };
-    let verified = match r.get("require_verified_email") {
-        Some(SqlValue::Bool(b)) => *b,
-        Some(SqlValue::I64(n)) => *n != 0,
-        Some(SqlValue::I32(n)) => *n != 0,
-        Some(SqlValue::I16(n)) => *n != 0,
-        other => return Err(bad("require_verified_email", other)),
-    };
+    let claims = json_of(r, "required_claims")?;
+    let verified = flag(r, "require_verified_email")
+        .ok_or_else(|| bad("require_verified_email", r.get("require_verified_email")))?;
     SignInPolicy::parse(&SignInColumns {
         allowed_email_domains: list("allowed_email_domains")?,
         blocked_email_domains: list("blocked_email_domains")?,
@@ -454,6 +531,8 @@ pub struct ResolvedProvider {
     pub allow_email_link: bool,
     /// The row's sign-in rules; an error refuses every sign-in.
     pub policy: Result<super::policy::SignInPolicy, super::policy::PolicyError>,
+    /// The row's sign-up settings; an error refuses every sign-in.
+    pub signup: Result<super::policy::SignupPolicy, super::policy::PolicyError>,
 }
 
 impl ResolvedProvider {
@@ -472,6 +551,7 @@ impl ResolvedProvider {
     #[must_use]
     pub fn effective_policy(&self) -> super::policy::EffectivePolicy {
         super::policy::EffectivePolicy::new(self.policy.clone(), self.allow_email_link)
+            .with_signup(self.signup.clone())
     }
 }
 
@@ -505,8 +585,10 @@ pub(crate) async fn resolve_row<T: Model>(
         }
     };
     let policy = read_policy::<T>(pool, r.id).await;
+    let signup = read_signup::<T>(pool, r.id).await;
     Ok(Some(ResolvedProvider {
         policy,
+        signup,
         sso: ResolvedSso {
             provider: r.kind,
             issuer_url: r.issuer_url,
@@ -563,16 +645,13 @@ mod tests {
     #[test]
     fn a_read_error_falls_back_only_when_no_policy_column_exists() {
         let t = "rustango_sso_providers";
-        assert_eq!(
-            policy_after_read_error(Ok(Columns::None), t, "e"),
-            Ok(SignInPolicy::default())
-        );
+        assert_eq!(columns_after_read_error(Ok(Columns::None), t, "e"), Ok(()));
         for refused in [
             Ok(Columns::Some(vec!["allowed_email_domains"])),
             Ok(Columns::All),
             Err("the catalog shows no columns".to_owned()),
         ] {
-            assert!(policy_after_read_error(refused, t, "e").is_err());
+            assert!(columns_after_read_error(refused, t, "e").is_err());
         }
     }
 

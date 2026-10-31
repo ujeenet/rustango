@@ -10,10 +10,12 @@ pub mod domain;
 pub mod identity;
 pub mod jwks;
 pub mod models;
+pub mod signup;
 
 pub use domain::{DomainList, DomainRule, EmailAddr, PolicyError, TokenList};
 pub use identity::{IdToken, Identity, RequiredClaims};
 pub use models::{SsoInvite, SsoSharedOverride, SsoTenantPolicy};
+pub use signup::{InviteTarget, RoleMap, RoleNames, SignupColumns, SignupPolicy};
 
 use crate::sql::Pool;
 
@@ -329,6 +331,9 @@ impl SignInPolicy {
 pub struct EffectivePolicy {
     layers: Vec<Result<SignInPolicy, PolicyError>>,
     allow_email_link: bool,
+    signup: Result<SignupPolicy, PolicyError>,
+    /// The surface's sign-up mode when the provider sets none.
+    default_signup: SignupMode,
 }
 
 impl EffectivePolicy {
@@ -338,6 +343,8 @@ impl EffectivePolicy {
         Self {
             layers: vec![provider],
             allow_email_link,
+            signup: Ok(SignupPolicy::default()),
+            default_signup: SignupMode::Closed,
         }
     }
 
@@ -347,6 +354,30 @@ impl EffectivePolicy {
         Self {
             layers: Vec::new(),
             allow_email_link,
+            signup: Ok(SignupPolicy::default()),
+            default_signup: SignupMode::Closed,
+        }
+    }
+
+    /// The provider's sign-up settings; an error refuses every sign-in.
+    #[must_use]
+    pub fn with_signup(mut self, signup: Result<SignupPolicy, PolicyError>) -> Self {
+        self.signup = signup;
+        self
+    }
+
+    /// The sign-up mode when the provider sets none (default closed).
+    #[must_use]
+    pub fn default_signup(mut self, mode: SignupMode) -> Self {
+        self.default_signup = mode;
+        self
+    }
+
+    /// Who may sign up on `surface`. The bare admin never signs anyone up.
+    fn signup_mode(&self, surface: Surface, signup: &SignupPolicy) -> SignupMode {
+        match surface {
+            Surface::BareAdmin => SignupMode::Closed,
+            _ => signup.mode.unwrap_or(self.default_signup),
         }
     }
 
@@ -397,6 +428,8 @@ pub struct AdmitRequest<'a> {
     pub key: &'a ProviderKey,
     pub policy: &'a EffectivePolicy,
     pub identity: &'a Identity,
+    /// The provider's slug: invites for one provider match only it.
+    pub provider: &'a str,
 }
 
 impl<'a> AdmitRequest<'a> {
@@ -414,7 +447,15 @@ impl<'a> AdmitRequest<'a> {
             key,
             policy,
             identity,
+            provider: "",
         }
+    }
+
+    /// Name the provider, so invites for it apply.
+    #[must_use]
+    pub fn provider(mut self, slug: &'a str) -> Self {
+        self.provider = slug;
+        self
     }
 }
 
@@ -427,23 +468,31 @@ pub struct Admitted {
     pub created: bool,
 }
 
-/// Decide one SSO sign-in: the policy's rules, then the link, then a link
-/// by verified email. Stamps the link's `last_used_at`.
+/// Decide one SSO sign-in: the policy's rules, the link, a re-link
+/// invite, a link by verified email, then sign-up. Stamps the link's
+/// `last_used_at`; on a tenant user table also syncs mapped roles and the profile.
 ///
 /// # Errors
 /// [`Denied::Refused`] with the rule; [`Denied::Storage`] on a driver error.
-pub async fn admit(
+pub async fn admit<A: AccountLookup>(
     req: AdmitRequest<'_>,
-    accounts: &impl AccountLookup,
+    accounts: &A,
 ) -> Result<Admitted, Denied> {
     let AdmitRequest {
         pool,
+        surface,
         key,
         policy,
         identity,
         ..
     } = req;
     policy.check(identity)?;
+    let signup = policy.signup.as_ref().map_err(|e| {
+        tracing::error!(target: "rustango::sso", "SSO sign-up policy does not parse: {e}");
+        Refusal::PolicyInvalid
+    })?;
+    // Sign-up, role and profile sync write the tenant user table only.
+    let tenant_users = A::TENANT_USERS && surface != Surface::BareAdmin;
     let subject = identity.subject();
     if let Some(found) = link::linked_user(pool, key, subject)
         .await
@@ -461,6 +510,9 @@ pub async fn admit(
             {
                 if !a.active {
                     return Err(Refusal::Inactive.into());
+                }
+                if tenant_users {
+                    after_sign_in(&req, signup, a.user_id, signup.sync_roles_on_login).await?;
                 }
                 link::touch(pool, &found).await;
                 return Ok(Admitted {
@@ -480,19 +532,29 @@ pub async fn admit(
     let email = policy
         .link_email(identity)
         .ok_or(Refusal::EmailUnverified)?;
+    #[cfg(feature = "tenancy")]
+    if tenant_users {
+        if let Some(admitted) = relink(&req, accounts, email).await? {
+            after_sign_in(&req, signup, admitted.user_id, true).await?;
+            return Ok(admitted);
+        }
+    }
     let found = match accounts
         .by_email(email.as_str())
         .await
         .map_err(Denied::Storage)?
     {
         EmailLookup::Found(a) => a,
+        EmailLookup::Missing if tenant_users => return sign_up(&req, signup, email).await,
         EmailLookup::Missing => return Err(Refusal::SignupClosed.into()),
         EmailLookup::Collides => return Err(Refusal::EmailCollides.into()),
     };
     if !policy.allow_email_link {
         return Err(Refusal::EmailLinkDisabled.into());
     }
-    if found.privileged || found.superuser {
+    // Never a superuser; a role holder only when the provider opts in.
+    let staff_ok = tenant_users && signup.allow_email_link_staff;
+    if found.superuser || (found.privileged && !staff_ok) {
         return Err(Refusal::Privileged.into());
     }
     if !found.active {
@@ -511,6 +573,9 @@ pub async fn admit(
             _ => Err(Denied::Storage(e.to_string())),
         };
     }
+    if tenant_users {
+        after_sign_in(&req, signup, found.user_id, true).await?;
+    }
     if let Ok(Some(l)) = link::linked_user(pool, key, subject).await {
         link::touch(pool, &l).await;
     }
@@ -518,6 +583,108 @@ pub async fn admit(
         user_id: found.user_id,
         created: false,
     })
+}
+
+/// Sync a tenant user's mapped roles (when `roles`) and profile after a sign-in.
+#[allow(unused_variables)]
+async fn after_sign_in(
+    req: &AdmitRequest<'_>,
+    signup: &SignupPolicy,
+    user_id: i64,
+    roles: bool,
+) -> Result<(), Denied> {
+    #[cfg(feature = "tenancy")]
+    {
+        if roles {
+            let unknown = signup::sync_roles(req.pool, user_id, req.identity, signup).await?;
+            signup::audit_unknown_roles(req.pool, req.provider, user_id, &unknown).await;
+        }
+        if signup.sync_profile {
+            let email = req.policy.link_email(req.identity);
+            signup::sync_profile(req.pool, user_id, req.identity, email).await?;
+        }
+    }
+    Ok(())
+}
+
+/// A re-link invite for `email`: link its user, never a superuser.
+#[cfg(feature = "tenancy")]
+async fn relink(
+    req: &AdmitRequest<'_>,
+    accounts: &impl AccountLookup,
+    email: &EmailAddr,
+) -> Result<Option<Admitted>, Denied> {
+    let invite =
+        match signup::find_invite(req.pool, req.provider, email, signup::InviteKind::Relink)
+            .await
+            .map_err(Denied::Storage)?
+        {
+            Ok(i) => i,
+            // No usable re-link invite: carry on as an ordinary sign-in.
+            Err(_) => return Ok(None),
+        };
+    let Some(user_id) = invite.link_user_id else {
+        return Ok(None);
+    };
+    let Some(account) = accounts.by_id(user_id).await.map_err(Denied::Storage)? else {
+        return Err(Refusal::NotInvited.into());
+    };
+    if account.superuser {
+        return Err(Refusal::Privileged.into());
+    }
+    if !account.active {
+        return Err(Refusal::Inactive.into());
+    }
+    signup::relink(req.pool, req.key, req.identity.subject(), &invite, user_id).await?;
+    Ok(Some(Admitted {
+        user_id,
+        created: false,
+    }))
+}
+
+/// No account has `email`: sign up under the surface's mode.
+#[allow(unused_variables)]
+async fn sign_up(
+    req: &AdmitRequest<'_>,
+    signup: &SignupPolicy,
+    email: &EmailAddr,
+) -> Result<Admitted, Denied> {
+    let mode = req.policy.signup_mode(req.surface, signup);
+    #[cfg(feature = "tenancy")]
+    {
+        use signup::InviteKind;
+        let kind = match mode {
+            SignupMode::InviteOnly => InviteKind::Email,
+            SignupMode::Allowlist | SignupMode::Open => InviteKind::EmailOrDomain,
+            _ => return Err(Refusal::SignupClosed.into()),
+        };
+        let invite = signup::find_invite(req.pool, req.provider, email, kind)
+            .await
+            .map_err(Denied::Storage)?;
+        let invite = match (invite, mode) {
+            (Ok(i), _) => Some(i),
+            // Open needs no invite; one only adds its roles.
+            (Err(_), SignupMode::Open) => None,
+            (Err(r), _) => return Err(r.into()),
+        };
+        let made = signup::create_user(
+            req.pool,
+            req.key,
+            req.identity,
+            email,
+            signup,
+            invite.as_ref(),
+        )
+        .await?;
+        signup::audit_unknown_roles(req.pool, req.provider, made.user_id, &made.unknown_roles)
+            .await;
+        Ok(Admitted {
+            user_id: made.user_id,
+            created: true,
+        })
+    }
+    #[cfg(not(feature = "tenancy"))]
+    Err(Refusal::SignupClosed.into())
 }
 
 /// [`link::sign_in`]: [`admit`] with no sign-in rules, as a [`LinkRefusal`].
