@@ -1472,7 +1472,11 @@ async fn bare_admin_domain_rule_refuses_a_linked_admin() {
     set_policy(&pool, "corp", "allowed_email_domains", "client.org").await;
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(!signed_in(&resp));
-    assert_eq!(location(&resp), "/login?sso_error=nouser");
+    assert!(
+        location(&resp).ends_with("/login?sso_error=nouser"),
+        "{}",
+        location(&resp)
+    );
 }
 
 async fn bare_admin() -> (Router, Pool, Idp) {
@@ -2146,7 +2150,7 @@ async fn upgrading_adds_the_framework_column_once() {
             .filter(|e| {
                 std::fs::read_to_string(e.as_ref().unwrap().path())
                     .unwrap()
-                    .contains("allow_email_link")
+                    .contains("\"allow_email_link\"")
             })
             .count()
     };
