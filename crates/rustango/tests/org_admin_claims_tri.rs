@@ -365,6 +365,54 @@ async fn admin_inline_host_refuses_a_base_host(pool: &Pool) {
     assert!(rows.is_empty(), "{rows:?}");
 }
 
+/// A rival's base-host claim, committed while an inline extra host of the
+/// same name waits on its lock row, is still seen: MySQL's snapshot must
+/// not predate it.
+async fn admin_inline_host_sees_a_racing_base_claim(pool: &Pool) {
+    let slug = name(pool, "inline-race");
+    let id = org(pool, &slug).await;
+    let rival = name(pool, "inline-rival");
+    let rival_id = org(pool, &rival).await;
+    let host = format!("{slug}.race.test");
+    // The rival's claim as `claim_routing` writes it, left uncommitted.
+    let mut tx = rustango::sql::write_transaction(pool).await.unwrap();
+    let mut lock = OrgHost {
+        id: rustango::sql::Auto::Unset,
+        org_id: rival_id,
+        hostname: host.clone(),
+        enabled: true,
+        created_at: rustango::sql::Auto::Unset,
+    };
+    lock.insert_tx(&mut tx).await.unwrap();
+    let mut row = org_named(pool, &rival).await.unwrap();
+    row.host_pattern = Some(host.clone());
+    row.save_tx(&mut tx).await.unwrap();
+    lock.delete_tx(&mut tx).await.unwrap();
+
+    let form = format!(
+        "{}&rustango_org_hosts-TOTAL_FORMS=1&rustango_org_hosts-INITIAL_FORMS=0\
+         &rustango_org_hosts-0-hostname={host}&rustango_org_hosts-0-enabled=true",
+        org_form(&slug, "", "", ""),
+    );
+    let save = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            send(&pool, Method::POST, &format!("/rustango_orgs/{id}"), form).await
+        })
+    };
+    // Let the save read and then queue on the lock row.
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    tx.commit().await.unwrap();
+    let (status, html) = save.await.unwrap();
+    refused(status, &html, "inline extra host after a racing base claim");
+    let rows: Vec<OrgHost> = OrgHost::objects()
+        .where_(OrgHost::org_id.eq(id))
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "{rows:?}");
+}
+
 async fn resolve(pool: &Pool, host: &str) -> Option<String> {
     let (parts, ()) = Request::builder()
         .uri("/")
@@ -606,6 +654,7 @@ tri_dialect_test! {
         viewset_org_creates_racing_for_a_host_one_wins,
         admin_org_creates_racing_for_a_host_one_wins,
         admin_inline_host_refuses_a_base_host,
+        admin_inline_host_sees_a_racing_base_claim,
         admin_writes_clear_the_org_cache,
         viewset_writes_clear_the_host_cache,
         admin_org_edit_refuses_another_tenants_routing,
