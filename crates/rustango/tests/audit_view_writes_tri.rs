@@ -415,13 +415,16 @@ mod bulk {
                 column: "deleted_at",
             };
             assert_eq!(soft.run(&one, &pool).await.unwrap().affected, 1);
+            // Counted, not fetched: a TEXT key does not decode as `Uuid`.
             let trashed = TextKey::objects()
-                .fetch(&pool)
+                .filter_op(
+                    "deleted_at",
+                    rustango::core::Op::IsNull,
+                    SqlValue::Bool(false),
+                )
+                .count(&pool)
                 .await
-                .unwrap()
-                .into_iter()
-                .filter(|r| r.deleted_at.is_some())
-                .count();
+                .unwrap();
             assert_eq!(trashed, 1, "only the selected row is soft-deleted");
         }
     }
