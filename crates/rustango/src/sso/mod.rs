@@ -102,11 +102,10 @@ impl<'a> FlowCookie<'a> {
         out
     }
 
-    /// The sealed flow from the request. The unprefixed name is still read,
-    /// so a sign-in begun before the switch to `__Host-` finishes.
+    /// The sealed flow from the request, under [`Self::name`] only: a plain
+    /// name beside `__Host-` could be planted from a sibling subdomain.
     pub(crate) fn read(self, headers: &axum::http::HeaderMap) -> Option<&str> {
         crate::cookies::cookie_from_headers(headers, &self.name())
-            .or_else(|| crate::cookies::cookie_from_headers(headers, self.name))
     }
 }
 
@@ -541,9 +540,14 @@ mod tests {
         assert_eq!(root.clear().len(), 2);
         assert_eq!(FlowCookie::new("f", "/acme", true).name(), "f");
         assert_eq!(FlowCookie::new("f", "/", false).name(), "f");
+        // A plain-name cookie (tossed from a sibling subdomain) is ignored.
         let mut h = axum::http::HeaderMap::new();
-        h.insert(axum::http::header::COOKIE, "f=old".parse().unwrap());
-        assert_eq!(root.read(&h), Some("old"));
+        h.insert(axum::http::header::COOKIE, "f=planted".parse().unwrap());
+        assert_eq!(root.read(&h), None);
+        assert_eq!(
+            FlowCookie::new("f", "/acme", true).read(&h),
+            Some("planted")
+        );
         h.insert(
             axum::http::header::COOKIE,
             "f=old; __Host-f=new".parse().unwrap(),

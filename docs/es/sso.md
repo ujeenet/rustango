@@ -425,8 +425,8 @@ emisor y hora).
 
 - **Vincular por email bloquea la contraseña.** Cuando el SSO vincula una
   cuenta de tenant existente por email (o por una invitación de re-vínculo), su
-  contraseña queda inutilizable y sus sesiones terminan, en la misma
-  transacción. Quien registró el email antes que su dueño pierde la cuenta; el
+  contraseña queda inutilizable, sus sesiones terminan, sus claves API se
+  borran y sus claves de agente se desactivan, en la misma transacción. Quien registró el email antes que su dueño pierde la cuenta; el
   dueño restablece la contraseña para volver a usar una. Cualquier rol, incluso
   sin permisos, cuenta como privilegiado para vincular por email.
 - **Un flujo, un uso.** Un callback completa un flujo una sola vez (por
@@ -436,14 +436,15 @@ emisor y hora).
   `?next` de la URL de inicio, sellado en el flujo; un `?next` en el callback se
   ignora.
 - **Cookies de flujo `__Host-`** en HTTPS con `Path=/` (admin simple, tenant en
-  su propio host). Un tenant con prefijo de ruta mantiene el nombre simple.
+  su propio host); allí solo se lee ese nombre. Un tenant con prefijo de ruta
+  mantiene el nombre simple, y el `?next` de miembros debe quedar bajo el prefijo.
 - **Invitaciones.** Una invitación de dominio para un sufijo público o un correo
   gratuito (`@gmail.com`, `*.co.uk`) se rechaza, y una invitación de dominio
   necesita `max_uses` o `expires_at`. Los nombres visibles del IdP se limitan a
   150 caracteres.
 - **Host del admin simple.** Con `security.allowed_hosts` (o
   `Builder::allowed_hosts`), la URI de redirección SSO solo se construye para un
-  host de la lista.
+  host de la lista. Sin lista acepta cualquier host, y el admin avisa al arrancar.
 
 ### Tenants en su propio host y bajo un prefijo
 

@@ -506,6 +506,13 @@ impl Mount {
         }
     }
 
+    /// A post-login `?next` this mount may land on: same-origin, and under
+    /// the prefix on a path-prefix tenant (another tenant shares the origin).
+    fn next(&self, raw: &str) -> Option<String> {
+        crate::auth_decorators::safe_next(raw)
+            .filter(|n| self.path == "/" || super::routes::path_is_under(n, &self.path))
+    }
+
     fn login_url(&self) -> String {
         match self.url(&self.login) {
             u if u.is_empty() => "/".to_owned(),
@@ -642,10 +649,7 @@ async fn sso_begin_in(
     // Sealed with the flow, so the unauthenticated callback cannot choose it.
     let begin: BeginParams =
         serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
-    flow.next = begin
-        .next
-        .as_deref()
-        .and_then(crate::auth_decorators::safe_next);
+    flow.next = begin.next.as_deref().and_then(|n| mount.next(n));
     let sealed = seal_flow(
         &flow,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
@@ -700,11 +704,7 @@ async fn sso_callback_in(
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     ) {
-        Ok(f) if crate::sso::claim_flow(&f) => f,
-        Ok(_) => {
-            tracing::warn!(slug, "SSO flow already used");
-            return sso_error(SsoFailure::Expired, &mount);
-        }
+        Ok(f) => f,
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");
             return sso_error(SsoFailure::Expired, &mount);
@@ -718,6 +718,11 @@ async fn sso_callback_in(
             Ok(a) => a,
             Err(refused) => return clear_flow(refused),
         };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        tracing::warn!(slug, "SSO flow already used");
+        return clear_flow(sso_error(SsoFailure::Expired, &mount));
+    }
 
     let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
         return clear_flow(sso_error(SsoFailure::Unavailable, &mount));
@@ -1413,6 +1418,27 @@ mod tests {
         let cleared = logout_at(&pool, &user, &org, "/acme/logout").await.unwrap();
         assert_eq!(path_of(&minted).as_deref(), Some("/acme"));
         assert_eq!(path_of(&cleared), path_of(&minted));
+    }
+
+    /// Under a path prefix, `?next` must stay under it.
+    #[test]
+    fn a_prefix_mount_lands_only_under_its_prefix() {
+        let at = |path: &str| Mount {
+            path: path.into(),
+            login: "/auth".into(),
+        };
+        assert_eq!(
+            at("/acme").next("/acme/dash").as_deref(),
+            Some("/acme/dash")
+        );
+        assert_eq!(at("/acme").next("/acme").as_deref(), Some("/acme"));
+        assert_eq!(at("/acme").next("/globex/dash"), None);
+        assert_eq!(at("/acme").next("/acmex"), None);
+        assert_eq!(
+            at("/").next("/globex/dash").as_deref(),
+            Some("/globex/dash")
+        );
+        assert_eq!(at("/").next("//evil.example"), None);
     }
 
     // ---- safe_landing -----------------------------------------------

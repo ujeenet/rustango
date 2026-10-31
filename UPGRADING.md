@@ -182,11 +182,13 @@ untouched.
 - Tenant logout now lands on `login?local=1`. `sso-deactivate-idle` only switches off users who cannot use a password there.
 - `LinkTarget::with_registry` lets a reset read shared providers' rules; without it a user linked through one is refused a reset.
 - `require_verified_email` no longer loosens the domain allowlist: an unverified email never passes it.
-- A user linked to SSO by email (or re-linked) has their password locked and sessions ended; to use a password again they reset it.
+- A user linked to SSO by email (or re-linked) has their password locked, sessions ended, API keys deleted and own agent keys switched off; to use a password again they reset it, and new keys must be made.
 - Any role (even one without permissions) makes a tenant user privileged: email linking needs `allow_email_link_staff` for them.
 - `OAuth2Flow` has new `nonce` and `next` fields (struct literals must set them); `Identity::from_handshake` takes the flow. An OIDC IdP must echo the `nonce` in its id_token.
 - The member SSO callback ignores `?next`; pass it to the begin URL instead (`{login}/sso/{slug}?next=/path`).
-- SSO flow cookies are named `__Host-…` on HTTPS at `/`; the old name is still read for sign-ins already under way.
+- SSO flow cookies are named `__Host-…` on HTTPS at `/`, and only that name is read there: a sign-in started before the deploy fails once with `expired` and must be restarted.
+- `Refusal` has a new `IdTokenReplayed` variant and `IdTokenError` a new `Nonce` variant (both `#[non_exhaustive]`).
+- Under a path prefix, the member `?next` must stay under the prefix; otherwise the default landing is used.
 - Domain invites for public suffixes or free mail domains are refused, and a new domain invite needs `max_uses` or `expires_at`.
 - Tenant SSO provider rows with a bad slug, unknown kind or a plain `http://` issuer (outside dev) can no longer be saved in the admin.
 - The bare admin refuses SSO from a Host that `security.allowed_hosts` (or `Builder::allowed_hosts`) does not list.

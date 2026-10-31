@@ -423,7 +423,8 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 
 - **E-Mail-Verknüpfung sperrt das Passwort.** Verknüpft SSO ein bestehendes
   Tenant-Konto per E-Mail (oder per Re-Link-Einladung), wird sein Passwort
-  unbrauchbar und seine Sitzungen enden, in derselben Transaktion. Wer die
+  unbrauchbar, seine Sitzungen enden, seine API-Schlüssel werden gelöscht und
+  eigene Agent-Schlüssel abgeschaltet, in derselben Transaktion. Wer die
   E-Mail vor ihrem Besitzer registriert hat, verliert das Konto; der Besitzer
   setzt das Passwort zurück, um wieder eines zu nutzen. Jede Rolle, auch ohne
   Rechte, gilt bei der E-Mail-Verknüpfung als privilegiert.
@@ -434,14 +435,15 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
   ist das `?next` der Begin-URL, im Flow versiegelt; ein `?next` am Callback
   wird ignoriert.
 - **`__Host-`-Flow-Cookies** über HTTPS bei `Path=/` (Bare Admin, Tenant auf
-  eigenem Host). Ein Pfadpräfix-Tenant behält den einfachen Namen.
+  eigenem Host); dort wird nur dieser Name gelesen. Ein Pfadpräfix-Tenant
+  behält den einfachen Namen, und das Member-`?next` muss unter dem Präfix bleiben.
 - **Einladungen.** Eine Domain-Einladung für ein Public Suffix oder einen
   Freemail-Anbieter (`@gmail.com`, `*.co.uk`) wird abgelehnt, und eine
   Domain-Einladung braucht `max_uses` oder `expires_at`. Gespeicherte
   IdP-Anzeigenamen sind auf 150 Zeichen begrenzt.
 - **Host des Bare Admin.** Mit `security.allowed_hosts` (oder
   `Builder::allowed_hosts`) wird die SSO-Redirect-URI nur für einen gelisteten
-  Host gebaut.
+  Host gebaut. Ohne Liste nimmt sie jeden Host, und der Admin warnt beim Start.
 
 ### Tenants auf eigenem Host und unter einem Präfix
 

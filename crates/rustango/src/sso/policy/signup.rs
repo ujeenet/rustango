@@ -328,7 +328,8 @@ impl InviteTarget {
 }
 
 /// Public suffixes and free mail domains a domain invite would open to anyone.
-/// A short built-in list of the common ones, not the full public suffix list.
+/// A short built-in list of common ones: NOT the full public suffix list, so
+/// an invite for an unlisted shared domain still goes through.
 const OPEN_DOMAINS: &[&str] = &[
     // Second-level public suffixes.
     "co.uk",
@@ -650,7 +651,8 @@ mod store {
         subject: &str,
         invite: &Invite,
         user_id: i64,
-    ) -> Result<(), Denied> {
+    ) -> Result<Revoked, Denied> {
+        let lock = Lock::prepare(pool).await?;
         let mut tx = crate::sql::transaction_pool(pool)
             .await
             .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
@@ -663,56 +665,114 @@ mod store {
         link::insert_link_tx(&mut tx, key, subject, user_id, false)
             .await
             .map_err(|e| Denied::Storage(format!("link: {e}")))?;
-        lock_password_tx(&mut tx, user_id).await?;
+        let revoked = lock.apply_tx(&mut tx, user_id).await?;
         tx.commit()
             .await
-            .map_err(|e| Denied::Storage(format!("commit: {e}")))
+            .map_err(|e| Denied::Storage(format!("commit: {e}")))?;
+        Ok(revoked)
     }
 
     /// Link `subject` to the existing `user_id` its verified email matched.
-    /// The account's password is locked in the same transaction.
+    /// The account is locked in the same transaction ([`Lock`]).
     pub(crate) async fn link_by_email(
         pool: &Pool,
         key: &ProviderKey,
         subject: &str,
         user_id: i64,
-    ) -> Result<(), Denied> {
+    ) -> Result<Revoked, Denied> {
+        let lock = Lock::prepare(pool).await?;
         let mut tx = crate::sql::transaction_pool(pool)
             .await
             .map_err(|e| Denied::Storage(format!("begin: {e}")))?;
         link::insert_link_tx(&mut tx, key, subject, user_id, false)
             .await
             .map_err(|e| Denied::Storage(format!("link: {e}")))?;
-        lock_password_tx(&mut tx, user_id).await?;
+        let revoked = lock.apply_tx(&mut tx, user_id).await?;
         tx.commit()
             .await
-            .map_err(|e| Denied::Storage(format!("commit: {e}")))
+            .map_err(|e| Denied::Storage(format!("commit: {e}")))?;
+        Ok(revoked)
     }
 
-    /// Make the password unusable and end every session: whoever registered
-    /// the email before its owner linked the IdP loses the account.
-    async fn lock_password_tx(tx: &mut PoolTx<'_>, user_id: i64) -> Result<(), Denied> {
-        let stored = User::objects()
-            .filter("id", user_id)
-            .fetch_tx(tx)
-            .await
-            .map_err(|e| Denied::Storage(format!("lock password: {e}")))?
-            .into_iter()
-            .next()
-            .and_then(|u| u.sessions_revoked_at);
-        // Never earlier than a cut-off already set (a logout may set one ahead).
-        let cutoff = stored.map_or_else(chrono::Utc::now, |at| at.max(chrono::Utc::now()));
-        let query = User::objects()
-            .filter("id", user_id)
-            .update()
-            .set("password_hash", unusable_hash().await?)
-            .set("sessions_revoked_at", cutoff)
-            .compile()
-            .map_err(|e| Denied::Storage(e.to_string()))?;
-        crate::sql::update_tx(tx, &query)
-            .await
-            .map(|_| ())
-            .map_err(|e| Denied::Storage(format!("lock password: {e}")))
+    /// What an email link takes from the account it attaches to, so whoever
+    /// registered the email before its owner loses it: the password, every
+    /// session, API keys and user-owned agent keys. Tenant users have no
+    /// second-factor devices. Prepared outside the transaction: the hash is
+    /// slow, and a missing table must not abort it.
+    pub(crate) struct Lock {
+        hash: String,
+        api_keys: bool,
+        #[cfg(feature = "mcp")]
+        agents: bool,
+    }
+
+    /// What [`Lock`] revoked, for the audit row.
+    #[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+    pub(crate) struct Revoked {
+        pub(crate) api_keys: u64,
+        pub(crate) agent_keys: u64,
+    }
+
+    impl Lock {
+        async fn prepare(pool: &Pool) -> Result<Self, Denied> {
+            let here = |table: &'static str| async move {
+                crate::migrate::try_table_exists_here(pool, table)
+                    .await
+                    .map_err(|e| Denied::Storage(format!("probe {table}: {e}")))
+            };
+            Ok(Self {
+                hash: unusable_hash().await?,
+                api_keys: here("rustango_api_keys").await?,
+                #[cfg(feature = "mcp")]
+                agents: here("rustango_agents").await?,
+            })
+        }
+
+        async fn apply_tx(&self, tx: &mut PoolTx<'_>, user_id: i64) -> Result<Revoked, Denied> {
+            use crate::core::Column as _;
+            let storage = |e: ExecError| Denied::Storage(format!("lock account: {e}"));
+            let bad = |e: crate::core::QueryError| Denied::Storage(e.to_string());
+            let user = || User::objects().filter("id", user_id);
+            let q = user()
+                .update()
+                .set("password_hash", self.hash.clone())
+                .compile()
+                .map_err(bad)?;
+            crate::sql::update_tx(tx, &q).await.map_err(storage)?;
+            // Only ever later: a concurrent logout may have set a later cut-off.
+            let now = chrono::Utc::now();
+            for older in [
+                user().filter("sessions_revoked_at__isnull", true),
+                user().where_(User::sessions_revoked_at.lt(now)),
+            ] {
+                let q = older
+                    .update()
+                    .set("sessions_revoked_at", now)
+                    .compile()
+                    .map_err(bad)?;
+                crate::sql::update_tx(tx, &q).await.map_err(storage)?;
+            }
+            let mut revoked = Revoked::default();
+            if self.api_keys {
+                let q = crate::tenancy::auth_backends::ApiKey::objects()
+                    .filter("user_id", user_id)
+                    .compile_delete()
+                    .map_err(bad)?;
+                revoked.api_keys = crate::sql::delete_tx(tx, &q).await.map_err(storage)?;
+            }
+            #[cfg(feature = "mcp")]
+            if self.agents {
+                let q = crate::tenancy::agents::Agent::objects()
+                    .filter("user_id", user_id)
+                    .filter("active", true)
+                    .update()
+                    .set("active", false)
+                    .compile()
+                    .map_err(bad)?;
+                revoked.agent_keys = crate::sql::update_tx(tx, &q).await.map_err(storage)?;
+            }
+            Ok(revoked)
+        }
     }
 
     /// Whether `name` may be a username: letters, digits and `._@+-`, within

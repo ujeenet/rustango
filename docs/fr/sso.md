@@ -445,8 +445,8 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
 
 - **La liaison par email verrouille le mot de passe.** Quand le SSO lie un
   compte tenant existant par email (ou par une invitation de re-liaison), son
-  mot de passe devient inutilisable et ses sessions prennent fin, dans la même
-  transaction. Celui qui a enregistré l'email avant son propriétaire perd le
+  mot de passe devient inutilisable, ses sessions prennent fin, ses clés API
+  sont supprimées et ses clés d'agent désactivées, dans la même transaction. Celui qui a enregistré l'email avant son propriétaire perd le
   compte ; le propriétaire réinitialise le mot de passe pour en utiliser un.
   Tout rôle, même sans permission, compte comme privilégié pour la liaison par email.
 - **Un flow, un usage.** Un callback termine un flow une seule fois (par
@@ -456,14 +456,15 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
   `?next` donné à l'URL de début, scellé dans le flow ; un `?next` sur le
   callback est ignoré.
 - **Cookies de flow `__Host-`** en HTTPS avec `Path=/` (admin nu, tenant sur
-  son propre hôte). Un tenant à préfixe de chemin garde le nom simple.
+  son propre hôte) ; seul ce nom y est lu. Un tenant à préfixe de chemin garde
+  le nom simple, et le `?next` membre doit rester sous le préfixe.
 - **Invitations.** Une invitation de domaine pour un suffixe public ou un
   webmail gratuit (`@gmail.com`, `*.co.uk`) est refusée, et une invitation de
   domaine exige `max_uses` ou `expires_at`. Les noms affichés de l'IdP sont
   limités à 150 caractères.
 - **Hôte de l'admin nu.** Avec `security.allowed_hosts` (ou
   `Builder::allowed_hosts`), l'URI de redirection SSO n'est construite que pour
-  un hôte listé.
+  un hôte listé. Sans liste elle accepte tout hôte, et l'admin l'avertit au démarrage.
 
 ### Tenants sur leur propre hôte et sous un préfixe
 

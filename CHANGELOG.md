@@ -4,7 +4,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant; `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`. See UPGRADING.
+**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant; `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`; `OAuth2Flow` has new `nonce` and `next` fields. See UPGRADING.
 
 ### Added
 
@@ -31,7 +31,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A refused SSO sign-in no longer counts against the IP's password-login limit.
 - An SSO email domain allowlist matches only an IdP-verified email, whatever `require_verified_email` says.
 - Shared SSO providers are superuser-only in the admin, and a role holder (any role) counts as privileged for email linking.
-- An SSO email link or re-link to an existing tenant account locks its password and ends its sessions, so whoever registered the email first loses access.
+- An SSO email link or re-link to an existing tenant account locks its password, ends its sessions and revokes its API and agent keys, so whoever registered the email first loses access.
 - A tenant's own SSO provider is checked like the operator console's (slug, kind, issuer, `https` outside dev); the console shows an error instead of panicking when `RUSTANGO_SECRET_KEY` is unset.
 - SSO flows are single-use, OIDC sign-ins send a `nonce` the verified id_token must echo, flow cookies take the `__Host-` prefix at `/` over HTTPS, and the member landing (`?next`) is sealed at begin.
 - SSO invites refuse public suffix and free mail domains, a domain invite needs max uses or an expiry, and the stored IdP display name is capped at 150 characters.

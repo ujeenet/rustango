@@ -192,14 +192,18 @@ async fn sso_callback(
         FlowScope::new(FlowPurpose::Admin, "", &slug),
         secret.key(),
     ) {
-        Ok(f) if crate::sso::claim_flow(&f) => f,
-        _ => return login_error(&state, "expired"),
+        Ok(f) => f,
+        Err(_) => return login_error(&state, "expired"),
     };
     let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
     let attempt = match crate::sso::policy::throttle_begin(&scope, &extensions, &headers).await {
         Ok(a) => a,
         Err(refused) => return refused,
     };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        return login_error(&state, "expired");
+    }
     let Some(redirect_uri) = derive_bare_redirect(&headers, &extensions, &state, &slug) else {
         return login_error(&state, "config");
     };

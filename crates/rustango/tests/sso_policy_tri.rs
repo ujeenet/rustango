@@ -1672,17 +1672,43 @@ async fn an_email_link_locks_the_password(pool: &Pool) {
         .execute_pool(pool)
         .await
         .unwrap();
+    let mut key = rustango::tenancy::auth_backends::ApiKey {
+        id: Auto::default(),
+        user_id: id,
+        key_prefix: t.chars().take(8).collect(),
+        key_hash: "x".into(),
+        label: "squatter".into(),
+        expires_at: None,
+        created_at: Auto::default(),
+    };
+    key.insert_pool(pool).await.unwrap();
+    // A later cut-off (a logout racing the link) is never moved earlier.
+    let later = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 3600, 0).unwrap();
+    User::objects()
+        .filter("id", id)
+        .update()
+        .set("sessions_revoked_at", Some(later))
+        .execute_pool(pool)
+        .await
+        .unwrap();
     let who = member(&format!("p-{t}"), &email, serde_json::json!({}));
     assert_eq!(tenant(pool, "lock", &who).await.unwrap().user_id, id);
     let after = user_by_id(pool, id).await;
+    assert_eq!(after.sessions_revoked_at, Some(later));
+    assert!(rustango::tenancy::auth_backends::ApiKey::objects()
+        .filter("user_id", id)
+        .fetch(pool)
+        .await
+        .unwrap()
+        .is_empty());
     assert_ne!(after.password_hash, hash);
     assert!(!rustango::tenancy::password::verify("squatter-pass", &after.password_hash).unwrap());
     assert!(after.sessions_revoked_at.is_some());
     let events = sso_events(pool, "lock", &format!("p-{t}")).await;
     assert!(
-        events
-            .iter()
-            .any(|e| e["event"] == "sso_linked" && e["password_locked"] == true),
+        events.iter().any(|e| e["event"] == "sso_linked"
+            && e["password_locked"] == true
+            && e["revoked"]["api_keys"] == 1),
         "{events:?}"
     );
     // Signing in by the link again changes nothing.

@@ -937,6 +937,12 @@ impl Builder {
             let public = super::login_view::public_router(state.clone());
             #[cfg(feature = "admin-sso")]
             let public = if state.config.session_secret.is_some() {
+                if state.config.allowed_hosts.is_none() {
+                    tracing::warn!(
+                        target: "rustango::admin::sso",
+                        "admin SSO builds its redirect URI from any Host: set security.allowed_hosts"
+                    );
+                }
                 public.merge(super::sso::sso_router(state.clone()))
             } else {
                 public

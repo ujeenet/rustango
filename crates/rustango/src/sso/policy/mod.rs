@@ -731,20 +731,23 @@ pub async fn admit<A: AccountLookup>(
     if !found.active {
         return Err(Refusal::Inactive.into());
     }
-    if let Err(e) = link_by_email(pool, key, subject, found.user_id, tenant_users).await {
-        // A concurrent first login may have linked it already.
-        return match link::linked_user(pool, key, subject)
-            .await
-            .map_err(Denied::Storage)?
-        {
-            Some(l) if l.user_id == found.user_id => Ok(Admitted {
-                user_id: found.user_id,
-                created: false,
-            }),
-            _ => Err(Denied::Storage(e)),
-        };
-    }
-    let locked = serde_json::json!({"password_locked": tenant_users});
+    let revoked = match link_by_email(pool, key, subject, found.user_id, tenant_users).await {
+        Ok(r) => r,
+        Err(e) => {
+            // A concurrent first login may have linked it already.
+            return match link::linked_user(pool, key, subject)
+                .await
+                .map_err(Denied::Storage)?
+            {
+                Some(l) if l.user_id == found.user_id => Ok(Admitted {
+                    user_id: found.user_id,
+                    created: false,
+                }),
+                _ => Err(Denied::Storage(e)),
+            };
+        }
+    };
+    let locked = serde_json::json!({"password_locked": tenant_users, "revoked": revoked});
     audit_success(&req, "sso_linked", found.user_id, locked).await;
     if tenant_users {
         after_sign_in(&req, signup, found.user_id, signup.sync_roles_on_login).await?;
@@ -759,7 +762,8 @@ pub async fn admit<A: AccountLookup>(
 }
 
 /// Link `subject` to an account its verified email matched. On the tenant
-/// user table the account's password is locked in the same transaction.
+/// user table the account is locked in the same transaction; returns what
+/// was revoked (`null` elsewhere).
 #[allow(unused_variables)]
 async fn link_by_email(
     pool: &Pool,
@@ -767,15 +771,17 @@ async fn link_by_email(
     subject: &str,
     user_id: i64,
     tenant_users: bool,
-) -> Result<(), String> {
+) -> Result<serde_json::Value, String> {
     #[cfg(feature = "tenancy")]
     if tenant_users {
         return signup::link_by_email(pool, key, subject, user_id)
             .await
+            .map(|r| serde_json::json!(r))
             .map_err(|e| e.to_string());
     }
     link::create_link(pool, key, subject, user_id)
         .await
+        .map(|()| serde_json::Value::Null)
         .map_err(|e| e.to_string())
 }
 
@@ -855,8 +861,10 @@ async fn relink(
     if !account.active {
         return Err(Refusal::Inactive.into());
     }
-    signup::relink(req.pool, req.key, req.identity.subject(), &invite, user_id).await?;
-    let used = serde_json::json!({"invite": invite.id(), "password_locked": true});
+    let revoked =
+        signup::relink(req.pool, req.key, req.identity.subject(), &invite, user_id).await?;
+    let used =
+        serde_json::json!({"invite": invite.id(), "password_locked": true, "revoked": revoked});
     audit_success(req, "sso_relinked", user_id, used).await;
     Ok(Some(Admitted {
         user_id,

@@ -475,8 +475,8 @@ pub(super) async fn tenant_sso_callback(
         FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
         secret.key(),
     ) {
-        Ok(f) if crate::sso::claim_flow(&f) => f,
-        _ => return login_error(routes, "expired"),
+        Ok(f) => f,
+        Err(_) => return login_error(routes, "expired"),
     };
     let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
     let attempt =
@@ -484,6 +484,10 @@ pub(super) async fn tenant_sso_callback(
             Ok(a) => a,
             Err(refused) => return refused,
         };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        return login_error(routes, "expired");
+    }
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };

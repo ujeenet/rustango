@@ -428,7 +428,8 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
 
 - **Email links lock the password.** When SSO links an existing tenant
   account by email (or a re-link invite links it), its password is made
-  unusable and its sessions end, in the link's transaction. Whoever
+  unusable, its sessions end, its API keys are deleted and its own agent
+  keys switched off, in the link's transaction. Whoever
   registered the email before its owner loses the account; the owner
   resets the password to use one again. Any role, even one without
   permissions, counts as privileged for email linking.
@@ -438,14 +439,17 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
   (`id_token_replayed`). The member landing is the `?next` given to the
   begin URL, sealed into the flow; a `?next` on the callback is ignored.
 - **`__Host-` flow cookies** on HTTPS at `Path=/` (the bare admin, a
-  tenant on its own host). A path-prefix tenant keeps the plain name.
+  tenant on its own host); only that name is read there. A path-prefix
+  tenant keeps the plain name. Under a prefix the member `?next` must stay
+  under it.
 - **Invites.** A domain invite for a public suffix or free mail domain
   (`@gmail.com`, `*.co.uk`) is refused, and a domain invite needs
   `max_uses` or `expires_at`. Stored IdP display names are capped at 150
   characters.
 - **Bare admin host.** With `security.allowed_hosts` (or
   `Builder::allowed_hosts`), the SSO redirect URI is built only for a
-  listed Host.
+  listed Host. Without a list it uses any Host, and the admin logs a
+  warning at startup.
 
 ### Tenants on their own host and under a prefix
 
