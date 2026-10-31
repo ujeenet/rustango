@@ -2373,6 +2373,14 @@ async fn upgrading_adds_the_framework_column_once() {
     )
     .await
     .unwrap();
+    // The strip above also took the tenant override's column of that name.
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "ALTER TABLE rustango_sso_shared_overrides DROP COLUMN allow_email_link",
+        Vec::new(),
+    )
+    .await
+    .unwrap();
 
     manage("makemigrations").await.unwrap();
     let mentions = |sub: &str| {
