@@ -8,11 +8,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `i18n::tera_tags::register_with` looks the translator up on every render, so one `Tera` can serve each tenant's overrides.
 - `sso::set_client_config` adjusts the HTTP client (e.g. a private root CA) of SSO providers built from tenant, shared or admin rows, discovery included.
+- Transaction helpers `sql::count_tx`, `sql::get_or_create_tx` and `soft_delete::soft_delete_tx`; `sql::bulk_insert_tx` is now public. `soft_delete_tx` refuses an audited model.
 
 ### Fixed
 
 - `HeaderResolver` and `PortResolver` cache their lookups, misses included, like the host and path-prefix resolvers; a page-cache hit no longer costs a registry query.
 - An extra host added inline on the Org page can no longer take a base host another tenant claimed during the save on MySQL.
+- Bulk actions missed a SQLite UUID key a column default wrote as TEXT: the new async `bulk_actions::PkSet::parse_on` binds each key as the rows store it.
 
 ## [0.61.15] — 2026-10-31
 

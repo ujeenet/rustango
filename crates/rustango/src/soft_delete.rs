@@ -152,6 +152,34 @@ pub async fn soft_delete(
     Ok(n)
 }
 
+/// [`soft_delete`] inside an open transaction. Refused on an audited
+/// model, as its audit entry cannot be written in `tx`.
+///
+/// # Errors
+/// As [`soft_delete`]; [`ExecError::AuditUnsupported`] on an audited model.
+pub async fn soft_delete_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static ModelSchema,
+    pk_column: &'static str,
+    pk_value: SqlValue,
+) -> Result<u64, SoftDeleteError> {
+    let col = model
+        .soft_delete_column
+        .ok_or(SoftDeleteError::NotSoftDeleteEnabled(model.name))?;
+    if crate::core::ModelEntry::for_schema(model)
+        .and_then(crate::core::ModelEntry::audited_update)
+        .is_some()
+    {
+        return Err(ExecError::AuditUnsupported {
+            table: model.table,
+            reason: "soft_delete_tx cannot write the audit entry; use soft_delete",
+        }
+        .into());
+    }
+    let query = __mark_query(model, col, pk_column, pk_value, Some(chrono::Utc::now()));
+    Ok(crate::sql::update_tx(tx, &query).await?)
+}
+
 /// Undo a soft delete by setting the column back to `NULL`. Returns
 /// how many rows changed.
 ///
