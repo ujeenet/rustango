@@ -12,9 +12,9 @@
 //!
 //! * **CSRF is covered by the `state` parameter** (CSPRNG-generated,
 //!   sealed into the flow cookie, constant-time compared on callback).
-//! * **No OIDC `nonce`** is sent. The id_token comes straight from the
-//!   token endpoint over TLS in exchange for a PKCE-bound code, so no
-//!   front-channel token can be injected; `state` carries the CSRF guarantee.
+//! * **An OIDC `nonce`** is sent when the scopes include `openid` and kept
+//!   in the flow; the `sso` feature refuses a verified id_token that does
+//!   not echo it. `state` carries the CSRF guarantee.
 //! * **`redirect_uri` is not re-validated locally** — it's fixed per
 //!   provider at registration and enforced by the provider's allowlist.
 //!   Keep the registered `redirect_uri` exact (no open wildcards) on the
@@ -169,7 +169,7 @@ impl std::fmt::Debug for TokenResponse {
 /// a flow whose sealed `created_at` is older than this, bounding replay
 /// of a captured sealed-flow value. 10 minutes gives headroom over the
 /// 5-minute cookie `Max-Age` for slow logins while still being short.
-const MAX_FLOW_AGE_SECS: u64 = 600;
+pub(crate) const MAX_FLOW_AGE_SECS: u64 = 600;
 
 /// Per-flow secret state — must be persisted between `begin()` and
 /// `complete()`. Round-trip via signed cookie, server-side cache, or DB.
@@ -178,6 +178,12 @@ pub struct OAuth2Flow {
     pub state: String,
     pub pkce_verifier: String,
     pub created_at: u64,
+    /// The OIDC `nonce` sent (scope `openid`); a verified id_token must echo it.
+    #[serde(default)]
+    pub nonce: Option<String>,
+    /// Where to land after the callback, set by the caller before sealing.
+    #[serde(default)]
+    pub next: Option<String>,
 }
 
 /// Redacted: state and verifier are what a callback replay needs.
@@ -187,6 +193,7 @@ impl std::fmt::Debug for OAuth2Flow {
             .field("state", &"<redacted>")
             .field("pkce_verifier", &"<redacted>")
             .field("created_at", &self.created_at)
+            .field("next", &self.next)
             .finish()
     }
 }
@@ -504,6 +511,15 @@ impl OAuth2Provider {
             params.push(("code_challenge", pkce_challenge));
             params.push(("code_challenge_method", "S256".into()));
         }
+        // OIDC: the id_token must name this very sign-in.
+        let nonce = self
+            .scopes
+            .iter()
+            .any(|s| s == "openid")
+            .then(|| random_token(32));
+        if let Some(n) = &nonce {
+            params.push(("nonce", n.clone()));
+        }
         let mut url = self.auth_url.clone();
         url.push(if url.contains('?') { '&' } else { '?' });
         url.push_str(&encode_form(params.iter().map(|(k, v)| (*k, v.as_str()))));
@@ -518,6 +534,8 @@ impl OAuth2Provider {
             state,
             pkce_verifier,
             created_at: now,
+            nonce,
+            next: None,
         };
         (url, flow)
     }
@@ -997,6 +1015,34 @@ mod tests {
         assert!(url.contains("client_id=cid"));
         assert!(url.contains("response_type=code"));
         assert!(url.contains(&format!("scope=openid{}email{}profile", "%20", "%20")));
+    }
+
+    /// An `openid` scope sends a fresh nonce and keeps it in the flow; plain OAuth2 sends none.
+    #[test]
+    fn begin_sends_a_nonce_for_oidc_only() {
+        let p = OAuth2Provider::new(
+            "t",
+            "cid",
+            "s",
+            "https://a/cb",
+            "https://i/auth",
+            "https://i/t",
+        );
+        let (url, flow) = p.begin();
+        let nonce = flow.nonce.clone().expect("an openid flow has a nonce");
+        assert!(url.contains(&format!("&nonce={nonce}")), "{url}");
+        assert_ne!(p.begin().1.nonce, Some(nonce));
+        let plain = OAuth2Provider::new(
+            "t",
+            "cid",
+            "s",
+            "https://a/cb",
+            "https://i/auth",
+            "https://i/t",
+        )
+        .with_scopes(["read:user"]);
+        let (url, flow) = plain.begin();
+        assert!(flow.nonce.is_none() && !url.contains("nonce="));
     }
 
     #[test]
@@ -1534,6 +1580,8 @@ mod tests {
             state: "expected".into(),
             pkce_verifier: "v".into(),
             created_at: 0,
+            nonce: None,
+            next: None,
         };
         let err = p.complete(&flow, "code", "wrong-state").await.unwrap_err();
         assert!(matches!(err, OAuthError::StateMismatch));
@@ -1555,6 +1603,8 @@ mod tests {
             state: "expected".into(),
             pkce_verifier: "v".into(),
             created_at: 1, // ~1970 — far older than MAX_FLOW_AGE_SECS
+            nonce: None,
+            next: None,
         };
         // State matches, so we get past the CSRF check and hit the
         // freshness gate (no network).
@@ -1610,6 +1660,8 @@ mod tests {
             state: "s".into(),
             pkce_verifier: "v".into(),
             created_at: 1234,
+            nonce: None,
+            next: None,
         };
         let sealed = seal_flow(&flow, SCOPE, secret);
         let opened = open_flow(&sealed, SCOPE, secret).unwrap();
@@ -1625,6 +1677,8 @@ mod tests {
             state: "s".into(),
             pkce_verifier: "v".into(),
             created_at: 0,
+            nonce: None,
+            next: None,
         };
         let mut sealed = seal_flow(&flow, SCOPE, secret);
         // Flip a payload character (before the `.`) — sig should mismatch.
@@ -1651,6 +1705,8 @@ mod tests {
             state: "s".into(),
             pkce_verifier: "v".into(),
             created_at: 0,
+            nonce: None,
+            next: None,
         };
         let sealed = seal_flow(&flow, SCOPE, b"k");
         for (tenant, provider) in [("acme", "okta"), ("globex", "google"), ("acmeg", "oogle")] {
@@ -1671,6 +1727,8 @@ mod tests {
             state: "s".into(),
             pkce_verifier: "v".into(),
             created_at: 0,
+            nonce: None,
+            next: None,
         };
         let sealed = seal_flow(&flow, SCOPE, b"k");
         for purpose in [
@@ -1689,6 +1747,8 @@ mod tests {
             state: "s".into(),
             pkce_verifier: "v".into(),
             created_at: 0,
+            nonce: None,
+            next: None,
         };
         let sealed = seal_flow(&flow, SCOPE, b"key-a");
         let err = open_flow(&sealed, SCOPE, b"key-b").unwrap_err();
@@ -1730,6 +1790,8 @@ mod tests {
             state: "st-secret".into(),
             pkce_verifier: "pkce-secret".into(),
             created_at: 7,
+            nonce: None,
+            next: None,
         };
         let s = format!("{flow:?}");
         assert!(

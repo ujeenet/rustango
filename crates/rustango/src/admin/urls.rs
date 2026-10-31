@@ -287,6 +287,10 @@ pub(crate) struct Config {
     /// [`crate::session::secure_cookies`]; `Builder::from_settings`
     /// defaults to `true`. Set it with [`Builder::secure_cookies`].
     pub(crate) secure_cookies: bool,
+    /// Hosts the admin builds absolute URLs for (the SSO `redirect_uri`).
+    /// `None`: the request's Host. Set it with [`Builder::allowed_hosts`].
+    #[cfg_attr(not(feature = "admin-sso"), allow(dead_code))]
+    pub(crate) allowed_hosts: Option<crate::host_validation::AllowedHostsLayer>,
 }
 
 impl Builder {
@@ -388,6 +392,7 @@ impl Builder {
         //    `security.secure_cookies = false` opts out for local
         //    plain-HTTP work.
         builder = builder.secure_cookies(settings.security.secure_cookies.unwrap_or(true));
+        builder = builder.allowed_hosts(&settings.security.allowed_hosts);
 
         // SSO providers are configured from the admin UI, through the
         // `SsoProvider` model, so there is no settings section here.
@@ -404,6 +409,26 @@ impl Builder {
     #[must_use]
     pub fn secure_cookies(mut self, secure: bool) -> Self {
         self.config.secure_cookies = secure;
+        self
+    }
+
+    /// Hosts (`Settings.security.allowed_hosts` patterns) the admin builds
+    /// absolute URLs for, such as the SSO `redirect_uri`; another Host is
+    /// refused there. An empty list keeps the request's Host.
+    /// `from_settings` takes `security.allowed_hosts`.
+    #[must_use]
+    pub fn allowed_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let hosts: Vec<String> = hosts
+            .into_iter()
+            .map(|h| h.as_ref().trim().to_owned())
+            .filter(|h| !h.is_empty())
+            .collect();
+        self.config.allowed_hosts =
+            (!hosts.is_empty()).then(|| crate::host_validation::AllowedHostsLayer::new(hosts));
         self
     }
 

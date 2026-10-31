@@ -524,13 +524,18 @@ impl Mount {
     }
 }
 
-/// Query params on the IdP callback (`?code=…&state=…` or `?error=…`),
-/// plus an optional post-login `?next` (honored only when same-origin).
+/// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
+/// A `?next` here is ignored: the landing was sealed into the flow at begin.
 #[derive(Deserialize)]
 struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+}
+
+/// The post-login `?next` on the begin URL (honored only when same-origin).
+#[derive(Deserialize, Default)]
+struct BeginParams {
     next: Option<String>,
 }
 
@@ -633,17 +638,20 @@ async fn sso_begin_in(
         }
     };
 
-    let (authorize_url, flow) = provider.begin();
+    let (authorize_url, mut flow) = provider.begin();
+    // Sealed with the flow, so the unauthenticated callback cannot choose it.
+    let begin: BeginParams =
+        serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
+    flow.next = begin
+        .next
+        .as_deref()
+        .and_then(crate::auth_decorators::safe_next);
     let sealed = seal_flow(
         &flow,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     );
-    let flow_cookie = format!(
-        "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
-        path = mount.path,
-        s = secure_suffix(),
-    );
+    let flow_cookie = flow_cookie(&mount.path).set(&sealed, FLOW_TTL_SECS);
     redirect_with_cookie(&authorize_url, &flow_cookie)
 }
 
@@ -684,15 +692,19 @@ async fn sso_callback_in(
         return sso_error(SsoFailure::Malformed, &mount);
     };
 
-    let Some(sealed) = extract_cookie(&parts, FLOW_COOKIE) else {
+    let Some(sealed) = flow_cookie(&mount.path).read(&parts.headers) else {
         return sso_error(SsoFailure::Expired, &mount);
     };
     let flow = match open_flow(
-        &sealed,
+        sealed,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     ) {
-        Ok(f) => f,
+        Ok(f) if crate::sso::claim_flow(&f) => f,
+        Ok(_) => {
+            tracing::warn!(slug, "SSO flow already used");
+            return sso_error(SsoFailure::Expired, &mount);
+        }
         Err(e) => {
             tracing::warn!(error = %e, "open_flow failed");
             return sso_error(SsoFailure::Expired, &mount);
@@ -723,7 +735,7 @@ async fn sso_callback_in(
     };
 
     let identity = match provider.complete(&flow, &code, &state).await {
-        Ok((user, tokens)) => Identity::from_handshake(&provider, user, &tokens).await,
+        Ok((user, tokens)) => Identity::from_handshake(&provider, user, &tokens, &flow).await,
         Err(e) => {
             tracing::error!(error = %e, "oauth2 complete failed");
             let failure = match e {
@@ -790,7 +802,7 @@ async fn sso_callback_in(
     attempt.succeeded().await;
     let ttl = policy.session_ttl(config.session_ttl, member.is_superuser);
     let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, ttl);
-    let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
+    let landing = safe_landing(flow.next.as_deref(), &mount.url(&config.landing_url));
     crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
         source: MEMBER_SIGNAL_SOURCE,
         user_id: member_id,
@@ -1034,13 +1046,17 @@ fn redirect_with_cookie(location: &str, cookie: &str) -> Response {
 
 /// Append a flow-cookie-clearing `Set-Cookie` to a response.
 fn clear_flow(mut resp: Response, path: &str) -> Response {
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        format!("{FLOW_COOKIE}=; HttpOnly; SameSite=Lax; Path={path}; Max-Age=0")
-            .parse()
-            .expect("valid cookie"),
-    );
+    for c in flow_cookie(path).clear() {
+        if let Ok(v) = c.parse() {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
     resp
+}
+
+/// The member flow cookie under `path`: `__Host-` at `/` over HTTPS.
+fn flow_cookie(path: &str) -> crate::sso::FlowCookie<'_> {
+    crate::sso::FlowCookie::new(FLOW_COOKIE, path, secure_cookies())
 }
 
 /// Minimal self-contained HTML error page for SSO failures — no

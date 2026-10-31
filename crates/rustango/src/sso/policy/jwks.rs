@@ -48,6 +48,8 @@ pub enum IdTokenError {
     Issuer,
     /// The key set could not be fetched or read.
     Keys(String),
+    /// Signed and valid, but its `nonce` is not the one this sign-in sent.
+    Nonce,
 }
 
 impl std::fmt::Display for IdTokenError {
@@ -62,6 +64,7 @@ impl std::fmt::Display for IdTokenError {
             Self::Expired => f.write_str("id_token expired"),
             Self::NotYetValid => f.write_str("id_token not yet valid"),
             Self::Issuer => f.write_str("id_token issuer not accepted"),
+            Self::Nonce => f.write_str("id_token nonce is not this sign-in's"),
             Self::Keys(e) => write!(f, "JWKS: {e}"),
         }
     }

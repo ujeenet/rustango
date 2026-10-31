@@ -50,6 +50,106 @@ pub use crate::oauth2::{open_flow, seal_flow, FlowPurpose, FlowScope, Normalized
 /// `oauth2::router`'s `rustango_oauth_flow` so the two can coexist.
 pub const SSO_FLOW_COOKIE: &str = "rustango_admin_sso_flow";
 
+/// One surface's flow cookie at one cookie `Path`. A host-only cookie with
+/// `Path=/` over HTTPS takes the `__Host-` prefix, so a sibling subdomain
+/// cannot plant or shadow it; a prefix tenant (`Path=/acme`) cannot.
+#[cfg(feature = "admin")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FlowCookie<'a> {
+    name: &'static str,
+    path: &'a str,
+    secure: bool,
+}
+
+#[cfg(feature = "admin")]
+impl<'a> FlowCookie<'a> {
+    pub(crate) fn new(name: &'static str, path: &'a str, secure: bool) -> Self {
+        Self { name, path, secure }
+    }
+
+    fn host_only(self) -> bool {
+        self.secure && self.path == "/"
+    }
+
+    /// The name this cookie is set under.
+    pub(crate) fn name(self) -> String {
+        if self.host_only() {
+            format!("__Host-{}", self.name)
+        } else {
+            self.name.to_owned()
+        }
+    }
+
+    fn attrs(self, max_age: i64) -> String {
+        let secure = if self.secure { "; Secure" } else { "" };
+        format!(
+            "; Path={}; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}",
+            self.path
+        )
+    }
+
+    /// The `Set-Cookie` value holding `sealed`.
+    pub(crate) fn set(self, sealed: &str, max_age: i64) -> String {
+        format!("{}={sealed}{}", self.name(), self.attrs(max_age))
+    }
+
+    /// `Set-Cookie` values that expire it, under both names.
+    pub(crate) fn clear(self) -> Vec<String> {
+        let mut out = vec![format!("{}={}", self.name(), self.attrs(0))];
+        if self.host_only() {
+            out.push(format!("{}={}", self.name, self.attrs(0)));
+        }
+        out
+    }
+
+    /// The sealed flow from the request. The unprefixed name is still read,
+    /// so a sign-in begun before the switch to `__Host-` finishes.
+    pub(crate) fn read(self, headers: &axum::http::HeaderMap) -> Option<&str> {
+        crate::cookies::cookie_from_headers(headers, &self.name())
+            .or_else(|| crate::cookies::cookie_from_headers(headers, self.name))
+    }
+}
+
+#[cfg(feature = "admin")]
+/// Flows already completed in this process, oldest first, kept as long as
+/// a flow can live.
+struct UsedFlows {
+    order: std::collections::VecDeque<(Instant, String)>,
+    seen: std::collections::HashSet<String>,
+}
+
+#[cfg(feature = "admin")]
+static USED_FLOWS: LazyLock<Mutex<UsedFlows>> = LazyLock::new(|| {
+    Mutex::new(UsedFlows {
+        order: std::collections::VecDeque::new(),
+        seen: std::collections::HashSet::new(),
+    })
+});
+
+#[cfg(feature = "admin")]
+/// Most completed flows remembered; past it the oldest is forgotten.
+const USED_FLOWS_MAX: usize = 100_000;
+
+#[cfg(feature = "admin")]
+/// Claim `flow` for its one callback: `false` when this process already
+/// took it. Per process; across replicas the IdP's one-time code still holds.
+pub(crate) fn claim_flow(flow: &OAuth2Flow) -> bool {
+    let keep = Duration::from_secs(crate::oauth2::MAX_FLOW_AGE_SECS + 60);
+    let mut used = USED_FLOWS.lock().unwrap_or_else(PoisonError::into_inner);
+    while let Some((at, state)) = used.order.front().cloned() {
+        if at.elapsed() < keep && used.order.len() < USED_FLOWS_MAX {
+            break;
+        }
+        used.order.pop_front();
+        used.seen.remove(&state);
+    }
+    if !used.seen.insert(flow.state.clone()) {
+        return false;
+    }
+    used.order.push_back((Instant::now(), flow.state.clone()));
+    true
+}
+
 /// A fully-resolved SSO provider config — the client secret is the
 /// decrypted value, ready to build a provider. Both surfaces normalize their stored config into this.
 #[derive(Clone)]
@@ -428,6 +528,38 @@ mod tests {
             redirect_uri: "https://app.example.com/login/sso/x/callback".into(),
             scopes: None,
         }
+    }
+
+    #[cfg(feature = "admin")]
+    /// `__Host-` only for a host-only HTTPS cookie at `/`; the old name still reads.
+    #[test]
+    fn flow_cookies_take_the_host_prefix_only_at_the_root() {
+        let root = FlowCookie::new("f", "/", true);
+        assert_eq!(root.name(), "__Host-f");
+        assert!(root.set("v", 600).starts_with("__Host-f=v; Path=/;"));
+        assert!(root.set("v", 600).ends_with("; Secure"));
+        assert_eq!(root.clear().len(), 2);
+        assert_eq!(FlowCookie::new("f", "/acme", true).name(), "f");
+        assert_eq!(FlowCookie::new("f", "/", false).name(), "f");
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::COOKIE, "f=old".parse().unwrap());
+        assert_eq!(root.read(&h), Some("old"));
+        h.insert(
+            axum::http::header::COOKIE,
+            "f=old; __Host-f=new".parse().unwrap(),
+        );
+        assert_eq!(root.read(&h), Some("new"));
+    }
+
+    #[cfg(feature = "admin")]
+    /// A flow completes once.
+    #[test]
+    fn a_flow_is_claimed_once() {
+        let (_, flow) = crate::oauth2::OAuth2Provider::new("t", "c", "s", "r", "a", "t").begin();
+        assert!(claim_flow(&flow));
+        assert!(!claim_flow(&flow));
+        let (_, other) = crate::oauth2::OAuth2Provider::new("t", "c", "s", "r", "a", "t").begin();
+        assert!(claim_flow(&other));
     }
 
     #[test]

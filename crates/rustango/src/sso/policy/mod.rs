@@ -141,6 +141,8 @@ pub enum Refusal {
     Inactive,
     /// The tenant's hourly sign-up limit is reached.
     SignupRate,
+    /// A signed id_token carried another sign-in's `nonce`.
+    IdTokenReplayed,
 }
 
 impl Refusal {
@@ -166,6 +168,7 @@ impl Refusal {
             Self::EmailCollides => "email_collides",
             Self::Inactive => "inactive",
             Self::SignupRate => "signup_rate",
+            Self::IdTokenReplayed => "id_token_replayed",
         }
     }
 
@@ -556,6 +559,9 @@ impl EffectivePolicy {
     pub fn check(&self, identity: &Identity) -> Result<(), Refusal> {
         if identity.subject().is_empty() {
             return Err(Refusal::NoSubject);
+        }
+        if identity.replayed() {
+            return Err(Refusal::IdTokenReplayed);
         }
         if let Err(e) = &self.lifecycle {
             tracing::error!(target: "rustango::sso", "SSO session rules do not parse: {e}");
