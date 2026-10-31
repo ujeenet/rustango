@@ -314,6 +314,10 @@ async fn login_submit(
         Err(crate::passwords::PasswordError::Busy) => return LoginRefused::Busy.into_response(),
         Err(_) => false,
     };
+    // Only after a right password, so the refusal reads as a wrong one.
+    #[cfg(feature = "sso")]
+    let password_ok = password_ok
+        && crate::sso::lifecycle::admin_password_allowed(&state.pool, id, is_superuser).await;
 
     if !is_active {
         attempt.failed().await;
@@ -479,6 +483,7 @@ struct ChangePasswordInput {
 async fn change_password_submit(
     State(state): State<AppState>,
     ip: crate::login_throttle::ClientIp,
+    headers: axum::http::HeaderMap,
     Form(form): Form<ChangePasswordInput>,
 ) -> Response {
     // The middleware guarantees a session here. Reaching this handler
@@ -612,9 +617,15 @@ async fn change_password_submit(
         None,
     ))
     .into_response();
-    if let Some(secret) = state.config.session_secret.as_ref() {
+    // The same session, re-bound to the new hash: it keeps its expiry (an
+    // SSO sign-in may have minted a shorter one).
+    let minted = state.config.session_secret.as_ref().and_then(|secret| {
+        let val = crate::cookies::cookie_from_headers(&headers, SESSION_COOKIE)?;
+        Some((secret, session::decode_full(secret, val)?.1.exp))
+    });
+    if let Some((secret, exp)) = minted {
         let auth_hash = crate::session::PasswordFingerprint::of(secret, &new_hash);
-        let cookie_value = session::encode(
+        let cookie_value = session::encode_until(
             secret,
             AdminSession::new(
                 session.user_id,
@@ -623,6 +634,7 @@ async fn change_password_submit(
             ),
             &auth_hash,
             sessions_revoked_at(&row).unwrap_or_default(),
+            exp,
         );
         let cookie = format!(
             "{name}={val}; Path=/; HttpOnly; SameSite=Lax{secure}",

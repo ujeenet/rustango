@@ -349,6 +349,7 @@ async fn member_sso_router_serves_a_non_default_backend() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer = format!("http://{}", listener.local_addr().unwrap());
     let doc = serde_json::json!({
+        "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/auth"),
         "token_endpoint": format!("{issuer}/token"),
         "userinfo_endpoint": format!("{issuer}/userinfo"),
@@ -393,6 +394,24 @@ async fn member_sso_router_serves_a_non_default_backend() {
         sort_order: 0,
         scopes: None,
         allow_email_link: false,
+        allowed_email_domains: None,
+        blocked_email_domains: None,
+        allowed_idp_tenants: None,
+        allowed_hosted_domains: None,
+        required_claims: serde_json::json!({}),
+        signup_mode: None,
+        default_roles: None,
+        role_map: serde_json::json!({}),
+        role_claims: None,
+        sync_roles_on_login: false,
+        username_from: "email_local".into(),
+        username_clash: "suffix".into(),
+        sync_profile: false,
+        allow_email_link_staff: false,
+        sso_only: false,
+        auto_deactivate_after_days: None,
+        session_ttl_secs: None,
+        superuser_session_ttl_secs: None,
         created_at: Auto::default(),
         updated_at: Auto::default(),
     };

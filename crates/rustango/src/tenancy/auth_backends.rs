@@ -303,6 +303,10 @@ impl AuthBackend for ModelBackend {
         let ok = password::verify_async_in(HashLane::Credential, &password, &user.password_hash)
             .await
             .map_err(AuthError::from_hash)?;
+        // Only after a right password, so the refusal reads as a wrong one.
+        // Its extra reads are not timing-hidden; the caller knew the password.
+        let registry = super::middleware::session_keys(&parts.extensions).map(|k| k.registry);
+        let ok = ok && super::auth::password_login_allowed(pool, registry.as_ref(), &user).await;
         if !user.active || !ok {
             attempt.settle(false).await;
             // Audit N4 — an inactive account must look identical to a

@@ -185,6 +185,7 @@ gibt einen neuen aus.
 |---|---|
 | `audit-log` | Liest den Audit-Trail |
 | `audit-cleanup` | Kürzt ihn |
+| `sso-deactivate-idle` | Inaktive SSO-Benutzer in jedem Mandanten deaktivieren |
 
 ### MCP **T**
 
@@ -810,7 +811,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.14
+rustango 0.61.15
 ```
 
 ### `about`
@@ -822,7 +823,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.14
+  version:        0.61.15
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

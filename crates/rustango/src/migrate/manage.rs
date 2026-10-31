@@ -2243,13 +2243,24 @@ fn collation_warning(collation: &str) -> Option<String> {
     }
 }
 
-/// Warn about bare-admin SSO providers that refuse every admin user (#2359).
+/// Warn about bare-admin SSO providers that refuse every admin user (#2359)
+/// or weaken sign-in.
 #[cfg(feature = "admin-sso")]
 async fn sso_link_audit(pool: &Pool, audit: &mut DeployAuditFindings) {
     match crate::sso::check::admin_providers(pool).await {
         Ok(slugs) => audit
             .warnings
             .extend(slugs.iter().map(|s| crate::sso::check::admin_warning(s))),
+        Err(e) => audit.warnings.push(format!(
+            "[sso] could not check the admin SSO providers: {e}"
+        )),
+    }
+    match crate::sso::check::admin_risks(pool).await {
+        Ok(found) => audit.warnings.extend(
+            found
+                .iter()
+                .map(|r| crate::sso::check::risk_warning("admin provider", r)),
+        ),
         Err(e) => audit.warnings.push(format!(
             "[sso] could not check the admin SSO providers: {e}"
         )),

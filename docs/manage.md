@@ -181,6 +181,7 @@ run. `set-password-link <slug> <username>` prints a fresh one.
 |---|---|
 | `audit-log` | Read the audit trail |
 | `audit-cleanup` | Trim it |
+| `sso-deactivate-idle` | Switch off idle SSO-made users in every tenant |
 
 ### MCP **T**
 
@@ -788,7 +789,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.14
+rustango 0.61.15
 ```
 
 ### `about`
@@ -800,7 +801,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.14
+  version:        0.61.15
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

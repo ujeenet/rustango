@@ -461,13 +461,20 @@ pub fn reset_org_cache() {
 #[cfg(all(feature = "sso", any(feature = "tenancy", feature = "admin-sso")))]
 pub mod sso_check {
     #[cfg(feature = "admin-sso")]
-    pub use crate::sso::check::admin_providers;
+    pub use crate::sso::check::{admin_providers, admin_risks};
     #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
-    pub use crate::sso::check::{shared_providers, SharedProviders};
+    pub use crate::sso::check::{shared_providers, shared_risks, SharedProviders};
     #[cfg(feature = "tenancy")]
-    pub use crate::sso::check::{tenant_providers, Refusal, Stranded};
+    pub use crate::sso::check::{tenant_providers, tenant_risks, Refusal, Stranded};
+    pub use crate::sso::check::{Risk, Risky};
     #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
     pub use crate::tenancy::sso::SharedSsoProvider;
+}
+
+/// The `SsoLink` re-link admin action, reachable from integration tests.
+#[cfg(all(feature = "sso", feature = "tenancy"))]
+pub mod sso_admin {
+    pub use crate::sso::policy::admin::relink;
 }
 
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]

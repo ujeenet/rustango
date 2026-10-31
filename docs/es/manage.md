@@ -184,6 +184,7 @@ imprime uno nuevo.
 |---|---|
 | `audit-log` | Lee el registro de auditoría |
 | `audit-cleanup` | Lo recorta |
+| `sso-deactivate-idle` | Desactivar usuarios SSO inactivos en cada tenant |
 
 ### MCP **T**
 
@@ -799,7 +800,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.14
+rustango 0.61.15
 ```
 
 ### `about`
@@ -811,7 +812,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.14
+  version:        0.61.15
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

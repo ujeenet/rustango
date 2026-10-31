@@ -25,6 +25,16 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "restores the framework table in the same scenario",
     ),
     (
+        "sso_policy_tri.rs",
+        "rustango_sso_providers",
+        "restores the framework table in the same scenario",
+    ),
+    (
+        "sso_policy_tri.rs",
+        "rustango_sso_links",
+        "restores the framework table in the same scenario",
+    ),
+    (
         "migrate_tenant_storage_live.rs",
         "rustango_users",
         "scratch databases",

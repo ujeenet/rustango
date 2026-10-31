@@ -148,6 +148,54 @@ untouched.
 
 ---
 
+## 0.61.15
+
+### SSO
+
+- Run `makemigrations` and `migrate`: the SSO provider and link tables get new columns, and three tables are new. Until then sign-in keeps working with no rules (a warning is logged), but a new email link cannot be saved.
+- `SsoProvider`, `SharedSsoProvider` and `SsoLink` struct literals must set the new fields; the defaults are `None`, `false`, `{}`, `username_from: "email_local"`, `username_clash: "suffix"`.
+- A provider field that does not parse (written past the admin) refuses every sign-in through it until fixed.
+- An email link to an existing account still needs an IdP-verified email; a Microsoft email now counts as verified when the id_token says `xms_edov` or the provider pins its `tid`.
+- `LinkRefusal` has a new `Policy` variant.
+- Every refused SSO sign-in now looks the same to the browser: the member flow shows one "You can't sign in with this account" page (403) instead of separate not-linked / no-account / inactive / unverified pages, and the tenant and admin logins redirect with `sso_error=nouser` (no more `sso_error=inactive`). The reason is in the server log and the audit log.
+- A provider table with only some of the policy columns refuses SSO sign-in until `migrate` runs.
+- Sign-up follows a provider's `signup_mode`. Left empty, nothing changes: the tenant login never signs up, and the member flow follows `auto_provision`. A set `signup_mode` overrides `auto_provision` on the member flow.
+- A provider whose sign-up fields do not parse (`signup_mode`, `role_map`, ...) refuses every sign-in through it.
+- `ResolvedProvider` has new `policy`, `signup` and `lifecycle` fields; `TenantAccounts` is now public.
+- `role_map` reads its claims only from a verified id_token when the provider has a JWKS; a userinfo-only provider keeps reading userinfo. A sign-in with none of the role claims leaves the mapped roles alone.
+- `ViewSet::for_model` panics on an SSO table (`rustango_sso_*`, `rustango_shared_sso_providers`); manage those rows through the admin.
+- `StaleLinks` now defaults to `Drop`; call `set_stale_links(StaleLinks::Warn)` at startup to keep the old behaviour (do so if account `created_at` values were imported or backfilled after their links).
+- A link is stale only when made more than an hour (was 5 minutes) before its account; each dropped link is logged at error level with the user id and provider source.
+- Deleting a user in the admin (single or bulk) deletes its SSO links in the same transaction; a soft delete keeps them.
+- OIDC discovery fails when the document has no `issuer` or it differs from the configured one (a trailing `/` is ignored). Set `issuer_url` to the IdP's exact issuer.
+- The admin refuses an SSO link whose `provider_source` its database does not hold: `admin` and `shared` are valid only in the bare admin's and a tenant's database respectively.
+- `sso_only`, `password_login`, session lifetimes and `auto_deactivate_after_days` are now enforced. An `sso_only` user's password is refused on every login and by `confirm_password_reset_pool` (new `AuthFlowError::PasswordLoginDisabled`); `authenticate_user_pool` returns `None` for them. Without the registry, a user linked through a shared provider is refused a password there.
+- A shared provider grants no roles in a tenant until the tenant's `SsoSharedOverride.allowed_roles` names them.
+- `sync_roles_on_login = false` now also skips the role map on a first email link or re-link.
+- SSO sign-up is limited to 100 per tenant per hour unless `signups_per_hour` says otherwise (`0`: no limit).
+- `LoginScope` has a new `Sso` variant.
+- Schedule `sso-deactivate-idle` (tenancy manage) if a provider sets `auto_deactivate_after_days`.
+- A failed password lockout does not stop SSO sign-in; to stop a user, set `active = false`, which SSO refuses.
+- `tenancy::authenticate_user` is deprecated: it skips the SSO password rules. Move to `authenticate_user_pool` on the tenant's pool.
+- A provider's `sso_only` binds its users while the provider is disabled too, and a link to a deleted provider counts as `sso_only` until an admin removes the link. Unreadable tenant SSO settings let only superusers use a password.
+- The bare-admin password login honours `sso_only` on its providers. `sso_only` does not stop API keys or MCP agent secrets.
+- Tenant logout now lands on `login?local=1`. `sso-deactivate-idle` only switches off users who cannot use a password there.
+- `LinkTarget::with_registry` lets a reset read shared providers' rules; without it a user linked through one is refused a reset.
+- The domain allowlist never passes an unverified email.
+- A user linked to SSO by email (or re-linked) has their password locked, sessions ended, API keys deleted and own agent keys switched off; to use a password again they reset it, and new keys must be made.
+- Any role (even one without permissions) makes a tenant user privileged: email linking needs `allow_email_link_staff` for them.
+- `OAuth2Flow` has new `nonce` and `next` fields (struct literals must set them). An OIDC IdP must echo the `nonce` in its id_token.
+- The member SSO callback ignores `?next`; pass it to the begin URL instead (`{login}/sso/{slug}?next=/path`).
+- SSO flow cookies are named `__Host-…` on HTTPS at `/`, and only that name is read there: a sign-in started before the deploy fails once with `expired` and must be restarted.
+- Under a path prefix, the member `?next` must stay under the prefix; otherwise the default landing is used.
+- Domain invites for public suffixes or free mail domains are refused, and a new domain invite needs `max_uses` or `expires_at`.
+- Tenant SSO provider rows with a bad slug, unknown kind or a plain `http://` issuer (outside dev) can no longer be saved in the admin.
+- The bare admin refuses SSO from a Host that `security.allowed_hosts` (or `Builder::allowed_hosts`) does not list.
+- A multi-tenant Microsoft provider (`kind = microsoft`, or `oidc` on `/common` or `/organizations`) ignores `role_map` and `required_claims` claims until `allowed_idp_tenants` is set: no roles sync and required claims refuse.
+- `SsoSharedOverride` has new fields (`shared_provider_id`, `shared_issuer`, `allow_email_link`, `allow_email_link_staff`); `shared_slug` is no longer unique. An override binds to its shared row on first use; after the operator repoints that row at another issuer, delete and re-add the override. `SharedOverride::load` takes the provider key.
+- `deactivate_idle` returns `IdleSweep` (deactivated ids and a failure count) and stops when the tenant settings cannot be read.
+- `find_or_provision_member` is deprecated: it ignores the provider's policy.
+
 ## 0.61.14
 
 ### Forms and ViewSets

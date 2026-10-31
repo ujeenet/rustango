@@ -39,7 +39,7 @@
 //! ## v1 scope / trims
 //!
 //! * The `provision` closure hook is intentionally **not** exposed —
-//!   v1 uses the built-in default provisioning in `provision_member`.
+//!   v1 uses the built-in provisioning in `crate::sso::policy::signup`.
 //! * Providers are resolved from the tenant's own [`SsoProvider`] rows
 //!   only; the registry-wide shared-provider merge
 //!   ([`crate::tenancy::sso::SharedSsoProvider`]) is a follow-up.
@@ -60,10 +60,11 @@ use subtle::ConstantTimeEq;
 use crate::extractors::{Tenant, TenantScope};
 use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
 use crate::sql::sqlx::Database;
-use crate::sql::{Auto, Pool};
-use crate::sso::link::{
-    create_link_tx, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, LinkSource,
-    ProviderKey,
+use crate::sql::Pool;
+use crate::sso::link::{Account, AccountLookup, EmailLookup, LinkSource, ProviderKey};
+use crate::sso::policy::{
+    admit, refuse, AdmitRequest, Denied, EffectivePolicy, Identity, Refusal, RefusalContext,
+    SignupMode, Surface,
 };
 use crate::sso::provider::resolve_by_slug;
 use crate::sso::{
@@ -394,12 +395,14 @@ pub struct MemberAuthConfig {
     /// Path the SSO routes hang off — buttons link to
     /// `{login_base}/sso/{slug}`. Default `"/auth"`.
     pub login_base: String,
-    /// Post-login destination when no (sanitized) `?next` is present.
+    /// Post-login destination when the begin URL had no (sanitized) `?next`;
+    /// a `?next` on the callback is ignored.
     /// Default `"/"`.
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first
     /// time it's seen. When `false`, an unknown email is refused.
     /// Default `false`: the provider rows are shared with the tenant console.
+    /// A provider's own `signup_mode` overrides it.
     pub auto_provision: bool,
     /// Member session lifetime in seconds. Default `604800` (7 days).
     pub session_ttl: i64,
@@ -504,6 +507,13 @@ impl Mount {
         }
     }
 
+    /// A post-login `?next` this mount may land on: same-origin, and under
+    /// the prefix on a path-prefix tenant (another tenant shares the origin).
+    fn next(&self, raw: &str) -> Option<String> {
+        crate::auth_decorators::safe_next(raw)
+            .filter(|n| self.path == "/" || super::routes::path_is_under(n, &self.path))
+    }
+
     fn login_url(&self) -> String {
         match self.url(&self.login) {
             u if u.is_empty() => "/".to_owned(),
@@ -522,13 +532,18 @@ impl Mount {
     }
 }
 
-/// Query params on the IdP callback (`?code=…&state=…` or `?error=…`),
-/// plus an optional post-login `?next` (honored only when same-origin).
+/// Query params on the IdP callback (`?code=…&state=…` or `?error=…`).
+/// A `?next` here is ignored: the landing was sealed into the flow at begin.
 #[derive(Deserialize)]
 struct CallbackParams {
     code: Option<String>,
     state: Option<String>,
     error: Option<String>,
+}
+
+/// The post-login `?next` on the begin URL (honored only when same-origin).
+#[derive(Deserialize, Default)]
+struct BeginParams {
     next: Option<String>,
 }
 
@@ -597,6 +612,12 @@ async fn sso_begin_in(
         return StatusCode::NOT_FOUND.into_response();
     };
     let slug = sso.slug.as_str();
+    let scope = crate::sso::policy::throttle_scope(Some(&t.org.slug));
+    if let Err(refused) =
+        crate::sso::policy::throttle_check(&scope, &parts.extensions, &parts.headers).await
+    {
+        return refused;
+    }
     let Some(secret) = session_secret(&parts) else {
         return sso_error(SsoFailure::Unavailable, &mount);
     };
@@ -625,17 +646,17 @@ async fn sso_begin_in(
         }
     };
 
-    let (authorize_url, flow) = provider.begin();
+    let (authorize_url, mut flow) = provider.begin();
+    // Sealed with the flow, so the unauthenticated callback cannot choose it.
+    let begin: BeginParams =
+        serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
+    flow.next = begin.next.as_deref().and_then(|n| mount.next(n));
     let sealed = seal_flow(
         &flow,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     );
-    let flow_cookie = format!(
-        "{FLOW_COOKIE}={sealed}; HttpOnly; SameSite=Lax; Path={path}; Max-Age={FLOW_TTL_SECS}{s}",
-        path = mount.path,
-        s = secure_suffix(),
-    );
+    let flow_cookie = flow_cookie(&mount.path).set(&sealed, FLOW_TTL_SECS);
     redirect_with_cookie(&authorize_url, &flow_cookie)
 }
 
@@ -676,11 +697,11 @@ async fn sso_callback_in(
         return sso_error(SsoFailure::Malformed, &mount);
     };
 
-    let Some(sealed) = extract_cookie(&parts, FLOW_COOKIE) else {
+    let Some(sealed) = flow_cookie(&mount.path).read(&parts.headers) else {
         return sso_error(SsoFailure::Expired, &mount);
     };
     let flow = match open_flow(
-        &sealed,
+        sealed,
         FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
         secret.key(),
     ) {
@@ -692,6 +713,17 @@ async fn sso_callback_in(
     };
 
     let pool = t.pool();
+    let scope = crate::sso::policy::throttle_scope(Some(&t.org.slug));
+    let attempt =
+        match crate::sso::policy::throttle_begin(&scope, &parts.extensions, &parts.headers).await {
+            Ok(a) => a,
+            Err(refused) => return clear_flow(refused),
+        };
+    // Claimed only past the throttle, so a throttled callback can be retried.
+    if !crate::sso::claim_flow(&flow) {
+        tracing::warn!(slug, "SSO flow already used");
+        return clear_flow(sso_error(SsoFailure::Expired, &mount));
+    }
 
     let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
         return clear_flow(sso_error(SsoFailure::Unavailable, &mount));
@@ -708,8 +740,8 @@ async fn sso_callback_in(
         }
     };
 
-    let normalized = match provider.complete(&flow, &code, &state).await {
-        Ok((user, _tokens)) => user,
+    let identity = match provider.complete(&flow, &code, &state).await {
+        Ok((user, tokens)) => Identity::from_handshake(&provider, user, &tokens, &flow).await,
         Err(e) => {
             tracing::error!(error = %e, "oauth2 complete failed");
             let failure = match e {
@@ -717,6 +749,7 @@ async fn sso_callback_in(
                 | crate::oauth2::OAuthError::FlowExpired => SsoFailure::Expired,
                 _ => SsoFailure::Upstream,
             };
+            attempt.failed().await;
             return clear_flow(sso_error(failure, &mount));
         }
     };
@@ -729,50 +762,30 @@ async fn sso_callback_in(
             Some(parts.uri.path()),
         )
     };
-    let outcome = find_or_provision_member(
-        pool,
-        &key,
-        resolved.allow_email_link,
-        &normalized,
-        config.auto_provision,
-    )
-    .await;
-    if let Ok(signed) = &outcome {
-        use crate::signals::auth::AuthFailureReason as R;
-        let reason = match signed {
-            MemberSignIn::Member(_) => None,
-            MemberSignIn::Inactive => Some(R::Inactive),
-            MemberSignIn::NotLinked
-            | MemberSignIn::NoAccount
-            | MemberSignIn::Unverified
-            | MemberSignIn::Refused => Some(R::InvalidCredentials),
-        };
-        if let Some(reason) = reason {
-            crate::sso::link::signal_refused(
-                MEMBER_SIGNAL_SOURCE,
-                &normalized,
-                reason,
-                meta(),
-                Some(t.org.slug.clone()),
-            )
-            .await;
-        }
+    let policy = match crate::sso::policy::TenantSettings::load(pool).await {
+        Ok(settings) => resolved.effective_policy().tenant(&settings),
+        Err(e) => resolved.effective_policy().tighten(Err(e)),
     }
+    .default_signup(member_default_signup(config.auto_provision));
+    let outcome = admit_member(pool, &key, &policy, &identity, slug).await;
     let member_id = match outcome {
-        Ok(MemberSignIn::Member(id)) => id,
-        Ok(MemberSignIn::NotLinked) => {
-            return clear_flow(sso_error(SsoFailure::NotLinked, &mount));
-        }
-        Ok(MemberSignIn::NoAccount) => {
-            return clear_flow(sso_error(SsoFailure::NoAccount, &mount));
-        }
-        Ok(MemberSignIn::Inactive) => {
-            return clear_flow(sso_error(SsoFailure::Inactive, &mount));
-        }
-        Ok(MemberSignIn::Unverified) => {
-            return clear_flow(sso_error(SsoFailure::Unverified, &mount));
-        }
-        Ok(_) => {
+        Ok(id) => id,
+        Err(Denied::Refused(r)) => {
+            let ctx = RefusalContext {
+                pool,
+                surface: Surface::Member,
+                signal_source: MEMBER_SIGNAL_SOURCE,
+                provider: slug,
+                key: &key,
+                identity: &identity,
+                tenant: Some(t.org.slug.clone()),
+                extensions: &parts.extensions,
+                headers: &parts.headers,
+                path: parts.uri.path(),
+            };
+            refuse(&ctx, &r).await;
+            attempt.failed().await;
+            // One answer for every refusal: the rule stays in the log and audit.
             return clear_flow(sso_error(SsoFailure::Refused, &mount));
         }
         Err(e) => {
@@ -781,12 +794,21 @@ async fn sso_callback_in(
         }
     };
 
-    let Some(member) = tenant_user(pool, member_id).await.filter(|u| u.active) else {
-        tracing::warn!(member_id, "member missing or inactive after sign-in");
-        return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
+    let member = match tenant_user(pool, member_id).await {
+        Some(u) if u.active => u,
+        Some(_) => {
+            tracing::warn!(member_id, "member deactivated during sign-in");
+            return clear_flow(sso_error(SsoFailure::Refused, &mount));
+        }
+        None => {
+            tracing::warn!(member_id, "member missing after sign-in");
+            return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
+        }
     };
-    let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
-    let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
+    attempt.succeeded().await;
+    let ttl = policy.session_ttl(config.session_ttl, member.is_superuser);
+    let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, ttl);
+    let landing = safe_landing(flow.next.as_deref(), &mount.url(&config.landing_url));
     crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
         source: MEMBER_SIGNAL_SOURCE,
         user_id: member_id,
@@ -826,13 +848,21 @@ pub enum MemberSignIn {
     Refused,
 }
 
-/// The member linked to `(provider, profile.provider_user_id)`; else see
-/// [`crate::sso::link::sign_in`]; else, with `auto_provision`, a new linked member.
+/// The member linked to `(provider, profile.provider_user_id)`, or linked by
+/// verified email ([`crate::sso::policy::admit`]); else, with
+/// `auto_provision`, a new linked member.
 ///
-/// Public so a native sign-in that verified its own ID token uses the same rule.
+/// **Applies none of the provider's sign-in policy** (domain, tenant and
+/// claim rules, sign-up mode, tenant settings): `auto_provision` alone lets
+/// anyone in. Call [`crate::sso::policy::admit`] with
+/// [`crate::sso::ResolvedProvider::effective_policy`] instead.
 ///
 /// # Errors
 /// Storage failures.
+#[deprecated(
+    since = "0.61.15",
+    note = "ignores the provider's sign-in policy; use `sso::policy::admit` with `ResolvedProvider::effective_policy()`"
+)]
 pub async fn find_or_provision_member(
     pool: &Pool,
     provider: &ProviderKey,
@@ -840,39 +870,60 @@ pub async fn find_or_provision_member(
     profile: &NormalizedUser,
     auto_provision: bool,
 ) -> Result<MemberSignIn, String> {
-    let refusal = match sign_in(
-        pool,
-        provider,
-        allow_email_link,
-        profile,
-        &TenantAccounts(pool),
-    )
-    .await
-    {
-        Ok(id) => return Ok(MemberSignIn::Member(id)),
-        Err(LinkRefusal::NoAccount(email)) if auto_provision => {
-            return provision_member(pool, provider, &email, profile)
-                .await
-                .map(MemberSignIn::Member);
+    let identity = Identity::from_profile(profile.clone());
+    let policy = EffectivePolicy::legacy(allow_email_link)
+        .default_signup(member_default_signup(auto_provision));
+    match admit_member(pool, provider, &policy, &identity, "").await {
+        Ok(id) => Ok(MemberSignIn::Member(id)),
+        Err(Denied::Refused(r)) => {
+            tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {r}");
+            Ok(MemberSignIn::of(&r))
         }
-        Err(LinkRefusal::Storage(e)) => return Err(e),
-        Err(e) => e,
-    };
-    tracing::warn!(subject = %profile.provider_user_id, "member sso refused: {refusal}");
-    Ok(match refusal {
-        LinkRefusal::EmailLinkDisabled | LinkRefusal::Privileged | LinkRefusal::EmailCollides => {
-            MemberSignIn::NotLinked
-        }
-        LinkRefusal::NoAccount(_) => MemberSignIn::NoAccount,
-        LinkRefusal::Inactive => MemberSignIn::Inactive,
-        LinkRefusal::Unverified => MemberSignIn::Unverified,
-        _ => MemberSignIn::Refused,
-    })
+        Err(e) => Err(e.to_string()),
+    }
 }
 
-/// A tenant's users. Privileged = superuser, or holds any admin permission;
-/// a permission read error counts as privileged.
-pub(crate) struct TenantAccounts<'a>(pub &'a Pool);
+impl MemberSignIn {
+    /// What a refusal looks like to the member flow.
+    fn of(r: &Refusal) -> Self {
+        match r {
+            Refusal::EmailLinkDisabled | Refusal::Privileged | Refusal::EmailCollides => {
+                Self::NotLinked
+            }
+            Refusal::SignupClosed => Self::NoAccount,
+            Refusal::Inactive => Self::Inactive,
+            Refusal::EmailUnverified => Self::Unverified,
+            _ => Self::Refused,
+        }
+    }
+}
+
+/// The member flow's sign-up mode when the provider sets none.
+fn member_default_signup(auto_provision: bool) -> SignupMode {
+    if auto_provision {
+        SignupMode::Open
+    } else {
+        SignupMode::Closed
+    }
+}
+
+/// [`admit`] for the member flow.
+async fn admit_member(
+    pool: &Pool,
+    key: &ProviderKey,
+    policy: &EffectivePolicy,
+    identity: &Identity,
+    slug: &str,
+) -> Result<i64, Denied> {
+    let request = AdmitRequest::new(pool, Surface::Member, key, policy, identity).provider(slug);
+    admit(request, &TenantAccounts(pool))
+        .await
+        .map(|a| a.user_id)
+}
+
+/// A tenant's users. Privileged = superuser, or holds any role or admin
+/// permission; a read error counts as privileged.
+pub struct TenantAccounts<'a>(pub &'a Pool);
 
 impl TenantAccounts<'_> {
     async fn account(&self, user: &User) -> Result<Option<Account>, String> {
@@ -881,13 +932,24 @@ impl TenantAccounts<'_> {
         };
         let privileged = user.is_superuser || holds_permissions(self.0, user_id).await;
         Ok(Some(
-            Account::new(user_id, privileged, user.active).with_created_at(user.created_at),
+            Account::new(user_id, privileged, user.active)
+                .with_superuser(user.is_superuser)
+                .with_created_at(user.created_at),
         ))
     }
 }
 
-/// Whether `user_id` holds any permission; a read error counts as yes.
+/// Whether `user_id` holds any role (even one with no permission yet) or
+/// permission; a read error counts as yes.
 async fn holds_permissions(pool: &Pool, user_id: i64) -> bool {
+    use crate::sql::ExistsPool as _;
+    let has_role = crate::tenancy::permissions::UserRole::objects()
+        .filter("user_id", user_id)
+        .exists(pool)
+        .await;
+    if !matches!(has_role, Ok(false)) {
+        return true;
+    }
     crate::tenancy::permissions::user_permissions_pool(user_id, pool)
         .await
         .map_or(true, |perms| !perms.is_empty())
@@ -914,6 +976,8 @@ pub(crate) async fn any_email_linkable(pool: &Pool) -> Result<bool, crate::sql::
 }
 
 impl AccountLookup for TenantAccounts<'_> {
+    const TENANT_USERS: bool = true;
+
     async fn by_id(&self, id: i64) -> Result<Option<Account>, String> {
         match find_tenant_user(self.0, id)
             .await
@@ -962,108 +1026,6 @@ pub(crate) async fn tenant_user(pool: &Pool, id: i64) -> Option<User> {
     find_tenant_user(pool, id).await.ok().flatten()
 }
 
-/// Auto-create a tenant user from a verified IdP email. `password_hash`
-/// is a **real, unusable** random Argon2 hash (never an empty string —
-/// empty is a login footgun); SSO users can't password-login anyway.
-/// The username is the email local-part, deduped on unique clash.
-async fn provision_member(
-    pool: &Pool,
-    provider: &ProviderKey,
-    email: &str,
-    profile: &NormalizedUser,
-) -> Result<i64, String> {
-    let base = email
-        .split('@')
-        .next()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(email)
-        .to_owned();
-
-    let display_name = profile.name.clone().unwrap_or_else(|| base.clone());
-    let data = serde_json::json!({
-        "display_name": display_name,
-        "avatar_url": profile.avatar_url,
-    });
-
-    // Two attempts: the plain local-part first (query-then-pick), then a
-    // suffixed variant if it's taken or lost an insert race.
-    for attempt in 0..2 {
-        let username = if attempt == 0 && !username_taken(pool, &base).await? {
-            base.clone()
-        } else {
-            format!("{base}-{}", short_suffix())
-        };
-
-        let mut user = User {
-            id: Auto::Unset,
-            username,
-            password_hash: crate::tenancy::password::hash_async(&random_unusable_secret())
-                .await
-                .map_err(|e| format!("hash: {e}"))?,
-            email: Some(email.to_owned()),
-            is_superuser: false,
-            active: true,
-            created_at: chrono::Utc::now(),
-            data: data.clone(),
-            password_changed_at: None,
-            sessions_revoked_at: None,
-        };
-
-        // The user and its link commit together, or neither does.
-        let mut tx = crate::sql::transaction_pool(pool)
-            .await
-            .map_err(|e| format!("begin: {e}"))?;
-        match user.insert_tx(&mut tx).await {
-            Ok(()) => {
-                let id = user
-                    .id
-                    .get()
-                    .copied()
-                    .ok_or_else(|| "insert returned no id".to_owned())?;
-                create_link_tx(&mut tx, provider, &profile.provider_user_id, id)
-                    .await
-                    .map_err(|e| format!("link: {e}"))?;
-                tx.commit().await.map_err(|e| format!("commit: {e}"))?;
-                return Ok(id);
-            }
-            Err(e) if attempt == 0 => {
-                // Likely a username/email unique clash — retry once with
-                // a suffixed username.
-                tracing::debug!(error = %e, "member insert retry after conflict");
-            }
-            Err(e) => return Err(format!("insert: {e}")),
-        }
-    }
-    Err("could not allocate a unique username".to_owned())
-}
-
-/// `true` when a `rustango_users.username` row already exists.
-async fn username_taken(pool: &Pool, username: &str) -> Result<bool, String> {
-    use crate::core::Column as _;
-    use crate::sql::FetcherPool as _;
-    let rows = User::objects()
-        .where_(User::username.eq(username.to_owned()))
-        .limit(1)
-        .fetch(pool)
-        .await
-        .map_err(|e| format!("username lookup: {e}"))?;
-    Ok(!rows.is_empty())
-}
-
-/// A short, URL-safe suffix for username de-duplication.
-fn short_suffix() -> String {
-    crate::tenancy::password::generate(6).to_ascii_lowercase()
-}
-
-/// A real 32-byte random secret (base64) to seed an *unusable* Argon2
-/// hash for an SSO-only account.
-fn random_unusable_secret() -> String {
-    use rand::RngCore;
-    let mut buf = [0u8; 32];
-    rand::rngs::OsRng.fill_bytes(&mut buf);
-    base64::engine::general_purpose::STANDARD.encode(buf)
-}
-
 /// Sanitize a `?next` redirect target: only a same-origin absolute
 /// path is honored, else fall back to `landing`.
 ///
@@ -1097,13 +1059,17 @@ fn redirect_with_cookie(location: &str, cookie: &str) -> Response {
 
 /// Append a flow-cookie-clearing `Set-Cookie` to a response.
 fn clear_flow(mut resp: Response, path: &str) -> Response {
-    resp.headers_mut().append(
-        header::SET_COOKIE,
-        format!("{FLOW_COOKIE}=; HttpOnly; SameSite=Lax; Path={path}; Max-Age=0")
-            .parse()
-            .expect("valid cookie"),
-    );
+    for c in flow_cookie(path).clear() {
+        if let Ok(v) = c.parse() {
+            resp.headers_mut().append(header::SET_COOKIE, v);
+        }
+    }
     resp
+}
+
+/// The member flow cookie under `path`: `__Host-` at `/` over HTTPS.
+fn flow_cookie(path: &str) -> crate::sso::FlowCookie<'_> {
+    crate::sso::FlowCookie::new(FLOW_COOKIE, path, secure_cookies())
 }
 
 /// Minimal self-contained HTML error page for SSO failures — no
@@ -1122,10 +1088,7 @@ enum SsoFailure {
     Expired,
     /// The code exchange or userinfo call failed.
     Upstream,
-    NotLinked,
-    NoAccount,
-    Inactive,
-    Unverified,
+    /// Any refused sign-in; which rule refused it is never shown.
     Refused,
     /// Our own read or write failed after the IdP answered.
     Incomplete,
@@ -1138,12 +1101,7 @@ impl SsoFailure {
             Self::UnknownProvider => StatusCode::NOT_FOUND,
             Self::Malformed | Self::Expired => StatusCode::BAD_REQUEST,
             Self::Upstream => StatusCode::BAD_GATEWAY,
-            Self::Denied
-            | Self::NotLinked
-            | Self::NoAccount
-            | Self::Inactive
-            | Self::Unverified
-            | Self::Refused => StatusCode::FORBIDDEN,
+            Self::Denied | Self::Refused => StatusCode::FORBIDDEN,
             Self::Incomplete => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -1155,15 +1113,10 @@ impl SsoFailure {
             Self::Denied => "Sign-in was cancelled or denied.",
             Self::Malformed => "Malformed sign-in response.",
             Self::Expired => "Your sign-in session expired. Please try again.",
-            Self::Upstream | Self::Refused => "Sign-in failed. Please try again.",
-            Self::NotLinked => {
-                "This sign-in is not linked to your account. Please contact your administrator."
+            Self::Upstream => "Sign-in failed. Please try again.",
+            Self::Refused => {
+                "You can't sign in with this account. Please contact your administrator."
             }
-            Self::NoAccount => {
-                "There is no account for this sign-in. Please contact your administrator."
-            }
-            Self::Inactive => "This account is disabled. Please contact your administrator.",
-            Self::Unverified => "Your identity provider did not return a verified email.",
             Self::Incomplete => "Could not complete sign-in.",
         }
     }
@@ -1473,6 +1426,27 @@ mod tests {
         let cleared = logout_at(&pool, &user, &org, "/acme/logout").await.unwrap();
         assert_eq!(path_of(&minted).as_deref(), Some("/acme"));
         assert_eq!(path_of(&cleared), path_of(&minted));
+    }
+
+    /// Under a path prefix, `?next` must stay under it.
+    #[test]
+    fn a_prefix_mount_lands_only_under_its_prefix() {
+        let at = |path: &str| Mount {
+            path: path.into(),
+            login: "/auth".into(),
+        };
+        assert_eq!(
+            at("/acme").next("/acme/dash").as_deref(),
+            Some("/acme/dash")
+        );
+        assert_eq!(at("/acme").next("/acme").as_deref(), Some("/acme"));
+        assert_eq!(at("/acme").next("/globex/dash"), None);
+        assert_eq!(at("/acme").next("/acmex"), None);
+        assert_eq!(
+            at("/").next("/globex/dash").as_deref(),
+            Some("/globex/dash")
+        );
+        assert_eq!(at("/").next("//evil.example"), None);
     }
 
     // ---- safe_landing -----------------------------------------------

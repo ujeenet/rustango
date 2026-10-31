@@ -745,6 +745,245 @@ async fn console_and_admin_race_keeps_one_active(pool: &Pool) {
     }
 }
 
+/// A link row pointing `user_id` at `source`'s user table; its subject.
+async fn seed_link(pool: &Pool, source: &str, user_id: i64) -> String {
+    use rustango::sso::SsoLink;
+    let subject = unique("sub");
+    SsoLink {
+        id: rustango::sql::Auto::default(),
+        provider_source: source.into(),
+        provider_id: 1,
+        issuer: "oidc".into(),
+        subject: subject.clone(),
+        key_sha256: rustango::sso::link::key_sha256("oidc", &subject),
+        user_id,
+        created_at: rustango::sql::Auto::default(),
+        provisioned: false,
+        last_used_at: None,
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    subject
+}
+
+/// The `provider_source` of each link with these subjects, in order.
+async fn link_sources(pool: &Pool, subjects: &[&str]) -> Vec<Option<String>> {
+    let mut out = Vec::new();
+    for subject in subjects {
+        let rows = rustango::sso::SsoLink::objects()
+            .filter("subject", (*subject).to_owned())
+            .fetch(pool)
+            .await
+            .unwrap();
+        out.push(rows.into_iter().next().map(|l| l.provider_source));
+    }
+    out
+}
+
+/// Deleting a user in the admin deletes its links, so a later user given
+/// the same id does not sign in through them; an `admin` link points into
+/// the admin's own user table and stays.
+async fn deleting_a_user_deletes_its_links(pool: &Pool) {
+    let name = unique("gone");
+    let (status, body) = create_user(pool, &name, "pw-links-gone").await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    let id = user_pk(pool, &name).await;
+    let tenant = seed_link(pool, "tenant", id).await;
+    let shared = seed_link(pool, "shared", id).await;
+    let app = seed_link(pool, "app", id).await;
+    let admin = seed_link(pool, "admin", id).await;
+    let (status, body) = send(
+        pool,
+        Method::POST,
+        &format!("/rustango_users/{id}/delete"),
+        String::new(),
+    )
+    .await;
+    assert!(status.is_redirection(), "{status}: {body}");
+    assert_eq!(
+        link_sources(pool, &[&tenant, &shared, &app, &admin]).await,
+        [None, None, None, Some("admin".to_owned())]
+    );
+}
+
+/// POST a new link through a tenant (`tenant_db`) or single-database admin;
+/// whether the row was written.
+async fn admin_adds_link(pool: &Pool, tenant_db: bool, source: &str) -> bool {
+    let subject = unique("asub");
+    let builder = rustango::admin::Builder::new(pool.clone()).admin_prefix("");
+    let app = if tenant_db {
+        builder.tenant_mode()
+    } else {
+        builder
+    }
+    .build();
+    let body = form(&[
+        ("provider_source", source),
+        ("provider_id", "1"),
+        ("issuer", "oidc"),
+        ("subject", &subject),
+        ("user_id", "1"),
+    ]);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/rustango_sso_links")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    link_sources(pool, &[&subject]).await[0].is_some()
+}
+
+/// An `admin` link outside the bare admin's own database would sign someone
+/// into the bare admin; the admin writes only the sources its database holds.
+async fn admin_link_sources_follow_the_database(pool: &Pool) {
+    for (tenant_db, source, written) in [
+        (true, "admin", false),
+        (true, "tenant", true),
+        (true, "shared", true),
+        (true, "app", true),
+        (true, "bogus", false),
+        (false, "admin", true),
+        (false, "tenant", true),
+        (false, "shared", false),
+    ] {
+        assert_eq!(
+            admin_adds_link(pool, tenant_db, source).await,
+            written,
+            "tenant_db={tenant_db} {source}"
+        );
+    }
+    // An edit cannot turn a tenant link into an admin one either.
+    let subject = seed_link(pool, "tenant", 1).await;
+    let id = rustango::sso::SsoLink::objects()
+        .filter("subject", subject.clone())
+        .fetch(pool)
+        .await
+        .unwrap()[0]
+        .id
+        .get()
+        .copied()
+        .unwrap();
+    let body = form(&[
+        ("provider_source", "admin"),
+        ("provider_id", "1"),
+        ("issuer", "oidc"),
+        ("subject", &subject),
+        ("user_id", "2"),
+    ]);
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .tenant_mode()
+        .build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/rustango_sso_links/{id}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(
+        link_sources(pool, &[&subject]).await,
+        [Some("tenant".to_owned())]
+    );
+    let user_of = |subject: String| async move {
+        rustango::sso::SsoLink::objects()
+            .filter("subject", subject)
+            .fetch(pool)
+            .await
+            .unwrap()[0]
+            .user_id
+    };
+    assert_eq!(
+        user_of(subject.clone()).await,
+        1,
+        "the refused edit wrote nothing"
+    );
+    // The same edit with an allowed source saves, so the refusal above is the rule.
+    let body = form(&[
+        ("provider_source", "tenant"),
+        ("provider_id", "1"),
+        ("issuer", "oidc"),
+        ("subject", &subject),
+        ("user_id", "2"),
+    ]);
+    let resp = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .tenant_mode()
+        .build()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/rustango_sso_links/{id}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "{}", resp.status());
+    assert_eq!(user_of(subject.clone()).await, 2, "the allowed edit saved");
+
+    // A stored `admin` link in a tenant database: the refusal says the stored value is wrong.
+    let subject = seed_link(pool, "admin", 1).await;
+    let id = rustango::sso::SsoLink::objects()
+        .filter("subject", subject.clone())
+        .fetch(pool)
+        .await
+        .unwrap()[0]
+        .id
+        .get()
+        .copied()
+        .unwrap();
+    let body = form(&[
+        ("provider_source", "admin"),
+        ("provider_id", "1"),
+        ("issuer", "oidc"),
+        ("subject", &subject),
+        ("user_id", "2"),
+    ]);
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .tenant_mode()
+        .build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/rustango_sso_links/{id}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("stored provider_source"), "{html}");
+    let rows = rustango::sso::SsoLink::objects()
+        .filter("subject", subject)
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].user_id, 1, "the edit is not saved");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -762,5 +1001,7 @@ tri_dialect_test! {
         user_superuser_fields_are_superuser_only,
         superuser_rows_are_superuser_only,
         admin_password_fields_apply_the_policy,
+        deleting_a_user_deletes_its_links,
+        admin_link_sources_follow_the_database,
     ],
 }
