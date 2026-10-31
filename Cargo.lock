@@ -2408,7 +2408,7 @@ dependencies = [
  "libc",
  "p256",
  "password-hash",
- "rand 0.8.8",
+ "rand 0.10.3",
  "redis",
  "reqwest",
  "ring",
