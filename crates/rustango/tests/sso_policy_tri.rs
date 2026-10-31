@@ -11,9 +11,12 @@ use rustango::sso::link::{
     create_link, key_sha256, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, SsoLink,
 };
 use rustango::sso::policy::{
-    admit, AdmitRequest, Denied, Identity, Refusal, SignInPolicy, Surface,
+    admit, AdmitRequest, Admitted, Denied, Identity, Refusal, SignInPolicy, SignupMode, SsoInvite,
+    Surface,
 };
 use rustango::sso::{resolve_by_slug, LinkSource, SsoProvider};
+use rustango::tenancy::member_auth::TenantAccounts;
+use rustango::tenancy::User;
 use rustango::{tri_dialect_test, Model};
 
 /// `rustango_sso_providers` before the policy columns.
@@ -107,6 +110,11 @@ async fn setup(pool: &Pool) {
     rustango::sso::link::ensure_table(pool)
         .await
         .expect("links table");
+    // Users and roles are shared with other suites: create what is missing.
+    rustango::testkit::migrate_framework(pool)
+        .await
+        .expect("framework tables");
+    rustango::testkit::matrix::fresh_table::<SsoInvite>(pool).await;
 }
 
 fn person(sub: &str, email: &str, raw: serde_json::Value) -> Identity {
@@ -528,6 +536,620 @@ async fn a_partly_migrated_table_refuses(pool: &Pool) {
     assert_eq!(res, Err(Denied::Refused(Refusal::PolicyInvalid)));
 }
 
+/// A token unique to this run, so rows left in a shared database never meet.
+fn tok() -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .subsec_nanos();
+    format!("{nanos:x}{}", N.fetch_add(1, Ordering::Relaxed))
+}
+
+fn member(sub: &str, email: &str, raw: serde_json::Value) -> Identity {
+    Identity::from_profile(NormalizedUser {
+        provider: "oidc".into(),
+        provider_user_id: sub.into(),
+        email: Some(email.into()),
+        email_verified: true,
+        name: Some("Ann Example".into()),
+        avatar_url: None,
+        raw,
+    })
+}
+
+/// `admit` on the tenant console against the real user table.
+async fn tenant(pool: &Pool, slug: &str, id: &Identity) -> Result<Admitted, Denied> {
+    let p = resolve_by_slug(pool, slug, String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let key = p.key(LinkSource::Tenant);
+    let policy = p.effective_policy();
+    admit(
+        AdmitRequest::new(pool, Surface::TenantAdmin, &key, &policy, id).provider(slug),
+        &TenantAccounts(pool),
+    )
+    .await
+}
+
+fn refused(r: Refusal) -> Result<Admitted, Denied> {
+    Err(Denied::Refused(r))
+}
+
+async fn invite(pool: &Pool, target: &str, roles: Option<&str>, max: Option<i32>) -> SsoInvite {
+    let mut i = SsoInvite {
+        id: Auto::default(),
+        provider_slug: None,
+        target: target.into(),
+        roles: roles.map(str::to_owned),
+        expires_at: None,
+        max_uses: max,
+        uses: 0,
+        used_at: None,
+        used_by: None,
+        invited_by: None,
+        link_user_id: None,
+        created_at: Auto::default(),
+    };
+    i.insert_pool(pool).await.unwrap();
+    i
+}
+
+async fn role(pool: &Pool, name: &str) -> i64 {
+    rustango::tenancy::permissions::get_or_create_role_pool(name, "", pool)
+        .await
+        .unwrap()
+}
+
+async fn roles_of(pool: &Pool, user_id: i64) -> Vec<String> {
+    let mut names: Vec<String> = rustango::tenancy::permissions::user_roles_pool(user_id, pool)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, n)| n)
+        .collect();
+    names.sort();
+    names
+}
+
+async fn user_by_id(pool: &Pool, id: i64) -> User {
+    User::objects()
+        .filter("id", id)
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0)
+}
+
+async fn plain_user(pool: &Pool, name: &str, email: &str, superuser: bool) -> i64 {
+    let mut u = User {
+        username: name.into(),
+        email: Some(email.into()),
+        is_superuser: superuser,
+        ..rustango::testkit::user()
+    };
+    u.insert_pool(pool).await.unwrap();
+    u.id.get().copied().unwrap()
+}
+
+/// Open sign-up with a domain rule: a new user lands with the default role,
+/// never a superuser; another domain is refused.
+async fn open_signup_with_a_domain_rule(pool: &Pool) {
+    let t = tok();
+    let viewer = format!("Viewer-{t}");
+    role(pool, &viewer).await;
+    provider(pool, "open", false).await;
+    set(
+        pool,
+        "open",
+        "allowed_email_domains",
+        SqlValue::String("client.org".into()),
+    )
+    .await;
+    set(pool, "open", "signup_mode", SqlValue::String("open".into())).await;
+    set(
+        pool,
+        "open",
+        "default_roles",
+        SqlValue::String(format!("{viewer}, Ghost-{t}")),
+    )
+    .await;
+    let email = format!("ann-{t}@client.org");
+    let first = tenant(
+        pool,
+        "open",
+        &member(&format!("s-{t}"), &email, serde_json::json!({})),
+    )
+    .await
+    .unwrap();
+    assert!(first.created);
+    let u = user_by_id(pool, first.user_id).await;
+    assert!(!u.is_superuser && u.active);
+    assert_eq!(u.username, format!("ann-{t}"));
+    assert_eq!(u.email.as_deref(), Some(email.as_str()));
+    assert_eq!(u.data["display_name"], "Ann Example");
+    assert_eq!(roles_of(pool, first.user_id).await, [viewer]);
+    let link = SsoLink::objects()
+        .filter("subject", format!("s-{t}"))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(link.provisioned);
+    let again = tenant(
+        pool,
+        "open",
+        &member(&format!("s-{t}"), &email, serde_json::json!({})),
+    )
+    .await
+    .unwrap();
+    assert_eq!((again.user_id, again.created), (first.user_id, false));
+    assert_eq!(
+        tenant(
+            pool,
+            "open",
+            &member(
+                &format!("g-{t}"),
+                &format!("eve-{t}@gmail.com"),
+                serde_json::json!({})
+            )
+        )
+        .await,
+        refused(Refusal::DomainNotAllowed {
+            domain: "gmail.com".into()
+        })
+    );
+}
+
+/// Invite only: an email invite signs up with its roles (over the defaults)
+/// until used up or expired; a domain invite does not count.
+async fn invite_only_signup(pool: &Pool) {
+    let t = tok();
+    let (viewer, editor) = (format!("Viewer-{t}"), format!("Editor-{t}"));
+    role(pool, &viewer).await;
+    role(pool, &editor).await;
+    provider(pool, "inv", false).await;
+    set(
+        pool,
+        "inv",
+        "signup_mode",
+        SqlValue::String("invite_only".into()),
+    )
+    .await;
+    set(
+        pool,
+        "inv",
+        "default_roles",
+        SqlValue::String(viewer.clone()),
+    )
+    .await;
+    let bob = format!("bob-{t}@client.org");
+    let inv = invite(pool, &bob, Some(&editor), Some(1)).await;
+    invite(pool, "@client.org", None, None).await;
+    let made = tenant(
+        pool,
+        "inv",
+        &member(&format!("b-{t}"), &bob, serde_json::json!({})),
+    )
+    .await
+    .unwrap();
+    assert!(made.created);
+    assert_eq!(roles_of(pool, made.user_id).await, [editor]);
+    let used = SsoInvite::objects()
+        .filter("id", *inv.id.get().unwrap())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!((used.uses, used.used_by), (1, Some(made.user_id)));
+    assert!(used.used_at.is_some());
+    assert_eq!(
+        tenant(
+            pool,
+            "inv",
+            &member(
+                &format!("c-{t}"),
+                &format!("carol-{t}@client.org"),
+                serde_json::json!({})
+            )
+        )
+        .await,
+        refused(Refusal::NotInvited),
+        "a domain invite does not admit under invite_only"
+    );
+    let erin = format!("erin-{t}@client.org");
+    let mut old = invite(pool, &erin, None, None).await;
+    old.expires_at = Some(chrono::Utc::now() - chrono::TimeDelta::hours(1));
+    old.save_pool(pool).await.unwrap();
+    assert_eq!(
+        tenant(
+            pool,
+            "inv",
+            &member(&format!("e-{t}"), &erin, serde_json::json!({}))
+        )
+        .await,
+        refused(Refusal::InviteExpired)
+    );
+    let fred = format!("fred-{t}@client.org");
+    let mut gone = invite(pool, &fred, None, Some(1)).await;
+    gone.uses = 1;
+    gone.save_pool(pool).await.unwrap();
+    assert_eq!(
+        tenant(
+            pool,
+            "inv",
+            &member(&format!("f-{t}"), &fred, serde_json::json!({}))
+        )
+        .await,
+        refused(Refusal::InviteUsedUp)
+    );
+}
+
+/// Allowlist: a domain invite admits the domain and only it.
+async fn allowlist_by_domain(pool: &Pool) {
+    let t = tok();
+    provider(pool, "allow", false).await;
+    set(
+        pool,
+        "allow",
+        "signup_mode",
+        SqlValue::String("allowlist".into()),
+    )
+    .await;
+    invite(pool, &format!("*.c{t}.org"), None, None).await;
+    let ok = tenant(
+        pool,
+        "allow",
+        &member(
+            &format!("a-{t}"),
+            &format!("ann@eu.c{t}.org"),
+            serde_json::json!({}),
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(ok.created);
+    assert_eq!(
+        tenant(
+            pool,
+            "allow",
+            &member(
+                &format!("x-{t}"),
+                &format!("ann@c{t}.org"),
+                serde_json::json!({})
+            )
+        )
+        .await,
+        refused(Refusal::NotInvited),
+        "`*.` covers subdomains only"
+    );
+}
+
+/// Closed, and no mode on the tenant console, refuse an unknown email.
+async fn closed_refuses_signup(pool: &Pool) {
+    let t = tok();
+    provider(pool, "shut", false).await;
+    let who = member(
+        &format!("s-{t}"),
+        &format!("z-{t}@client.org"),
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        tenant(pool, "shut", &who).await,
+        refused(Refusal::SignupClosed)
+    );
+    set(
+        pool,
+        "shut",
+        "signup_mode",
+        SqlValue::String("closed".into()),
+    )
+    .await;
+    invite(pool, &format!("z-{t}@client.org"), None, None).await;
+    assert_eq!(
+        tenant(pool, "shut", &who).await,
+        refused(Refusal::SignupClosed)
+    );
+}
+
+/// Several sign-ups race for one use of an invite: exactly one user is made.
+async fn one_use_admits_one_racer(pool: &Pool) {
+    let t = tok();
+    provider(pool, "race", false).await;
+    set(
+        pool,
+        "race",
+        "signup_mode",
+        SqlValue::String("allowlist".into()),
+    )
+    .await;
+    let domain = format!("r{t}.org");
+    invite(pool, &format!("@{domain}"), None, Some(1)).await;
+    let ids: Vec<Identity> = (0..6)
+        .map(|n| {
+            member(
+                &format!("r{n}-{t}"),
+                &format!("u{n}@{domain}"),
+                serde_json::json!({}),
+            )
+        })
+        .collect();
+    let runs = futures_util::future::join_all(ids.iter().map(|id| tenant(pool, "race", id))).await;
+    let wins = runs.iter().filter(|r| r.is_ok()).count();
+    let made = User::objects()
+        .filter("email__endswith", format!("@{domain}"))
+        .fetch(pool)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!((wins, made), (1, 1), "{runs:?}");
+}
+
+/// A superuser is never linked by email, whatever the provider or an invite says;
+/// a role holder links only with the staff opt-in.
+async fn superusers_are_never_email_linked(pool: &Pool) {
+    let t = tok();
+    let editor = format!("Editor-{t}");
+    let editor_id = role(pool, &editor).await;
+    rustango::tenancy::permissions::grant_role_perm_pool(editor_id, "post.change", pool)
+        .await
+        .unwrap();
+    provider(pool, "staff", true).await;
+    set(
+        pool,
+        "staff",
+        "allow_email_link_staff",
+        SqlValue::Bool(true),
+    )
+    .await;
+    set(
+        pool,
+        "staff",
+        "signup_mode",
+        SqlValue::String("open".into()),
+    )
+    .await;
+    let root_email = format!("root-{t}@client.org");
+    let root = plain_user(pool, &format!("root-{t}"), &root_email, true).await;
+    let who = member(&format!("su-{t}"), &root_email, serde_json::json!({}));
+    assert_eq!(
+        tenant(pool, "staff", &who).await,
+        refused(Refusal::Privileged)
+    );
+    let mut relink = invite(pool, &root_email, None, Some(1)).await;
+    relink.link_user_id = Some(root);
+    relink.save_pool(pool).await.unwrap();
+    assert_eq!(
+        tenant(pool, "staff", &who).await,
+        refused(Refusal::Privileged)
+    );
+    assert!(SsoLink::objects()
+        .filter("user_id", root)
+        .fetch(pool)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let ed_email = format!("ed-{t}@client.org");
+    let ed = plain_user(pool, &format!("ed-{t}"), &ed_email, false).await;
+    rustango::tenancy::permissions::assign_role_pool(ed, editor_id, pool)
+        .await
+        .unwrap();
+    let ed_who = member(&format!("ed-{t}"), &ed_email, serde_json::json!({}));
+    set(
+        pool,
+        "staff",
+        "allow_email_link_staff",
+        SqlValue::Bool(false),
+    )
+    .await;
+    assert_eq!(
+        tenant(pool, "staff", &ed_who).await,
+        refused(Refusal::Privileged)
+    );
+    set(
+        pool,
+        "staff",
+        "allow_email_link_staff",
+        SqlValue::Bool(true),
+    )
+    .await;
+    assert_eq!(tenant(pool, "staff", &ed_who).await.unwrap().user_id, ed);
+}
+
+/// A re-link invite links its (non-superuser) user once, by verified email.
+async fn a_relink_invite_links_its_user_once(pool: &Pool) {
+    let t = tok();
+    provider(pool, "re", false).await;
+    let email = format!("rl-{t}@client.org");
+    let uid = plain_user(pool, &format!("rl-{t}"), &email, false).await;
+    let mut inv = invite(pool, &email, None, Some(1)).await;
+    inv.link_user_id = Some(uid);
+    inv.save_pool(pool).await.unwrap();
+    let got = tenant(
+        pool,
+        "re",
+        &member(&format!("new-{t}"), &email, serde_json::json!({})),
+    )
+    .await
+    .unwrap();
+    assert_eq!((got.user_id, got.created), (uid, false));
+    assert_eq!(
+        tenant(
+            pool,
+            "re",
+            &member(&format!("other-{t}"), &email, serde_json::json!({}))
+        )
+        .await,
+        refused(Refusal::EmailLinkDisabled),
+        "the invite is used up"
+    );
+}
+
+/// The role map grants on sign-up and, with sync on, adds and removes only
+/// the roles it names.
+async fn role_sync_touches_only_mapped_roles(pool: &Pool) {
+    let t = tok();
+    let (viewer, editor, hand) = (format!("V-{t}"), format!("E-{t}"), format!("H-{t}"));
+    role(pool, &viewer).await;
+    role(pool, &editor).await;
+    let hand_id = role(pool, &hand).await;
+    provider(pool, "map", false).await;
+    set(pool, "map", "signup_mode", SqlValue::String("open".into())).await;
+    set(
+        pool,
+        "map",
+        "default_roles",
+        SqlValue::String(viewer.clone()),
+    )
+    .await;
+    set(
+        pool,
+        "map",
+        "role_map",
+        SqlValue::Json(serde_json::json!({"g-ed": editor})),
+    )
+    .await;
+    set(pool, "map", "sync_roles_on_login", SqlValue::Bool(true)).await;
+    let email = format!("m-{t}@client.org");
+    let sub = format!("m-{t}");
+    let with =
+        |groups: serde_json::Value| member(&sub, &email, serde_json::json!({"groups": groups}));
+    let uid = tenant(pool, "map", &with(serde_json::json!(["g-ed"])))
+        .await
+        .unwrap()
+        .user_id;
+    let mut want = vec![editor.clone(), viewer.clone()];
+    want.sort();
+    assert_eq!(roles_of(pool, uid).await, want);
+    rustango::tenancy::permissions::assign_role_pool(uid, hand_id, pool)
+        .await
+        .unwrap();
+    tenant(pool, "map", &with(serde_json::json!([])))
+        .await
+        .unwrap();
+    let mut want = vec![hand.clone(), viewer.clone()];
+    want.sort();
+    assert_eq!(roles_of(pool, uid).await, want, "only the mapped role went");
+    tenant(pool, "map", &with(serde_json::json!(["g-ed"])))
+        .await
+        .unwrap();
+    let mut want = vec![editor, hand, viewer];
+    want.sort();
+    assert_eq!(roles_of(pool, uid).await, want);
+}
+
+/// A taken username gets a suffix, or refuses.
+async fn username_clash_suffix_or_refuse(pool: &Pool) {
+    let t = tok();
+    plain_user(
+        pool,
+        &format!("gina-{t}"),
+        &format!("other-{t}@x.org"),
+        false,
+    )
+    .await;
+    provider(pool, "clash", false).await;
+    set(
+        pool,
+        "clash",
+        "signup_mode",
+        SqlValue::String("open".into()),
+    )
+    .await;
+    let email = format!("gina-{t}@client.org");
+    set(
+        pool,
+        "clash",
+        "username_clash",
+        SqlValue::String("refuse".into()),
+    )
+    .await;
+    assert_eq!(
+        tenant(
+            pool,
+            "clash",
+            &member(&format!("g1-{t}"), &email, serde_json::json!({}))
+        )
+        .await,
+        refused(Refusal::UsernameTaken)
+    );
+    set(
+        pool,
+        "clash",
+        "username_clash",
+        SqlValue::String("suffix".into()),
+    )
+    .await;
+    let uid = tenant(
+        pool,
+        "clash",
+        &member(&format!("g1-{t}"), &email, serde_json::json!({})),
+    )
+    .await
+    .unwrap()
+    .user_id;
+    let name = user_by_id(pool, uid).await.username;
+    assert!(name.starts_with(&format!("gina-{t}-")), "{name}");
+}
+
+/// The member flow with no mode set follows `auto_provision`, as before.
+async fn member_auto_provision_is_unchanged(pool: &Pool) {
+    use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};
+    let t = tok();
+    provider(pool, "mem", false).await;
+    let key = resolve_by_slug(pool, "mem", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let profile = NormalizedUser {
+        provider: "oidc".into(),
+        provider_user_id: format!("mem-{t}"),
+        email: Some(format!("mem-{t}@example.com")),
+        email_verified: true,
+        name: None,
+        avatar_url: None,
+        raw: serde_json::json!({}),
+    };
+    assert_eq!(
+        find_or_provision_member(pool, &key, false, &profile, false)
+            .await
+            .unwrap(),
+        MemberSignIn::NoAccount
+    );
+    let MemberSignIn::Member(id) = find_or_provision_member(pool, &key, false, &profile, true)
+        .await
+        .unwrap()
+    else {
+        panic!("auto_provision signs up");
+    };
+    let u = user_by_id(pool, id).await;
+    assert_eq!(u.username, format!("mem-{t}"));
+    assert!(!u.is_superuser);
+    // Through `admit`, the surface default is the member flow's choice.
+    let p = resolve_by_slug(pool, "mem", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let who = member(
+        &format!("mem2-{t}"),
+        &format!("mem2-{t}@example.com"),
+        serde_json::json!({}),
+    );
+    for (mode, ok) in [(SignupMode::Closed, false), (SignupMode::Open, true)] {
+        let policy = p.effective_policy().default_signup(mode);
+        let got = admit(
+            AdmitRequest::new(pool, Surface::Member, &key, &policy, &who),
+            &TenantAccounts(pool),
+        )
+        .await;
+        assert_eq!(got.is_ok(), ok, "{mode:?}: {got:?}");
+    }
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
@@ -536,6 +1158,16 @@ tri_dialect_test!(
         stored_rules_are_enforced,
         an_unparseable_rule_refuses,
         pre_migration_tables_still_sign_in,
+        open_signup_with_a_domain_rule,
+        invite_only_signup,
+        allowlist_by_domain,
+        closed_refuses_signup,
+        one_use_admits_one_racer,
+        superusers_are_never_email_linked,
+        a_relink_invite_links_its_user_once,
+        role_sync_touches_only_mapped_roles,
+        username_clash_suffix_or_refuse,
+        member_auto_provision_is_unchanged,
     ],
 );
 

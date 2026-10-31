@@ -204,6 +204,9 @@ async fn boot_with(permissions: bool) -> Env {
             .await
             .unwrap();
         rustango::sso::link::ensure_table(&pool).await.unwrap();
+        rustango::testkit::create_tables_for::<rustango::sso::policy::SsoInvite>(&pool)
+            .await
+            .unwrap();
         if permissions {
             rustango::tenancy::permissions::ensure_tables_pool(&pool)
                 .await
@@ -1465,6 +1468,73 @@ async fn tenant_refusals_look_like_no_account() {
     let unknown = callback("sub-x", "nobody@example.com").await;
     let refused = callback("sub-y", "eve@gmail.com").await;
     assert_eq!(refused, unknown);
+}
+
+/// Invite-only sign-up on the tenant console: the invitee lands with the
+/// invited role; refused sign-ups look like an unknown account.
+#[tokio::test]
+async fn tenant_console_signs_up_an_invitee_only() {
+    use rustango::sso::policy::SsoInvite;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    env.tenant_provider("corp", false).await;
+    let viewer = rustango::tenancy::permissions::get_or_create_role_pool("Viewer", "", env.pool())
+        .await
+        .unwrap();
+    let callback = |sub: &'static str, email: &'static str| {
+        let env = &env;
+        async move {
+            env.idp.assert(sub, email);
+            let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
+            (resp.status(), location(&resp))
+        }
+    };
+    let closed = callback("sub-x", "x@client.org").await;
+    env.set_policy("corp", "signup_mode", "invite_only").await;
+    SsoInvite {
+        id: Auto::default(),
+        provider_slug: Some("corp".into()),
+        target: "ann@client.org".into(),
+        roles: Some("Viewer".into()),
+        expires_at: None,
+        max_uses: Some(1),
+        uses: 0,
+        used_at: None,
+        used_by: None,
+        invited_by: None,
+        link_user_id: None,
+        created_at: Auto::default(),
+    }
+    .insert_pool(env.pool())
+    .await
+    .unwrap();
+    let uninvited = callback("sub-y", "y@client.org").await;
+    assert_eq!(uninvited, closed);
+    let uid = env.sso("corp", "sub-ann", "ann@client.org").await.unwrap();
+    let ann = User::objects()
+        .filter("id", uid)
+        .fetch(env.pool())
+        .await
+        .unwrap()
+        .remove(0);
+    assert!(!ann.is_superuser);
+    assert_eq!(
+        rustango::tenancy::permissions::user_roles_pool(uid, env.pool())
+            .await
+            .unwrap(),
+        [(viewer, "Viewer".to_owned())]
+    );
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-y").await,
+        ["not_invited"]
+    );
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-x").await,
+        ["signup_closed"]
+    );
 }
 
 /// The member flow: a domain refusal and a missing account get
