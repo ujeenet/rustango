@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has a `policy` field. See UPGRADING.
+
+### Added
+
+- SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, required claims, and `require_verified_email`. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
+- The SSO callbacks read claims only an id_token carries (`tid`, `iss`) after checking its signature against the issuer's JWKS (RS256, ES256), its `aud`, `exp` and issuer. A Microsoft email counts as verified when `xms_edov` is true or the provider pins the token's `tid`.
+- The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`); these do nothing yet.
+
 ## [0.61.14] — 2026-10-30
 
 **Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant and is `#[non_exhaustive]`. `AuthSettings` has a new field `login_field` (struct literals need `..Default::default()`); `derive(Model)` refuses unknown `validators` names and `validators` on non-`String` fields at compile time; `server::Builder::from_env` no longer falls back to a built-in database URL; a JSON `""` on a nullable `String` field is kept as `""`; `derive(Form)` bool fields refuse unknown values; `where_not_in` past the bind cap returns `InListUnsplittable`; a dotted `DatabaseCache` table name means `schema.table`. See UPGRADING.

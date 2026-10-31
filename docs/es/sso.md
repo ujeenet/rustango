@@ -258,6 +258,43 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > propias filas `SsoProvider` del tenant — la fusión de `SharedSsoProvider` a nivel
 > de registro y un hook `provision` personalizado son seguimientos futuros.
 
+## Quién puede iniciar sesión
+
+Cada proveedor (y cada proveedor compartido en la consola del operador)
+tiene reglas de inicio de sesión. Las reglas vacías admiten a cualquiera
+que el IdP autentique.
+
+| Campo | Regla |
+|---|---|
+| `allowed_email_domains` | Solo estos dominios: `client.org` coincide solo consigo mismo, `*.client.org` solo con sus subdominios. Separados por comas o saltos de línea. |
+| `blocked_email_domains` | Nunca estos dominios, aunque estén permitidos arriba. Se comprueba con cualquier email, verificado o no. |
+| `allowed_idp_tenants` | IDs de directorio de Microsoft (`tid`). Solo se leen de un id_token verificado. |
+| `allowed_hosted_domains` | Dominios de Google Workspace (claim `hd`). |
+| `required_claims` | JSON `{"claim": ["valor", ...]}`: el claim (texto o lista) debe contener uno de los valores. `{"iss": [...]}` fija el emisor. Un claim ausente rechaza. |
+| `require_verified_email` | Activado por defecto: la lista permitida solo acepta un email verificado por el IdP. |
+
+El admin y la consola del operador guardan las listas en una forma canónica
+y rechazan valores que no se pueden interpretar. Un valor inválido escrito
+por otra vía rechaza todo inicio de sesión con ese proveedor.
+
+Un inicio de sesión rechazado va al log del servidor y al log de auditoría
+(`source = sso:<surface>`, `changes.rule`, p. ej. `domain_not_allowed`).
+El navegador ve un mensaje genérico; la página de login del tenant muestra
+además el `access_denied_message` del tenant (de `SsoTenantPolicy`), escapado.
+
+### Confianza en el id_token
+
+Los datos del perfil vienen de `/userinfo` sobre TLS. Los claims que solo
+trae el id_token (`tid`, `iss`, `xms_edov`) se usan solo si el id_token
+pasa: firma contra el JWKS del emisor (RS256 o ES256; en caché según su
+`max-age` y recargado como mucho una vez por minuto ante una clave
+desconocida), `aud` contiene el client id, `exp`/`nbf` con un minuto de
+margen, el emisor (Microsoft: `https://login.microsoftonline.com/{tid}/v2.0`)
+y el mismo `sub` que userinfo. Si no, esos claims faltan y una regla que los
+necesita rechaza. Un email de Microsoft cuenta como verificado si `xms_edov`
+es verdadero, o si el proveedor fija `allowed_idp_tenants` y el `tid` del
+token está en la lista.
+
 ## Almacenamiento de secretos
 
 `client_secret` se almacena **cifrado en reposo** con XChaCha20-Poly1305
@@ -307,8 +344,9 @@ emisor y hora).
 - Las sesiones de SSO son la sesión de administrador corriente — rotar o
   desactivar al usuario vinculado las invalida a través del control en vivo
   existente.
-- El modelo de confianza es `/userinfo` sobre TLS (el id_token no se verifica de
-  forma independiente); antepón HTTPS al admin.
+- El modelo de confianza es `/userinfo` sobre TLS; los claims del id_token
+  cuentan solo tras la verificación JWKS (ver [confianza en el id_token](#confianza-en-el-id_token)).
+  Antepón HTTPS al admin.
 
 ## Véase también
 

@@ -252,6 +252,43 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > `SsoProvider` rows only — the registry-wide `SharedSsoProvider` merge
 > and a custom `provision` hook are follow-ups.
 
+## Who may sign in
+
+Each provider (and each shared provider in the operator console) has
+sign-in rules. Every rule left empty admits anyone the IdP signs in.
+
+| Field | Rule |
+|---|---|
+| `allowed_email_domains` | Only these domains: `client.org` matches only itself, `*.client.org` only its subdomains. Comma or newline separated. |
+| `blocked_email_domains` | Never these domains, even if allowed above. Checked against any email, verified or not. |
+| `allowed_idp_tenants` | Microsoft directory ids (`tid`). Read only from a verified id_token. |
+| `allowed_hosted_domains` | Google Workspace domains (the `hd` claim). |
+| `required_claims` | JSON `{"claim": ["value", ...]}`: the claim (a string or a list) must hold one of the values. `{"iss": [...]}` pins the issuer. A missing claim refuses. |
+| `require_verified_email` | On by default: the allowlist accepts only an email the IdP verified. |
+
+The admin and the operator console store lists in one canonical form and
+refuse a value that does not parse. A value that still does not parse
+(written past them) refuses every sign-in through the provider.
+
+A refused sign-in goes to the server log and to the audit log
+(`source = sso:<surface>`, `changes.rule` such as `domain_not_allowed`).
+The browser gets one generic message; on the tenant login page it also
+shows the tenant's `access_denied_message` (from `SsoTenantPolicy`),
+escaped.
+
+### id_token trust
+
+Profile data comes from `/userinfo` over TLS. Claims only an id_token
+carries (`tid`, `iss`, `xms_edov`) are used only after the id_token
+passes: its signature against the issuer's JWKS (RS256 or ES256; the key
+set is cached per its `max-age` and refetched at most once a minute for an
+unknown key), `aud` holds the client id, `exp`/`nbf` with one minute of
+leeway, the issuer (Microsoft: `https://login.microsoftonline.com/{tid}/v2.0`),
+and the same `sub` as userinfo. Otherwise those claims are absent, and a
+rule that needs them refuses. A Microsoft email counts as verified when
+`xms_edov` is true, or when the provider pins `allowed_idp_tenants` and
+the token's `tid` is one of them.
+
 ## Secret storage
 
 `client_secret` is stored **encrypted at rest** with XChaCha20-Poly1305
@@ -297,8 +334,9 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
   signed `state`.
 - SSO sessions are the ordinary admin session — rotating or deactivating
   the linked user invalidates them through the existing live gate.
-- Trust model is `/userinfo` over TLS (the id_token isn't independently
-  verified); front the admin with HTTPS.
+- Trust model is `/userinfo` over TLS; id_token claims count only after
+  JWKS verification (see [id_token trust](#id_token-trust)). Front the
+  admin with HTTPS.
 
 ## See also
 

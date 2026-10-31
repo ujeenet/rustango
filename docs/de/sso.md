@@ -260,6 +260,42 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > `SsoProvider`-Zeilen des Tenants auf — der registry-weite
 > `SharedSsoProvider`-Merge und ein eigener `provision`-Hook sind Folgeaufgaben.
 
+## Wer sich anmelden darf
+
+Jeder Anbieter (und jeder geteilte Anbieter in der Operator-Konsole) hat
+Anmelderegeln. Leere Regeln lassen jeden zu, den der IdP anmeldet.
+
+| Feld | Regel |
+|---|---|
+| `allowed_email_domains` | Nur diese Domains: `client.org` passt nur auf sich selbst, `*.client.org` nur auf Subdomains. Durch Komma oder Zeilenumbruch getrennt. |
+| `blocked_email_domains` | Nie diese Domains, auch wenn oben erlaubt. Gilt für jede E-Mail, verifiziert oder nicht. |
+| `allowed_idp_tenants` | Microsoft-Verzeichnis-IDs (`tid`). Nur aus einem verifizierten id_token gelesen. |
+| `allowed_hosted_domains` | Google-Workspace-Domains (Claim `hd`). |
+| `required_claims` | JSON `{"claim": ["wert", ...]}`: der Claim (String oder Liste) muss einen der Werte enthalten. `{"iss": [...]}` legt den Issuer fest. Ein fehlender Claim lehnt ab. |
+| `require_verified_email` | Standardmäßig an: die Allowlist akzeptiert nur eine vom IdP verifizierte E-Mail. |
+
+Admin und Operator-Konsole speichern Listen in einer festen Form und
+lehnen Werte ab, die sich nicht parsen lassen. Ein trotzdem ungültiger Wert
+lehnt jede Anmeldung über den Anbieter ab.
+
+Eine abgelehnte Anmeldung landet im Server-Log und im Audit-Log
+(`source = sso:<surface>`, `changes.rule`, z. B. `domain_not_allowed`).
+Der Browser sieht eine allgemeine Meldung; die Tenant-Login-Seite zeigt
+zusätzlich die `access_denied_message` des Tenants (aus `SsoTenantPolicy`), escaped.
+
+### id_token-Vertrauen
+
+Profildaten kommen von `/userinfo` über TLS. Claims, die nur ein id_token
+trägt (`tid`, `iss`, `xms_edov`), werden erst genutzt, wenn das id_token
+besteht: Signatur gegen das JWKS des Issuers (RS256 oder ES256; gecacht
+gemäß `max-age`, bei unbekanntem Schlüssel höchstens einmal pro Minute neu
+geladen), `aud` enthält die Client-ID, `exp`/`nbf` mit einer Minute
+Toleranz, der Issuer (Microsoft: `https://login.microsoftonline.com/{tid}/v2.0`)
+und dasselbe `sub` wie userinfo. Sonst fehlen diese Claims, und eine Regel,
+die sie braucht, lehnt ab. Eine Microsoft-E-Mail gilt als verifiziert, wenn
+`xms_edov` wahr ist oder der Anbieter `allowed_idp_tenants` festlegt und die
+`tid` des Tokens darin steht.
+
 ## Secret-Speicherung
 
 `client_secret` wird **im Ruhezustand verschlüsselt** mit XChaCha20-Poly1305
@@ -306,8 +342,9 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
 - SSO-Sessions sind die gewöhnliche Admin-Session — das Rotieren oder
   Deaktivieren des verknüpften Benutzers invalidiert sie über das bestehende
   Live-Gate.
-- Das Vertrauensmodell ist `/userinfo` über TLS (das id_token wird nicht
-  unabhängig verifiziert); stellen Sie dem Admin HTTPS voran.
+- Das Vertrauensmodell ist `/userinfo` über TLS; id_token-Claims zählen erst
+  nach der JWKS-Prüfung (siehe [id_token-Vertrauen](#id_token-vertrauen)).
+  Stellen Sie dem Admin HTTPS voran.
 
 ## Siehe auch
 
