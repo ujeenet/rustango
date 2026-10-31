@@ -159,7 +159,6 @@ async fn provider(pool: &Pool, slug: &str, allow_email_link: bool) {
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),
@@ -1543,28 +1542,35 @@ async fn shared_roles_need_tenant_approval(pool: &Pool) {
     }
     // A stored override row parses into the same rule.
     rustango::testkit::matrix::fresh_table::<SsoSharedOverride>(pool).await;
-    SsoSharedOverride {
+    let row = |slug: &str| SsoSharedOverride {
         id: Auto::default(),
-        shared_slug: "sh".into(),
+        shared_slug: slug.into(),
+        shared_provider_id: None,
+        shared_issuer: None,
         allowed_email_domains: None,
         blocked_email_domains: Some("x.org".into()),
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: None,
         signup_mode: Some("closed".into()),
+        allow_email_link: Some(false),
+        allow_email_link_staff: None,
         sso_only: Some(true),
         session_ttl_secs: Some(60),
         superuser_session_ttl_secs: None,
         allowed_roles: Some(viewer.clone()),
-    }
-    .insert_pool(pool)
-    .await
-    .unwrap();
-    let loaded = SharedOverride::load(pool, "sh").await.unwrap().unwrap();
+    };
+    row("sh").insert_pool(pool).await.unwrap();
+    // The shared row as a sign-in sees it.
+    let shared = p.key(LinkSource::Shared);
+    let loaded = SharedOverride::load(pool, &shared, "sh")
+        .await
+        .unwrap()
+        .unwrap();
     assert!(loaded.lifecycle.sso_only);
+    assert!(loaded.email_link_off && !loaded.email_link_staff_off);
     assert_eq!(loaded.signup_mode, Some(SignupMode::Closed));
-    assert_eq!(loaded.allowed_roles.names(), [viewer]);
+    assert_eq!(loaded.allowed_roles.names(), [viewer.clone()]);
     let policy = p.effective_policy().shared_override(Ok(Some(loaded)));
     assert_eq!(policy.session_ttl(3600, false), 60);
     assert_eq!(
@@ -1574,7 +1580,41 @@ async fn shared_roles_need_tenant_approval(pool: &Pool) {
             .rule(),
         "domain_blocked"
     );
-    assert!(SharedOverride::load(pool, "other").await.unwrap().is_none());
+    // First use bound it to the row: a rename keeps it.
+    assert!(SharedOverride::load(pool, &shared, "renamed")
+        .await
+        .unwrap()
+        .is_some());
+    // A new row under the old slug does not inherit it.
+    provider(pool, "sh-new", false).await;
+    let newer = resolve_by_slug(pool, "sh-new", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Shared);
+    assert_ne!(newer, shared);
+    assert!(SharedOverride::load(pool, &newer, "sh")
+        .await
+        .unwrap()
+        .is_none());
+    // The same row repointed at another IdP refuses until made again.
+    set(
+        pool,
+        "sh",
+        "issuer_url",
+        SqlValue::String("https://other-idp.example".into()),
+    )
+    .await;
+    let repointed = resolve_by_slug(pool, "sh", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Shared);
+    assert!(SharedOverride::load(pool, &repointed, "sh").await.is_err());
+    // Two unbound overrides of one slug are ambiguous.
+    row("sh-new").insert_pool(pool).await.unwrap();
+    row("sh-new").insert_pool(pool).await.unwrap();
+    assert!(SharedOverride::load(pool, &newer, "sh-new").await.is_err());
     rustango::testkit::matrix::drop_table(pool, "rustango_sso_shared_overrides").await;
 }
 

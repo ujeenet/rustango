@@ -269,6 +269,38 @@ impl IssuerRule {
     }
 }
 
+/// Microsoft's multi-tenant endpoints: any Entra directory signs in.
+const MICROSOFT_MULTI_TENANT: &[&str] = &[
+    "https://login.microsoftonline.com/common/v2.0",
+    "https://login.microsoftonline.com/organizations/v2.0",
+];
+
+/// Whether `issuer` is a Microsoft endpoint any directory signs in through.
+#[must_use]
+pub fn is_microsoft_multi_tenant(issuer: &str) -> bool {
+    let issuer = issuer.trim_end_matches('/');
+    MICROSOFT_MULTI_TENANT
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(issuer))
+}
+
+/// The id_token issuer rule for a discovery doc of `issuer` naming `doc_iss`.
+/// It must be `issuer` itself, or Microsoft's `{tenantid}` template for a
+/// multi-tenant endpoint, which then matches each token's signed `tid`.
+fn discovered_issuer_rule(issuer: &str, doc_iss: Option<&str>) -> Result<IssuerRule, String> {
+    const MICROSOFT_TEMPLATE: &str = "https://login.microsoftonline.com/{tenantid}/v2.0";
+    match doc_iss {
+        Some(iss) if iss.trim_end_matches('/') == issuer => {
+            Ok(IssuerRule::AnyOf(vec![iss.to_owned()]))
+        }
+        Some(iss) if iss == MICROSOFT_TEMPLATE && is_microsoft_multi_tenant(issuer) => {
+            Ok(IssuerRule::MicrosoftTenant)
+        }
+        Some(iss) => Err(format!("discovery doc issuer `{iss}` is not `{issuer}`")),
+        None => Err("discovery doc has no `issuer`".to_owned()),
+    }
+}
+
 impl std::fmt::Debug for OAuth2Provider {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuth2Provider")
@@ -466,24 +498,13 @@ impl OAuth2Provider {
         let doc: DiscoveryDoc = serde_json::from_slice(&bytes)
             .map_err(|e| OAuthError::Discovery(format!("decode discovery doc: {e}")))?;
         // A doc for another issuer would pin its keys and endpoints to ours.
-        match doc.issuer.as_deref() {
-            Some(iss) if iss.trim_end_matches('/') == issuer => {}
-            Some(iss) => {
-                return Err(OAuthError::Discovery(format!(
-                    "discovery doc issuer `{iss}` is not `{issuer}`"
-                )))
-            }
-            None => {
-                return Err(OAuthError::Discovery(
-                    "discovery doc has no `issuer`".to_owned(),
-                ))
-            }
-        }
+        let rule =
+            discovered_issuer_rule(issuer, doc.issuer.as_deref()).map_err(OAuthError::Discovery)?;
         self.auth_url = doc.authorization_endpoint;
         self.token_url = doc.token_endpoint;
         self.userinfo_url = doc.userinfo_endpoint;
-        if let (Some(iss), Some(jwks)) = (doc.issuer, doc.jwks_uri) {
-            self.id_token_keys = Some((jwks, IssuerRule::AnyOf(vec![iss])));
+        if let Some(jwks) = doc.jwks_uri {
+            self.id_token_keys = Some((jwks, rule));
         }
         Ok(self)
     }
@@ -972,6 +993,44 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Microsoft's /common and /organizations docs name a `{tenantid}`
+    /// template; only those accept it, and then the token's `tid` decides.
+    #[test]
+    fn microsoft_multi_tenant_discovery_issuer_is_a_template() {
+        const TEMPLATE: &str = "https://login.microsoftonline.com/{tenantid}/v2.0";
+        for issuer in [
+            "https://login.microsoftonline.com/common/v2.0",
+            "https://login.microsoftonline.com/organizations/v2.0",
+        ] {
+            let rule = discovered_issuer_rule(issuer, Some(TEMPLATE)).unwrap();
+            assert_eq!(rule, IssuerRule::MicrosoftTenant, "{issuer}");
+            let claims = |iss: &str, tid: &str| {
+                serde_json::json!({"iss": iss, "tid": tid})
+                    .as_object()
+                    .unwrap()
+                    .clone()
+            };
+            assert!(rule.accepts(&claims("https://login.microsoftonline.com/t1/v2.0", "t1")));
+            assert!(!rule.accepts(&claims("https://login.microsoftonline.com/t2/v2.0", "t1")));
+            assert!(!rule.accepts(&claims(TEMPLATE, "t1")));
+        }
+        for issuer in [
+            "https://login.microsoftonline.com/0000-tenant/v2.0",
+            "https://idp.example.com",
+        ] {
+            assert!(
+                discovered_issuer_rule(issuer, Some(TEMPLATE)).is_err(),
+                "{issuer}"
+            );
+        }
+        assert_eq!(
+            discovered_issuer_rule("https://idp.example.com", Some("https://idp.example.com/")),
+            Ok(IssuerRule::AnyOf(vec!["https://idp.example.com/".into()]))
+        );
+        assert!(discovered_issuer_rule("https://idp.example.com", Some("https://evil")).is_err());
+        assert!(discovered_issuer_rule("https://idp.example.com", None).is_err());
+    }
 
     #[test]
     fn pkce_challenge_matches_rfc_7636_appendix_b_test_vector() {

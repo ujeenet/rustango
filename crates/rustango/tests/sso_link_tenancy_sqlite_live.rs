@@ -424,7 +424,6 @@ fn provider_row(issuer: &str, slug: &str, allow_email_link: bool) -> SsoProvider
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),

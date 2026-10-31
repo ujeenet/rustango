@@ -1,6 +1,6 @@
 {
   "name": "0013_auto",
-  "created_at": "2026-10-31T13:31:39.837089+00:00",
+  "created_at": "2026-10-31T18:03:49.668217+00:00",
   "prev": "0011_create_index_rustango_sso_links_provider_source_provider_id_subject_idx",
   "atomic": true,
   "snapshot": {
@@ -918,14 +918,6 @@
             "max_length": 150
           },
           {
-            "name": "require_verified_email",
-            "column": "require_verified_email",
-            "ty": "bool",
-            "nullable": false,
-            "primary_key": false,
-            "default": "true"
-          },
-          {
             "name": "required_claims",
             "column": "required_claims",
             "ty": "json",
@@ -1054,6 +1046,20 @@
         "model": "SsoSharedOverride",
         "fields": [
           {
+            "name": "allow_email_link",
+            "column": "allow_email_link",
+            "ty": "bool",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
+            "name": "allow_email_link_staff",
+            "column": "allow_email_link_staff",
+            "ty": "bool",
+            "nullable": true,
+            "primary_key": false
+          },
+          {
             "name": "allowed_email_domains",
             "column": "allowed_email_domains",
             "ty": "string",
@@ -1102,13 +1108,6 @@
             "auto": true
           },
           {
-            "name": "require_verified_email",
-            "column": "require_verified_email",
-            "ty": "bool",
-            "nullable": true,
-            "primary_key": false
-          },
-          {
             "name": "required_claims",
             "column": "required_claims",
             "ty": "json",
@@ -1124,13 +1123,28 @@
             "primary_key": false
           },
           {
+            "name": "shared_issuer",
+            "column": "shared_issuer",
+            "ty": "string",
+            "nullable": true,
+            "primary_key": false,
+            "max_length": 300
+          },
+          {
+            "name": "shared_provider_id",
+            "column": "shared_provider_id",
+            "ty": "i64",
+            "nullable": true,
+            "primary_key": false,
+            "unique": true
+          },
+          {
             "name": "shared_slug",
             "column": "shared_slug",
             "ty": "string",
             "nullable": false,
             "primary_key": false,
-            "max_length": 64,
-            "unique": true
+            "max_length": 64
           },
           {
             "name": "signup_mode",
@@ -1532,10 +1546,29 @@
         "method": "btree"
       },
       {
+        "name": "rustango_sso_links_provisioned_created_at_idx",
+        "table": "rustango_sso_links",
+        "columns": [
+          "provisioned",
+          "created_at"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
         "name": "rustango_sso_links_user_id_idx",
         "table": "rustango_sso_links",
         "columns": [
           "user_id"
+        ],
+        "unique": false,
+        "method": "btree"
+      },
+      {
+        "name": "rustango_sso_shared_overrides_shared_slug_idx",
+        "table": "rustango_sso_shared_overrides",
+        "columns": [
+          "shared_slug"
         ],
         "unique": false,
         "method": "btree"
@@ -1654,14 +1687,6 @@
       "schema": {
         "AddColumn": {
           "table": "rustango_sso_providers",
-          "column": "require_verified_email"
-        }
-      }
-    },
-    {
-      "schema": {
-        "AddColumn": {
-          "table": "rustango_sso_providers",
           "column": "required_claims"
         }
       }
@@ -1762,10 +1787,37 @@
     {
       "schema": {
         "CreateIndex": {
+          "name": "rustango_sso_links_provisioned_created_at_idx",
+          "table": "rustango_sso_links",
+          "columns": [
+            "provisioned",
+            "created_at"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
           "name": "rustango_sso_links_user_id_idx",
           "table": "rustango_sso_links",
           "columns": [
             "user_id"
+          ],
+          "unique": false,
+          "method": "btree"
+        }
+      }
+    },
+    {
+      "schema": {
+        "CreateIndex": {
+          "name": "rustango_sso_shared_overrides_shared_slug_idx",
+          "table": "rustango_sso_shared_overrides",
+          "columns": [
+            "shared_slug"
           ],
           "unique": false,
           "method": "btree"

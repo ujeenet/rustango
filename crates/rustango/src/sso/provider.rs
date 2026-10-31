@@ -116,10 +116,6 @@ pub struct SsoProvider {
     #[rustango(default = "'{}'")]
     pub required_claims: serde_json::Value,
 
-    /// The email domain rules only accept an IdP-verified email.
-    #[rustango(default = "true")]
-    pub require_verified_email: bool,
-
     /// Who may sign up: `closed`, `invite_only`, `allowlist` or `open`.
     /// Empty: the sign-in surface's default.
     #[rustango(
@@ -231,7 +227,6 @@ const DEFERRED: &[&str] = &[
     "allowed_idp_tenants",
     "allowed_hosted_domains",
     "required_claims",
-    "require_verified_email",
     "signup_mode",
     "default_roles",
     "role_map",
@@ -254,7 +249,6 @@ const SIGN_IN_COLUMNS: &[&str] = &[
     "allowed_idp_tenants",
     "allowed_hosted_domains",
     "required_claims",
-    "require_verified_email",
 ];
 
 /// The sign-up policy columns.
@@ -489,15 +483,12 @@ fn policy_of_row(
         other => Err(bad(c, other)),
     };
     let claims = json_of(r, "required_claims")?;
-    let verified = flag(r, "require_verified_email")
-        .ok_or_else(|| bad("require_verified_email", r.get("require_verified_email")))?;
     SignInPolicy::parse(&SignInColumns {
         allowed_email_domains: list("allowed_email_domains")?,
         blocked_email_domains: list("blocked_email_domains")?,
         allowed_idp_tenants: list("allowed_idp_tenants")?,
         allowed_hosted_domains: list("allowed_hosted_domains")?,
         required_claims: Some(&claims),
-        require_verified_email: verified,
     })
 }
 
@@ -723,7 +714,6 @@ mod tests {
             ("allowed_idp_tenants", SqlValue::Null),
             ("allowed_hosted_domains", SqlValue::Null),
             ("required_claims", SqlValue::String("{}".into())),
-            ("require_verified_email", SqlValue::I64(1)),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_owned(), v))
@@ -734,17 +724,15 @@ mod tests {
         r
     }
 
-    /// A value of the wrong type, or a NULL flag, refuses rather than reading as "no rule".
+    /// A value of the wrong type refuses rather than reading as "no rule".
     #[test]
     fn an_unexpected_value_refuses() {
         let p = policy_of_row(&row(&[])).unwrap();
-        assert!(p.allowed_email_domains.is_some() && p.require_verified_email);
+        assert!(p.allowed_email_domains.is_some());
         for bad in [
             ("allowed_email_domains", SqlValue::I64(5)),
             ("blocked_email_domains", SqlValue::Bool(true)),
             ("required_claims", SqlValue::Null),
-            ("require_verified_email", SqlValue::Null),
-            ("require_verified_email", SqlValue::String("yes".into())),
         ] {
             assert!(policy_of_row(&row(&[bad.clone()])).is_err(), "{bad:?}");
         }

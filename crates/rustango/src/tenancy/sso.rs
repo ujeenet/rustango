@@ -113,8 +113,6 @@ pub struct SharedSsoProvider {
     pub allowed_hosted_domains: Option<String>,
     #[rustango(default = "'{}'")]
     pub required_claims: serde_json::Value,
-    #[rustango(default = "true")]
-    pub require_verified_email: bool,
     #[rustango(
         max_length = 16,
         choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
@@ -273,7 +271,7 @@ pub(crate) async fn tenant_policy(
 ) -> EffectivePolicy {
     let mut policy = cfg.effective_policy();
     if key.source() == LinkSource::Shared {
-        policy = policy.shared_override(SharedOverride::load(tenant_pool, slug).await);
+        policy = policy.shared_override(SharedOverride::load(tenant_pool, key, slug).await);
     }
     match settings {
         Ok(s) => policy.tenant(s),

@@ -399,7 +399,6 @@ async fn member_sso_router_serves_a_non_default_backend() {
         allowed_idp_tenants: None,
         allowed_hosted_domains: None,
         required_claims: serde_json::json!({}),
-        require_verified_email: true,
         signup_mode: None,
         default_roles: None,
         role_map: serde_json::json!({}),

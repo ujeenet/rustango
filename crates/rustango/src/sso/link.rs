@@ -109,6 +109,12 @@ impl ProviderKey {
         self.source
     }
 
+    /// The provider row's primary key.
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
+    pub(crate) fn provider_id(&self) -> i64 {
+        self.provider_id
+    }
+
     /// The stored issuer (`kind` or `kind|issuer_url`).
     #[must_use]
     pub fn issuer(&self) -> &str {
@@ -125,6 +131,8 @@ impl ProviderKey {
     unique_together = "provider_source, provider_id, key_sha256",
     // Sign-in looks a link up by subject.
     index("provider_source, provider_id, subject"),
+    // The hourly sign-up count.
+    index("provisioned, created_at"),
     admin(
         list_display = "provider_source, provider_id, subject, user_id, created_at",
         search_fields = "subject",

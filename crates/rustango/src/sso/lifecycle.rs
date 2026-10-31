@@ -164,7 +164,13 @@ async fn shared_rules(
     let own = read_lifecycle::<SharedSsoProvider>(registry, id)
         .await
         .map_err(|e| e.0)?;
-    let tenant = super::policy::SharedOverride::load(pool, &row.slug)
+    let key = super::link::ProviderKey::for_row(
+        LinkSource::Shared,
+        row.id,
+        &row.kind,
+        row.issuer_url.as_deref(),
+    );
+    let tenant = super::policy::SharedOverride::load(pool, &key, &row.slug)
         .await
         .map_err(|e| e.0)?;
     Ok(Some(match tenant {
