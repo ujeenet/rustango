@@ -4,9 +4,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed
-
-- A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
 **Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has a `policy` field. See UPGRADING.
 
 ### Added
@@ -15,6 +12,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The SSO callbacks read claims only an id_token carries (`tid`, `iss`) after checking its signature against the issuer's JWKS (RS256, ES256), its `aud`, `exp` and issuer. A Microsoft email counts as verified when `xms_edov` is true or the provider pins the token's `tid`.
 - Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
 - The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`); these do nothing yet.
+
+### Fixed
+
+- A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
 
 ## [0.61.14] — 2026-10-30
 
