@@ -29,6 +29,7 @@
 #[cfg(any(feature = "tenancy", feature = "admin-sso"))]
 pub(crate) mod check;
 pub mod link;
+pub mod policy;
 pub mod provider;
 pub use link::{LinkSource, ProviderKey, SsoLink, StaleLinks};
 pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
@@ -212,6 +213,7 @@ struct Endpoints {
     auth_url: String,
     token_url: String,
     userinfo_url: Option<String>,
+    id_token_keys: Option<(String, crate::oauth2::IssuerRule)>,
 }
 
 /// A discovery outcome: the endpoints, or the failure's message.
@@ -293,6 +295,9 @@ async fn discovered(
                             auth_url: p.auth_url.clone(),
                             token_url: p.token_url.clone(),
                             userinfo_url: p.userinfo_url.clone(),
+                            id_token_keys: p
+                                .id_token_keys()
+                                .map(|(u, i)| (u.to_owned(), i.clone())),
                         });
                     remember(
                         &mut DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner),
@@ -308,11 +313,14 @@ async fn discovered(
         }
     };
     let e = found.map_err(OAuthError::Discovery)?;
-    let p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
-    Ok(match e.userinfo_url {
-        Some(u) => p.with_userinfo_url(u),
-        None => p,
-    })
+    let mut p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
+    if let Some(u) = e.userinfo_url {
+        p = p.with_userinfo_url(u);
+    }
+    if let Some((jwks, issuer)) = e.id_token_keys {
+        p = p.with_id_token_keys(jwks, issuer);
+    }
+    Ok(p)
 }
 
 /// Insert `found`, dropping expired entries and then the oldest when `max` is reached.
@@ -512,6 +520,7 @@ mod tests {
             auth_url: "a".into(),
             token_url: "t".into(),
             userinfo_url: None,
+            id_token_keys: None,
         };
         let mut map = HashMap::new();
         for k in ["one", "two", "three"] {

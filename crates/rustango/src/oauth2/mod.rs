@@ -2,21 +2,19 @@
 //!
 //! [`OAuth2Provider`] handles **both** pure OAuth2 (GitHub, Discord, Slack)
 //! and OpenID Connect (Google, Microsoft, Apple, Keycloak, Auth0, Okta) by
-//! treating the provider's `/userinfo` endpoint as the identity source. We
-//! skip `id_token` JWT verification on purpose — TLS to a discovered
-//! `userinfo_endpoint` is the trust anchor instead. That trade buys
-//! uniform handling across both protocol shapes and avoids pulling a
-//! JWT/JWKS stack into the dep tree.
+//! treating the provider's `/userinfo` endpoint as the identity source.
+//! TLS to a discovered `userinfo_endpoint` is the trust anchor for the
+//! profile. This module never trusts the `id_token`; the `sso` feature
+//! reads claims only the id_token carries (Microsoft `tid`, `iss`) after
+//! checking its signature against the issuer's JWKS, its `aud`, `exp` and `iss`.
 //!
 //! ## Security notes (audit L2)
 //!
 //! * **CSRF is covered by the `state` parameter** (CSPRNG-generated,
 //!   sealed into the flow cookie, constant-time compared on callback).
-//! * **No OIDC `nonce`** is sent. With the userinfo-over-TLS model the
-//!   `id_token` is never trusted, so a `nonce` (which binds a session to
-//!   an `id_token`) has nothing to bind to; `state` carries the CSRF
-//!   guarantee. If you switch to trusting the `id_token`, add + verify a
-//!   `nonce`.
+//! * **No OIDC `nonce`** is sent. The id_token comes straight from the
+//!   token endpoint over TLS in exchange for a PKCE-bound code, so no
+//!   front-channel token can be injected; `state` carries the CSRF guarantee.
 //! * **`redirect_uri` is not re-validated locally** — it's fixed per
 //!   provider at registration and enforced by the provider's allowlist.
 //!   Keep the registered `redirect_uri` exact (no open wildcards) on the
@@ -229,6 +227,36 @@ pub struct OAuth2Provider {
     http: EgressCache,
     /// Fixed egress policy; `None` reads the operator allowlist per call.
     egress: Option<TargetPolicy>,
+    /// Where the id_token's signing keys are, and its expected issuer.
+    id_token_keys: Option<(String, IssuerRule)>,
+}
+
+/// The `iss` an id_token must carry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum IssuerRule {
+    /// One of these, exactly.
+    AnyOf(Vec<String>),
+    /// `https://login.microsoftonline.com/{tid}/v2.0` for the token's own `tid`.
+    MicrosoftTenant,
+}
+
+impl IssuerRule {
+    /// Whether `claims` carry an accepted `iss`.
+    #[must_use]
+    pub fn accepts(&self, claims: &serde_json::Map<String, serde_json::Value>) -> bool {
+        let Some(iss) = claims.get("iss").and_then(serde_json::Value::as_str) else {
+            return false;
+        };
+        match self {
+            Self::AnyOf(list) => list.iter().any(|i| i == iss),
+            Self::MicrosoftTenant => claims
+                .get("tid")
+                .and_then(serde_json::Value::as_str)
+                .filter(|t| !t.is_empty())
+                .is_some_and(|tid| iss == format!("https://login.microsoftonline.com/{tid}/v2.0")),
+        }
+    }
 }
 
 impl std::fmt::Debug for OAuth2Provider {
@@ -277,7 +305,21 @@ impl OAuth2Provider {
             client_config: None,
             http: EgressCache::default(),
             egress: None,
+            id_token_keys: None,
         }
+    }
+
+    /// Verify id_tokens against the JWKS at `jwks_uri`, issued by `issuer`.
+    #[must_use]
+    pub fn with_id_token_keys(mut self, jwks_uri: impl Into<String>, issuer: IssuerRule) -> Self {
+        self.id_token_keys = Some((jwks_uri.into(), issuer));
+        self
+    }
+
+    /// The JWKS URL and issuer rule, when id_tokens can be verified.
+    #[must_use]
+    pub fn id_token_keys(&self) -> Option<(&str, &IssuerRule)> {
+        self.id_token_keys.as_ref().map(|(u, i)| (u.as_str(), i))
     }
 
     #[must_use]
@@ -374,6 +416,12 @@ impl OAuth2Provider {
         p.discover(issuer.as_ref(), &TargetPolicy::from_env()).await
     }
 
+    /// The egress policy calls run under.
+    #[cfg(feature = "sso")]
+    pub(crate) fn egress_policy(&self) -> TargetPolicy {
+        self.egress.clone().unwrap_or_else(TargetPolicy::from_env)
+    }
+
     /// Pin the egress policy for every later call.
     #[cfg(feature = "sso")]
     pub(crate) fn with_egress(mut self, policy: TargetPolicy) -> Self {
@@ -410,6 +458,9 @@ impl OAuth2Provider {
         self.auth_url = doc.authorization_endpoint;
         self.token_url = doc.token_endpoint;
         self.userinfo_url = doc.userinfo_endpoint;
+        if let (Some(iss), Some(jwks)) = (doc.issuer, doc.jwks_uri) {
+            self.id_token_keys = Some((jwks, IssuerRule::AnyOf(vec![iss])));
+        }
         Ok(self)
     }
 
@@ -620,12 +671,54 @@ impl OAuth2Provider {
     }
 }
 
+impl OAuth2Provider {
+    /// GET `url` under this provider's egress policy: the capped body and
+    /// the response's `Cache-Control: max-age`, if any.
+    #[cfg(feature = "sso")]
+    pub(crate) async fn get_document(
+        &self,
+        url: &str,
+    ) -> Result<(Vec<u8>, Option<u64>), OAuthError> {
+        let policy = self.egress_policy();
+        let resp = self
+            .checked(url, reqwest::Method::GET, &policy)
+            .await?
+            .header("Accept", "application/json")
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(OAuthError::BadStatus {
+                status: status.as_u16(),
+                body: error_code(resp).await,
+            });
+        }
+        let max_age = resp
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| {
+                v.split(',')
+                    .filter_map(|d| d.trim().strip_prefix("max-age="))
+                    .find_map(|n| n.trim().parse::<u64>().ok())
+            });
+        let body = capped_body(resp, SUCCESS_BODY_MAX)
+            .await
+            .map_err(|e| OAuthError::Http(format!("GET {url}: {e}")))?;
+        Ok((body, max_age))
+    }
+}
+
 #[derive(Deserialize)]
 struct DiscoveryDoc {
     authorization_endpoint: String,
     token_endpoint: String,
     #[serde(default)]
     userinfo_endpoint: Option<String>,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    jwks_uri: Option<String>,
 }
 
 async fn decode_or_error<T: serde::de::DeserializeOwned>(

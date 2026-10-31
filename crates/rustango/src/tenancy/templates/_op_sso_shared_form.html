@@ -75,6 +75,53 @@
       </td>
     </tr>
     <tr>
+      <th><label for="sso_allowed_email_domains">allowed email domains</label></th>
+      <td>
+        <textarea id="sso_allowed_email_domains" name="allowed_email_domains" rows="2" maxlength="2000"
+                  placeholder="client.org, *.client.org">{{ f.allowed_email_domains }}</textarea>
+        <div class="field-helper">Only these domains sign in. <code>*.client.org</code> means its subdomains only. Blank: any domain.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_blocked_email_domains">blocked email domains</label></th>
+      <td>
+        <textarea id="sso_blocked_email_domains" name="blocked_email_domains" rows="2" maxlength="2000"
+                  placeholder="gmail.com">{{ f.blocked_email_domains }}</textarea>
+        <div class="field-helper">Never sign in, even when allowed above.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_allowed_idp_tenants">IdP tenants</label></th>
+      <td>
+        <input type="text" id="sso_allowed_idp_tenants" name="allowed_idp_tenants" maxlength="1000"
+               value="{{ f.allowed_idp_tenants }}">
+        <div class="field-helper">Microsoft directory ids (<code>tid</code>) allowed to sign in.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_allowed_hosted_domains">hosted domains</label></th>
+      <td>
+        <input type="text" id="sso_allowed_hosted_domains" name="allowed_hosted_domains" maxlength="1000"
+               value="{{ f.allowed_hosted_domains }}">
+        <div class="field-helper">Google Workspace domains (<code>hd</code>) allowed to sign in.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_required_claims">required claims</label></th>
+      <td>
+        <textarea id="sso_required_claims" name="required_claims" rows="2"
+                  placeholder='{"roles": ["App.User"]}'>{{ f.required_claims }}</textarea>
+        <div class="field-helper">JSON: each claim must hold one of its values.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_require_verified_email">verified email</label></th>
+      <td>
+        <input type="checkbox" id="sso_require_verified_email" name="require_verified_email"{% if f.require_verified_email == "on" %} checked{% endif %}>
+        <div class="field-helper">The domain allowlist only accepts an email the IdP verified.</div>
+      </td>
+    </tr>
+    <tr>
       <th>callback URL</th>
       <td>
         <code class="sso-callback" data-template="{{ callback.pattern }}">{{ callback.pattern }}</code>

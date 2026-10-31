@@ -94,6 +94,93 @@ pub struct SsoProvider {
     #[rustango(default = "false")]
     pub allow_email_link: bool,
 
+    /// Only emails in these domains sign in: `client.org`, `*.client.org`
+    /// (subdomains only), comma or newline separated. Empty: any domain.
+    #[rustango(max_length = 2000)]
+    pub allowed_email_domains: Option<String>,
+
+    /// Emails in these domains never sign in; beats the allowed list.
+    #[rustango(max_length = 2000)]
+    pub blocked_email_domains: Option<String>,
+
+    /// Microsoft directory ids (`tid`) allowed to sign in. Needs a verified id_token.
+    #[rustango(max_length = 1000)]
+    pub allowed_idp_tenants: Option<String>,
+
+    /// Google Workspace domains (`hd`) allowed to sign in.
+    #[rustango(max_length = 1000)]
+    pub allowed_hosted_domains: Option<String>,
+
+    /// `{"claim": ["value", ...]}`: each claim must hold one of its values.
+    /// `{"iss": [...]}` pins the issuer.
+    #[rustango(default = "'{}'")]
+    pub required_claims: serde_json::Value,
+
+    /// The email domain rules only accept an IdP-verified email.
+    #[rustango(default = "true")]
+    pub require_verified_email: bool,
+
+    /// Who may sign up: `closed`, `invite_only`, `allowlist` or `open`.
+    /// Empty: the sign-in surface's default.
+    #[rustango(
+        max_length = 16,
+        choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
+    )]
+    pub signup_mode: Option<String>,
+
+    /// Roles granted to a user created through this provider.
+    #[rustango(max_length = 1000)]
+    pub default_roles: Option<String>,
+
+    /// `{"<IdP group or role>": "<tenant role>"}`.
+    #[rustango(default = "'{}'")]
+    pub role_map: serde_json::Value,
+
+    /// Claims [`Self::role_map`] reads. Empty: `groups,roles`.
+    #[rustango(max_length = 255)]
+    pub role_claims: Option<String>,
+
+    /// Re-apply [`Self::role_map`] on every sign-in, not just the first.
+    #[rustango(default = "false")]
+    pub sync_roles_on_login: bool,
+
+    /// Where a new user's username comes from.
+    #[rustango(
+        max_length = 24,
+        default = "'email_local'",
+        choices = "email_local:Email local part, email:Email, preferred_username:Preferred username"
+    )]
+    pub username_from: String,
+
+    /// What a taken username does on sign-up.
+    #[rustango(
+        max_length = 16,
+        default = "'suffix'",
+        choices = "suffix:Add a suffix, refuse:Refuse"
+    )]
+    pub username_clash: String,
+
+    /// Refresh name and email from the IdP on every sign-in.
+    #[rustango(default = "false")]
+    pub sync_profile: bool,
+
+    /// Email linking may also link role holders (never superusers).
+    #[rustango(default = "false")]
+    pub allow_email_link_staff: bool,
+
+    /// Users of this provider may not sign in with a password.
+    #[rustango(default = "false")]
+    pub sso_only: bool,
+
+    /// Deactivate users this provider created after this many idle days.
+    pub auto_deactivate_after_days: Option<i32>,
+
+    /// Session lifetime after a sign-in through this provider.
+    pub session_ttl_secs: Option<i64>,
+
+    /// Session lifetime for a superuser.
+    pub superuser_session_ttl_secs: Option<i64>,
+
     /// Set on INSERT via `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
@@ -133,9 +220,103 @@ inventory::submit! {
     }
 }
 
-/// Columns provider reads leave out. `allow_email_link` is read on its own,
-/// so a table not yet migrated still serves logins.
-const DEFERRED: &[&str] = &["allow_email_link", "created_at", "updated_at"];
+/// Columns provider reads leave out. `allow_email_link` and the policy are
+/// read on their own, so a table not yet migrated still serves logins.
+const DEFERRED: &[&str] = &[
+    "allow_email_link",
+    "created_at",
+    "updated_at",
+    "allowed_email_domains",
+    "blocked_email_domains",
+    "allowed_idp_tenants",
+    "allowed_hosted_domains",
+    "required_claims",
+    "require_verified_email",
+    "signup_mode",
+    "default_roles",
+    "role_map",
+    "role_claims",
+    "sync_roles_on_login",
+    "username_from",
+    "username_clash",
+    "sync_profile",
+    "allow_email_link_staff",
+    "sso_only",
+    "auto_deactivate_after_days",
+    "session_ttl_secs",
+    "superuser_session_ttl_secs",
+];
+
+/// The sign-in policy columns.
+const SIGN_IN_COLUMNS: &[&str] = &[
+    "allowed_email_domains",
+    "blocked_email_domains",
+    "allowed_idp_tenants",
+    "allowed_hosted_domains",
+    "required_claims",
+    "require_verified_email",
+];
+
+/// Whether `table` lacks any of `cols`: a schema not yet migrated.
+pub(crate) async fn lacks_columns(pool: &Pool, table: &str, cols: &[&str]) -> bool {
+    match crate::migrate::ensure::live_columns(pool, table).await {
+        Ok(have) => cols.iter().any(|c| !have.contains(*c)),
+        Err(_) => false,
+    }
+}
+
+/// Row `id`'s sign-in policy. Columns not yet migrated give the default
+/// policy (with a warning); any other read error, or a value that does
+/// not parse, is an error, and sign-in through the row refuses.
+async fn read_policy<T: Model>(
+    pool: &Pool,
+    id: i64,
+) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
+    use super::policy::{PolicyError, SignInColumns, SignInPolicy};
+    let rows = match QuerySet::<T>::new()
+        .filter("id", id)
+        .only(SIGN_IN_COLUMNS)
+        .fetch(pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(e) if lacks_columns(pool, T::SCHEMA.table, SIGN_IN_COLUMNS).await => {
+            tracing::warn!(
+                target: "rustango::sso",
+                table = T::SCHEMA.table,
+                "SSO policy columns missing; run `migrate`. Using the default policy: {e}"
+            );
+            return Ok(SignInPolicy::default());
+        }
+        Err(e) => return Err(PolicyError(format!("read: {e}"))),
+    };
+    let Some(r) = rows.first() else {
+        return Err(PolicyError("the provider row vanished".into()));
+    };
+    let claims = match r.get("required_claims") {
+        Some(SqlValue::Json(v)) => Some(v.clone()),
+        Some(SqlValue::String(s)) => Some(
+            serde_json::from_str(s).map_err(|e| PolicyError(format!("required_claims: {e}")))?,
+        ),
+        _ => None,
+    };
+    let (a, b, c, d) = (
+        text(r.get("allowed_email_domains")),
+        text(r.get("blocked_email_domains")),
+        text(r.get("allowed_idp_tenants")),
+        text(r.get("allowed_hosted_domains")),
+    );
+    SignInPolicy::parse(&SignInColumns {
+        allowed_email_domains: a.as_deref(),
+        blocked_email_domains: b.as_deref(),
+        allowed_idp_tenants: c.as_deref(),
+        allowed_hosted_domains: d.as_deref(),
+        required_claims: claims.as_ref(),
+        require_verified_email: r
+            .get("require_verified_email")
+            .is_none_or(|v| int(Some(v)) != 0),
+    })
+}
 
 /// A provider row, shared by [`SsoProvider`] and `SharedSsoProvider`.
 /// `client_secret` is still encrypted.
@@ -205,6 +386,8 @@ pub struct ResolvedProvider {
     pub id: i64,
     /// The row's `allow_email_link`; `false` when it can't be read.
     pub allow_email_link: bool,
+    /// The row's sign-in rules; an error refuses every sign-in.
+    pub policy: Result<super::policy::SignInPolicy, super::policy::PolicyError>,
 }
 
 impl ResolvedProvider {
@@ -217,6 +400,12 @@ impl ResolvedProvider {
             &self.sso.provider,
             self.sso.issuer_url.as_deref(),
         )
+    }
+
+    /// The policy a sign-in through this row runs under.
+    #[must_use]
+    pub fn effective_policy(&self) -> super::policy::EffectivePolicy {
+        super::policy::EffectivePolicy::new(self.policy.clone(), self.allow_email_link)
     }
 }
 
@@ -249,7 +438,9 @@ pub(crate) async fn resolve_row<T: Model>(
             false
         }
     };
+    let policy = read_policy::<T>(pool, r.id).await;
     Ok(Some(ResolvedProvider {
+        policy,
         sso: ResolvedSso {
             provider: r.kind,
             issuer_url: r.issuer_url,

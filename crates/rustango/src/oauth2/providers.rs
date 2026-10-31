@@ -17,7 +17,7 @@
 
 use std::sync::Arc;
 
-use super::{NormalizedUser, OAuth2Provider, OAuthError, TokenResponse};
+use super::{IssuerRule, NormalizedUser, OAuth2Provider, OAuthError, TokenResponse};
 
 // --------------------------------------------------------------------- google
 // OIDC. Userinfo follows OIDC spec — default mapper handles it. Picks up
@@ -39,6 +39,13 @@ pub fn google(
         "https://oauth2.googleapis.com/token",
     )
     .with_userinfo_url("https://openidconnect.googleapis.com/v1/userinfo")
+    .with_id_token_keys(
+        "https://www.googleapis.com/oauth2/v3/certs",
+        IssuerRule::AnyOf(vec![
+            "https://accounts.google.com".into(),
+            "accounts.google.com".into(),
+        ]),
+    )
     .with_scopes(["openid", "email", "profile"])
     .with_extra_auth_params([("access_type", "offline"), ("prompt", "consent")])
 }
@@ -73,6 +80,10 @@ pub fn microsoft_for_tenant(
         format!("https://login.microsoftonline.com/{t}/oauth2/v2.0/token"),
     )
     .with_userinfo_url("https://graph.microsoft.com/oidc/userinfo")
+    .with_id_token_keys(
+        format!("https://login.microsoftonline.com/{t}/discovery/v2.0/keys"),
+        IssuerRule::MicrosoftTenant,
+    )
     .with_scopes(["openid", "email", "profile", "offline_access"])
 }
 
@@ -234,6 +245,10 @@ pub fn gitlab(
         "https://gitlab.com/oauth/token",
     )
     .with_userinfo_url("https://gitlab.com/oauth/userinfo")
+    .with_id_token_keys(
+        "https://gitlab.com/oauth/discovery/keys",
+        IssuerRule::AnyOf(vec!["https://gitlab.com".into()]),
+    )
     .with_scopes(["openid", "email", "profile"])
 }
 

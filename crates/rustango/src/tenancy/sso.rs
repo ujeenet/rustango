@@ -30,10 +30,14 @@ use crate::signals::auth::{
 use crate::sql::Pool;
 use crate::sso::build_provider_for;
 use crate::sso::link::{signal_refused, LinkSource, ProviderKey};
+use crate::sso::policy::{admit, refuse, AdmitRequest, Denied, Identity, RefusalContext, Surface};
 use crate::sso::provider::{load_rows, resolve_row, ResolvedProvider};
 
 /// The auth-signal `source` for a tenant console SSO sign-in.
 const SIGNAL_SOURCE: &str = "tenant_admin_sso";
+
+/// The `?sso_error=` of every refused sign-in: the rule stays server-side.
+pub(crate) const REFUSED: &str = "nouser";
 
 /// IdP callback params (`?code=…&state=…` or `?error=…`).
 #[derive(serde::Deserialize, Default)]
@@ -95,6 +99,53 @@ pub struct SharedSsoProvider {
     /// See [`SsoProvider::allow_email_link`].
     #[rustango(default = "false")]
     pub allow_email_link: bool,
+    // The access policy: see the same fields on `SsoProvider`.
+    #[rustango(max_length = 2000)]
+    pub allowed_email_domains: Option<String>,
+    #[rustango(max_length = 2000)]
+    pub blocked_email_domains: Option<String>,
+    #[rustango(max_length = 1000)]
+    pub allowed_idp_tenants: Option<String>,
+    #[rustango(max_length = 1000)]
+    pub allowed_hosted_domains: Option<String>,
+    #[rustango(default = "'{}'")]
+    pub required_claims: serde_json::Value,
+    #[rustango(default = "true")]
+    pub require_verified_email: bool,
+    #[rustango(
+        max_length = 16,
+        choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
+    )]
+    pub signup_mode: Option<String>,
+    #[rustango(max_length = 1000)]
+    pub default_roles: Option<String>,
+    #[rustango(default = "'{}'")]
+    pub role_map: serde_json::Value,
+    #[rustango(max_length = 255)]
+    pub role_claims: Option<String>,
+    #[rustango(default = "false")]
+    pub sync_roles_on_login: bool,
+    #[rustango(
+        max_length = 24,
+        default = "'email_local'",
+        choices = "email_local:Email local part, email:Email, preferred_username:Preferred username"
+    )]
+    pub username_from: String,
+    #[rustango(
+        max_length = 16,
+        default = "'suffix'",
+        choices = "suffix:Add a suffix, refuse:Refuse"
+    )]
+    pub username_clash: String,
+    #[rustango(default = "false")]
+    pub sync_profile: bool,
+    #[rustango(default = "false")]
+    pub allow_email_link_staff: bool,
+    #[rustango(default = "false")]
+    pub sso_only: bool,
+    pub auto_deactivate_after_days: Option<i32>,
+    pub session_ttl_secs: Option<i64>,
+    pub superuser_session_ttl_secs: Option<i64>,
     #[rustango(auto_now_add)]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
@@ -105,6 +156,13 @@ inventory::submit! {
     crate::admin::derived_fields::AdminDerivedField {
         table: "rustango_shared_sso_providers",
         derive: crate::sso::provider::admin_encrypt_secret,
+    }
+}
+
+inventory::submit! {
+    crate::admin::derived_fields::AdminDerivedField {
+        table: "rustango_shared_sso_providers",
+        derive: crate::sso::policy::admin_normalise,
     }
 }
 
@@ -204,6 +262,55 @@ fn derive_redirect(parts: &Parts, routes: &RouteConfig, slug: &str) -> Option<St
 /// The IdP callback path for `slug` under the tenant login path.
 pub(crate) fn callback_path(login_url: &str, slug: &str) -> String {
     format!("{login_url}/sso/{slug}/callback")
+}
+
+/// The login page's text for `?sso_error=`: a fixed message for a known
+/// code only, and after a refusal the tenant's own access-denied note.
+pub(crate) async fn login_notice(
+    tenant_pool: &Pool,
+    query: Option<&str>,
+) -> Option<(&'static str, Option<String>)> {
+    let code = query?
+        .split('&')
+        .find_map(|p| p.strip_prefix("sso_error="))?;
+    let notice = match code {
+        REFUSED | "inactive" => {
+            "You can't sign in with this account. Ask your administrator for access."
+        }
+        "denied" => "The sign-in was cancelled.",
+        "expired" | "callback" | "handshake" => "The sign-in did not finish. Please try again.",
+        "config" | "disabled" => "This sign-in option is not available right now.",
+        _ => return None,
+    };
+    let note = if matches!(code, REFUSED | "inactive") {
+        denied_note(tenant_pool).await
+    } else {
+        None
+    };
+    Some((notice, note))
+}
+
+/// The tenant's `access_denied_message`, if set and readable.
+async fn denied_note(pool: &Pool) -> Option<String> {
+    use crate::core::Model as _;
+    use crate::sso::policy::SsoTenantPolicy;
+    let table = SsoTenantPolicy::SCHEMA.table;
+    if !crate::migrate::try_table_exists_here(pool, table)
+        .await
+        .ok()?
+    {
+        return None;
+    }
+    QuerySet::<SsoTenantPolicy>::new()
+        .filter("name", "default")
+        .values_list_flat("access_denied_message")
+        .fetch::<Option<String>>(pool)
+        .await
+        .ok()?
+        .into_iter()
+        .flatten()
+        .map(|s| s.trim().to_owned())
+        .find(|s| !s.is_empty())
 }
 
 fn login_error(routes: &RouteConfig, code: &str) -> Response {
@@ -321,45 +428,38 @@ pub(super) async fn tenant_sso_callback(
             return login_error(routes, "config");
         }
     };
-    let normalized = match provider.complete(&flow, &code, &cb_state).await {
-        Ok((u, _t)) => u,
+    let identity = match provider.complete(&flow, &code, &cb_state).await {
+        Ok((u, tokens)) => Identity::from_handshake(&provider, u, &tokens).await,
         Err(e) => {
             tracing::warn!(target: "rustango::tenancy::sso", "handshake: {e}");
             return login_error(routes, "handshake");
         }
     };
+    let normalized = &identity.profile;
     let meta = || meta_from_parts(&parts.extensions, &parts.headers, Some(parts.uri.path()));
-    let uid = match crate::sso::link::sign_in(
-        tenant_pool,
-        &key,
-        cfg.allow_email_link,
-        &normalized,
-        &member_auth::TenantAccounts(tenant_pool),
-    )
-    .await
-    {
-        Ok(uid) => uid,
+    let policy = cfg.effective_policy();
+    let request = AdmitRequest::new(tenant_pool, Surface::TenantAdmin, &key, &policy, &identity);
+    let uid = match admit(request, &member_auth::TenantAccounts(tenant_pool)).await {
+        Ok(a) => a.user_id,
+        Err(Denied::Refused(r)) => {
+            let ctx = RefusalContext {
+                pool: tenant_pool,
+                surface: Surface::TenantAdmin,
+                signal_source: SIGNAL_SOURCE,
+                provider: slug,
+                key: &key,
+                identity: &identity,
+                tenant: Some(org.slug.clone()),
+                extensions: &parts.extensions,
+                headers: &parts.headers,
+                path: parts.uri.path(),
+            };
+            refuse(&ctx, &r).await;
+            return login_error(routes, REFUSED);
+        }
         Err(e) => {
-            tracing::warn!(
-                target: "rustango::tenancy::sso",
-                tenant = %org.slug,
-                slug,
-                provider_id = cfg.id,
-                issuer = key.issuer(),
-                subject = %normalized.provider_user_id,
-                "sso refused: {e}"
-            );
-            if let Some(reason) = e.failure_reason() {
-                signal_refused(
-                    SIGNAL_SOURCE,
-                    &normalized,
-                    reason,
-                    meta(),
-                    Some(org.slug.clone()),
-                )
-                .await;
-            }
-            return login_error(routes, "nouser");
+            tracing::error!(target: "rustango::tenancy::sso", tenant = %org.slug, slug, "sso sign-in failed: {e}");
+            return login_error(routes, REFUSED);
         }
     };
     let Some(user) = member_auth::tenant_user(tenant_pool, uid).await else {
@@ -368,7 +468,7 @@ pub(super) async fn tenant_sso_callback(
     if !user.active {
         signal_refused(
             SIGNAL_SOURCE,
-            &normalized,
+            normalized,
             AuthFailureReason::Inactive,
             meta(),
             Some(org.slug.clone()),
