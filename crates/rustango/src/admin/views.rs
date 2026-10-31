@@ -2805,13 +2805,18 @@ pub(crate) async fn update_submit(
     // row rolls the parent back too (#2339).
     // An extra host is checked after its UPDATE: retried once, as on create.
     #[cfg(feature = "tenancy")]
-    let mut retry = claims.retries();
+    let inline_hosts = inline_plan.extra_hosts();
+    #[cfg(feature = "tenancy")]
+    let mut retry = claims.retries() || !inline_hosts.is_empty();
     // The operator lock can deadlock with another admin write: retried once.
     #[cfg(feature = "tenancy")]
     let mut lock_retry = true;
     let (mut tx, deferred) = loop {
         #[cfg(feature = "tenancy")]
-        let mut tx = match claims.begin(&state.pool, &pk_value).await {
+        let mut tx = match claims
+            .begin_holding(&state.pool, &pk_value, &inline_hosts)
+            .await
+        {
             Ok(tx) => crate::audit::PoolBoundTx::opened_on(&state.pool, tx),
             Err(e) => return Ok(refused(claim_refusal(model, e)).await),
         };

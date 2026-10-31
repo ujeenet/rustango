@@ -181,6 +181,11 @@ struct RegistryState {
     /// `/<first segment>` → [`Org`] by `path_prefix` (`None` = known miss).
     /// The apex dispatch asks it on every apex request.
     prefix_cache: HostTtlCache<Org>,
+    /// Header slug → [`Org`] by `slug` (`None` = known miss). The page cache
+    /// resolves on every hit, so uncached it cost one registry query each.
+    slug_cache: HostTtlCache<Org>,
+    /// Listener port → [`Org`] by `port` (`None` = known miss).
+    port_cache: HostTtlCache<Org>,
     /// Last `rustango_orgs` fingerprint seen, so this pod notices another
     /// pod's writes without a shared cache. See [`sync_org_generation`].
     org_gen: GenerationPoll<super::org::OrgGeneration>,
@@ -202,6 +207,8 @@ impl RegistryState {
             org_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             host_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             prefix_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
+            slug_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
+            port_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             org_gen: GenerationPoll::new(),
             host_gen: GenerationPoll::new(),
             registry_down: Breaker::new(),
@@ -214,6 +221,8 @@ impl RegistryState {
         self.org_cache.clear();
         self.host_cache.clear();
         self.prefix_cache.clear();
+        self.slug_cache.clear();
+        self.port_cache.clear();
     }
 }
 
@@ -566,25 +575,42 @@ impl OrgResolver for PathPrefixResolver {
             return Ok(None);
         };
         let candidate = format!("/{first}");
-        // Cached like the host lookups, with the same invalidation.
         let st = state(registry);
-        sync_org_generation(registry, &st).await;
-        match st.prefix_cache.get(&candidate) {
-            Cached::Miss => return Ok(None),
-            Cached::Hit(org) => return Ok(Some(org)),
-            Cached::Absent => {}
-        }
-        let _flight = st.prefix_cache.single_flight(&candidate).await;
-        match st.prefix_cache.get(&candidate) {
-            Cached::Miss => return Ok(None),
-            Cached::Hit(org) => return Ok(Some(org)),
-            Cached::Absent => {}
-        }
-        let found =
-            find_active_org_by(registry, &st, Org::path_prefix.eq(candidate.clone())).await?;
-        st.prefix_cache.put(&candidate, found.clone());
-        Ok(found)
+        cached_org_by(registry, &st, &st.prefix_cache, &candidate, || {
+            Org::path_prefix.eq(candidate.clone())
+        })
+        .await
     }
+}
+
+/// Look `key` up in `cache`, else run [`find_active_org_by`] once for all
+/// waiters and cache the answer, a miss included. Same invalidation as the
+/// host lookups.
+async fn cached_org_by<F>(
+    registry: &Pool,
+    st: &RegistryState,
+    cache: &HostTtlCache<Org>,
+    key: &str,
+    filter: impl FnOnce() -> F,
+) -> Result<Option<Org>, TenancyError>
+where
+    F: Into<rustango::core::TypedFilter<Org>>,
+{
+    sync_org_generation(registry, st).await;
+    match cache.get(key) {
+        Cached::Miss => return Ok(None),
+        Cached::Hit(org) => return Ok(Some(org)),
+        Cached::Absent => {}
+    }
+    let _flight = cache.single_flight(key).await;
+    match cache.get(key) {
+        Cached::Miss => return Ok(None),
+        Cached::Hit(org) => return Ok(Some(org)),
+        Cached::Absent => {}
+    }
+    let found = find_active_org_by(registry, st, filter()).await?;
+    cache.put(key, found.clone());
+    Ok(found)
 }
 
 /// Whether `candidate` (`/<segment>`) was looked up and cached, hit or miss.
@@ -699,7 +725,11 @@ impl OrgResolver for HeaderResolver {
                 return Ok(None);
             }
         }
-        find_active_org_by(registry, &state(registry), Org::slug.eq(slug.to_owned())).await
+        let st = state(registry);
+        cached_org_by(registry, &st, &st.slug_cache, slug, || {
+            Org::slug.eq(slug.to_owned())
+        })
+        .await
     }
 }
 
@@ -727,7 +757,11 @@ impl OrgResolver for PortResolver {
         let Some(ListenerPort(port)) = parts.extensions.get::<ListenerPort>().copied() else {
             return Ok(None);
         };
-        find_active_org_by(registry, &state(registry), Org::port.eq(i32::from(port))).await
+        let st = state(registry);
+        cached_org_by(registry, &st, &st.port_cache, &port.to_string(), || {
+            Org::port.eq(i32::from(port))
+        })
+        .await
     }
 }
 
