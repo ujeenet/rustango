@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use crate::core::SqlValue;
 use crate::query::QuerySet;
-use crate::sql::{FetcherPool as _, Pool};
+use crate::sql::Pool;
 
 use super::link::{LinkSource, SsoLink};
 use super::policy::Lifecycle;
@@ -212,6 +212,7 @@ async fn sso_only(
 /// A read or write failed.
 #[cfg(feature = "tenancy")]
 pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Vec<i64>, String> {
+    use crate::sql::FetcherPool as _;
     use crate::tenancy::User;
     let links = match SsoLink::objects().fetch(pool).await {
         Ok(l) => l,

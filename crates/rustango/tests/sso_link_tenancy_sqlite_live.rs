@@ -2984,7 +2984,16 @@ async fn bare_admin_password_login_honours_sso_only() {
         }
     };
     assert!(login("ed").await, "before sso_only");
-    set_number(&pool, "corp", "sso_only", 1).await;
+    {
+        use rustango::sql::UpdaterPool as _;
+        SsoProvider::objects()
+            .filter("slug", "corp")
+            .update()
+            .set("sso_only", true)
+            .execute_pool(&pool)
+            .await
+            .unwrap();
+    }
     assert!(!login("ed").await, "sso_only refuses the password");
     assert!(login("root").await, "a superuser is never locked out");
 }
