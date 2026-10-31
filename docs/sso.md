@@ -268,7 +268,7 @@ sign-in rules. Every rule left empty admits anyone the IdP signs in.
 | `allowed_idp_tenants` | Microsoft directory ids (`tid`). Read only from a verified id_token. |
 | `allowed_hosted_domains` | Google Workspace domains (the `hd` claim). |
 | `required_claims` | JSON `{"claim": ["value", ...]}`: the claim (a string or a list) must hold one of the values. `{"iss": [...]}` pins the issuer. A missing claim refuses. |
-| `require_verified_email` | On by default: the allowlist accepts only an email the IdP verified. |
+| `require_verified_email` | Kept for stored rows: the allowlist always accepts only an email the IdP verified. |
 
 The admin and the operator console store lists in one canonical form and
 refuse a value that does not parse. A value that still does not parse
@@ -423,6 +423,41 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
 - Trust model is `/userinfo` over TLS; id_token claims count only after
   JWKS verification (see [id_token trust](#id_token-trust)). Front the
   admin with HTTPS.
+
+## Hardening
+
+- **Email links lock the password.** When SSO links an existing tenant
+  account by email (or a re-link invite links it), its password is made
+  unusable and its sessions end, in the link's transaction. Whoever
+  registered the email before its owner loses the account; the owner
+  resets the password to use one again. Any role, even one without
+  permissions, counts as privileged for email linking.
+- **One use per flow.** A callback completes a flow once (per process; the
+  IdP's one-time code covers other replicas). OIDC sign-ins send a `nonce`;
+  a verified id_token without it, or with another, is refused
+  (`id_token_replayed`). The member landing is the `?next` given to the
+  begin URL, sealed into the flow; a `?next` on the callback is ignored.
+- **`__Host-` flow cookies** on HTTPS at `Path=/` (the bare admin, a
+  tenant on its own host). A path-prefix tenant keeps the plain name.
+- **Invites.** A domain invite for a public suffix or free mail domain
+  (`@gmail.com`, `*.co.uk`) is refused, and a domain invite needs
+  `max_uses` or `expires_at`. Stored IdP display names are capped at 150
+  characters.
+- **Bare admin host.** With `security.allowed_hosts` (or
+  `Builder::allowed_hosts`), the SSO redirect URI is built only for a
+  listed Host.
+
+### Tenants on their own host and under a prefix
+
+A tenant can be reached on its own host (cookies at `Path=/`) and on the
+apex host under its prefix (`app.example.com/acme`, cookies at
+`Path=/acme`). Prefix tenants share one origin with the operator console
+and with each other: a cookie `Path` is not a security boundary there.
+Sessions and flows are bound to the tenant slug by their MAC, so one
+tenant's cookie never opens another's. Register both callback URLs at the
+IdP for a tenant reachable both ways:
+`https://acme.example.com/__login/sso/<slug>/callback` and
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## See also
 

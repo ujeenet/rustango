@@ -29,6 +29,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The admin no longer saves an SSO link with an `admin` source outside the bare admin's database, or a source that database does not hold.
 - A disabled tenant SSO provider no longer falls through to the shared provider with the same slug.
 - A refused SSO sign-in no longer counts against the IP's password-login limit.
+- An SSO email domain allowlist matches only an IdP-verified email, whatever `require_verified_email` says.
+- Shared SSO providers are superuser-only in the admin, and a role holder (any role) counts as privileged for email linking.
+- An SSO email link or re-link to an existing tenant account locks its password and ends its sessions, so whoever registered the email first loses access.
+- A tenant's own SSO provider is checked like the operator console's (slug, kind, issuer, `https` outside dev); the console shows an error instead of panicking when `RUSTANGO_SECRET_KEY` is unset.
+- SSO flows are single-use, OIDC sign-ins send a `nonce` the verified id_token must echo, flow cookies take the `__Host-` prefix at `/` over HTTPS, and the member landing (`?next`) is sealed at begin.
+- SSO invites refuse public suffix and free mail domains, a domain invite needs max uses or an expiry, and the stored IdP display name is capped at 150 characters.
+- The bare admin builds its SSO redirect URI only for a host on `security.allowed_hosts` (when set).
 
 ### Deprecated
 
