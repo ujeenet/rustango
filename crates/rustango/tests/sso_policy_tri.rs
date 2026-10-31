@@ -1073,6 +1073,69 @@ async fn a_relink_invite_links_its_user_once(pool: &Pool) {
         .is_empty());
 }
 
+/// The admin re-link action applies the sign-in's staff rule to every
+/// link before it changes any, and then re-links them all.
+async fn the_relink_action_checks_every_link_first(pool: &Pool) {
+    use rustango::testkit::sso_admin::relink;
+    let t = tok();
+    provider(pool, "ra", false).await;
+    let key = resolve_by_slug(pool, "ra", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let ann = plain_user(
+        pool,
+        &format!("ra-{t}"),
+        &format!("ra-{t}@client.org"),
+        false,
+    )
+    .await;
+    let bob = plain_user(
+        pool,
+        &format!("rb-{t}"),
+        &format!("rb-{t}@client.org"),
+        false,
+    )
+    .await;
+    let editor = role(pool, &format!("RA-{t}")).await;
+    rustango::tenancy::permissions::assign_role_pool(bob, editor, pool)
+        .await
+        .unwrap();
+    for (sub, uid) in [(format!("ra-{t}"), ann), (format!("rb-{t}"), bob)] {
+        create_link(pool, &key, &sub, uid).await.unwrap();
+    }
+    let link_of = |uid: i64| async move {
+        SsoLink::objects()
+            .filter("user_id", uid)
+            .fetch(pool)
+            .await
+            .unwrap()
+    };
+    let invites_for = |uid: i64| async move {
+        SsoInvite::objects()
+            .filter("link_user_id", uid)
+            .fetch(pool)
+            .await
+            .unwrap()
+            .len()
+    };
+    let pk = |l: &SsoLink| SqlValue::I64(*l.id.get().unwrap());
+    let (a, b) = (pk(&link_of(ann).await[0]), pk(&link_of(bob).await[0]));
+    // Bob holds a role and the provider does not link staff: nothing changes.
+    let err = relink(pool, &[a.clone(), b.clone()]).await.unwrap_err();
+    assert!(err.contains("role"), "{err}");
+    assert_eq!(link_of(ann).await.len(), 1, "ann's link was kept");
+    assert_eq!(invites_for(ann).await, 0);
+    relink(pool, &[a]).await.unwrap();
+    assert!(link_of(ann).await.is_empty());
+    assert_eq!(invites_for(ann).await, 1);
+    set(pool, "ra", "allow_email_link_staff", SqlValue::Bool(true)).await;
+    relink(pool, &[b]).await.unwrap();
+    assert!(link_of(bob).await.is_empty());
+    assert_eq!(invites_for(bob).await, 1);
+}
+
 /// The role map grants on sign-up and, with sync on, adds and removes only
 /// the roles it names.
 async fn role_sync_touches_only_mapped_roles(pool: &Pool) {
@@ -1228,6 +1291,7 @@ async fn username_clash_suffix_or_refuse(pool: &Pool) {
 }
 
 /// The member flow with no mode set follows `auto_provision`, as before.
+#[allow(deprecated)]
 async fn member_auto_provision_is_unchanged(pool: &Pool) {
     use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};
     let t = tok();
@@ -1803,6 +1867,7 @@ tri_dialect_test!(
         one_use_admits_one_racer,
         superusers_are_never_email_linked,
         a_relink_invite_links_its_user_once,
+        the_relink_action_checks_every_link_first,
         role_sync_touches_only_mapped_roles,
         username_clash_suffix_or_refuse,
         member_auto_provision_is_unchanged,

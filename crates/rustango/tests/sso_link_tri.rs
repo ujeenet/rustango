@@ -1,6 +1,8 @@
 //! SSO link table, provider reads and exact matching on every backend.
 
 #![cfg(all(feature = "sso", feature = "tenancy"))]
+// Covers the legacy member helper until it is removed.
+#![allow(deprecated)]
 
 use rustango::casts::{Cast, EncryptedString};
 use rustango::oauth2::NormalizedUser;

@@ -851,10 +851,17 @@ pub enum MemberSignIn {
 /// verified email ([`crate::sso::policy::admit`]); else, with
 /// `auto_provision`, a new linked member.
 ///
-/// Public so a native sign-in that verified its own ID token uses the same rule.
+/// **Applies none of the provider's sign-in policy** (domain, tenant and
+/// claim rules, sign-up mode, tenant settings): `auto_provision` alone lets
+/// anyone in. Call [`crate::sso::policy::admit`] with
+/// [`crate::sso::ResolvedProvider::effective_policy`] instead.
 ///
 /// # Errors
 /// Storage failures.
+#[deprecated(
+    since = "0.61.15",
+    note = "ignores the provider's sign-in policy; use `sso::policy::admit` with `ResolvedProvider::effective_policy()`"
+)]
 pub async fn find_or_provision_member(
     pool: &Pool,
     provider: &ProviderKey,

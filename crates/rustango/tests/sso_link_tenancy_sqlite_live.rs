@@ -1296,6 +1296,8 @@ async fn only_a_superuser_writes_links_and_providers() {
 }
 
 #[tokio::test]
+// The legacy helper, kept until it is removed.
+#[allow(deprecated)]
 async fn a_failed_link_insert_leaves_no_member_behind() {
     use rustango::sso::ProviderKey;
     use rustango::tenancy::member_auth::find_or_provision_member;
@@ -1976,6 +1978,8 @@ fn profile(sub: &str, email: &str) -> rustango::oauth2::NormalizedUser {
 }
 
 #[tokio::test]
+// The legacy helper, kept until it is removed.
+#[allow(deprecated)]
 async fn member_flow_provisions_with_a_link_and_tells_not_linked_apart() {
     use rustango::sso::ProviderKey;
     use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};

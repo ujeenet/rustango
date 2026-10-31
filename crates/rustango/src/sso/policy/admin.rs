@@ -307,12 +307,20 @@ async fn unlink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
 }
 
 /// Delete each link and leave a one-use invite that links its user again on
-/// the next sign-in by the user's verified email. Never for a superuser.
-async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
+/// the next sign-in by the user's verified email. Every link is checked
+/// first, as the sign-in will (never a superuser; a role holder only when
+/// the provider links staff), and then all are re-linked in one
+/// transaction, or none.
+///
+/// # Errors
+/// The first link that cannot be re-linked, naming why; nothing changed.
+pub async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
     #[cfg(feature = "tenancy")]
     {
         use crate::sql::FetcherPool as _;
+        use crate::sso::link::AccountLookup as _;
         let invited_by = current_user_id();
+        let mut planned = Vec::new();
         for pk in pks {
             let Some(link) = crate::sso::SsoLink::objects()
                 .filter("id", pk.clone())
@@ -324,28 +332,41 @@ async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
             else {
                 continue;
             };
+            let who = format!("link {}", link.subject);
             if link.provider_source == crate::sso::LinkSource::Admin.as_str() {
-                return Err(
-                    "admin links are never re-linked; unlink and add a link instead".into(),
-                );
+                return Err(format!(
+                    "{who}: admin links are never re-linked; unlink and add a link instead"
+                ));
             }
             let user = crate::tenancy::member_auth::find_tenant_user(pool, link.user_id)
                 .await
                 .map_err(|e| e.to_string())?
-                .ok_or("the linked user is gone; unlink instead")?;
+                .ok_or_else(|| format!("{who}: the linked user is gone; unlink instead"))?;
             if user.is_superuser {
-                return Err("a superuser is never re-linked by email; add the link by hand".into());
+                return Err(format!(
+                    "{who}: a superuser is never re-linked by email; add the link by hand"
+                ));
             }
             let email: super::EmailAddr = user
                 .email
                 .as_deref()
-                .ok_or("the user has no email to re-link by")?
+                .ok_or_else(|| format!("{who}: the user has no email to re-link by"))?
                 .parse()
-                .map_err(|e| format!("the user's email: {e}"))?;
+                .map_err(|e| format!("{who}: the user's email: {e}"))?;
+            let account = crate::tenancy::member_auth::TenantAccounts(pool)
+                .by_id(link.user_id)
+                .await?
+                .ok_or_else(|| format!("{who}: the linked user is gone; unlink instead"))?;
+            if account.privileged && !links_staff(pool, &link).await {
+                return Err(format!(
+                    "{who}: the user holds a role and the provider does not email-link \
+                     role holders (allow_email_link_staff); add the link by hand"
+                ));
+            }
             // Only a sign-in through the old link's provider may use the invite.
             let key = crate::sso::ProviderKey::of_link(&link)
-                .ok_or("the link names an unknown provider source")?;
-            let mut invite = SsoInvite {
+                .ok_or_else(|| format!("{who}: the link names an unknown provider source"))?;
+            let invite = SsoInvite {
                 id: crate::sql::Auto::Unset,
                 provider_slug: None,
                 target: email.as_str().to_owned(),
@@ -360,11 +381,14 @@ async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
                 link_key: Some(key.fingerprint()),
                 created_at: crate::sql::Auto::Unset,
             };
-            let mut tx = crate::sql::transaction_pool(pool)
-                .await
-                .map_err(|e| e.to_string())?;
+            planned.push((pk.clone(), invite));
+        }
+        let mut tx = crate::sql::transaction_pool(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+        for (pk, mut invite) in planned {
             let query = crate::sso::SsoLink::objects()
-                .filter("id", pk.clone())
+                .filter("id", pk)
                 .compile_delete()
                 .map_err(|e| e.to_string())?;
             crate::sql::delete_tx(&mut tx, &query)
@@ -374,15 +398,28 @@ async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
                 .insert_tx(&mut tx)
                 .await
                 .map_err(|e| format!("invite: {e}"))?;
-            tx.commit().await.map_err(|e| e.to_string())?;
         }
-        Ok(())
+        tx.commit().await.map_err(|e| e.to_string())
     }
     #[cfg(not(feature = "tenancy"))]
     {
         let _ = (pool, pks);
         Err("re-link needs tenant users".into())
     }
+}
+
+/// Whether the provider of `link` may email-link a role holder, as a
+/// sign-in reads it. A shared provider's row is in the registry, out of
+/// reach here: no.
+#[cfg(feature = "tenancy")]
+async fn links_staff(pool: &Pool, link: &crate::sso::SsoLink) -> bool {
+    if link.provider_source != crate::sso::LinkSource::Tenant.as_str() {
+        return false;
+    }
+    crate::sso::provider::read_rules::<crate::sso::SsoProvider>(pool, link.provider_id)
+        .await
+        .1
+        .is_ok_and(|s| s.allow_email_link_staff)
 }
 
 #[cfg(test)]

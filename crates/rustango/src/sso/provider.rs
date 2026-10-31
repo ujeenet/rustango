@@ -339,7 +339,7 @@ async fn read_columns<T: Model>(
 }
 
 /// Row `id`'s sign-in, sign-up and lifecycle rules, in one read; see [`read_columns`].
-async fn read_rules<T: Model>(pool: &Pool, id: i64) -> Rules {
+pub(crate) async fn read_rules<T: Model>(pool: &Pool, id: i64) -> Rules {
     use super::policy::{Lifecycle, SignInPolicy, SignupPolicy};
     match read_columns::<T>(pool, id, POLICY_COLUMNS).await {
         Ok(Some(r)) => (policy_of_row(&r), signup_of_row(&r), lifecycle_of_row(&r)),
@@ -353,7 +353,7 @@ async fn read_rules<T: Model>(pool: &Pool, id: i64) -> Rules {
 }
 
 /// What [`read_rules`] returns: each part refuses on its own error.
-type Rules = (
+pub(crate) type Rules = (
     Result<super::policy::SignInPolicy, super::policy::PolicyError>,
     Result<super::policy::SignupPolicy, super::policy::PolicyError>,
     Result<super::policy::Lifecycle, super::policy::PolicyError>,
