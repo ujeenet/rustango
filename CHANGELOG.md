@@ -10,6 +10,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `sso::set_client_config` adjusts the HTTP client (e.g. a private root CA) of SSO providers built from tenant, shared or admin rows, discovery included.
 - Transaction helpers `sql::count_tx`, `sql::get_or_create_tx` and `soft_delete::soft_delete_tx`; `sql::bulk_insert_tx` is now public. `soft_delete_tx` refuses an audited model.
 
+### Changed
+
+- Lockfiles take the latest compatible minor and patch releases that build on Rust 1.88 (hyper 1.12, tokio 1.54, serde_json 1.0.154).
+
 ### Fixed
 
 - `HeaderResolver` and `PortResolver` cache their lookups, misses included, like the host and path-prefix resolvers; a page-cache hit no longer costs a registry query.
