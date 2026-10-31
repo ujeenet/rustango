@@ -692,11 +692,21 @@ mod store {
     /// Make the password unusable and end every session: whoever registered
     /// the email before its owner linked the IdP loses the account.
     async fn lock_password_tx(tx: &mut PoolTx<'_>, user_id: i64) -> Result<(), Denied> {
+        let stored = User::objects()
+            .filter("id", user_id)
+            .fetch_tx(tx)
+            .await
+            .map_err(|e| Denied::Storage(format!("lock password: {e}")))?
+            .into_iter()
+            .next()
+            .and_then(|u| u.sessions_revoked_at);
+        // Never earlier than a cut-off already set (a logout may set one ahead).
+        let cutoff = stored.map_or_else(chrono::Utc::now, |at| at.max(chrono::Utc::now()));
         let query = User::objects()
             .filter("id", user_id)
             .update()
             .set("password_hash", unusable_hash().await?)
-            .set("sessions_revoked_at", chrono::Utc::now())
+            .set("sessions_revoked_at", cutoff)
             .compile()
             .map_err(|e| Denied::Storage(e.to_string()))?;
         crate::sql::update_tx(tx, &query)
