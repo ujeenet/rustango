@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.61.15] — 2026-10-31
+
 **Breaking:** run `makemigrations` and `migrate` (new SSO columns and tables). `SsoProvider`, `SharedSsoProvider`, `SsoLink` and `OAuth2Flow` have new fields (struct literals must set them); `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`; `sso_only` is enforced. `sso_error=inactive` is gone (every refusal is `nouser`); OIDC discovery needs the exact issuer and IdPs must echo the `nonce`; flow cookies are named `__Host-…` on HTTPS at `/` (sign-ins in flight fail once); an SSO email link locks the account's password and deletes its API keys; SSO sign-up is capped at 100 per tenant per hour. See UPGRADING.
 
 ### Added
