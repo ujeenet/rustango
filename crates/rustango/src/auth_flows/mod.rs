@@ -89,6 +89,9 @@ pub enum AuthFlowError {
     /// The link was issued for another tenant or audience (#2472).
     #[error("token is for another scope")]
     WrongScope,
+    /// The tenant's SSO rules let this user sign in only through SSO.
+    #[error("password sign-in is turned off for this account")]
+    PasswordLoginDisabled,
 }
 
 /// Who a link is for: one tenant, or an app-chosen audience. Signed into
@@ -362,6 +365,7 @@ pub async fn confirm_password_reset_pool(
     let LinkTarget { pool, scope } = target.into();
     let (user_id, iat) = PasswordReset::verify_issued(&scope, url, secret)?;
     check_password_strength(new_password)?;
+    sso_allows_password(pool, user_id).await?;
     // Not a delegation to `_into`: this form owns `rustango_users`, so it
     // also stamps `password_changed_at` and ends existing sessions (#1449).
     write_password_hash(
@@ -438,6 +442,7 @@ pub async fn confirm_password_reset_single_use(
     let LinkTarget { pool, scope } = target.into();
     let (user_id, iat) = PasswordReset::verify_issued(&scope, url, secret)?;
     check_password_strength(new_password)?;
+    sso_allows_password(pool, user_id).await?;
     consume_single_use(url, cache).await?;
     // As with the non-single-use form: this one owns `rustango_users`,
     // so it stamps `password_changed_at` too (#1449).
@@ -486,6 +491,28 @@ pub async fn confirm_password_reset_single_use_into(
         None,
     )
     .await
+}
+
+/// A tenant user an SSO rule keeps off passwords gets no reset either.
+#[cfg(feature = "passwords")]
+async fn sso_allows_password(pool: &crate::sql::Pool, user_id: i64) -> Result<(), AuthFlowError> {
+    #[cfg(all(feature = "sso", feature = "tenancy"))]
+    {
+        use crate::sql::FetcherPool as _;
+        let found = crate::tenancy::User::objects()
+            .filter("id", user_id)
+            .fetch(pool)
+            .await
+            .map_err(|e| AuthFlowError::Database(e.to_string()))?;
+        if let Some(user) = found.first() {
+            if !crate::sso::lifecycle::password_login_allowed(pool, None, user).await {
+                return Err(AuthFlowError::PasswordLoginDisabled);
+            }
+        }
+    }
+    #[cfg(not(all(feature = "sso", feature = "tenancy")))]
+    let _ = (pool, user_id);
+    Ok(())
 }
 
 /// The framework's one password policy, shared with the CLI and the forms.

@@ -621,6 +621,7 @@ where
                         &org,
                         cfg,
                         &pool,
+                        &pools.registry_pool(),
                         routes,
                         cookie_path,
                         &parts.extensions,
@@ -1119,7 +1120,15 @@ async fn login_form(
     // `SsoProvider` rows merged with the registry-wide shared set).
     #[cfg(feature = "admin-sso")]
     {
+        let settings = crate::sso::policy::TenantSettings::load(tenant_pool)
+            .await
+            .unwrap_or_default();
+        let local = query.is_some_and(|q| q.split('&').any(|p| p == "local=1"));
+        ctx.insert("password_form", &settings.shows_password_form(local));
         let providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
+        if let Some(to) = super::sso::auto_redirect(&settings, &providers, query, error.is_some()) {
+            return Redirect::to(&to).into_response();
+        }
         ctx.insert("sso_enabled", &!providers.is_empty());
         ctx.insert("sso_providers", &providers);
         if let Some((notice, note)) = super::sso::login_notice(tenant_pool, query).await {
@@ -1188,10 +1197,12 @@ struct LoginSubmitForm {
     csrf: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn login_submit(
     org: &Org,
     cfg: &TenantSessionConfig,
     tenant_pool: &crate::sql::Pool,
+    registry_pool: &crate::sql::Pool,
     routes: &super::routes::RouteConfig,
     cookie_path: &str,
     extensions: &axum::http::Extensions,
@@ -1298,6 +1309,9 @@ async fn login_submit(
         Err(_) => false,
     };
 
+    // After the verify, so a refused password takes the same time.
+    let ok =
+        ok && super::auth::password_login_allowed(tenant_pool, Some(registry_pool), &user).await;
     if !user.active || !ok || uid == 0 {
         attempt.failed().await;
         let reason = if !user.active {

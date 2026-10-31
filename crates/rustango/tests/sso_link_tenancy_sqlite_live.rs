@@ -1378,6 +1378,7 @@ async fn tenant_domain_rule_refuses_a_linked_user() {
         password_login: "on".into(),
         sso_only: false,
         default_provider: None,
+        signups_per_hour: None,
     }
     .insert_pool(env.pool())
     .await

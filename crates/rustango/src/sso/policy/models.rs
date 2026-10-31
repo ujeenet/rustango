@@ -51,7 +51,7 @@ pub struct SsoInvite {
 #[rustango(
     table = "rustango_sso_shared_overrides",
     admin(
-        list_display = "shared_slug, signup_mode, sso_only",
+        list_display = "shared_slug, signup_mode, sso_only, allowed_roles",
         ordering = "shared_slug"
     )
 )]
@@ -80,6 +80,10 @@ pub struct SsoSharedOverride {
     pub sso_only: Option<bool>,
     pub session_ttl_secs: Option<i64>,
     pub superuser_session_ttl_secs: Option<i64>,
+    /// Role names the shared provider may grant here, comma separated.
+    /// Empty: none.
+    #[rustango(max_length = 1000)]
+    pub allowed_roles: Option<String>,
 }
 
 /// The tenant-wide SSO settings: one row, named `default`.
@@ -107,6 +111,8 @@ pub struct SsoTenantPolicy {
     pub sso_only: bool,
     #[rustango(max_length = 64)]
     pub default_provider: Option<String>,
+    /// SSO sign-ups allowed per hour. Empty: 100; `0`: no limit.
+    pub signups_per_hour: Option<i32>,
 }
 
 #[cfg(feature = "admin")]

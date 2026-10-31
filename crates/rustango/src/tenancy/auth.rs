@@ -448,7 +448,7 @@ pub async fn authenticate_user(
         .where_(User::username.eq(username.to_owned()))
         .fetch_on(&mut *conn)
         .await?;
-    check_user_password(rows.into_iter().next(), password).await
+    check_user_password(None, rows.into_iter().next(), password).await
 }
 
 /// Tri-dialect counterpart of [`authenticate_user`] (v0.38). Takes the
@@ -479,11 +479,30 @@ pub async fn authenticate_user_pool(
     password: &str,
 ) -> Result<Option<PasswordVerified<User>>, TenancyError> {
     let user = super::login::find_login_user(pool, super::login_field(), identifier).await?;
-    check_user_password(user, password).await
+    check_user_password(Some(pool), user, password).await
 }
 
-/// [`check_operator_password`] for a tenant user.
+/// Whether the tenant's SSO rules let `user` use a password (always without `sso`).
+pub(crate) async fn password_login_allowed(
+    pool: &crate::sql::Pool,
+    registry: Option<&crate::sql::Pool>,
+    user: &User,
+) -> bool {
+    #[cfg(feature = "sso")]
+    {
+        crate::sso::lifecycle::password_login_allowed(pool, registry, user).await
+    }
+    #[cfg(not(feature = "sso"))]
+    {
+        let _ = (pool, registry, user);
+        true
+    }
+}
+
+/// [`check_operator_password`] for a tenant user. With `pool`, the
+/// tenant's SSO rules may refuse the password too.
 async fn check_user_password(
+    pool: Option<&crate::sql::Pool>,
     user: Option<User>,
     password: &str,
 ) -> Result<Option<PasswordVerified<User>>, TenancyError> {
@@ -495,6 +514,11 @@ async fn check_user_password(
     let password_ok = password::verify_async(password, &user.password_hash).await?;
     if !user.active || !password_ok {
         return Ok(None);
+    }
+    if let Some(pool) = pool {
+        if !password_login_allowed(pool, None, &user).await {
+            return Ok(None);
+        }
     }
     let upgrade = crate::passwords::rehash_async(password, &user.password_hash).await;
     Ok(Some(PasswordVerified { row: user, upgrade }))

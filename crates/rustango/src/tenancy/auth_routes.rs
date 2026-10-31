@@ -672,6 +672,10 @@ async fn login_in(
         // a valid token for this user, so it's not an enumeration vector).
         return Err(err(StatusCode::UNAUTHORIZED, "invalid credentials"));
     }
+    // After the verify, so a refused password takes the same time.
+    let registry = crate::tenancy::middleware::session_keys(&extensions).map(|k| k.registry);
+    let ok = ok
+        && crate::tenancy::auth::password_login_allowed(t.pool(), registry.as_ref(), &user).await;
     if !ok {
         attempt.failed().await;
         send_user_login_failed(fire_failed(AuthFailureReason::InvalidCredentials)).await;
