@@ -387,14 +387,15 @@ async fn a_link_to_a_deleted_user_is_dropped(pool: &Pool) {
 
 /// Backdate a link, as one made for an earlier user with the same id.
 async fn age_link(pool: &Pool, subject: &str) {
+    age_link_by(pool, subject, chrono::TimeDelta::days(365)).await;
+}
+
+async fn age_link_by(pool: &Pool, subject: &str, by: chrono::TimeDelta) {
     use rustango::sql::UpdaterPool as _;
     SsoLink::objects()
         .filter("subject", subject.to_owned())
         .update()
-        .set(
-            "created_at",
-            chrono::Utc::now() - chrono::TimeDelta::days(365),
-        )
+        .set("created_at", chrono::Utc::now() - by)
         .execute_pool(pool)
         .await
         .unwrap();
@@ -462,6 +463,18 @@ async fn a_link_older_than_its_account(pool: &Pool) {
         "{dropped:?}"
     );
     assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_none());
+
+    // Within the hour of clock skew a link is not stale.
+    create_link(pool, &key, "sub-skew", 44).await.unwrap();
+    age_link_by(pool, "sub-skew", TimeDelta::minutes(30)).await;
+    let skewed = Account::new(44, false, true).with_created_at(Utc::now());
+    let p4 = profile("sub-skew", "skew@example.com");
+    assert_eq!(
+        sign_in(pool, &key, false, &p4, &One(Some(skewed)))
+            .await
+            .unwrap(),
+        44
+    );
 
     // A link made after its account still signs in.
     create_link(pool, &key, "sub-new", 43).await.unwrap();

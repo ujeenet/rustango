@@ -349,6 +349,7 @@ async fn member_sso_router_serves_a_non_default_backend() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let issuer = format!("http://{}", listener.local_addr().unwrap());
     let doc = serde_json::json!({
+        "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/auth"),
         "token_endpoint": format!("{issuer}/token"),
         "userinfo_endpoint": format!("{issuer}/userinfo"),

@@ -164,9 +164,10 @@ untouched.
 - `ResolvedProvider` has a new `signup` field; `TenantAccounts` is now public.
 - `role_map` reads its claims only from a verified id_token when the provider has a JWKS; a userinfo-only provider keeps reading userinfo. A sign-in with none of the role claims leaves the mapped roles alone.
 - `ViewSet::for_model` panics on an SSO table (`rustango_sso_*`, `rustango_shared_sso_providers`); manage those rows through the admin.
-- A link created before its account is now deleted at sign-in (`StaleLinks::Drop` is the default). If account `created_at` values were imported or backfilled after their links, call `set_stale_links(StaleLinks::Warn)` at startup.
+- `StaleLinks` now defaults to `Drop`; call `set_stale_links(StaleLinks::Warn)` at startup to keep the old behaviour (do so if account `created_at` values were imported or backfilled after their links).
+- A link is stale only when made more than an hour (was 5 minutes) before its account; each dropped link is logged at error level with the user id and provider source.
 - Deleting a user in the admin (single or bulk) deletes its SSO links in the same transaction; a soft delete keeps them.
-- OIDC discovery fails when the document's `issuer` differs from the configured one (a trailing `/` is ignored). Set `issuer_url` to the IdP's exact issuer.
+- OIDC discovery fails when the document has no `issuer` or it differs from the configured one (a trailing `/` is ignored). Set `issuer_url` to the IdP's exact issuer.
 - The admin refuses an SSO link whose `provider_source` its database does not hold: `admin` and `shared` are valid only in the bare admin's and a tenant's database respectively.
 
 ## 0.61.14

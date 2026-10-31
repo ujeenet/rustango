@@ -152,7 +152,7 @@ Zeile anzulegen erfordert die Session-Authentifizierung des Admins
 (`Builder::with_session_auth` oder `with_session` des Tenant-Admins); ohne sie
 kann niemand Verknüpfungen anlegen.
 
-Eine Verknüpfung, die mehr als 5 Minuten vor dem Konto angelegt wurde, auf das
+Eine Verknüpfung, die mehr als eine Stunde vor dem Konto angelegt wurde, auf das
 sie zeigt (etwa eine nach einem Restore wiederverwendete ID), wird gelöscht, und
 die Anmeldung läuft weiter wie ohne Verknüpfung. Eine Verknüpfung, deren
 Benutzer nicht mehr existiert, wird bei der nächsten Anmeldung gelöscht, und wer

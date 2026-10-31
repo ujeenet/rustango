@@ -897,6 +897,54 @@ async fn admin_link_sources_follow_the_database(pool: &Pool) {
         link_sources(pool, &[&subject]).await,
         [Some("tenant".to_owned())]
     );
+
+    // A stored `admin` link in a tenant database: the refusal says the stored value is wrong.
+    let subject = seed_link(pool, "admin", 1).await;
+    let id = rustango::sso::SsoLink::objects()
+        .filter("subject", subject.clone())
+        .fetch(pool)
+        .await
+        .unwrap()[0]
+        .id
+        .get()
+        .copied()
+        .unwrap();
+    let body = form(&[
+        ("provider_source", "admin"),
+        ("provider_id", "1"),
+        ("issuer", "oidc"),
+        ("subject", &subject),
+        ("user_id", "2"),
+    ]);
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .tenant_mode()
+        .build();
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/rustango_sso_links/{id}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let html = String::from_utf8(
+        axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(html.contains("stored provider_source"), "{html}");
+    let rows = rustango::sso::SsoLink::objects()
+        .filter("subject", subject)
+        .fetch(pool)
+        .await
+        .unwrap();
+    assert_eq!(rows[0].user_id, 1, "the edit is not saved");
 }
 
 tri_dialect_test! {

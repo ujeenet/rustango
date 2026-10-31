@@ -152,7 +152,7 @@ Añadir una fila requiere la autenticación por sesión del admin
 (`Builder::with_session_auth`, o `with_session` del admin de tenant); sin ella,
 nadie puede añadir enlaces.
 
-Un enlace creado más de 5 minutos antes que la cuenta a la que apunta (un id
+Un enlace creado más de una hora antes que la cuenta a la que apunta (un id
 reutilizado tras una restauración, por ejemplo) se borra, y el inicio de sesión
 sigue como sin enlace. Un enlace cuyo usuario ya no existe se borra en el
 siguiente inicio de sesión, y borrar un usuario en el admin borra sus enlaces.

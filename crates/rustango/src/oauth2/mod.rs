@@ -51,7 +51,7 @@
 //! [`OAuth2Provider::from_discovery`] fetches `.well-known/openid-configuration`
 //! and populates `auth_url`, `token_url`, `userinfo_url` automatically. Use it
 //! for any conformant OIDC provider — Keycloak, Auth0, Okta, etc.
-//! A doc naming another `issuer` is refused. A doc with no `issuer` or
+//! A doc with no `issuer`, or naming another, is refused. A doc with no
 //! `jwks_uri` is accepted, but then no id_token is verified: identity comes
 //! from the userinfo endpoint only.
 //!
@@ -459,11 +459,17 @@ impl OAuth2Provider {
         let doc: DiscoveryDoc = serde_json::from_slice(&bytes)
             .map_err(|e| OAuthError::Discovery(format!("decode discovery doc: {e}")))?;
         // A doc for another issuer would pin its keys and endpoints to ours.
-        if let Some(iss) = doc.issuer.as_deref() {
-            if iss.trim_end_matches('/') != issuer {
+        match doc.issuer.as_deref() {
+            Some(iss) if iss.trim_end_matches('/') == issuer => {}
+            Some(iss) => {
                 return Err(OAuthError::Discovery(format!(
                     "discovery doc issuer `{iss}` is not `{issuer}`"
-                )));
+                )))
+            }
+            None => {
+                return Err(OAuthError::Discovery(
+                    "discovery doc has no `issuer`".to_owned(),
+                ))
             }
         }
         self.auth_url = doc.authorization_endpoint;
@@ -1045,10 +1051,17 @@ mod tests {
         assert!(err.to_string().contains("blocked address"), "{err}");
     }
 
-    /// A discovery doc naming another issuer is refused; a trailing `/` is not a difference.
+    /// A discovery doc naming another issuer, or none, is refused; a trailing
+    /// `/` is not a difference, and `jwks_uri` may be missing.
     #[tokio::test]
     async fn discovery_refuses_another_issuer() {
         async fn doc_for(iss: Option<&'static str>) -> Result<OAuth2Provider, OAuthError> {
+            doc_with(iss, true).await
+        }
+        async fn doc_with(
+            iss: Option<&'static str>,
+            jwks: bool,
+        ) -> Result<OAuth2Provider, OAuthError> {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
             let iss = iss.map(|i| i.replace("{base}", &base));
@@ -1058,6 +1071,8 @@ mod tests {
             });
             if let Some(i) = iss {
                 doc["issuer"] = i.into();
+            }
+            if jwks {
                 doc["jwks_uri"] = format!("{base}/jwks").into();
             }
             let app = axum::Router::new().route(
@@ -1075,7 +1090,9 @@ mod tests {
         assert!(err.to_string().contains("is not"), "{err}");
         assert!(doc_for(Some("{base}")).await.is_ok());
         assert!(doc_for(Some("{base}/")).await.is_ok());
-        assert!(doc_for(None).await.is_ok());
+        let err = doc_for(None).await.err().unwrap();
+        assert!(err.to_string().contains("no `issuer`"), "{err}");
+        assert!(doc_with(Some("{base}"), false).await.is_ok());
     }
 
     /// A provider whose token URL redirects to `/internal`; returns the hit count.

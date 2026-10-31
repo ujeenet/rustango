@@ -5167,6 +5167,22 @@ mod sso_table_tests {
             assert!(refused(s), "{} must be refused", s.table);
         }
     }
+
+    /// A new SSO table is refused too, without editing the list by hand.
+    #[test]
+    fn every_registered_sso_table_is_refused() {
+        let sso: Vec<&'static ModelSchema> = inventory::iter::<crate::core::ModelEntry>
+            .into_iter()
+            .map(|e| e.schema)
+            .filter(|s| {
+                s.table.starts_with("rustango_sso_") || s.table == "rustango_shared_sso_providers"
+            })
+            .collect();
+        assert!(sso.len() >= 5, "registry walk found {}", sso.len());
+        for s in sso {
+            assert!(refused(s), "{} must be refused", s.table);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "tenancy"))]

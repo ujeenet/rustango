@@ -166,7 +166,7 @@ l'authentification par session de l'admin (`Builder::with_session_auth`,
 ou `with_session` de l'admin tenant) ; sans elle, personne ne peut ajouter
 de liens.
 
-Un lien créé plus de 5 minutes avant le compte vers lequel il pointe (un id
+Un lien créé plus d'une heure avant le compte vers lequel il pointe (un id
 réutilisé après une restauration, par exemple) est supprimé, et la connexion
 continue comme sans lien. Un lien dont l'utilisateur n'existe plus est supprimé
 à la connexion suivante, et supprimer un utilisateur dans l'admin supprime ses

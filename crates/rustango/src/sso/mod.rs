@@ -468,6 +468,9 @@ mod tests {
     async fn issuer(fail_first: usize) -> (String, Arc<AtomicUsize>) {
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let iss = base.clone();
         let app = axum::Router::new().route(
             "/.well-known/openid-configuration",
             axum::routing::get(move || async move {
@@ -475,13 +478,12 @@ mod tests {
                     return Err(axum::http::StatusCode::BAD_GATEWAY);
                 }
                 Ok(axum::Json(serde_json::json!({
+                    "issuer": iss,
                     "authorization_endpoint": "https://idp.test/auth",
                     "token_endpoint": "https://idp.test/token",
                 })))
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (base, hits)
     }

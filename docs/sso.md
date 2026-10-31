@@ -149,7 +149,7 @@ users), or by a superuser adding an `SsoLink` row: `provider_source`
 (`Builder::with_session_auth`, or the tenant admin's `with_session`);
 without it nobody can add links.
 
-A link created more than 5 minutes before the account it points at (an id
+A link created more than an hour before the account it points at (an id
 reused after a restore, say) is deleted, and sign-in goes on as if unlinked.
 A link whose user no longer exists is deleted at the next sign-in, and
 deleting a user in the admin deletes its links.

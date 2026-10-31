@@ -236,11 +236,22 @@ pub(crate) fn admin_source_refusal(
     if allowed.iter().any(|s| s.as_str() == raw) {
         return None;
     }
-    let names: Vec<&str> = allowed.iter().map(|s| s.as_str()).collect();
-    Some(format!(
-        "provider_source must be one of {} in this admin's database",
-        names.join(", ")
-    ))
+    let names = allowed
+        .iter()
+        .map(|s| s.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stored = before
+        .and_then(|b| b.get("provider_source")?.as_str())
+        .is_some_and(|s| s == raw);
+    Some(if stored {
+        format!(
+            "this link's stored provider_source `{raw}` does not belong in this admin's \
+             database (one of {names}); delete the link instead"
+        )
+    } else {
+        format!("provider_source must be one of {names} in this admin's database")
+    })
 }
 
 /// Lowercase hex SHA-256 of `issuer`, a newline and `subject`, as stored in
@@ -572,9 +583,10 @@ impl Account {
         self
     }
 
-    /// Whether `link` predates this account by more than clock skew.
+    /// Whether `link` predates this account by more than clock skew. The
+    /// account time is the app's clock, the link's the database's: allow an hour.
     fn outlived_by(&self, link: &SsoLink) -> bool {
-        const SKEW: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
+        const SKEW: chrono::TimeDelta = chrono::TimeDelta::hours(1);
         match (self.created_at, link.created_at.get()) {
             (Some(account), Some(linked)) => account > *linked + SKEW,
             _ => false,
@@ -636,6 +648,12 @@ pub(crate) async fn stale(pool: &Pool, link: &SsoLink, account: &Account) -> Res
         return Ok(false);
     }
     drop_link(pool, link).await?;
+    tracing::error!(
+        target: "rustango::sso",
+        user_id = account.user_id,
+        provider_source = %link.provider_source,
+        "dropped an SSO link older than its account; the user must link again"
+    );
     Ok(true)
 }
 
