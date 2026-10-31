@@ -149,12 +149,13 @@ users), or by a superuser adding an `SsoLink` row: `provider_source`
 (`Builder::with_session_auth`, or the tenant admin's `with_session`);
 without it nobody can add links.
 
-A link created more than 5 minutes before the account it points at (an id
-reused after a restore, say) logs a warning and still signs in.
-A link whose user no longer exists is deleted at the next sign-in.
-`rustango::sso::link::set_stale_links(StaleLinks::Drop)` deletes such a link
-instead. Use it only when account `created_at` values are never imported or
-backfilled.
+A link created more than an hour before the account it points at (an id
+reused after a restore, say) is deleted, and sign-in goes on as if unlinked.
+A link whose user no longer exists is deleted at the next sign-in, and
+deleting a user in the admin deletes its links.
+When account `created_at` values are imported or backfilled after their
+links, `rustango::sso::link::set_stale_links(StaleLinks::Warn)` only logs a
+warning and still signs in.
 
 With the `totp` feature, a bare-admin user with a confirmed TOTP device
 must still enter a code after SSO. The admin shows the code form and
@@ -164,6 +165,9 @@ posts to `<login>/sso-totp`. The tenant admin has no TOTP step.
 `manage check --deploy` warns about an enabled provider that would refuse
 every existing user: no `SsoLink` rows, and email linking off or only
 privileged users. In the bare admin that means any provider with no links.
+It also warns about email linking on a `kind = "oidc"` provider, an `http://`
+issuer that is not loopback, email domain rules with `require_verified_email`
+off, and a shared provider that signs users up.
 
 ## Member (end-user) SSO
 
@@ -208,7 +212,7 @@ Differences from the admin flow:
   `X-Forwarded-Host`), else `http` on a loopback host
   (`localhost`, `*.localhost`, a loopback IP) and `https` everywhere else,
   so `localhost.example.com` gets `https`.
-- **Auto-provisioning.** With `auto_provision = true` (opt-in; the default is `false`), a
+- **Auto-provisioning.** A provider's `signup_mode` ([Who may sign up](#who-may-sign-up)) wins; with none set, `auto_provision = true` (opt-in; the default is `false`) works as `open`: a
   verified IdP email with no matching `rustango_users` row **creates**
   one — username from the email local-part (deduped on a clash), a real
   but unusable random password hash (SSO users can't password-login) —
@@ -251,6 +255,125 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 > **v1 scope.** Member SSO resolves providers from the tenant's own
 > `SsoProvider` rows only — the registry-wide `SharedSsoProvider` merge
 > and a custom `provision` hook are follow-ups.
+
+## Who may sign in
+
+Each provider (and each shared provider in the operator console) has
+sign-in rules. Every rule left empty admits anyone the IdP signs in.
+
+| Field | Rule |
+|---|---|
+| `allowed_email_domains` | Only these domains: `client.org` matches only itself, `*.client.org` only its subdomains. Comma or newline separated. |
+| `blocked_email_domains` | Never these domains, even if allowed above. Checked against any email, verified or not. |
+| `allowed_idp_tenants` | Microsoft directory ids (`tid`). Read only from a verified id_token. |
+| `allowed_hosted_domains` | Google Workspace domains (the `hd` claim). |
+| `required_claims` | JSON `{"claim": ["value", ...]}`: the claim (a string or a list) must hold one of the values. `{"iss": [...]}` pins the issuer. A missing claim refuses. |
+| `require_verified_email` | Kept for stored rows: the allowlist always accepts only an email the IdP verified. |
+
+The admin and the operator console store lists in one canonical form and
+refuse a value that does not parse. A value that still does not parse
+(written past them) refuses every sign-in through the provider.
+
+A refused sign-in goes to the server log and to the audit log
+(`source = sso:<surface>`, `changes.rule` such as `domain_not_allowed`).
+The browser gets one generic message; on the tenant login page it also
+shows the tenant's `access_denied_message` (from `SsoTenantPolicy`),
+escaped.
+
+The member route (`member_sso_router`) resolves only the tenant's own
+providers, so shared providers, and any tenant tightening of them, do not
+apply there yet.
+
+### id_token trust
+
+Profile data comes from `/userinfo` over TLS. Claims only an id_token
+carries (`tid`, `iss`, `xms_edov`) are used only after the id_token
+passes: its signature against the issuer's JWKS (RS256 or ES256; the key
+set is cached per its `max-age` and refetched at most once a minute for an
+unknown key), `aud` holds the client id, `exp`/`nbf` with one minute of
+leeway, the issuer (Microsoft: `https://login.microsoftonline.com/{tid}/v2.0`),
+and the same `sub` as userinfo. Otherwise those claims are absent, and a
+rule that needs them refuses. A Microsoft email counts as verified when
+`xms_edov` is true, or when the provider pins `allowed_idp_tenants` and
+the token's `tid` is one of them.
+
+## Who may sign up
+
+A provider can also create the account the first time someone signs in.
+Sign-up runs only when no link and no account match the IdP's verified
+email, and only after the sign-in rules above pass.
+
+| Field | Meaning |
+|---|---|
+| `signup_mode` | `closed` (link only), `invite_only` (an `SsoInvite` for this email), `allowlist` (an invite for this email or its domain) or `open` (anyone the sign-in rules admit). Empty: closed on the tenant login; the member flow follows `MemberAuthConfig::auto_provision`. The bare admin never signs anyone up. |
+| `default_roles` | Tenant roles a new user gets, e.g. `Viewer`. An invite with roles replaces them. |
+| `role_map` | JSON `{"<group or app role>": "Editor"}` (or a list of roles). Read from the claims in `role_claims` (empty: `groups,roles`). A provider with a JWKS (OIDC discovery, Microsoft, Google) takes them only from a verified id_token; a userinfo-only provider takes them from userinfo. |
+| `sync_roles_on_login` | Re-apply `role_map` on every sign-in. Only roles named in `role_map` are added or removed; roles granted by hand stay. A sign-in without any of the role claims changes nothing. |
+| `username_from` | `email_local` (default), `email`, or `preferred_username` (falls back to the email local part). |
+| `username_clash` | `suffix` (default: `ann-x7k2q9`) or `refuse`. |
+| `sync_profile` | Refresh the display name and email from the IdP on every sign-in (never for a superuser; an email another user has is kept). |
+| `allow_email_link_staff` | With `allow_email_link`, also link a user who holds roles. A superuser is never linked by email. |
+
+A new user is never a superuser. Roles go through the permission engine
+(`UserRole`); a role name with no `Role` row is skipped and written to the
+audit log (`sso_role_unknown`). The user, its link (`provisioned = true`),
+its roles and the invite's use commit in one transaction.
+
+**Invites** (`SsoInvite`, superuser-only in the tenant admin) target one
+email (`ann@client.org`) or a domain (`@client.org`, or `*.client.org` for
+its subdomains). They can name one provider, carry roles, expire
+(`expires_at`) and limit uses (`max_uses`). A use is counted atomically:
+two sign-ups racing for the last use make one account. `.../rustango_sso_invites/bulk`
+adds many at once from a pasted list or a CSV column.
+
+**Unlink and re-link.** On `SsoLink` rows, the admin actions *Unlink* and
+*Re-link on next sign-in* (superuser-only). Re-link deletes the link and
+leaves a one-use invite, good for 7 days, that links the same user again
+the next time they sign in through the same provider with their verified
+email, even if the IdP gives them a new subject. The user must still have
+that email. It never re-links a superuser, and a role holder only with
+`allow_email_link_staff`.
+
+`check --deploy` does not report a provider whose sign-up is not closed
+as refusing everyone, and warns about `signup_mode = open` with no
+`allowed_email_domains`, `allowed_hosted_domains` or `allowed_idp_tenants`.
+
+## Passwords, sessions and lifecycle
+
+| Where | Field | Meaning |
+|---|---|---|
+| Provider | `sso_only` | Users linked through it may not use a password (login, JSON login, HTTP Basic, reset link). Only while the provider is enabled. |
+| Provider | `session_ttl_secs`, `superuser_session_ttl_secs` | The session after a sign-in through it lasts the shortest of these and the route's lifetime. |
+| Provider | `auto_deactivate_after_days` | `sso-deactivate-idle` switches off users it signed up whose every link is unused this long. Never a superuser, never a user with a link an admin made. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off`, or `superusers_only`: the password form shows only at `?local=1`, for superusers. |
+| `SsoTenantPolicy` | `sso_only` | No one but a superuser uses a password. |
+| `SsoTenantPolicy` | `default_provider` | The login page goes straight to it (or to the only provider when the password form is hidden), except at `?local=1` or after an error. |
+| `SsoTenantPolicy` | `signups_per_hour` | SSO sign-ups per hour (empty: 100, `0`: no limit). |
+
+A superuser follows only `password_login`; `sso_only` never locks one out.
+A refused password looks like a wrong one. An unreadable rule refuses;
+unreadable tenant settings still let a superuser in. A provider binds its
+users while disabled too; a link to a deleted provider counts as
+`sso_only` until an admin removes it. `sso_only` covers password logins
+(tenant and bare admin) and resets, not API keys or MCP agent secrets.
+`sso-deactivate-idle` only switches off users who cannot use a password.
+Logout lands on `?local=1`, and the automatic redirect happens at most
+once a minute, so a dropped session cannot loop.
+
+**Shared providers.** A tenant's `SsoSharedOverride` (one row per shared
+slug) adds its own rules on top: it can block more domains, require a
+verified email, narrow sign-up, set `sso_only` or shorter sessions, never
+loosen. A shared provider grants only the roles its `allowed_roles` names;
+with no override, none.
+
+**Throttle and audit.** SSO callbacks have their own per-IP limit (a 429
+past it), apart from the password one. Email links, sign-ups, re-links and
+role changes are audited (`sso_linked`, `sso_signup`, `sso_relinked`,
+`sso_roles_synced`); refusals at most five times per subject in ten minutes.
+
+**Account lock.** The lock after failed passwords does not stop SSO, so a
+guessed username cannot lock its owner out of SSO. To stop a user, set
+`active = false`: SSO refuses inactive users.
 
 ## Secret storage
 
@@ -297,8 +420,48 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
   signed `state`.
 - SSO sessions are the ordinary admin session — rotating or deactivating
   the linked user invalidates them through the existing live gate.
-- Trust model is `/userinfo` over TLS (the id_token isn't independently
-  verified); front the admin with HTTPS.
+- Trust model is `/userinfo` over TLS; id_token claims count only after
+  JWKS verification (see [id_token trust](#id_token-trust)). Front the
+  admin with HTTPS.
+
+## Hardening
+
+- **Email links lock the password.** When SSO links an existing tenant
+  account by email (or a re-link invite links it), its password is made
+  unusable, its sessions end, its API keys are deleted and its own agent
+  keys switched off, in the link's transaction. Whoever
+  registered the email before its owner loses the account; the owner
+  resets the password to use one again. Any role, even one without
+  permissions, counts as privileged for email linking.
+- **One use per flow.** A callback completes a flow once (per process; the
+  IdP's one-time code covers other replicas). OIDC sign-ins send a `nonce`;
+  a verified id_token without it, or with another, is refused
+  (`id_token_replayed`). The member landing is the `?next` given to the
+  begin URL, sealed into the flow; a `?next` on the callback is ignored.
+- **`__Host-` flow cookies** on HTTPS at `Path=/` (the bare admin, a
+  tenant on its own host); only that name is read there. A path-prefix
+  tenant keeps the plain name. Under a prefix the member `?next` must stay
+  under it.
+- **Invites.** A domain invite for a public suffix or free mail domain
+  (`@gmail.com`, `*.co.uk`) is refused, and a domain invite needs
+  `max_uses` or `expires_at`. Stored IdP display names are capped at 150
+  characters.
+- **Bare admin host.** With `security.allowed_hosts` (or
+  `Builder::allowed_hosts`), the SSO redirect URI is built only for a
+  listed Host. Without a list it uses any Host, and the admin logs a
+  warning at startup.
+
+### Tenants on their own host and under a prefix
+
+A tenant can be reached on its own host (cookies at `Path=/`) and on the
+apex host under its prefix (`app.example.com/acme`, cookies at
+`Path=/acme`). Prefix tenants share one origin with the operator console
+and with each other: a cookie `Path` is not a security boundary there.
+Sessions and flows are bound to the tenant slug by their MAC, so one
+tenant's cookie never opens another's. Register both callback URLs at the
+IdP for a tenant reachable both ways:
+`https://acme.example.com/__login/sso/<slug>/callback` and
+`https://app.example.com/acme/__login/sso/<slug>/callback`.
 
 ## See also
 

@@ -446,7 +446,7 @@ admin-sso = ["admin", "sso"]
 # SSO (`tenancy::member_auth`) can build without pulling in the auto-admin.
 # Composes the existing `oauth2` client with `casts` (encrypted-at-rest
 # client secret). `admin-sso` layers the admin login wiring on top.
-sso = ["oauth2", "casts"]
+sso = ["oauth2", "casts", "dep:ring"]
 
 # Multi-tenancy module (`rustango::tenancy`). Implies `admin` (the
 # tenant admin builder wraps `rustango::admin`). Pulls in Argon2 +
@@ -606,6 +606,7 @@ bytes            = { version = "1", optional = true }
 
 # `oauth2` feature deps — optional.
 reqwest     = { workspace = true, optional = true }
+ring        = { workspace = true, optional = true }
 urlencoding = { workspace = true, optional = true }
 
 # `compression` feature dep — optional.
@@ -666,6 +667,8 @@ base64         = { workspace = true }
 dotenvy        = { workspace = true }
 # Tests build form bodies with it; the lib only pulls it in via `oauth2`.
 urlencoding    = { workspace = true }
+# Signs id_tokens for the fake IdP in the SSO tests.
+ring           = { workspace = true }
 tempfile       = "3"
 
 # All example crates removed. Single-file examples are auto-detected

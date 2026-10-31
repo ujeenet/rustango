@@ -105,7 +105,7 @@ pub fn current_csrf_token() -> Option<String> {
 }
 
 /// Session lifetime: 8 hours, so an operator signs in once a workday.
-const DEFAULT_TTL_SECS: i64 = 8 * 60 * 60;
+pub(crate) const DEFAULT_TTL_SECS: i64 = 8 * 60 * 60;
 
 /// Cookie name the admin session is stored under. Distinct from any
 /// `tenancy` cookies so the two layers can coexist on one host.
@@ -213,11 +213,28 @@ pub(crate) fn encode(
     auth_hash: &PasswordFingerprint,
     sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> String {
+    encode_for(
+        secret,
+        session,
+        auth_hash,
+        sessions_revoked_at,
+        DEFAULT_TTL_SECS,
+    )
+}
+
+/// [`encode`] with a lifetime of `ttl_secs`.
+pub(crate) fn encode_for(
+    secret: &AdminSessionSecret,
+    session: AdminSession,
+    auth_hash: &PasswordFingerprint,
+    sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    ttl_secs: i64,
+) -> String {
     let payload = CookiePayload {
         user_id: session.user_id,
         username: session.username,
         is_superuser: session.is_superuser,
-        exp: chrono::Utc::now().timestamp() + DEFAULT_TTL_SECS,
+        exp: chrono::Utc::now().timestamp() + ttl_secs,
         auth_hash: auth_hash.clone(),
         iat: crate::session::issued_at(sessions_revoked_at),
     };

@@ -4,6 +4,43 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant; `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`; `OAuth2Flow` has new `nonce` and `next` fields. See UPGRADING.
+
+### Added
+
+- SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, required claims, and `require_verified_email`. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
+- The SSO callbacks read claims only an id_token carries (`tid`, `iss`) after checking its signature against the issuer's JWKS (RS256, ES256), its `aud`, `exp` and issuer. A Microsoft email counts as verified when `xms_edov` is true or the provider pins the token's `tid`.
+- Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
+- The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`).
+- SSO sign-up per provider: `signup_mode` (closed, invite only, allowlist, open), `SsoInvite` for emails or domains with roles, expiry and atomic use limits (bulk add from a paste or CSV), `default_roles`, `role_map` with `sync_roles_on_login` (touches only mapped roles), `username_from`/`username_clash`, `sync_profile`, and `allow_email_link_staff`. A new user is never a superuser.
+- `check --deploy` SSO risk scan types: `Risk`, `Risky`, and `admin_risks` / `tenant_risks` / `shared_risks` (via `testkit::sso_check`).
+- `SsoLink` admin actions: unlink, and re-link on next sign-in (a one-use invite bound to the same provider; never for a superuser). `check --deploy` knows sign-up and warns on open sign-up with no domain rule.
+- SSO lifecycle: `sso_only` (provider or tenant) and `password_login` (`on`, `off`, `superusers_only`) refuse every password login on tenant and bare-admin surfaces, and reset links; superusers follow only `password_login`, with `?local=1` as the break-glass form. API keys and MCP agent secrets are not affected. The login page goes straight to the default provider; logout lands on `?local=1`. Session lifetimes per provider and for superusers. `sso-deactivate-idle` switches off idle SSO-only users past `auto_deactivate_after_days`.
+- A tenant's `SsoSharedOverride` tightens a shared provider (rules, sign-up mode, `sso_only`, lifetimes) and names the roles it may grant (`allowed_roles`; none by default).
+- SSO sign-ins have their own per-IP throttle on every surface, and a per-tenant sign-up limit (`signups_per_hour`, default 100). Email links, sign-ups, re-links and role changes are written to the audit log.
+
+### Fixed
+
+- A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
+- `ViewSet::for_model` refuses the SSO tables: a ViewSet skipped their superuser-only admin checks.
+- `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback, email domain rules with `require_verified_email` off, and a shared provider that signs users up.
+- OIDC discovery refuses a document with no `issuer` or another issuer than the configured one.
+- Deleting a user in the admin deletes its SSO links; a link older than its account is now dropped by default.
+- The admin no longer saves an SSO link with an `admin` source outside the bare admin's database, or a source that database does not hold.
+- A disabled tenant SSO provider no longer falls through to the shared provider with the same slug.
+- A refused SSO sign-in no longer counts against the IP's password-login limit.
+- An SSO email domain allowlist matches only an IdP-verified email, whatever `require_verified_email` says.
+- Shared SSO providers are superuser-only in the admin, and a role holder (any role) counts as privileged for email linking.
+- An SSO email link or re-link to an existing tenant account locks its password, ends its sessions and revokes its API and agent keys, so whoever registered the email first loses access.
+- A tenant's own SSO provider is checked like the operator console's (slug, kind, issuer, `https` outside dev); the console shows an error instead of panicking when `RUSTANGO_SECRET_KEY` is unset.
+- SSO flows are single-use, OIDC sign-ins send a `nonce` the verified id_token must echo, flow cookies take the `__Host-` prefix at `/` over HTTPS, and the member landing (`?next`) is sealed at begin.
+- SSO invites refuse public suffix and free mail domains, a domain invite needs max uses or an expiry, and the stored IdP display name is capped at 150 characters.
+- The bare admin builds its SSO redirect URI only for a host on `security.allowed_hosts` (when set).
+
+### Deprecated
+
+- `tenancy::authenticate_user` (raw Postgres connection): it skips the SSO password rules. Use `authenticate_user_pool`.
+
 ## [0.61.14] — 2026-10-30
 
 **Breaking:** `WsHub::upgrade` and `ws_handler` take a `Shutdown`; `RegisteredHostResolver` is built with `::new(apex)`; `org_host::add_host` takes the apex; `HostError` has a new `IsApex` variant and is `#[non_exhaustive]`. `AuthSettings` has a new field `login_field` (struct literals need `..Default::default()`); `derive(Model)` refuses unknown `validators` names and `validators` on non-`String` fields at compile time; `server::Builder::from_env` no longer falls back to a built-in database URL; a JSON `""` on a nullable `String` field is kept as `""`; `derive(Form)` bool fields refuse unknown values; `where_not_in` past the bind cap returns `InListUnsplittable`; a dotted `DatabaseCache` table name means `schema.table`. See UPGRADING.

@@ -129,6 +129,25 @@ async fn provider(pool: &Pool, slug: &str, allow_email_link: bool) {
         sort_order: 3,
         scopes: Some("openid email".into()),
         allow_email_link,
+        allowed_email_domains: None,
+        blocked_email_domains: None,
+        allowed_idp_tenants: None,
+        allowed_hosted_domains: None,
+        required_claims: serde_json::json!({}),
+        require_verified_email: true,
+        signup_mode: None,
+        default_roles: None,
+        role_map: serde_json::json!({}),
+        role_claims: None,
+        sync_roles_on_login: false,
+        username_from: "email_local".into(),
+        username_clash: "suffix".into(),
+        sync_profile: false,
+        allow_email_link_staff: false,
+        sso_only: false,
+        auto_deactivate_after_days: None,
+        session_ttl_secs: None,
+        superuser_session_ttl_secs: None,
         created_at: Auto::default(),
         updated_at: Auto::default(),
     };
@@ -275,6 +294,8 @@ async fn a_hand_made_link_gets_its_key(pool: &Pool) {
         key_sha256: "stale".into(),
         user_id: 8,
         created_at: Auto::default(),
+        provisioned: false,
+        last_used_at: None,
     };
     row.insert_pool(pool).await.unwrap();
     let ok = One(Some(Account::new(8, false, true)));
@@ -366,14 +387,15 @@ async fn a_link_to_a_deleted_user_is_dropped(pool: &Pool) {
 
 /// Backdate a link, as one made for an earlier user with the same id.
 async fn age_link(pool: &Pool, subject: &str) {
+    age_link_by(pool, subject, chrono::TimeDelta::days(365)).await;
+}
+
+async fn age_link_by(pool: &Pool, subject: &str, by: chrono::TimeDelta) {
     use rustango::sql::UpdaterPool as _;
     SsoLink::objects()
         .filter("subject", subject.to_owned())
         .update()
-        .set(
-            "created_at",
-            chrono::Utc::now() - chrono::TimeDelta::days(365),
-        )
+        .set("created_at", chrono::Utc::now() - by)
         .execute_pool(pool)
         .await
         .unwrap();
@@ -385,9 +407,9 @@ fn policy_lock() -> &'static tokio::sync::Mutex<()> {
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-/// A link older than its account: by default it warns and still signs in
-/// (an imported `created_at` looks the same); with `StaleLinks::Drop` it is
-/// deleted and sign-in goes on as if unlinked.
+/// A link older than its account: by default it is deleted and sign-in goes
+/// on as if unlinked; with `StaleLinks::Warn` it warns and still signs in
+/// (an imported `created_at` looks the same).
 async fn a_link_older_than_its_account(pool: &Pool) {
     use chrono::{TimeDelta, Utc};
     use rustango::sso::link::{set_stale_links, StaleLinks};
@@ -395,6 +417,11 @@ async fn a_link_older_than_its_account(pool: &Pool) {
     let key = app_key();
     let p = profile("sub-old", "new@example.com");
     let reused = Account::new(42, false, true).with_created_at(Utc::now());
+    assert_eq!(
+        rustango::sso::link::stale_links(),
+        StaleLinks::Drop,
+        "the default"
+    );
 
     set_stale_links(StaleLinks::Warn);
     create_link(pool, &key, "sub-old", 42).await.unwrap();
@@ -412,7 +439,7 @@ async fn a_link_older_than_its_account(pool: &Pool) {
         let got = sign_in(pool, &key, false, &p, &One(Some(reused)))
             .with_subscriber(subscriber)
             .await;
-        assert_eq!(got.unwrap(), 42, "the default keeps signing in");
+        assert_eq!(got.unwrap(), 42, "Warn keeps signing in");
         buf.contents()
     };
     #[cfg(not(feature = "runtime"))]
@@ -437,6 +464,18 @@ async fn a_link_older_than_its_account(pool: &Pool) {
     );
     assert!(linked_user(pool, &key, "sub-old").await.unwrap().is_none());
 
+    // Within the hour of clock skew a link is not stale.
+    create_link(pool, &key, "sub-skew", 44).await.unwrap();
+    age_link_by(pool, "sub-skew", TimeDelta::minutes(30)).await;
+    let skewed = Account::new(44, false, true).with_created_at(Utc::now());
+    let p4 = profile("sub-skew", "skew@example.com");
+    assert_eq!(
+        sign_in(pool, &key, false, &p4, &One(Some(skewed)))
+            .await
+            .unwrap(),
+        44
+    );
+
     // A link made after its account still signs in.
     create_link(pool, &key, "sub-new", 43).await.unwrap();
     let older = Account::new(43, false, true).with_created_at(Utc::now() - TimeDelta::days(1));
@@ -457,7 +496,6 @@ async fn a_link_older_than_its_account(pool: &Pool) {
     age_link(pool, "sub-tenant").await;
     let p3 = profile("sub-tenant", &email);
     let got = find_or_provision_member(pool, &key, false, &p3, false).await;
-    set_stale_links(StaleLinks::Warn);
     assert!(matches!(got, Ok(MemberSignIn::NotLinked)), "{got:?}");
     assert!(linked_user(pool, &key, "sub-tenant")
         .await
@@ -650,6 +688,25 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
                 sort_order: 0,
                 scopes: None,
                 allow_email_link: allow,
+                allowed_email_domains: None,
+                blocked_email_domains: None,
+                allowed_idp_tenants: None,
+                allowed_hosted_domains: None,
+                required_claims: serde_json::json!({}),
+                require_verified_email: true,
+                signup_mode: None,
+                default_roles: None,
+                role_map: serde_json::json!({}),
+                role_claims: None,
+                sync_roles_on_login: false,
+                username_from: "email_local".into(),
+                username_clash: "suffix".into(),
+                sync_profile: false,
+                allow_email_link_staff: false,
+                sso_only: false,
+                auto_deactivate_after_days: None,
+                session_ttl_secs: None,
+                superuser_session_ttl_secs: None,
                 created_at: Auto::default(),
                 updated_at: Auto::default(),
             }
@@ -675,6 +732,8 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             key_sha256: rustango::sso::link::key_sha256(issuer, "sub-1"),
             user_id: 1,
             created_at: Auto::default(),
+            provisioned: false,
+            last_used_at: None,
         };
         // Sign-in matches the issuer exactly, so a case variant is no link (MySQL `_ci`).
         link("oidc|https://SHARED.example")
@@ -687,6 +746,134 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
             .await
             .unwrap();
         assert_eq!(shared_stranded(pool, pool).await, ["off"]);
+        // Other suites on this database recreate it through the migrations.
+        rustango::testkit::matrix::drop_table(pool, "rustango_shared_sso_providers").await;
+    }
+}
+
+/// `check --deploy` names provider settings that weaken sign-in.
+async fn check_warns_about_risky_settings(pool: &Pool) {
+    use rustango::sql::FetcherPool as _;
+    use rustango::testkit::sso_check::{tenant_risks, Risk};
+    let edit = |slug: &'static str, f: fn(&mut SsoProvider)| async move {
+        let mut p = SsoProvider::objects()
+            .filter("slug", slug)
+            .fetch(pool)
+            .await
+            .unwrap()
+            .remove(0);
+        f(&mut p);
+        p.save_pool(pool).await.unwrap();
+    };
+    for slug in [
+        "safe", "linky", "staffy", "plain", "local", "loose", "lax", "preset", "off",
+    ] {
+        provider(pool, slug, slug == "linky" || slug == "off").await;
+    }
+    edit("staffy", |p| p.allow_email_link_staff = true).await;
+    edit("plain", |p| {
+        p.issuer_url = Some("HTTP://idp.example/realm".into())
+    })
+    .await;
+    edit("local", |p| {
+        p.issuer_url = Some("http://127.0.0.1:8080".into())
+    })
+    .await;
+    edit("loose", |p| {
+        p.require_verified_email = false;
+        p.allowed_email_domains = Some("example.com".into());
+    })
+    .await;
+    edit("lax", |p| p.require_verified_email = false).await;
+    edit("preset", |p| {
+        p.kind = "google".into();
+        p.issuer_url = None;
+        p.allow_email_link = true;
+    })
+    .await;
+    edit("off", |p| p.enabled = false).await;
+    let risks = |found: Vec<rustango::testkit::sso_check::Risky>| {
+        let mut got: Vec<(String, Risk)> = found.into_iter().map(|r| (r.slug, r.why)).collect();
+        got.sort();
+        got
+    };
+    let want = |rows: &[(&str, Risk)]| -> Vec<(String, Risk)> {
+        rows.iter().map(|(s, r)| ((*s).to_owned(), *r)).collect()
+    };
+    assert_eq!(
+        risks(tenant_risks(pool).await.unwrap()),
+        want(&[
+            ("linky", Risk::EmailLinkOnCustomIdp),
+            ("loose", Risk::UnverifiedDomainRule),
+            ("plain", Risk::InsecureIssuer),
+            ("staffy", Risk::EmailLinkOnCustomIdp),
+        ])
+    );
+
+    #[cfg(feature = "admin-sso")]
+    {
+        use rustango::testkit::sso_check::{admin_risks, shared_risks, SharedSsoProvider};
+        // The admin never links by email.
+        assert_eq!(
+            risks(admin_risks(pool).await.unwrap()),
+            want(&[
+                ("loose", Risk::UnverifiedDomainRule),
+                ("plain", Risk::InsecureIssuer),
+            ])
+        );
+        rustango::testkit::matrix::fresh_table::<SharedSsoProvider>(pool).await;
+        for (slug, signup) in [
+            ("open", Some("open")),
+            ("listed", Some("allowlist")),
+            ("invited", Some("invite_only")),
+            ("closed", None),
+        ] {
+            SharedSsoProvider {
+                id: Auto::default(),
+                slug: slug.into(),
+                label: slug.into(),
+                kind: "oidc".into(),
+                issuer_url: Some("https://shared.example".into()),
+                client_id: "cid".into(),
+                client_secret: Cast::new("s3cret".into()),
+                enabled: true,
+                sort_order: 0,
+                scopes: None,
+                allow_email_link: slug == "closed",
+                allowed_email_domains: Some("example.com".into()),
+                blocked_email_domains: None,
+                allowed_idp_tenants: None,
+                allowed_hosted_domains: None,
+                required_claims: serde_json::json!({}),
+                require_verified_email: true,
+                signup_mode: signup.map(str::to_owned),
+                default_roles: None,
+                role_map: serde_json::json!({}),
+                role_claims: None,
+                sync_roles_on_login: false,
+                username_from: "email_local".into(),
+                username_clash: "suffix".into(),
+                sync_profile: false,
+                allow_email_link_staff: false,
+                sso_only: false,
+                auto_deactivate_after_days: None,
+                session_ttl_secs: None,
+                superuser_session_ttl_secs: None,
+                created_at: Auto::default(),
+                updated_at: Auto::default(),
+            }
+            .insert_pool(pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(
+            risks(shared_risks(pool).await.unwrap()),
+            want(&[
+                ("closed", Risk::EmailLinkOnCustomIdp),
+                ("listed", Risk::SharedSignup),
+                ("open", Risk::SharedSignup),
+            ])
+        );
         // Other suites on this database recreate it through the migrations.
         rustango::testkit::matrix::drop_table(pool, "rustango_shared_sso_providers").await;
     }
@@ -756,5 +943,6 @@ tri_dialect_test!(
         a_table_without_the_flag_still_serves_logins,
         a_missing_provider_table_holds_no_providers,
         check_finds_providers_that_refuse_every_user,
+        check_warns_about_risky_settings,
     ],
 );

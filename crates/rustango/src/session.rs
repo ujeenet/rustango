@@ -536,6 +536,9 @@ pub(crate) struct PendingSecondFactor {
     /// The flow's encrypted rehash of the password, stored after the code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) upgrade: Option<String>,
+    /// The session lifetime the sign-in earned, when shorter than the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session_ttl: Option<i64>,
 }
 
 #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
@@ -549,6 +552,7 @@ impl PendingSecondFactor {
             pwf: PasswordFingerprint::of(secret, password_hash),
             exp: chrono::Utc::now().timestamp() + Self::TTL_SECS,
             upgrade: None,
+            session_ttl: None,
         }
     }
 

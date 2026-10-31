@@ -314,6 +314,10 @@ async fn login_submit(
         Err(crate::passwords::PasswordError::Busy) => return LoginRefused::Busy.into_response(),
         Err(_) => false,
     };
+    // Only after a right password, so the refusal reads as a wrong one.
+    #[cfg(feature = "sso")]
+    let password_ok = password_ok
+        && crate::sso::lifecycle::admin_password_allowed(&state.pool, id, is_superuser).await;
 
     if !is_active {
         attempt.failed().await;

@@ -9,7 +9,7 @@ use rustango::core::Column as _;
 use rustango::migrate as rmig;
 use rustango::sql::sqlx;
 use rustango::tenancy::{
-    authenticate_operator, authenticate_user, manage, password, Org, TenantPools,
+    authenticate_operator, authenticate_user_pool, manage, password, Org, TenantPools,
 };
 use tokio::sync::Mutex;
 
@@ -231,10 +231,10 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     .await
     .unwrap();
 
-    // Authenticate via a schema-scoped connection from TenantPools.
+    // Authenticate on the tenant's schema-scoped pool.
     let org = lookup_org(pools.registry(), &slug).await;
-    let mut conn = pools.acquire(&org).await.unwrap();
-    let auth = authenticate_user(&mut conn, &user, "hunter2")
+    let scoped = rustango::sql::Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
+    let auth = authenticate_user_pool(&scoped, &user, "hunter2")
         .await
         .unwrap();
     assert!(auth.is_some(), "right password should authenticate");
@@ -243,14 +243,15 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     assert!(u.is_superuser);
 
     // Wrong password rejects.
-    let auth = authenticate_user(&mut conn, &user, "wrong").await.unwrap();
+    let auth = authenticate_user_pool(&scoped, &user, "wrong")
+        .await
+        .unwrap();
     assert!(auth.is_none());
 
     // The session cut-offs come back, so a login's `iat` can land after them (#1855).
     let at = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 60, 0).unwrap();
     {
         use rustango::sql::UpdaterPool as _;
-        let scoped = rustango::sql::Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
         rustango::tenancy::User::objects()
             .filter("username", user.clone())
             .update()
@@ -260,7 +261,7 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
             .await
             .unwrap();
     }
-    let u = authenticate_user(&mut conn, &user, "hunter2")
+    let u = authenticate_user_pool(&scoped, &user, "hunter2")
         .await
         .unwrap()
         .unwrap();
@@ -322,10 +323,10 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     create_users_in_schema(&pool, &slug).await;
 
     let org = lookup_org(pools.registry(), &slug).await;
-    let mut conn = pools.acquire(&org).await.unwrap();
+    let scoped = rustango::sql::Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
     // Operator's exact username + password — should NOT authenticate
     // as a tenant user (the hard wall).
-    let auth = authenticate_user(&mut conn, &op_user, "secret")
+    let auth = authenticate_user_pool(&scoped, &op_user, "secret")
         .await
         .unwrap();
     assert!(

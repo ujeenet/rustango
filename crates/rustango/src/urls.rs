@@ -309,7 +309,7 @@ fn check_host_and_scheme(trimmed: &str, allowed_hosts: &[&str], require_https: b
 }
 
 /// `localhost`, `*.localhost`, or a loopback IP, with or without a port.
-#[cfg(feature = "tenancy")]
+#[cfg(any(feature = "tenancy", feature = "sso"))]
 pub(crate) fn is_loopback_host(host: &str) -> bool {
     use std::net::IpAddr;
     let name = if let Some(rest) = host.strip_prefix('[') {

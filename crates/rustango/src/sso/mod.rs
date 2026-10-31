@@ -28,7 +28,11 @@
 
 #[cfg(any(feature = "tenancy", feature = "admin-sso"))]
 pub(crate) mod check;
+/// Password rules and idle deactivation.
+#[cfg(any(feature = "tenancy", feature = "admin"))]
+pub mod lifecycle;
 pub mod link;
+pub mod policy;
 pub mod provider;
 pub use link::{LinkSource, ProviderKey, SsoLink, StaleLinks};
 pub use provider::{list_enabled, resolve_by_slug, ResolvedProvider, SsoProvider};
@@ -45,6 +49,105 @@ pub use crate::oauth2::{open_flow, seal_flow, FlowPurpose, FlowScope, Normalized
 /// redirect and the callback. Distinct from the standalone
 /// `oauth2::router`'s `rustango_oauth_flow` so the two can coexist.
 pub const SSO_FLOW_COOKIE: &str = "rustango_admin_sso_flow";
+
+/// One surface's flow cookie at one cookie `Path`. A host-only cookie with
+/// `Path=/` over HTTPS takes the `__Host-` prefix, so a sibling subdomain
+/// cannot plant or shadow it; a prefix tenant (`Path=/acme`) cannot.
+#[cfg(feature = "admin")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FlowCookie<'a> {
+    name: &'static str,
+    path: &'a str,
+    secure: bool,
+}
+
+#[cfg(feature = "admin")]
+impl<'a> FlowCookie<'a> {
+    pub(crate) fn new(name: &'static str, path: &'a str, secure: bool) -> Self {
+        Self { name, path, secure }
+    }
+
+    fn host_only(self) -> bool {
+        self.secure && self.path == "/"
+    }
+
+    /// The name this cookie is set under.
+    pub(crate) fn name(self) -> String {
+        if self.host_only() {
+            format!("__Host-{}", self.name)
+        } else {
+            self.name.to_owned()
+        }
+    }
+
+    fn attrs(self, max_age: i64) -> String {
+        let secure = if self.secure { "; Secure" } else { "" };
+        format!(
+            "; Path={}; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}",
+            self.path
+        )
+    }
+
+    /// The `Set-Cookie` value holding `sealed`.
+    pub(crate) fn set(self, sealed: &str, max_age: i64) -> String {
+        format!("{}={sealed}{}", self.name(), self.attrs(max_age))
+    }
+
+    /// `Set-Cookie` values that expire it, under both names.
+    pub(crate) fn clear(self) -> Vec<String> {
+        let mut out = vec![format!("{}={}", self.name(), self.attrs(0))];
+        if self.host_only() {
+            out.push(format!("{}={}", self.name, self.attrs(0)));
+        }
+        out
+    }
+
+    /// The sealed flow from the request, under [`Self::name`] only: a plain
+    /// name beside `__Host-` could be planted from a sibling subdomain.
+    pub(crate) fn read(self, headers: &axum::http::HeaderMap) -> Option<&str> {
+        crate::cookies::cookie_from_headers(headers, &self.name())
+    }
+}
+
+#[cfg(feature = "admin")]
+/// Flows already completed in this process, oldest first, kept as long as
+/// a flow can live.
+struct UsedFlows {
+    order: std::collections::VecDeque<(Instant, String)>,
+    seen: std::collections::HashSet<String>,
+}
+
+#[cfg(feature = "admin")]
+static USED_FLOWS: LazyLock<Mutex<UsedFlows>> = LazyLock::new(|| {
+    Mutex::new(UsedFlows {
+        order: std::collections::VecDeque::new(),
+        seen: std::collections::HashSet::new(),
+    })
+});
+
+#[cfg(feature = "admin")]
+/// Most completed flows remembered; past it the oldest is forgotten.
+const USED_FLOWS_MAX: usize = 100_000;
+
+#[cfg(feature = "admin")]
+/// Claim `flow` for its one callback: `false` when this process already
+/// took it. Per process; across replicas the IdP's one-time code still holds.
+pub(crate) fn claim_flow(flow: &OAuth2Flow) -> bool {
+    let keep = Duration::from_secs(crate::oauth2::MAX_FLOW_AGE_SECS + 60);
+    let mut used = USED_FLOWS.lock().unwrap_or_else(PoisonError::into_inner);
+    while let Some((at, state)) = used.order.front().cloned() {
+        if at.elapsed() < keep && used.order.len() < USED_FLOWS_MAX {
+            break;
+        }
+        used.order.pop_front();
+        used.seen.remove(&state);
+    }
+    if !used.seen.insert(flow.state.clone()) {
+        return false;
+    }
+    used.order.push_back((Instant::now(), flow.state.clone()));
+    true
+}
 
 /// A fully-resolved SSO provider config — the client secret is the
 /// decrypted value, ready to build a provider. Both surfaces normalize their stored config into this.
@@ -139,6 +242,22 @@ pub(crate) fn check_provider(provider: &str, issuer_url: Option<&str>) -> Result
     }
 }
 
+/// `http://` to a host other than loopback.
+#[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
+pub(crate) fn insecure_url(url: &str) -> bool {
+    let url = url.trim();
+    let Some(rest) = url
+        .get(..7)
+        .filter(|s| s.eq_ignore_ascii_case("http://"))
+        .map(|_| &url[7..])
+    else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or("");
+    !crate::urls::is_loopback_host(host)
+}
+
 /// Build an [`OAuth2Provider`] from a resolved config. Known keys use the
 /// built-in presets; `"oidc"` runs OpenID Connect discovery against
 /// `issuer_url`, reusing the result for an hour.
@@ -212,6 +331,7 @@ struct Endpoints {
     auth_url: String,
     token_url: String,
     userinfo_url: Option<String>,
+    id_token_keys: Option<(String, crate::oauth2::IssuerRule)>,
 }
 
 /// A discovery outcome: the endpoints, or the failure's message.
@@ -293,6 +413,9 @@ async fn discovered(
                             auth_url: p.auth_url.clone(),
                             token_url: p.token_url.clone(),
                             userinfo_url: p.userinfo_url.clone(),
+                            id_token_keys: p
+                                .id_token_keys()
+                                .map(|(u, i)| (u.to_owned(), i.clone())),
                         });
                     remember(
                         &mut DISCOVERED.lock().unwrap_or_else(PoisonError::into_inner),
@@ -308,11 +431,14 @@ async fn discovered(
         }
     };
     let e = found.map_err(OAuthError::Discovery)?;
-    let p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
-    Ok(match e.userinfo_url {
-        Some(u) => p.with_userinfo_url(u),
-        None => p,
-    })
+    let mut p = OAuth2Provider::new("oidc", id, secret, redirect, e.auth_url, e.token_url);
+    if let Some(u) = e.userinfo_url {
+        p = p.with_userinfo_url(u);
+    }
+    if let Some((jwks, issuer)) = e.id_token_keys {
+        p = p.with_id_token_keys(jwks, issuer);
+    }
+    Ok(p)
 }
 
 /// Insert `found`, dropping expired entries and then the oldest when `max` is reached.
@@ -403,6 +529,43 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "admin")]
+    /// `__Host-` only for a host-only HTTPS cookie at `/`; the old name still reads.
+    #[test]
+    fn flow_cookies_take_the_host_prefix_only_at_the_root() {
+        let root = FlowCookie::new("f", "/", true);
+        assert_eq!(root.name(), "__Host-f");
+        assert!(root.set("v", 600).starts_with("__Host-f=v; Path=/;"));
+        assert!(root.set("v", 600).ends_with("; Secure"));
+        assert_eq!(root.clear().len(), 2);
+        assert_eq!(FlowCookie::new("f", "/acme", true).name(), "f");
+        assert_eq!(FlowCookie::new("f", "/", false).name(), "f");
+        // A plain-name cookie (tossed from a sibling subdomain) is ignored.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(axum::http::header::COOKIE, "f=planted".parse().unwrap());
+        assert_eq!(root.read(&h), None);
+        assert_eq!(
+            FlowCookie::new("f", "/acme", true).read(&h),
+            Some("planted")
+        );
+        h.insert(
+            axum::http::header::COOKIE,
+            "f=old; __Host-f=new".parse().unwrap(),
+        );
+        assert_eq!(root.read(&h), Some("new"));
+    }
+
+    #[cfg(feature = "admin")]
+    /// A flow completes once.
+    #[test]
+    fn a_flow_is_claimed_once() {
+        let (_, flow) = crate::oauth2::OAuth2Provider::new("t", "c", "s", "r", "a", "t").begin();
+        assert!(claim_flow(&flow));
+        assert!(!claim_flow(&flow));
+        let (_, other) = crate::oauth2::OAuth2Provider::new("t", "c", "s", "r", "a", "t").begin();
+        assert!(claim_flow(&other));
+    }
+
     #[test]
     fn debug_hides_the_client_secret() {
         let s = format!("{:?}", cfg("google"));
@@ -460,6 +623,9 @@ mod tests {
     async fn issuer(fail_first: usize) -> (String, Arc<AtomicUsize>) {
         let hits = Arc::new(AtomicUsize::new(0));
         let h = hits.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let iss = base.clone();
         let app = axum::Router::new().route(
             "/.well-known/openid-configuration",
             axum::routing::get(move || async move {
@@ -467,13 +633,12 @@ mod tests {
                     return Err(axum::http::StatusCode::BAD_GATEWAY);
                 }
                 Ok(axum::Json(serde_json::json!({
+                    "issuer": iss,
                     "authorization_endpoint": "https://idp.test/auth",
                     "token_endpoint": "https://idp.test/token",
                 })))
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         (base, hits)
     }
@@ -512,6 +677,7 @@ mod tests {
             auth_url: "a".into(),
             token_url: "t".into(),
             userinfo_url: None,
+            id_token_keys: None,
         };
         let mut map = HashMap::new();
         for k in ["one", "two", "three"] {

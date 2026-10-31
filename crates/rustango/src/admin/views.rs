@@ -2203,6 +2203,12 @@ pub(crate) async fn create_submit(
     if let Err(e) = super::derived_fields::apply(model.table, &mut collected, None).await {
         return Ok(refused(e.as_str().to_owned()).await);
     }
+    #[cfg(feature = "sso")]
+    if let Some(msg) =
+        crate::sso::link::admin_source_refusal(model.table, state.config.database, &collected, None)
+    {
+        return Ok(refused(msg).await);
+    }
     let write = LinkedWrite {
         values: &collected,
         stored: None,
@@ -2718,6 +2724,15 @@ pub(crate) async fn update_submit(
     {
         return Ok(refused(e.as_str().to_owned()).await);
     }
+    #[cfg(feature = "sso")]
+    if let Some(msg) = crate::sso::link::admin_source_refusal(
+        model.table,
+        state.config.database,
+        &collected,
+        pre_update_row.as_ref(),
+    ) {
+        return Ok(refused(msg).await);
+    }
     let write = LinkedWrite {
         values: &collected,
         stored: Some((pk_field, &pk_value)),
@@ -3058,6 +3073,8 @@ pub(crate) async fn delete_submit(
         super::audit::admin_row_snapshot_entry(model, pk_text.clone(), audit_op, &before_row, None);
     // An `audit(...)` model's entry commits with the write, as on edit (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
+    #[cfg(feature = "sso")]
+    let links = user_links(&state, model).await?;
     let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
@@ -3078,6 +3095,16 @@ pub(crate) async fn delete_submit(
         let stamp = crate::soft_delete::__mark_query(model, col, pk_field.column, pk_value, now);
         crate::sql::update_tx(&mut tx, &stamp).await
     } else {
+        #[cfg(feature = "sso")]
+        if let Some(links) = &links {
+            if let Err(e) = links
+                .drop_tx(&mut tx, std::slice::from_ref(&pk_value))
+                .await
+            {
+                rollback_quietly(tx, model.table).await;
+                return Err(e.into());
+            }
+        }
         let query = DeleteQuery::by_pk(model, pk_field.column, pk_value);
         crate::sql::delete_tx(&mut tx, &query).await
     };
@@ -3117,6 +3144,18 @@ pub(crate) async fn delete_submit(
     })
     .await;
     Ok(Redirect::to(&list_url).into_response())
+}
+
+/// The SSO links a hard delete of `model`'s users takes with it (soft delete keeps them).
+#[cfg(feature = "sso")]
+async fn user_links(
+    state: &AppState,
+    model: &'static crate::core::ModelSchema,
+) -> Result<Option<crate::sso::link::UserLinks>, AdminError> {
+    if model.soft_delete_column.is_some() {
+        return Ok(None);
+    }
+    Ok(crate::sso::link::UserLinks::of(&state.pool, model.table).await?)
 }
 
 /// A failed hard delete: a 409 naming who still points at the row when
@@ -3395,6 +3434,11 @@ pub(crate) async fn action_submit(
     };
     // An `audit(...)` model's entries commit with the write (#2390).
     let emit = crate::audit::DiffEmit::for_model(model);
+    #[cfg(feature = "sso")]
+    let links = match builtin {
+        BuiltinWrite::HardDelete => user_links(&state, model).await?,
+        BuiltinWrite::Mark(..) => None,
+    };
     let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
@@ -3410,6 +3454,13 @@ pub(crate) async fn action_submit(
             return Err(e.into());
         }
     };
+    #[cfg(feature = "sso")]
+    if let Some(links) = &links {
+        if let Err(e) = links.drop_tx(&mut tx, &pk_values).await {
+            rollback_quietly(tx, model.table).await;
+            return Err(e.into());
+        }
+    }
     let changed = match builtin.run(&mut tx, model, pk_field, &pk_values).await {
         Ok(changed) => changed,
         Err(e) => {

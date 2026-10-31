@@ -53,6 +53,7 @@
 use std::time::Duration;
 
 use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
+use futures_util::FutureExt as _;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use tokio::sync::broadcast::error::RecvError;
@@ -197,9 +198,20 @@ where
     tokio::pin!(stopped);
 
     loop {
-        tokio::select! {
+        let step = tokio::select! {
+            () = &mut stopped => Step::Stop,
+            recv = rx.recv() => Step::Bus(recv),
+            incoming = socket.recv() => Step::Peer(incoming),
+            // `select!` picks among ready branches at random, so a reply
+            // queued behind a long send may lose to the overdue tick: read it first.
+            _ = ticks.tick() => match awaiting_reply.then(|| socket.recv().now_or_never()).flatten() {
+                Some(incoming) => Step::Peer(incoming),
+                None => Step::Tick,
+            },
+        };
+        match step {
             // The server is stopping: say so, so the client reconnects elsewhere.
-            () = &mut stopped => {
+            Step::Stop => {
                 let away = CloseFrame {
                     code: close_code::AWAY,
                     reason: "server shutting down".into(),
@@ -209,7 +221,7 @@ where
             }
 
             // Outbound: fan-out from the bus.
-            recv = rx.recv() => match recv {
+            Step::Bus(recv) => match recv {
                 Ok(event) => {
                     let json = match serde_json::to_string(&event) {
                         Ok(j) => j,
@@ -234,7 +246,7 @@ where
 
             // Inbound: read the socket so disconnects show up quickly
             // and `on_message` can run. Any frame proves the peer is alive.
-            incoming = socket.recv() => {
+            Step::Peer(incoming) => {
                 if matches!(incoming, Some(Ok(_))) {
                     awaiting_reply = false;
                 }
@@ -246,7 +258,8 @@ where
                         }
                         if let Some(handler) = on_message {
                             if let Some(reply) = handler(t.as_str()) {
-                                if !send(&mut socket, Message::Text(reply.into()), send_limit).await {
+                                if !send(&mut socket, Message::Text(reply.into()), send_limit).await
+                                {
                                     return;
                                 }
                             }
@@ -271,11 +284,11 @@ where
                         return;
                     }
                 }
-            },
+            }
 
             // Keepalive: no answer to the last ping in a whole interval
             // means a half-open peer.
-            _ = ticks.tick() => {
+            Step::Tick => {
                 if awaiting_reply {
                     tracing::debug!("ws: no pong within keepalive, closing");
                     return;
@@ -287,6 +300,14 @@ where
             }
         }
     }
+}
+
+/// What the connection loop does next.
+enum Step<T> {
+    Stop,
+    Bus(Result<T, RecvError>),
+    Peer(Option<Result<Message, axum::Error>>),
+    Tick,
 }
 
 /// Shortest time a send may take; a short keepalive must not drop slow readers.
@@ -498,6 +519,67 @@ mod tests {
             alive, 1,
             "a slow reader was dropped at the keepalive interval"
         );
+    }
+
+    /// A pong that queued while a send was blocked counts, even when the
+    /// keepalive tick is overdue at the same time. Many runs, since the
+    /// race is a coin flip per run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pong_queued_behind_a_blocked_send_beats_an_overdue_tick() {
+        let runs: Vec<_> = (0..16)
+            .map(|_| tokio::spawn(pong_behind_blocked_send()))
+            .collect();
+        let mut dropped = 0;
+        for run in runs {
+            if !run.await.unwrap() {
+                dropped += 1;
+            }
+        }
+        assert_eq!(dropped, 0, "{dropped}/16 peers dropped despite a pong");
+    }
+
+    /// One run: `true` if the connection survived.
+    async fn pong_behind_blocked_send() -> bool {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        const PONG: [u8; 6] = [0x8A, 0x80, 1, 2, 3, 4];
+        // Wide enough that a loaded runner still pongs within one interval.
+        let keepalive = Duration::from_millis(600);
+        let hub = WsHub::new(EventBus::<String>::new(64)).keepalive(keepalive);
+        let (mut read, mut write) = open(hub.clone()).await.into_split();
+        // Wait for the first ping: the server now awaits a reply.
+        loop {
+            let mut h = [0u8; 2];
+            read.read_exact(&mut h).await.unwrap();
+            let mut body = vec![0u8; usize::from(h[1] & 0x7f)];
+            read.read_exact(&mut body).await.unwrap();
+            if h[0] & 0x0f == 0x9 {
+                break;
+            }
+        }
+        // Block the server in a send, queue the pong behind it, let the tick go overdue.
+        // 15 MiB, past what loopback buffers hold on Linux and macOS; under the bus's 64.
+        let big = "y".repeat(256 * 1024);
+        for _ in 0..60 {
+            hub.broadcast(big.clone());
+        }
+        tokio::time::sleep(keepalive / 3).await;
+        write.write_all(&PONG).await.unwrap();
+        tokio::time::sleep(keepalive * 2).await;
+        let drain = tokio::spawn(async move {
+            let mut buf = vec![0u8; 64 * 1024];
+            while read.read(&mut buf).await.is_ok_and(|n| n > 0) {}
+        });
+        // Keep answering so only the race can close the socket.
+        let ponger = tokio::spawn(async move {
+            while write.write_all(&PONG).await.is_ok() {
+                tokio::time::sleep(keepalive / 4).await;
+            }
+        });
+        tokio::time::sleep(keepalive * 2).await;
+        let alive = hub.receiver_count() == 1;
+        drain.abort();
+        ponger.abort();
+        alive
     }
 
     #[test]
