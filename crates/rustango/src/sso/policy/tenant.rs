@@ -368,6 +368,18 @@ mod tests {
         assert!(settings(P::On, true).shows_password_form(false));
     }
 
+    /// The settings row is saved as `default`, whatever the case typed.
+    #[cfg(feature = "admin")]
+    #[tokio::test]
+    async fn the_admin_names_the_settings_row_default() {
+        use crate::core::SqlValue as V;
+        let mut ok = vec![("name", V::String(" Default ".into()))];
+        admin_settings_name(&mut ok, None).await.unwrap();
+        assert_eq!(ok[0].1, V::String("default".into()));
+        let mut bad = vec![("name", V::String("main".into()))];
+        assert!(admin_settings_name(&mut bad, None).await.is_err());
+    }
+
     #[test]
     fn signup_limit_defaults_and_zero_is_none() {
         let mut s = TenantSettings::default();

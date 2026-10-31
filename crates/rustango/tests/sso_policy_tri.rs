@@ -1196,6 +1196,28 @@ async fn role_sync_touches_only_mapped_roles(pool: &Pool) {
         want,
         "a missing claim strips nothing"
     );
+    // A mapped role with no row is audited, but not on every sign-in.
+    rustango::audit::ensure_table_pool(pool).await.unwrap();
+    set(
+        pool,
+        "map",
+        "role_map",
+        SqlValue::Json(serde_json::json!({"g-ghost": format!("Ghost-{t}")})),
+    )
+    .await;
+    for _ in 0..8 {
+        tenant(pool, "map", &with(serde_json::json!(["g-ghost"])))
+            .await
+            .unwrap();
+    }
+    let unknown = rustango::audit::AuditLog::objects()
+        .filter("entity_table", "rustango_user_roles")
+        .filter("entity_pk", uid.to_string())
+        .fetch(pool)
+        .await
+        .unwrap()
+        .len();
+    assert!((1..=5).contains(&unknown), "{unknown} unknown-role rows");
 }
 
 /// A taken username gets a suffix, or refuses.
@@ -1288,6 +1310,29 @@ async fn username_clash_suffix_or_refuse(pool: &Pool) {
         .await,
         refused(Refusal::UsernameTaken)
     );
+}
+
+/// Only a row named exactly `default` holds the tenant settings, on every
+/// backend (MySQL's `=` alone would match `Default`).
+async fn the_settings_row_name_is_exact(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<SsoTenantPolicy>(pool).await;
+    SsoTenantPolicy {
+        id: Auto::default(),
+        name: "Default".into(),
+        access_denied_message: None,
+        password_login: "off".into(),
+        sso_only: true,
+        default_provider: None,
+        signups_per_hour: None,
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        TenantSettings::load(pool).await.unwrap(),
+        TenantSettings::default()
+    );
+    rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
 }
 
 /// The member flow with no mode set follows `auto_provision`, as before.
@@ -1872,6 +1917,7 @@ tri_dialect_test!(
         username_clash_suffix_or_refuse,
         member_auto_provision_is_unchanged,
         password_rules_follow_sso_only,
+        the_settings_row_name_is_exact,
         successes_are_audited_and_signups_capped,
         shared_roles_need_tenant_approval,
         idle_users_are_deactivated,

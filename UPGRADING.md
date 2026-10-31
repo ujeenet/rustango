@@ -153,7 +153,7 @@ untouched.
 ### SSO
 
 - Run `makemigrations` and `migrate`: the SSO provider and link tables get new columns, and three tables are new. Until then sign-in keeps working with no rules (a warning is logged), but a new email link cannot be saved.
-- `SsoProvider`, `SharedSsoProvider` and `SsoLink` struct literals must set the new fields; the defaults are `None`, `false`, `{}`, `require_verified_email: true`, `username_from: "email_local"`, `username_clash: "suffix"`.
+- `SsoProvider`, `SharedSsoProvider` and `SsoLink` struct literals must set the new fields; the defaults are `None`, `false`, `{}`, `username_from: "email_local"`, `username_clash: "suffix"`.
 - A provider field that does not parse (written past the admin) refuses every sign-in through it until fixed.
 - An email link to an existing account still needs an IdP-verified email; a Microsoft email now counts as verified when the id_token says `xms_edov` or the provider pins its `tid`.
 - Matches on `LinkRefusal` need a wildcard arm (new `Policy` variant).
@@ -181,7 +181,7 @@ untouched.
 - The bare-admin password login honours `sso_only` on its providers. `sso_only` does not stop API keys or MCP agent secrets.
 - Tenant logout now lands on `login?local=1`. `sso-deactivate-idle` only switches off users who cannot use a password there.
 - `LinkTarget::with_registry` lets a reset read shared providers' rules; without it a user linked through one is refused a reset.
-- `require_verified_email` no longer loosens the domain allowlist: an unverified email never passes it.
+- The domain allowlist never passes an unverified email.
 - A user linked to SSO by email (or re-linked) has their password locked, sessions ended, API keys deleted and own agent keys switched off; to use a password again they reset it, and new keys must be made.
 - Any role (even one without permissions) makes a tenant user privileged: email linking needs `allow_email_link_staff` for them.
 - `OAuth2Flow` has new `nonce` and `next` fields (struct literals must set them); `Identity::from_handshake` takes the flow. An OIDC IdP must echo the `nonce` in its id_token.
@@ -192,6 +192,10 @@ untouched.
 - Domain invites for public suffixes or free mail domains are refused, and a new domain invite needs `max_uses` or `expires_at`.
 - Tenant SSO provider rows with a bad slug, unknown kind or a plain `http://` issuer (outside dev) can no longer be saved in the admin.
 - The bare admin refuses SSO from a Host that `security.allowed_hosts` (or `Builder::allowed_hosts`) does not list.
+- A multi-tenant Microsoft provider (`kind = microsoft`, or `oidc` on `/common` or `/organizations`) ignores `role_map` and `required_claims` claims until `allowed_idp_tenants` is set: no roles sync and required claims refuse.
+- `SsoSharedOverride` has new fields (`shared_provider_id`, `shared_issuer`, `allow_email_link`, `allow_email_link_staff`); `shared_slug` is no longer unique. An override binds to its shared row on first use; after the operator repoints that row at another issuer, delete and re-add the override. `SharedOverride::load` takes the provider key.
+- `deactivate_idle` returns `IdleSweep` (deactivated ids and a failure count) and stops when the tenant settings cannot be read.
+- `find_or_provision_member` is deprecated: it ignores the provider's policy.
 
 ## 0.61.14
 
