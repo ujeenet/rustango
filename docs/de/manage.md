@@ -185,6 +185,7 @@ gibt einen neuen aus.
 |---|---|
 | `audit-log` | Liest den Audit-Trail |
 | `audit-cleanup` | Kürzt ihn |
+| `sso-deactivate-idle` | Inaktive SSO-Benutzer in jedem Mandanten deaktivieren |
 
 ### MCP **T**
 

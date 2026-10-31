@@ -135,6 +135,7 @@
     <p class="sub">Sign in to <strong>{{ tenant_name | default(value=tenant_slug) }}</strong></p>
     {% if error %}<div class="error">{{ error }}</div>{% endif %}
     {% if sso_notice %}<div class="error">{{ sso_notice }}{% if sso_denied_note %}<br>{{ sso_denied_note }}{% endif %}</div>{% endif %}
+    {% if password_form | default(value=true) %}
     <label for="username">{{ login_label | default(value="Username") }}</label>
     <input type="{{ login_input_type | default(value="text") }}" id="username" name="username" autocomplete="{{ login_autocomplete | default(value="username") }}" autofocus required>
     <label for="password">Password</label>
@@ -144,8 +145,9 @@
        browser into an attacker-controlled account (#1607). #}
     {% if csrf_token %}<input type="hidden" name="_csrf" value="{{ csrf_token }}">{% endif %}
     <button type="submit">Sign in</button>
+    {% endif %}
     {% if sso_enabled %}
-    <div class="sso-divider"><span>or</span></div>
+    {% if password_form | default(value=true) %}<div class="sso-divider"><span>or</span></div>{% endif %}
     {% for p in sso_providers %}
     <a class="sso-button" href="{{ p.login_url }}">{{ p.label }}</a>
     {% endfor %}

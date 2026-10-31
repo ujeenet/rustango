@@ -13,11 +13,13 @@ pub mod identity;
 pub mod jwks;
 pub mod models;
 pub mod signup;
+pub mod tenant;
 
 pub use domain::{DomainList, DomainRule, EmailAddr, PolicyError, TokenList};
 pub use identity::{IdToken, Identity, RequiredClaims};
 pub use models::{SsoInvite, SsoSharedOverride, SsoTenantPolicy};
 pub use signup::{InviteTarget, RoleMap, RoleNames, SignupColumns, SignupPolicy};
+pub use tenant::{SharedOverride, TenantSettings};
 
 use crate::sql::Pool;
 
@@ -137,6 +139,8 @@ pub enum Refusal {
     Privileged,
     EmailCollides,
     Inactive,
+    /// The tenant's hourly sign-up limit is reached.
+    SignupRate,
 }
 
 impl Refusal {
@@ -161,6 +165,7 @@ impl Refusal {
             Self::Privileged => "privileged",
             Self::EmailCollides => "email_collides",
             Self::Inactive => "inactive",
+            Self::SignupRate => "signup_rate",
         }
     }
 
@@ -327,6 +332,67 @@ impl SignInPolicy {
     }
 }
 
+/// A layer's password and session rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct Lifecycle {
+    /// Users of this provider may not sign in with a password.
+    pub sso_only: bool,
+    pub auto_deactivate_after_days: Option<i32>,
+    pub session_ttl_secs: Option<i64>,
+    pub superuser_session_ttl_secs: Option<i64>,
+}
+
+fn min_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (x, None) | (None, x) => x,
+    }
+}
+
+impl Lifecycle {
+    /// Stored values; a number must be positive.
+    ///
+    /// # Errors
+    /// A zero or negative number, naming its column.
+    pub fn parse(
+        sso_only: bool,
+        auto_deactivate_after_days: Option<i64>,
+        session_ttl_secs: Option<i64>,
+        superuser_session_ttl_secs: Option<i64>,
+    ) -> Result<Self, PolicyError> {
+        let positive = |col: &str, v: Option<i64>| match v {
+            Some(n) if n <= 0 => Err(PolicyError(format!("{col}: must be positive"))),
+            v => Ok(v),
+        };
+        let days = positive("auto_deactivate_after_days", auto_deactivate_after_days)?
+            .map(|d| i32::try_from(d).unwrap_or(i32::MAX));
+        Ok(Self {
+            sso_only,
+            auto_deactivate_after_days: days,
+            session_ttl_secs: positive("session_ttl_secs", session_ttl_secs)?,
+            superuser_session_ttl_secs: positive(
+                "superuser_session_ttl_secs",
+                superuser_session_ttl_secs,
+            )?,
+        })
+    }
+
+    /// Both layers' rules: `sso_only` if either, the shorter lifetimes.
+    #[must_use]
+    pub fn tighten(self, other: Self) -> Self {
+        Self {
+            sso_only: self.sso_only || other.sso_only,
+            auto_deactivate_after_days: self.auto_deactivate_after_days,
+            session_ttl_secs: min_opt(self.session_ttl_secs, other.session_ttl_secs),
+            superuser_session_ttl_secs: min_opt(
+                self.superuser_session_ttl_secs,
+                other.superuser_session_ttl_secs,
+            ),
+        }
+    }
+}
+
 /// The policy one sign-in runs under: every layer must admit it.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -336,6 +402,13 @@ pub struct EffectivePolicy {
     signup: Result<SignupPolicy, PolicyError>,
     /// The surface's sign-up mode when the provider sets none.
     default_signup: SignupMode,
+    /// A tenant override's sign-up mode: the effective one is never looser.
+    signup_cap: Option<SignupMode>,
+    lifecycle: Result<Lifecycle, PolicyError>,
+    /// Roles this provider may grant here; `None`: any.
+    roles_allowed: Option<RoleNames>,
+    /// Sign-ups per hour; `None`: no limit.
+    signups_per_hour: Option<u32>,
 }
 
 impl EffectivePolicy {
@@ -344,9 +417,7 @@ impl EffectivePolicy {
     pub fn new(provider: Result<SignInPolicy, PolicyError>, allow_email_link: bool) -> Self {
         Self {
             layers: vec![provider],
-            allow_email_link,
-            signup: Ok(SignupPolicy::default()),
-            default_signup: SignupMode::Closed,
+            ..Self::legacy(allow_email_link)
         }
     }
 
@@ -358,6 +429,10 @@ impl EffectivePolicy {
             allow_email_link,
             signup: Ok(SignupPolicy::default()),
             default_signup: SignupMode::Closed,
+            signup_cap: None,
+            lifecycle: Ok(Lifecycle::default()),
+            roles_allowed: None,
+            signups_per_hour: None,
         }
     }
 
@@ -365,7 +440,100 @@ impl EffectivePolicy {
     #[must_use]
     pub fn with_signup(mut self, signup: Result<SignupPolicy, PolicyError>) -> Self {
         self.signup = signup;
+        self.restrict_roles();
         self
+    }
+
+    /// The provider's password and session rules; an error refuses every sign-in.
+    #[must_use]
+    pub fn with_lifecycle(mut self, lifecycle: Result<Lifecycle, PolicyError>) -> Self {
+        self.lifecycle = lifecycle;
+        self
+    }
+
+    /// A tenant's override of a shared provider, `None` when it has none.
+    /// It only tightens; without one the shared provider grants no roles.
+    #[must_use]
+    pub fn shared_override(mut self, ov: Result<Option<SharedOverride>, PolicyError>) -> Self {
+        let ov = match ov {
+            Ok(Some(ov)) => ov,
+            Ok(None) => {
+                self.roles_allowed = Some(RoleNames::default());
+                self.restrict_roles();
+                return self;
+            }
+            Err(e) => {
+                self.roles_allowed = Some(RoleNames::default());
+                self.restrict_roles();
+                return self.tighten(Err(e));
+            }
+        };
+        let base = self.layers.first().map_or(true, |l| {
+            l.as_ref().map_or(true, |p| p.require_verified_email)
+        });
+        if ov.require_verified_email == Some(true) {
+            for layer in self.layers.iter_mut().flatten() {
+                layer.require_verified_email = true;
+            }
+        }
+        let mut layer = ov.sign_in;
+        layer.require_verified_email = ov.require_verified_email.map_or(base, |o| o || base);
+        self.signup_cap = match (self.signup_cap, ov.signup_mode) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        self.lifecycle = self.lifecycle.map(|l| l.tighten(ov.lifecycle));
+        self.roles_allowed = Some(match self.roles_allowed.take() {
+            Some(prev) => ov.allowed_roles.only(&prev),
+            None => ov.allowed_roles,
+        });
+        self.restrict_roles();
+        self.tighten(Ok(layer))
+    }
+
+    /// The tenant-wide settings: the sign-up rate limit.
+    #[must_use]
+    pub fn tenant(mut self, settings: &TenantSettings) -> Self {
+        self.signups_per_hour = settings.signup_limit();
+        self
+    }
+
+    fn restrict_roles(&mut self) {
+        if let (Some(allowed), Ok(signup)) = (&self.roles_allowed, &mut self.signup) {
+            signup.restrict_roles(allowed);
+        }
+    }
+
+    /// A session's lifetime: the shortest of `base` and every layer's, and
+    /// for a superuser also of the superuser lifetime.
+    #[must_use]
+    pub fn session_ttl(&self, base: i64, superuser: bool) -> i64 {
+        let Ok(l) = &self.lifecycle else {
+            return base;
+        };
+        let mut ttl = min_opt(Some(base), l.session_ttl_secs);
+        if superuser {
+            ttl = min_opt(ttl, l.superuser_session_ttl_secs);
+        }
+        ttl.unwrap_or(base)
+    }
+
+    /// The effective sign-up mode before the surface default applies.
+    #[must_use]
+    pub fn signup_cap(&self) -> Option<SignupMode> {
+        self.signup_cap
+    }
+
+    /// The sign-up settings in force; `None` when they do not parse.
+    #[must_use]
+    pub fn signup(&self) -> Option<&SignupPolicy> {
+        self.signup.as_ref().ok()
+    }
+
+    /// The password and session rules in force; `None` when they do not parse.
+    #[must_use]
+    pub fn lifecycle(&self) -> Option<&Lifecycle> {
+        self.lifecycle.as_ref().ok()
     }
 
     /// The sign-up mode when the provider sets none (default closed).
@@ -377,10 +545,11 @@ impl EffectivePolicy {
 
     /// Who may sign up on `surface`. The bare admin never signs anyone up.
     fn signup_mode(&self, surface: Surface, signup: &SignupPolicy) -> SignupMode {
-        match surface {
+        let mode = match surface {
             Surface::BareAdmin => SignupMode::Closed,
             _ => signup.mode.unwrap_or(self.default_signup),
-        }
+        };
+        self.signup_cap.map_or(mode, |cap| mode.min(cap))
     }
 
     /// Add a layer. It can only narrow what the others admit.
@@ -397,6 +566,10 @@ impl EffectivePolicy {
     pub fn check(&self, identity: &Identity) -> Result<(), Refusal> {
         if identity.subject().is_empty() {
             return Err(Refusal::NoSubject);
+        }
+        if let Err(e) = &self.lifecycle {
+            tracing::error!(target: "rustango::sso", "SSO session rules do not parse: {e}");
+            return Err(Refusal::PolicyInvalid);
         }
         for layer in &self.layers {
             match layer {
@@ -537,7 +710,7 @@ pub async fn admit<A: AccountLookup>(
     #[cfg(feature = "tenancy")]
     if tenant_users {
         if let Some(admitted) = relink(&req, accounts, signup, email).await? {
-            after_sign_in(&req, signup, admitted.user_id, true).await?;
+            after_sign_in(&req, signup, admitted.user_id, signup.sync_roles_on_login).await?;
             return Ok(admitted);
         }
     }
@@ -575,8 +748,9 @@ pub async fn admit<A: AccountLookup>(
             _ => Err(Denied::Storage(e.to_string())),
         };
     }
+    audit_success(&req, "sso_linked", found.user_id, serde_json::json!({})).await;
     if tenant_users {
-        after_sign_in(&req, signup, found.user_id, true).await?;
+        after_sign_in(&req, signup, found.user_id, signup.sync_roles_on_login).await?;
     }
     if let Ok(Some(l)) = link::linked_user(pool, key, subject).await {
         link::touch(pool, &l).await;
@@ -598,8 +772,12 @@ async fn after_sign_in(
     #[cfg(feature = "tenancy")]
     {
         if roles {
-            let unknown = signup::sync_roles(req.pool, user_id, req.identity, signup).await?;
-            signup::audit_unknown_roles(req.pool, req.provider, user_id, &unknown).await;
+            let sync = signup::sync_roles(req.pool, user_id, req.identity, signup).await?;
+            signup::audit_unknown_roles(req.pool, req.provider, user_id, &sync.unknown).await;
+            if !sync.added.is_empty() || !sync.removed.is_empty() {
+                let diff = serde_json::json!({"added": sync.added, "removed": sync.removed});
+                audit_success(req, "sso_roles_synced", user_id, diff).await;
+            }
         }
         if signup.sync_profile {
             // A profile refresh never fails the sign-in.
@@ -660,6 +838,8 @@ async fn relink(
         return Err(Refusal::Inactive.into());
     }
     signup::relink(req.pool, req.key, req.identity.subject(), &invite, user_id).await?;
+    let used = serde_json::json!({"invite": invite.id()});
+    audit_success(req, "sso_relinked", user_id, used).await;
     Ok(Some(Admitted {
         user_id,
         created: false,
@@ -691,6 +871,11 @@ async fn sign_up(
             (Err(_), SignupMode::Open) => None,
             (Err(r), _) => return Err(r.into()),
         };
+        if let Some(limit) = req.policy.signups_per_hour {
+            if signup::signups_last_hour(req.pool).await? >= i64::from(limit) {
+                return Err(Refusal::SignupRate.into());
+            }
+        }
         let made = signup::create_user(
             req.pool,
             req.key,
@@ -702,6 +887,8 @@ async fn sign_up(
         .await?;
         signup::audit_unknown_roles(req.pool, req.provider, made.user_id, &made.unknown_roles)
             .await;
+        let used = serde_json::json!({"invite": invite.as_ref().map(signup::Invite::id)});
+        audit_success(req, "sso_signup", made.user_id, used).await;
         Ok(Admitted {
             user_id: made.user_id,
             created: true,
@@ -709,6 +896,39 @@ async fn sign_up(
     }
     #[cfg(not(feature = "tenancy"))]
     Err(Refusal::SignupClosed.into())
+}
+
+/// Record an SSO account change in the audit log, in the shape of a refusal row.
+async fn audit_success(
+    req: &AdmitRequest<'_>,
+    event: &'static str,
+    user_id: i64,
+    extra: serde_json::Value,
+) {
+    let subject = req.identity.subject();
+    let mut changes = serde_json::json!({
+        "event": event,
+        "provider": req.provider,
+        "subject": subject,
+        "email": req.identity.email().map(EmailAddr::as_str),
+        "user_id": user_id,
+    });
+    if let (Some(out), serde_json::Value::Object(more)) = (changes.as_object_mut(), extra) {
+        out.extend(more);
+    }
+    let entry = crate::audit::PendingEntry {
+        entity_table: "rustango_sso_links",
+        entity_pk: format!("{}:{subject}", req.provider)
+            .chars()
+            .take(255)
+            .collect(),
+        operation: crate::audit::AuditOp::Action,
+        source: crate::audit::AuditSource::Custom(format!("sso:{}", req.surface.as_str())),
+        changes,
+    };
+    if let Err(e) = crate::audit::emit_one_pool(req.pool, &entry).await {
+        tracing::error!(target: "rustango::sso", error = %e, event, "an SSO account change was NOT written to the audit log");
+    }
 }
 
 /// [`link::sign_in`]: [`admit`] with no sign-in rules, as a [`LinkRefusal`].
@@ -799,12 +1019,13 @@ pub(crate) fn admin_normalise<'a>(
                     },
                     _ => return Err(format!("{}: expected text", col.replace('_', " "))),
                 };
-            } else if *col == "default_roles" || *col == "role_claims" {
+            } else if matches!(*col, "default_roles" | "allowed_roles" | "role_claims") {
                 *v = match v {
                     SqlValue::Null => SqlValue::Null,
-                    SqlValue::String(raw) if *col == "default_roles" => {
-                        let r: RoleNames =
-                            raw.parse().map_err(|e| format!("default roles: {e}"))?;
+                    SqlValue::String(raw) if *col != "role_claims" => {
+                        let r: RoleNames = raw
+                            .parse()
+                            .map_err(|e| format!("{}: {e}", col.replace('_', " ")))?;
                         if r.is_empty() {
                             SqlValue::Null
                         } else {
@@ -919,8 +1140,12 @@ pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
             "email": email,
         }),
     };
-    if let Err(e) = crate::audit::emit_one_pool(ctx.pool, &entry).await {
-        tracing::error!(target: "rustango::sso", error = %e, "an SSO refusal was NOT written to the audit log");
+    if refusal_rows_recently(ctx.pool, &entry.entity_pk).await < MAX_REFUSAL_ROWS {
+        if let Err(e) = crate::audit::emit_one_pool(ctx.pool, &entry).await {
+            tracing::error!(target: "rustango::sso", error = %e, "an SSO refusal was NOT written to the audit log");
+        }
+    } else {
+        tracing::debug!(target: "rustango::sso", subject, "sso refusal not audited again: too many recently");
     }
     crate::sso::link::signal_refused(
         ctx.signal_source,
@@ -930,18 +1155,69 @@ pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
         ctx.tenant.clone(),
     )
     .await;
-    use crate::login_throttle::{ClientIp, LoginScope};
-    let scope = match (&ctx.surface, &ctx.tenant) {
-        (Surface::BareAdmin, _) | (_, None) => LoginScope::Admin,
-        (_, Some(t)) => LoginScope::Tenant(t.clone()),
-    };
-    let ip = ClientIp::from_parts(ctx.extensions, ctx.headers);
-    if let Ok(attempt) = crate::login_throttle::shared()
-        .begin(&scope, &ip, &format!("sso:{subject}"))
+}
+
+/// Audit rows one `(provider, subject)` gets per [`REFUSAL_WINDOW`].
+#[cfg(feature = "admin")]
+const MAX_REFUSAL_ROWS: i64 = 5;
+#[cfg(feature = "admin")]
+const REFUSAL_WINDOW: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
+
+/// SSO audit rows for `entity_pk` in the last [`REFUSAL_WINDOW`]; 0 when unreadable.
+#[cfg(feature = "admin")]
+async fn refusal_rows_recently(pool: &Pool, entity_pk: &str) -> i64 {
+    use crate::sql::CounterPool as _;
+    crate::audit::AuditLog::objects()
+        .filter("entity_table", "rustango_sso_links")
+        .filter("entity_pk", entity_pk.to_owned())
+        .filter("occurred_at__gte", chrono::Utc::now() - REFUSAL_WINDOW)
+        .count(pool)
         .await
-    {
-        attempt.failed().await;
-    }
+        .unwrap_or(0)
+}
+
+/// The SSO throttle scope of a tenant (or the bare admin, `None`).
+#[cfg(feature = "admin")]
+pub(crate) fn throttle_scope(tenant: Option<&str>) -> crate::login_throttle::LoginScope {
+    crate::login_throttle::LoginScope::Sso(match tenant {
+        Some(t) => format!("tenant/{t}"),
+        None => "admin".to_owned(),
+    })
+}
+
+/// Refuse an SSO start from an IP whose SSO failures are spent. Reserves nothing.
+///
+/// # Errors
+/// The `429` to send.
+#[cfg(feature = "admin")]
+pub(crate) async fn throttle_check(
+    scope: &crate::login_throttle::LoginScope,
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> Result<(), axum::response::Response> {
+    let ip = crate::login_throttle::ClientIp::from_parts(extensions, headers);
+    crate::login_throttle::shared()
+        .check(scope, &ip, "")
+        .await
+        .map_err(crate::login_throttle::LoginRefused::into_response)
+}
+
+/// Admit one SSO callback. Report a refusal on the attempt with `failed`,
+/// a sign-in with `succeeded`; dropped, it counts nothing.
+///
+/// # Errors
+/// The `429` / `503` to send.
+#[cfg(feature = "admin")]
+pub(crate) async fn throttle_begin(
+    scope: &crate::login_throttle::LoginScope,
+    extensions: &axum::http::Extensions,
+    headers: &axum::http::HeaderMap,
+) -> Result<crate::login_throttle::LoginAttempt, axum::response::Response> {
+    let ip = crate::login_throttle::ClientIp::from_parts(extensions, headers);
+    crate::login_throttle::shared()
+        .begin(scope, &ip, "")
+        .await
+        .map_err(crate::login_throttle::LoginRefused::into_response)
 }
 
 #[cfg(test)]
@@ -1156,6 +1432,157 @@ mod tests {
             }
         }
         assert!(checked > 10_000);
+    }
+
+    /// A shared provider with every rule set to something to loosen.
+    fn shared_base() -> EffectivePolicy {
+        let sign_in = SignInPolicy::parse(&SignInColumns {
+            allowed_email_domains: Some("client.org"),
+            require_verified_email: false,
+            ..SignInColumns::default()
+        });
+        let signup = SignupPolicy::parse(&SignupColumns {
+            signup_mode: Some("invite_only"),
+            default_roles: Some("Viewer, Editor"),
+            ..SignupColumns::default()
+        });
+        EffectivePolicy::new(sign_in, true)
+            .with_signup(signup)
+            .with_lifecycle(Lifecycle::parse(true, Some(30), Some(3600), Some(600)))
+    }
+
+    fn people() -> Vec<Identity> {
+        let mut out = Vec::new();
+        for email in ["a@client.org", "a@other.org"] {
+            for verified in [true, false] {
+                out.push(person(email, verified, serde_json::json!({})));
+            }
+        }
+        out
+    }
+
+    /// Over every override field: the loosest value admits nobody the
+    /// shared provider refuses, and grants nothing it would not.
+    #[test]
+    fn an_override_never_loosens_any_field() {
+        let roles = |p: &EffectivePolicy| p.signup().unwrap().default_roles.clone();
+        let loosest = [
+            SharedOverride::default(),
+            SharedOverride {
+                require_verified_email: Some(false),
+                ..SharedOverride::default()
+            },
+            SharedOverride {
+                signup_mode: Some(SignupMode::Open),
+                ..SharedOverride::default()
+            },
+            SharedOverride {
+                lifecycle: Lifecycle::parse(false, None, Some(999_999), Some(999_999)).unwrap(),
+                ..SharedOverride::default()
+            },
+            SharedOverride {
+                allowed_roles: "Viewer, Editor, Admin".parse().unwrap(),
+                ..SharedOverride::default()
+            },
+        ];
+        let base = shared_base();
+        for ov in loosest {
+            let both = shared_base().shared_override(Ok(Some(ov.clone())));
+            for id in people() {
+                if both.check(&id).is_ok() {
+                    assert!(base.check(&id).is_ok(), "{ov:?} admitted {id:?}");
+                }
+            }
+            let sp = both.signup().unwrap();
+            for surface in [Surface::TenantAdmin, Surface::Member] {
+                assert!(
+                    both.signup_mode(surface, sp)
+                        <= base.signup_mode(surface, base.signup().unwrap()),
+                    "{ov:?}"
+                );
+            }
+            assert!(both.lifecycle().unwrap().sso_only, "{ov:?}");
+            for su in [false, true] {
+                assert!(both.session_ttl(86_400, su) <= base.session_ttl(86_400, su));
+            }
+            let granted = roles(&both);
+            assert!(
+                granted
+                    .names()
+                    .iter()
+                    .all(|r| roles(&base).names().contains(r)),
+                "{ov:?} granted {granted:?}"
+            );
+        }
+    }
+
+    /// Each override field does tighten.
+    #[test]
+    fn an_override_tightens_every_field() {
+        let tight = SharedOverride {
+            sign_in: SignInPolicy::parse(&SignInColumns {
+                blocked_email_domains: Some("client.org"),
+                ..SignInColumns::default()
+            })
+            .unwrap(),
+            ..SharedOverride::default()
+        };
+        let p = shared_base().shared_override(Ok(Some(tight)));
+        assert_eq!(
+            p.check(&person("a@client.org", true, serde_json::json!({})))
+                .unwrap_err()
+                .rule(),
+            "domain_blocked"
+        );
+        // The shared provider takes unverified emails; the override does not.
+        let verified = SharedOverride {
+            require_verified_email: Some(true),
+            ..SharedOverride::default()
+        };
+        let unverified = person("a@client.org", false, serde_json::json!({}));
+        assert!(shared_base().check(&unverified).is_ok());
+        let p = shared_base().shared_override(Ok(Some(verified)));
+        assert_eq!(p.check(&unverified), Err(Refusal::EmailUnverified));
+        let closed = SharedOverride {
+            signup_mode: Some(SignupMode::Closed),
+            lifecycle: Lifecycle::parse(false, None, Some(60), Some(30)).unwrap(),
+            allowed_roles: "Viewer".parse().unwrap(),
+            ..SharedOverride::default()
+        };
+        let p = shared_base().shared_override(Ok(Some(closed)));
+        let sp = p.signup().unwrap();
+        assert_eq!(p.signup_mode(Surface::TenantAdmin, sp), SignupMode::Closed);
+        assert_eq!(p.session_ttl(86_400, false), 60);
+        assert_eq!(p.session_ttl(86_400, true), 30);
+        assert_eq!(sp.default_roles.names(), ["Viewer"]);
+        // No override: the shared provider grants no role here.
+        let none = shared_base().shared_override(Ok(None));
+        assert!(none.signup().unwrap().default_roles.is_empty());
+        // An unreadable override refuses.
+        let bad = shared_base().shared_override(Err(PolicyError("x".into())));
+        assert_eq!(
+            bad.check(&person("a@client.org", true, serde_json::json!({}))),
+            Err(Refusal::PolicyInvalid)
+        );
+    }
+
+    #[test]
+    fn session_ttl_is_the_shortest_and_bad_numbers_refuse() {
+        let p = shared_base();
+        assert_eq!(p.session_ttl(86_400, false), 3600);
+        assert_eq!(p.session_ttl(86_400, true), 600);
+        assert_eq!(p.session_ttl(100, true), 100);
+        assert!(Lifecycle::parse(false, None, Some(0), None).is_err());
+        let bad = EffectivePolicy::legacy(true).with_lifecycle(Lifecycle::parse(
+            false,
+            Some(-1),
+            None,
+            None,
+        ));
+        assert_eq!(
+            bad.check(&person("a@b.org", true, serde_json::json!({}))),
+            Err(Refusal::PolicyInvalid)
+        );
     }
 
     #[cfg(feature = "admin")]

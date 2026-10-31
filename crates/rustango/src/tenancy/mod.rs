@@ -161,6 +161,7 @@ pub use agents::{
     AgentSecret, AgentSkill, AgentSkillPermission, AgentSkillResource, AgentSkillTool,
 };
 #[cfg(feature = "postgres")]
+#[allow(deprecated)]
 pub use auth::{authenticate_operator, authenticate_user};
 pub use auth::{
     authenticate_operator_pool, authenticate_user_pool, validate_tenant_user_schema, Operator,

@@ -47,6 +47,18 @@ impl RoleNames {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    /// The names `allowed` also has.
+    #[must_use]
+    pub fn only(&self, allowed: &Self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|n| allowed.0.contains(n))
+                .cloned()
+                .collect(),
+        )
+    }
 }
 
 impl FromStr for RoleNames {
@@ -154,6 +166,14 @@ impl RoleMap {
         self.map.is_empty()
     }
 
+    /// Drop every role `allowed` lacks, and the entries left with none.
+    pub fn restrict(&mut self, allowed: &RoleNames) {
+        for (_, roles) in &mut self.map {
+            *roles = roles.only(allowed);
+        }
+        self.map.retain(|(_, roles)| !roles.is_empty());
+    }
+
     /// Every role the map can grant: the only roles sync may add or remove.
     #[must_use]
     pub fn managed(&self) -> BTreeSet<&str> {
@@ -202,6 +222,14 @@ pub struct SignupPolicy {
     pub sync_profile: bool,
     /// Email linking may also link role holders, never superusers.
     pub allow_email_link_staff: bool,
+}
+
+impl SignupPolicy {
+    /// Grant only roles in `allowed`.
+    pub(crate) fn restrict_roles(&mut self, allowed: &RoleNames) {
+        self.default_roles = self.default_roles.only(allowed);
+        self.role_map.restrict(allowed);
+    }
 }
 
 /// A provider row's stored sign-up columns, unparsed.
@@ -360,6 +388,33 @@ mod store {
         max_uses: Option<i32>,
         pub(crate) roles: RoleNames,
         pub(crate) link_user_id: Option<i64>,
+    }
+
+    impl Invite {
+        pub(crate) fn id(&self) -> i64 {
+            self.id
+        }
+    }
+
+    /// Sign-ups in this tenant over the last hour: links made with their user.
+    pub(crate) async fn signups_last_hour(pool: &Pool) -> Result<i64, Denied> {
+        use crate::sql::CounterPool as _;
+        let since = chrono::Utc::now() - chrono::TimeDelta::hours(1);
+        link::SsoLink::objects()
+            .filter("provisioned", true)
+            .filter("created_at__gte", since)
+            .count(pool)
+            .await
+            .map_err(|e| Denied::Storage(format!("sign-up count: {e}")))
+    }
+
+    /// What a role sync changed.
+    #[derive(Debug, Default)]
+    pub(crate) struct RoleSync {
+        pub(crate) added: Vec<String>,
+        pub(crate) removed: Vec<String>,
+        /// Wanted names no role row has.
+        pub(crate) unknown: Vec<String>,
     }
 
     /// The invite `email` may use through provider `slug`. The refusal says
@@ -719,16 +774,17 @@ mod store {
         user_id: i64,
         identity: &Identity,
         policy: &SignupPolicy,
-    ) -> Result<Vec<String>, Denied> {
+    ) -> Result<RoleSync, Denied> {
         let map = &policy.role_map;
         if map.is_empty() {
-            return Ok(Vec::new());
+            return Ok(RoleSync::default());
         }
         let managed: Vec<String> = map.managed().into_iter().map(str::to_owned).collect();
         // No role claim to read: leave the mapped roles as they are.
         let Some(wanted) = map.wanted(identity) else {
-            return Ok(Vec::new());
+            return Ok(RoleSync::default());
         };
+        let mut out = RoleSync::default();
         let storage = |e: ExecError| Denied::Storage(format!("role sync: {e}"));
         let mut tx = crate::sql::transaction_pool(pool).await.map_err(storage)?;
         let roles = roles_named_tx(&mut tx, &managed).await.map_err(storage)?;
@@ -757,11 +813,13 @@ mod store {
                     crate::tenancy::permissions::assign_role_tx(&mut tx, user_id, id)
                         .await
                         .map_err(storage)?;
+                    out.added.push(r.name.clone());
                 }
                 (false, true) => {
                     crate::tenancy::permissions::remove_role_tx(&mut tx, user_id, id)
                         .await
                         .map_err(storage)?;
+                    out.removed.push(r.name.clone());
                 }
                 _ => {}
             }
@@ -769,10 +827,11 @@ mod store {
         tx.commit()
             .await
             .map_err(|e| Denied::Storage(format!("role sync commit: {e}")))?;
-        Ok(wanted
+        out.unknown = wanted
             .into_iter()
             .filter(|n| !roles.iter().any(|r| &r.name == n))
-            .collect())
+            .collect();
+        Ok(out)
     }
 
     /// Refresh a non-superuser's name, and its email when the IdP vouches

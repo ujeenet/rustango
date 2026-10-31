@@ -30,8 +30,11 @@ use crate::signals::auth::{
 use crate::sql::Pool;
 use crate::sso::build_provider_for;
 use crate::sso::link::{signal_refused, LinkSource, ProviderKey};
-use crate::sso::policy::{admit, refuse, AdmitRequest, Denied, Identity, RefusalContext, Surface};
-use crate::sso::provider::{load_rows, resolve_row, ResolvedProvider};
+use crate::sso::policy::{
+    admit, refuse, AdmitRequest, Denied, EffectivePolicy, Identity, PolicyError, RefusalContext,
+    SharedOverride, Surface, TenantSettings,
+};
+use crate::sso::provider::{has_slug, load_rows, resolve_row, ResolvedProvider};
 
 /// The auth-signal `source` for a tenant console SSO sign-in.
 const SIGNAL_SOURCE: &str = "tenant_admin_sso";
@@ -192,9 +195,9 @@ pub(crate) async fn list_enabled(
     )
 }
 
-/// Pure merge: tenant providers first (they **win** on a slug clash), then
-/// the registry-wide shared set; disabled rows dropped; result sorted by
-/// `sort_order`. Each `(slug, label, sort_order, enabled)`.
+/// Pure merge: tenant providers first (they **win** on a slug clash, a
+/// disabled one too), then the registry-wide shared set; disabled rows
+/// dropped; result sorted by `sort_order`. Each `(slug, label, sort_order, enabled)`.
 fn merge_provider_buttons(
     login_base: &str,
     tenant: impl IntoIterator<Item = (String, String, i32, bool)>,
@@ -203,10 +206,7 @@ fn merge_provider_buttons(
     let mut seen = std::collections::HashSet::new();
     let mut out: Vec<(i32, ProviderButton)> = Vec::new();
     for (slug, label, sort_order, enabled) in tenant.into_iter().chain(shared) {
-        if !enabled {
-            continue;
-        }
-        if seen.insert(slug.clone()) {
+        if seen.insert(slug.clone()) && enabled {
             out.push((
                 sort_order,
                 ProviderButton {
@@ -223,7 +223,7 @@ fn merge_provider_buttons(
 
 /// Resolve one provider by `slug` — the tenant's own table first, then the
 /// registry-wide shared set — with its link key. `Ok(None)` when no enabled
-/// row matches.
+/// row matches, or the tenant's own row for the slug is disabled.
 async fn resolve_by_slug(
     tenant_pool: &Pool,
     registry_pool: &Pool,
@@ -234,6 +234,13 @@ async fn resolve_by_slug(
         let key = p.key(LinkSource::Tenant);
         return Ok(Some((p, key)));
     }
+    // The tenant's row wins even when disabled: never the shared one.
+    if has_slug::<SsoProvider>(tenant_pool, slug)
+        .await
+        .map_err(|e| SsoError::Config(format!("db: {e}")))?
+    {
+        return Ok(None);
+    }
     Ok(
         resolve_row::<SharedSsoProvider>(registry_pool, slug, redirect_uri)
             .await?
@@ -242,6 +249,26 @@ async fn resolve_by_slug(
                 (p, key)
             }),
     )
+}
+
+/// The policy a tenant sign-in through `cfg` runs under: the provider, a
+/// tenant override of a shared provider, then the tenant's settings. An
+/// unreadable override or settings row refuses.
+pub(crate) async fn tenant_policy(
+    tenant_pool: &Pool,
+    cfg: &ResolvedProvider,
+    key: &ProviderKey,
+    slug: &str,
+    settings: &Result<TenantSettings, PolicyError>,
+) -> EffectivePolicy {
+    let mut policy = cfg.effective_policy();
+    if key.source() == LinkSource::Shared {
+        policy = policy.shared_override(SharedOverride::load(tenant_pool, slug).await);
+    }
+    match settings {
+        Ok(s) => policy.tenant(s),
+        Err(e) => policy.tighten(Err(e.clone())),
+    }
 }
 
 /// Derive the absolute per-provider callback URL for this tenant from the
@@ -290,25 +317,46 @@ pub(crate) async fn login_notice(
 
 /// The tenant's `access_denied_message`, if set and readable.
 async fn denied_note(pool: &Pool) -> Option<String> {
-    use crate::core::Model as _;
-    use crate::sso::policy::SsoTenantPolicy;
-    let table = SsoTenantPolicy::SCHEMA.table;
-    if !crate::migrate::try_table_exists_here(pool, table)
-        .await
-        .ok()?
+    TenantSettings::load(pool).await.ok()?.access_denied_message
+}
+
+/// Set on the login page's automatic redirect; while it lives the page
+/// shows instead, so a session that does not stick cannot loop.
+pub(crate) const AUTO_COOKIE: &str = "rustango_sso_auto";
+
+/// The [`AUTO_COOKIE`] header value under `cookie_path`, for 60 seconds.
+pub(crate) fn auto_cookie(cookie_path: &str) -> String {
+    format!(
+        "{AUTO_COOKIE}=1; Path={cookie_path}; HttpOnly; SameSite=Lax; Max-Age=60{}",
+        secure_suffix()
+    )
+}
+
+/// Where the login page sends a visitor straight away: the tenant's
+/// default provider, or the only one when the password form is hidden.
+/// Never with `?local=1`, after an SSO error or with a flash message, so a
+/// refused sign-in does not loop. `shown`: a flash message or a recent
+/// automatic redirect.
+pub(crate) fn auto_redirect(
+    settings: &TenantSettings,
+    providers: &[ProviderButton],
+    query: Option<&str>,
+    shown: bool,
+) -> Option<String> {
+    let pairs: Vec<&str> = query.unwrap_or("").split('&').collect();
+    if shown
+        || pairs
+            .iter()
+            .any(|p| *p == "local=1" || p.starts_with("sso_error="))
     {
         return None;
     }
-    QuerySet::<SsoTenantPolicy>::new()
-        .filter("name", "default")
-        .values_list_flat("access_denied_message")
-        .fetch::<Option<String>>(pool)
-        .await
-        .ok()?
-        .into_iter()
-        .flatten()
-        .map(|s| s.trim().to_owned())
-        .find(|s| !s.is_empty())
+    let pick = match &settings.default_provider {
+        Some(slug) => providers.iter().find(|b| &b.slug == slug),
+        None if !settings.shows_password_form(false) && providers.len() == 1 => providers.first(),
+        None => None,
+    };
+    pick.map(|b| b.login_url.clone())
 }
 
 fn login_error(routes: &RouteConfig, code: &str) -> Response {
@@ -344,6 +392,12 @@ pub(super) async fn tenant_sso_begin(
     cookie_path: &str,
     parts: &Parts,
 ) -> Response {
+    let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
+    if let Err(refused) =
+        crate::sso::policy::throttle_check(&scope, &parts.extensions, &parts.headers).await
+    {
+        return refused;
+    }
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
@@ -408,6 +462,12 @@ pub(super) async fn tenant_sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };
+    let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
+    let attempt =
+        match crate::sso::policy::throttle_begin(&scope, &parts.extensions, &parts.headers).await {
+            Ok(a) => a,
+            Err(refused) => return refused,
+        };
     let Some(redirect_uri) = derive_redirect(parts, routes, slug) else {
         return login_error(routes, "config");
     };
@@ -430,12 +490,14 @@ pub(super) async fn tenant_sso_callback(
         Ok((u, tokens)) => Identity::from_handshake(&provider, u, &tokens).await,
         Err(e) => {
             tracing::warn!(target: "rustango::tenancy::sso", "handshake: {e}");
+            attempt.failed().await;
             return login_error(routes, "handshake");
         }
     };
     let normalized = &identity.profile;
     let meta = || meta_from_parts(&parts.extensions, &parts.headers, Some(parts.uri.path()));
-    let policy = cfg.effective_policy();
+    let settings = TenantSettings::load(tenant_pool).await;
+    let policy = tenant_policy(tenant_pool, &cfg, &key, slug, &settings).await;
     let request = AdmitRequest::new(tenant_pool, Surface::TenantAdmin, &key, &policy, &identity)
         .provider(slug);
     let uid = match admit(request, &member_auth::TenantAccounts(tenant_pool)).await {
@@ -454,6 +516,7 @@ pub(super) async fn tenant_sso_callback(
                 path: parts.uri.path(),
             };
             refuse(&ctx, &r).await;
+            attempt.failed().await;
             return login_error(routes, REFUSED);
         }
         Err(e) => {
@@ -477,8 +540,10 @@ pub(super) async fn tenant_sso_callback(
     }
 
     // Mint the tenant session — same shape as a password login.
-    let ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
+    attempt.succeeded().await;
+    let route_ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
+    let ttl = policy.session_ttl(route_ttl, user.is_superuser);
     let mut payload = TenantSessionPayload::new(
         uid,
         &org.slug,
@@ -545,6 +610,56 @@ mod tests {
                 ("global", "Global", "/login/sso/global"),  // shared-only, sort=5
             ]
         );
+    }
+
+    /// A disabled tenant row still hides the shared provider with its slug.
+    #[test]
+    fn a_disabled_tenant_row_hides_the_shared_one() {
+        let buttons = merge_provider_buttons(
+            "/login",
+            vec![row("corp", "Tenant Corp", 0, false)],
+            vec![row("corp", "Shared Corp", 0, true)],
+        );
+        assert!(buttons.is_empty(), "{:?}", buttons.len());
+    }
+
+    /// The default provider, or the only one with the password form
+    /// hidden; never with `?local=1`, an SSO error or a flash.
+    #[test]
+    fn auto_redirect_picks_and_never_loops() {
+        use crate::sso::policy::{PasswordLogin, TenantSettings};
+        let one = merge_provider_buttons("/login", vec![row("corp", "C", 0, true)], vec![]);
+        let two = merge_provider_buttons(
+            "/login",
+            vec![row("corp", "C", 0, true), row("b", "B", 1, true)],
+            vec![],
+        );
+        let on = TenantSettings::default();
+        let off = TenantSettings {
+            password_login: PasswordLogin::SuperusersOnly,
+            ..TenantSettings::default()
+        };
+        let default = TenantSettings {
+            default_provider: Some("corp".into()),
+            ..TenantSettings::default()
+        };
+        let go = |s: &TenantSettings, p: &[super::ProviderButton], q: Option<&str>, f| {
+            super::auto_redirect(s, p, q, f)
+        };
+        assert_eq!(go(&on, &one, None, false), None);
+        assert_eq!(
+            go(&off, &one, None, false).as_deref(),
+            Some("/login/sso/corp")
+        );
+        assert_eq!(go(&off, &two, None, false), None);
+        assert_eq!(
+            go(&default, &two, None, false).as_deref(),
+            Some("/login/sso/corp")
+        );
+        for q in ["local=1", "sso_error=nouser", "next=/x&local=1"] {
+            assert_eq!(go(&default, &two, Some(q), false), None, "{q}");
+        }
+        assert_eq!(go(&default, &two, None, true), None);
     }
 
     #[test]

@@ -61,6 +61,8 @@ mod scaffold;
 mod server;
 #[cfg(feature = "sso")]
 mod sso_check;
+#[cfg(feature = "sso")]
+mod sso_idle;
 mod tenants;
 mod users;
 mod wizard;
@@ -411,6 +413,8 @@ where
         // across both crates, so the heavy lifting still runs through
         // `rustango::migrate::scaffold::startapp`.
         "audit-cleanup" => audit::audit_cleanup_cmd(pools, &args[1..], writer).await,
+        #[cfg(feature = "sso")]
+        "sso-deactivate-idle" => sso_idle::sso_deactivate_idle_cmd(pools, writer).await,
         // The fall-through flush is scope-blind and ran on the registry pool (#2284).
         "flush" => flush::flush_cmd(pools, &args[1..], writer).await,
         // The fall-through read and wrote every model on the registry pool.
@@ -1012,6 +1016,11 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "                [--tenant <s>]  Scope to one tenant instead of all."
+    )?;
+    #[cfg(feature = "sso")]
+    writeln!(
+        w,
+        "  sso-deactivate-idle          Switch off SSO-made users idle past their provider's limit."
     )?;
     writeln!(w)?;
     writeln!(w, "DATA:")?;

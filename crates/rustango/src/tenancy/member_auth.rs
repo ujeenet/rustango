@@ -599,6 +599,12 @@ async fn sso_begin_in(
         return StatusCode::NOT_FOUND.into_response();
     };
     let slug = sso.slug.as_str();
+    let scope = crate::sso::policy::throttle_scope(Some(&t.org.slug));
+    if let Err(refused) =
+        crate::sso::policy::throttle_check(&scope, &parts.extensions, &parts.headers).await
+    {
+        return refused;
+    }
     let Some(secret) = session_secret(&parts) else {
         return sso_error(SsoFailure::Unavailable, &mount);
     };
@@ -694,6 +700,12 @@ async fn sso_callback_in(
     };
 
     let pool = t.pool();
+    let scope = crate::sso::policy::throttle_scope(Some(&t.org.slug));
+    let attempt =
+        match crate::sso::policy::throttle_begin(&scope, &parts.extensions, &parts.headers).await {
+            Ok(a) => a,
+            Err(refused) => return clear_flow(refused),
+        };
 
     let Some(redirect_uri) = mount.callback_uri(&parts, slug) else {
         return clear_flow(sso_error(SsoFailure::Unavailable, &mount));
@@ -719,6 +731,7 @@ async fn sso_callback_in(
                 | crate::oauth2::OAuthError::FlowExpired => SsoFailure::Expired,
                 _ => SsoFailure::Upstream,
             };
+            attempt.failed().await;
             return clear_flow(sso_error(failure, &mount));
         }
     };
@@ -731,9 +744,11 @@ async fn sso_callback_in(
             Some(parts.uri.path()),
         )
     };
-    let policy = resolved
-        .effective_policy()
-        .default_signup(member_default_signup(config.auto_provision));
+    let policy = match crate::sso::policy::TenantSettings::load(pool).await {
+        Ok(settings) => resolved.effective_policy().tenant(&settings),
+        Err(e) => resolved.effective_policy().tighten(Err(e)),
+    }
+    .default_signup(member_default_signup(config.auto_provision));
     let outcome = admit_member(pool, &key, &policy, &identity, slug).await;
     let member_id = match outcome {
         Ok(id) => id,
@@ -751,6 +766,7 @@ async fn sso_callback_in(
                 path: parts.uri.path(),
             };
             refuse(&ctx, &r).await;
+            attempt.failed().await;
             // One answer for every refusal: the rule stays in the log and audit.
             return clear_flow(sso_error(SsoFailure::Refused, &mount));
         }
@@ -771,7 +787,9 @@ async fn sso_callback_in(
             return clear_flow(sso_error(SsoFailure::Incomplete, &mount));
         }
     };
-    let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, config.session_ttl);
+    attempt.succeeded().await;
+    let ttl = policy.session_ttl(config.session_ttl, member.is_superuser);
+    let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, ttl);
     let landing = safe_landing(params.next.as_deref(), &mount.url(&config.landing_url));
     crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
         source: MEMBER_SIGNAL_SOURCE,

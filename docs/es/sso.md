@@ -347,6 +347,27 @@ vuelve a enlazar a un superusuario; a un usuario con roles, solo con
 abierto, y avisa de `signup_mode = open` sin `allowed_email_domains`,
 `allowed_hosted_domains` ni `allowed_idp_tenants`.
 
+## Contraseñas, sesiones y ciclo de vida
+
+| Dónde | Campo | Significado |
+|---|---|---|
+| Proveedor | `sso_only` | Sus usuarios vinculados no pueden usar contraseña (formulario, login JSON, HTTP Basic, enlace de restablecimiento). Solo mientras esté activo. |
+| Proveedor | `session_ttl_secs`, `superuser_session_ttl_secs` | La sesión dura lo más corto de estos valores y el de la ruta. |
+| Proveedor | `auto_deactivate_after_days` | `sso-deactivate-idle` desactiva a los usuarios que registró y llevan ese tiempo sin uso. Nunca un superusuario ni un usuario vinculado por un admin. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off` o `superusers_only`: el formulario solo aparece con `?local=1`, para superusuarios. |
+| `SsoTenantPolicy` | `sso_only` | Solo los superusuarios usan contraseña. |
+| `SsoTenantPolicy` | `default_provider` | La página de login redirige directamente, salvo con `?local=1` o tras un error. |
+| `SsoTenantPolicy` | `signups_per_hour` | Registros SSO por hora (vacío: 100, `0`: sin límite). |
+
+Un superusuario solo sigue `password_login`; `sso_only` nunca lo bloquea.
+Una contraseña rechazada parece incorrecta. Una regla ilegible rechaza; una configuración ilegible solo deja entrar a superusuarios. Un proveedor desactivado mantiene a sus usuarios `sso_only`, un vínculo a uno borrado cuenta como `sso_only`. Las claves API y secretos de agentes MCP no se ven afectados. Cerrar sesión lleva a `?local=1`.
+
+**Proveedores compartidos.** El `SsoSharedOverride` de un tenant endurece un proveedor compartido, nunca lo relaja, y nombra en `allowed_roles` los roles que puede otorgar (sin override: ninguno).
+
+**Límite y auditoría.** Los callbacks SSO tienen su propio límite por IP (429), aparte del de contraseñas. Vínculos, registros, re-vínculos y cambios de roles van al registro de auditoría; los rechazos como mucho cinco veces por sujeto en diez minutos.
+
+**Bloqueo de cuenta.** El bloqueo tras contraseñas fallidas no detiene el SSO. Para detener a un usuario, ponga `active = false`.
+
 ## Almacenamiento de secretos
 
 `client_secret` se almacena **cifrado en reposo** con XChaCha20-Poly1305

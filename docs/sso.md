@@ -338,6 +338,43 @@ that email. It never re-links a superuser, and a role holder only with
 as refusing everyone, and warns about `signup_mode = open` with no
 `allowed_email_domains`, `allowed_hosted_domains` or `allowed_idp_tenants`.
 
+## Passwords, sessions and lifecycle
+
+| Where | Field | Meaning |
+|---|---|---|
+| Provider | `sso_only` | Users linked through it may not use a password (login, JSON login, HTTP Basic, reset link). Only while the provider is enabled. |
+| Provider | `session_ttl_secs`, `superuser_session_ttl_secs` | The session after a sign-in through it lasts the shortest of these and the route's lifetime. |
+| Provider | `auto_deactivate_after_days` | `sso-deactivate-idle` switches off users it signed up whose every link is unused this long. Never a superuser, never a user with a link an admin made. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off`, or `superusers_only`: the password form shows only at `?local=1`, for superusers. |
+| `SsoTenantPolicy` | `sso_only` | No one but a superuser uses a password. |
+| `SsoTenantPolicy` | `default_provider` | The login page goes straight to it (or to the only provider when the password form is hidden), except at `?local=1` or after an error. |
+| `SsoTenantPolicy` | `signups_per_hour` | SSO sign-ups per hour (empty: 100, `0`: no limit). |
+
+A superuser follows only `password_login`; `sso_only` never locks one out.
+A refused password looks like a wrong one. An unreadable rule refuses;
+unreadable tenant settings still let a superuser in. A provider binds its
+users while disabled too; a link to a deleted provider counts as
+`sso_only` until an admin removes it. `sso_only` covers password logins
+(tenant and bare admin) and resets, not API keys or MCP agent secrets.
+`sso-deactivate-idle` only switches off users who cannot use a password.
+Logout lands on `?local=1`, and the automatic redirect happens at most
+once a minute, so a dropped session cannot loop.
+
+**Shared providers.** A tenant's `SsoSharedOverride` (one row per shared
+slug) adds its own rules on top: it can block more domains, require a
+verified email, narrow sign-up, set `sso_only` or shorter sessions, never
+loosen. A shared provider grants only the roles its `allowed_roles` names;
+with no override, none.
+
+**Throttle and audit.** SSO callbacks have their own per-IP limit (a 429
+past it), apart from the password one. Email links, sign-ups, re-links and
+role changes are audited (`sso_linked`, `sso_signup`, `sso_relinked`,
+`sso_roles_synced`); refusals at most five times per subject in ten minutes.
+
+**Account lock.** The lock after failed passwords does not stop SSO, so a
+guessed username cannot lock its owner out of SSO. To stop a user, set
+`active = false`: SSO refuses inactive users.
+
 ## Secret storage
 
 `client_secret` is stored **encrypted at rest** with XChaCha20-Poly1305

@@ -184,6 +184,7 @@ imprime uno nuevo.
 |---|---|
 | `audit-log` | Lee el registro de auditoría |
 | `audit-cleanup` | Lo recorta |
+| `sso-deactivate-idle` | Desactivar usuarios SSO inactivos en cada tenant |
 
 ### MCP **T**
 

@@ -122,6 +122,34 @@
       </td>
     </tr>
     <tr>
+      <th><label for="sso_sso_only">SSO only</label></th>
+      <td>
+        <input type="checkbox" id="sso_sso_only" name="sso_only"{% if f.sso_only == "on" %} checked{% endif %}>
+        <div class="field-helper">Its users may not sign in with a password. Superusers are never locked out.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_auto_deactivate_after_days">deactivate after days</label></th>
+      <td>
+        <input type="number" min="1" id="sso_auto_deactivate_after_days" name="auto_deactivate_after_days" value="{{ f.auto_deactivate_after_days }}">
+        <div class="field-helper">Switch off users it signed up after this many idle days (<code>sso-deactivate-idle</code>).</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_session_ttl_secs">session seconds</label></th>
+      <td>
+        <input type="number" min="1" id="sso_session_ttl_secs" name="session_ttl_secs" value="{{ f.session_ttl_secs }}">
+        <div class="field-helper">Longest session after a sign-in through it.</div>
+      </td>
+    </tr>
+    <tr>
+      <th><label for="sso_superuser_session_ttl_secs">superuser session seconds</label></th>
+      <td>
+        <input type="number" min="1" id="sso_superuser_session_ttl_secs" name="superuser_session_ttl_secs" value="{{ f.superuser_session_ttl_secs }}">
+        <div class="field-helper">Longest session for a superuser.</div>
+      </td>
+    </tr>
+    <tr>
       <th>callback URL</th>
       <td>
         <code class="sso-callback" data-template="{{ callback.pattern }}">{{ callback.pattern }}</code>

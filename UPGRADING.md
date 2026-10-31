@@ -169,6 +169,18 @@ untouched.
 - Deleting a user in the admin (single or bulk) deletes its SSO links in the same transaction; a soft delete keeps them.
 - OIDC discovery fails when the document has no `issuer` or it differs from the configured one (a trailing `/` is ignored). Set `issuer_url` to the IdP's exact issuer.
 - The admin refuses an SSO link whose `provider_source` its database does not hold: `admin` and `shared` are valid only in the bare admin's and a tenant's database respectively.
+- `sso_only`, `password_login`, session lifetimes and `auto_deactivate_after_days` are now enforced. An `sso_only` user's password is refused on every login and by `confirm_password_reset_pool` (new `AuthFlowError::PasswordLoginDisabled`); `authenticate_user_pool` returns `None` for them. Without the registry, a user linked through a shared provider is refused a password there.
+- A shared provider grants no roles in a tenant until the tenant's `SsoSharedOverride.allowed_roles` names them. `SsoSharedOverride` and `SsoTenantPolicy` have new fields (`allowed_roles`, `signups_per_hour`).
+- `sync_roles_on_login = false` now also skips the role map on a first email link or re-link.
+- SSO sign-up is limited to 100 per tenant per hour unless `signups_per_hour` says otherwise (`0`: no limit).
+- `LoginScope` has a new `Sso` variant; `Refusal` a new `SignupRate`.
+- Schedule `sso-deactivate-idle` (tenancy manage) if a provider sets `auto_deactivate_after_days`.
+- A failed password lockout does not stop SSO sign-in; to stop a user, set `active = false`, which SSO refuses.
+- `tenancy::authenticate_user` is deprecated: it skips the SSO password rules. Move to `authenticate_user_pool` on the tenant's pool.
+- A provider's `sso_only` binds its users while the provider is disabled too, and a link to a deleted provider counts as `sso_only` until an admin removes the link. Unreadable tenant SSO settings let only superusers use a password.
+- The bare-admin password login honours `sso_only` on its providers. `sso_only` does not stop API keys or MCP agent secrets.
+- Tenant logout now lands on `login?local=1`. `sso-deactivate-idle` only switches off users who cannot use a password there.
+- `LinkTarget::with_registry` lets a reset read shared providers' rules; without it a user linked through one is refused a reset.
 
 ## 0.61.14
 

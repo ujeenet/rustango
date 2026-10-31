@@ -348,6 +348,27 @@ mit `allow_email_link_staff`.
 blockierend und warnt bei `signup_mode = open` ohne
 `allowed_email_domains`, `allowed_hosted_domains` oder `allowed_idp_tenants`.
 
+## Passwörter, Sitzungen und Lebenszyklus
+
+| Wo | Feld | Bedeutung |
+|---|---|---|
+| Anbieter | `sso_only` | Darüber verknüpfte Benutzer dürfen kein Passwort nutzen (Login, JSON-Login, HTTP Basic, Reset-Link). Nur solange der Anbieter aktiv ist. |
+| Anbieter | `session_ttl_secs`, `superuser_session_ttl_secs` | Die Sitzung dauert das Kürzeste davon und der Lebensdauer der Route. |
+| Anbieter | `auto_deactivate_after_days` | `sso-deactivate-idle` deaktiviert so lange ungenutzte, per SSO registrierte Benutzer. Nie Superuser, nie Benutzer mit einer Verknüpfung, die ein Admin angelegt hat. |
+| `SsoTenantPolicy` | `password_login` | `on`, `off` oder `superusers_only`: das Passwortformular erscheint nur unter `?local=1`, für Superuser. |
+| `SsoTenantPolicy` | `sso_only` | Nur Superuser nutzen ein Passwort. |
+| `SsoTenantPolicy` | `default_provider` | Die Login-Seite leitet direkt dorthin weiter, außer bei `?local=1` oder nach einem Fehler. |
+| `SsoTenantPolicy` | `signups_per_hour` | SSO-Registrierungen pro Stunde (leer: 100, `0`: unbegrenzt). |
+
+Ein Superuser folgt nur `password_login`; `sso_only` sperrt ihn nie aus.
+Ein abgelehntes Passwort sieht aus wie ein falsches. Eine unlesbare Regel lehnt ab; unlesbare Mandanteneinstellungen lassen nur Superuser herein. Ein deaktivierter Anbieter bindet seine Benutzer weiter, eine Verknüpfung zu einem gelöschten zählt als `sso_only`. API-Schlüssel und MCP-Agenten-Secrets sind nicht betroffen. Logout landet auf `?local=1`.
+
+**Gemeinsame Anbieter.** `SsoSharedOverride` eines Mandanten verschärft einen gemeinsamen Anbieter, lockert ihn nie, und nennt in `allowed_roles` die Rollen, die er vergeben darf (ohne Override: keine).
+
+**Drosselung und Audit.** SSO-Callbacks haben ein eigenes Limit pro IP (429), getrennt vom Passwort-Limit. Verknüpfungen, Registrierungen, Re-Links und Rollenänderungen landen im Audit-Log; Ablehnungen höchstens fünfmal pro Subjekt in zehn Minuten.
+
+**Kontosperre.** Die Sperre nach falschen Passwörtern stoppt SSO nicht. Um einen Benutzer zu stoppen, `active = false` setzen.
+
 ## Secret-Speicherung
 
 `client_secret` wird **im Ruhezustand verschlüsselt** mit XChaCha20-Poly1305

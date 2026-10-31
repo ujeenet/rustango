@@ -270,6 +270,14 @@ const SIGNUP_COLUMNS: &[&str] = &[
     "allow_email_link_staff",
 ];
 
+/// The password and session columns.
+const LIFECYCLE_COLUMNS: &[&str] = &[
+    "sso_only",
+    "auto_deactivate_after_days",
+    "session_ttl_secs",
+    "superuser_session_ttl_secs",
+];
+
 /// Which of some columns a table has, by the catalog.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Columns {
@@ -356,6 +364,38 @@ async fn read_signup<T: Model>(
         Some(r) => signup_of_row(&r),
         None => Ok(super::policy::SignupPolicy::default()),
     }
+}
+
+/// Row `id`'s password and session rules; see [`read_columns`].
+pub(crate) async fn read_lifecycle<T: Model>(
+    pool: &Pool,
+    id: i64,
+) -> Result<super::policy::Lifecycle, super::policy::PolicyError> {
+    match read_columns::<T>(pool, id, LIFECYCLE_COLUMNS).await? {
+        Some(r) => lifecycle_of_row(&r),
+        None => Ok(super::policy::Lifecycle::default()),
+    }
+}
+
+/// The rules in one row read with every [`LIFECYCLE_COLUMNS`] column.
+fn lifecycle_of_row(
+    r: &std::collections::HashMap<String, SqlValue>,
+) -> Result<super::policy::Lifecycle, super::policy::PolicyError> {
+    use super::policy::{Lifecycle, PolicyError};
+    let bad = |c: &str| PolicyError(format!("{c}: unexpected value {:?}", r.get(c)));
+    let number = |c: &str| match r.get(c) {
+        Some(SqlValue::Null) => Ok(None),
+        Some(SqlValue::I64(n)) => Ok(Some(*n)),
+        Some(SqlValue::I32(n)) => Ok(Some(i64::from(*n))),
+        Some(SqlValue::I16(n)) => Ok(Some(i64::from(*n))),
+        _ => Err(bad(c)),
+    };
+    Lifecycle::parse(
+        flag(r, "sso_only").ok_or_else(|| bad("sso_only"))?,
+        number("auto_deactivate_after_days")?,
+        number("session_ttl_secs")?,
+        number("superuser_session_ttl_secs")?,
+    )
 }
 
 /// What a failed policy read means, by which policy columns exist: none is
@@ -533,6 +573,8 @@ pub struct ResolvedProvider {
     pub policy: Result<super::policy::SignInPolicy, super::policy::PolicyError>,
     /// The row's sign-up settings; an error refuses every sign-in.
     pub signup: Result<super::policy::SignupPolicy, super::policy::PolicyError>,
+    /// The row's password and session rules; an error refuses every sign-in.
+    pub lifecycle: Result<super::policy::Lifecycle, super::policy::PolicyError>,
 }
 
 impl ResolvedProvider {
@@ -552,6 +594,7 @@ impl ResolvedProvider {
     pub fn effective_policy(&self) -> super::policy::EffectivePolicy {
         super::policy::EffectivePolicy::new(self.policy.clone(), self.allow_email_link)
             .with_signup(self.signup.clone())
+            .with_lifecycle(self.lifecycle.clone())
     }
 }
 
@@ -586,9 +629,11 @@ pub(crate) async fn resolve_row<T: Model>(
     };
     let policy = read_policy::<T>(pool, r.id).await;
     let signup = read_signup::<T>(pool, r.id).await;
+    let lifecycle = read_lifecycle::<T>(pool, r.id).await;
     Ok(Some(ResolvedProvider {
         policy,
         signup,
+        lifecycle,
         sso: ResolvedSso {
             provider: r.kind,
             issuer_url: r.issuer_url,
@@ -600,6 +645,20 @@ pub(crate) async fn resolve_row<T: Model>(
         id: r.id,
         allow_email_link,
     }))
+}
+
+/// Whether `T` has a row for `slug`, enabled or not. A missing table has none.
+///
+/// # Errors
+/// A driver error.
+#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+pub(crate) async fn has_slug<T: Model>(pool: &Pool, slug: &str) -> Result<bool, ExecError> {
+    Ok(
+        load_rows(QuerySet::<T>::new().filter("slug", slug.to_owned()), pool)
+            .await?
+            .iter()
+            .any(|r| r.slug == slug),
+    )
 }
 
 /// Enabled providers for the bare admin login page, sorted by `sort_order`.

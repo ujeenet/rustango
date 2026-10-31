@@ -46,10 +46,29 @@ pub(super) struct SharedSsoForm {
     allowed_hosted_domains: String,
     required_claims: String,
     require_verified_email: String,
+    sso_only: String,
+    auto_deactivate_after_days: String,
+    session_ttl_secs: String,
+    superuser_session_ttl_secs: String,
 }
 
 fn on(b: bool) -> String {
     if b { "on" } else { "" }.to_owned()
+}
+
+fn num(v: Option<i64>) -> String {
+    v.map(|n| n.to_string()).unwrap_or_default()
+}
+
+/// A blank or positive whole number.
+fn positive(name: &str, raw: &str) -> Result<Option<i64>, String> {
+    match raw.trim() {
+        "" => Ok(None),
+        s => match s.parse::<i64>() {
+            Ok(n) if n > 0 => Ok(Some(n)),
+            _ => Err(format!("{name} must be a positive whole number")),
+        },
+    }
 }
 
 fn opt(s: &str) -> Option<String> {
@@ -91,6 +110,10 @@ impl SharedSsoForm {
                 v => v.to_string(),
             },
             require_verified_email: on(row.require_verified_email),
+            sso_only: on(row.sso_only),
+            auto_deactivate_after_days: num(row.auto_deactivate_after_days.map(i64::from)),
+            session_ttl_secs: num(row.session_ttl_secs),
+            superuser_session_ttl_secs: num(row.superuser_session_ttl_secs),
         }
     }
 
@@ -147,6 +170,14 @@ impl SharedSsoForm {
             s => serde_json::from_str(s).map_err(|e| format!("required claims: {e}"))?,
         };
         crate::sso::policy::RequiredClaims::parse(&claims).map_err(|e| e.to_string())?;
+        let days = positive("deactivate after days", &self.auto_deactivate_after_days)?
+            .map(|d| i32::try_from(d).map_err(|_| "deactivate after days is too large".to_owned()))
+            .transpose()?;
+        let ttl = positive("session seconds", &self.session_ttl_secs)?;
+        let su_ttl = positive(
+            "superuser session seconds",
+            &self.superuser_session_ttl_secs,
+        )?;
         row.label = label.to_owned();
         row.kind = kind.to_owned();
         row.issuer_url = issuer_url;
@@ -164,6 +195,10 @@ impl SharedSsoForm {
         row.allowed_hosted_domains = hosted;
         row.required_claims = claims;
         row.require_verified_email = self.require_verified_email == "on";
+        row.sso_only = self.sso_only == "on";
+        row.auto_deactivate_after_days = days;
+        row.session_ttl_secs = ttl;
+        row.superuser_session_ttl_secs = su_ttl;
         Ok(())
     }
 }

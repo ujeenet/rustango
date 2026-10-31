@@ -181,6 +181,7 @@ run. `set-password-link <slug> <username>` prints a fresh one.
 |---|---|
 | `audit-log` | Read the audit trail |
 | `audit-cleanup` | Trim it |
+| `sso-deactivate-idle` | Switch off idle SSO-made users in every tenant |
 
 ### MCP **T**
 

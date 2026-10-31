@@ -11,8 +11,8 @@ use rustango::sso::link::{
     create_link, key_sha256, sign_in, Account, AccountLookup, EmailLookup, LinkRefusal, SsoLink,
 };
 use rustango::sso::policy::{
-    admit, AdmitRequest, Admitted, Denied, Identity, Refusal, SignInPolicy, SignupMode, SsoInvite,
-    Surface,
+    admit, AdmitRequest, Admitted, Denied, Identity, Refusal, SharedOverride, SignInPolicy,
+    SignupMode, SsoInvite, SsoSharedOverride, SsoTenantPolicy, Surface, TenantSettings,
 };
 use rustango::sso::{resolve_by_slug, LinkSource, SsoProvider};
 use rustango::tenancy::member_auth::TenantAccounts;
@@ -1283,6 +1283,379 @@ async fn member_auto_provision_is_unchanged(pool: &Pool) {
     }
 }
 
+/// A tenant settings row, made fresh.
+async fn tenant_settings(pool: &Pool, password_login: &str, sso_only: bool, per_hour: Option<i32>) {
+    rustango::testkit::matrix::fresh_table::<SsoTenantPolicy>(pool).await;
+    SsoTenantPolicy {
+        id: Auto::default(),
+        name: "default".into(),
+        access_denied_message: None,
+        password_login: password_login.into(),
+        sso_only,
+        default_provider: None,
+        signups_per_hour: per_hour,
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+}
+
+async fn may_use_password(pool: &Pool, id: i64) -> bool {
+    rustango::sso::lifecycle::password_login_allowed(pool, None, &user_by_id(pool, id).await).await
+}
+
+/// `sso_only` on a provider or the tenant keeps its users off passwords;
+/// a superuser follows only `password_login`.
+async fn password_rules_follow_sso_only(pool: &Pool) {
+    let t = tok();
+    rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
+    provider(pool, "strict", false).await;
+    let key = resolve_by_slug(pool, "strict", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let ann = plain_user(pool, &format!("ann-{t}"), &format!("ann-{t}@x.org"), false).await;
+    let boss = plain_user(pool, &format!("boss-{t}"), &format!("boss-{t}@x.org"), true).await;
+    let bob = plain_user(pool, &format!("bob-{t}"), &format!("bob-{t}@x.org"), false).await;
+    create_link(pool, &key, &format!("a-{t}"), ann)
+        .await
+        .unwrap();
+    create_link(pool, &key, &format!("b-{t}"), boss)
+        .await
+        .unwrap();
+    // No settings table, no rule: everyone.
+    for id in [ann, boss, bob] {
+        assert!(may_use_password(pool, id).await);
+    }
+    set(pool, "strict", "sso_only", SqlValue::Bool(true)).await;
+    assert!(
+        !may_use_password(pool, ann).await,
+        "linked through an sso_only provider"
+    );
+    assert!(
+        may_use_password(pool, boss).await,
+        "a superuser is never locked out"
+    );
+    assert!(may_use_password(pool, bob).await, "not linked");
+    // Disabling the provider keeps its users off passwords; so does deleting it.
+    set(pool, "strict", "enabled", SqlValue::Bool(false)).await;
+    assert!(!may_use_password(pool, ann).await, "disabled");
+    set(pool, "strict", "enabled", SqlValue::Bool(true)).await;
+    provider(pool, "gone", false).await;
+    let gone_key = resolve_by_slug(pool, "gone", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let cy = plain_user(pool, &format!("cy-{t}"), &format!("cy-{t}@x.org"), false).await;
+    create_link(pool, &gone_key, &format!("c-{t}"), cy)
+        .await
+        .unwrap();
+    assert!(may_use_password(pool, cy).await);
+    let q = SsoProvider::objects()
+        .filter("slug", "gone")
+        .compile_delete()
+        .unwrap();
+    rustango::sql::delete_pool(pool, &q).await.unwrap();
+    assert!(!may_use_password(pool, cy).await, "deleted");
+    // Tenant-wide.
+    tenant_settings(pool, "on", true, None).await;
+    assert!(!may_use_password(pool, bob).await);
+    assert!(may_use_password(pool, boss).await);
+    tenant_settings(pool, "superusers_only", false, None).await;
+    assert!(!may_use_password(pool, bob).await);
+    assert!(may_use_password(pool, boss).await);
+    tenant_settings(pool, "off", false, None).await;
+    assert!(!may_use_password(pool, boss).await);
+    // Unreadable settings: only a superuser, the break-glass way in.
+    tenant_settings(pool, "on", false, None).await;
+    SsoTenantPolicy::objects()
+        .filter("name", "default")
+        .update()
+        .set("signups_per_hour", -5)
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    assert!(may_use_password(pool, boss).await, "superuser break-glass");
+    assert!(!may_use_password(pool, bob).await, "everyone else refused");
+    rustango::testkit::matrix::drop_table(pool, "rustango_sso_tenant_policy").await;
+}
+
+/// The SSO audit rows for subject `sub` of provider `slug`, by event.
+async fn sso_events(pool: &Pool, slug: &str, sub: &str) -> Vec<serde_json::Value> {
+    rustango::audit::fetch_for_entity_pool(pool, "rustango_sso_links", &format!("{slug}:{sub}"))
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.changes)
+        .collect()
+}
+
+/// Sign-ups, email links and role changes leave an audit row; the tenant's
+/// hourly sign-up limit refuses past it.
+async fn successes_are_audited_and_signups_capped(pool: &Pool) {
+    rustango::audit::ensure_table_pool(pool).await.unwrap();
+    let t = tok();
+    let viewer = format!("Viewer-{t}");
+    role(pool, &viewer).await;
+    provider(pool, "aud", true).await;
+    set(pool, "aud", "signup_mode", SqlValue::String("open".into())).await;
+    set(
+        pool,
+        "aud",
+        "role_map",
+        SqlValue::Json(serde_json::json!({ "g1": viewer })),
+    )
+    .await;
+    set(pool, "aud", "sync_roles_on_login", SqlValue::Bool(true)).await;
+    let made = tenant(
+        pool,
+        "aud",
+        &member(
+            &format!("n-{t}"),
+            &format!("new-{t}@x.org"),
+            serde_json::json!({}),
+        ),
+    )
+    .await
+    .unwrap();
+    let events = sso_events(pool, "aud", &format!("n-{t}")).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "sso_signup" && e["user_id"] == made.user_id),
+        "{events:?}"
+    );
+    // The role map adds a role on the next sign-in: a diff row.
+    tenant(
+        pool,
+        "aud",
+        &member(
+            &format!("n-{t}"),
+            &format!("new-{t}@x.org"),
+            serde_json::json!({"groups": ["g1"]}),
+        ),
+    )
+    .await
+    .unwrap();
+    let events = sso_events(pool, "aud", &format!("n-{t}")).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "sso_roles_synced" && e["added"] == serde_json::json!([viewer])),
+        "{events:?}"
+    );
+    // An email link.
+    let old = plain_user(pool, &format!("old-{t}"), &format!("old-{t}@x.org"), false).await;
+    tenant(
+        pool,
+        "aud",
+        &member(
+            &format!("o-{t}"),
+            &format!("old-{t}@x.org"),
+            serde_json::json!({}),
+        ),
+    )
+    .await
+    .unwrap();
+    let events = sso_events(pool, "aud", &format!("o-{t}")).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| e["event"] == "sso_linked" && e["user_id"] == old),
+        "{events:?}"
+    );
+
+    // The hourly cap, counted from this hour's sign-ups.
+    let p = resolve_by_slug(pool, "aud", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let key = p.key(LinkSource::Tenant);
+    let mut capped = TenantSettings::default();
+    capped.signups_per_hour = Some(1);
+    let policy = p.effective_policy().tenant(&capped);
+    let late = member(
+        &format!("l-{t}"),
+        &format!("late-{t}@x.org"),
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        admit(
+            AdmitRequest::new(pool, Surface::TenantAdmin, &key, &policy, &late).provider("aud"),
+            &TenantAccounts(pool),
+        )
+        .await,
+        refused(Refusal::SignupRate)
+    );
+    let mut unlimited = TenantSettings::default();
+    unlimited.signups_per_hour = Some(0);
+    let open = p.effective_policy().tenant(&unlimited);
+    assert!(
+        admit(
+            AdmitRequest::new(pool, Surface::TenantAdmin, &key, &open, &late).provider("aud"),
+            &TenantAccounts(pool),
+        )
+        .await
+        .unwrap()
+        .created
+    );
+}
+
+/// A shared provider grants only the roles the tenant approved, and none
+/// without an override.
+async fn shared_roles_need_tenant_approval(pool: &Pool) {
+    let t = tok();
+    let (viewer, admin) = (format!("Viewer-{t}"), format!("Admin-{t}"));
+    role(pool, &viewer).await;
+    role(pool, &admin).await;
+    provider(pool, "sh", false).await;
+    set(pool, "sh", "signup_mode", SqlValue::String("open".into())).await;
+    set(
+        pool,
+        "sh",
+        "default_roles",
+        SqlValue::String(format!("{viewer}, {admin}")),
+    )
+    .await;
+    let p = resolve_by_slug(pool, "sh", String::new())
+        .await
+        .unwrap()
+        .unwrap();
+    let key = p.key(LinkSource::Tenant);
+    let mut ov = SharedOverride::default();
+    ov.allowed_roles = viewer.parse().unwrap();
+    for (n, approved, want) in [(0, None, vec![]), (1, Some(ov), vec![viewer.clone()])] {
+        let policy = p.effective_policy().shared_override(Ok(approved));
+        let who = member(
+            &format!("r{n}-{t}"),
+            &format!("r{n}-{t}@x.org"),
+            serde_json::json!({}),
+        );
+        let a = admit(
+            AdmitRequest::new(pool, Surface::TenantAdmin, &key, &policy, &who).provider("sh"),
+            &TenantAccounts(pool),
+        )
+        .await
+        .unwrap();
+        assert_eq!(roles_of(pool, a.user_id).await, want, "case {n}");
+    }
+    // A stored override row parses into the same rule.
+    rustango::testkit::matrix::fresh_table::<SsoSharedOverride>(pool).await;
+    SsoSharedOverride {
+        id: Auto::default(),
+        shared_slug: "sh".into(),
+        allowed_email_domains: None,
+        blocked_email_domains: Some("x.org".into()),
+        allowed_idp_tenants: None,
+        allowed_hosted_domains: None,
+        required_claims: serde_json::json!({}),
+        require_verified_email: None,
+        signup_mode: Some("closed".into()),
+        sso_only: Some(true),
+        session_ttl_secs: Some(60),
+        superuser_session_ttl_secs: None,
+        allowed_roles: Some(viewer.clone()),
+    }
+    .insert_pool(pool)
+    .await
+    .unwrap();
+    let loaded = SharedOverride::load(pool, "sh").await.unwrap().unwrap();
+    assert!(loaded.lifecycle.sso_only);
+    assert_eq!(loaded.signup_mode, Some(SignupMode::Closed));
+    assert_eq!(loaded.allowed_roles.names(), [viewer]);
+    let policy = p.effective_policy().shared_override(Ok(Some(loaded)));
+    assert_eq!(policy.session_ttl(3600, false), 60);
+    assert_eq!(
+        policy
+            .check(&member("z", "z@x.org", serde_json::json!({})))
+            .unwrap_err()
+            .rule(),
+        "domain_blocked"
+    );
+    assert!(SharedOverride::load(pool, "other").await.unwrap().is_none());
+    rustango::testkit::matrix::drop_table(pool, "rustango_sso_shared_overrides").await;
+}
+
+/// Idle SSO-made users are switched off; superusers, hand-linked users and
+/// recent ones are left alone.
+async fn idle_users_are_deactivated(pool: &Pool) {
+    rustango::audit::ensure_table_pool(pool).await.unwrap();
+    let t = tok();
+    provider(pool, "idle", false).await;
+    set(pool, "idle", "auto_deactivate_after_days", SqlValue::I32(2)).await;
+    set(pool, "idle", "sso_only", SqlValue::Bool(true)).await;
+    // Same idle rule, but its users may still use a password.
+    provider(pool, "soft", false).await;
+    set(pool, "soft", "auto_deactivate_after_days", SqlValue::I32(2)).await;
+    let soft_key = resolve_by_slug(pool, "soft", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let key = resolve_by_slug(pool, "idle", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Tenant);
+    let old = chrono::Utc::now() - chrono::TimeDelta::days(5);
+    let mut ids = Vec::new();
+    for (name, superuser, provisioned, last) in [
+        ("gone", false, true, Some(old)),
+        ("boss", true, true, Some(old)),
+        ("hand", false, false, Some(old)),
+        ("fresh", false, true, Some(chrono::Utc::now())),
+    ] {
+        let id = plain_user(
+            pool,
+            &format!("{name}-{t}"),
+            &format!("{name}-{t}@x.org"),
+            superuser,
+        )
+        .await;
+        create_link(pool, &key, &format!("{name}-{t}"), id)
+            .await
+            .unwrap();
+        SsoLink::objects()
+            .filter("subject", format!("{name}-{t}"))
+            .update()
+            .set("provisioned", provisioned)
+            .set("last_used_at", last)
+            .execute_pool(pool)
+            .await
+            .unwrap();
+        ids.push(id);
+    }
+    let pw = plain_user(pool, &format!("pw-{t}"), &format!("pw-{t}@x.org"), false).await;
+    create_link(pool, &soft_key, &format!("pw-{t}"), pw)
+        .await
+        .unwrap();
+    SsoLink::objects()
+        .filter("subject", format!("pw-{t}"))
+        .update()
+        .set("provisioned", true)
+        .set("last_used_at", Some(old))
+        .execute_pool(pool)
+        .await
+        .unwrap();
+    let done = rustango::sso::lifecycle::deactivate_idle(pool, None)
+        .await
+        .unwrap();
+    assert!(user_by_id(pool, pw).await.active, "a password user stays");
+    assert_eq!(done, [ids[0]]);
+    let gone = user_by_id(pool, ids[0]).await;
+    assert!(!gone.active && gone.sessions_revoked_at.is_some());
+    for id in &ids[1..] {
+        assert!(user_by_id(pool, *id).await.active);
+    }
+    // Run again: nothing more.
+    assert!(rustango::sso::lifecycle::deactivate_idle(pool, None)
+        .await
+        .unwrap()
+        .is_empty());
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
@@ -1301,6 +1674,10 @@ tri_dialect_test!(
         role_sync_touches_only_mapped_roles,
         username_clash_suffix_or_refuse,
         member_auto_provision_is_unchanged,
+        password_rules_follow_sso_only,
+        successes_are_audited_and_signups_capped,
+        shared_roles_need_tenant_approval,
+        idle_users_are_deactivated,
     ],
 );
 
