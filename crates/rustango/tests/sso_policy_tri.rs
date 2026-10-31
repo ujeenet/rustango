@@ -1683,7 +1683,7 @@ async fn idle_users_are_deactivated(pool: &Pool) {
         .await
         .unwrap();
     assert!(user_by_id(pool, pw).await.active, "a password user stays");
-    assert_eq!(done, [ids[0]]);
+    assert_eq!((done.deactivated, done.failed), (vec![ids[0]], 0));
     let gone = user_by_id(pool, ids[0]).await;
     assert!(!gone.active && gone.sessions_revoked_at.is_some());
     for id in &ids[1..] {
@@ -1693,6 +1693,7 @@ async fn idle_users_are_deactivated(pool: &Pool) {
     assert!(rustango::sso::lifecycle::deactivate_idle(pool, None)
         .await
         .unwrap()
+        .deactivated
         .is_empty());
 }
 

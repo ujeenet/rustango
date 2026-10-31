@@ -242,17 +242,21 @@ const DEFERRED: &[&str] = &[
     "superuser_session_ttl_secs",
 ];
 
-/// The sign-in policy columns.
-const SIGN_IN_COLUMNS: &[&str] = &[
+/// The password and session columns.
+const LIFECYCLE_COLUMNS: &[&str] = &[
+    "sso_only",
+    "auto_deactivate_after_days",
+    "session_ttl_secs",
+    "superuser_session_ttl_secs",
+];
+
+/// Every policy column, read in one go when a provider resolves.
+const POLICY_COLUMNS: &[&str] = &[
     "allowed_email_domains",
     "blocked_email_domains",
     "allowed_idp_tenants",
     "allowed_hosted_domains",
     "required_claims",
-];
-
-/// The sign-up policy columns.
-const SIGNUP_COLUMNS: &[&str] = &[
     "signup_mode",
     "default_roles",
     "role_map",
@@ -262,10 +266,6 @@ const SIGNUP_COLUMNS: &[&str] = &[
     "username_clash",
     "sync_profile",
     "allow_email_link_staff",
-];
-
-/// The password and session columns.
-const LIFECYCLE_COLUMNS: &[&str] = &[
     "sso_only",
     "auto_deactivate_after_days",
     "session_ttl_secs",
@@ -338,27 +338,26 @@ async fn read_columns<T: Model>(
     columns_after_read_error(present, T::SCHEMA.table, &err).map(|()| None)
 }
 
-/// Row `id`'s sign-in policy; see [`read_columns`].
-async fn read_policy<T: Model>(
-    pool: &Pool,
-    id: i64,
-) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
-    match read_columns::<T>(pool, id, SIGN_IN_COLUMNS).await? {
-        Some(r) => policy_of_row(&r),
-        None => Ok(super::policy::SignInPolicy::default()),
+/// Row `id`'s sign-in, sign-up and lifecycle rules, in one read; see [`read_columns`].
+async fn read_rules<T: Model>(pool: &Pool, id: i64) -> Rules {
+    use super::policy::{Lifecycle, SignInPolicy, SignupPolicy};
+    match read_columns::<T>(pool, id, POLICY_COLUMNS).await {
+        Ok(Some(r)) => (policy_of_row(&r), signup_of_row(&r), lifecycle_of_row(&r)),
+        Ok(None) => (
+            Ok(SignInPolicy::default()),
+            Ok(SignupPolicy::default()),
+            Ok(Lifecycle::default()),
+        ),
+        Err(e) => (Err(e.clone()), Err(e.clone()), Err(e)),
     }
 }
 
-/// Row `id`'s sign-up policy; see [`read_columns`].
-async fn read_signup<T: Model>(
-    pool: &Pool,
-    id: i64,
-) -> Result<super::policy::SignupPolicy, super::policy::PolicyError> {
-    match read_columns::<T>(pool, id, SIGNUP_COLUMNS).await? {
-        Some(r) => signup_of_row(&r),
-        None => Ok(super::policy::SignupPolicy::default()),
-    }
-}
+/// What [`read_rules`] returns: each part refuses on its own error.
+type Rules = (
+    Result<super::policy::SignInPolicy, super::policy::PolicyError>,
+    Result<super::policy::SignupPolicy, super::policy::PolicyError>,
+    Result<super::policy::Lifecycle, super::policy::PolicyError>,
+);
 
 /// Row `id`'s password and session rules; see [`read_columns`].
 pub(crate) async fn read_lifecycle<T: Model>(
@@ -445,7 +444,7 @@ fn json_of(
     }
 }
 
-/// The sign-up policy in one row read with every [`SIGNUP_COLUMNS`] column.
+/// The sign-up policy in one row read with every [`POLICY_COLUMNS`] column.
 fn signup_of_row(
     r: &std::collections::HashMap<String, SqlValue>,
 ) -> Result<super::policy::SignupPolicy, super::policy::PolicyError> {
@@ -471,7 +470,7 @@ fn signup_of_row(
     })
 }
 
-/// The policy in one row read with every [`SIGN_IN_COLUMNS`] column.
+/// The sign-in policy in one row read with every [`POLICY_COLUMNS`] column.
 fn policy_of_row(
     r: &std::collections::HashMap<String, SqlValue>,
 ) -> Result<super::policy::SignInPolicy, super::policy::PolicyError> {
@@ -595,14 +594,38 @@ pub(crate) async fn resolve_row<T: Model>(
     slug: &str,
     redirect_uri: String,
 ) -> Result<Option<ResolvedProvider>, SsoError> {
+    Ok(match lookup_row::<T>(pool, slug, redirect_uri).await? {
+        Lookup::Enabled(p) => Some(*p),
+        _ => None,
+    })
+}
+
+/// A provider slug looked up in one table.
+#[cfg_attr(not(all(feature = "tenancy", feature = "admin-sso")), allow(dead_code))]
+pub(crate) enum Lookup {
+    Enabled(Box<ResolvedProvider>),
+    /// Only a disabled row has the slug.
+    Disabled,
+    Missing,
+}
+
+/// [`resolve_row`], also telling a disabled row from none.
+pub(crate) async fn lookup_row<T: Model>(
+    pool: &Pool,
+    slug: &str,
+    redirect_uri: String,
+) -> Result<Lookup, SsoError> {
     use crate::casts::CastValue as _;
-    let row = load_rows(QuerySet::<T>::new().filter("slug", slug.to_owned()), pool)
+    let rows = load_rows(QuerySet::<T>::new().filter("slug", slug.to_owned()), pool)
         .await
-        .map_err(|e| SsoError::Config(format!("db: {e}")))?
-        .into_iter()
-        .find(|r| r.enabled);
-    let Some(r) = row else {
-        return Ok(None);
+        .map_err(|e| SsoError::Config(format!("db: {e}")))?;
+    let disabled = rows.iter().any(|r| r.slug == slug);
+    let Some(r) = rows.into_iter().find(|r| r.enabled) else {
+        return Ok(if disabled {
+            Lookup::Disabled
+        } else {
+            Lookup::Missing
+        });
     };
     let client_secret =
         EncryptedString::from_db(&r.client_secret).map_err(|e| SsoError::Secret(e.to_string()))?;
@@ -618,10 +641,8 @@ pub(crate) async fn resolve_row<T: Model>(
             false
         }
     };
-    let policy = read_policy::<T>(pool, r.id).await;
-    let signup = read_signup::<T>(pool, r.id).await;
-    let lifecycle = read_lifecycle::<T>(pool, r.id).await;
-    Ok(Some(ResolvedProvider {
+    let (policy, signup, lifecycle) = read_rules::<T>(pool, r.id).await;
+    Ok(Lookup::Enabled(Box::new(ResolvedProvider {
         policy,
         signup,
         lifecycle,
@@ -635,21 +656,7 @@ pub(crate) async fn resolve_row<T: Model>(
         },
         id: r.id,
         allow_email_link,
-    }))
-}
-
-/// Whether `T` has a row for `slug`, enabled or not. A missing table has none.
-///
-/// # Errors
-/// A driver error.
-#[cfg(all(feature = "tenancy", feature = "admin-sso"))]
-pub(crate) async fn has_slug<T: Model>(pool: &Pool, slug: &str) -> Result<bool, ExecError> {
-    Ok(
-        load_rows(QuerySet::<T>::new().filter("slug", slug.to_owned()), pool)
-            .await?
-            .iter()
-            .any(|r| r.slug == slug),
-    )
+    })))
 }
 
 /// Enabled providers for the bare admin login page, sorted by `sort_order`.
@@ -747,7 +754,7 @@ mod tests {
     async fn an_empty_catalog_is_an_error() {
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
         assert!(
-            columns_present(&pool, "rustango_sso_providers", SIGN_IN_COLUMNS)
+            columns_present(&pool, "rustango_sso_providers", POLICY_COLUMNS)
                 .await
                 .is_err()
         );

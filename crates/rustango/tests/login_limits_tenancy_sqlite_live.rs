@@ -1444,3 +1444,82 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
         &env.admin_login(&next_ip(), &boss, PASS).await
     ));
 }
+
+/// The reset helpers that write a caller-named table apply `sso_only` when
+/// that table is the tenant user table; a refused single-use link is not spent.
+#[cfg(all(feature = "sso", feature = "cache"))]
+#[tokio::test]
+async fn sso_only_refuses_the_reset_into_variants() {
+    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+    use rustango::sso::policy::SsoTenantPolicy;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let ann = unique("ann-into");
+    let mut u = User {
+        username: ann.clone(),
+        password_hash: rustango::tenancy::password::hash(PASS).unwrap(),
+        is_superuser: false,
+        ..rustango::testkit::user()
+    };
+    u.insert_pool(&env.tenant).await.unwrap();
+    let ann_id = u.id.get().copied().unwrap();
+    rustango::testkit::create_tables_for::<SsoTenantPolicy>(&env.tenant)
+        .await
+        .unwrap();
+    // Another test may have left the settings row.
+    for old in SsoTenantPolicy::objects().fetch(&env.tenant).await.unwrap() {
+        old.delete_pool(&env.tenant).await.unwrap();
+    }
+    let mut policy = SsoTenantPolicy {
+        id: Auto::default(),
+        name: "default".into(),
+        access_denied_message: None,
+        password_login: "on".into(),
+        sso_only: true,
+        default_provider: None,
+        signups_per_hour: None,
+    };
+    policy.insert_pool(&env.tenant).await.unwrap();
+    let secret = b"reset-secret-reset-secret-32byte";
+    let url = PasswordReset::issue(
+        &LinkScope::audience("t"),
+        "https://x/reset",
+        ann_id,
+        secret,
+        Duration::from_secs(600),
+    );
+    let cache: Arc<dyn rustango::cache::Cache> = Arc::new(rustango::cache::InMemoryCache::new());
+    let table = "rustango_users";
+    let pass = "Another-strong-pass-9!";
+    assert_eq!(
+        rustango::auth_flows::confirm_password_reset_pool_into(
+            LinkTarget::audience(&env.tenant, "t"),
+            &url,
+            pass,
+            secret,
+            table,
+            "id",
+            "password_hash",
+        )
+        .await,
+        Err(AuthFlowError::PasswordLoginDisabled)
+    );
+    let once = || {
+        rustango::auth_flows::confirm_password_reset_single_use_into(
+            LinkTarget::audience(&env.tenant, "t"),
+            &url,
+            pass,
+            secret,
+            &cache,
+            table,
+            "id",
+            "password_hash",
+        )
+    };
+    assert_eq!(once().await, Err(AuthFlowError::PasswordLoginDisabled));
+    // The refusal did not spend the link.
+    policy.sso_only = false;
+    policy.save_pool(&env.tenant).await.unwrap();
+    assert_eq!(once().await, Ok(ann_id));
+    policy.delete_pool(&env.tenant).await.unwrap();
+}

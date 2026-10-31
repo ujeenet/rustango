@@ -34,7 +34,7 @@ use crate::sso::policy::{
     admit, refuse, AdmitRequest, Denied, EffectivePolicy, Identity, PolicyError, RefusalContext,
     SharedOverride, Surface, TenantSettings,
 };
-use crate::sso::provider::{has_slug, load_rows, resolve_row, ResolvedProvider};
+use crate::sso::provider::{load_rows, lookup_row, resolve_row, Lookup, ResolvedProvider};
 
 /// The auth-signal `source` for a tenant console SSO sign-in.
 const SIGNAL_SOURCE: &str = "tenant_admin_sso";
@@ -238,16 +238,14 @@ async fn resolve_by_slug(
     slug: &str,
     redirect_uri: String,
 ) -> Result<Option<(ResolvedProvider, ProviderKey)>, SsoError> {
-    if let Some(p) = resolve_row::<SsoProvider>(tenant_pool, slug, redirect_uri.clone()).await? {
-        let key = p.key(LinkSource::Tenant);
-        return Ok(Some((p, key)));
-    }
-    // The tenant's row wins even when disabled: never the shared one.
-    if has_slug::<SsoProvider>(tenant_pool, slug)
-        .await
-        .map_err(|e| SsoError::Config(format!("db: {e}")))?
-    {
-        return Ok(None);
+    match lookup_row::<SsoProvider>(tenant_pool, slug, redirect_uri.clone()).await? {
+        Lookup::Enabled(p) => {
+            let key = p.key(LinkSource::Tenant);
+            return Ok(Some((*p, key)));
+        }
+        // The tenant's row wins even when disabled: never the shared one.
+        Lookup::Disabled => return Ok(None),
+        Lookup::Missing => {}
     }
     Ok(
         resolve_row::<SharedSsoProvider>(registry_pool, slug, redirect_uri)
