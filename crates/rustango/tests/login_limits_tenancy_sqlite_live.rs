@@ -1426,6 +1426,30 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
     {
         through.push("reset");
     }
+    #[cfg(feature = "cache")]
+    {
+        let cache: Arc<dyn rustango::cache::Cache> =
+            Arc::new(rustango::cache::InMemoryCache::new());
+        let url = PasswordReset::issue(
+            &LinkScope::audience("t"),
+            "https://x/reset-once",
+            ann_id,
+            secret,
+            Duration::from_secs(600),
+        );
+        if rustango::auth_flows::confirm_password_reset_single_use(
+            LinkTarget::audience(&env.tenant, "t"),
+            &url,
+            "Another-strong-pass-9!",
+            secret,
+            &cache,
+        )
+        .await
+            != Err(AuthFlowError::PasswordLoginDisabled)
+        {
+            through.push("single-use reset");
+        }
+    }
     assert!(through.is_empty(), "the password got through: {through:?}");
     // A superuser is never locked out by sso_only.
     assert!(has_session(&env.admin_login(&next_ip(), &boss, PASS).await));

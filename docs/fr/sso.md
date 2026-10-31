@@ -17,8 +17,8 @@ Le SSO connecte l'utilisateur **lié** à l'identité de l'IdP : une ligne
 suffit jamais à lui seul. Un utilisateur qui se connecte pour la première
 fois n'est lié par son email vérifié que si le provider a
 **`allow_email_link`** activé (désactivé par défaut), et jamais si le
-compte est un superutilisateur ou du staff (tenant : détient une
-permission quelconque ; bare admin : tout compte). Ces comptes sont liés
+compte est un superutilisateur ou, sans `allow_email_link_staff`, du staff
+(tenant : détient un rôle quelconque ; bare admin : tout compte). Ces comptes sont liés
 par un admin, qui ajoute la ligne `SsoLink` dans l'admin ; la ligne de
 journal du refus indique le subject. (Le flux membre, ci-dessous,
 peut aussi créer un compte pour un email inconnu ; c'est désactivé par défaut.)
@@ -112,7 +112,7 @@ d'admin, sans redéploiement. Champs :
 | `enabled` | Indique si le bouton s'affiche sur la page de connexion. |
 | `sort_order` | Ordre d'affichage des boutons (croissant). |
 | `scopes` | Substitution optionnelle des scopes, séparés par des espaces (par défaut `openid email profile`). |
-| `allow_email_link` | Lier un utilisateur qui se connecte pour la première fois par son email vérifié (désactivé par défaut). Ne lie jamais un compte superutilisateur ou staff ; ignoré par le bare admin. |
+| `allow_email_link` | Lier un utilisateur qui se connecte pour la première fois par son email vérifié (désactivé par défaut). Ne lie jamais un superutilisateur, et un détenteur de rôle seulement avec `allow_email_link_staff` ; ignoré par le bare admin. |
 
 Seul un superutilisateur peut ajouter, modifier ou supprimer des lignes
 `SsoProvider` et `SsoLink` dans l'admin ; le reste du staff peut seulement
@@ -184,9 +184,8 @@ d'étape TOTP.
 utilisateur existant : aucune ligne `SsoLink`, et liaison par email désactivée
 ou seulement des utilisateurs privilégiés. Dans le bare admin, c'est tout
 provider sans lien. Il avertit aussi pour la liaison par email sur un provider
-`kind = "oidc"`, un issuer `http://` hors loopback, des règles de domaine email
-avec `require_verified_email` désactivé, et un provider partagé qui inscrit des
-utilisateurs.
+`kind = "oidc"`, un issuer `http://` hors loopback, et un provider partagé qui
+inscrit des utilisateurs.
 
 ## SSO membre (utilisateur final)
 
@@ -208,7 +207,7 @@ use rustango::tenancy::member_auth::{member_sso_router, MemberAuthConfig};
 
 let members = member_sso_router(MemberAuthConfig {
     login_base:     "/auth".into(),   // buttons link to /auth/sso/<slug>
-    landing_url:    "/".into(),       // post-login destination (honors a same-origin ?next)
+    landing_url:    "/".into(),       // post-login destination (a same-origin ?next on the begin URL wins)
     auto_provision: true,             // create a user from a verified email on first sign-in
     session_ttl:    7 * 24 * 60 * 60, // 7 days
     ..Default::default()
@@ -297,7 +296,6 @@ authentifie.
 | `allowed_idp_tenants` | Identifiants d'annuaire Microsoft (`tid`). Lus uniquement depuis un id_token vérifié. |
 | `allowed_hosted_domains` | Domaines Google Workspace (claim `hd`). |
 | `required_claims` | JSON `{"claim": ["valeur", ...]}` : le claim (texte ou liste) doit contenir une des valeurs. `{"iss": [...]}` fixe l'émetteur. Un claim absent refuse. |
-| `require_verified_email` | Conservé pour les lignes existantes : la liste autorisée n'accepte toujours qu'un email vérifié par l'IdP. |
 
 L'admin et la console opérateur enregistrent les listes sous une forme
 canonique et refusent une valeur illisible. Une valeur invalide écrite par
@@ -363,6 +361,12 @@ utilisateur à sa prochaine connexion par le même provider avec son e-mail
 vérifié, même avec un nouveau subject. Un superuser n'est jamais relié ; un
 détenteur de rôles seulement avec `allow_email_link_staff`.
 
+Les collisions de nom d'utilisateur et d'email ignorent la casse comme le
+backend : PostgreSQL replie l'Unicode, SQLite seulement les lettres ASCII, et
+MySQL suit la collation de la colonne (par défaut aussi les accents, `ané` et
+`ane` entrent en collision). Des noms d'utilisateur ASCII donnent la même
+réponse partout.
+
 `check --deploy` ne signale pas comme bloquant un provider dont
 l'inscription n'est pas fermée, et avertit pour `signup_mode = open` sans
 `allowed_email_domains`, `allowed_hosted_domains` ni `allowed_idp_tenants`.
@@ -371,16 +375,16 @@ l'inscription n'est pas fermée, et avertit pour `signup_mode = open` sans
 
 | Où | Champ | Sens |
 |---|---|---|
-| Provider | `sso_only` | Ses utilisateurs liés ne peuvent pas utiliser de mot de passe (formulaire, login JSON, HTTP Basic, lien de réinitialisation). Seulement tant qu'il est activé. |
+| Provider | `sso_only` | Ses utilisateurs liés ne peuvent pas utiliser de mot de passe (formulaire, login JSON, HTTP Basic, lien de réinitialisation), même s'il est désactivé ou supprimé. |
 | Provider | `session_ttl_secs`, `superuser_session_ttl_secs` | La session dure le plus court de ces valeurs et de celle de la route. |
 | Provider | `auto_deactivate_after_days` | `sso-deactivate-idle` désactive les utilisateurs inscrits par lui et inactifs depuis ce délai. Jamais un superutilisateur, jamais un utilisateur lié par un admin. |
 | `SsoTenantPolicy` | `password_login` | `on`, `off` ou `superusers_only` : le formulaire n'apparaît qu'avec `?local=1`, pour les superutilisateurs. |
 | `SsoTenantPolicy` | `sso_only` | Seuls les superutilisateurs utilisent un mot de passe. |
-| `SsoTenantPolicy` | `default_provider` | La page de connexion y redirige directement, sauf avec `?local=1` ou après une erreur. |
+| `SsoTenantPolicy` | `default_provider` | La page de connexion y redirige directement (ou vers le seul provider quand le formulaire de mot de passe est masqué), sauf avec `?local=1` ou après une erreur. |
 | `SsoTenantPolicy` | `signups_per_hour` | Inscriptions SSO par heure (vide : 100, `0` : sans limite). |
 
 Un superutilisateur ne suit que `password_login` ; `sso_only` ne le bloque jamais.
-Un mot de passe refusé ressemble à un mauvais. Une règle illisible refuse ; des réglages illisibles ne laissent entrer que les superutilisateurs. Un provider désactivé garde ses utilisateurs `sso_only`, un lien vers un provider supprimé compte comme `sso_only`. Les clés API et secrets d'agents MCP ne sont pas concernés. La déconnexion mène à `?local=1`.
+Un mot de passe refusé ressemble à un mauvais. Une règle illisible refuse ; des réglages illisibles ne laissent entrer que les superutilisateurs. Un provider désactivé garde ses utilisateurs `sso_only`, un lien vers un provider supprimé compte comme `sso_only` jusqu'à ce qu'un admin le retire. `sso_only` couvre les connexions par mot de passe (tenant et bare admin) et les réinitialisations, pas les clés API ni les secrets d'agents MCP. `sso-deactivate-idle` ne désactive que les utilisateurs qui ne peuvent pas utiliser de mot de passe. La déconnexion mène à `?local=1`, et la redirection automatique a lieu au plus une fois par minute, pour qu'une session perdue ne boucle pas.
 
 **Providers partagés.** Le `SsoSharedOverride` d'un tenant resserre un provider partagé, sans jamais l'assouplir, et nomme dans `allowed_roles` les rôles qu'il peut donner (sans override : aucun).
 
@@ -422,8 +426,8 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
 
 - **Le lien d'abord** — le lien `(provider, sub)` décide ; l'email ne sert
   qu'à la liaison optionnelle par email, et seulement s'il est vérifié.
-- **Pas de liens privilégiés par email** — seuls les superutilisateurs lient
-  les superutilisateurs et le staff. Un lien créé par email continue de
+- **Pas de liens privilégiés par email** — un superutilisateur n'est jamais
+  lié par email, un détenteur de rôle seulement avec `allow_email_link_staff`. Un lien créé par email continue de
   fonctionner après la promotion de l'utilisateur ; supprimez-le si ce
   n'est pas voulu.
 - **Pas de provisionnement automatique** pour les admins — un email inconnu

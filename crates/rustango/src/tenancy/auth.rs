@@ -16,7 +16,7 @@
 //!
 //! The hard wall is enforced by middleware: operator routes call
 //! [`authenticate_operator`] against the registry; tenant routes
-//! call [`authenticate_user`] against the resolved tenant's pool.
+//! call [`authenticate_user_pool`] against the resolved tenant's pool.
 //! An operator's `Authorization: Basic …` header sent to a tenant
 //! URL won't authenticate (the username doesn't exist in the
 //! tenant's `rustango_users`); a user's header sent to `/operator`
@@ -442,7 +442,10 @@ pub(crate) async fn check_operator_password(
 /// # Errors
 /// As [`authenticate_operator`].
 #[cfg(feature = "postgres")]
-#[deprecated(note = "bypasses SSO password rules; use authenticate_user_pool")]
+#[deprecated(
+    since = "0.61.15",
+    note = "bypasses SSO password rules; use authenticate_user_pool"
+)]
 pub async fn authenticate_user(
     conn: &mut PgConnection,
     username: &str,
@@ -456,7 +459,7 @@ pub async fn authenticate_user(
     check_user_password(None, rows.into_iter().next(), password).await
 }
 
-/// Tri-dialect counterpart of [`authenticate_user`] (v0.38). Takes the
+/// Tri-dialect tenant user login, with the SSO password rules (v0.38). Takes the
 /// unified [`crate::sql::Pool`] enum so the same body runs on PG,
 /// SQLite, and MySQL — the underlying ORM `_pool` helper picks the
 /// right placeholder + identifier-quoting rules per dialect.

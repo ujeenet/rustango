@@ -13,8 +13,8 @@ SSO signs in the user **linked** to the IdP identity: one
 `rustango_sso_links` row per `(provider, sub)`. The email the IdP sends is
 never enough on its own. A first-time user is linked by verified email
 only when the provider has **`allow_email_link`** on (default off), and
-never when the account is a superuser or staff (tenant: holds any
-permission; bare admin: every account). Those accounts are linked by an
+never when the account is a superuser or, without `allow_email_link_staff`,
+staff (tenant: holds any role; bare admin: every account). Those accounts are linked by an
 admin, who adds the `SsoLink` row in the admin; the refusal log line names
 the subject. (The member flow, below, can also create an account for an
 unknown email; that is off by default.)
@@ -103,7 +103,7 @@ admin model — add/edit/enable from the admin UI, no redeploy. Fields:
 | `enabled` | Whether the button shows on the login page. |
 | `sort_order` | Button ordering (ascending). |
 | `scopes` | Optional space-separated scope override (default `openid email profile`). |
-| `allow_email_link` | Link a first-time user by verified email (default off). Never links a superuser or staff account; ignored by the bare admin. |
+| `allow_email_link` | Link a first-time user by verified email (default off). Never links a superuser, and a role holder only with `allow_email_link_staff`; ignored by the bare admin. |
 
 Only a superuser can add, change or delete `SsoProvider` and `SsoLink`
 rows in the admin; other staff can list them with the usual permissions.
@@ -166,8 +166,7 @@ posts to `<login>/sso-totp`. The tenant admin has no TOTP step.
 every existing user: no `SsoLink` rows, and email linking off or only
 privileged users. In the bare admin that means any provider with no links.
 It also warns about email linking on a `kind = "oidc"` provider, an `http://`
-issuer that is not loopback, email domain rules with `require_verified_email`
-off, and a shared provider that signs users up.
+issuer that is not loopback, and a shared provider that signs users up.
 
 ## Member (end-user) SSO
 
@@ -187,7 +186,7 @@ use rustango::tenancy::member_auth::{member_sso_router, MemberAuthConfig};
 
 let members = member_sso_router(MemberAuthConfig {
     login_base:     "/auth".into(),   // buttons link to /auth/sso/<slug>
-    landing_url:    "/".into(),       // post-login destination (honors a same-origin ?next)
+    landing_url:    "/".into(),       // post-login destination (a same-origin ?next on the begin URL wins)
     auto_provision: true,             // create a user from a verified email on first sign-in
     session_ttl:    7 * 24 * 60 * 60, // 7 days
     ..Default::default()
@@ -268,7 +267,6 @@ sign-in rules. Every rule left empty admits anyone the IdP signs in.
 | `allowed_idp_tenants` | Microsoft directory ids (`tid`). Read only from a verified id_token. |
 | `allowed_hosted_domains` | Google Workspace domains (the `hd` claim). |
 | `required_claims` | JSON `{"claim": ["value", ...]}`: the claim (a string or a list) must hold one of the values. `{"iss": [...]}` pins the issuer. A missing claim refuses. |
-| `require_verified_email` | Kept for stored rows: the allowlist always accepts only an email the IdP verified. |
 
 The admin and the operator console store lists in one canonical form and
 refuse a value that does not parse. A value that still does not parse
@@ -334,6 +332,11 @@ email, even if the IdP gives them a new subject. The user must still have
 that email. It never re-links a superuser, and a role holder only with
 `allow_email_link_staff`.
 
+Username and email collision checks ignore case as the backend does:
+PostgreSQL folds Unicode case, SQLite only ASCII letters, and MySQL follows
+the column collation (by default also accents, so `ané` and `ane` collide).
+Keep usernames ASCII for the same answer everywhere.
+
 `check --deploy` does not report a provider whose sign-up is not closed
 as refusing everyone, and warns about `signup_mode = open` with no
 `allowed_email_domains`, `allowed_hosted_domains` or `allowed_idp_tenants`.
@@ -342,7 +345,7 @@ as refusing everyone, and warns about `signup_mode = open` with no
 
 | Where | Field | Meaning |
 |---|---|---|
-| Provider | `sso_only` | Users linked through it may not use a password (login, JSON login, HTTP Basic, reset link). Only while the provider is enabled. |
+| Provider | `sso_only` | Users linked through it may not use a password (login, JSON login, HTTP Basic, reset link), even while the provider is disabled or after it is deleted. |
 | Provider | `session_ttl_secs`, `superuser_session_ttl_secs` | The session after a sign-in through it lasts the shortest of these and the route's lifetime. |
 | Provider | `auto_deactivate_after_days` | `sso-deactivate-idle` switches off users it signed up whose every link is unused this long. Never a superuser, never a user with a link an admin made. |
 | `SsoTenantPolicy` | `password_login` | `on`, `off`, or `superusers_only`: the password form shows only at `?local=1`, for superusers. |
@@ -360,10 +363,9 @@ users while disabled too; a link to a deleted provider counts as
 Logout lands on `?local=1`, and the automatic redirect happens at most
 once a minute, so a dropped session cannot loop.
 
-**Shared providers.** A tenant's `SsoSharedOverride` (one row per shared
-slug) adds its own rules on top: it can block more domains, require a
-verified email, narrow sign-up, set `sso_only` or shorter sessions, never
-loosen. A shared provider grants only the roles its `allowed_roles` names;
+**Shared providers.** A tenant's `SsoSharedOverride` (one row, bound to
+the shared provider) adds its own rules on top: it can block more
+domains, narrow sign-up, set `sso_only` or shorter sessions, never loosen. A shared provider grants only the roles its `allowed_roles` names;
 with no override, none.
 
 **Throttle and audit.** SSO callbacks have their own per-IP limit (a 429
@@ -405,9 +407,9 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
 
 - **Link first** — the `(provider, sub)` link decides; the email is used
   only by opt-in email linking, and only when verified.
-- **No privileged email links** — superusers and staff are linked by a
-  superuser only. A link made by email keeps working after the user is
-  promoted; delete it if that is not wanted.
+- **No privileged email links** — a superuser is never linked by email;
+  a role holder only with `allow_email_link_staff`. A link made by email
+  keeps working after the user is promoted; delete it if that is not wanted.
 - **No auto-provisioning** for the admins — an unknown email can't get in.
 - **Secrets encrypted at rest** (`RUSTANGO_SECRET_KEY`), decrypted only
   in memory at login; edit forms mask the stored secret.

@@ -395,7 +395,8 @@ pub struct MemberAuthConfig {
     /// Path the SSO routes hang off — buttons link to
     /// `{login_base}/sso/{slug}`. Default `"/auth"`.
     pub login_base: String,
-    /// Post-login destination when no (sanitized) `?next` is present.
+    /// Post-login destination when the begin URL had no (sanitized) `?next`;
+    /// a `?next` on the callback is ignored.
     /// Default `"/"`.
     pub landing_url: String,
     /// Auto-create a tenant user from a verified IdP email the first

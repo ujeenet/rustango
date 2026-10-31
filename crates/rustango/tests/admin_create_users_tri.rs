@@ -875,7 +875,7 @@ async fn admin_link_sources_follow_the_database(pool: &Pool) {
         ("provider_id", "1"),
         ("issuer", "oidc"),
         ("subject", &subject),
-        ("user_id", "1"),
+        ("user_id", "2"),
     ]);
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
@@ -897,6 +897,43 @@ async fn admin_link_sources_follow_the_database(pool: &Pool) {
         link_sources(pool, &[&subject]).await,
         [Some("tenant".to_owned())]
     );
+    let user_of = |subject: String| async move {
+        rustango::sso::SsoLink::objects()
+            .filter("subject", subject)
+            .fetch(pool)
+            .await
+            .unwrap()[0]
+            .user_id
+    };
+    assert_eq!(
+        user_of(subject.clone()).await,
+        1,
+        "the refused edit wrote nothing"
+    );
+    // The same edit with an allowed source saves, so the refusal above is the rule.
+    let body = form(&[
+        ("provider_source", "tenant"),
+        ("provider_id", "1"),
+        ("issuer", "oidc"),
+        ("subject", &subject),
+        ("user_id", "2"),
+    ]);
+    let resp = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .tenant_mode()
+        .build()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/rustango_sso_links/{id}"))
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.status().is_redirection(), "{}", resp.status());
+    assert_eq!(user_of(subject.clone()).await, 2, "the allowed edit saved");
 
     // A stored `admin` link in a tenant database: the refusal says the stored value is wrong.
     let subject = seed_link(pool, "admin", 1).await;

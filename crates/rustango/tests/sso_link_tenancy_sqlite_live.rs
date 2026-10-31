@@ -3327,3 +3327,264 @@ async fn the_member_landing_is_sealed_at_begin() {
     assert_eq!(run("", "&next=/elsewhere").await, "/");
     assert_eq!(run("?next=//evil.example", "").await, "/");
 }
+
+/// Begin once, then send the same callback twice: both responses.
+async fn replayed(
+    app: &Router,
+    host: &str,
+    login: &str,
+    slug: &str,
+) -> (axum::response::Response, axum::response::Response) {
+    let begin = send(
+        app,
+        Request::builder()
+            .uri(format!("{login}/sso/{slug}"))
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&begin);
+    note_nonce(&to);
+    let state = to
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("state="))
+        .unwrap_or_else(|| panic!("{host}{login}: begin got {} {to:?}", begin.status()))
+        .to_owned();
+    let flow = set_cookies(&begin).join("; ");
+    let callback = || {
+        send(
+            app,
+            Request::builder()
+                .uri(format!("{login}/sso/{slug}/callback?code=c&state={state}"))
+                .header(header::HOST, host)
+                .header(header::COOKIE, &flow)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    let first = callback().await;
+    (first, callback().await)
+}
+
+/// The member and bare-admin callbacks also complete a flow only once.
+#[tokio::test]
+async fn a_replayed_callback_is_refused_on_member_and_bare_admin() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::member_auth::member_sso_router_for;
+    use rustango::tenancy::{MemberAuthConfig, MEMBER_COOKIE};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let members = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    env.idp.assert("sub-m", "m@example.com");
+    let member_session = |r: &axum::response::Response| {
+        set_cookies(r)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}=")))
+    };
+    let (first, again) = replayed(&members, &env.tenants[0].host, "/auth", "corp").await;
+    assert!(member_session(&first), "member: {}", location(&first));
+    assert!(!member_session(&again), "member replay signed in");
+
+    let (admin, pool, idp) = bare_admin().await;
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    let root = rustango::admin::AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", root.id.get().copied().unwrap())
+        .await
+        .unwrap();
+    idp.assert("sub-root", "root@example.com");
+    let (first, again) = replayed(&admin, "admin.test", "/login", "corp").await;
+    assert!(signed_in(&first), "bare admin: {}", location(&first));
+    assert!(!signed_in(&again), "bare admin replay signed in");
+    assert!(
+        location(&again).ends_with("sso_error=expired"),
+        "{}",
+        location(&again)
+    );
+}
+
+/// Sets an env var for one test and puts the old value back (tests hold `SUITE`).
+struct EnvVar(&'static str, Option<String>);
+
+impl EnvVar {
+    fn set(name: &'static str, value: &str) -> Self {
+        let old = std::env::var(name).ok();
+        std::env::set_var(name, value);
+        Self(name, old)
+    }
+}
+
+impl Drop for EnvVar {
+    fn drop(&mut self) {
+        match &self.1 {
+            Some(v) => std::env::set_var(self.0, v),
+            None => std::env::remove_var(self.0),
+        }
+    }
+}
+
+/// With Secure cookies the tenant flow cookie is `__Host-` on the tenant's
+/// own host and keeps its plain name under the prefix; each signs in, and
+/// the own host reads only the `__Host-` name.
+#[tokio::test]
+async fn secure_flow_cookies_take_the_host_prefix_only_on_the_own_host() {
+    let _g = SUITE.lock().await;
+    // Secure cookies come from the prod tier when nothing set them at boot.
+    let _prod = EnvVar::set("RUSTANGO_ENV", "prod");
+    assert!(rustango::session::secure_cookies(), "secure cookies are on");
+    let env = boot().await;
+    let ann = env.user("ann", "ann@example.com", false).await;
+    env.tenant_provider("corp", true).await;
+    let app = env.both_ways().await;
+    env.idp.assert("sub-ann", "ann@example.com");
+    for (host, login, name) in [
+        (
+            "acme.app.test",
+            "/__login",
+            "__Host-rustango_admin_sso_flow",
+        ),
+        ("app.test", "/acme/__login", "rustango_admin_sso_flow"),
+    ] {
+        let begin = send(
+            &app,
+            Request::builder()
+                .uri(format!("{login}/sso/corp"))
+                .header(header::HOST, host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let flow = cookie_named(&begin, name);
+        assert!(flow.contains("; Secure"), "{flow}");
+        assert_eq!(
+            set_cookies(&begin)
+                .iter()
+                .filter(|c| c.contains("sso_flow="))
+                .count(),
+            1,
+            "{host}: one flow cookie"
+        );
+        let resp = handshake(&app, host, login, "corp").await;
+        let session = cookie_named(&resp, COOKIE_NAME);
+        let value = session
+            .split(';')
+            .next()
+            .unwrap()
+            .split_once('=')
+            .unwrap()
+            .1
+            .to_owned();
+        assert_eq!(
+            decode(&env.secret, "acme", &value).unwrap().uid,
+            ann,
+            "{host}"
+        );
+    }
+    // On the own host a flow under the plain name is not read.
+    let begin = send(
+        &app,
+        Request::builder()
+            .uri("/__login/sso/corp")
+            .header(header::HOST, "acme.app.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&begin);
+    note_nonce(&to);
+    let state = to
+        .split(['?', '&'])
+        .find_map(|kv| kv.strip_prefix("state="))
+        .unwrap()
+        .to_owned();
+    let planted = set_cookies(&begin).join("; ").replace(
+        "__Host-rustango_admin_sso_flow=",
+        "rustango_admin_sso_flow=",
+    );
+    let resp = send(
+        &app,
+        Request::builder()
+            .uri(format!("/__login/sso/corp/callback?code=c&state={state}"))
+            .header(header::HOST, "acme.app.test")
+            .header(header::COOKIE, planted)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        location(&resp).ends_with("sso_error=expired"),
+        "{}",
+        location(&resp)
+    );
+}
+
+/// A shared provider signs in on the tenant console; the tenant's override
+/// row tightens it there and nowhere else.
+#[tokio::test]
+async fn a_shared_override_row_tightens_the_tenant_console() {
+    use rustango::sso::policy::SsoSharedOverride;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    rustango::audit::ensure_table_pool(env.pool())
+        .await
+        .unwrap();
+    let ann = env.user("ann", "ann@example.com", false).await;
+    let bea = env.user_in(1, "bea", "bea@example.com", false).await;
+    env.shared_provider("corp", true).await;
+    assert_eq!(env.sso("corp", "sub-ann", "ann@example.com").await, Ok(ann));
+    rustango::testkit::create_tables_for::<SsoSharedOverride>(env.pool())
+        .await
+        .unwrap();
+    SsoSharedOverride {
+        id: Auto::default(),
+        shared_slug: "corp".into(),
+        allowed_email_domains: None,
+        blocked_email_domains: Some("example.com".into()),
+        allowed_idp_tenants: None,
+        allowed_hosted_domains: None,
+        required_claims: serde_json::json!({}),
+        require_verified_email: None,
+        signup_mode: None,
+        sso_only: None,
+        session_ttl_secs: None,
+        superuser_session_ttl_secs: None,
+        allowed_roles: None,
+    }
+    .insert_pool(env.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        env.sso("corp", "sub-ann", "ann@example.com").await,
+        Err("nouser".into()),
+        "the override blocks the domain"
+    );
+    assert_eq!(
+        refused_rules(env.pool(), "corp", "sub-ann").await,
+        ["domain_blocked"]
+    );
+    // The other tenant has no override.
+    assert_eq!(
+        env.sso_in(1, "corp", "sub-bea", "bea@example.com").await,
+        Ok(bea)
+    );
+}

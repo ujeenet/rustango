@@ -4,11 +4,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-**Breaking:** `SsoProvider`, `SharedSsoProvider` and `SsoLink` have new fields (struct literals must set them); `LinkRefusal` has a new `Policy` variant; `ResolvedProvider` has `policy` and `signup` fields; `AccountLookup` has a `TENANT_USERS` constant; `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`; `OAuth2Flow` has new `nonce` and `next` fields. See UPGRADING.
+**Breaking:** run `makemigrations` and `migrate` (new SSO columns and tables). `SsoProvider`, `SharedSsoProvider`, `SsoLink` and `OAuth2Flow` have new fields (struct literals must set them); `ViewSet::for_model` refuses the SSO tables; `StaleLinks` defaults to `Drop`; `sso_only` is enforced. `sso_error=inactive` is gone (every refusal is `nouser`); OIDC discovery needs the exact issuer and IdPs must echo the `nonce`; flow cookies are named `__Host-…` on HTTPS at `/` (sign-ins in flight fail once); an SSO email link locks the account's password and deletes its API keys; SSO sign-up is capped at 100 per tenant per hour. See UPGRADING.
 
 ### Added
 
 - SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, and required claims. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
+- SSO sign-in rules per provider (`SsoProvider` and the operator console's shared providers): allowed and blocked email domains (`*.client.org` = subdomains, verified emails only), Microsoft tenant (`tid`) and Google hosted-domain (`hd`) pins, and required claims. A refused sign-in is written to the audit log with its rule; the browser sees one generic message plus the tenant's own `access_denied_message`.
 - The SSO callbacks read claims only an id_token carries (`tid`, `iss`) after checking its signature against the issuer's JWKS (RS256, ES256), its `aud`, `exp` and issuer. A Microsoft email counts as verified when `xms_edov` is true or the provider pins the token's `tid`.
 - Every refused SSO sign-in gets one generic browser answer per surface (member page, `sso_error=nouser`); the reason goes only to the log and audit.
 - The schema for SSO sign-up and lifecycle settings (`signup_mode`, roles, `sso_only`, session lifetimes, `SsoInvite`, `SsoSharedOverride`, `SsoTenantPolicy`).
@@ -24,6 +25,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A WebSocket client whose pong queued behind a long blocked send is no longer closed when the keepalive tick is due at the same moment.
 - `ViewSet::for_model` refuses the SSO tables: a ViewSet skipped their superuser-only admin checks.
 - `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback a shared provider that signs users up, and a multi-tenant Microsoft provider with a role map or required claims but no `allowed_idp_tenants`.
+- `check --deploy` warns about email linking on a custom OIDC provider, an `http://` issuer that is not loopback, and a shared provider that signs users up.
 - OIDC discovery refuses a document with no `issuer` or another issuer than the configured one.
 - Deleting a user in the admin deletes its SSO links; a link older than its account is now dropped by default.
 - The admin no longer saves an SSO link with an `admin` source outside the bare admin's database, or a source that database does not hold.
