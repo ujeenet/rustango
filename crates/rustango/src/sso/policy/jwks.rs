@@ -425,11 +425,10 @@ pub(crate) mod testing {
     }
 
     pub(crate) fn rs256_jwk(pair: &s::RsaKeyPair, kid: &str) -> Value {
-        let public = pair.public();
+        let public: s::RsaPublicKeyComponents<Vec<u8>> = pair.public().into();
         serde_json::json!({
             "kty": "RSA", "alg": "RS256", "kid": kid,
-            "n": enc(public.modulus().big_endian_without_leading_zero()),
-            "e": enc(public.exponent().big_endian_without_leading_zero()),
+            "n": enc(&public.n), "e": enc(&public.e),
         })
     }
 

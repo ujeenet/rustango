@@ -667,6 +667,8 @@ base64         = { workspace = true }
 dotenvy        = { workspace = true }
 # Tests build form bodies with it; the lib only pulls it in via `oauth2`.
 urlencoding    = { workspace = true }
+# Signs id_tokens for the fake IdP in the SSO tests.
+ring           = { workspace = true }
 tempfile       = "3"
 
 # All example crates removed. Single-file examples are auto-detected
