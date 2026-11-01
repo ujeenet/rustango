@@ -45,6 +45,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Jobs: dispatching a type with no registered handler is refused instead of dead-lettered or left locked; `PgJobQueue::allow_unregistered_dispatch` opts a producer out.
 - MCP agent tokens no longer sign with a passphrase `RUSTANGO_SESSION_SECRET`'s raw text.
 - `apply_all` fails on an index it cannot create instead of skipping it.
+- `TestClient` panics on a response body that fails or passes 16 MiB, instead of returning it empty.
 
 ## [0.61.16] — 2026-10-31
 

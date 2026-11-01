@@ -186,6 +186,7 @@ untouched.
 - The admin answers 404 instead of 403 on the item pages of a row its `view` hook hides.
 - A tenant ViewSet refuses (403) a principal bound to another tenant, and its hooks see a principal with no tenant as anonymous: set `TenantSlug` next to your own `AuthenticatedUser` / `Principal`, or use `require_auth`.
 - A ViewSet create or update whose row would leave a `register_queryset_scope!` scope is a 403; `ViewSet::for_model` also panics on the tables the admin never serves (TOTP secrets, passkeys, database servers).
+- `TestClient` panics when a response body fails to read or passes 16 MiB; it used to return an empty body.
 
 - A tenant needs a host, a path prefix or a port: `create-tenant`, the console and the webhook refuse one with none (a configured apex domain still gives the `<slug>.<apex>` default), and `edit-tenant` refuses clearing the last. `FirstAdminHandover::hand_over` returns `Result`.
 - `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
