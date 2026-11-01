@@ -290,7 +290,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
@@ -301,7 +301,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -347,13 +347,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
       # Prebuilt and pinned: 0.9.114 is the last nextest that builds on 1.88.
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       # No DATABASE_URL / MYSQL_TEST_URL is set here on purpose: under
@@ -525,7 +525,7 @@ jobs:
           docker-images: false
           swap-storage: true
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - name: Install lld
         run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       - uses: Swatinem/rust-cache@v2
@@ -533,7 +533,7 @@ jobs:
           shared-key: all-features
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo nextest archive --workspace --all-features --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
@@ -559,7 +559,7 @@ jobs:
       RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - name: Install lld
         run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       - uses: Swatinem/rust-cache@v2
@@ -650,8 +650,8 @@ jobs:
           docker-images: false
           swap-storage: true
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: dtolnay/rust-toolchain@1.120
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - uses: actions/download-artifact@v8
@@ -701,7 +701,7 @@ jobs:
       RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - name: Install lld
         run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       # Reads the `tests_compile` cache: same features, same dependency build.
@@ -709,7 +709,7 @@ jobs:
         with:
           shared-key: all-features
           save-if: false
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo test --workspace --all-features --doc
@@ -729,7 +729,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -810,7 +810,7 @@ jobs:
           - crates/rustango/examples/tenant_user_extension/Cargo.toml
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - name: Committed lockfile is the one that resolves
         run: cargo metadata --locked --format-version 1 --manifest-path ${{ matrix.manifest }} > /dev/null
 
@@ -849,7 +849,7 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           key: platform-${{ matrix.backend }}
@@ -1001,7 +1001,7 @@ jobs:
       CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           key: scaffolded-projects
@@ -1099,7 +1099,7 @@ jobs:
           - sqlite,admin,tenancy
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           # One cache per backend: the rows of a backend share most of their
@@ -1107,7 +1107,7 @@ jobs:
           shared-key: feature-combos-${{ startsWith(matrix.features, 'mysql') && 'mysql' || startsWith(matrix.features, 'postgres') && 'postgres' || 'sqlite' }}
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo check -p rustango --no-default-features --features ${{ matrix.features }}
@@ -1144,12 +1144,12 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo build -p rustango --no-default-features --features sqlite,tenancy
@@ -1165,14 +1165,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo check -p rustango --no-default-features --features sqlite,tenancy
@@ -1311,12 +1311,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       # `--profile ci`, parallel: every suite here uses `:memory:` or its own
@@ -1479,14 +1479,14 @@ jobs:
       REDIS_TEST_URL: redis://127.0.0.1:6379/
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           # Default features plus one or two: one cache for the three jobs.
           shared-key: live-default
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo nextest run --profile live -p rustango --features cache,cache-redis --test cache_redis_incr_live
@@ -1540,13 +1540,13 @@ jobs:
       RUSTANGO_S3_TEST_REGION: us-east-1
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: live-default
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       # MinIO withdrew its public images — `quay.io/minio/minio`, the `mc`
@@ -1669,8 +1669,8 @@ jobs:
           docker-images: false
           swap-storage: true
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: dtolnay/rust-toolchain@1.120
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - uses: actions/download-artifact@v8
@@ -1885,13 +1885,13 @@ jobs:
       DATABASE_URL: postgres://rustango:rustango@127.0.0.1:5432/rustango_test
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: live-default
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
-      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+      - uses: taiki-e/install-action@86f7a0ffb25f40114606501a311ebcfaf882ea32 # v2.88.0
         with:
           tool: nextest@0.9.114
       - run: cargo nextest run --profile live -p rustango --features postgres,tenancy --test gis_geometry_postgis_live
@@ -1978,7 +1978,7 @@ jobs:
           docker-images: false
           swap-storage: true
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.backend }}
@@ -2085,7 +2085,7 @@ jobs:
           docker-images: false
           swap-storage: true
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           key: tenant-e2e-${{ matrix.backend }}
@@ -2198,7 +2198,7 @@ jobs:
       DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.88
+      - uses: dtolnay/rust-toolchain@1.120
       - uses: Swatinem/rust-cache@v2
         with:
           key: doc-example-${{ matrix.example }}
