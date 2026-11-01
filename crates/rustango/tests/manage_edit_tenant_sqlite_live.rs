@@ -225,6 +225,28 @@ async fn clearing_the_last_routing_key_is_refused() {
     assert_eq!(b.org("acme").await.host_pattern, before, "row unchanged");
 }
 
+/// A tenant made before the routing rule (none set) can still be edited
+/// where routing is untouched, e.g. its name or a reseal.
+#[tokio::test]
+async fn a_legacy_unroutable_tenant_keeps_non_routing_edits() {
+    use rustango::sql::UpdaterPool as _;
+    let b = boot().await;
+    b.tenant("acme").await;
+    Org::objects()
+        .where_(Org::slug.eq("acme".to_owned()))
+        .update()
+        .set("host_pattern", rustango::core::SqlValue::Null)
+        .execute_pool(&b.registry)
+        .await
+        .expect("make it legacy");
+    assert!(b.org("acme").await.host_pattern.is_none());
+
+    b.run(&["edit-tenant", "acme", "--display-name", "Renamed"])
+        .await
+        .expect("a non-routing edit is allowed");
+    assert_eq!(b.org("acme").await.display_name, "Renamed");
+}
+
 #[tokio::test]
 async fn activate_and_deactivate_flip_the_column() {
     let b = boot().await;

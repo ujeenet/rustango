@@ -319,7 +319,11 @@ pub(crate) async fn apply_values_if(
         Some(_) => None,
         None => existing.port,
     };
-    if !crate::tenancy::provision::is_routable(host.as_deref(), prefix.as_deref(), port) {
+    // Only an edit that touches routing is checked, so a tenant made before
+    // the rule (none set) can still be resealed or renamed.
+    if !routing.is_empty()
+        && !crate::tenancy::provision::is_routable(host.as_deref(), prefix.as_deref(), port)
+    {
         return Err(TenancyError::Validation(
             crate::tenancy::provision::unroutable(slug),
         ));
