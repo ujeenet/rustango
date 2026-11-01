@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- `LinkTarget::audience` takes a `SingleDb` instead of a pool, so a tenant pool cannot be passed by mistake: `LinkTarget::audience(&pool, "app")` becomes `LinkTarget::audience(SingleDb::new(&pool), "app")`. Multi-tenant apps use `LinkTarget::from(&tenant)`.
 - On Postgres `Model::truncate` no longer cascades or restarts ids: it fails while `RESTRICT` / `NO ACTION` rows point at the table. Call `Model::truncate_cascade` (or `sql::truncate_cascade`) to empty them too. `sql::truncate_sql` is gone; `audit::truncate_with_audit` takes a `TruncateMode`.
 - A schema-mode tenant whose schema has a database role's name is refused when its pool opens (requests and `migrate-tenants`); `check --deploy` lists it as an error. Rename the role or move the tenant to another schema before upgrading.
 - On Postgres, the server (`migrate`, `seed_with`, `serve`) and every tenancy CLI verb refuse to run when a schema named after the database role holds a registry table that also exists later in `search_path`. Drop or rename one copy, or pin `search_path` on the registry URL.

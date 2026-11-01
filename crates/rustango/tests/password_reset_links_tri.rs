@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use rustango::auth_flows::{
-    confirm_password_reset_pool, AuthFlowError, LinkScope, LinkTarget, PasswordReset,
+    confirm_password_reset_pool, AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb,
 };
 use rustango::sql::{FetcherPool as _, Pool};
 use rustango::tenancy::User;
@@ -66,13 +66,18 @@ async fn using_a_newer_link_ends_an_older_one(pool: &Pool) {
     let id = user(pool, None).await;
     let (older, newer) = (link(id), link(id));
 
-    confirm_password_reset_pool(LinkTarget::audience(pool, "app"), &newer, STRONG, SECRET)
-        .await
-        .expect("newer link resets");
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(pool), "app"),
+        &newer,
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("newer link resets");
     let after = hash(pool, id).await;
 
     let res = confirm_password_reset_pool(
-        LinkTarget::audience(pool, "app"),
+        LinkTarget::audience(SingleDb::new(pool), "app"),
         &older,
         "another-strong-pass-8?",
         SECRET,
@@ -85,36 +90,61 @@ async fn using_a_newer_link_ends_an_older_one(pool: &Pool) {
 async fn a_used_link_cannot_be_replayed(pool: &Pool) {
     let id = user(pool, None).await;
     let url = link(id);
-    confirm_password_reset_pool(LinkTarget::audience(pool, "app"), &url, STRONG, SECRET)
-        .await
-        .expect("first use");
-    let res =
-        confirm_password_reset_pool(LinkTarget::audience(pool, "app"), &url, STRONG, SECRET).await;
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(pool), "app"),
+        &url,
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("first use");
+    let res = confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(pool), "app"),
+        &url,
+        STRONG,
+        SECRET,
+    )
+    .await;
     assert_eq!(res, Err(AuthFlowError::Expired));
 }
 
 async fn a_link_issued_after_the_last_change_works(pool: &Pool) {
     let earlier = chrono::Utc::now() - chrono::Duration::seconds(60);
     let id = user(pool, Some(earlier)).await;
-    confirm_password_reset_pool(LinkTarget::audience(pool, "app"), &link(id), STRONG, SECRET)
-        .await
-        .expect("link newer than the change");
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(pool), "app"),
+        &link(id),
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("link newer than the change");
     assert_ne!(hash(pool, id).await, "OLD-HASH");
 }
 
 async fn a_link_asked_for_just_after_a_change_works(pool: &Pool) {
     let id = user(pool, Some(chrono::Utc::now())).await;
-    confirm_password_reset_pool(LinkTarget::audience(pool, "app"), &link(id), STRONG, SECRET)
-        .await
-        .expect("a link from the same second, after the change");
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(pool), "app"),
+        &link(id),
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("a link from the same second, after the change");
 }
 
 async fn a_link_without_an_issue_time_is_refused(pool: &Pool) {
     let id = user(pool, None).await;
     let url = format!("https://x/reset?user_id={id}&purpose=pwreset&scope=aud%3Aapp");
     let url = rustango::signed_url::sign(&url, SECRET, Some(Duration::from_secs(600)));
-    let res =
-        confirm_password_reset_pool(LinkTarget::audience(pool, "app"), &url, STRONG, SECRET).await;
+    let res = confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(pool), "app"),
+        &url,
+        STRONG,
+        SECRET,
+    )
+    .await;
     assert_eq!(res, Err(AuthFlowError::Expired));
     assert_eq!(hash(pool, id).await, "OLD-HASH");
 }

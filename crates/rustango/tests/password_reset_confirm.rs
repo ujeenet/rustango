@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use rustango::auth_flows::{
-    confirm_password_reset_pool_into, AuthFlowError, LinkScope, LinkTarget, PasswordReset,
+    confirm_password_reset_pool_into, AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb,
 };
 use rustango::core::SqlValue;
 use rustango::sql::Pool;
@@ -70,7 +70,7 @@ async fn confirm_updates_password_on_valid_token() {
         Duration::from_secs(60),
     );
     let user_id = confirm_password_reset_pool_into(
-        LinkTarget::audience(&pool, "app"),
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
         &url,
         "brand-new-strong-password",
         SECRET,
@@ -102,7 +102,7 @@ async fn weak_password_rejected_without_writing() {
         Duration::from_secs(60),
     );
     let err = confirm_password_reset_pool_into(
-        LinkTarget::audience(&pool, "app"),
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
         &url,
         "short",
         SECRET,
@@ -131,7 +131,7 @@ async fn tampered_signature_rejected() {
     // signature no longer matches.
     let tampered = url.replacen("user_id=1", "user_id=2", 1);
     let err = confirm_password_reset_pool_into(
-        LinkTarget::audience(&pool, "app"),
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
         &tampered,
         "brand-new-strong-password",
         SECRET,
@@ -156,7 +156,7 @@ async fn wrong_secret_rejected() {
         Duration::from_secs(60),
     );
     let err = confirm_password_reset_pool_into(
-        LinkTarget::audience(&pool, "app"),
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
         &url,
         "brand-new-strong-password",
         b"different-secret-32-bytes-long-xxx",

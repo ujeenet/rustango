@@ -98,7 +98,7 @@ let user_id = confirm_password_reset_pool(
 
 > **Multi-tenant apps must pass `&t`** (the `Tenant`, or a `TenantScope`) to
 > confirm, so the pool and the scope come from one value. A link issued for
-> another scope fails with `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")`
+> another scope fails with `Err(WrongScope)`. `LinkTarget::audience(SingleDb::new(&pool), "app")`
 > and `LinkScope::audience("app")` are for apps with a single user database.
 
 > **Use this form for `rustango_users`.** Framework sessions carry a fingerprint

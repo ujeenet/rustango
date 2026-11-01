@@ -101,7 +101,7 @@ pub enum AuthFlowError {
 /// A multi-tenant app takes it from the request's tenant
 /// (`LinkScope::from(&tenant)`, a `Tenant` or `TenantScope`) and confirms
 /// with [`LinkTarget::from`] the same `&tenant`. [`Self::audience`] is for
-/// single-database apps only.
+/// single-database apps only, confirmed through a `SingleDb`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkScope(Option<String>);
 
@@ -170,13 +170,44 @@ pub struct LinkTarget<'a> {
     registry: Option<&'a crate::sql::Pool>,
 }
 
+/// The user pool of an app with one user database. Only [`Self::new`] makes
+/// one, so a tenant pool never becomes an audience target by accident.
+#[cfg(feature = "passwords")]
+#[derive(Debug, Clone, Copy)]
+pub struct SingleDb<'a>(&'a crate::sql::Pool);
+
+#[cfg(feature = "passwords")]
+impl<'a> SingleDb<'a> {
+    /// Mark `pool` as the app's only user database. Never call it with a
+    /// tenant pool: use `LinkTarget::from(&tenant)` there.
+    #[must_use]
+    pub fn new(pool: &'a crate::sql::Pool) -> Self {
+        Self(pool)
+    }
+}
+
 #[cfg(feature = "passwords")]
 impl<'a> LinkTarget<'a> {
     /// A single-database app's user pool and its audience.
+    ///
+    /// ```no_run
+    /// # fn f(pool: &rustango::sql::Pool) {
+    /// use rustango::auth_flows::{LinkTarget, SingleDb};
+    /// let target = LinkTarget::audience(SingleDb::new(pool), "app");
+    /// # }
+    /// ```
+    ///
+    /// A bare pool is refused, so a tenant pool cannot slip in:
+    ///
+    /// ```compile_fail
+    /// # fn f(pool: &rustango::sql::Pool) {
+    /// let target = rustango::auth_flows::LinkTarget::audience(pool, "app");
+    /// # }
+    /// ```
     #[must_use]
-    pub fn audience(pool: &'a crate::sql::Pool, audience: &str) -> Self {
+    pub fn audience(db: SingleDb<'a>, audience: &str) -> Self {
         Self {
-            pool,
+            pool: db.0,
             scope: LinkScope::audience(audience),
             registry: None,
         }

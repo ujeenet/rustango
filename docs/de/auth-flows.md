@@ -98,7 +98,7 @@ let user_id = confirm_password_reset_pool(
 
 > **Mandantenfähige Apps müssen `&t`** (den `Tenant` oder einen `TenantScope`) an die
 > Bestätigung übergeben, damit Pool und Scope aus einem Wert stammen. Ein Link für einen
-> anderen Scope scheitert mit `Err(WrongScope)`. `LinkTarget::audience(&pool, "app")`
+> anderen Scope scheitert mit `Err(WrongScope)`. `LinkTarget::audience(SingleDb::new(&pool), "app")`
 > und `LinkScope::audience("app")` sind für Apps mit einer einzigen Benutzerdatenbank.
 
 > **Verwende diese Form für `rustango_users`.** Framework-Sitzungen tragen einen

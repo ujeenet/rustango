@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use rustango::auth_flows::{
-    confirm_password_reset_pool, AuthFlowError, LinkScope, LinkTarget, PasswordReset,
+    confirm_password_reset_pool, AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb,
 };
 use rustango::sql::Pool;
 
@@ -65,9 +65,13 @@ async fn a_link_for_another_scope_does_not_reset_this_one() {
         SECRET,
         Duration::from_secs(600),
     );
-    let res =
-        confirm_password_reset_pool(LinkTarget::audience(&tenant_b, "b"), &url, STRONG, SECRET)
-            .await;
+    let res = confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(&tenant_b), "b"),
+        &url,
+        STRONG,
+        SECRET,
+    )
+    .await;
     assert_eq!(
         res,
         Err(AuthFlowError::WrongScope),
@@ -86,8 +90,13 @@ async fn a_link_resets_in_its_own_scope() {
         SECRET,
         Duration::from_secs(600),
     );
-    confirm_password_reset_pool(LinkTarget::audience(&tenant_b, "b"), &url, STRONG, SECRET)
-        .await
-        .expect("own scope");
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(&tenant_b), "b"),
+        &url,
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("own scope");
     assert_ne!(hash(&tenant_b).await, "OLD-HASH");
 }

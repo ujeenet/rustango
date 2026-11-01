@@ -1414,7 +1414,7 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
     {
         through.push("authenticate_user_pool");
     }
-    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb};
     let secret = b"reset-secret-reset-secret-32byte";
     let url = PasswordReset::issue(
         &LinkScope::audience("t"),
@@ -1424,7 +1424,7 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
         Duration::from_secs(600),
     );
     if rustango::auth_flows::confirm_password_reset_pool(
-        LinkTarget::audience(&env.tenant, "t"),
+        LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
         &url,
         "Another-strong-pass-9!",
         secret,
@@ -1446,7 +1446,7 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
             Duration::from_secs(600),
         );
         if rustango::auth_flows::confirm_password_reset_single_use(
-            LinkTarget::audience(&env.tenant, "t"),
+            LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
             &url,
             "Another-strong-pass-9!",
             secret,
@@ -1482,7 +1482,7 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
 #[cfg(all(feature = "sso", feature = "cache"))]
 #[tokio::test]
 async fn sso_only_refuses_the_reset_into_variants() {
-    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb};
     use rustango::sso::policy::SsoTenantPolicy;
     let _g = SUITE.lock().await;
     let env = boot().await;
@@ -1525,7 +1525,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     let pass = "Another-strong-pass-9!";
     assert_eq!(
         rustango::auth_flows::confirm_password_reset_pool_into(
-            LinkTarget::audience(&env.tenant, "t"),
+            LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
             &url,
             pass,
             secret,
@@ -1538,7 +1538,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     );
     let once = || {
         rustango::auth_flows::confirm_password_reset_single_use_into(
-            LinkTarget::audience(&env.tenant, "t"),
+            LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
             &url,
             pass,
             secret,

@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use rustango::auth_flows::{
     confirm_password_reset_pool_into, confirm_password_reset_single_use_into, AuthFlowError,
-    LinkScope, LinkTarget, PasswordReset,
+    LinkScope, LinkTarget, PasswordReset, SingleDb,
 };
 use rustango::cache::{Cache, InMemoryCache};
 use rustango::core::SqlValue;
@@ -97,7 +97,7 @@ fn cache() -> Arc<dyn Cache> {
 
 async fn confirm(pool: &Pool, url: &str, password: &str) -> Result<i64, AuthFlowError> {
     confirm_password_reset_pool_into(
-        LinkTarget::audience(pool, "app"),
+        LinkTarget::audience(SingleDb::new(pool), "app"),
         url,
         password,
         SECRET,
@@ -115,7 +115,7 @@ async fn confirm_once(
     c: &Arc<dyn Cache>,
 ) -> Result<i64, AuthFlowError> {
     confirm_password_reset_single_use_into(
-        LinkTarget::audience(pool, "app"),
+        LinkTarget::audience(SingleDb::new(pool), "app"),
         url,
         password,
         SECRET,
