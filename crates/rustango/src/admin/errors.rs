@@ -17,6 +17,7 @@ use super::forms::FormError;
 /// with [`super::Builder::register_action`]. Custom actions should
 /// almost always return [`AdminError::Internal`].
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AdminError {
     /// No such table in the model registry: the URL slug is wrong.
     TableNotFound {
@@ -44,6 +45,15 @@ pub enum AdminError {
         action: &'static str,
     },
     Form(FormError),
+    /// The request is malformed or names something the admin refuses,
+    /// such as an action the model does not have. Renders as a 400.
+    BadRequest(String),
+    /// The write conflicts with the stored data, such as a delete other
+    /// rows still reference. Renders as a 409 with `details`.
+    Conflict {
+        message: String,
+        details: serde_json::Value,
+    },
     Internal(String),
 }
 
@@ -225,6 +235,11 @@ applied yet for this tenant / database.</p>
                 let text = e.to_string();
                 page_message(&text, ApiError::bad_request(text.clone()))
             }
+            Self::BadRequest(msg) => page_message(&msg, ApiError::bad_request(msg.clone())),
+            Self::Conflict { message, details } => page_message(
+                &message,
+                ApiError::conflict(message.clone()).with_details(details),
+            ),
             Self::Internal(msg) => {
                 // Log the raw message for the operator and return a
                 // generic body. The raw text can hold table names,

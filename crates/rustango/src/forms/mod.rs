@@ -175,6 +175,7 @@ pub trait Form: Sized {
 /// New code should use [`FormErrors`] (multi-error). This type is kept
 /// for the admin's CRUD path which reports one error at a time.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FormError {
     #[error("required field `{field}` was missing from the form")]
     Missing { field: String },
@@ -669,6 +670,7 @@ pub(crate) fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'stati
 
 /// Error returned by [`ModelForm::save`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ModelFormError {
     #[error("form validation failed:\n{0}")]
     Validation(FormErrors),

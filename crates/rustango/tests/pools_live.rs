@@ -801,6 +801,43 @@ fn schema_org(schema: &str) -> Org {
     }
 }
 
+/// A schema-mode `Tenant` takes no connection until `conn()`: more live
+/// extractors than the held pool's size do not wait on it.
+#[tokio::test]
+async fn a_tenant_takes_its_connection_on_first_use() {
+    use axum::extract::FromRequestParts as _;
+    use std::sync::Arc;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    create_schema(&admin, "acme_tp_lazy").await;
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&url)
+        .await
+        .unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        scoped_pool_max_connections: 2,
+        database_pool_acquire_timeout: std::time::Duration::from_secs(2),
+        ..Default::default()
+    };
+    let pools = Arc::new(TenantPools::new(registry).config(cfg));
+    let mut held = Vec::new();
+    for _ in 0..6 {
+        let mut parts = tenant_parts(pools.clone(), schema_org("acme_tp_lazy"));
+        let t = rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap_or_else(|_| panic!("extractor waited on the held pool"));
+        held.push(t);
+    }
+    assert_eq!(
+        current_schema(held[0].conn().await.unwrap()).await,
+        "acme_tp_lazy"
+    );
+}
+
 /// Requests that each hold a schema-mode `Tenant` and also query through
 /// `t.pool()` must not starve the scoped pool, even at its max size.
 #[tokio::test]
@@ -843,7 +880,10 @@ async fn schema_mode_tenants_using_pool_do_not_starve_it() {
                     .fetch_one(&pg)
                     .await
                     .map_err(|e| e.to_string())?;
-                assert_eq!(current_schema(t.conn()).await, "acme_tp_many");
+                assert_eq!(
+                    current_schema(t.conn().await.unwrap()).await,
+                    "acme_tp_many"
+                );
                 Ok::<_, String>(row.0)
             })
         })
@@ -901,7 +941,7 @@ async fn database_mode_tenants_using_pool_do_not_starve_it() {
                     .fetch_one(&pg)
                     .await
                     .map_err(|e| e.to_string())?;
-                let _ = current_schema(t.conn()).await;
+                let _ = current_schema(t.conn().await.unwrap()).await;
                 Ok::<_, String>(row.0)
             })
         })
@@ -991,9 +1031,15 @@ async fn a_busy_schema_tenant_does_not_block_other_tenants() {
         .await
         .expect("globex waited for acme's connections")
         .expect("globex request");
-    assert_eq!(current_schema(other.conn()).await, "globex_tp_busy");
+    assert_eq!(
+        current_schema(other.conn().await.unwrap()).await,
+        "globex_tp_busy"
+    );
     for t in &mut busy {
-        assert_eq!(current_schema(t.conn()).await, "acme_tp_busy");
+        assert_eq!(
+            current_schema(t.conn().await.unwrap()).await,
+            "acme_tp_busy"
+        );
         // `t.pool()` stays usable while every held slot is taken.
         let pg = t.pool().as_postgres().unwrap().clone();
         let mut c = pg.acquire().await.expect("t.pool() starved");

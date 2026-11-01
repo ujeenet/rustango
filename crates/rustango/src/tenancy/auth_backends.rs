@@ -64,6 +64,7 @@ pub struct AuthUser {
 /// Error returned by a backend that hard-fails (as opposed to `Ok(None)`
 /// which means "I can't handle this request, try the next backend").
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AuthError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),

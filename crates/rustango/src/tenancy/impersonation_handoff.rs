@@ -55,6 +55,7 @@ pub const HANDOFF_TTL_SECS: i64 = 60;
 
 /// Errors decoding or validating a handoff token.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum HandoffError {
     /// Token shape is wrong (no `.` separator, bad base64, bad JSON).
     #[error("handoff token malformed")]

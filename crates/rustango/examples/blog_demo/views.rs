@@ -7,7 +7,7 @@ use crate::models::{Author, Post};
 pub async fn list_articles(mut tenant: Tenant) -> Result<Json<serde_json::Value>, ApiError> {
     let posts: Vec<Post> = Post::objects()
         .order_by(&[("published_at", true)])
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(db_error)?)
         .await
         .map_err(db_error)?;
 
@@ -36,7 +36,7 @@ pub async fn get_article(
     use rustango::core::Column as _;
     let posts: Vec<Post> = Post::objects()
         .where_(Post::id.eq(id))
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(db_error)?)
         .await
         .map_err(db_error)?;
     let Some(post) = posts.into_iter().next() else {
@@ -54,7 +54,7 @@ pub async fn get_article(
 pub async fn list_authors(mut tenant: Tenant) -> Result<Json<serde_json::Value>, ApiError> {
     let authors: Vec<Author> = Author::objects()
         .order_by(&[("name", false)])
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(db_error)?)
         .await
         .map_err(db_error)?;
 

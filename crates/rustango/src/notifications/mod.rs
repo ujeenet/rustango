@@ -80,6 +80,7 @@ pub mod slack;
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NotificationError {
     #[error("mail channel failed: {0}")]
     Mail(String),
@@ -593,6 +594,13 @@ mod tests {
         struct Gated(InMemoryCache, tokio::sync::Barrier);
         #[async_trait::async_trait]
         impl Cache for Gated {
+            async fn touch(
+                &self,
+                _: &str,
+                _: Option<std::time::Duration>,
+            ) -> Result<bool, crate::cache::CacheError> {
+                Ok(false)
+            }
             async fn get(&self, k: &str) -> Result<Option<String>, CacheError> {
                 self.0.get(k).await
             }

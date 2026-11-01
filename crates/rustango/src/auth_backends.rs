@@ -135,6 +135,7 @@ pub struct Principal {
 // ------------------------------------------------------------------ AuthError
 
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum AuthError {
     /// The backend ran and the credentials did not match. This
     /// stops the chain. Prefer `Ok(None)`, which lets an unknown

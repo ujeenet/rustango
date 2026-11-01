@@ -225,44 +225,6 @@ async fn fetch_row_as_json_pool_returns_none_for_missing_pk() {
     assert!(row.is_none(), "no row with id=9999 should return None");
 }
 
-// Kept for coverage until the deprecated helper is removed.
-#[allow(deprecated)]
-#[tokio::test]
-async fn render_generic_fk_link_pool_emits_clickable_html_on_sqlite() {
-    // Coverage for `render_generic_fk_link_pool` — slice 26c. Renders
-    // `(content_type_id, pk)` as a link (the admin has its own renderer).
-    // Returns graceful fallback HTML when the CT row is unknown.
-    let pool = sqlite_pool().await;
-    contenttypes::ensure_seeded(&pool).await.expect("seed");
-    let ct = ContentType::for_model::<Post>(&pool)
-        .await
-        .expect("for_model_pool")
-        .expect("ct row");
-    let ct_id = ct.id.get().copied().expect("ct id");
-    let gfk = rustango::contenttypes::GenericForeignKey::new(ct_id, 7);
-    let html = contenttypes::render_generic_fk_link(&pool, gfk)
-        .await
-        .expect("render_generic_fk_link_pool");
-    assert!(
-        html.contains("ct_pool_live_post"),
-        "rendered link should mention the target table, got: {html}"
-    );
-    assert!(html.contains(">"), "should be HTML, got: {html}");
-    assert!(html.contains("#7"), "should mention the pk, got: {html}");
-
-    // Unknown CT id → graceful fallback HTML, not an error.
-    let fallback = contenttypes::render_generic_fk_link(
-        &pool,
-        rustango::contenttypes::GenericForeignKey::new(99_999, 7),
-    )
-    .await
-    .expect("fallback ok");
-    assert!(
-        fallback.contains("ct=99999"),
-        "unknown CT should render the raw (ct, pk) tuple, got: {fallback}"
-    );
-}
-
 /// Model with an explicit `author_id: i64` soft-FK column for the
 /// prefetch tests. Separate from `Post` above so the schema field
 /// resolves at compile time.

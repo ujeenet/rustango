@@ -247,7 +247,7 @@ async fn list_view_falls_back_to_placeholder_on_stale_content_type() {
     let html = String::from_utf8(body.to_vec()).unwrap();
 
     // Stale CT renders as `(ct=N, pk=M)` placeholder, same shape as
-    // contenttypes::render_generic_fk_link's fallback.
+    // the admin GFK renderer's fallback.
     assert!(
         html.contains("(ct=999999, pk=42)"),
         "stale-CT fallback missing: {html}"

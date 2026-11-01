@@ -36,6 +36,7 @@ use crate::sql::sqlx::PgPool;
 use crate::sql::{Pool, PoolTx};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FixtureError {
     #[error("io error: {0}")]
     Io(String),

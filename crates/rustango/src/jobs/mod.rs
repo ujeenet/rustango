@@ -68,6 +68,7 @@ use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::{JoinHandle, JoinSet};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JobError {
     /// Transient failure — worker will retry with exponential backoff.
     #[error("retryable: {0}")]

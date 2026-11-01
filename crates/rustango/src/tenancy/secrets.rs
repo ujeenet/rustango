@@ -30,6 +30,7 @@ use crate::sql::connect_diagnosis::SEALED_SCHEME;
 
 /// Errors raised while resolving a secret reference.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SecretsError {
     /// The reference points at something that doesn't exist (env var
     /// unset, vault path missing, etc.).

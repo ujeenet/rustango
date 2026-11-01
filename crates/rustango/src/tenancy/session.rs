@@ -191,6 +191,7 @@ fn existing_tenant_secret_at(
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SessionError {
     #[error("session cookie is malformed")]
     Malformed,

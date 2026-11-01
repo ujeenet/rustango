@@ -37,27 +37,27 @@ pub struct TenantContext<DB: Database = DefaultTenantDb> {
     pub operator_secret: SessionSecret,
 }
 
+/// Takes the tenant's connection when a handler first asks for one.
+type ConnSource<DB> = Arc<
+    dyn Fn() -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = Result<TenantConn<DB>, TenancyError>> + Send>,
+        > + Send
+        + Sync,
+>;
+
 /// Where a [`Tenant`] keeps its connection.
 ///
-/// SQLite and MySQL start `Deferred` and take a connection only when
-/// a handler asks, through [`Tenant::pool_conn`] or
+/// Every backend starts `Deferred` and takes a connection only when a
+/// handler asks, through [`Tenant::conn`], [`Tenant::pool_conn`] or
 /// [`Tenant::into_conn`]. A handler that queries only through
 /// [`Tenant::pool`] then holds no connection at all, so a request
 /// cannot pin a pool slot it never uses. That used to deadlock the
-/// pool once concurrency reached `max_conn`. Postgres stays eager,
-/// because [`Tenant::conn`] is sync; use [`TenantScope`] to hold none.
+/// pool once concurrency reached `max_conn`.
 enum TenantConnCell<DB: Database> {
-    /// A connection is held: always on Postgres, and on the other
-    /// backends after the first `pool_conn` or `into_conn` call.
+    /// A connection is held, after the first ask.
     Ready(TenantConn<DB>),
-    /// No connection yet; take one from the tenant's pool, the same
-    /// one [`Tenant::pool`] erases, when asked.
-    ///
-    /// Only the SQLite and MySQL extractors build this variant, so a
-    /// Postgres-only build never constructs it, but the arms that
-    /// match it still have to compile.
-    #[cfg_attr(not(any(feature = "sqlite", feature = "mysql")), allow(dead_code))]
-    Deferred(sqlx::Pool<DB>),
+    /// No connection yet.
+    Deferred(ConnSource<DB>),
 }
 
 /// Finds the request's tenant and gives the handler a connection
@@ -67,7 +67,7 @@ enum TenantConnCell<DB: Database> {
 ///
 /// ```ignore
 /// pub async fn my_handler(mut t: Tenant) -> Result<Json<Vec<Post>>, StatusCode> {
-///     let posts = Post::objects().fetch_on(t.conn()).await?;
+///     let posts = Post::objects().fetch_on(t.conn().await?).await?;
 ///     Ok(Json(posts))
 /// }
 /// ```
@@ -104,13 +104,13 @@ impl<DB: Database> Tenant<DB> {
     }
 
     /// Take a connection if none is held yet. Does nothing once the
-    /// cell is `Ready`, which on Postgres it always is.
+    /// cell is `Ready`.
     async fn ensure_conn(&mut self) -> Result<(), TenancyError> {
-        let pool = match &self.conn {
+        let source = match &self.conn {
             TenantConnCell::Ready(_) => return Ok(()),
-            TenantConnCell::Deferred(pool) => pool.clone(),
+            TenantConnCell::Deferred(source) => source.clone(),
         };
-        self.conn = TenantConnCell::Ready(TenantConn::database(pool.acquire().await?));
+        self.conn = TenantConnCell::Ready(source().await?);
         Ok(())
     }
 
@@ -155,28 +155,6 @@ impl<DB: Database> Tenant<DB> {
         &self.pool
     }
 
-    /// **For tests only.** Build a `Tenant` from an `Org` and a
-    /// connection you already hold, skipping the extractor. It is
-    /// behind the `test_utils` feature so a production build cannot
-    /// reach it.
-    ///
-    /// Nothing checks that `conn` and `pool` are the same tenant's:
-    /// prefer `for_test_pools`, `for_test_sqlite` or `for_test_mysql`.
-    #[cfg(any(test, feature = "test_utils"))]
-    #[deprecated(
-        since = "0.61.6",
-        note = "conn and pool can name different tenants; use `Tenant::for_test_pools`, \
-                `Tenant::for_test_sqlite` or `Tenant::for_test_mysql`"
-    )]
-    #[must_use]
-    pub fn for_test(org: Org, conn: TenantConn<DB>, pool: crate::sql::Pool) -> Self {
-        Self {
-            org,
-            conn: TenantConnCell::Ready(conn),
-            pool,
-        }
-    }
-
     /// No connection yet, taken from `pool` when asked: the SQLite /
     /// MySQL extractor's shape.
     #[cfg(any(feature = "sqlite", feature = "mysql"))]
@@ -184,10 +162,15 @@ impl<DB: Database> Tenant<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        let erased = crate::sql::Pool::from(pool.clone());
+        let source: ConnSource<DB> = Arc::new(move || {
+            let pool = pool.clone();
+            Box::pin(async move { Ok(TenantConn::database(pool.acquire().await?)) })
+        });
         Self {
             org,
-            pool: crate::sql::Pool::from(pool.clone()),
-            conn: TenantConnCell::Deferred(pool),
+            pool: erased,
+            conn: TenantConnCell::Deferred(source),
         }
     }
 }
@@ -225,7 +208,7 @@ impl Tenant<sqlx::Postgres> {
     /// The pool lookup or acquire failing.
     pub async fn for_test_pools(
         org: Org,
-        pools: &TenantPools<sqlx::Postgres>,
+        pools: &Arc<TenantPools<sqlx::Postgres>>,
     ) -> Result<Self, TenancyError> {
         Self::from_pools(org, pools).await
     }
@@ -236,16 +219,20 @@ impl Tenant<sqlx::Postgres> {
     /// The held connection and the scoped pool, both from `org`'s pools.
     async fn from_pools(
         org: Org,
-        pools: &TenantPools<sqlx::Postgres>,
+        pools: &Arc<TenantPools<sqlx::Postgres>>,
     ) -> Result<Self, TenancyError> {
-        // The held connection comes from the tenant's own held pool, in
-        // both modes, never the registry's or the one `t.pool()` uses:
-        // a busy tenant would block the others, or deadlock at max size.
-        let conn = pools.acquire(&org).await?;
         let pool = pools.scoped_pool_dyn(&org).await?;
+        // Taken on first use from the tenant's own held pool, in both
+        // modes, never the registry's or the one `t.pool()` uses: a busy
+        // tenant would block the others, or deadlock at max size.
+        let (pools, held_org) = (Arc::clone(pools), org.clone());
+        let source: ConnSource<sqlx::Postgres> = Arc::new(move || {
+            let (pools, org) = (Arc::clone(&pools), held_org.clone());
+            Box::pin(async move { pools.acquire(&org).await })
+        });
         Ok(Self {
             org,
-            conn: TenantConnCell::Ready(conn),
+            conn: TenantConnCell::Deferred(source),
             pool,
         })
     }
@@ -294,13 +281,18 @@ impl<DB: Database> From<Tenant<DB>> for TenantScope {
 #[cfg(feature = "postgres")]
 impl Tenant<sqlx::Postgres> {
     /// Borrow the connection as `&mut PgConnection`, the type sqlx
-    /// and the `fetch_on` / `get_on` helpers want. Postgres only; on
-    /// other backends use [`Tenant::pool_conn`].
-    pub fn conn(&mut self) -> &mut sqlx::PgConnection {
+    /// and the `fetch_on` / `get_on` helpers want, taking it from the
+    /// tenant's pool on first use. Postgres only; on other backends use
+    /// [`Tenant::pool_conn`].
+    ///
+    /// # Errors
+    /// The pool acquire, on the first call.
+    pub async fn conn(&mut self) -> Result<&mut sqlx::PgConnection, TenancyError> {
+        self.ensure_conn().await?;
         match &mut self.conn {
-            TenantConnCell::Ready(conn) => conn,
+            TenantConnCell::Ready(conn) => Ok(conn),
             TenantConnCell::Deferred(_) => {
-                unreachable!("Tenant<Postgres> acquires its connection eagerly")
+                unreachable!("ensure_conn just populated the connection")
             }
         }
     }

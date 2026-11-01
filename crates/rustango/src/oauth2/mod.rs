@@ -86,6 +86,7 @@ pub use registry::OAuth2Registry;
 // --------------------------------------------------------------------- errors
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum OAuthError {
     #[error("HTTP transport error: {0}")]
     Http(String),

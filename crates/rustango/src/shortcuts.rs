@@ -43,6 +43,7 @@ use crate::sql::{
 /// - [`Self::Database`] → `500 Internal Server Error`, with the
 ///   [`ExecError`] in the body.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum ShortcutError {
     /// No row matched the queryset. Rendered as 404.
     NotFound { message: String },

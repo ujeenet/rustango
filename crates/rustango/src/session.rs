@@ -21,6 +21,7 @@ use sha2::Sha256;
 /// Production boot paths return this instead of quietly falling back
 /// to a random key.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SessionSecretError {
     /// The env var is not set. Only the strict
     /// [`SessionSecret::require_from_env`] reports this; the other

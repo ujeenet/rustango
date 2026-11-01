@@ -1293,6 +1293,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for MissFirstRead {
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
         async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
             if !key.ends_with(":inflight") && !self.missed.swap(true, Ordering::SeqCst) {
                 return Ok(None);

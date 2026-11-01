@@ -5,6 +5,7 @@
 /// "challenge mismatch" vs "bad signature" can aid an attacker) — log
 /// the detail, return a generic "verification failed" to the user.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PasskeyError {
     /// `clientDataJSON` wasn't valid JSON, or a required field was missing.
     #[error("malformed clientDataJSON: {0}")]

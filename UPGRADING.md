@@ -150,6 +150,10 @@ untouched.
 
 ## Unreleased
 
+- `Tenant<Postgres>::conn()` is async and takes the connection on first use: write `t.conn().await?` (it returns `Result<&mut PgConnection, TenancyError>`). `Tenant::for_test_pools` takes `&Arc<TenantPools>`.
+- `Tenant::for_test` and `contenttypes::render_generic_fk_link` are removed; use `Tenant::for_test_pools` / `for_test_sqlite` / `for_test_mysql`, and build links from `ContentType::by_id`.
+- `Cache::touch` has no default: a custom backend implements it without a `get` then `set`.
+- Every public `*Error` enum is `#[non_exhaustive]`: add a `_ =>` arm to matches. `AdminError` gains `BadRequest` and `Conflict`; `admin::InlineApplyOutcome` is removed.
 - `ModelForm` locks the admin's superuser-only fields by default. A form that should write them, for a superuser or a trusted job, calls `.acting_superuser(true)`.
 - `config::ServerSettings` is `#[non_exhaustive]`: build it from `Default` and set fields, not with a struct literal.
 - Operator console cookies, tenant admin cookies and impersonation handoff tokens are signed under a per-kind tag. Every existing operator and tenant session ends once on upgrade; users sign in again.

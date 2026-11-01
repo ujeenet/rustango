@@ -534,7 +534,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     }
 }
 
-// Any Postgres sqlx executor, so `fetch_on(t.conn())` keeps compiling.
+// Any Postgres sqlx executor, so `fetch_on(t.conn().await?)` keeps compiling.
 #[cfg(feature = "postgres")]
 impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> sealed::Sealed<'c> for E {}
 #[cfg(feature = "postgres")]

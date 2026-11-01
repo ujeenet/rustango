@@ -42,6 +42,7 @@ use crate::url_codec::urlsafe_base64_encode;
 
 /// Errors returned by [`Signer::unsign`] / [`TimestampSigner::unsign`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignError {
     /// No separator and tag, so this is not a signed value.
     #[error("signing: malformed value (missing tag separator)")]
@@ -320,6 +321,7 @@ pub fn loads<T: serde::de::DeserializeOwned>(
 
 /// Failure modes for [`loads`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum LoadsError {
     /// Verification failed: tampering, wrong salt, or expired. The
     /// inner [`SignError`] gives the exact cause.

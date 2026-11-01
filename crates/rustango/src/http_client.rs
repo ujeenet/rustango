@@ -46,6 +46,7 @@ use reqwest::{Method, Response, StatusCode, Url};
 use serde::Serialize;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum HttpError {
     #[error("reqwest: {0}")]
     Reqwest(String),

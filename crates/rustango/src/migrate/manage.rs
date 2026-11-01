@@ -9073,6 +9073,13 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     #[cfg(feature = "cache")]
     #[async_trait::async_trait]
     impl crate::cache::Cache for SharedStandIn {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
             Ok(None)
         }

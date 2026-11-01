@@ -76,6 +76,7 @@ pub fn default_brand_storage() -> BoxedStorage {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BrandError {
     #[error("file too large: {actual} bytes (max {max})")]
     TooLarge { actual: usize, max: usize },

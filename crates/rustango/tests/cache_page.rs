@@ -1288,6 +1288,13 @@ struct Counting {
 
 #[async_trait::async_trait]
 impl rustango::cache::Cache for Counting {
+    async fn touch(
+        &self,
+        k: &str,
+        ttl: Option<std::time::Duration>,
+    ) -> Result<bool, rustango::cache::CacheError> {
+        self.inner.touch(k, ttl).await
+    }
     async fn get(&self, key: &str) -> Result<Option<String>, rustango::cache::CacheError> {
         self.text_calls.fetch_add(1, Ordering::SeqCst);
         self.inner.get(key).await

@@ -148,6 +148,7 @@ impl MemberSessionPayload {
 /// the shared [`crate::tenancy::session::SessionError`] because the
 /// member codec adds an audience check ([`Self::WrongAudience`]).
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum MemberSessionError {
     /// Bad split, non-base64, or bad JSON.
     #[error("member session cookie is malformed")]

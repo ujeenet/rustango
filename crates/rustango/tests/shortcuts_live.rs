@@ -107,7 +107,7 @@ async fn get_object_or_404_returns_not_found_on_no_match() {
                 "default 404 message: {message}"
             );
         }
-        ShortcutError::Database(e) => panic!("expected NotFound, got Database: {e}"),
+        other => panic!("expected NotFound, got {other:?}"),
     }
 }
 

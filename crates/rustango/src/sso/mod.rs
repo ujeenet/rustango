@@ -185,6 +185,7 @@ impl std::fmt::Debug for ResolvedSso {
 /// Errors surfaced by the SSO login flow. Rendered as a generic
 /// user-facing message by the handlers — details go to `tracing`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SsoError {
     /// `provider` key isn't a known preset or `"oidc"`.
     UnknownProvider(String),
