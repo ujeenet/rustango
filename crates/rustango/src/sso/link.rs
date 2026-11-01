@@ -172,25 +172,44 @@ pub struct SsoLink {
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-#[cfg(feature = "admin")]
-fn superuser_only(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
-    crate::admin::session::is_superuser(parts)
-}
-
 // A link row decides who an IdP identity signs in as.
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_links", "add", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_links",
+    "add",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_links", "change", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_links",
+    "change",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_links", "delete", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_links",
+    "delete",
+    crate::object_permissions::superuser_only
+);
 // A provider row can turn on email linking or add a new IdP.
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_providers", "add", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_providers",
+    "add",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_providers", "change", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_providers",
+    "change",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_providers", "delete", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_providers",
+    "delete",
+    crate::object_permissions::superuser_only
+);
 
 // The admin writes `key_sha256` from the submitted issuer and subject.
 #[cfg(feature = "admin")]

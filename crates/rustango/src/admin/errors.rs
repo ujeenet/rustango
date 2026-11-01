@@ -38,7 +38,7 @@ pub enum AdminError {
         table: String,
     },
     /// A per-object permission hook, registered with
-    /// `register_admin_object_permission!`, said no for this row.
+    /// `register_object_permission!`, said no for this row.
     /// Renders as a 403.
     Forbidden {
         table: String,

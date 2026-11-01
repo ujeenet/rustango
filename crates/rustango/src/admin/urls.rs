@@ -1090,7 +1090,7 @@ async fn mark_perms_scoped(
 /// Tables the generic admin never serves: the TOTP store holds raw
 /// secrets, and a passkey row signs in as its `user_id` (#2364).
 /// Enrollment has its own pages.
-fn is_never_served(table: &str) -> bool {
+pub(crate) fn is_never_served(table: &str) -> bool {
     #[cfg(not(any(feature = "totp", feature = "passkey", feature = "tenancy")))]
     let _ = table;
     // Written only through `db_server`, which seals the admin password.

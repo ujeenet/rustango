@@ -137,6 +137,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::media::auth` | Media-router authorization refusals |
 | `rustango::messages` | Flash messages |
 | `rustango::migrate` | Migration runner |
+| `rustango::object_permissions` | "view" hook scan cap reached on a list |
 | `rustango::outbound` | Checked outbound calls (SSO, Slack, webhooks) |
 | `rustango::passkey` | Passkey challenges refused by the cache |
 | `rustango::passwords` | Password-hash upgrades on login |

@@ -256,12 +256,16 @@ crate::register_admin_view!(
     perm = "add",
 );
 
-fn superuser_only(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
-    crate::admin::session::is_superuser(parts)
-}
-
-crate::register_admin_object_permission!("rustango_sso_links", "unlink", superuser_only);
-crate::register_admin_object_permission!("rustango_sso_links", "relink", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_links",
+    "unlink",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_links",
+    "relink",
+    crate::object_permissions::superuser_only
+);
 
 /// The `SsoLink` admin actions: unlink, and re-link on the next sign-in.
 pub(crate) fn register_link_actions(b: crate::admin::Builder) -> crate::admin::Builder {

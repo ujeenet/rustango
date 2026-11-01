@@ -425,14 +425,14 @@ d'un modèle enregistré :
   `with_user_perms`, un GET demande `{table}.view` et un POST/PUT/PATCH/DELETE
   `{table}.change` ; ajoutez `perm = "publish"` pour exiger `{table}.publish`.
 - **Restriction de queryset** —
-  `register_admin_queryset!("posts", hook)` où
+  `register_queryset_scope!("posts", hook)` où
   `hook: fn(&Parts) -> Vec<Filter>` restreint ce qu'une requête peut voir
   (p. ex. seulement les lignes de l'utilisateur courant). Plusieurs hooks sur
   une table se combinent. Une création, une modification ou une ligne inline dont une FK
   vise une ligne cible que ses hooks, le soft delete ou le hook `view` cachent est refusée
   avec « no such object ».
 - **Permissions au niveau de la ligne** —
-  `register_admin_object_permission!("posts", "change", check)` où
+  `register_object_permission!("posts", "change", check)` où
   `check: fn(&Parts, Option<&Value>) -> bool` autorise ou refuse par ligne.
   Les gestionnaires intégrés consultent les actions `add`, `change`,
   `delete` et `view` ; plusieurs hooks se combinent avec un ET logique. Un

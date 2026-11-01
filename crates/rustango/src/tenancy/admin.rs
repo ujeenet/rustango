@@ -824,6 +824,10 @@ where
         parts.extensions.insert(sess.clone());
     }
     parts.extensions.insert(admin_state);
+    // Hooks bind the session, and an impersonation, to this tenant.
+    parts
+        .extensions
+        .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays

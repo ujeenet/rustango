@@ -80,7 +80,11 @@ impl Agent {
 // An agent is minted by `create_agent_pool`, which shows the secret once;
 // an admin form could only store a row nobody can use (#1763).
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_agents", "add", |_, _| false);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_agents",
+    "add",
+    |_, _| false
+);
 // The owner decides who the credential signs in as (#2520).
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(Agent, Add, [user_id]);

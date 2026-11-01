@@ -599,7 +599,8 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `pagination(PaginationStyle::…)` | Définir le style explicitement. |
 | `filter_backend(closure)` | Ajouter des prédicats `WHERE` personnalisés au-delà de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
-| `admin_add_hooks()` | Exécute les hooks de permission objet `"add"` de l'admin à la création, sur la requête et sur chaque ligne écrite ; un refus donne un `403`. Désactivé par défaut. |
+| `skip_object_permissions()` | Ignore les hooks de permission objet et les scopes de queryset de l'application, pour une API qui protège ses lignes elle-même. Les hooks du framework s'exécutent toujours. |
+| `view_hook_scan_cap(n)` | Nombre maximal de lignes qu'une liste lit pour le hook `"view"` (10 000 par défaut) ; au-delà, `count` et `last_page` valent `null`. |
 | `router(prefix, pgpool)` | Monter (Postgres uniquement, `PgPool` statique ; feature `postgres`). |
 | `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(multi-location)* monter avec résolution du locataire par requête. |
@@ -765,10 +766,19 @@ est refusé. `.permissions_for_model::<Post>()` remplit automatiquement les code
 `<table>.view` / `.add` / `.change` / `.delete` (`posts.view`, … pour la table
 `posts`).
 
-Un ViewSet n'exécute pas encore les hooks de permission objet `change`,
-`delete` ou `view` de l'admin. Quand son modèle en a, le monter journalise un
-avertissement ; 0.62.0 les exécutera à la mise à jour, à la suppression et à
-la lecture.
+**Permissions objet.** Un ViewSet exécute les mêmes hooks que l'admin
+(`register_object_permission!`, `register_queryset_scope!`) : `add` à la
+création (un bulk create est tout ou rien, `403` avec `{"details": {"index": i}}`) ;
+`view` à la lecture, la mise à jour et la suppression (masqué donne `404`), puis
+`change` ou `delete` (`403`, soft delete compris) ; `view` sur les listes (les
+lignes masquées sortent de la page et du `count` ; au-delà de
+`view_hook_scan_cap`, `count` et `last_page` valent `null`). Les scopes de
+queryset restreignent chaque lecture et écriture ; une écriture dont la ligne en
+sortirait donne un `403`. Les hooks lisent la ligne verrouillée dans la
+transaction d'écriture ; un identifiant d'un autre tenant donne un `403`. `change` ne vérifie que la
+ligne stockée. `object_permissions::Actor::of(&parts)` indique à un hook qui
+demande ; un jeton d'agent n'est jamais superuser. `ViewSet::for_model` refuse
+`rustango_api_keys`, `rustango_agents` et les tables SSO.
 
 **Le throttling** applique des limites à fenêtre fixe par client, par action :
 

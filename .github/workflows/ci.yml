@@ -1327,6 +1327,7 @@ jobs:
             --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,scheduler,testkit,casts \
             --test access_admin_codename_sqlite_live \
             --test auth_binds_to_the_request_tenant \
+            --test viewset_object_permissions_tenancy_sqlite_live \
             --test admin_sqlite_live \
             --test brand_assets_sqlite_live \
             --test admin_list_display_links_sqlite_live \
@@ -1763,6 +1764,7 @@ jobs:
           binary(=single_db_admin_tri) |
           binary(=permissions_inactive_tri) |
           binary(=viewset_superuser_fields_tri) |
+          binary(=viewset_object_permissions_tri) |
           binary(=login_throttle_mysql_live) |
           binary(=view_global_scopes_tri) |
           binary(=template_views_typed_binds_tri) |

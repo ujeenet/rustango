@@ -137,7 +137,7 @@ fn record_owner_read(_: &axum::http::request::Parts, row: Option<&serde_json::Va
     }
     true
 }
-rustango::register_admin_object_permission!("adminls_owner", "view", record_owner_read);
+rustango::register_object_permission!("adminls_owner", "view", record_owner_read);
 
 async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
     let s = Slugged {

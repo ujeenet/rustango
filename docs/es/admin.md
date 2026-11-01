@@ -403,13 +403,13 @@ Tres macros de registro más se enganchan al comportamiento de un modelo registr
   advertencia.) Con `with_user_perms`, un GET necesita `{table}.view` y un
   POST/PUT/PATCH/DELETE `{table}.change`; añade `perm = "publish"` para exigir `{table}.publish`.
 - **Acotación de querysets** —
-  `register_admin_queryset!("posts", hook)` donde `hook: fn(&Parts) -> Vec<Filter>`
+  `register_queryset_scope!("posts", hook)` donde `hook: fn(&Parts) -> Vec<Filter>`
   restringe lo que una petición puede ver (por ejemplo, solo las filas del usuario
   actual). Varios hooks sobre una tabla se componen. Una creación, edición o fila inline
   cuya FK apunta a una fila destino que sus hooks, el soft delete o el hook `view` ocultan
   se rechaza con "no such object".
 - **Permisos a nivel de fila** —
-  `register_admin_object_permission!("posts", "change", check)` donde
+  `register_object_permission!("posts", "change", check)` donde
   `check: fn(&Parts, Option<&Value>) -> bool` permite o deniega por fila. Los manejadores
   incorporados consultan las acciones `add`, `change`, `delete` y `view`; varios hooks se
   combinan con Y (AND). Un hook `view` también oculta filas de la lista, del

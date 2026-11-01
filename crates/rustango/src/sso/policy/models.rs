@@ -127,33 +127,76 @@ pub struct SsoTenantPolicy {
     pub signups_per_hour: Option<i32>,
 }
 
-#[cfg(feature = "admin")]
-fn superuser_only(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
-    crate::admin::session::is_superuser(parts)
-}
-
 // These rows decide who may sign up and sign in.
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_invites", "add", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_invites",
+    "add",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_invites", "change", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_invites",
+    "change",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_invites", "delete", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_invites",
+    "delete",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_shared_overrides", "add", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_shared_overrides",
+    "add",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_shared_overrides", "change", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_shared_overrides",
+    "change",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_shared_overrides", "delete", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_shared_overrides",
+    "delete",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_tenant_policy", "add", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_tenant_policy",
+    "add",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_tenant_policy", "change", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_tenant_policy",
+    "change",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_tenant_policy", "delete", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_tenant_policy",
+    "delete",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_invites", "view", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_invites",
+    "view",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_shared_overrides", "view", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_shared_overrides",
+    "view",
+    crate::object_permissions::superuser_only
+);
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_sso_tenant_policy", "view", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_tenant_policy",
+    "view",
+    crate::object_permissions::superuser_only
+);

@@ -65,11 +65,12 @@ pub(crate) struct FkWrite<'a> {
 
 /// The first FK among `values` naming a row `targets` hide, read on `tx`
 /// when the write holds one. On update, `stored` is the owner row's pk: a
-/// value it already holds is kept. `admits` judges a gated target's row.
+/// value it already holds inside `owner`'s scope is kept. `admits` judges
+/// a gated target's row.
 pub(crate) async fn first_hidden(
     pool: &Pool,
     tx: Option<&mut PoolTx<'_>>,
-    owner: &'static ModelSchema,
+    owner: (&'static ModelSchema, &[WhereExpr]),
     targets: &[FkTarget],
     values: &[(&'static str, SqlValue)],
     stored: Option<(&'static FieldSchema, &SqlValue)>,
@@ -86,7 +87,7 @@ pub(crate) async fn first_hidden(
 pub(crate) async fn first_hidden_in(
     pool: &Pool,
     mut tx: Option<&mut PoolTx<'_>>,
-    owner: &'static ModelSchema,
+    (owner, owner_scope): (&'static ModelSchema, &[WhereExpr]),
     targets: &[FkTarget],
     writes: &[FkWrite<'_>],
     admits: impl Fn(&FkTarget, &Value) -> bool,
@@ -138,15 +139,15 @@ pub(crate) async fn first_hidden_in(
             }
             if let Some((pk_field, pk)) = write.stored {
                 // Unchanged: resending the stored parent is not a new link.
+                // Inside the owner's scope: a row the writer cannot see holds nothing.
                 let mut q = SelectQuery::by_pk(owner, pk_field.column, pk.clone());
-                q.where_clause = super::narrow(
-                    q.where_clause,
-                    vec![WhereExpr::Predicate(Filter::new(
-                        *column,
-                        Op::Eq,
-                        value.clone(),
-                    ))],
-                );
+                let mut held = owner_scope.to_vec();
+                held.push(WhereExpr::Predicate(Filter::new(
+                    *column,
+                    Op::Eq,
+                    value.clone(),
+                )));
+                q.where_clause = super::narrow(q.where_clause, held);
                 if read_one(pool, tx.as_deref_mut(), &q, &[pk_field])
                     .await?
                     .is_some()

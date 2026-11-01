@@ -142,6 +142,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::media::auth` | Rechazos de autorización del router de medios |
 | `rustango::messages` | Mensajes flash |
 | `rustango::migrate` | Ejecutor de migraciones |
+| `rustango::object_permissions` | Límite de escaneo del hook `"view"` alcanzado en una lista |
 | `rustango::outbound` | Llamadas salientes verificadas (SSO, Slack, webhooks) |
 | `rustango::passkey` | Desafíos de passkey rechazados por el caché |
 | `rustango::passwords` | Actualización de hashes de contraseña al iniciar sesión |
