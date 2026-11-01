@@ -3270,10 +3270,7 @@ fn resolved_fields(
             .collect(),
         None => schema
             .scalar_fields()
-            .filter(|f| {
-                !(crate::core::is_credential_column(f.name)
-                    || crate::core::is_credential_column(f.column))
-            })
+            .filter(|f| !f.is_credential())
             .collect(),
     }
 }
@@ -4214,6 +4211,7 @@ mod tests {
                     fk_on_delete: None,
                     validators: &[],
                     cast: None,
+                    secret: false,
                 },
                 crate::core::FieldSchema {
                     name: "title",
@@ -4240,6 +4238,7 @@ mod tests {
                     fk_on_delete: None,
                     validators: &[],
                     cast: None,
+                    secret: false,
                 },
             ])),
             display: None,
@@ -4307,6 +4306,7 @@ mod tests {
                     fk_on_delete: None,
                     validators: &[],
                     cast: None,
+                    secret: false,
                 },
                 crate::core::FieldSchema {
                     name: "title",
@@ -4333,6 +4333,7 @@ mod tests {
                     fk_on_delete: None,
                     validators: &[],
                     cast: None,
+                    secret: false,
                 },
                 crate::core::FieldSchema {
                     name: "score",
@@ -4359,6 +4360,7 @@ mod tests {
                     fk_on_delete: None,
                     validators: &[],
                     cast: None,
+                    secret: false,
                 },
             ])),
             display: None,
@@ -4766,6 +4768,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: false,
             }])),
             display: None,
             app_label: None,
@@ -5225,6 +5228,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: false,
             }])),
             display: None,
             app_label: None,
@@ -5296,6 +5300,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: false,
             }])),
             display: None,
             app_label: None,

@@ -454,6 +454,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `min` / `max` | número | validación de rango |
 | `blank` | flag | permitir vacío en formularios/admin |
 | `editable` | `true`/`false` | editabilidad en formulario/admin |
+| `secret` | flag | credencial: las vistas de plantilla y el admin no la muestran salvo que una vista la liste |
 | `verbose_name` | `"Label"` | etiqueta legible del campo en formularios/admin |
 | `help_text` | `"…"` | texto de ayuda bajo el widget de formulario/admin |
 | `validators` | `"name, name"` | validadores con nombre a ejecutar en este campo |

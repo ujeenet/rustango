@@ -196,6 +196,9 @@ pub struct FieldSchema {
     pub validators: &'static [&'static str],
     /// The cast of a `Cast<C>` field; `None` for any other field.
     pub cast: Option<FieldCast>,
+    /// `#[rustango(secret)]`: a credential, kept out of every view that does
+    /// not list it. See [`Self::is_credential`] for the name rules.
+    pub secret: bool,
 }
 
 /// How a `Cast<C>` field stores its value.
@@ -316,10 +319,21 @@ pub enum FieldCast {
 #[cfg(doctest)]
 pub struct KeyedStringsNeedMaxLength;
 
-/// Credential columns: secret wherever they are rendered.
-#[cfg(any(feature = "admin", feature = "template_views"))]
-pub(crate) fn is_credential_column(name: &str) -> bool {
-    ["password_hash", "password", "database_url"].contains(&name)
+/// Clear credential names: these exact names, or ending in `_password`,
+/// `_secret`, `_token`, `_api_key` or `_private_key`. No `*_hash`: content hashes.
+fn is_credential_name(name: &str) -> bool {
+    const EXACT: [&str; 7] = [
+        "password",
+        "password_hash",
+        "database_url",
+        "secret",
+        "token",
+        "api_key",
+        "private_key",
+    ];
+    const SUFFIX: [&str; 5] = ["_password", "_secret", "_token", "_api_key", "_private_key"];
+    let name = name.to_ascii_lowercase();
+    EXACT.contains(&name.as_str()) || SUFFIX.iter().any(|s| name.ends_with(s))
 }
 
 impl FieldSchema {
@@ -362,6 +376,7 @@ impl FieldSchema {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: false,
         }
     }
 
@@ -371,6 +386,17 @@ impl FieldSchema {
     #[must_use]
     pub fn display_label(&self) -> &'static str {
         self.verbose_name.unwrap_or(self.name)
+    }
+
+    /// `true` for a credential: `#[rustango(secret)]`, a sealed cast, or a
+    /// credential name on the field or its column. Views without an explicit
+    /// field list never render it.
+    #[must_use]
+    pub fn is_credential(&self) -> bool {
+        self.secret
+            || matches!(self.cast, Some(FieldCast::Sealed))
+            || is_credential_name(self.name)
+            || is_credential_name(self.column)
     }
 
     /// `true` for a server-assigned timestamp: an
@@ -1943,6 +1969,7 @@ pub struct FieldSchemaParts {
     pub fk_on_delete: Option<OnDeleteAction>,
     pub validators: &'static [&'static str],
     pub cast: Option<FieldCast>,
+    pub secret: bool,
 }
 
 impl FieldSchema {
@@ -1975,6 +2002,7 @@ impl FieldSchema {
             fk_on_delete,
             validators,
             cast,
+            secret,
         } = parts;
         Self {
             name,
@@ -2001,6 +2029,7 @@ impl FieldSchema {
             fk_on_delete,
             validators,
             cast,
+            secret,
         }
     }
 }

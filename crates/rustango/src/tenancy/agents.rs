@@ -42,7 +42,7 @@ pub struct Agent {
     #[rustango(max_length = 16, unique)]
     pub secret_prefix: String,
     /// argon2id hash of the 32-char secret half. Never returned.
-    #[rustango(max_length = 255)]
+    #[rustango(secret, max_length = 255)]
     pub secret_hash: String,
     /// Soft-disable — `false` rejects auth without dropping the row.
     pub active: bool,

@@ -489,14 +489,19 @@ pub(super) fn audit_form(
     };
     let mut out: HashMap<String, String> = form
         .iter()
-        .filter(|(k, _)| !super::helpers::is_secret_field(admin_cfg, k) && is_written(k))
+        .filter(|(k, _)| {
+            !model
+                .field(k)
+                .is_some_and(|f| super::helpers::is_secret_field(admin_cfg, f))
+                && is_written(k)
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     for (column, value) in written {
         let Some(f) = model.scalar_fields().find(|f| f.column == *column) else {
             continue;
         };
-        if super::helpers::is_secret_field(admin_cfg, f.name) {
+        if super::helpers::is_secret_field(admin_cfg, f) {
             out.insert(f.name.to_owned(), SECRET_CHANGED.to_owned());
         } else if let crate::core::SqlValue::DateTime(at) = value {
             out.insert(f.name.to_owned(), at.to_rfc3339());
@@ -520,7 +525,7 @@ fn mask_secrets(
 ) -> Value {
     let mut row = row.clone();
     for f in model.scalar_fields() {
-        if super::helpers::is_secret_field(admin_cfg, f.name) {
+        if super::helpers::is_secret_field(admin_cfg, f) {
             if let Some(v) = row.get_mut(f.name).filter(|v| !v.is_null()) {
                 *v = Value::String(SECRET_SET.to_owned());
             }

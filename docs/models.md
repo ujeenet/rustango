@@ -447,6 +447,7 @@ above; this is the complete list, including advanced/PostgreSQL-specific ones.
 | `min` / `max` | number | range validation |
 | `blank` | flag | allow empty in forms/admin |
 | `editable` | `true`/`false` | form/admin editability |
+| `secret` | flag | credential: template views and the admin never show it unless a view lists it. Sealed casts and names like `password`, `token`, `api_key`, `*_secret`, `*_token` count too |
 | `verbose_name` | `"Label"` | human label for the field in forms/admin |
 | `help_text` | `"…"` | help string rendered under the form/admin widget |
 | `validators` | `"name, name"` | named validators to run on this field |

@@ -346,21 +346,21 @@ pub(crate) fn admin_config_or_default(model: &'static ModelSchema) -> crate::cor
         .unwrap_or(crate::core::AdminConfig::DEFAULT)
 }
 
-/// `true` for a credential column or one with a `password` widget override.
-/// Its value is never echoed: forms render it empty, lists and detail show
-/// only whether it is set, and the audit log records only that it changed.
+/// `true` for a [credential](FieldSchema::is_credential) or a field with a
+/// `password` widget override. Its value is never echoed: forms render it empty,
+/// lists and detail show only whether it is set, and the audit log records only that it changed.
 #[must_use]
-pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, name: &str) -> bool {
-    crate::core::is_credential_column(name)
+pub(crate) fn is_secret_field(admin_cfg: &crate::core::AdminConfig, field: &FieldSchema) -> bool {
+    field.is_credential()
         || admin_cfg
             .formfield_overrides
             .iter()
-            .any(|(f, w)| *f == name && *w == "password")
+            .any(|(f, w)| *f == field.name && *w == "password")
 }
 
 /// Columns `?q=` searches, for the list and autocomplete alike:
 /// `search_fields` when set, else the searchable fields. Never a secret (#2228).
-/// "Secret" is [`is_secret_field`]: a `token` field without the widget stays searchable.
+/// "Secret" is [`is_secret_field`].
 #[must_use]
 pub(crate) fn search_columns(
     model: &'static ModelSchema,
@@ -377,7 +377,7 @@ pub(crate) fn search_columns(
     };
     fields
         .into_iter()
-        .filter(|f| !is_secret_field(admin_cfg, f.name))
+        .filter(|f| !is_secret_field(admin_cfg, f))
         .map(|f| f.column)
         .collect()
 }
@@ -392,7 +392,7 @@ pub(crate) fn url_filterable(
     admin_cfg: &crate::core::AdminConfig,
     field: &FieldSchema,
 ) -> bool {
-    if is_secret_field(admin_cfg, field.name) {
+    if is_secret_field(admin_cfg, field) {
         return false;
     }
     let named = |names: &[&str]| names.contains(&field.name);
@@ -770,7 +770,7 @@ pub(crate) fn render_form_with_inlines_and_picker(
     };
 
     let row_for_field = |f: &'static FieldSchema| -> serde_json::Value {
-        let is_secret = is_secret_field(&admin_cfg, f.name);
+        let is_secret = is_secret_field(&admin_cfg, f);
         let new_default = (prefill.is_none() && !pk_locked)
             .then(|| crate::forms::default_form_value(f))
             .flatten();
@@ -1052,9 +1052,23 @@ mod tests {
     #[test]
     fn credential_columns_are_secret_without_a_widget() {
         let cfg = crate::core::AdminConfig::DEFAULT;
-        assert!(is_secret_field(&cfg, "password_hash"));
-        assert!(is_secret_field(&cfg, "database_url"));
-        assert!(!is_secret_field(&cfg, "username"));
+        let named = |n| FieldSchema::new(n, n, FieldType::String);
+        for n in [
+            "password_hash",
+            "database_url",
+            "api_key",
+            "reset_token",
+            "client_secret",
+        ] {
+            assert!(is_secret_field(&cfg, &named(n)), "{n}");
+        }
+        assert!(!is_secret_field(&cfg, &named("username")));
+        let mut flagged = named("recovery_codes");
+        flagged.secret = true;
+        assert!(is_secret_field(&cfg, &flagged));
+        let mut sealed = named("note");
+        sealed.cast = Some(crate::core::FieldCast::Sealed);
+        assert!(is_secret_field(&cfg, &sealed));
     }
 
     /// List and detail FK cells link under the mounted prefix (#1916).

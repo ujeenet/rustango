@@ -655,7 +655,7 @@ fn resolve_render_fields(
 /// so the operator at least sees something instead of a blank cell.
 /// One read-only cell: a secret shows only whether it is set (#1861).
 fn render_cell(cfg: &crate::core::AdminConfig, f: &FieldSchema, raw: &serde_json::Value) -> String {
-    if is_secret_field(cfg, f.name) {
+    if is_secret_field(cfg, f) {
         super::helpers::render_secret_value(Some(raw))
     } else {
         render_cell_text(raw)
@@ -1076,7 +1076,7 @@ fn render_prefixed_input(
 ) -> String {
     // A locked, auto or generated column is shown, never input; a secret only as set or not.
     if locked || !field.accepts_input(kind) {
-        let shown = if is_secret_field(cfg, field.name) {
+        let shown = if is_secret_field(cfg, field) {
             super::helpers::render_secret_value(Some(&serde_json::Value::String(value.to_owned())))
         } else {
             html_escape(value)
@@ -1090,7 +1090,7 @@ fn render_prefixed_input(
         ..*field
     };
     // The child's widget overrides apply; a secret is never echoed (#1861).
-    let base = if is_secret_field(cfg, field.name) {
+    let base = if is_secret_field(cfg, field) {
         crate::admin::render::render_secret_input(field, false, false)
     } else {
         let widget = cfg
@@ -1251,7 +1251,7 @@ impl InlineTarget {
         let add = state.locked_fields(child, super::object_permissions::AdminWrite::Add);
         let secrets = display
             .iter()
-            .filter(|f| is_secret_field(&cfg, f.name))
+            .filter(|f| is_secret_field(&cfg, f))
             .map(|f| f.name)
             .collect();
         let writable = display
@@ -2523,6 +2523,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: false,
         };
         let cfg = crate::core::AdminConfig::DEFAULT;
         let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update), false);

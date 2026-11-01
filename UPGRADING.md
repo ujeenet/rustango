@@ -193,6 +193,7 @@ untouched.
 - `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
 - A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
 - `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
+- Template views without `.fields()` now hide, and the admin masks, `#[rustango(secret)]` fields, sealed casts and columns named `secret`, `token`, `api_key`, `private_key` or ending in `_password`, `_secret`, `_token`, `_api_key`, `_private_key`; list a field to show it.
 ---
 
 ## 0.61.16

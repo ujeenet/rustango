@@ -11050,6 +11050,8 @@ struct FieldAttrs {
     /// Empty by default; fires on every typed INSERT/UPDATE. Each is
     /// spanned on the attribute string, so an unknown name errors there.
     validators: Vec<syn::Ident>,
+    /// `#[rustango(secret)]`: a credential column. `FieldSchema::secret`.
+    secret: bool,
 }
 
 /// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
@@ -11073,6 +11075,7 @@ const FIELD_ATTR_KEYS: &[&str] = &[
     "db_comment",
     "verbose_name",
     "editable",
+    "secret",
     "blank",
     "citext",
     "validators",
@@ -11216,6 +11219,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         blank: false,
         case_insensitive: false,
         validators: Vec::new(),
+        secret: false,
     };
     for attr in model_attrs(&field.attrs)? {
         attr.parse_nested_meta(|meta| {
@@ -11387,6 +11391,15 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("verbose_name") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.verbose_name = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("secret") {
+                // `#[rustango(secret)]` or `#[rustango(secret = false)]`.
+                out.secret = if let Ok(v) = meta.value() {
+                    v.parse::<syn::LitBool>()?.value
+                } else {
+                    true
+                };
                 return Ok(());
             }
             if meta.path.is_ident("editable") {
@@ -11891,6 +11904,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let db_comment = optional_str(attrs.db_comment.as_deref());
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
+    let secret = attrs.secret;
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     // A path per name: one the runtime does not know fails to resolve.
@@ -11960,6 +11974,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             fk_on_delete: #fk_on_delete,
             validators: &[ #( #root::core::__validator_names::#validators ),* ],
             cast: #cast,
+            secret: #secret,
         })
     }};
 

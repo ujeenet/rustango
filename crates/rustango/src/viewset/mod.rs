@@ -5617,6 +5617,32 @@ mod sso_table_tests {
         }
     }
 
+    /// The framework's own secrets are credentials wherever a row is rendered.
+    #[cfg(all(feature = "mcp", feature = "totp", feature = "sso"))]
+    #[test]
+    fn framework_secret_columns_are_credentials() {
+        for (s, f) in [
+            (crate::tenancy::auth_backends::ApiKey::SCHEMA, "key_hash"),
+            (crate::tenancy::agents::Agent::SCHEMA, "secret_hash"),
+            (crate::tenancy::DbServer::SCHEMA, "admin_password"),
+            (crate::admin::totp_store::AdminTotp::SCHEMA, "secret_base32"),
+            (
+                crate::admin::totp_store::AdminTotp::SCHEMA,
+                "pending_secret_base32",
+            ),
+            (crate::tenancy::OperatorTotp::SCHEMA, "secret"),
+            (crate::tenancy::OperatorTotp::SCHEMA, "pending_secret"),
+            (crate::sso::provider::SsoProvider::SCHEMA, "client_secret"),
+            (
+                crate::tenancy::sso::SharedSsoProvider::SCHEMA,
+                "client_secret",
+            ),
+        ] {
+            let field = s.field(f).unwrap_or_else(|| panic!("{}.{f}", s.table));
+            assert!(field.is_credential(), "{}.{f} is not a credential", s.table);
+        }
+    }
+
     /// A new SSO table is refused too, without editing the list by hand.
     #[test]
     fn every_registered_sso_table_is_refused() {
@@ -5745,6 +5771,7 @@ mod lookup_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: false,
         }
     }
 
@@ -5774,6 +5801,7 @@ mod lookup_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: false,
         }
     }
 
