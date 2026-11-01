@@ -111,6 +111,8 @@ pub struct PgJobQueue {
     queue_column: QueueColumn,
     reclaim_after: Option<Duration>,
     sweeper: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// [`PgJobQueue::allow_unregistered_dispatch`].
+    allow_unregistered: bool,
 }
 
 /// Whether `rustango_jobs` has the `queue_name` column. Decided once per queue.
@@ -340,6 +342,7 @@ impl PgJobQueue {
             queue_column: QueueColumn::default(),
             reclaim_after: None,
             sweeper: Mutex::new(None),
+            allow_unregistered: false,
         }
     }
 
@@ -403,6 +406,15 @@ impl PgJobQueue {
     #[must_use]
     pub fn reclaim_stuck_after(mut self, older_than: Duration) -> Self {
         self.reclaim_after = Some(older_than);
+        self
+    }
+
+    /// Let `dispatch` enqueue a job type this queue has no handler for.
+    /// For a producer whose jobs a worker in another process runs; by
+    /// default such a dispatch is refused, as nothing here would run it.
+    #[must_use]
+    pub fn allow_unregistered_dispatch(mut self) -> Self {
+        self.allow_unregistered = true;
         self
     }
 
@@ -563,6 +575,9 @@ impl JobQueue for PgJobQueue {
     /// block; do not hold its `TxGuard` across this call.
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
+        if !self.allow_unregistered {
+            self.registry.lock().await.require(T::NAME)?;
+        }
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let max_attempts = i32::try_from(super::max_attempts(payload)).unwrap_or(i32::MAX);
         let dialect = self.pool.dialect();

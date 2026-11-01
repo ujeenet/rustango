@@ -233,6 +233,7 @@ mod jobs {
         .await;
 
         let queue = PgJobQueue::with_workers_pool(pool.clone(), 0);
+        queue.register::<Noop>().await;
         queue.dispatch(&Noop).await.expect("dispatch");
 
         let run_at = column(&pool, "SELECT run_at FROM rustango_jobs").await;

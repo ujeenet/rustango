@@ -765,35 +765,37 @@ pub(crate) fn jwt_secret() -> Vec<u8> {
     )
 }
 
+/// A secret that is not a valid key (a passphrase) never signs: its text
+/// is guessable. It falls back as an unset one does.
 fn agent_secret(raw: Option<&str>, tier: &str, disk: &std::path::Path) -> Vec<u8> {
-    match agent_key(raw) {
-        AgentKey::Valid(key) => key,
-        AgentKey::Unusable(key, e) => {
-            tracing::warn!(
-                reason = %e,
-                "RUSTANGO_SESSION_SECRET is not a valid base64 key; MCP agent tokens still \
-                 sign with its text so issued tokens keep working, but a later release will \
-                 refuse it. Generate one with: openssl rand -base64 32"
-            );
-            key
-        }
-        AgentKey::Missing if !crate::session::is_prod_tier(tier) => {
-            crate::session::SessionSecret::from_env_or_disk(disk)
-                .key()
-                .to_vec()
-        }
-        AgentKey::Missing => {
-            use rand::RngCore;
-            tracing::warn!(
-                "RUSTANGO_SESSION_SECRET unset or <32 bytes; MCP agent tokens \
-                 are signed with an ephemeral per-process key (tokens won't \
-                 survive a restart and won't verify across instances)"
-            );
-            let mut key = vec![0u8; 32];
-            rand::rngs::OsRng.fill_bytes(&mut key);
-            key
-        }
+    let unusable = match agent_key(raw) {
+        AgentKey::Valid(key) => return key,
+        AgentKey::Unusable(e) => Some(e),
+        AgentKey::Missing => None,
+    };
+    if !crate::session::is_prod_tier(tier) {
+        // Warns itself when `raw` is set but unusable.
+        return crate::session::SessionSecret::from_raw_or_disk(raw, disk)
+            .key()
+            .to_vec();
     }
+    use rand::RngCore;
+    match unusable {
+        Some(e) => tracing::warn!(
+            reason = %e,
+            "RUSTANGO_SESSION_SECRET is not a valid base64 key, so MCP agent tokens do not \
+             sign with it; they use an ephemeral per-process key. Generate one with: \
+             openssl rand -base64 32"
+        ),
+        None => tracing::warn!(
+            "RUSTANGO_SESSION_SECRET unset or <32 bytes; MCP agent tokens \
+             are signed with an ephemeral per-process key (tokens won't \
+             survive a restart and won't verify across instances)"
+        ),
+    }
+    let mut key = vec![0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut key);
+    key
 }
 
 /// What `RUSTANGO_SESSION_SECRET` gives the agent-token key.
@@ -801,8 +803,8 @@ enum AgentKey {
     /// A secret [`crate::session::SessionSecret::from_b64`] accepts. The
     /// key stays its text, which issued tokens were signed with.
     Valid(Vec<u8>),
-    /// 32 bytes or more, but not a valid secret: still used, with a warning.
-    Unusable(Vec<u8>, crate::session::SessionSecretError),
+    /// 32 bytes or more, but not a valid secret: refused.
+    Unusable(crate::session::SessionSecretError),
     /// Unset, or shorter than 32 bytes.
     Missing,
 }
@@ -813,7 +815,7 @@ fn agent_key(raw: Option<&str>) -> AgentKey {
     };
     match crate::session::SessionSecret::from_b64(raw) {
         Ok(_) => AgentKey::Valid(raw.as_bytes().to_vec()),
-        Err(e) => AgentKey::Unusable(raw.as_bytes().to_vec(), e),
+        Err(e) => AgentKey::Unusable(e),
     }
 }
 
@@ -826,9 +828,6 @@ mod tests {
     /// tokens survive a restart; prod gets a per-process key and no file.
     #[test]
     fn dev_agent_tokens_sign_with_the_saved_session_key() {
-        if std::env::var("RUSTANGO_SESSION_SECRET").is_ok() {
-            return; // from_env_or_disk would return the env key
-        }
         let dir = std::env::temp_dir().join(format!("rustango_mcp_key_{}", std::process::id()));
         let path = dir.join("var/.rustango_tenant_session.key");
         let first = agent_secret(None, "dev", &path);
@@ -841,6 +840,22 @@ mod tests {
         let prod = dir.join("prod.key");
         assert_eq!(agent_secret(None, "prod", &prod).len(), 32);
         assert!(!prod.exists(), "prod wrote a key file");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A passphrase never becomes the signing key, on any tier: off prod it
+    /// is the saved session key, on prod a per-process one.
+    #[test]
+    fn a_passphrase_secret_never_signs_agent_tokens() {
+        let pass = "correct horse battery staple and two more";
+        let dir = std::env::temp_dir().join(format!("rustango_mcp_pass_{}", std::process::id()));
+        let path = dir.join("var/.rustango_tenant_session.key");
+        let dev = agent_secret(Some(pass), "dev", &path);
+        assert_ne!(dev, pass.as_bytes(), "dev signs with the passphrase");
+        assert_eq!(std::fs::read(&path).unwrap(), dev, "not the saved key");
+        let prod = agent_secret(Some(pass), "prod", &dir.join("prod.key"));
+        assert_ne!(prod, pass.as_bytes(), "prod signs with the passphrase");
+        assert_eq!(prod.len(), 32);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -959,7 +974,7 @@ mod tests {
         let good = b64(32);
         assert!(matches!(agent_key(Some(&good)), AgentKey::Valid(k) if k == good.as_bytes()));
         let pass = "correct horse battery staple and two more";
-        assert!(matches!(agent_key(Some(pass)), AgentKey::Unusable(k, _) if k == pass.as_bytes()));
+        assert!(matches!(agent_key(Some(pass)), AgentKey::Unusable(_)));
         // 32 characters of base64, but only 24 bytes of key.
         assert!(matches!(agent_key(Some(&b64(24))), AgentKey::Unusable(..)));
         assert!(matches!(agent_key(Some("short")), AgentKey::Missing));
