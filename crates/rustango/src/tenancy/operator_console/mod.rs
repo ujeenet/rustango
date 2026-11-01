@@ -799,6 +799,11 @@ fn router_unlogged(
     // shared cache stores a `Set-Cookie` with them.
     let mut assets = Router::new()
         .route(at("/__static__/rustango.png"), get(static_rustango_png))
+        // Browsers ask for it whatever the page links; the admin's icon.
+        .route(
+            at("/favicon.ico"),
+            get(|| async { crate::welcome::icon_png_response() }),
+        )
         .route(
             at(&format!(
                 "{}/{{slug}}/{{filename}}",
@@ -1042,6 +1047,7 @@ pub(crate) const CONSOLE_SEGMENTS: &[&str] = &[
     "logout",
     "__static__",
     "__brand__",
+    "favicon.ico",
     "operators",
     "orgs",
     "audit",

@@ -531,11 +531,12 @@ In a tenancy project each tenant's admin is served on that tenant's host at
 not apply). Old `/__admin` links still reach it, unless
 `RouteConfig::legacy()` makes `/__admin` the main path.
 
-The tenant admin does not read `[admin]` or `[brand]`. It takes its brand from
-the tenant's `Org` row: the name is `brand_name`, else the tenant's display
-name; the logo is the one uploaded on the console's edit page, else the
+The tenant admin takes its name from the tenant's `Org` row `brand_name`, else
+`[admin] title`, else `[brand] name`, else the tenant's display name; the
+sidebar, the page `<title>` and the heading all show it. The rest comes from
+the `Org` row: the logo is the one uploaded on the console's edit page, else the
 framework logo (`rustango.png` under the static URL); the theme is
-`theme_mode` and the accent colour `primary_color`. See
+`theme_mode` and the accent colour `primary_color`, which links take too. See
 [per-tenant branding](operator-console.md#per-tenant-branding).
 
 ---

@@ -576,11 +576,12 @@ tenant, à `/admin` (`RouteConfig::admin_url` ; la valeur par défaut `/__admin`
 du `Builder` seul ne s'applique pas). Les anciens liens `/__admin` y mènent
 toujours, sauf si `RouteConfig::legacy()` fait de `/__admin` le chemin principal.
 
-L'admin du tenant ne lit ni `[admin]` ni `[brand]`. Il prend son identité
-visuelle dans la ligne `Org` du tenant : le nom est `brand_name`, sinon le nom
-affiché du tenant ; le logo est celui envoyé sur la page d'édition de la
+L'admin du tenant prend son nom dans `brand_name` de la ligne `Org`, sinon
+`[admin] title`, sinon `[brand] name`, sinon le nom affiché du tenant ; la
+barre latérale, le `<title>` et le titre l'affichent. Le reste vient de la
+ligne `Org` : le logo est celui envoyé sur la page d'édition de la
 console, sinon le logo du framework (`rustango.png` sous l'URL statique) ; le
-thème est `theme_mode` et la couleur d'accent `primary_color`. Voir
+thème est `theme_mode` et la couleur d'accent `primary_color`, qui colore aussi les liens. Voir
 [l'identité visuelle par tenant](operator-console.md#identité-visuelle-par-tenant).
 
 ---

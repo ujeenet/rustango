@@ -678,6 +678,115 @@ async fn apex_request(
         .unwrap()
 }
 
+/// The page an admin `GET` answers, as text.
+async fn page(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The `<title>`, the sidebar and the heading name the tenant admin one way,
+/// on its own host and on the apex path prefix; links take the org's color.
+#[tokio::test]
+async fn the_tenant_admin_names_itself_one_way_and_takes_the_org_color() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.display_name = "Org Display".into();
+    org.brand_name = None;
+    org.primary_color = Some("#123456".into());
+    org.save_pool(&env.registry).await.expect("brand org");
+    rustango::tenancy::invalidate_org_cache();
+    let mut user = User {
+        username: "brand-boss".into(),
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("brand-password-1").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert_pool(&env.tenant).await.expect("seed user");
+    let login = TenantSessionPayload::new(
+        user.id.get().copied().unwrap(),
+        &env.bound,
+        3600,
+        PasswordFingerprint::of(&env.secret, &user.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &login));
+    let named = |html: &str, name: &str| {
+        assert!(
+            html.contains(&format!("<title>{name}</title>")),
+            "<title>: {html}"
+        );
+        assert!(
+            html.contains(&format!("<h2>{name}</h2>")),
+            "sidebar: {html}"
+        );
+        assert!(
+            html.contains(&format!("<h1>{name}</h1>")),
+            "heading: {html}"
+        );
+        assert!(!html.contains("Rustango Admin"), "{html}");
+        assert!(html.contains("--color-link: #123456"), "link color: {html}");
+    };
+
+    // Own host: the configured title, then the org's display name.
+    let titled = TenantAdminBuilder::new(
+        env.pools.clone(),
+        env.reg_url.clone(),
+        ChainResolver::new().push(SubdomainResolver::new("app.test")),
+    )
+    .routes(RouteConfig::legacy())
+    .with_session(env.secret.clone())
+    .title("Acme Admin")
+    .build();
+    let get = |app: axum::Router| {
+        let req = Request::builder()
+            .uri("/__admin/")
+            .header(header::HOST, &env.host)
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    };
+    named(&page(get(titled).await).await, "Acme Admin");
+    named(&page(get(env.admin.clone()).await).await, "Org Display");
+
+    // Apex + path prefix, through a server built with the title.
+    org.host_pattern = None;
+    org.path_prefix = Some("/acme".into());
+    org.save_pool(&env.registry).await.expect("prefix org");
+    rustango::tenancy::invalidate_org_cache();
+    let registry = sqlx::SqlitePool::connect(&env.reg_url).await.unwrap();
+    let app = rustango::server::Builder::from_pool(registry, env.reg_url.clone(), "apex.test")
+        .routes(RouteConfig::legacy())
+        .admin_title("Acme Admin")
+        .into_router()
+        .await
+        .expect("router");
+    // This server signs its own sessions: sign in through its form.
+    let form = "username=brand-boss&password=brand-password-1&_csrf=t".to_owned();
+    let signed = apex_request(&app, "POST", "/acme/__login", "", form).await;
+    let session = signed.headers()["set-cookie"].to_str().unwrap();
+    let session = session.split(';').next().unwrap().to_owned();
+    let res = apex_request(&app, "GET", "/acme/__admin/", &session, String::new()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    named(&page(res).await, "Acme Admin");
+}
+
+/// The operator console answers the browser's `/favicon.ico` with the admin icon.
+#[tokio::test]
+async fn the_console_serves_a_favicon() {
+    let env = boot().await;
+    let (_, app) = builder_app(&env).await;
+    let res = apex_request(&app, "GET", "/favicon.ico", "", String::new()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "image/png");
+}
+
 /// A tenant prefix equal to a console path never takes it over: the console
 /// keeps `/orgs` and warns once; a path it does not serve reaches the tenant.
 #[tokio::test]

@@ -2114,20 +2114,13 @@ fn inner_admin_state(
     if let Some(perms) = user_perms {
         builder = builder.with_user_perms(perms);
     }
-    if let Some(t) = title {
-        builder = builder.title(t);
-    }
     if let Some(s) = subtitle {
         builder = builder.subtitle(s);
     }
 
-    // Per-tenant branding overrides the static title/subtitle when
-    // set on the resolved Org. Fall through to `display_name` as a
-    // last resort so the sidebar always names the current tenant.
-    if let Some(name) = org.brand_name.as_deref() {
-        builder = builder.brand_name(name);
-    } else if !org.display_name.is_empty() {
-        builder = builder.brand_name(&org.display_name);
+    // One name for the sidebar, the `<title>` and the index heading.
+    if let Some(name) = tenant_admin_name(org, title) {
+        builder = builder.title(name).brand_name(name);
     }
     if let Some(tag) = org.brand_tagline.as_deref() {
         builder = builder.brand_tagline(tag);
@@ -2162,6 +2155,17 @@ fn inner_admin_state(
         );
     }
     builder.into_request_state()
+}
+
+/// The org's brand name, then the configured title (`[admin] title`, else
+/// `[brand] name`), then the org's display name.
+fn tenant_admin_name<'a>(org: &'a Org, title: Option<&'a str>) -> Option<&'a str> {
+    let set = |s: &&str| !s.is_empty();
+    org.brand_name
+        .as_deref()
+        .filter(set)
+        .or(title.filter(set))
+        .or(Some(org.display_name.as_str()).filter(set))
 }
 
 /// The brand asset at `path` when it is under `routes.brand_url`, else `None`.
