@@ -157,28 +157,31 @@ pub fn admin_router(pool: Pool) -> axum::Router {
         .subtitle("rustango auto-admin showcase")
         .admin_prefix("/admin")
         .with_session_auth(secret)
-        .register_action("posts", "publish", |pool, pks| {
-            Box::pin(async move { set_status(pool, pks, "published").await })
+        .register_tx_action("posts", "publish", |tx, pks| {
+            Box::pin(async move { set_status(tx, pks, "published").await })
         })
-        .register_action("posts", "archive", |pool, pks| {
-            Box::pin(async move { set_status(pool, pks, "archived").await })
+        .register_tx_action("posts", "archive", |tx, pks| {
+            Box::pin(async move { set_status(tx, pks, "archived").await })
         })
         .build()
 }
 
-/// Bulk action handler — sets `status` on every selected post.
+/// Bulk action handler — sets `status` on every selected post, in the
+/// admin's transaction so its audit rows commit with it.
 async fn set_status(
-    pool: &Pool,
+    tx: &mut rustango::sql::PoolTx<'static>,
     pks: &[rustango::core::SqlValue],
     status: &str,
 ) -> Result<(), rustango::admin::AdminError> {
+    use rustango::admin::AdminError;
     if !pks.is_empty() {
-        Post::objects()
+        let query = Post::objects()
             .filter("id__in", rustango::core::SqlValue::List(pks.to_vec()))
             .update()
             .set("status", status)
-            .execute_pool(pool)
-            .await?;
+            .compile()
+            .map_err(|e| AdminError::Internal(e.to_string()))?;
+        rustango::sql::update_tx(tx, &query).await?;
     }
     Ok(())
 }

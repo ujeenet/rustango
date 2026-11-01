@@ -528,10 +528,10 @@ pub mod sso_check {
     pub use crate::tenancy::sso::SharedSsoProvider;
 }
 
-/// The `SsoLink` re-link admin action, reachable from integration tests.
+/// The `SsoLink` unlink and re-link admin actions, reachable from integration tests.
 #[cfg(all(feature = "sso", feature = "tenancy"))]
 pub mod sso_admin {
-    pub use crate::sso::policy::admin::relink;
+    pub use crate::sso::policy::admin::{relink, unlink};
 }
 
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]

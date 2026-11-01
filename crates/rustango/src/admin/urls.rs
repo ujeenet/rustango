@@ -22,24 +22,21 @@ use axum::Router;
 use super::errors::AdminError;
 use super::views;
 
-/// Future returned by an [`AdminActionFn`] handler.
+/// Future returned by an [`AdminTxActionFn`] handler.
 pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
 
-/// Bulk action handler. It receives the [`crate::sql::Pool`] enum, so
-/// one handler runs on any backend, plus the parsed PK list of the
-/// selected rows. Return `Ok(())`, or `AdminError::Internal(...)` to
-/// fail. The built-in `delete_selected` uses this signature.
-///
-/// The handler takes `&Pool`, not a backend-specific pool, and writes
-/// through the ORM. Register it with [`Builder::register_action`]:
+/// Bulk action handler. It writes in the admin's transaction, through the
+/// ORM, on any backend: the action's audit rows commit or roll back with
+/// its writes. It gets the parsed PK list of the selected rows; return
+/// `Ok(())`, or an [`AdminError`] to roll everything back. Register it
+/// with [`Builder::register_tx_action`]:
 ///
 /// ```no_run
-/// use rustango::admin::{AdminActionFuture, Builder};
+/// use rustango::admin::{AdminActionFuture, AdminError, Builder};
 /// use rustango::core::{Op, SqlValue};
-/// use rustango::sql::{Pool, UpdaterPool as _};
-/// use rustango::Model;
+/// use rustango::sql::{Pool, PoolTx};
 ///
-/// #[derive(Model)]
+/// #[derive(rustango::Model)]
 /// #[rustango(table = "post")]
 /// pub struct Post {
 ///     #[rustango(primary_key)]
@@ -47,42 +44,29 @@ pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminErr
 ///     pub published_at: Option<chrono::DateTime<chrono::Utc>>,
 /// }
 ///
-/// fn publish<'a>(pool: &'a Pool, pks: &'a [SqlValue]) -> AdminActionFuture<'a> {
+/// fn publish<'a>(tx: &'a mut PoolTx<'static>, pks: &'a [SqlValue]) -> AdminActionFuture<'a> {
 ///     Box::pin(async move {
-///         Post::objects()
+///         let query = Post::objects()
 ///             .filter_op("id", Op::In, SqlValue::List(pks.to_vec()))
 ///             .update()
 ///             .set("published_at", chrono::Utc::now())
-///             .execute_pool(pool)
-///             .await?;
+///             .compile()
+///             .map_err(|e| AdminError::Internal(e.to_string()))?;
+///         rustango::sql::update_tx(tx, &query).await?;
 ///         Ok(())
 ///     })
 /// }
 ///
 /// fn admin(pool: Pool) -> Builder {
-///     Builder::new(pool).register_action("post", "publish", publish)
+///     Builder::new(pool).register_tx_action("post", "publish", publish)
 /// }
 /// # fn main() {}
 /// ```
-pub type AdminActionFn = Arc<
-    dyn for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a> + Send + Sync,
->;
-
-/// Bulk action handler that writes in the admin's transaction, so the
-/// action's audit rows commit or roll back with it. See
-/// [`Builder::register_tx_action`].
 pub type AdminTxActionFn = Arc<
     dyn for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
         + Send
         + Sync,
 >;
-
-/// How a custom action writes: on its own connection, or in the admin's tx.
-#[derive(Clone)]
-pub(crate) enum ActionHandler {
-    Pool(AdminActionFn),
-    Tx(AdminTxActionFn),
-}
 
 /// The permission a custom bulk action is checked against (#1818).
 ///
@@ -101,7 +85,7 @@ pub enum ActionPerm {
 /// A registered custom action: its handler and the permission it needs.
 #[derive(Clone)]
 pub(crate) struct RegisteredAction {
-    pub(crate) handler: ActionHandler,
+    pub(crate) handler: AdminTxActionFn,
     pub(crate) perm: ActionPerm,
 }
 
@@ -159,6 +143,14 @@ pub fn router(pool: impl Into<Pool>) -> Router {
 pub struct Builder {
     pool: Pool,
     config: Config,
+}
+
+impl Builder {
+    /// The pool the admin serves, for an action that reads beside its transaction.
+    #[cfg(feature = "sso")]
+    pub(crate) fn pool(&self) -> &Pool {
+        &self.pool
+    }
 }
 
 /// The database an admin serves. Each holds a different set of tables.
@@ -729,93 +721,18 @@ impl Builder {
         self
     }
 
-    /// Register a user-defined bulk action handler.
+    /// Register a user-defined bulk action handler; see [`AdminTxActionFn`].
     ///
-    /// `model_table` must match the model's `table = "..."`.
+    /// `model_table` must match the model's `table = "..."`, and
     /// `action_name` **must** also be in that model's
     /// `admin(actions = "...")` allowlist: the attribute is the
     /// allowlist, this is the code that runs.
     ///
-    /// The handler gets the pool and the parsed PK list of the
-    /// selected rows. Use it for publish, archive, recompute and
-    /// anything else that runs over a batch of rows.
-    ///
-    /// It is gated like an edit: `{table}.change` plus the object hook
-    /// named after the action. An action that deletes should use
-    /// [`Self::register_action_with_perm`] with [`ActionPerm::Delete`].
-    ///
-    /// Its audit rows are written after it, best effort. Use
-    /// [`Self::register_tx_action`] to audit in the action's transaction.
-    ///
-    /// ```ignore
-    /// use rustango::sql::sqlx::PgPool;
-    /// use rustango::core::SqlValue;
-    /// use rustango::admin::AdminError;
-    /// async fn mark_published(pool: &PgPool, pks: &[SqlValue]) -> Result<(), AdminError> {
-    ///     // ... custom UPDATE here ...
-    ///     Ok(())
-    /// }
-    /// admin::Builder::new(pool)
-    ///     .register_action("post", "mark_published", |pool, pks| {
-    ///         Box::pin(mark_published(pool, pks))
-    ///     })
-    ///     .build();
-    /// ```
-    pub fn register_action<F>(
-        self,
-        model_table: &'static str,
-        action_name: &'static str,
-        handler: F,
-    ) -> Self
-    where
-        F: for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.register_action_with_perm(model_table, action_name, ActionPerm::Change, handler)
-    }
-
-    /// [`Self::register_action`] checked against `perm` instead of
-    /// `change`, plus the object hook named after the action (#1818).
-    /// A `Delete` action still needs `{table}.change`, and it audits and
-    /// signals as an edit; the handler does its own deleting.
-    pub fn register_action_with_perm<F>(
-        self,
-        model_table: &'static str,
-        action_name: &'static str,
-        perm: ActionPerm,
-        handler: F,
-    ) -> Self
-    where
-        F: for<'a> Fn(&'a crate::sql::Pool, &'a [SqlValue]) -> AdminActionFuture<'a>
-            + Send
-            + Sync
-            + 'static,
-    {
-        self.insert_action(
-            model_table,
-            action_name,
-            perm,
-            ActionHandler::Pool(Arc::new(handler)),
-        )
-    }
-
-    /// [`Self::register_action`] for a handler that writes in the admin's
-    /// transaction: the action's audit rows commit with its writes, and an
-    /// error from either rolls both back. Prefer it for audited models.
-    ///
-    /// ```ignore
-    /// admin::Builder::new(pool)
-    ///     .register_tx_action("post", "publish", |tx, pks| {
-    ///         Box::pin(async move {
-    ///             rustango::sql::update_tx(tx, &publish_query(pks)).await
-    ///                 .map_err(|e| AdminError::Internal(e.to_string()))?;
-    ///             Ok(())
-    ///         })
-    ///     })
-    ///     .build();
-    /// ```
+    /// The handler writes in the admin's transaction: the action's audit
+    /// rows commit with its writes, and an error from either rolls both
+    /// back. It is gated like an edit: `{table}.change` plus the object
+    /// hook named after the action. An action that deletes should use
+    /// [`Self::register_tx_action_with_perm`] with [`ActionPerm::Delete`].
     pub fn register_tx_action<F>(
         self,
         model_table: &'static str,
@@ -831,8 +748,10 @@ impl Builder {
         self.register_tx_action_with_perm(model_table, action_name, ActionPerm::Change, handler)
     }
 
-    /// [`Self::register_tx_action`] checked against `perm`, as
-    /// [`Self::register_action_with_perm`].
+    /// [`Self::register_tx_action`] checked against `perm` instead of
+    /// `change`, plus the object hook named after the action (#1818).
+    /// A `Delete` action still needs `{table}.change`, and it audits and
+    /// signals as an edit; the handler does its own deleting.
     pub fn register_tx_action_with_perm<F>(
         self,
         model_table: &'static str,
@@ -846,12 +765,7 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.insert_action(
-            model_table,
-            action_name,
-            perm,
-            ActionHandler::Tx(Arc::new(handler)),
-        )
+        self.insert_action(model_table, action_name, perm, Arc::new(handler))
     }
 
     fn insert_action(
@@ -859,7 +773,7 @@ impl Builder {
         model_table: &'static str,
         action_name: &'static str,
         perm: ActionPerm,
-        handler: ActionHandler,
+        handler: AdminTxActionFn,
     ) -> Self {
         self.config
             .actions
