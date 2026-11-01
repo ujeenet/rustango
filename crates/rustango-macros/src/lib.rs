@@ -4337,35 +4337,44 @@ fn inherent_impl_tokens(
 
     // Bulk writers on audited models write one audit row per affected
     // row, in the write's transaction (#1747).
-    let (bulk_delete_run, destroy_run, bulk_update_run, truncate_run) = if audited_fields.is_some()
-    {
-        (
-            quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+    let (bulk_delete_run, destroy_run, bulk_update_run, truncate_run, truncate_cascade_run) =
+        if audited_fields.is_some() {
+            (
+                quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
             })
             .await),
-            quote!(#root::audit::delete_each_with_audit::<Self>(pool, &_queries, |_r: &Self| {
+                quote!(#root::audit::delete_each_with_audit::<Self>(pool, &_queries, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
             })
             .await),
-            quote!(#root::audit::update_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                quote!(#root::audit::update_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
             })
             .await),
-            quote! {
-                let _table = <Self as #root::core::Model>::SCHEMA.table;
-                let _sql = #root::sql::truncate_sql(pool.dialect(), _table);
-                #root::audit::truncate_with_audit(pool, _table, &_sql).await
-            },
-        )
-    } else {
-        (
-            quote!(#root::sql::delete_pool(pool, &_query).await),
-            quote!(#root::sql::__rustango_delete_all_or_none(pool, _queries).await),
-            quote!(#root::sql::update_pool(pool, &_query).await),
-            quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
-        )
-    };
+                quote!(#root::audit::truncate_with_audit(
+                pool,
+                <Self as #root::core::Model>::SCHEMA.table,
+                #root::sql::TruncateMode::Plain,
+            )
+            .await),
+                quote!(#root::audit::truncate_with_audit(
+                pool,
+                <Self as #root::core::Model>::SCHEMA.table,
+                #root::sql::TruncateMode::Cascade,
+            )
+            .await
+            .map(drop)),
+            )
+        } else {
+            (
+                quote!(#root::sql::delete_pool(pool, &_query).await),
+                quote!(#root::sql::__rustango_delete_all_or_none(pool, _queries).await),
+                quote!(#root::sql::update_pool(pool, &_query).await),
+                quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
+                quote!(#root::sql::truncate_cascade(pool, <Self as #root::core::Model>::SCHEMA).await),
+            )
+        };
 
     // `refresh_from_db_pool(&mut self, pool)` — re-SELECT the row
     // matching this instance's PK and overwrite the in-memory state
@@ -5129,17 +5138,14 @@ fn inherent_impl_tokens(
                 }
             }
 
-            /// Delete every row of this model — `TRUNCATE TABLE
-            /// <table> RESTART IDENTITY CASCADE` on Postgres,
-            /// `DELETE FROM <table>` on MySQL / SQLite (which don't
-            /// support `TRUNCATE` inside foreign-key constraints
-            /// or — for SQLite — at all). Eloquent `Model::truncate()`
-            /// parity.
+            /// Delete every row of this model with one `DELETE FROM
+            /// <table>` on every backend; returns the rows deleted. Each
+            /// FK's `ON DELETE` applies, so a `RESTRICT` / `NO ACTION`
+            /// row still pointing here refuses it; see
+            /// [`truncate_cascade`](Self::truncate_cascade).
             ///
-            /// **Use only in tests / fixture-reset flows.** Production
-            /// writes through this would silently bypass the
-            /// `pre_delete` / `post_delete` signals (no per-row hooks
-            /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
+            /// **Use only in tests / fixture-reset flows.** No per-row
+            /// `pre_delete` / `post_delete` signals fire. An audited model
             /// gets one bulk audit entry, not one per row. Global scopes
             /// do not apply: every row goes, generic M2M links too.
             ///
@@ -5151,6 +5157,20 @@ fn inherent_impl_tokens(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #truncate_run
+            }
+
+            /// [`truncate`](Self::truncate), also emptying every table
+            /// that references this one, transitively and whatever its
+            /// `ON DELETE`. The same on every backend.
+            ///
+            /// # Errors
+            /// As [`truncate_cascade`].
+            ///
+            /// [`truncate_cascade`]: rustango::sql::truncate_cascade
+            pub async fn truncate_cascade(
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #truncate_cascade_run
             }
 
             /// Bulk-delete every row whose primary key is in

@@ -1406,6 +1406,8 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 > per-row validation. Use them for speed; drop to per-row `save_pool()` /
 > `delete_pool()` when you need those side effects.
 
+**Empty a table.** `Model::truncate(&pool)` runs `DELETE FROM` on every backend and returns the rows deleted. Each FK's `on_delete` applies, so while a `restrict` row still points at the table it fails with `ExecError::TruncateReferenced` and changes nothing. `Model::truncate_cascade(&pool)` also empties every table that references it, transitively and whatever its `on_delete`: `TRUNCATE … CASCADE` on PostgreSQL, one `DELETE` per table with FK checks off (MySQL) or deferred (SQLite). Neither restarts ids. On MySQL and SQLite a table that references itself with `restrict` can refuse a plain truncate; use `truncate_cascade`.
+
 Insert, update, or delete many rows in one statement instead of one per row. The `as _` import brings a trait's methods into scope without naming the trait directly.
 
 ```rust
@@ -1633,7 +1635,7 @@ with_source(
 
 The admin's per-row history panel reads from this table; the cross-model feed is at `<admin prefix>/__audit` (`Builder::audit_url` changes it; the tenant admin uses `RouteConfig::audit_url`, default `/audit`).
 
-Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default`, and child tables PostgreSQL's `Model::truncate` empties with `CASCADE`, are not audited. It runs on pool and transaction paths (`delete_pool`, `PoolTx`, `PoolConn`), 500 deleted rows at a time: each chunk's cascaded rows are read with `FOR UPDATE` and held in memory with their entries until the chunk is deleted. A raw sqlx executor (`Model::delete(&PgPool)`, `delete_on`) runs one plain DELETE and logs a one-time warning instead. A `DEFERRABLE INITIALLY DEFERRED` FK cascades only at commit, so its rows get no entries.
+Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default` get an `update` entry, and `Model::truncate` / `truncate_cascade` write one bulk entry per audited table they change. It runs on pool and transaction paths (`delete_pool`, `PoolTx`, `PoolConn`), 500 deleted rows at a time: each chunk's cascaded rows are read with `FOR UPDATE` and held in memory with their entries until the chunk is deleted. A raw sqlx executor (`Model::delete(&PgPool)`, `delete_on`) runs one plain DELETE and logs a one-time warning instead. A `DEFERRABLE INITIALLY DEFERRED` FK cascades only at commit, so its rows get no entries.
 
 Cleanup:
 

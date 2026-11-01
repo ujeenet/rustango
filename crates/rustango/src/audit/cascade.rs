@@ -109,15 +109,15 @@ fn build_graph() -> HashMap<&'static str, Vec<Edge>> {
 }
 
 /// An audited table a truncate of `table` changes: rows it takes, or, for a
-/// MySQL/SQLite `DELETE`, the FK it sets to NULL / default (`set`).
+/// plain truncate, the FK it sets to NULL / default (`set`).
 pub(crate) struct Reached {
     schema: &'static ModelSchema,
     set: Option<&'static str>,
     before: i64,
 }
 
-/// The audited tables a truncate of `table` reaches besides it: PG's
-/// `TRUNCATE … CASCADE` empties every FK child, a `DELETE` only follows
+/// The audited tables a truncate of `table` reaches besides it: a cascading
+/// one empties every FK child, a plain `DELETE` only follows
 /// `ON DELETE CASCADE` and sets the `SET NULL` / `SET DEFAULT` children.
 fn truncate_reach(
     table: &str,
@@ -176,8 +176,9 @@ fn truncate_reach(
 pub(crate) async fn truncate_counts(
     tx: &mut PoolTx<'_>,
     table: &str,
+    mode: crate::sql::TruncateMode,
 ) -> Result<Vec<Reached>, ExecError> {
-    let every_fk = crate::sql::truncate_cascades_every_fk(tx.dialect());
+    let every_fk = mode == crate::sql::TruncateMode::Cascade;
     let mut out = Vec::new();
     for (schema, set) in truncate_reach(table, every_fk) {
         let before = row_count(tx, schema, set).await?;

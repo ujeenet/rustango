@@ -1406,6 +1406,8 @@ Se ramène en interne à `save_partial` — même restriction d'audit, même con
 > la validation par ligne. Utilisez-les pour la vitesse ; passez au `save_pool()` / `delete_pool()` par ligne
 > quand vous avez besoin de ces effets de bord.
 
+**Vider une table.** `Model::truncate(&pool)` exécute `DELETE FROM` sur chaque backend et renvoie le nombre de lignes supprimées. Le `on_delete` de chaque FK s'applique : tant qu'une ligne `restrict` pointe vers la table, l'appel échoue avec `ExecError::TruncateReferenced` et ne change rien. `Model::truncate_cascade(&pool)` vide aussi chaque table qui la référence, de proche en proche et quel que soit son `on_delete` : `TRUNCATE … CASCADE` sur PostgreSQL, un `DELETE` par table avec les contrôles de FK désactivés (MySQL) ou différés (SQLite). Aucun des deux ne remet les ids à zéro. Sur MySQL et SQLite, une table qui se référence elle-même en `restrict` peut refuser un truncate simple ; utilisez `truncate_cascade`.
+
 Insère, met à jour ou supprime de nombreuses lignes en une seule instruction au lieu d'en émettre une par ligne. L'import `as _` amène les méthodes d'un trait dans la portée sans nommer directement le trait.
 
 ```rust
@@ -1634,7 +1636,7 @@ with_source(
 
 Le panneau d'historique par ligne de l'admin lit dans cette table ; le flux inter-modèles est à `<admin prefix>/__audit` (`Builder::audit_url` le change ; l'admin de tenant utilise `RouteConfig::audit_url`, par défaut `/audit`).
 
-Les lignes auditées qu'une FK `on_delete = "cascade"` supprime reçoivent une entrée `delete`, lue avant la suppression dans sa transaction. Les lignes modifiées par `set_null` / `set_default`, et les tables enfants que `Model::truncate` de PostgreSQL vide avec `CASCADE`, ne sont pas auditées. Cela s'exécute sur les chemins pool et transaction (`delete_pool`, `PoolTx`, `PoolConn`), par 500 lignes supprimées à la fois : les lignes en cascade de chaque tranche sont lues avec `FOR UPDATE` et gardées en mémoire avec leurs entrées jusqu'à la suppression de la tranche. Un exécuteur sqlx brut (`Model::delete(&PgPool)`, `delete_on`) exécute un simple DELETE et journalise à la place un avertissement unique. Une FK `DEFERRABLE INITIALLY DEFERRED` ne cascade qu'au commit, donc ses lignes ne reçoivent pas d'entrées.
+Les lignes auditées qu'une FK `on_delete = "cascade"` supprime reçoivent une entrée `delete`, lue avant la suppression dans sa transaction. Les lignes modifiées par `set_null` / `set_default` reçoivent une entrée `update`, et `Model::truncate` / `truncate_cascade` écrivent une entrée groupée par table auditée qu'ils modifient. Cela s'exécute sur les chemins pool et transaction (`delete_pool`, `PoolTx`, `PoolConn`), par 500 lignes supprimées à la fois : les lignes en cascade de chaque tranche sont lues avec `FOR UPDATE` et gardées en mémoire avec leurs entrées jusqu'à la suppression de la tranche. Un exécuteur sqlx brut (`Model::delete(&PgPool)`, `delete_on`) exécute un simple DELETE et journalise à la place un avertissement unique. Une FK `DEFERRABLE INITIALLY DEFERRED` ne cascade qu'au commit, donc ses lignes ne reçoivent pas d'entrées.
 
 Nettoyage :
 

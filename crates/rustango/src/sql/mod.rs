@@ -103,13 +103,13 @@ pub use executor::{
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
-    inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_cascades_every_fk, truncate_tx,
+    inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx,
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) use executor::{stored_key, stored_keys};
-pub use executor::{truncate, truncate_sql};
+pub use executor::{truncate, truncate_cascade, TruncateMode};
 // PG-typed back-compat surface gone (issue #270 / T1.8 waves 1–4):
 // the entire family of `_on` functions + `&PgPool` wrappers + the
 // `Fetcher`/`Counter`/`Updater`/`Deleter` extension traits is deleted

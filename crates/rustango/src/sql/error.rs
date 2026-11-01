@@ -263,6 +263,15 @@ pub enum ExecError {
         reason: &'static str,
     },
 
+    /// A plain truncate refused: rows in another table still reference it
+    /// under an FK whose `ON DELETE` does not let them go.
+    #[error("cannot truncate `{table}`: other rows still reference it; use `truncate_cascade` to empty those tables too")]
+    TruncateReferenced {
+        table: &'static str,
+        #[source]
+        source: sqlx::Error,
+    },
+
     /// The audit row for a write failed, so the write was rolled back.
     /// A server fault, even when the driver error inside is a rejection.
     #[error("`{table}` audit write failed: {source}")]
@@ -415,8 +424,10 @@ impl ExecError {
     /// Which constraint refused the write, read from sqlx's `ErrorKind`.
     pub(crate) fn refusal(&self) -> Option<Refusal> {
         use sqlx::error::ErrorKind;
-        let Self::Driver(sqlx::Error::Database(db)) = self else {
-            return None;
+        let db = match self {
+            Self::Driver(sqlx::Error::Database(db)) => db,
+            Self::TruncateReferenced { .. } => return Some(Refusal::ForeignKey),
+            _ => return None,
         };
         match db.kind() {
             ErrorKind::UniqueViolation => Some(Refusal::Unique),

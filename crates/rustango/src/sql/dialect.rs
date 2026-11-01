@@ -547,6 +547,35 @@ pub trait Dialect: Send + Sync {
             .collect()
     }
 
+    /// Query for the tables with an FK to one table, binding `(table)`, for a
+    /// cascading truncate. `None` where `TRUNCATE … CASCADE` finds them (PG).
+    fn referencing_tables_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT DISTINCT m.name FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+             WHERE m.type = 'table' AND f.\"table\" = ? COLLATE NOCASE",
+        )
+    }
+
+    /// Statements that truncate `table`. `Plain` is a `DELETE`, so each FK's
+    /// `ON DELETE` applies; `Cascade` also empties `referencing`, in any order.
+    fn truncate_sql(
+        &self,
+        table: &str,
+        mode: crate::sql::TruncateMode,
+        referencing: &[String],
+    ) -> Vec<String> {
+        match mode {
+            crate::sql::TruncateMode::Plain => {
+                vec![format!("DELETE FROM {}", self.quote_ident(table))]
+            }
+            crate::sql::TruncateMode::Cascade => {
+                let mut tables = vec![table];
+                tables.extend(referencing.iter().map(String::as_str));
+                self.clear_tables_sql(&tables)
+            }
+        }
+    }
+
     /// Add a named UNIQUE on one column of an existing table. PG and MySQL
     /// share this form; SQLite has no `ADD CONSTRAINT` and overrides it.
     fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {

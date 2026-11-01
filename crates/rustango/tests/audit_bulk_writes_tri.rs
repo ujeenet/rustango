@@ -670,10 +670,9 @@ mod cascade {
         assert_eq!(entry.changes["body"], "n1");
     }
 
-    /// A truncate's FK cascade gets a bulk entry on each audited table it
-    /// empties: every FK on PG (`TRUNCATE … CASCADE`), `ON DELETE CASCADE`
-    /// elsewhere (a `DELETE`).
-    async fn truncate_cascade_audits_the_tables_it_empties(pool: &Pool) {
+    /// A plain truncate's `ON DELETE CASCADE` gets a bulk entry on each
+    /// audited table it empties; the `SET NULL` note stays.
+    async fn truncate_audits_the_tables_its_delete_empties(pool: &Pool) {
         Note {
             id: 1,
             body: "n".into(),
@@ -685,12 +684,30 @@ mod cascade {
         Shelf::truncate(pool).await.expect("truncate");
         assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
         assert_eq!(entries(pool, CRATE, "", "delete").await, 1);
-        let pg = pool.dialect().name() == "postgres";
-        assert_eq!(entries(pool, NOTE, "", "delete").await, i64::from(pg));
+        assert_eq!(entries(pool, NOTE, "", "delete").await, 0);
     }
 
-    /// A MySQL/SQLite truncate's `DELETE` sets `Note.shelf_id` to NULL: one
-    /// bulk `update` entry, none when no note pointed at a shelf.
+    /// `truncate_cascade` empties every FK child, `SET NULL` ones too, with
+    /// a bulk `delete` entry on each audited one.
+    async fn truncate_cascade_audits_the_tables_it_empties(pool: &Pool) {
+        Note {
+            id: 1,
+            body: "n".into(),
+            shelf_id: Some(1),
+        }
+        .insert_pool(pool)
+        .await
+        .expect("note");
+        Shelf::truncate_cascade(pool).await.expect("truncate");
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(Note::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(entries(pool, CRATE, "", "delete").await, 1);
+        assert_eq!(entries(pool, NOTE, "", "delete").await, 1);
+        assert_eq!(entries(pool, NOTE, "", "update").await, 0);
+    }
+
+    /// A plain truncate's `DELETE` sets `Note.shelf_id` to NULL: one bulk
+    /// `update` entry, none when no note pointed at a shelf.
     async fn truncate_set_null_audits_the_table_it_changes(pool: &Pool) {
         Note {
             id: 1,
@@ -713,12 +730,9 @@ mod cascade {
         .await
         .expect("note");
         Shelf::truncate(pool).await.expect("truncate");
-        let pg = pool.dialect().name() == "postgres";
-        assert_eq!(entries(pool, NOTE, "", "update").await, i64::from(!pg));
-        if !pg {
-            let note = Note::objects().fetch(pool).await.unwrap();
-            assert_eq!(note[0].shelf_id, None);
-        }
+        assert_eq!(entries(pool, NOTE, "", "update").await, 1);
+        let note = Note::objects().fetch(pool).await.unwrap();
+        assert_eq!(note[0].shelf_id, None);
     }
 
     /// Audited tables the truncate reaches but takes no rows from get no entry.
@@ -823,6 +837,7 @@ mod cascade {
             cascade_audit_follows_the_atomic_block,
             single_statement_pg_paths_still_delete,
             fk_set_null_audits_each_changed_child,
+            truncate_audits_the_tables_its_delete_empties,
             truncate_cascade_audits_the_tables_it_empties,
             truncate_set_null_audits_the_table_it_changes,
             truncate_skips_reached_tables_without_rows,

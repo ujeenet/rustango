@@ -24,8 +24,7 @@
 //! insert them in multi-row statements sized to the bind limit.
 //!
 //! Audited rows an FK `ON DELETE CASCADE` removes get a `delete` entry
-//! too. Rows changed by `SET NULL` / `SET DEFAULT`, or emptied by PG's
-//! `truncate` (`CASCADE`), are not audited.
+//! too, rows `SET NULL` / `SET DEFAULT` changes an `update` entry.
 
 use serde_json::{Map, Value};
 
@@ -2553,19 +2552,20 @@ pub async fn upsert_returning_on(
     }
 }
 
-/// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`
-/// entry naming it, in one transaction. No per-row PK is known here.
+/// Truncate an audited model's table (`Model::truncate` /
+/// `truncate_cascade`) and write one bulk `Delete` entry naming it, in one
+/// transaction. No per-row PK is known here.
 ///
 /// # Errors
-/// As [`crate::sql::raw_execute_tx`], plus the audit emit.
+/// As [`crate::sql::truncate`], plus the audit emit.
 pub async fn truncate_with_audit(
     pool: &crate::sql::Pool,
     entity_table: &'static str,
-    sql: &str,
+    mode: crate::sql::TruncateMode,
 ) -> Result<u64, crate::sql::ExecError> {
     writing_via(pool, async {
         let mut tx = crate::sql::write_transaction(pool).await?;
-        let affected = crate::sql::truncate_tx(&mut tx, entity_table, sql).await?;
+        let affected = crate::sql::truncate_tx(&mut tx, entity_table, mode).await?;
         let entry = PendingEntry {
             entity_table,
             entity_pk: String::new(),
@@ -2574,7 +2574,9 @@ pub async fn truncate_with_audit(
             changes: serde_json::json!({ "bulk": "truncate" }),
         };
         emit_one_tx(&mut tx, Via::Pool(pool), &entry).await?;
-        tx.commit().await?;
+        tx.commit()
+            .await
+            .map_err(|e| crate::sql::truncate_refusal(entity_table, mode, e.into()))?;
         Ok(affected)
     })
     .await
