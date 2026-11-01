@@ -153,6 +153,7 @@ untouched.
 - `[security] hsts_max_age_secs` keeps the preset's directives: on `relaxed` it no longer adds `includeSubDomains; preload`, and on `dev` it sends a bare `max-age`. Sites that relied on the added `preload` should use `strict` or set the header.
 - A tenant database URL that reaches the registry's own database under another name is refused at create, edit and `migrate-tenant-storage`, and resuming a half-made tenant whose URL now reaches the registry fails; both only warned before. `org_edit::Applied::warning` is gone.
 - Migrating a schema-mode tenant into a schema that already holds tables but no rustango ledger is refused; move the tenant to a schema of its own.
+- `config::CacheSettings` is `#[non_exhaustive]`: build it from `Default` and set fields.
 - `Tenant<Postgres>::conn()` is async and takes the connection on first use: write `t.conn().await?` (it returns `Result<&mut PgConnection, TenancyError>`). `Tenant::for_test_pools` takes `&Arc<TenantPools>`.
 - `Tenant::for_test` and `contenttypes::render_generic_fk_link` are removed; use `Tenant::for_test_pools` / `for_test_sqlite` / `for_test_mysql`, and build links from `ContentType::by_id`.
 - `Cache::touch` has no default: a custom backend implements it without a `get` then `set`.

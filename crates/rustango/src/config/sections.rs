@@ -436,6 +436,7 @@ pub struct TenancySettings {
 /// cache from it; pass it to [`crate::cache::from_settings_async`].
 #[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct CacheSettings {
     /// One of `"memory"` (the default), `"null"` / `"none"`,
     /// `"file"`, `"redis"`, or `"db"` / `"database"`. Note that the
@@ -445,8 +446,7 @@ pub struct CacheSettings {
     /// and cannot build `"redis"` or `"db"`; it panics rather than
     /// swap in another backend. Use `cache::from_settings_async` for
     /// redis, and build the DB backend where the `Pool` is. Any other
-    /// value, including a mis-cased one, logs an error and uses
-    /// `InMemoryCache`.
+    /// value, including a mis-cased one, is refused.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
@@ -454,6 +454,10 @@ pub struct CacheSettings {
     /// key. Required when `backend = "file"`; without it the resolvers
     /// treat the backend as unknown.
     pub file_cache_dir: Option<std::path::PathBuf>,
+    /// One Redis connect attempt, in milliseconds. `None` means 5000.
+    pub redis_connect_timeout_ms: Option<u64>,
+    /// One Redis command, send to reply, in milliseconds. `None` means 2000.
+    pub redis_command_timeout_ms: Option<u64>,
 }
 
 /// Background job runner. User-wired: the framework never reads it;
@@ -1010,6 +1014,8 @@ impl std::fmt::Debug for CacheSettings {
             .field("backend", &self.backend)
             .field("redis_url", &redacted_url(&self.redis_url))
             .field("file_cache_dir", &self.file_cache_dir)
+            .field("redis_connect_timeout_ms", &self.redis_connect_timeout_ms)
+            .field("redis_command_timeout_ms", &self.redis_command_timeout_ms)
             .finish()
     }
 }
