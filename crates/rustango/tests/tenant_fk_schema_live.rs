@@ -495,3 +495,61 @@ async fn citext_in_public_compares_case_insensitively_for_a_tenant() {
     registry.close().await;
     drop(db);
 }
+
+/// An extension in tenant A's schema must not put A's schema on tenant B's
+/// path: B would read A's tables.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn an_extension_in_another_tenants_schema_stays_off_the_path() {
+    let Some((db, registry, pools, a)) =
+        unmigrated_schema_tenant("rustango_textleak", "textleak-a", &[]).await
+    else {
+        return;
+    };
+    let url = db.url().to_owned();
+    run(
+        &pools,
+        &url,
+        &[
+            "create-tenant",
+            "textleak-b",
+            "--mode",
+            "schema",
+            "--no-migrate",
+        ],
+    )
+    .await
+    .unwrap();
+    run(&pools, &url, &["migrate-tenants"]).await.unwrap();
+    let a_pool = pools.scoped_pool_dyn(&a).await.unwrap();
+    let a_name: String = sqlx::query_scalar("SELECT current_schema()::text")
+        .fetch_one(a_pool.as_postgres().unwrap())
+        .await
+        .unwrap();
+    a_pool.close().await;
+    let a_schema = format!("\"{a_name}\"");
+    for sql in [
+        format!("CREATE EXTENSION pg_trgm SCHEMA {a_schema}"),
+        format!("CREATE TABLE {a_schema}.a_secret (id int)"),
+    ] {
+        sqlx::query(&sql).execute(&registry).await.unwrap();
+    }
+    let b = Org::objects()
+        .where_(Org::slug.eq("textleak-b".to_owned()))
+        .fetch(&rustango::sql::Pool::from(registry.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+    let scoped = TenantPools::new(registry.clone())
+        .scoped_pool_dyn(&b)
+        .await
+        .unwrap();
+    let path = show_search_path(&scoped).await;
+    assert!(!path.contains(&a_name), "A's schema on B's path: {path}");
+    let read = rustango::sql::raw_execute_pool(&scoped, "SELECT 1 FROM a_secret", Vec::new()).await;
+    assert!(read.is_err(), "tenant B read tenant A's table");
+    scoped.close().await;
+    drop(pools);
+    registry.close().await;
+    drop(db);
+}

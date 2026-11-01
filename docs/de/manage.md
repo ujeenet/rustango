@@ -1162,8 +1162,9 @@ cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode
 
 Bei mehreren Servern erst deaktivieren (`drop-tenant`) und 30 s warten. Ein
 Server, dessen Tenant-Cache noch einen Schema-Mode-Tenant hält, behält
-seinen Pool; nach dem Löschen des Schemas schlagen seine Abfragen bis zur
-Cache-Auffrischung fehl.
+seinen Pool bis zur Cache-Auffrischung; nach dem Löschen des Schemas schlagen
+seine Abfragen fehl oder lesen `public`, wenn eine Extension (etwa citext)
+`public` in seinem `search_path` hält.
 
 ### `rotate-tenant-password <slug>`
 

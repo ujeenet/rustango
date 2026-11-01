@@ -1196,8 +1196,9 @@ que quoi que ce soit ne change. Voir
 
 Avec plusieurs serveurs, désactivez d'abord (`drop-tenant`) et attendez 30 s.
 Un serveur dont le cache contient encore un tenant en mode schema garde
-son pool ; une fois le schema supprimé, ses requêtes échouent jusqu'au
-rafraîchissement du cache.
+son pool jusqu'au rafraîchissement du cache ; une fois le schema supprimé, ses
+requêtes échouent, ou lisent `public` quand une extension (citext, par exemple)
+garde `public` dans son `search_path`.
 
 ### `rotate-tenant-password <slug>`
 

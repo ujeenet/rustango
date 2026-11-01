@@ -1419,6 +1419,7 @@ impl TenantPools<sqlx::Postgres> {
                 // Statements prepared under another `search_path` keep its
                 // result type: reused here they fail with 0A000.
                 sqlx::Connection::clear_cached_statements(&mut **tc).await?;
+                // One catalog round trip per acquire; caching scoped pools avoids it.
                 let path = TenantSearchPath::resolve(&mut **tc, &schema)
                     .await?
                     .strict()?;
@@ -1541,6 +1542,7 @@ impl TenantPools<sqlx::Postgres> {
             let path = tokio::time::timeout(self.config.database_pool_acquire_timeout, resolve)
                 .await
                 .map_err(|_| sqlx::Error::PoolTimedOut)??
+                .warn_skipped()
                 .strict()?;
             let scoped = self.build_scoped_pool(&path, &registry).await?;
             // On the new pool: it carries the tenant's connect timeout.
@@ -1628,49 +1630,73 @@ pub(crate) struct TenantSearchPath {
     schemas: Vec<String>,
 }
 
-/// A resolved path, not yet checked for tables `public` would serve the tenant.
+/// A resolved path, not yet checked for tenant tables its extra schemas would serve.
 #[cfg(feature = "postgres")]
 #[must_use]
 pub(crate) struct UncheckedPath {
     path: TenantSearchPath,
-    /// Tenant tables in `public` that the tenant's schema lacks.
+    /// `schema.table` for tenant tables an extra schema has and the tenant's lacks.
     shadowed: Vec<String>,
+    /// Extensions left off the path: their schema holds tables, maybe another tenant's.
+    skipped: Vec<String>,
 }
 
+/// The tenant-scoped model tables, walked once per process.
 #[cfg(feature = "postgres")]
-impl TenantSearchPath {
-    /// Read the extension schemas, and the tenant tables only `public` has.
-    pub(crate) async fn resolve<'e, E>(pg: E, schema: &str) -> Result<UncheckedPath, TenancyError>
-    where
-        E: sqlx::PgExecutor<'e>,
-    {
-        let tenant: Vec<String> = inventory::iter::<crate::core::ModelEntry>
+fn tenant_tables() -> &'static [String] {
+    static TABLES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    TABLES.get_or_init(|| {
+        inventory::iter::<crate::core::ModelEntry>
             .into_iter()
             .map(|e| e.schema)
             .filter(|s| s.scope == crate::core::ModelScope::Tenant && s.managed && !s.is_view)
             .map(|s| s.table.to_owned())
-            .collect();
-        let (extension_schemas, shadowed): (Vec<String>, Vec<String>) = sqlx::query_as(
-            "SELECT ARRAY(SELECT DISTINCT n.nspname::text FROM pg_catalog.pg_extension e \
-               JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
-               WHERE n.nspname NOT IN ('pg_catalog', $1) ORDER BY 1), \
-             ARRAY(SELECT c.relname::text FROM pg_catalog.pg_class c \
-               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
-               WHERE n.nspname = 'public' AND c.relname = ANY($2) AND c.relkind IN ('r', 'p') \
-               AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class t \
-                 JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace \
-                 WHERE tn.nspname = $1 AND t.relname = c.relname) \
-               ORDER BY 1)",
-        )
-        .bind(schema)
-        .bind(tenant)
-        .fetch_one(pg)
-        .await?;
+            .collect()
+    })
+}
+
+#[cfg(feature = "postgres")]
+impl TenantSearchPath {
+    /// Read the extension schemas and what they would serve the tenant. Only
+    /// `public` and schemas holding nothing but extension objects qualify, so
+    /// another tenant's schema never joins the path.
+    pub(crate) async fn resolve<'e, E>(pg: E, schema: &str) -> Result<UncheckedPath, TenancyError>
+    where
+        E: sqlx::PgExecutor<'e>,
+    {
+        let (extension_schemas, skipped, shadowed): (Vec<String>, Vec<String>, Vec<String>) =
+            sqlx::query_as(
+                "WITH ext AS (SELECT DISTINCT n.oid, n.nspname::text AS name, \
+                   (n.nspname = 'public' OR NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class c \
+                     WHERE c.relnamespace = n.oid AND c.relkind IN ('r', 'p', 'v', 'm', 'f') \
+                     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d \
+                       WHERE d.classid = 'pg_catalog.pg_class'::pg_catalog.regclass \
+                       AND d.objid = c.oid AND d.deptype = 'e'))) AS ok \
+                   FROM pg_catalog.pg_extension e \
+                   JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace \
+                   WHERE n.nspname NOT IN ('pg_catalog', $1)) \
+                 SELECT ARRAY(SELECT name FROM ext WHERE ok ORDER BY name), \
+                 ARRAY(SELECT e.extname || ' (in ' || ext.name || ')' \
+                   FROM pg_catalog.pg_extension e JOIN ext ON ext.oid = e.extnamespace \
+                   WHERE NOT ext.ok ORDER BY 1), \
+                 ARRAY(SELECT ext.name || '.' || c.relname FROM pg_catalog.pg_class c \
+                   JOIN ext ON ext.oid = c.relnamespace AND ext.ok \
+                   WHERE c.relname = ANY($2) AND c.relkind IN ('r', 'p') \
+                   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_class t \
+                     JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace \
+                     WHERE tn.nspname = $1 AND t.relname = c.relname) \
+                   ORDER BY 1)",
+            )
+            .bind(schema)
+            .bind(tenant_tables())
+            .fetch_one(pg)
+            .await?;
         let mut schemas = vec![schema.to_owned()];
         schemas.extend(extension_schemas);
         Ok(UncheckedPath {
             path: Self { schemas },
             shadowed,
+            skipped,
         })
     }
 
@@ -1702,31 +1728,47 @@ impl TenantSearchPath {
 
 #[cfg(feature = "postgres")]
 impl UncheckedPath {
-    /// Refuse a path whose `public` would serve tenant tables the schema lacks.
+    /// Refuse a path whose extra schemas would serve tenant tables the schema lacks.
     pub(crate) fn strict(self) -> Result<TenantSearchPath, TenancyError> {
-        let tenant = &self.path.schemas[0];
-        if self.shadowed.is_empty() || !self.path.schemas[1..].iter().any(|s| s == "public") {
+        if self.shadowed.is_empty() {
             return Ok(self.path);
         }
         Err(TenancyError::Validation(format!(
-            "tenant schema `{tenant}` lacks {}, which `public` has; an extension in `public` \
-             keeps it on the tenant's search_path, so the tenant would use those shared tables. \
-             Run `migrate-tenants` for it, or move the extensions out of `public`",
+            "tenant schema `{}` lacks tables that its search_path would read from an extension \
+             schema instead: {}. Run `migrate-tenants` for it, or move the extensions to a \
+             schema of their own",
+            self.path.schemas[0],
             self.shadowed.join(", ")
         )))
     }
 
     /// Migrate also gets `public`, where registry FK targets and the citext a
     /// migration installs live; it creates the tenant's tables, then checks.
-    fn before_migrate(mut self) -> TenantSearchPath {
-        if !self.path.schemas.iter().any(|s| s == "public") {
-            self.path.schemas.push("public".to_owned());
+    fn before_migrate(self) -> TenantSearchPath {
+        let mut unchecked = self.warn_skipped();
+        if !unchecked.path.schemas.iter().any(|s| s == "public") {
+            unchecked.path.schemas.push("public".to_owned());
         }
-        self.path
+        unchecked.path
+    }
+
+    /// Warn about [`Self::skipped`]; not per request, only where a pool is built.
+    fn warn_skipped(self) -> Self {
+        if self.skipped.is_empty() {
+            return self;
+        }
+        tracing::warn!(
+            target: "rustango::tenancy::pools",
+            schema = %self.path.schemas[0],
+            extensions = %self.skipped.join(", "),
+            "extensions in a schema that holds tables stay off the tenant's search_path; \
+             move them with `ALTER EXTENSION <name> SET SCHEMA public`",
+        );
+        self
     }
 }
 
-/// When [`connect_schema_scoped`] refuses a `public` fall-through.
+/// When [`connect_schema_scoped`] refuses a fall-through to an extension schema.
 #[cfg(feature = "postgres")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FallThrough {
@@ -1735,7 +1777,7 @@ pub(crate) enum FallThrough {
     CheckAfterMigrate,
 }
 
-/// Err if `public` would still serve `pool`'s tenant a table its schema lacks.
+/// Err if an extension schema would still serve `pool`'s tenant a table its schema lacks.
 #[cfg(feature = "postgres")]
 pub(crate) async fn refuse_public_fallthrough(
     pool: &PgPool,
@@ -1758,11 +1800,15 @@ pub(crate) async fn connect_schema_scoped(
     max: u32,
     check: FallThrough,
 ) -> Result<PgPool, TenancyError> {
-    let mut probe = <sqlx::PgConnection as sqlx::Connection>::connect(registry_url).await?;
-    let resolved = TenantSearchPath::resolve(&mut probe, schema).await;
-    let _ = sqlx::Connection::close(probe).await;
+    // A one-connection pool: its connect is bounded like the pool's below.
+    let probe = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(registry_url)
+        .await?;
+    let resolved = TenantSearchPath::resolve(&probe, schema).await;
+    probe.close().await;
     let path = match check {
-        FallThrough::Refuse => resolved?.strict()?,
+        FallThrough::Refuse => resolved?.warn_skipped().strict()?,
         FallThrough::CheckAfterMigrate => resolved?.before_migrate(),
     };
     let stmt: Arc<str> = Arc::from(path.set_sql());

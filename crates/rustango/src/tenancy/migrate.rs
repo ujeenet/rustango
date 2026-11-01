@@ -1030,7 +1030,18 @@ async fn run_for_one_tenant(
             }
             let applied = run?;
             // Checked after the run: a fresh tenant's tables only exist once it has migrated.
-            super::pools::refuse_public_fallthrough(&pool, &schema).await?;
+            if let Err(e) = super::pools::refuse_public_fallthrough(&pool, &schema).await {
+                pool.close().await;
+                let e = match e {
+                    TenancyError::Validation(why) => why,
+                    other => other.to_string(),
+                };
+                return Err(TenancyError::Validation(format!(
+                    "tenant `{}`: {} migration(s) were applied, but its pool will not open: {e}",
+                    org.slug,
+                    applied.len()
+                )));
+            }
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
