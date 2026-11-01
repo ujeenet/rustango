@@ -48,7 +48,8 @@ async fn build_brand_css_emits_safelisted_assignments() {
     // tests cover this, but echoing it here makes the suite
     // self-explanatory when read in isolation.
     let css = branding::build_op_brand_css(Some("#2c5fb0")).expect("hex roundtrips");
-    assert!(css.starts_with("--color-accent: #2c5fb0"), "got: {css}");
+    assert!(css.contains("--color-link: #2c5fb0"), "got: {css}");
+    assert!(css.contains("--color-accent: #2c5fb0"), "got: {css}");
     assert!(css.contains("--color-accent-hover"));
     assert!(css.contains("--color-accent-bg-soft"));
     assert!(branding::build_op_brand_css(Some("javascript:alert(1)")).is_none());
