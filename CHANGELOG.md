@@ -4,8 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `[server] trusted_proxies` (and `RUSTANGO__SERVER__TRUSTED_PROXIES`) installs the real-IP layer for `Cli` apps; `Cli::with_trusted_proxies` in code wins and an invalid entry stops `run`.
+
 ### Changed
 
+- `ModelForm` locks superuser-only fields unless `acting_superuser(true)` is called; before, a form that never stated the acting user locked nothing.
+- Operator, tenant and impersonation-handoff tokens sign under their own tag (`session::sign_tagged`), so one kind can never verify as another under the shared `RUSTANGO_SESSION_SECRET`. Existing sessions end once.
 - `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
 - An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
 

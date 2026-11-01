@@ -876,6 +876,20 @@ impl Cli {
         // #1609 / #1732 — login limits and the hash-slot wait; code-side config wins.
         apply_login_settings(&s.auth);
 
+        // `[server] trusted_proxies`; an earlier `with_trusted_proxies` wins.
+        if self.real_ip.is_none() && !s.server.trusted_proxies.is_empty() {
+            match crate::real_ip::RealIpLayer::default().trust_proxies(&s.server.trusted_proxies) {
+                Ok(layer) => self.real_ip = Some(layer),
+                Err(e) => {
+                    self.settings_error = Some(crate::config::ConfigError::Shape(
+                        <toml::de::Error as serde::de::Error>::custom(format!(
+                            "[server] trusted_proxies: {e}"
+                        )),
+                    ));
+                }
+            }
+        }
+
         // Stash a clone for `runserver` to apply layered settings
         // (security_headers, CORS, access_log, body_limit) on top
         // of the user's `api` Router. Done at run time rather than
@@ -2756,6 +2770,30 @@ mod tests {
         s.server.bind = Some("127.0.0.1:9090".into());
         let cli = Cli::new().with_settings(&s);
         assert_eq!(cli.bind, "127.0.0.1:9090");
+    }
+
+    /// `[server] trusted_proxies` installs the real-IP layer, a bad entry
+    /// stops `run`, and `with_trusted_proxies` in code wins.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_trusts_the_configured_proxies() {
+        let mut s = crate::config::Settings::default();
+        s.server.trusted_proxies = vec!["10.0.0.0/8".into()];
+        let cli = Cli::new().with_settings(&s);
+        assert!(cli.real_ip.is_some());
+        assert!(cli.boot_settings_error().is_none());
+
+        let code = Cli::new()
+            .with_trusted_proxies(["192.168.0.1"])
+            .unwrap()
+            .with_settings(&s);
+        let peer = std::net::IpAddr::from([192, 168, 0, 1]);
+        assert!(code.real_ip.as_ref().is_some_and(|l| l.trusts(peer)));
+
+        s.server.trusted_proxies = vec!["not-a-cidr".into()];
+        let bad = Cli::new().with_settings(&s);
+        assert!(bad.real_ip.is_none());
+        assert!(bad.boot_settings_error().is_some());
     }
 
     /// `[database] url` reaches the one URL resolver; env vars still win there.

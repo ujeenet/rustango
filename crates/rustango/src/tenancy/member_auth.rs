@@ -58,7 +58,7 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
 use crate::extractors::{Tenant, TenantScope};
-use crate::session::{secure_cookies, sign, PasswordFingerprint, SessionSecret};
+use crate::session::{secure_cookies, PasswordFingerprint, SessionSecret};
 use crate::sql::sqlx::Database;
 use crate::sql::Pool;
 use crate::sso::link::{Account, AccountLookup, EmailLookup, LinkSource, ProviderKey};
@@ -172,8 +172,7 @@ pub enum MemberSessionError {
 pub fn encode(secret: &SessionSecret, payload: &MemberSessionPayload) -> String {
     let json = serde_json::to_vec(payload).expect("payload serializes");
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let msg = [MEMBER_DOMAIN_TAG, b".", payload_b64.as_bytes()].concat();
-    let sig = sign(secret, &msg);
+    let sig = crate::session::sign_tagged(secret, MEMBER_DOMAIN_TAG, payload_b64.as_bytes());
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
     format!("{payload_b64}.{sig_b64}")
 }
@@ -195,8 +194,7 @@ pub fn decode(
     value: &str,
 ) -> Result<MemberSessionPayload, MemberSessionError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(MemberSessionError::Malformed)?;
-    let msg = [MEMBER_DOMAIN_TAG, b".", payload_b64.as_bytes()].concat();
-    let expected = sign(secret, &msg);
+    let expected = crate::session::sign_tagged(secret, MEMBER_DOMAIN_TAG, payload_b64.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(sig_b64)
         .map_err(|_| MemberSessionError::Malformed)?;

@@ -175,7 +175,7 @@ impl RealIpLayer {
     }
 
     /// Whether `peer` is a proxy whose forwarding headers we believe.
-    fn trusts(&self, peer: IpAddr) -> bool {
+    pub(crate) fn trusts(&self, peer: IpAddr) -> bool {
         self.trusted_proxies
             .as_ref()
             .is_some_and(|nets| nets.iter().any(|n| n.contains(peer)))

@@ -27,8 +27,11 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use super::session::{sign, SessionError};
+use super::session::SessionError;
 pub use super::session::{PasswordFingerprint, SessionSecret};
+
+/// Signature domain of this token kind: it never verifies as another kind.
+const TENANT_DOMAIN_TAG: &[u8] = b"rustango-tenant-session-v1";
 
 /// Default tenant cookie name. Distinct from the operator console's
 /// `rustango_op_session` so the two never collide on a host that
@@ -156,7 +159,7 @@ impl TenantSessionPayload {
 pub fn encode(secret: &SessionSecret, payload: &TenantSessionPayload) -> String {
     let json = serde_json::to_vec(payload).expect("payload serializes");
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = sign(secret, payload_b64.as_bytes());
+    let sig = crate::session::sign_tagged(secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
     format!("{payload_b64}.{sig_b64}")
 }
@@ -178,7 +181,7 @@ pub fn decode(
     value: &str,
 ) -> Result<TenantSessionPayload, SessionError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(SessionError::Malformed)?;
-    let expected = sign(secret, payload_b64.as_bytes());
+    let expected = crate::session::sign_tagged(secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(sig_b64)
         .map_err(|_| SessionError::Malformed)?;
@@ -205,6 +208,31 @@ mod tests {
 
     fn key() -> SessionSecret {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
+    }
+
+    /// An operator cookie, handoff token or untagged signature over a
+    /// tenant-shaped payload is refused under the same key.
+    #[test]
+    fn a_token_of_another_kind_is_refused() {
+        use base64::Engine;
+        let secret = key();
+        let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        let tags: [&[u8]; 2] = [
+            b"rustango-operator-session-v1",
+            b"rustango-impersonation-handoff-v1",
+        ];
+        let sigs = tags
+            .iter()
+            .map(|t| crate::session::sign_tagged(&secret, t, b64.as_bytes()))
+            .chain([crate::session::sign(&secret, b64.as_bytes())]);
+        for sig in sigs {
+            let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+            assert!(matches!(
+                decode(&secret, "acme", &format!("{b64}.{sig_b64}")),
+                Err(SessionError::BadSignature)
+            ));
+        }
     }
 
     fn fp() -> PasswordFingerprint {
@@ -279,7 +307,7 @@ mod tests {
         let secret = key();
         let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-        let sig = sign(&secret, payload_b64.as_bytes());
+        let sig = crate::session::sign_tagged(&secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         let cookie = format!("{payload_b64}.{sig_b64}");
         let back = decode(&secret, "acme", &cookie).unwrap();
@@ -340,7 +368,7 @@ mod tests {
         let secret = key();
         let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-        let sig = sign(&secret, payload_b64.as_bytes());
+        let sig = crate::session::sign_tagged(&secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         let cookie = format!("{payload_b64}.{sig_b64}");
         let p = decode(&secret, "acme", &cookie).expect("legacy cookie still parses");
