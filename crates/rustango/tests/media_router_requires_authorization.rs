@@ -458,7 +458,8 @@ async fn the_whole_route_table_reaches_the_gate_correctly() {
             "/media/7/move",
             "Change(MediaMove { id: 7, collection_id: None })",
         ),
-        ("POST", "/media/7/tags", "Change(Media(7))"),
+        // A new slug creates a tag, so the gate also asks about that.
+        ("POST", "/media/7/tags", "[Change(Media(7)), Add(NewTag)]"),
         ("DELETE", "/media/7/tags/blue", "Change(Media(7))"),
         (
             "POST",
@@ -1820,4 +1821,46 @@ async fn the_tag_listing_route_does_not_query_per_row() {
         assert_eq!(resp.status(), StatusCode::OK, "control: the page is served");
     })
     .await;
+}
+
+/// May edit media but not create tags.
+struct MayChangeMedia;
+
+#[async_trait::async_trait]
+impl MediaAuthorizer for MayChangeMedia {
+    async fn authorize(
+        &self,
+        _: &axum::http::request::Parts,
+        action: MediaAction,
+    ) -> MediaDecision {
+        matches!(action, MediaAction::Change(MediaTarget::Media(_))).into()
+    }
+}
+
+/// Replacing a media row's tags with an existing slug needs only
+/// `Change(Media)`; a new slug creates a tag, so it needs `Add(NewTag)`.
+#[tokio::test]
+async fn setting_tags_creates_none_without_add_new_tag() {
+    let mgr = manager().await;
+    let id = seed(&mgr).await;
+    mgr.ensure_tag("known").await.unwrap();
+    let app = media_router_with(mgr.clone(), MayChangeMedia);
+    let post = |slugs: &str| {
+        Request::post(format!("/media/{id}/tags"))
+            .header("content-type", "application/json")
+            .body(Body::from(format!(r#"{{"slugs":{slugs}}}"#)))
+            .unwrap()
+    };
+    let resp = app.clone().oneshot(post(r#"["known"]"#)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    let resp = app.oneshot(post(r#"["known","fresh"]"#)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let slugs: Vec<String> = mgr
+        .list_tags(100, 0)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.slug)
+        .collect();
+    assert_eq!(slugs, ["known"], "no tag was created");
 }

@@ -933,8 +933,25 @@ async fn send_to_list(
 /// `smtp_host`, a bad `from_address` or `smtp_tls`, or no `email-smtp`
 /// feature; also for `file` without `file_email_dir` or an unknown
 /// backend. Falling back to the console put reset links in logs (#1923).
+/// On the prod tier an unset backend is an error too; `console` must be
+/// named.
 #[cfg(feature = "config")]
 pub fn from_settings(s: &crate::config::MailSettings) -> Result<BoxedMailer, MailError> {
+    from_settings_on_tier(s, &crate::env::tier_from_env())
+}
+
+#[cfg(feature = "config")]
+fn from_settings_on_tier(
+    s: &crate::config::MailSettings,
+    tier: &str,
+) -> Result<BoxedMailer, MailError> {
+    if s.backend.is_none() && crate::env::is_prod_tier(tier) {
+        return Err(MailError::Config(
+            "[mail].backend is unset on the prod tier; the console default prints \
+             password-reset links to the log, so name the backend"
+                .into(),
+        ));
+    }
     Ok(match s.backend.as_deref() {
         Some("smtp") => smtp_from_settings(s)?,
         Some("memory") => Arc::new(InMemoryMailer::new()),
@@ -1301,13 +1318,26 @@ mod tests {
     #[tokio::test]
     async fn from_settings_unset_falls_back_to_console() {
         let s = crate::config::MailSettings::default();
-        let m = from_settings(&s).expect("mailer");
+        let m = from_settings_on_tier(&s, "dev").expect("mailer");
         let email = Email::new()
             .to("a@x.com")
             .from("noreply@x.com")
             .subject("hi")
             .body("body");
         m.send(&email).await.expect("console mailer ok");
+    }
+
+    /// On the prod tier an unset backend is refused; a named `console` is not.
+    #[cfg(feature = "config")]
+    #[test]
+    fn prod_refuses_an_unset_backend() {
+        let mut s = crate::config::MailSettings::default();
+        assert!(matches!(
+            from_settings_on_tier(&s, "prod"),
+            Err(MailError::Config(_))
+        ));
+        s.backend = Some("console".into());
+        assert!(from_settings_on_tier(&s, "prod").is_ok());
     }
 
     /// `smtp` with a host builds a mailer; no contact is made.

@@ -154,6 +154,14 @@ untouched.
 - `Tenant::for_test` and `contenttypes::render_generic_fk_link` are removed; use `Tenant::for_test_pools` / `for_test_sqlite` / `for_test_mysql`, and build links from `ContentType::by_id`.
 - `Cache::touch` has no default: a custom backend implements it without a `get` then `set`.
 - Every public `*Error` enum is `#[non_exhaustive]`: add a `_ =>` arm to matches. `AdminError` gains `BadRequest` and `Conflict`; `admin::InlineApplyOutcome` is removed.
+- `SslRedirectLayer::exempt` matches whole path segments: `/health` no longer exempts `/healthz`. List each probe path.
+- `POST /media/{id}/tags` with a slug that is not stored yet also needs `Add(NewTag)` (`rustango_media_tags.add` under `MediaPerms`).
+- On the prod tier `email::from_settings` refuses an unset `[mail].backend`; set it (`console` still works when named).
+- `cache::from_settings` panics, and `from_settings_async` errors, on an unknown or mis-cased `[cache].backend` or `file` without `file_cache_dir`, instead of using a per-process cache.
+- `DynamicForm` `url` fields take http(s) only and `email` fields must be a deliverable address; both used to accept other values with a warning.
+- An admin custom view whose suffix shadows a built-in route (`{id}`, `{id}/edit`, ...) is skipped; rename its suffix.
+- `ViewSet::cursor_pagination` on a nullable column panics at build time.
+- `#[derive(Model)]` index or `get_latest_by` names that are no column, and unknown `#[rustango::main]` arguments (tokio's included), are compile errors.
 - `ModelForm` locks the admin's superuser-only fields by default. A form that should write them, for a superuser or a trusted job, calls `.acting_superuser(true)`.
 - `config::ServerSettings` is `#[non_exhaustive]`: build it from `Default` and set fields, not with a struct literal.
 - Operator console cookies, tenant admin cookies and impersonation handoff tokens are signed under a per-kind tag. Every existing operator and tenant session ends once on upgrade; users sign in again.

@@ -1488,6 +1488,18 @@ impl MediaManager {
         Ok(tag_ids_of(&self.tags_by_slug(&slugs).await?))
     }
 
+    /// Whether any of `slugs` names no stored tag yet. More than
+    /// [`MAX_TAGS_PER_CALL`] slugs answer `false`: tagging refuses them anyway.
+    pub(crate) async fn names_new_tag(&self, slugs: &[&str]) -> Result<bool, MediaError> {
+        let mut slugs = slugs.to_vec();
+        slugs.sort_unstable();
+        slugs.dedup();
+        if slugs.is_empty() || slugs.len() > MAX_TAGS_PER_CALL {
+            return Ok(false);
+        }
+        Ok(self.tags_by_slug(&slugs).await?.len() < slugs.len())
+    }
+
     /// Tags whose slug is in `slugs` (at most [`MAX_TAGS_PER_CALL`]).
     async fn tags_by_slug(&self, slugs: &[&str]) -> Result<Vec<MediaTag>, MediaError> {
         use crate::sql::FetcherPool as _;

@@ -21,16 +21,15 @@
 //!
 //! ## Exempt paths
 //!
-//! [`SslRedirectLayer::exempt`] takes path prefixes. A request whose
-//! path starts with one of them is not redirected. This suits health
-//! checks reached over plain HTTP. By default nothing is exempt.
-//! A match inside a segment (`/health` for `/healthz`) logs a warning:
-//! a later release matches whole segments only.
+//! [`SslRedirectLayer::exempt`] takes path prefixes, matched on whole
+//! segments: `/health` exempts `/health` and `/health/db`, not
+//! `/healthz`. This suits health checks reached over plain HTTP. By
+//! default nothing is exempt.
 //!
 //! [`SslRedirectLayer::exempt`]: crate::ssl_redirect::SslRedirectLayer::exempt
 //! [`SslRedirectLayer::proxy_ssl_header`]: crate::ssl_redirect::SslRedirectLayer::proxy_ssl_header
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -48,8 +47,6 @@ pub struct SslRedirectLayer {
     proxy_ssl_header: Option<(HeaderName, HeaderValue)>,
     /// Path prefixes that skip the redirect. Include the leading `/`.
     exempt: Vec<String>,
-    /// Prefixes already warned about a mid-segment match; shared by clones.
-    warned: Arc<Mutex<Vec<String>>>,
     /// `/health` and `/ready` pass: probes come over plain HTTP.
     probes_exempt: bool,
 }
@@ -69,7 +66,6 @@ impl SslRedirectLayer {
         Self {
             proxy_ssl_header: None,
             exempt: Vec::new(),
-            warned: Arc::default(),
             probes_exempt: false,
         }
     }
@@ -136,35 +132,13 @@ impl SslRedirectLayer {
         false
     }
 
-    /// `true` when the request path starts with any exempt prefix.
+    /// `true` when the request path is an exempt prefix or under one,
+    /// segment by segment.
     #[must_use]
     pub fn is_exempt(&self, path: &str) -> bool {
-        let Some(p) = self.exempt.iter().find(|p| path.starts_with(p.as_str())) else {
-            return false;
-        };
-        if !self
-            .exempt
+        self.exempt
             .iter()
             .any(|p| crate::urls::path_under_prefix(path, p))
-        {
-            self.warn_mid_segment(p, path);
-        }
-        true
-    }
-
-    /// Once per prefix: this match stops working when exempt goes segment-only.
-    fn warn_mid_segment(&self, prefix: &str, path: &str) {
-        let mut warned = self.warned.lock().unwrap_or_else(|e| e.into_inner());
-        if warned.iter().any(|w| w == prefix) {
-            return;
-        }
-        warned.push(prefix.to_owned());
-        tracing::warn!(
-            prefix,
-            path,
-            "SSL-redirect exempt prefix matched mid-segment; a later release \
-             matches whole path segments only, so list this path explicitly"
-        );
     }
 }
 
@@ -270,20 +244,14 @@ mod tests {
         assert!(!layer.is_exempt("/api/users"));
     }
 
-    /// A mid-segment match (`/health` → `/healthz`) still exempts in 0.61,
-    /// and warns once per prefix.
+    /// A prefix exempts whole segments only: `/health` is not `/healthz`.
     #[test]
-    fn a_mid_segment_match_still_exempts_and_warns_once() {
+    fn a_mid_segment_match_does_not_exempt() {
         let layer = SslRedirectLayer::new().exempt(["/health", "/static/"]);
-        assert!(layer.is_exempt("/healthz"));
-        assert!(layer.is_exempt("/health-check"));
+        assert!(!layer.is_exempt("/healthz"));
+        assert!(!layer.is_exempt("/health-check"));
         assert!(layer.is_exempt("/static/app.js"));
         assert!(!layer.is_exempt("/staticfoo"));
-        assert_eq!(*layer.warned.lock().unwrap(), ["/health".to_owned()]);
-        // A clone shares the record, so a cloned layer does not warn again.
-        let copy = layer.clone();
-        assert!(copy.is_exempt("/healthz"));
-        assert_eq!(layer.warned.lock().unwrap().len(), 1);
     }
 
     #[test]

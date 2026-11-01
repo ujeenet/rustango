@@ -337,7 +337,6 @@ enum SettingsBackend<'a> {
 
 /// Parse `[cache]`. An unknown name or `file` without a directory is an
 /// error: an in-memory stand-in drops what a shared cache guarantees.
-/// Both resolvers still fall back for now, logging at `error`.
 #[cfg(feature = "config")]
 fn settings_backend(s: &crate::config::CacheSettings) -> Result<SettingsBackend<'_>, CacheError> {
     Ok(match s.backend.as_deref() {
@@ -377,9 +376,8 @@ fn settings_backend(s: &crate::config::CacheSettings) -> Result<SettingsBackend<
 /// [`from_settings_async`] for redis, and build the DB backend where
 /// the `Pool` is.
 ///
-/// An unknown or mis-cased name, or `file` without `file_cache_dir`,
-/// logs an error and gives an [`InMemoryCache`]. A later minor release
-/// will refuse them.
+/// Also on an unknown or mis-cased name, or `file` without
+/// `file_cache_dir`.
 ///
 /// ```ignore
 /// let cfg = rustango::config::Settings::load_from_env()?;
@@ -390,15 +388,9 @@ fn settings_backend(s: &crate::config::CacheSettings) -> Result<SettingsBackend<
 #[must_use]
 pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
     match settings_backend(s) {
-        // Kept a fallback so an app that booted before keeps booting.
-        Err(e) => {
-            tracing::error!(
-                target: "rustango::cache",
-                error = %e,
-                "falling back to a per-process InMemoryCache; replicas will not share it",
-            );
-            Arc::new(InMemoryCache::new())
-        }
+        // Like `redis` and `db` below: a per-process stand-in would void
+        // every protection that needs a shared cache.
+        Err(e) => panic!("{e}; fix [cache] or use `from_settings_async`, which returns it"),
         // `redis` and `db` need to connect, so this sync resolver
         // cannot build either. Panic rather than pretend: silently
         // handing back a per-process cache voids every protection that
@@ -449,9 +441,8 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
 ///
 /// # Errors
 /// Returns [`CacheError`] when the configured backend cannot be built:
-/// an unreachable Redis, a missing `redis_url`, or `db`. An unknown name
-/// or `file` without `file_cache_dir` logs an error and falls back, as
-/// in [`from_settings`].
+/// an unreachable Redis, a missing `redis_url`, `db`, an unknown name, or
+/// `file` without `file_cache_dir`.
 #[cfg(feature = "config")]
 pub async fn from_settings_async(
     s: &crate::config::CacheSettings,
@@ -485,9 +476,9 @@ pub async fn from_settings_async(
              a runtime `&Pool`. Build it where the pool exists and pass the Arc directly."
                 .into(),
         )),
-        // Everything else builds synchronously and behaves the same; a
-        // bad value logs and falls back there, so a patch never stops boot.
-        _ => Ok(from_settings(s)),
+        Err(e) => Err(e),
+        // Everything else builds synchronously.
+        Ok(_) => Ok(from_settings(s)),
     }
 }
 
@@ -1758,64 +1749,39 @@ mod settings_tests {
         assert!(cache.get("k").await.unwrap().is_none());
     }
 
-    /// An unknown name still gives a working cache, but logs an error
-    /// naming the value.
-    #[cfg(feature = "runtime")]
-    #[tokio::test]
-    async fn unknown_backend_logs_an_error_and_falls_back() {
-        let buf = crate::testkit::CaptureWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_ansi(false)
-            .finish();
-        let mut caches = Vec::new();
-        tracing::subscriber::with_default(subscriber, || {
-            for (backend, dir) in [("Redis", None), ("file", None::<std::path::PathBuf>)] {
-                let s = crate::config::CacheSettings {
-                    backend: Some(backend.into()),
-                    redis_url: Some("redis://user:hunter2@cache.test".into()),
-                    file_cache_dir: dir,
-                };
-                caches.push(from_settings(&s));
-            }
-        });
-        let out = buf.contents();
-        assert!(out.contains("ERROR"), "{out}");
-        assert!(out.contains("unknown cache.backend `Redis`"), "{out}");
-        assert!(out.contains("file_cache_dir is unset"), "{out}");
-        assert!(!out.contains("hunter2"), "{out}");
-        for cache in caches {
-            cache.set("k", "v", None).await.unwrap();
-            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
-        }
+    /// An unknown name or `file` without a directory is refused by the
+    /// sync resolver, never swapped for a per-process cache.
+    #[test]
+    #[should_panic(expected = "unknown cache.backend `Redis`")]
+    fn an_unknown_backend_refuses_the_sync_resolver() {
+        let s = crate::config::CacheSettings {
+            backend: Some("Redis".into()),
+            ..Default::default()
+        };
+        let _ = from_settings(&s);
     }
 
-    /// The async resolver logs and falls back the same way; it must not
-    /// stop an app that booted on an earlier patch.
-    #[cfg(feature = "runtime")]
-    #[tokio::test(flavor = "current_thread")]
-    async fn async_resolver_logs_unknown_and_incomplete_backends_and_falls_back() {
-        let buf = crate::testkit::CaptureWriter::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(buf.clone())
-            .with_ansi(false)
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
-        for backend in ["Redis", "typo", "file"] {
+    /// The async resolver returns the same refusals as errors, and the
+    /// message never carries the Redis password.
+    #[tokio::test]
+    async fn async_resolver_refuses_unknown_and_incomplete_backends() {
+        for (backend, want) in [
+            ("Redis", "unknown cache.backend `Redis`"),
+            ("typo", "unknown cache.backend `typo`"),
+            ("file", "file_cache_dir is unset"),
+        ] {
             let s = crate::config::CacheSettings {
                 backend: Some(backend.into()),
-                ..Default::default()
+                redis_url: Some("redis://user:hunter2@cache.test".into()),
+                file_cache_dir: None,
             };
-            let Ok(cache) = from_settings_async(&s).await else {
-                panic!("`{backend}` must fall back, not fail");
+            let Err(e) = from_settings_async(&s).await else {
+                panic!("`{backend}` must be refused");
             };
-            cache.set("k", "v", None).await.unwrap();
-            assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+            let msg = e.to_string();
+            assert!(msg.contains(want), "{msg}");
+            assert!(!msg.contains("hunter2"), "{msg}");
         }
-        let out = buf.contents();
-        assert!(out.contains("unknown cache.backend `Redis`"), "{out}");
-        assert!(out.contains("unknown cache.backend `typo`"), "{out}");
-        assert!(out.contains("file_cache_dir is unset"), "{out}");
     }
 
     /// The sync resolver must refuse `redis`, not hand back an

@@ -125,7 +125,6 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email_jobs` | Two queues on one jobs table given different mailers |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::errors` | An error-page template that failed to render, or a template dir that did not load |
-| `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
 | `rustango::auth` | Permission checks that failed on a database error |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
 | `rustango::aead` | A blank previous secret key, or a dev secret key that cannot be saved |

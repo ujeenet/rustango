@@ -1283,16 +1283,16 @@ fn mount_custom_views(
                 );
                 continue;
             }
-            // Still mounted: an app may rely on its view winning. A later
-            // release skips it like a reserved suffix.
-            Some(super::custom_views::Clash::Shadows(built_in)) => tracing::warn!(
-                target: "rustango::admin",
-                table = %view.table,
-                suffix = %view.suffix,
-                built_in = %built_in,
-                "custom admin view shadows a built-in admin route — rename its suffix; \
-                 a future release will skip it"
-            ),
+            Some(super::custom_views::Clash::Shadows(built_in)) => {
+                tracing::warn!(
+                    target: "rustango::admin",
+                    table = %view.table,
+                    suffix = %view.suffix,
+                    built_in = %built_in,
+                    "custom admin view shadows a built-in admin route — skipping; rename its suffix"
+                );
+                continue;
+            }
             None => {}
         }
         // A hidden table, registry ones on a tenant admin included,
