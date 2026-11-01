@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- `PoolTx` is a struct: match `tx.conn()` (a `#[non_exhaustive]` `TxConn`) instead of the tx. Before: `match &mut tx { PoolTx::Postgres(t) => … }`. After: `match tx.conn() { TxConn::Postgres(t) => …, _ => … }`.
+- Migrate signal receivers read `ctx.pool` and `ctx.tenant`; build contexts with `PreMigrateContext::new` / `PostMigrateContext::new`. Before: `connect_post_migrate_with_target(|ctx, t| … t.pool …)`. After: `connect_post_migrate(|ctx| … ctx.pool …)`.
 - `LinkTarget::audience` and `LinkScope::audience` take a `rustango::auth_flows::SingleDb`, so a tenant pool or handler cannot use an unbound scope by mistake: `LinkTarget::audience(&pool, "app")` becomes `LinkTarget::audience(SingleDb::new(&pool), "app")`, and `LinkScope::audience("app")` becomes `LinkScope::audience(SingleDb::new(&pool), "app")`. Multi-tenant apps use `LinkScope::from(&tenant)` and `LinkTarget::from(&tenant)`.
 - On Postgres `Model::truncate` no longer cascades or restarts ids: it fails while `RESTRICT` / `NO ACTION` rows point at the table. Call `Model::truncate_cascade` (or `sql::truncate_cascade`) to empty them too. `sql::truncate_sql` is gone; `audit::truncate_with_audit` takes a `TruncateMode`.
 - A schema-mode tenant whose schema has a database role's name is refused when its pool opens (requests and `migrate-tenants`); `check --deploy` lists it as an error. Rename the role or move the tenant to another schema before upgrading.

@@ -338,19 +338,12 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
     // (#1208) — they were unconditional while the module is not.
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
-        PostMigrateContext, PreMigrateContext,
+        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    let target = MigrateTarget::new(crate::sql::Pool::Postgres(pool.clone()), None);
+    let target = crate::sql::Pool::Postgres(pool.clone());
     #[cfg(feature = "signals")]
-    send_pre_migrate_with_target(
-        PreMigrateContext {
-            source: "apply_all",
-        },
-        target.clone(),
-    )
-    .await;
+    send_pre_migrate(PreMigrateContext::new("apply_all", target.clone(), None)).await;
     let models = bootstrap_models();
 
     for model in &models {
@@ -366,13 +359,12 @@ pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
     // #411 — post_migrate fires once after the bootstrap walk
     // completes successfully.
     #[cfg(feature = "signals")]
-    send_post_migrate_with_target(
-        PostMigrateContext {
-            source: "apply_all",
-            applied: Vec::new(),
-        },
+    send_post_migrate(PostMigrateContext::new(
+        "apply_all",
+        Vec::new(),
         target,
-    )
+        None,
+    ))
     .await;
     Ok(())
 }
@@ -412,17 +404,10 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     }
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
-        PostMigrateContext, PreMigrateContext,
+        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    send_pre_migrate_with_target(
-        PreMigrateContext {
-            source: "apply_all_pool",
-        },
-        MigrateTarget::new(pool.clone(), None),
-    )
-    .await;
+    send_pre_migrate(PreMigrateContext::new("apply_all_pool", pool.clone(), None)).await;
     let dialect = pool.dialect();
     let models = bootstrap_models();
     if let Some(sql) = ddl::ci_text_extension_sql(dialect, &models) {
@@ -458,13 +443,12 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     // completes. `applied` is empty because apply_all_pool doesn't
     // carry per-migration names — it walks the model inventory.
     #[cfg(feature = "signals")]
-    send_post_migrate_with_target(
-        PostMigrateContext {
-            source: "apply_all_pool",
-            applied: Vec::new(),
-        },
-        MigrateTarget::new(pool.clone(), None),
-    )
+    send_post_migrate(PostMigrateContext::new(
+        "apply_all_pool",
+        Vec::new(),
+        pool.clone(),
+        None,
+    ))
     .await;
     Ok(())
 }
@@ -602,27 +586,30 @@ pub(crate) async fn with_migrate_signals<T>(
 ) -> Result<T, MigrateError> {
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
-        PostMigrateContext, PreMigrateContext,
+        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    let target = MigrateTarget::new(pool.clone(), tenant.map(str::to_owned));
+    let tenant = tenant.map(str::to_owned);
     #[cfg(not(feature = "signals"))]
     let _ = (pool, tenant);
     #[cfg(feature = "signals")]
-    send_pre_migrate_with_target(PreMigrateContext { source: "migrate" }, target.clone()).await;
+    send_pre_migrate(PreMigrateContext::new(
+        "migrate",
+        pool.clone(),
+        tenant.clone(),
+    ))
+    .await;
     let out = run.await?;
     // #411 — post_migrate fires once after the file-based migrate
     // session completes. `applied` lists newly-applied migration
     // names (empty when everything was already applied).
     #[cfg(feature = "signals")]
-    send_post_migrate_with_target(
-        PostMigrateContext {
-            source: "migrate",
-            applied: applied(&out),
-        },
-        target,
-    )
+    send_post_migrate(PostMigrateContext::new(
+        "migrate",
+        applied(&out),
+        pool.clone(),
+        tenant,
+    ))
     .await;
     #[cfg(not(feature = "signals"))]
     let _ = applied;

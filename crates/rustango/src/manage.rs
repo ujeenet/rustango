@@ -2494,21 +2494,20 @@ mod tests {
         let pool = crate::sql::Pool::connect(&url).await.expect("connect");
         // Receivers are global: record only runs on this test's database.
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let ours = move |t: &sig::MigrateTarget| {
-            t.pool
-                .as_sqlite()
+        let ours = move |pool: &crate::sql::Pool| {
+            pool.as_sqlite()
                 .is_some_and(|p| p.connect_options().get_filename() == db.as_path())
         };
         let (pre_seen, pre_ours) = (seen.clone(), ours.clone());
-        let pre = sig::connect_pre_migrate_with_target(move |_, t| {
-            if pre_ours(&t) {
+        let pre = sig::connect_pre_migrate(move |ctx| {
+            if pre_ours(&ctx.pool) {
                 pre_seen.lock().unwrap().push("pre");
             }
             async {}
         });
         let post_seen = seen.clone();
-        let post = sig::connect_post_migrate_with_target(move |_, t| {
-            if ours(&t) {
+        let post = sig::connect_post_migrate(move |ctx| {
+            if ours(&ctx.pool) {
                 post_seen.lock().unwrap().push("post");
             }
             async {}

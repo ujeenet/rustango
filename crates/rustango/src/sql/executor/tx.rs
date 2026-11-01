@@ -1,4 +1,4 @@
-//! `PoolTx` enum + `transaction_pool` user-facing helper.
+//! `PoolTx` + `transaction_pool` user-facing helper.
 //!
 //! Extracted from `executor/mod.rs` as part of #116 step 4. The per-
 //! backend `*_tx` operations (`insert_tx`, `update_tx`, …) and
@@ -6,7 +6,7 @@
 //! and will move into `pool/tx`-shaped modules in a later step.
 
 use super::{Dialect, ExecError};
-use crate::sql::Pool;
+use crate::sql::{Pool, PoolId};
 
 // ====================================================================
 // `transaction_pool` — user-facing bi-dialect transaction helper
@@ -14,7 +14,7 @@ use crate::sql::Pool;
 //
 // Wraps a closure in a per-backend `BEGIN`/`COMMIT`/`ROLLBACK`. Same
 // shape as the existing PgPool [`transaction`] helper, but the
-// closure receives a backend-tagged enum the caller pattern-matches
+// closure receives a `PoolTx` whose `TxConn` the caller pattern-matches
 // to get a typed connection. sqlx's `Transaction<DB>` is generic over
 // backend, so we can't hand callers a single "any-DB" transaction
 // handle without erasing the bind types — exposing the per-arm enum
@@ -22,14 +22,19 @@ use crate::sql::Pool;
 // avoids surprise driver mismatches.
 
 /// A transaction handle borrowed from one of [`Pool`]'s backend arms.
-/// Yielded by [`transaction_pool`]'s closure so callers run their
-/// queries against the right driver-typed connection.
+/// Yielded by [`transaction_pool`] so callers run their queries against
+/// the right driver-typed connection, reached through [`Self::conn`].
 ///
-/// In practice users `match` on the variant and call sqlx-style
-/// `.execute(&mut **tx)` against the inner connection. Mixing the
-/// two arms in one closure body is fine — Rust ensures the closure
-/// runs in exactly one arm per pool variant.
-pub enum PoolTx<'a> {
+/// It remembers the pool it was opened on, so audit rows written in it
+/// keep a tenant-bound source on that tenant's pool.
+pub struct PoolTx<'a> {
+    pub(crate) conn: TxConn<'a>,
+    pool: Option<PoolId>,
+}
+
+/// The driver-typed transaction inside a [`PoolTx`].
+#[non_exhaustive]
+pub enum TxConn<'a> {
     #[cfg(feature = "postgres")]
     Postgres(sqlx::Transaction<'a, sqlx::Postgres>),
     #[cfg(feature = "mysql")]
@@ -39,18 +44,36 @@ pub enum PoolTx<'a> {
 }
 
 impl<'a> PoolTx<'a> {
+    /// `conn` opened on `pool`; `None` when the pool is unknown.
+    pub(crate) fn new(conn: TxConn<'a>, pool: Option<&Pool>) -> Self {
+        Self {
+            conn,
+            pool: pool.map(PoolId::of),
+        }
+    }
+
+    /// The driver-typed transaction, to run sqlx queries on.
+    pub fn conn(&mut self) -> &mut TxConn<'a> {
+        &mut self.conn
+    }
+
+    /// The pool this transaction was opened on, when known.
+    pub(crate) fn pool_id(&self) -> Option<&PoolId> {
+        self.pool.as_ref()
+    }
+
     /// Commit this transaction. Consumes the wrapper.
     ///
     /// # Errors
     /// `sqlx::Error` from the underlying `COMMIT`.
     pub async fn commit(self) -> Result<(), sqlx::Error> {
-        match self {
+        match self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(tx) => tx.commit().await,
+            TxConn::Postgres(tx) => tx.commit().await,
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(tx) => tx.commit().await,
+            TxConn::Mysql(tx) => tx.commit().await,
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(tx) => tx.commit().await,
+            TxConn::Sqlite(tx) => tx.commit().await,
         }
     }
 
@@ -61,13 +84,13 @@ impl<'a> PoolTx<'a> {
     /// # Errors
     /// `sqlx::Error` from the underlying `ROLLBACK`.
     pub async fn rollback(self) -> Result<(), sqlx::Error> {
-        match self {
+        match self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(tx) => tx.rollback().await,
+            TxConn::Postgres(tx) => tx.rollback().await,
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(tx) => tx.rollback().await,
+            TxConn::Mysql(tx) => tx.rollback().await,
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(tx) => tx.rollback().await,
+            TxConn::Sqlite(tx) => tx.rollback().await,
         }
     }
 
@@ -75,13 +98,13 @@ impl<'a> PoolTx<'a> {
     /// as a prepared statement (error 1295).
     pub(crate) async fn execute_unprepared(&mut self, sql: &str) -> Result<(), sqlx::Error> {
         use sqlx::Executor as _;
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            TxConn::Postgres(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            TxConn::Mysql(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
+            TxConn::Sqlite(tx) => (&mut **tx).execute(sqlx::raw_sql(sql)).await.map(drop),
         }
     }
 
@@ -91,11 +114,11 @@ impl<'a> PoolTx<'a> {
     /// autocommit). Two round trips on MySQL, one on PG; SQLite reports
     /// its rollbacks through [`Self::on_sqlite_rollback`] instead.
     pub(crate) async fn still_open(&mut self) -> bool {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(_) => self.execute_unprepared("SELECT 1").await.is_ok(),
+            TxConn::Postgres(_) => self.execute_unprepared("SELECT 1").await.is_ok(),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(tx) => {
+            TxConn::Mysql(tx) => {
                 // sqlx checks the server's in-transaction flag after its
                 // SAVEPOINT; MySQL has no `@@in_transaction` to read.
                 use sqlx::Connection as _;
@@ -105,7 +128,7 @@ impl<'a> PoolTx<'a> {
                 }
             }
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(_) => true,
+            TxConn::Sqlite(_) => true,
         }
     }
 
@@ -115,9 +138,9 @@ impl<'a> PoolTx<'a> {
         &mut self,
         f: impl FnMut() + Send + 'static,
     ) -> Result<(), sqlx::Error> {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(tx) => {
+            TxConn::Sqlite(tx) => {
                 (**tx).lock_handle().await?.set_rollback_hook(f);
                 Ok(())
             }
@@ -133,7 +156,7 @@ impl<'a> PoolTx<'a> {
     pub(crate) async fn clear_sqlite_rollback(&mut self) {
         #[cfg(feature = "sqlite")]
         #[allow(irrefutable_let_patterns)]
-        if let PoolTx::Sqlite(tx) = self {
+        if let TxConn::Sqlite(tx) = &mut self.conn {
             if let Ok(mut h) = (**tx).lock_handle().await {
                 h.remove_rollback_hook();
             }
@@ -146,13 +169,13 @@ impl<'a> PoolTx<'a> {
     /// `_tx` executor helpers to compile SQL against the right backend.
     #[must_use]
     pub fn dialect(&self) -> &'static dyn Dialect {
-        match self {
+        match &self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(_) => crate::sql::postgres::DIALECT,
+            TxConn::Postgres(_) => crate::sql::postgres::DIALECT,
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(_) => crate::sql::mysql::DIALECT,
+            TxConn::Mysql(_) => crate::sql::mysql::DIALECT,
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(_) => crate::sql::sqlite::DIALECT,
+            TxConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
         }
     }
 }
@@ -169,17 +192,18 @@ impl<'a> PoolTx<'a> {
 ///
 /// ```ignore
 /// let mut tx = rustango::sql::transaction_pool(&pool).await?;
-/// match &mut tx {
+/// match tx.conn() {
 ///     #[cfg(feature = "postgres")]
-///     rustango::sql::PoolTx::Postgres(t) => {
+///     rustango::sql::TxConn::Postgres(t) => {
 ///         sqlx::query("UPDATE accounts SET balance = balance - $1 WHERE id = $2")
 ///             .bind(amount).bind(from).execute(&mut **t).await?;
 ///     }
 ///     #[cfg(feature = "mysql")]
-///     rustango::sql::PoolTx::Mysql(t) => {
+///     rustango::sql::TxConn::Mysql(t) => {
 ///         sqlx::query("UPDATE accounts SET balance = balance - ? WHERE id = ?")
 ///             .bind(amount).bind(from).execute(&mut **t).await?;
 ///     }
+///     _ => unreachable!(),
 /// }
 /// tx.commit().await?;
 /// ```
@@ -194,14 +218,15 @@ impl<'a> PoolTx<'a> {
 /// # Errors
 /// Driver errors from `BEGIN`.
 pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError> {
-    match pool {
+    let conn = match pool {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => Ok(PoolTx::Postgres(pg.begin().await?)),
+        Pool::Postgres(pg) => TxConn::Postgres(pg.begin().await?),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(my) => Ok(PoolTx::Mysql(my.begin().await?)),
+        Pool::Mysql(my) => TxConn::Mysql(my.begin().await?),
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin().await?)),
-    }
+        Pool::Sqlite(sq) => TxConn::Sqlite(sq.begin().await?),
+    };
+    Ok(PoolTx::new(conn, Some(pool)))
 }
 
 /// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`. Use it
@@ -216,7 +241,10 @@ pub async fn write_transaction(pool: &Pool) -> Result<PoolTx<'static>, ExecError
         // Take the write lock up front: a deferred tx that reads first
         // fails at once on a busy WAL database instead of waiting.
         #[cfg(feature = "sqlite")]
-        Pool::Sqlite(sq) => Ok(PoolTx::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?)),
+        Pool::Sqlite(sq) => Ok(PoolTx::new(
+            TxConn::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?),
+            Some(pool),
+        )),
         #[allow(unreachable_patterns)]
         _ => transaction_pool(pool).await,
     }

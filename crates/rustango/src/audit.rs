@@ -82,9 +82,6 @@ tokio::task_local! {
     static SOURCE_TENANT: Option<String>;
     /// Tenant the current writes go to, where the framework knows it.
     static WRITE_TENANT: WriteScope;
-    /// Pool the current audited write goes through, set by the `&Pool`
-    /// write paths that emit from inside a transaction.
-    static WRITE_POOL: crate::sql::PoolId;
 }
 
 /// Where writes go. With `pool` set (a `with_tenant` pass), a source
@@ -102,8 +99,15 @@ enum Via<'a> {
     Unknown,
     /// This pool.
     Pool(&'a crate::sql::Pool),
-    /// The pool the enclosing `&Pool` write path set in `WRITE_POOL`.
-    Scoped,
+    /// A transaction opened on this pool.
+    Tx(&'a crate::sql::PoolId),
+}
+
+impl<'a> Via<'a> {
+    /// The pool `tx` was opened on, if it knows.
+    fn of_tx(tx: &'a crate::sql::PoolTx<'_>) -> Self {
+        tx.pool_id().map_or(Via::Unknown, Via::Tx)
+    }
 }
 
 /// Read the active audit source. Returns [`AuditSource::System`] when no
@@ -142,18 +146,13 @@ fn source_token(source: &AuditSource, via: Via<'_>) -> String {
     let through_scope = match via {
         Via::Unknown => false,
         Via::Pool(pool) => scope.is(pool),
-        Via::Scoped => WRITE_POOL.try_with(|p| p.same(&scope)).unwrap_or(false),
+        Via::Tx(pool) => pool.same(&scope),
     };
     if bound && !through_scope {
         AuditSource::System.as_token()
     } else {
         token
     }
-}
-
-/// Run `fut` with its audited writes going through `pool`.
-async fn writing_via<F: std::future::Future>(pool: &crate::sql::Pool, fut: F) -> F::Output {
-    WRITE_POOL.scope(crate::sql::PoolId::of(pool), fut).await
 }
 
 /// Run `fut` with `source` as the active audit source. Every audit entry
@@ -1242,9 +1241,7 @@ pub async fn emit_many_pool(
         other => sqlx::Error::Protocol(format!("{other}")),
     };
     let mut tx = crate::sql::transaction_pool(pool).await.map_err(to_sqlx)?;
-    emit_many_tx(&mut tx, Via::Pool(pool), entries)
-        .await
-        .map_err(to_sqlx)?;
+    emit_many_tx(&mut tx, entries).await.map_err(to_sqlx)?;
     tx.commit().await
 }
 
@@ -1441,9 +1438,9 @@ pub async fn delete_one_with_audit(
 ) -> Result<u64, crate::sql::ExecError> {
     // SQLite: the cascade reads before it deletes, so lock at BEGIN.
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let affected = writing_via(pool, crate::sql::delete_tx(&mut tx, query)).await?;
+    let affected = crate::sql::delete_tx(&mut tx, query).await?;
     if affected > 0 {
-        emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
+        emit_one_tx(&mut tx, entry).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -1453,16 +1450,17 @@ pub async fn delete_one_with_audit(
 /// `PoolTx` API instead of unwrapping the backend variant themselves.
 async fn emit_one_tx(
     tx: &mut crate::sql::PoolTx<'_>,
-    via: Via<'_>,
     entry: &PendingEntry,
 ) -> Result<(), sqlx::Error> {
-    match tx {
+    let pool = tx.pool_id().cloned();
+    let via = pool.as_ref().map_or(Via::Unknown, Via::Tx);
+    match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::PoolTx::Postgres(t) => emit_one_pg(&mut **t, entry, via).await,
+        crate::sql::TxConn::Postgres(t) => emit_one_pg(&mut **t, entry, via).await,
         #[cfg(feature = "mysql")]
-        crate::sql::PoolTx::Mysql(t) => emit_one_my_via(&mut **t, entry, via).await,
+        crate::sql::TxConn::Mysql(t) => emit_one_my_via(&mut **t, entry, via).await,
         #[cfg(feature = "sqlite")]
-        crate::sql::PoolTx::Sqlite(t) => emit_one_sqlite_via(&mut **t, entry, via).await,
+        crate::sql::TxConn::Sqlite(t) => emit_one_sqlite_via(&mut **t, entry, via).await,
     }
 }
 
@@ -1486,7 +1484,7 @@ pub async fn save_one_with_audit(
     let mut tx = crate::sql::write_transaction(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     if affected > 0 {
-        emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
+        emit_one_tx(&mut tx, entry).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -1515,66 +1513,13 @@ impl DiffEmit {
     }
 }
 
-/// A write transaction tied to the pool it was opened on, so its audit
-/// entries are attributed through that pool and no other.
-#[cfg(feature = "admin")]
-pub(crate) struct PoolBoundTx<'p> {
-    tx: crate::sql::PoolTx<'static>,
-    pool: &'p crate::sql::Pool,
-}
-
-#[cfg(feature = "admin")]
-impl<'p> PoolBoundTx<'p> {
-    /// [`crate::sql::write_transaction`] on `pool`.
-    pub(crate) async fn begin_write(
-        pool: &'p crate::sql::Pool,
-    ) -> Result<Self, crate::sql::ExecError> {
-        let tx = crate::sql::write_transaction(pool).await?;
-        Ok(Self { tx, pool })
-    }
-
-    /// Bind `tx`, which the caller opened on `pool`.
-    #[cfg(feature = "tenancy")]
-    pub(crate) fn opened_on(pool: &'p crate::sql::Pool, tx: crate::sql::PoolTx<'static>) -> Self {
-        Self { tx, pool }
-    }
-
-    fn via(&self) -> Via<'p> {
-        Via::Pool(self.pool)
-    }
-
-    pub(crate) async fn commit(self) -> Result<(), sqlx::Error> {
-        self.tx.commit().await
-    }
-
-    pub(crate) async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.tx.rollback().await
-    }
-}
-
-#[cfg(feature = "admin")]
-impl std::ops::Deref for PoolBoundTx<'_> {
-    type Target = crate::sql::PoolTx<'static>;
-    fn deref(&self) -> &Self::Target {
-        &self.tx
-    }
-}
-
-#[cfg(feature = "admin")]
-impl std::ops::DerefMut for PoolBoundTx<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.tx
-    }
-}
-
 /// Write `entries` in the caller's `tx`: a failed emit fails the write.
 #[cfg(feature = "admin")]
 pub(crate) async fn emit_in_tx(
-    tx: &mut PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    let via = tx.via();
-    emit_many_tx(tx, via, entries).await
+    emit_many_tx(tx, entries).await
 }
 
 /// Outcome of [`update_one_with_row_diff_tx`].
@@ -1592,7 +1537,7 @@ pub(crate) enum RowDiffWrite {
 /// the write. The caller commits, so later writes can share the tx.
 #[cfg(feature = "admin")]
 pub(crate) async fn update_one_with_row_diff_tx(
-    tx: &mut PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::UpdateQuery,
     mut before: crate::core::SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -1620,8 +1565,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
     };
     let entry = entry.filter(|_| affected > 0);
     if let (DiffEmit::InTx, Some(entry)) = (emit, &entry) {
-        let via = tx.via();
-        emit_one_tx(tx, via, entry).await?;
+        emit_one_tx(tx, entry).await?;
     }
     Ok(RowDiffWrite::Written {
         deferred: entry.filter(|_| emit == DiffEmit::Deferred),
@@ -1633,7 +1577,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
 /// otherwise it comes back for the caller's best-effort emit.
 #[cfg(feature = "admin")]
 pub(crate) async fn insert_one_with_entry_tx(
-    tx: &mut PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
     entry_of: impl FnOnce(&crate::core::SqlValue) -> PendingEntry,
@@ -1643,8 +1587,7 @@ pub(crate) async fn insert_one_with_entry_tx(
     let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     let entry = entry_of(&pk);
     if emit == DiffEmit::InTx {
-        let via = tx.via();
-        emit_one_tx(tx, via, &entry).await?;
+        emit_one_tx(tx, &entry).await?;
     }
     Ok((pk, (emit == DiffEmit::Deferred).then_some(entry)))
 }
@@ -1673,7 +1616,7 @@ where
     let mut tx = crate::sql::write_transaction(pool).await?;
     let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
     crate::sql::apply_auto_pk(returning, model)?;
-    emit_one_tx(&mut tx, Via::Pool(pool), &entry(model)).await?;
+    emit_one_tx(&mut tx, &entry(model)).await?;
     tx.commit().await?;
     Ok(())
 }
@@ -1682,9 +1625,9 @@ where
 /// multi-row INSERTs.
 async fn emit_many_tx(
     tx: &mut crate::sql::PoolTx<'_>,
-    via: Via<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
+    let via = Via::of_tx(tx);
     let stmts = entries
         .chunks(audit_rows_per_insert(tx.dialect()))
         .map(|chunk| audit_insert_stmt(tx.dialect(), chunk, via))
@@ -1894,9 +1837,9 @@ where
                 model: query.model,
                 where_clause: pk_in(query.model, pks)?,
             };
-            affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
+            affected += crate::sql::delete_tx(&mut tx, &delete).await?;
             let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
-            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+            emit_many_tx(&mut tx, &entries).await?;
         }
     }
     tx.commit().await?;
@@ -1957,7 +1900,7 @@ where
         let after: Vec<M> =
             rows_in_tx(&mut tx, query.model, pk_in(query.model, pks)?, false).await?;
         let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
-        emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+        emit_many_tx(&mut tx, &entries).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -2077,25 +2020,24 @@ impl TxUpdate {
     pub(crate) async fn run(
         self,
         tx: &mut crate::sql::PoolTx<'_>,
-        pool: &crate::sql::Pool,
         query: &crate::core::UpdateQuery,
         pk: crate::core::SqlValue,
     ) -> Result<u64, crate::sql::ExecError> {
         let n = crate::sql::update_tx(tx, query).await?;
         if let (true, Some(record)) = (n > 0, self.0) {
-            writing_via(pool, record(tx, pk)).await.map_err(|e| {
-                crate::sql::ExecError::AuditWrite {
+            record(tx, pk)
+                .await
+                .map_err(|e| crate::sql::ExecError::AuditWrite {
                     table: query.model.table,
                     source: Box::new(e),
-                }
-            })?;
+                })?;
         }
         Ok(n)
     }
 }
 
 /// Delete, or soft delete by `stamp`, the row `row` selects in the caller's
-/// `tx`, opened on `pool`, audited as [`delete`] and [`update_as`] audit it.
+/// `tx`, audited as [`delete`] and [`update_as`] audit it.
 /// `by_pk` re-reads the row after a soft delete, which leaves its scope.
 ///
 /// # Errors
@@ -2103,7 +2045,6 @@ impl TxUpdate {
 /// reader is [`crate::sql::ExecError::AuditUnsupported`].
 #[cfg(feature = "admin")]
 pub(crate) async fn remove_one_tx(
-    pool: &crate::sql::Pool,
     tx: &mut crate::sql::PoolTx<'_>,
     model: &'static crate::core::ModelSchema,
     (row, by_pk): (crate::core::WhereExpr, crate::core::WhereExpr),
@@ -2132,13 +2073,10 @@ pub(crate) async fn remove_one_tx(
                 model,
                 where_clause: row,
             };
-            (
-                writing_via(pool, crate::sql::delete_tx(tx, &q)).await?,
-                entries,
-            )
+            (crate::sql::delete_tx(tx, &q).await?, entries)
         }
         Some(stamp) => {
-            let n = writing_via(pool, crate::sql::update_tx(tx, stamp)).await?;
+            let n = crate::sql::update_tx(tx, stamp).await?;
             let mut entries = match reader {
                 Some(read) if n > 0 => read(tx, by_pk).await?,
                 _ => Vec::new(),
@@ -2151,7 +2089,7 @@ pub(crate) async fn remove_one_tx(
     };
     if n > 0 && !entries.is_empty() {
         let entries: Vec<PendingEntry> = entries.into_iter().map(|(_, e)| e).collect();
-        emit_many_tx(tx, Via::Pool(pool), &entries).await?;
+        emit_many_tx(tx, &entries).await?;
     }
     Ok(n)
 }
@@ -2243,7 +2181,7 @@ where
         });
     }
     let entries: Vec<PendingEntry> = rows.iter().map(&entry).collect();
-    emit_many_tx(tx, Via::Scoped, &entries).await
+    emit_many_tx(tx, &entries).await
 }
 
 #[cfg_attr(
@@ -2300,25 +2238,22 @@ pub(crate) async fn insert_returning(
     }
     let mut tx = crate::sql::write_transaction(pool).await?;
     // The create recorder only has the transaction.
-    let inserted = writing_via(pool, insert_returning_tx(&mut tx, query, pk_field)).await?;
+    let inserted = insert_returning_tx(&mut tx, query, pk_field).await?;
     tx.commit().await?;
     Ok(inserted)
 }
 
-/// [`insert`] inside a transaction opened on `pool`, attributed as [`insert`] is.
+/// [`insert`] inside the caller's transaction, attributed as [`insert`] is.
 ///
 /// # Errors
 /// As [`crate::sql::insert_returning_tx`], plus the audit write.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) async fn insert_tx_on(
-    pool: &crate::sql::Pool,
     tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
-    Ok(writing_via(pool, insert_returning_tx(tx, query, pk_field))
-        .await?
-        .0)
+    Ok(insert_returning_tx(tx, query, pk_field).await?.0)
 }
 
 #[cfg_attr(
@@ -2426,7 +2361,7 @@ where
         )
         .await?;
         let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
-        emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+        emit_many_tx(&mut tx, &entries).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -2511,7 +2446,7 @@ where
             )
             .await?;
             let entries: Vec<PendingEntry> = rows.iter().map(|r| entry(r, op)).collect();
-            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+            emit_many_tx(&mut tx, &entries).await?;
         }
     }
     tx.commit().await?;
@@ -2563,23 +2498,20 @@ pub async fn truncate_with_audit(
     entity_table: &'static str,
     mode: crate::sql::TruncateMode,
 ) -> Result<u64, crate::sql::ExecError> {
-    writing_via(pool, async {
-        let mut tx = crate::sql::write_transaction(pool).await?;
-        let affected = crate::sql::truncate_tx(&mut tx, entity_table, mode).await?;
-        let entry = PendingEntry {
-            entity_table,
-            entity_pk: String::new(),
-            operation: AuditOp::Delete,
-            source: current_source(),
-            changes: serde_json::json!({ "bulk": "truncate" }),
-        };
-        emit_one_tx(&mut tx, Via::Pool(pool), &entry).await?;
-        tx.commit()
-            .await
-            .map_err(|e| crate::sql::truncate_refusal(entity_table, mode, e.into()))?;
-        Ok(affected)
-    })
-    .await
+    let mut tx = crate::sql::write_transaction(pool).await?;
+    let affected = crate::sql::truncate_tx(&mut tx, entity_table, mode).await?;
+    let entry = PendingEntry {
+        entity_table,
+        entity_pk: String::new(),
+        operation: AuditOp::Delete,
+        source: current_source(),
+        changes: serde_json::json!({ "bulk": "truncate" }),
+    };
+    emit_one_tx(&mut tx, &entry).await?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::sql::truncate_refusal(entity_table, mode, e.into()))?;
+    Ok(affected)
 }
 
 /// Postgres bind helper, exposed so generated bodies on the audited
@@ -2675,9 +2607,9 @@ where
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own `decode_before_*`.
     // A failed pre-read must not let the UPDATE commit unaudited.
-    let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match &mut tx {
+    let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::PoolTx::Postgres(t) => before
+        crate::sql::TxConn::Postgres(t) => before
             .params
             .iter()
             .cloned()
@@ -2686,7 +2618,7 @@ where
             .await?
             .map(|row| decode_before_pg(&row)),
         #[cfg(feature = "mysql")]
-        crate::sql::PoolTx::Mysql(t) => before
+        crate::sql::TxConn::Mysql(t) => before
             .params
             .iter()
             .cloned()
@@ -2695,7 +2627,7 @@ where
             .await?
             .map(|row| decode_before_my(&row)),
         #[cfg(feature = "sqlite")]
-        crate::sql::PoolTx::Sqlite(t) => before
+        crate::sql::TxConn::Sqlite(t) => before
             .params
             .iter()
             .cloned()
@@ -2706,7 +2638,6 @@ where
     };
     let affected = finish_update_with_audit_diff(
         &mut tx,
-        Via::Pool(pool),
         &stmt,
         before_pairs,
         &after_pairs,
@@ -2722,7 +2653,6 @@ where
 /// UPDATE, then emit the audit row if a BEFORE snapshot was captured.
 async fn finish_update_with_audit_diff(
     tx: &mut crate::sql::PoolTx<'_>,
-    via: Via<'_>,
     stmt: &crate::sql::CompiledStatement,
     before_pairs: Option<Vec<(&'static str, serde_json::Value)>>,
     after_pairs: &[(&'static str, serde_json::Value)],
@@ -2735,7 +2665,7 @@ async fn finish_update_with_audit_diff(
         PendingEntry::update_diff(entity_table, entity_pk.to_owned(), &before, after_pairs)
     });
     if let Some(entry) = entry {
-        emit_one_tx(tx, via, &entry).await?;
+        emit_one_tx(tx, &entry).await?;
     }
     Ok(_affected)
 }
@@ -2769,7 +2699,7 @@ mod tx_update_tests {
 }
 
 #[cfg(all(test, feature = "admin", feature = "tenancy", feature = "sqlite"))]
-mod pool_bound_tx_tests {
+mod tx_pool_tests {
     use super::*;
 
     async fn audited_pool() -> crate::sql::Pool {
@@ -2810,7 +2740,7 @@ mod pool_bound_tx_tests {
         with_tenant_source(user, "a".into(), async {
             writing_to_tenant("a".into(), Some(&a), async {
                 for pool in [&a, &b] {
-                    let mut tx = PoolBoundTx::begin_write(pool).await.unwrap();
+                    let mut tx = crate::sql::write_transaction(pool).await.unwrap();
                     emit_in_tx(&mut tx, std::slice::from_ref(&entry))
                         .await
                         .unwrap();

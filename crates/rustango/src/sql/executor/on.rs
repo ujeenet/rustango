@@ -5,7 +5,7 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, TryStreamExt as _};
 
 use super::atomic::{self, Gate};
-use super::{Dialect, ExecError, PoolTx};
+use super::{Dialect, ExecError, PoolTx, TxConn};
 use crate::core::SqlValue;
 use crate::sql::{DeletePlan, Pool};
 
@@ -85,14 +85,16 @@ impl PoolConn {
     /// Driver errors from `BEGIN`.
     pub async fn begin(&mut self) -> Result<PoolTx<'_>, ExecError> {
         use sqlx::Connection as _;
-        Ok(match self {
+        let conn = match self {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => PoolTx::Postgres((**c).begin().await?),
+            PoolConn::Postgres(c) => TxConn::Postgres((**c).begin().await?),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => PoolTx::Mysql((**c).begin().await?),
+            PoolConn::Mysql(c) => TxConn::Mysql((**c).begin().await?),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => PoolTx::Sqlite((**c).begin().await?),
-        })
+            PoolConn::Sqlite(c) => TxConn::Sqlite((**c).begin().await?),
+        };
+        // A pooled connection does not know its pool.
+        Ok(PoolTx::new(conn, None))
     }
 }
 
@@ -494,13 +496,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => pg_rows(&mut **t, sql, params, decode),
+            TxConn::Postgres(t) => pg_rows(&mut **t, sql, params, decode),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(t) => my_rows(&mut **t, sql, params, decode),
+            TxConn::Mysql(t) => my_rows(&mut **t, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => sq_rows(&mut **t, sql, params, decode),
+            TxConn::Sqlite(t) => sq_rows(&mut **t, sql, params, decode),
         }
     }
 
@@ -512,13 +514,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     where
         'c: 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => pg_exec(&mut **t, sql, params),
+            TxConn::Postgres(t) => pg_exec(&mut **t, sql, params),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(t) => my_exec(&mut **t, sql, params),
+            TxConn::Mysql(t) => my_exec(&mut **t, sql, params),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => sq_exec(&mut **t, sql, params),
+            TxConn::Sqlite(t) => sq_exec(&mut **t, sql, params),
         }
     }
 
@@ -613,7 +615,7 @@ macro_rules! database_conn_executor {
             {
                 Box::pin(async move {
                     use sqlx::Connection as _;
-                    let mut tx = PoolTx::$variant((***self).begin().await?);
+                    let mut tx = PoolTx::new(TxConn::$variant((***self).begin().await?), None);
                     let n = super::run_delete_plan_tx(&mut tx, plan).await?;
                     tx.commit().await?;
                     Ok(n)

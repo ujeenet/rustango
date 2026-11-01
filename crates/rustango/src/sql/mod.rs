@@ -98,7 +98,7 @@ pub use executor::{
     CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess,
     FlatScalar, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
     MaybeMyScalar, MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    MaybeSqliteScalar, Page, PoolConn, PoolTx, SqlExecutor, TxGuard, UpdaterPool,
+    MaybeSqliteScalar, Page, PoolConn, PoolTx, SqlExecutor, TxConn, TxGuard, UpdaterPool,
 };
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,

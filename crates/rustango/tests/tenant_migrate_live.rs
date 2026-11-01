@@ -304,7 +304,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     #[cfg(feature = "signals")]
     let receiver = {
         let seen = seen.clone();
-        rustango::signals::migrate::connect_post_migrate_with_target(move |_, target| {
+        rustango::signals::migrate::connect_post_migrate(move |target| {
             let seen = seen.clone();
             async move {
                 let pg = target.pool.as_postgres().expect("pg").clone();

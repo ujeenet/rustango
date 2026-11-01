@@ -441,15 +441,17 @@ async fn same_pool_found_from_inside_another_pool(pool: &Pool) {
 
 /// Release the block's savepoint behind its back, so its own RELEASE fails.
 async fn sabotage(sp: &AtomicTx) -> Result<(), ExecError> {
-    use rustango::sql::{sqlx, sqlx::Executor as _, PoolTx};
+    use rustango::sql::{sqlx, sqlx::Executor as _, TxConn};
     let sql = sqlx::raw_sql("RELEASE SAVEPOINT rustango_sp_1");
-    match &mut *sp.lock().await? {
+    #[allow(unreachable_patterns)]
+    match sp.lock().await?.conn() {
         #[cfg(feature = "postgres")]
-        PoolTx::Postgres(t) => (&mut **t).execute(sql).await.map(|_| ())?,
+        TxConn::Postgres(t) => (&mut **t).execute(sql).await.map(|_| ())?,
         #[cfg(feature = "mysql")]
-        PoolTx::Mysql(t) => (&mut **t).execute(sql).await.map(|_| ())?,
+        TxConn::Mysql(t) => (&mut **t).execute(sql).await.map(|_| ())?,
         #[cfg(feature = "sqlite")]
-        PoolTx::Sqlite(t) => (&mut **t).execute(sql).await.map(|_| ())?,
+        TxConn::Sqlite(t) => (&mut **t).execute(sql).await.map(|_| ())?,
+        _ => unreachable!(),
     }
     Ok(())
 }
@@ -681,7 +683,7 @@ async fn sqlite_rollback_refuses_later_statements(pool: &Pool) {
         let mut guard = tx.lock().await?;
         #[cfg(feature = "sqlite")]
         #[allow(irrefutable_let_patterns)]
-        if let rustango::sql::PoolTx::Sqlite(t) = &mut *guard {
+        if let rustango::sql::TxConn::Sqlite(t) = guard.conn() {
             use rustango::sql::{sqlx, sqlx::Executor as _};
             // Stands in for SQLite rolling back on its own (SQLITE_FULL, IOERR).
             (&mut **t).execute(sqlx::raw_sql("ROLLBACK")).await?;
@@ -804,9 +806,9 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
             );
         }
         #[allow(unreachable_patterns)]
-        match &mut *guard {
+        match guard.conn() {
             #[cfg(feature = "postgres")]
-            rustango::sql::PoolTx::Postgres(t) => {
+            rustango::sql::TxConn::Postgres(t) => {
                 let pid: i32 = rustango::sql::sqlx::query_scalar("SELECT pg_backend_pid()")
                     .fetch_one(&mut **t)
                     .await?;
@@ -815,7 +817,7 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
                 tokio::time::sleep(Duration::from_millis(300)).await;
             }
             #[cfg(feature = "sqlite")]
-            rustango::sql::PoolTx::Sqlite(t) => {
+            rustango::sql::TxConn::Sqlite(t) => {
                 use rustango::sql::{sqlx, sqlx::Executor as _};
                 (&mut **t).execute(sqlx::raw_sql("ROLLBACK")).await?;
             }

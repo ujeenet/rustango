@@ -1466,8 +1466,8 @@ Post::bulk_upsert_pool(
 > selbst `#[cfg(feature = "postgres")]`.
 >
 > Die Mehr-Backend-Einstiegspunkte sind `rustango::sql::transaction_pool(&pool)`
-> und `rustango::sql::atomic(&pool, …)`. Beide liefern ein `PoolTx` — ein Enum,
-> auf das du pro Backend `match`st — statt einer Treiber-Transaktion, sodass eine
+> und `rustango::sql::atomic(&pool, …)`. Beide liefern ein `PoolTx`; auf dessen
+> `tx.conn()` (ein `TxConn`) `match`st du pro Backend — statt einer Treiber-Transaktion, sodass eine
 > tri-dialektale Transaktion pro Zweig geschrieben wird und nicht durch Tausch des
 > Pool-Typs.
 
