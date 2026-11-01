@@ -1063,6 +1063,7 @@ pub trait Dialect: Send + Sync {
 
     /// Set the comment on an existing table; `""` drops it. Defaults to
     /// [`Self::table_comment_statement`]; MySQL alters the table instead.
+    /// A dialect that writes the comment inline must override it, or a change is a no-op.
     fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
         self.table_comment_statement(table, comment)
     }

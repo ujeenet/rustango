@@ -654,3 +654,17 @@ fn table_comment_is_tracked() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An unchanged model with a table comment writes no second migration.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[test]
+fn unchanged_table_comment_writes_nothing() {
+    use rustango::core::Model as _;
+    let dir = fresh_dir("table_comment_again");
+    let current = SchemaSnapshot::from_models(&[MkNoted::SCHEMA]);
+    make_migrations_from(&dir, &current, None).unwrap().unwrap();
+    assert!(make_migrations_from(&dir, &current, None)
+        .unwrap()
+        .is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

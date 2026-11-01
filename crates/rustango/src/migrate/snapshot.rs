@@ -159,6 +159,7 @@ impl PartialOrd for M2MTableSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct TableSnapshot {
     pub name: String,
     pub model: String,
