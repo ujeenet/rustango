@@ -1517,8 +1517,24 @@ impl UpdateView {
     cbv_setters!(template, success_url);
 
     /// Extra columns `object` carries for the template to show; never written.
+    ///
+    /// # Panics
+    /// On a name that is neither a field nor a column of the model.
     #[must_use]
     pub fn context_fields(mut self, names: &[&str]) -> Self {
+        let schema = self.schema;
+        let unknown: Vec<&str> = names
+            .iter()
+            .copied()
+            .filter(|n| schema.field(n).is_none() && schema.field_by_column(n).is_none())
+            .collect();
+        if !unknown.is_empty() {
+            let known: Vec<&str> = schema.fields.iter().map(|f| f.name).collect();
+            panic!(
+                "UpdateView context_fields: `{}` has no field {unknown:?}. Fields on this model: {known:?}",
+                schema.table
+            );
+        }
         self.context_fields = names.iter().map(|s| (*s).to_owned()).collect();
         self
     }

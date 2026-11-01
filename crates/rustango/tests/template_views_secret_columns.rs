@@ -62,11 +62,19 @@ fn app(pool: &Pool) -> axum::Router {
         .merge(
             ListView::for_model(Account::SCHEMA)
                 .template("list.html")
-                .fields(&["id", "name"])
+                .fields(&["name"])
                 .bulk_actions(true)
                 .with_delete_confirmation(true)
                 .with_delete_confirmation_template("bulk.html")
-                .router("/acc", t, pool.clone()),
+                .router("/acc", t.clone(), pool.clone()),
+        )
+        .merge(
+            ListView::for_model(Account::SCHEMA)
+                .template("list.html")
+                .bulk_actions(true)
+                .with_delete_confirmation(true)
+                .with_delete_confirmation_template("bulk.html")
+                .router("/all", t, pool.clone()),
         )
 }
 
@@ -130,12 +138,29 @@ async fn credential_columns_stay_out_of_the_context() {
         );
         assert!(!out.contains("\"note\""), "{uri}: {out}");
     }
-    // DetailView without `.fields()` still shows every non-secret column.
+    // Without `.fields()`, DetailView and the confirm page show every non-secret column.
     assert!(detail.contains("UNLISTED"), "{detail}");
+    let all = send(
+        &pool,
+        Method::POST,
+        "/all",
+        &format!("action=delete_selected&_selected_action={pk}"),
+    )
+    .await;
+    assert!(
+        all.contains("UNLISTED") && all.contains("ada") && !all.contains("SECRET"),
+        "{all}"
+    );
     // A view that lists the column on purpose still gets it.
     let out = send(&pool, Method::GET, &format!("/listed/{pk}/edit"), "").await;
     assert!(out.contains("SECRET"), "{out}");
     // `.context_fields()` opts a read-only column in.
     let out = send(&pool, Method::GET, &format!("/ctx/{pk}/edit"), "").await;
     assert!(out.contains("UNLISTED") && !out.contains("SECRET"), "{out}");
+}
+
+#[test]
+#[should_panic(expected = "UpdateView context_fields: `tvsecret_account` has no field [\"nope\"]")]
+fn context_fields_refuses_an_unknown_name() {
+    let _ = UpdateView::for_model(Account::SCHEMA, &["name"]).context_fields(&["note", "nope"]);
 }
