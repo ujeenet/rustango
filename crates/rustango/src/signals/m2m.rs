@@ -39,8 +39,10 @@
 //! - `Add`: one destination added, `dst_pks` holds its id.
 //! - `Remove`: one destination removed, `dst_pks` holds its id.
 //! - `Set`: the whole set replaced, `dst_pks` is the new set, which
-//!   may be empty.
+//!   may be empty; `added` and `removed` hold the difference.
 //! - `Clear`: everything removed, `dst_pks` is empty.
+//!
+//! `content_type_id` is the owner's content type for a generic M2M.
 //!
 //! The signal is sent only after the SQL succeeds, and only when it
 //! changed a row: a duplicate `add`, an unchanged `set` or an empty `clear` sends none. There is no
@@ -75,8 +77,9 @@ pub enum M2mAction {
     Clear,
 }
 
-/// What an `m2m_changed` receiver gets.
+/// What an `m2m_changed` receiver gets. Build one with [`Self::new`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct M2mChangedContext {
     pub action: M2mAction,
     /// Name of the junction table, such as `"post_tags"`.
@@ -91,6 +94,57 @@ pub struct M2mChangedContext {
     /// The destination keys involved, as bound (#1950). One id for `Add`
     /// and `Remove`, the new set for `Set`, and empty for `Clear`.
     pub dst_pks: Vec<crate::core::SqlValue>,
+    /// The owner's content type id for a generic M2M; `None` otherwise.
+    pub content_type_id: Option<i64>,
+    /// Keys newly linked: the id for `Add`, the new ones for `Set`.
+    pub added: Vec<crate::core::SqlValue>,
+    /// Keys unlinked: the id for `Remove`, the dropped ones for `Set`.
+    /// Empty for `Clear`, and for a `Set` whose old keys could not be read.
+    pub removed: Vec<crate::core::SqlValue>,
+}
+
+impl M2mChangedContext {
+    /// A context with no content type and an empty added/removed diff.
+    #[must_use]
+    pub fn new(
+        action: M2mAction,
+        through: &'static str,
+        src_col: &'static str,
+        dst_col: &'static str,
+        src_pk: crate::core::SqlValue,
+        dst_pks: Vec<crate::core::SqlValue>,
+    ) -> Self {
+        Self {
+            action,
+            through,
+            src_col,
+            dst_col,
+            src_pk,
+            dst_pks,
+            content_type_id: None,
+            added: Vec::new(),
+            removed: Vec::new(),
+        }
+    }
+
+    /// Set the generic owner's content type id.
+    #[must_use]
+    pub fn with_content_type(mut self, id: i64) -> Self {
+        self.content_type_id = Some(id);
+        self
+    }
+
+    /// Set the keys linked and unlinked by this change.
+    #[must_use]
+    pub fn with_diff(
+        mut self,
+        added: Vec<crate::core::SqlValue>,
+        removed: Vec<crate::core::SqlValue>,
+    ) -> Self {
+        self.added = added;
+        self.removed = removed;
+        self
+    }
 }
 
 // ---------------------------------------------------------------- Internal storage

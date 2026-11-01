@@ -1,4 +1,5 @@
-//! `m2m_changed` fires only when `add` / `remove` / `set` / `clear` changed a junction row (#2221).
+//! `m2m_changed` fires only when `add` / `remove` / `set` / `clear` changed a junction row (#2221),
+//! and carries the generic owner's content type and the `set` diff.
 
 #![cfg(all(
     feature = "signals",
@@ -8,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use rustango::core::{FieldSchema, FieldType, IndexSchema, Model as _, ModelSchema, SqlValue};
-use rustango::signals::m2m::{clear_all, connect_m2m_changed, M2mAction};
+use rustango::signals::m2m::{clear_all, connect_m2m_changed, M2mAction, M2mChangedContext};
 use rustango::sql::{Auto, GenericM2MManager, M2MManager, Pool};
 use rustango::{tri_dialect_test, Model};
 
@@ -386,6 +387,81 @@ async fn noop_set_and_clear_fire_nothing(pool: &Pool) {
     assert_eq!(got, [M2mAction::Set, M2mAction::Set, M2mAction::Clear]);
 }
 
+/// Record every full `m2m_changed` context, like [`record`].
+async fn record_contexts() -> (
+    tokio::sync::MutexGuard<'static, ()>,
+    Arc<Mutex<Vec<M2mChangedContext>>>,
+) {
+    let guard = signals_lock().await;
+    clear_all();
+    let fired: Arc<Mutex<Vec<M2mChangedContext>>> = Arc::default();
+    let sink = fired.clone();
+    connect_m2m_changed(move |ctx| {
+        sink.lock().unwrap().push(ctx);
+        async {}
+    });
+    (guard, fired)
+}
+
+/// `(content_type_id, added, removed)` of each recorded context.
+fn diffs(
+    fired: &Mutex<Vec<M2mChangedContext>>,
+) -> Vec<(Option<i64>, Vec<SqlValue>, Vec<SqlValue>)> {
+    let got = fired
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| (c.content_type_id, c.added.clone(), c.removed.clone()))
+        .collect();
+    clear_all();
+    got
+}
+
+/// `set` reports which keys it linked and unlinked; a plain M2M has no content type.
+async fn set_reports_added_and_removed(pool: &Pool) {
+    let (_signals, fired) = record_contexts().await;
+    let p = post(3);
+    p.set(&[5_i64, 6], pool).await.expect("set");
+    p.set(&[6_i64, 7], pool).await.expect("swap one");
+    p.add(8_i64, pool).await.expect("add");
+    p.remove(6_i64, pool).await.expect("remove");
+    p.clear(pool).await.expect("clear");
+    let i = SqlValue::I64;
+    assert_eq!(
+        diffs(&fired),
+        vec![
+            (None, vec![i(5), i(6)], vec![]),
+            (None, vec![i(7)], vec![i(5)]),
+            (None, vec![i(8)], vec![]),
+            (None, vec![], vec![i(6)]),
+            (None, vec![], vec![]),
+        ]
+    );
+}
+
+/// A generic M2M carries its owner's content type, and `set` its diff.
+async fn generic_signal_carries_content_type_and_diff(pool: &Pool) {
+    let ct = rustango::contenttypes::ContentType::get_for_schema(pool, Doc::SCHEMA)
+        .await
+        .expect("content type")
+        .and_then(|c| c.id.get().copied());
+    assert!(ct.is_some());
+    let (_signals, fired) = record_contexts().await;
+    let t = tags(GENERIC_STR);
+    t.set(&["a", "b"], pool).await.expect("set");
+    t.set(&["b", "c"], pool).await.expect("swap one");
+    t.clear(pool).await.expect("clear");
+    let s = |v: &str| SqlValue::String(v.to_owned());
+    assert_eq!(
+        diffs(&fired),
+        vec![
+            (ct, vec![s("a"), s("b")], vec![]),
+            (ct, vec![s("c")], vec![s("a")]),
+            (ct, vec![], vec![]),
+        ]
+    );
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -399,5 +475,7 @@ tri_dialect_test! {
         generic_set_with_string_keys,
         generic_set_on_an_int_column,
         generic_set_with_uuid_keys,
+        set_reports_added_and_removed,
+        generic_signal_carries_content_type_and_diff,
     ],
 }
