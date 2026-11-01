@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- `testkit::create_tables` creates the M2M junctions whose two ends it is given, so test setups match a migrated schema.
 - `toml` 1.1 replaces 0.8, so apps on `toml` 1.x no longer build two copies (and the old `toml_edit` / `toml_datetime` duplicates are gone).
 - Public `*Error` enums are `#[non_exhaustive]`; `AdminError::BadRequest` and `AdminError::Conflict` replace a faked form error and an `Ok` 409.
 - Removed: `Tenant::for_test`, `contenttypes::render_generic_fk_link`, `admin::InlineApplyOutcome`, and the racy `Cache::touch` default.
