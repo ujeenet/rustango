@@ -223,12 +223,12 @@ pub use org_host::{
 };
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use pools::build_database_pool;
+#[cfg(feature = "postgres")]
+pub(crate) use pools::refuse_registry_shadow;
 #[cfg(all(test, feature = "postgres"))]
 pub(crate) use pools::scoped_pool_options;
 #[cfg(any(feature = "postgres", feature = "manage"))]
 pub(crate) use pools::RegistryConnect;
-#[cfg(feature = "postgres")]
-pub(crate) use pools::refuse_registry_shadow;
 pub use pools::{
     DefaultTenantDb, PrewarmReport, TenantConn, TenantPool, TenantPoolInvalidator, TenantPools,
     TenantPoolsConfig,

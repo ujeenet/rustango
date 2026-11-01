@@ -103,7 +103,7 @@ pub enum AuthFlowError {
 /// with [`LinkTarget::from`] the same `&tenant`. [`Self::audience`] is for
 /// single-database apps only.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinkScope(String);
+pub struct LinkScope(Option<String>);
 
 impl LinkScope {
     /// Query param holding the scope.
@@ -113,7 +113,7 @@ impl LinkScope {
     /// user database. Never equal to a tenant scope.
     #[must_use]
     pub fn audience(audience: &str) -> Self {
-        Self(format!("aud:{audience}"))
+        Self(Some(format!("aud:{audience}")))
     }
 
     /// The unsigned link: `base` plus `query` and the scope, before any
@@ -122,26 +122,27 @@ impl LinkScope {
         let (path, fragment) = base.find('#').map_or((base, ""), |i| base.split_at(i));
         let path = path.trim_end_matches(['?', '&']);
         let joiner = if path.contains('?') { '&' } else { '?' };
-        let scope = url_encode(&self.0);
+        let scope = url_encode(self.0.as_deref().unwrap_or(""));
         format!("{path}{joiner}{query}&{}={scope}{fragment}", Self::PARAM)
     }
 
-    /// The link's scope must be this one; a link without one is refused.
+    /// The link's scope must be this one; a link without one, or an unbound
+    /// scope, is refused.
     fn check(&self, url: &str) -> Result<(), AuthFlowError> {
-        match extract_query(url, Self::PARAM) {
-            Some(s) if s == self.0 => Ok(()),
+        match (extract_query(url, Self::PARAM), self.0.as_deref()) {
+            (Some(s), Some(own)) if s == own => Ok(()),
             _ => Err(AuthFlowError::WrongScope),
         }
     }
 }
 
 /// A tenant's scope. The org id is in it, so a slug freed by a purge and
-/// taken again does not accept the old tenant's links.
+/// taken again does not accept the old tenant's links. An org with no id
+/// gets a scope that verifies no link.
 #[cfg(feature = "tenancy")]
 impl From<&crate::tenancy::Org> for LinkScope {
     fn from(org: &crate::tenancy::Org) -> Self {
-        let id = org.id.get().copied().unwrap_or_default();
-        Self(format!("tenant:{}:{id}", org.slug))
+        Self(org.id.get().map(|id| format!("tenant:{}:{id}", org.slug)))
     }
 }
 
@@ -1054,6 +1055,19 @@ mod tests {
             );
         }
         assert_eq!(PasswordReset::verify(&old, &url, SECRET), Ok(1));
+    }
+
+    /// An org with no id verifies no link, not even one minted for it.
+    #[cfg(all(feature = "tenancy", feature = "testkit"))]
+    #[test]
+    fn an_org_without_an_id_verifies_no_link() {
+        let unbound = LinkScope::from(&crate::testkit::org());
+        let url =
+            PasswordReset::issue(&unbound, "https://x/r", 1, SECRET, Duration::from_secs(600));
+        assert_eq!(
+            PasswordReset::verify(&unbound, &url, SECRET),
+            Err(AuthFlowError::WrongScope)
+        );
     }
 
     /// #2472 — confirm through `&Tenant` takes pool and scope from one

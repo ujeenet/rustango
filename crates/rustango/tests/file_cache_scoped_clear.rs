@@ -47,8 +47,8 @@ async fn clearing_one_tenant_leaves_the_others_entries() {
     let dir = temp_dir("isolation");
     let shared: BoxedCache = Arc::new(FileCache::new(&dir));
 
-    let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-    let globex = ScopedCache::for_tenant(shared.clone(), "globex");
+    let acme = ScopedCache::new(shared.clone(), "tenant:acme");
+    let globex = ScopedCache::new(shared.clone(), "tenant:globex");
 
     acme.set("stats:monthly", "acme-data", None).await.unwrap();
     globex

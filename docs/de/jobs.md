@@ -547,7 +547,8 @@ Wenn du den Sweep so absicherst, dass nur eine Replica ihn ausführt, dann
 ```rust
 use rustango::distributed_lock::DistributedLock;
 
-let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+let tenant = TenantSlug::of(&org).expect("a registry org");
+let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
 // Tick every minute; this runs once per UTC day across replicas.
 lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```

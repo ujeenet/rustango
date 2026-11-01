@@ -362,13 +362,22 @@ async fn current_member_ends_on_a_same_second_password_change() {
             b"test_oper_session_secret____32b!".to_vec(),
         ),
     );
-    let set_cookie = mint_cookie(&secret, &user, "acme", 3600);
+    let set_cookie = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     let cookie = set_cookie.split(';').next().unwrap().to_owned();
     assert_eq!(whoami_with(&app, &cookie).await, "member:alice");
 
-    let iat = decode(&secret, "acme", cookie.split_once('=').unwrap().1)
-        .unwrap()
-        .iat;
+    let iat = decode(
+        &secret,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        cookie.split_once('=').unwrap().1,
+    )
+    .unwrap()
+    .iat;
     user.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
     user.password_changed_at = chrono::DateTime::from_timestamp(iat, 999_000_000);
     user.save_pool(&tenant).await.expect("change password");
@@ -378,7 +387,12 @@ async fn current_member_ends_on_a_same_second_password_change() {
         "a member session must not survive a password change"
     );
 
-    let relogin = mint_cookie(&secret, &user, "acme", 3600);
+    let relogin = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     assert_eq!(
         whoami_with(&app, relogin.split(';').next().unwrap()).await,
         "member:alice",
@@ -431,7 +445,12 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );
-    let member = mint_cookie(&secret, &user, "acme", 3600);
+    let member = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     let cookies = format!(
         "{COOKIE_NAME}={}; {}",
         encode(&secret, &tenant_session),
@@ -452,7 +471,12 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
         .await
         .unwrap()
         .remove(0);
-    let relogin = mint_cookie(&secret, &user, "acme", 3600);
+    let relogin = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     assert_eq!(
         whoami_with(&app, relogin.split(';').next().unwrap()).await,
         "false|true",

@@ -542,7 +542,8 @@ tenant**:
 ```rust
 use rustango::distributed_lock::DistributedLock;
 
-let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+let tenant = TenantSlug::of(&org).expect("a registry org");
+let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
 lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
 ```
 

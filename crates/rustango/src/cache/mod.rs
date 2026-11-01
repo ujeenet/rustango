@@ -2468,7 +2468,7 @@ mod bytes_tests {
     #[tokio::test]
     async fn a_scope_forwards_bytes() {
         let inner: BoxedCache = Arc::new(InMemoryCache::new());
-        let scoped = ScopedCache::for_tenant(inner.clone(), "acme");
+        let scoped = ScopedCache::new(inner.clone(), "tenant:acme");
         stores_raw_bytes(&scoped).await;
         scoped.set_bytes("p", b"plain", None).await.unwrap();
         let raw = inner.get(&format!("{}p", scoped.prefix())).await.unwrap();

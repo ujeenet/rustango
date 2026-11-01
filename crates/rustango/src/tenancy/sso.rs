@@ -444,10 +444,13 @@ pub(super) async fn tenant_sso_begin(
             return login_error(routes, "config");
         }
     };
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return login_error(routes, "config");
+    };
     let (url, flow) = provider.begin();
     let sealed = seal_flow(
         &flow,
-        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        FlowScope::for_tenant(FlowPurpose::TenantAdmin, &tenant, slug),
         secret.key(),
     );
     let mut resp = Redirect::to(&url).into_response();
@@ -478,9 +481,12 @@ pub(super) async fn tenant_sso_callback(
     let Some(sealed) = flow_cookie(cookie_path).read(&parts.headers) else {
         return login_error(routes, "expired");
     };
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return login_error(routes, "config");
+    };
     let flow = match open_flow(
         sealed,
-        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        FlowScope::for_tenant(FlowPurpose::TenantAdmin, &tenant, slug),
         secret.key(),
     ) {
         Ok(f) => f,
@@ -572,9 +578,6 @@ pub(super) async fn tenant_sso_callback(
     let route_ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let ttl = policy.session_ttl(route_ttl, user.is_superuser);
-    let Some(tenant) = super::TenantSlug::of(org) else {
-        return login_error(routes, REFUSED);
-    };
     let mut payload = TenantSessionPayload::new(
         uid,
         &tenant,

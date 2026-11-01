@@ -983,16 +983,32 @@ async fn a_member_logout_cutoff_round_trips(pool: &Pool) {
             .unwrap()
             .1
             .to_owned();
-        decode(&secret, "acme", &value).unwrap().iat
+        decode(
+            &secret,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &value,
+        )
+        .unwrap()
+        .iat
     };
 
-    let before = iat(mint_cookie(&secret, &user, "acme", 3600));
+    let before = iat(mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    ));
     logout(pool, &user).await.expect("logout");
     let user = reload().await;
     let cut = user.sessions_revoked_at.expect("stamped").timestamp();
     assert!(before <= cut, "the earlier session is covered");
 
-    let next = iat(mint_cookie(&secret, &user, "acme", 3600));
+    let next = iat(mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    ));
     assert!(next > cut, "the next login lands after the cut-off");
 
     // A second logout in the same second still covers that login.
