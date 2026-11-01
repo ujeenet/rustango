@@ -146,12 +146,10 @@ async fn setup(pool: &Pool) {
     for t in tables {
         rustango::testkit::matrix::drop_table(pool, t.table).await;
     }
+    // Also makes the LockPost <-> LockTag junction: both ends are listed.
     rustango::testkit::create_tables(pool, &tables)
         .await
         .expect("tables");
-    rustango::testkit::create_junctions(pool, &[LockPost::SCHEMA, LockTag::SCHEMA])
-        .await
-        .expect("junction");
     // Another suite may have left this table with a different shape.
     let ct = rustango::contenttypes::ContentType::SCHEMA.table;
     rustango::testkit::matrix::drop_table(pool, ct).await;

@@ -73,7 +73,8 @@ fn framework_models() -> Vec<&'static ModelSchema> {
 }
 
 /// Create the given models' tables for the pool's dialect, from their
-/// `SCHEMA`. Same create → constraints → comments sequence as
+/// `SCHEMA`, then the auto-created M2M junctions between them. Same
+/// create → constraints → comments sequence as
 /// [`create_framework_tables`].
 ///
 /// # Errors
@@ -82,7 +83,8 @@ pub async fn create_tables(
     pool: &Pool,
     models: &[&'static ModelSchema],
 ) -> Result<(), MigrateError> {
-    emit_tables(pool, models).await
+    emit_tables(pool, models).await?;
+    create_junctions(pool, models).await
 }
 
 /// Create a single model's table (convenience over [`create_tables`]).
@@ -95,7 +97,8 @@ pub async fn create_tables_for<M: crate::core::Model>(pool: &Pool) -> Result<(),
 }
 
 /// Create the auto-created M2M junctions of `models` as migrations build
-/// them, FKs included. Pass both ends, and create their tables first.
+/// them, FKs included. Only junctions whose two ends are both in `models`
+/// are made; create their tables first.
 ///
 /// # Errors
 /// Any DDL failure ([`MigrateError`]).
@@ -107,7 +110,16 @@ pub async fn create_junctions(
     let junctions: Vec<crate::migrate::SchemaChange> =
         crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
             .into_iter()
-            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateM2MTable { .. }))
+            .filter(|c| match c {
+                crate::migrate::SchemaChange::CreateM2MTable {
+                    src_table,
+                    dst_table,
+                    ..
+                } => [src_table, dst_table]
+                    .iter()
+                    .all(|t| models.iter().any(|m| m.table == t.as_str())),
+                _ => false,
+            })
             .collect();
     crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &junctions).await?;
     Ok(())
