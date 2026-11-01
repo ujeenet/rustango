@@ -46,6 +46,7 @@ enum ConnectFail {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PoolError {
     /// `sqlx` couldn't connect (auth, host unreachable, schema bad…).
     #[error("connect: {0}")]

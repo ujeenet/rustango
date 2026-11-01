@@ -20,6 +20,7 @@ use crate::env::SettingSource;
 
 /// Errors the layered loader can raise.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// `config/default.toml` could not be read. The per-env file is
     /// optional and is skipped when missing; this one is required.

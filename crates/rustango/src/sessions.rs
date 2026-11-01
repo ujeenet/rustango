@@ -123,6 +123,7 @@ impl Session {
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SessionError {
     #[error("cache: {0}")]
     Cache(#[from] CacheError),

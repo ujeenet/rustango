@@ -10,6 +10,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- Public `*Error` enums are `#[non_exhaustive]`; `AdminError::BadRequest` and `AdminError::Conflict` replace a faked form error and an `Ok` 409.
+- Removed: `Tenant::for_test`, `contenttypes::render_generic_fk_link`, `admin::InlineApplyOutcome`, and the racy `Cache::touch` default.
 - `ModelForm` locks superuser-only fields unless `acting_superuser(true)` is called; before, a form that never stated the acting user locked nothing.
 - Operator, tenant and impersonation-handoff tokens sign under their own tag (`session::sign_tagged`), so one kind can never verify as another under the shared `RUSTANGO_SESSION_SECRET`. Existing sessions end once.
 - `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
@@ -17,6 +19,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- A Postgres `Tenant` no longer holds a pool connection for the whole request: it takes one on the first `conn()`, so handlers that only use `t.pool()` cannot exhaust the held pool.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
 
 ## [0.61.16] — 2026-10-31

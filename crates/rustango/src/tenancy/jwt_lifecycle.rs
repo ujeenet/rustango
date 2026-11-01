@@ -151,6 +151,7 @@ pub const RESERVED_CLAIM_NAMES: &[&str] = &["sub", "exp", "jti", "typ"];
 /// Returned by [`JwtLifecycle::issue_pair_with`] when the custom payload
 /// tries to overwrite a reserved framework claim.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JwtIssueError {
     #[error("reserved claim `{0}` cannot be set in custom payload")]
     ReservedClaim(String),

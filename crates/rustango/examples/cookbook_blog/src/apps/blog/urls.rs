@@ -25,7 +25,7 @@ async fn list(
 ) -> Result<Json<Vec<AuthorOut>>, (StatusCode, String)> {
     let rows: Vec<Author> = Author::objects()
         .order_by(&[("id", false)])
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(rustango::server_error)?)
         .await
         .map_err(rustango::server_error)?;
     Ok(Json(rows.into_iter().map(AuthorOut::from).collect()))
@@ -37,7 +37,7 @@ async fn retrieve(
 ) -> Result<Json<AuthorOut>, (StatusCode, String)> {
     let row: Vec<Author> = Author::objects()
         .filter("id", id)
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(rustango::server_error)?)
         .await
         .map_err(rustango::server_error)?;
     row.into_iter()
@@ -162,7 +162,11 @@ async fn submit_new_form(
         }
     };
     let query = mf.into_insert_query();
-    if let Err(e) = rustango::sql::insert_on(tenant.conn(), &query).await {
+    let conn = match tenant.conn().await {
+        Ok(conn) => conn,
+        Err(e) => return rustango::server_error(e).into_response(),
+    };
+    if let Err(e) = rustango::sql::insert_on(conn, &query).await {
         let page = new_form(&csrf_input, Some(save_error(&e)), Some(&form));
         return form_page(page, set_cookie);
     }
@@ -183,7 +187,7 @@ async fn show_edit_form(
     }
     let mut rows: Vec<Author> = Author::objects()
         .filter("id", id)
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(rustango::server_error)?)
         .await
         .map_err(rustango::server_error)?;
     let a = rows.pop().ok_or((StatusCode::NOT_FOUND, format!("author {id} not found")))?;
@@ -218,7 +222,11 @@ async fn submit_edit_form(
         Some(q) => q,
         None => return (StatusCode::INTERNAL_SERVER_ERROR, "Author has no PK").into_response(),
     };
-    if let Err(e) = rustango::sql::update_on(tenant.conn(), &query).await {
+    let conn = match tenant.conn().await {
+        Ok(conn) => conn,
+        Err(e) => return rustango::server_error(e).into_response(),
+    };
+    if let Err(e) = rustango::sql::update_on(conn, &query).await {
         let preview = form_preview(&form);
         let page = edit_form(id, &preview, Some(save_error(&e)), &csrf_input);
         return form_page(page, set_cookie);

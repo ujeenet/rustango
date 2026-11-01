@@ -18,6 +18,7 @@ use crate::tenancy::auth::Operator;
 
 /// Why an activation change was refused.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum OperatorError {
     NotFound(String),
     /// The signed-in operator tried to deactivate themselves.

@@ -34,6 +34,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EnvError {
     #[error("environment variable `{0}` is not set")]
     Missing(String),

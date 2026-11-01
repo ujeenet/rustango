@@ -1110,22 +1110,6 @@ fn render_prefixed_input(
 
 // ============================================================ POST processing (slice 2)
 
-/// Row counts from applying the inline FormSets of one parent edit POST.
-#[deprecated(since = "0.61.12", note = "no API returns it any more")]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct InlineApplyOutcome {
-    /// Existing rows successfully updated.
-    pub updated: usize,
-    /// Existing rows successfully deleted (DELETE checkbox was on).
-    pub deleted: usize,
-    /// New rows successfully inserted (extra/empty slots with content).
-    pub inserted: usize,
-    /// Always 0: a row that fails to parse or write refuses the whole
-    /// POST and rolls the edit back.
-    #[deprecated(since = "0.60.4", note = "always 0")]
-    pub failed: usize,
-}
-
 /// Child rows an inline may show: inside the queryset hooks and passing
 /// the child's `view` object-permission hook (#1717). `None` parts (the
 /// public no-request helpers) leaves them unscoped. Rows carry every

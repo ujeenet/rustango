@@ -370,6 +370,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for TtlSpy {
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
         async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
             self.inner.get(k).await
         }

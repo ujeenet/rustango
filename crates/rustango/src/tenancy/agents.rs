@@ -100,6 +100,7 @@ pub struct AgentSecret {
 
 /// Errors from the agent operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AgentError {
     #[error("agent `{0}` already exists in this tenant")]
     Duplicate(String),

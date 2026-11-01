@@ -31,6 +31,7 @@ const ALPHABET: &[u8; 62] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmn
 
 /// Errors from [`base62_to_int`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Base62Error {
     /// Empty string.
     #[error("base62_to_int: empty input")]

@@ -232,6 +232,7 @@ impl Media {
 // =====================================================================
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MediaError {
     #[error("unknown disk: {0} (configure via StorageRegistry::set)")]
     UnknownDisk(String),

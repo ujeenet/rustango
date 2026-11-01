@@ -1118,6 +1118,13 @@ mod tests {
     #[cfg(feature = "cache")]
     #[async_trait::async_trait]
     impl crate::cache::Cache for SlowExists {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
             self.0.get(k).await
         }
@@ -1213,6 +1220,13 @@ mod tests {
     #[cfg(feature = "cache")]
     #[async_trait::async_trait]
     impl crate::cache::Cache for Down {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
             Err(crate::cache::CacheError::Connection("down".into()))
         }

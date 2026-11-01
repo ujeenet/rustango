@@ -43,6 +43,7 @@ use serde_json::{json, Map, Value};
 use subtle::ConstantTimeEq;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum JwtError {
     #[error("malformed token: expected three base64url segments")]
     Malformed,

@@ -1773,7 +1773,7 @@ In a multi-tenant app, run each query against the current tenant's connection ra
 use rustango::extractors::Tenant;
 
 async fn handler(mut t: Tenant) -> Result<...> {
-    let conn = t.conn();        // &mut PgConnection for this tenant
+    let conn = t.conn().await?; // &mut PgConnection, taken on first use
     let posts = Post::objects().fetch_on(&mut *conn).await?;
     Ok(...)
 }
@@ -1805,7 +1805,7 @@ The `_on` methods are `fetch_on`, `first_on`, `count_on`, `exists_on`,
 `fetch_aggregate_on`, and `fetch_on` on `values()`, `values_list()`, `values_list_flat()`
 (plus `first_on`) and `aggregate()`. They take any `SqlExecutor`: `&mut PoolConn`,
 `&mut PoolTx`, `&Pool`, or on Postgres any sqlx executor (`&PgPool`,
-`&mut PgConnection`, `t.conn()`).
+`&mut PgConnection`, `t.conn().await?`).
 
 A connection goes back to the pool with any session state you set on it
 (`SET …`, MySQL `@vars`, SQLite `PRAGMA`); the next borrower inherits it, which

@@ -53,6 +53,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SignedUrlError {
     #[error("missing `signature` query parameter")]
     MissingSignature,

@@ -3212,14 +3212,14 @@ fn refused_delete(
         );
         return Ok((axum::http::StatusCode::CONFLICT, Html(html)).into_response());
     }
-    let body =
-        crate::api_errors::ApiError::conflict(message.clone()).with_details(serde_json::json!({
+    Err(AdminError::Conflict {
+        message,
+        details: serde_json::json!({
             "table": model.table,
             "referenced_by": tables,
             "correlation_id": id,
-        }));
-    // The words let the error-pages layer dress it for htmx.
-    Ok((crate::errors::Message::new(message), body).into_response())
+        }),
+    })
 }
 
 /// Tables whose FK onto `table` refuses a parent delete.
@@ -3264,7 +3264,7 @@ pub(crate) async fn action_submit(
     // collapse the duplicate `_selected` keys into one, so read the
     // raw body into a `Vec` of pairs instead.
     let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
-        .map_err(|e| bad_action_form("body", "form", String::new(), e.to_string()))?;
+        .map_err(|e| AdminError::BadRequest(format!("unreadable action form: {e}")))?;
 
     // The bottom action bar posts `action_bottom` so it does not
     // clash with the top bar's empty default. The first non-empty
@@ -3307,12 +3307,10 @@ pub(crate) async fn action_submit(
     let admin_cfg = admin_config_or_default(model);
     if !admin_cfg.actions.iter().any(|a| *a == action) {
         // A client error (#2346): the allowlist is the model's own.
-        return Err(bad_action_form(
-            "action",
-            "action",
-            action,
-            format!("not an action of `{}`", model.name),
-        ));
+        return Err(AdminError::BadRequest(format!(
+            "`{action}` is not an action of `{}`",
+            model.name
+        )));
     }
     // Pick and permission-check the write before any row signal (#1928).
     let Some(write) = BulkWrite::plan(&state, model, &action)? else {
@@ -3507,18 +3505,8 @@ pub(crate) async fn action_submit(
 fn operator_refusal(e: crate::tenancy::operators::OperatorError, pk: String) -> AdminError {
     match e {
         crate::tenancy::operators::OperatorError::Driver(e) => e.into(),
-        e => bad_action_form("active", "operator", pk, e.to_string()),
+        e => AdminError::BadRequest(format!("operator {pk}: {e}")),
     }
-}
-
-/// A malformed action POST: a 400, not a 500 (#2346).
-fn bad_action_form(field: &str, ty: &'static str, value: String, detail: String) -> AdminError {
-    AdminError::Form(forms::FormError::Parse {
-        field: field.to_owned(),
-        ty,
-        value,
-        detail,
-    })
 }
 
 /// The write a bulk action makes, chosen and permission-checked before

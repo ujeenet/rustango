@@ -1143,8 +1143,10 @@ pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
 //! ```ignore
 //! pub async fn list_items(mut t: rustango::extractors::Tenant)
 //!     -> Result<axum::Json<Vec<crate::models::Item>>, axum::http::StatusCode> {
+//!     let conn = t.conn().await
+//!         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 //!     let rows = crate::models::Item::objects()
-//!         .fetch_on(t.conn()).await
+//!         .fetch_on(conn).await
 //!         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
 //!     Ok(axum::Json(rows))
 //! }

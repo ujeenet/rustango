@@ -11,6 +11,7 @@ use super::secrets::SecretsError;
 /// Errors raised while resolving, provisioning, or operating on
 /// tenants.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum TenancyError {
     /// Per-request tenant resolution failed — no `Org` matched the
     /// request's host / path / header / port. The handler should
