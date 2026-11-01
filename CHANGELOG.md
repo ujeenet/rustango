@@ -34,6 +34,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
 - File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
+- `TestClient` panics on a response body that fails or passes 16 MiB, instead of returning it empty.
+- The Postgres registry pool pins `search_path=public`, so a schema named like the role can no longer shadow registry tables.
 
 ## [0.61.16] — 2026-10-31
 

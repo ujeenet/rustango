@@ -177,6 +177,8 @@ untouched.
 - `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
+- `TestClient` panics when a response body fails to read or passes 16 MiB; it used to return an empty body.
+- `TenantPools` sets a Postgres registry's `search_path` to `public`, overriding `ALTER ROLE ... SET search_path`; keep registry tables elsewhere with `?options=-c%20search_path%3D...` in the registry URL.
 
 ---
 
