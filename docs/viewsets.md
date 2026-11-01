@@ -593,7 +593,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
 | `skip_object_permissions()` | Skip the app's object-permission hooks and queryset scopes, for an API that guards its rows itself. The framework's own hooks still run. |
-| `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 10 000); past it `count` and `last_page` are `null`. |
+| `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 10 000); past it a page or offset list is a `400` (cursor lists keep working). |
 | `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
 | `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
@@ -767,8 +767,9 @@ the `posts` table).
   read locked in the write's transaction, so a concurrent edit cannot slip
   between the check and the write;
 - `view` on lists: hidden rows are left out of the page and the count. Past
-  `view_hook_scan_cap` rows, `count` and `last_page` are `null`; a queryset
-  scope does the same in SQL and scales;
+  `view_hook_scan_cap` rows a page or offset list is a `400`, since a window
+  counted over hidden rows would reveal them; narrow it with filters, add a
+  queryset scope (which scales) or use cursor pagination;
 - queryset scopes narrow every read and write, and a create or update whose
   row would land outside them is a `403` that writes nothing; an FK may not
   name a target row its scopes or `view` hook hide (`422`).

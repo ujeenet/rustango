@@ -596,7 +596,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `filter_backend(closure)` | Eigene `WHERE`-Prädikate über `filter_fields` hinaus hinzufügen. |
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster; `QUERY` verbraucht das Budget der Liste. |
 | `skip_object_permissions()` | Überspringt die Objekt-Berechtigungs-Hooks und Queryset-Scopes der App, für eine API, die ihre Zeilen selbst schützt. Die Hooks des Frameworks laufen weiter. |
-| `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 10 000); darüber sind `count` und `last_page` `null`. |
+| `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 10 000); darüber ist eine Seiten- oder Offset-Liste ein `400` (Cursor-Listen funktionieren weiter). |
 | `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
 | `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |
@@ -751,8 +751,8 @@ Tabelle `posts`).
 (ein Bulk-Create ganz oder gar nicht, `403` mit `{"details": {"index": i}}`);
 `view` bei Retrieve, Update und Delete (verborgen ist `404`), dann `change` bzw.
 `delete` (`403`, auch beim Soft Delete); `view` in Listen (verborgene Zeilen
-fehlen in Seite und `count`, ab `view_hook_scan_cap` sind `count` und
-`last_page` `null`). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
+fehlen in Seite und `count`, ab `view_hook_scan_cap` ist eine Seiten- oder
+Offset-Liste ein `400`: Queryset-Scope ergänzen oder Cursor-Paginierung nutzen). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
 `change` prüft nur die gespeicherte Zeile. `object_permissions::Actor::of(&parts)`
 sagt einem Hook, wer fragt; ein Agent-Token ist nie Superuser.
 `rustango_api_keys`, `rustango_agents` und die SSO-Tabellen lehnt

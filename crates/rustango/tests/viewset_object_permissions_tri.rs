@@ -325,29 +325,35 @@ async fn a_page_counts_only_visible_rows(pool: &Pool) {
     assert_eq!(titles_of(&body), ["a-3", "a-5"]);
 }
 
-/// Past the scan cap the count is withheld and each page still hides rows.
-async fn past_the_scan_cap_the_count_is_withheld(pool: &Pool) {
+/// Past the scan cap a page or offset list is refused, never a window
+/// counted over hidden rows; a filter that fits the cap still works.
+async fn past_the_scan_cap_offset_lists_are_refused(pool: &Pool) {
     docs(pool, &["a-1", "hidden-2", "a-3", "hidden-4", "a-5"]).await;
     let app = doc_app(pool, |v| {
         v.page_size(2)
             .view_hook_scan_cap(2)
+            .filter_fields(&["title"])
             .ordering(&[("id", false)])
     });
     let (status, body) = send(&app, "GET", "/docs", None).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(
-        body["count"].is_null() && body["last_page"].is_null(),
+        body["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("cursor pagination"),
         "{body}"
     );
-    assert_eq!(titles_of(&body), ["a-1"]);
+    let (status, body) = send(&app, "GET", "/docs?title=a-3", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(titles_of(&body), ["a-3"]);
     let lo = doc_app(pool, |v| {
         v.limit_offset_pagination()
             .view_hook_scan_cap(2)
             .ordering(&[("id", false)])
     });
-    let (_, body) = send(&lo, "GET", "/docs?limit=3&offset=2", None).await;
-    assert!(body["count"].is_null(), "{body}");
-    assert_eq!(titles_of(&body), ["a-3", "a-5"]);
+    let (status, body) = send(&lo, "GET", "/docs?limit=3&offset=2", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 /// A cursor page fills with visible rows; past the cap it still moves on.
@@ -714,7 +720,7 @@ tri_dialect_test!(
         item_routes_hide_with_404_and_refuse_with_403,
         a_soft_delete_runs_the_delete_hook,
         a_page_counts_only_visible_rows,
-        past_the_scan_cap_the_count_is_withheld,
+        past_the_scan_cap_offset_lists_are_refused,
         a_cursor_page_skips_hidden_rows,
         skip_object_permissions_skips_app_hooks,
         a_queryset_scope_narrows_every_action,

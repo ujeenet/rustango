@@ -30,6 +30,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
 - Admin detail, edit, update and delete answer 404, not 403, for a row the `view` hook hides.
+- Admin bulk actions skip rows the `view` hook hides instead of acting on them; ViewSet page and offset lists past the `view` hook scan cap answer 400 instead of windows that reveal hidden rows.
 - Tenancy: a tenant URL that reaches the registry's database under another name, a resume onto the registry, and migrating into a schema another app owns are refused instead of warned.
 - A Postgres `Tenant` no longer holds a pool connection for the whole request: it takes one on the first `conn()`, so handlers that only use `t.pool()` cannot exhaust the held pool.
 - Media: replacing a row's tags could create new tag rows with only the media `change` permission; a new slug now also needs `Add(NewTag)`.

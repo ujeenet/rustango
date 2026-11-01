@@ -3286,6 +3286,11 @@ pub(crate) async fn action_submit(
     )
     .await?;
 
+    // A row the `view` hook hides is dropped like one outside the scope:
+    // acting on it, or refusing because of it, would confirm it exists.
+    before_rows.retain(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    });
     // Every action runs the per-row hooks, as the single-row pages do. One
     // refused row refuses the whole action.
     let (perm, named) = row_perms(&write, &action);

@@ -606,7 +606,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `filter_backend(closure)` | Añade predicados `WHERE` personalizados más allá de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
 | `skip_object_permissions()` | Omite los hooks de permiso por objeto y los scopes de queryset de la app, para una API que protege sus filas por su cuenta. Los hooks del framework siguen ejecutándose. |
-| `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (10 000 por defecto); por encima, `count` y `last_page` son `null`. |
+| `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (10 000 por defecto); por encima, una lista por página u offset es un `400` (el modo cursor sigue funcionando). |
 | `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
 | `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
@@ -780,8 +780,8 @@ autocompleta los codenames estándar `<table>.view` / `.add` / `.change` /
 bulk create es todo o nada, `403` con `{"details": {"index": i}}`); `view` al
 leer, actualizar y eliminar (oculto es `404`), luego `change` o `delete` (`403`,
 también con soft delete); `view` en listas (las filas ocultas salen de la página
-y del `count`; por encima de `view_hook_scan_cap`, `count` y `last_page` son
-`null`). Los scopes de queryset acotan cada lectura y escritura; una escritura cuya fila saldría de ellos es un `403`. Los hooks leen la fila bloqueada en la transacción de escritura; una credencial de otro tenant es un `403`. `change` solo
+y del `count`; por encima de `view_hook_scan_cap`, una lista por página u offset
+es un `400`: añade un scope de queryset o usa paginación por cursor). Los scopes de queryset acotan cada lectura y escritura; una escritura cuya fila saldría de ellos es un `403`. Los hooks leen la fila bloqueada en la transacción de escritura; una credencial de otro tenant es un `403`. `change` solo
 comprueba la fila guardada. `object_permissions::Actor::of(&parts)` le dice a un
 hook quién pregunta; un token de agente nunca es superuser. `ViewSet::for_model`
 rechaza `rustango_api_keys`, `rustango_agents` y las tablas SSO.
