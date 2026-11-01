@@ -34,6 +34,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
 - File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
+- A tenant with no host, path prefix or port is refused at provisioning and edit, and gets no link, instead of being created unreachable with a warning.
 
 ## [0.61.16] — 2026-10-31
 

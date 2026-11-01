@@ -178,6 +178,7 @@ untouched.
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
 
+- A tenant needs a host, a path prefix or a port: `create-tenant`, the console and the webhook refuse one with none (a configured apex domain still gives the `<slug>.<apex>` default), and `edit-tenant` refuses clearing the last. `FirstAdminHandover::hand_over` returns `Result`.
 ---
 
 ## 0.61.16

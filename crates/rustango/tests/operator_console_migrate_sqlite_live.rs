@@ -186,7 +186,7 @@ async fn a_tenant(b: &Booted) -> String {
     let slug = unique("mig");
     let db = b._tmp.path().join(format!("{slug}.db"));
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url=sqlite%3A%2F%2F{}%3Fmode%3Drwc",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url=sqlite%3A%2F%2F{}%3Fmode%3Drwc",
         db.display().to_string().replace('/', "%2F")
     );
     let resp = b
@@ -312,7 +312,7 @@ async fn a_failed_create_is_audited() {
     let b = boot().await;
     let slug = unique("bad");
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite\
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite\
          &database_url=sqlite%3A%2F%2F%2Fno-such-dir-{slug}%2Fx.db"
     );
     let resp = b

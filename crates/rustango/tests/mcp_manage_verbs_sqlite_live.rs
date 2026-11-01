@@ -39,7 +39,7 @@ async fn run(
         pools,
         url,
         dir,
-        argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        rustango::testkit::routed_args(argv),
         &mut buf,
     )
     .await
@@ -59,7 +59,7 @@ async fn run_err(
         pools,
         url,
         dir,
-        argv.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+        rustango::testkit::routed_args(argv),
         &mut buf,
     )
     .await

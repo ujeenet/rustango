@@ -166,6 +166,8 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
         vec![
             "create-tenant".to_owned(),
             "acme".to_owned(),
+            "--host-pattern".to_owned(),
+            "acme.localhost".to_owned(),
             "--display-name".to_owned(),
             "Acme Corp".to_owned(),
             "--mode".to_owned(),
@@ -203,7 +205,7 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_mysql() {
 
     // Step 5: flush --tenant clears the tenant database, never the registry (#2284).
     let run = |args: &[&str]| {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let pools = &pools;
         let (url, dir) = (url.clone(), migrations_dir.path().to_owned());
         async move {

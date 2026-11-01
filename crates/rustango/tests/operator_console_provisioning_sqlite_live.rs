@@ -493,7 +493,7 @@ async fn submitting_the_form_provisions_a_tenant_and_redirects_to_its_run() {
     let tenant_db = b._tmp.path().join("acme.db");
     let slug = unique("acme");
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
 
@@ -616,7 +616,7 @@ async fn the_stream_replays_a_finished_run_and_then_ends() {
     let tenant_db = b._tmp.path().join("streamed.db");
     let slug = unique("streamed");
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
     let created = b
@@ -685,7 +685,7 @@ async fn the_stream_resumes_from_a_given_seq() {
     let tenant_db = b._tmp.path().join("resume.db");
     let slug = unique("resume");
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
     let created = b
@@ -760,7 +760,7 @@ async fn the_run_index_lists_runs_and_links_to_each() {
     let tenant_db = b._tmp.path().join("indexed.db");
     let slug = unique("indexed");
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
     let created = b
@@ -823,7 +823,7 @@ async fn the_run_index_shows_why_a_run_failed() {
     let slug = unique("doomed");
     // Schema mode on SQLite is refused — a real failure, recorded as a
     // run, with a message worth surfacing.
-    let form = format!("slug={slug}&storage_mode=schema&backend_kind=sqlite");
+    let form = format!("slug={slug}&host_pattern={slug}.localhost&host_pattern={slug}.localhost&storage_mode=schema&backend_kind=sqlite");
     b.app
         .clone()
         .oneshot(
@@ -874,7 +874,7 @@ async fn a_run_page_past_the_end_clamps_to_real_data() {
     let slug = unique("clamped");
     let tenant_db = b._tmp.path().join("clamped.db");
     let form = format!(
-        "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
     b.app
@@ -1143,7 +1143,7 @@ async fn a_failed_create_withholds_the_driver_text() {
     drop_registry_table(&b, "rustango_orgs").await;
     let tenant_db = b._tmp.path().join("broken.db");
     let form = format!(
-        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={}&host_pattern=broken.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         unique("broken"),
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
@@ -1245,7 +1245,7 @@ async fn a_failed_migration_withholds_the_driver_text() {
 
     let tenant_db = b._tmp.path().join("boom.db");
     let form = format!(
-        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={}&host_pattern=boom.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         unique("boom"),
         form_encode(&format!("sqlite://{}?mode=rwc", tenant_db.display()))
     );
@@ -1303,7 +1303,7 @@ async fn a_failed_connection_check_withholds_the_driver_text() {
     let b = boot().await;
     let missing = b._tmp.path().join("no-such-dir").join("x.db");
     let form = format!(
-        "slug={}&storage_mode=database&backend_kind=sqlite&database_url={}",
+        "slug={}&host_pattern=unreachable.localhost&storage_mode=database&backend_kind=sqlite&database_url={}",
         unique("unreachable"),
         form_encode(&format!("sqlite://{}?mode=ro", missing.display()))
     );
@@ -1507,7 +1507,7 @@ async fn the_probe_tests_what_create_would_use() {
         &b,
         "POST",
         "/orgs/test-connection",
-        &format!("slug={slug}&storage_mode=database&database_source=url"),
+        &format!("slug={slug}&host_pattern={slug}.localhost&host_pattern={slug}.localhost&storage_mode=database&database_source=url"),
     )
     .await;
     assert!(html.contains(r#""status":"bad""#), "{html}");
@@ -1519,7 +1519,7 @@ async fn the_probe_tests_what_create_would_use() {
         "POST",
         "/orgs/test-connection",
         &format!(
-            "slug={slug}&storage_mode=database&database_source=registry&database_url={}",
+            "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&database_source=registry&database_url={}",
             form_encode(&b.registry_url)
         ),
     )
@@ -1567,7 +1567,7 @@ async fn a_failed_create_resumes_from_its_run() {
 
     let slug = unique("resume");
     let form = format!(
-        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&database_source=url&database_url={}",
         form_encode(&format!(
             "sqlite://{}?mode=rwc",
             b._tmp.path().join("resume.db").display()
@@ -1629,7 +1629,7 @@ async fn a_failure_after_the_row_redirects_to_the_run() {
     let _alone = FAIL_AT.write().await;
     let slug = unique("late");
     let form = format!(
-        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&database_source=url&database_url={}",
         form_encode(&format!(
             "sqlite://{}?mode=rwc",
             b._tmp.path().join("late.db").display()
@@ -1762,7 +1762,7 @@ async fn a_dropped_resume_request_still_blocks_a_second_resume() {
     file::write(&boom_file, &boom).unwrap();
     let slug = unique("twice");
     let form = format!(
-        "slug={slug}&storage_mode=database&database_source=url&database_url={}",
+        "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&database_source=url&database_url={}",
         form_encode(&format!(
             "sqlite://{}?mode=rwc",
             b._tmp.path().join("twice.db").display()

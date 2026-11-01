@@ -33,7 +33,7 @@ async fn cross_schema_fks(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
 async fn run(pools: &TenantPools, url: &str, parts: &[&str]) -> Result<(), String> {
     let mut buf = Vec::new();
     let dir = std::env::temp_dir();
-    let args: Vec<String> = parts.iter().map(|s| (*s).to_owned()).collect();
+    let args = rustango::testkit::routed_args(parts);
     manage::run_with_writer(pools, url, &dir, args, &mut buf)
         .await
         .map_err(|e| format!("{e}: {}", String::from_utf8_lossy(&buf)))
