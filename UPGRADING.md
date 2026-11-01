@@ -168,6 +168,7 @@ untouched.
 - `#[derive(Model)]` index or `get_latest_by` names that are no column, and unknown `#[rustango::main]` arguments (tokio's included), are compile errors.
 - `ModelForm` locks the admin's superuser-only fields by default. A form that should write them, for a superuser or a trusted job, calls `.acting_superuser(true)`.
 - `signals::m2m::M2mChangedContext` is `#[non_exhaustive]`: build it with `M2mChangedContext::new(..)`, not a struct literal.
+- `TableSnapshot` is `#[non_exhaustive]` and gains `db_table_comment`: build it with `SchemaSnapshot::from_models` or serde, not a struct literal. `SchemaChange` gains `AlterTableComment`. The next `makemigrations` writes a migration for each model that sets a table comment.
 - `config::ServerSettings` is `#[non_exhaustive]`: build it from `Default` and set fields, not with a struct literal.
 - Operator console cookies, tenant admin cookies and impersonation handoff tokens are signed under a per-kind tag. Every existing operator and tenant session ends once on upgrade; users sign in again.
 - `M2MManager::all` and `GenericM2MManager::all` are generic over the key type and `all_as` is gone: write `m.all::<i64>(&pool)` (or annotate `let ids: Vec<i64>`); use `String` / `Uuid` for those keys.

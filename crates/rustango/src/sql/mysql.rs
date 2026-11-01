@@ -327,6 +327,14 @@ impl Dialect for MySql {
         Some(format!(" COMMENT={}", self.quote_literal(comment)))
     }
 
+    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {}{}",
+            self.quote_ident(table),
+            self.write_inline_table_comment(comment)?
+        ))
+    }
+
     // `?` placeholders are the trait default.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {

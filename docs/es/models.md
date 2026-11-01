@@ -430,7 +430,7 @@ la lista completa, incluyendo las avanzadas/específicas de PostgreSQL.
 | `through(...)` | especificación de relación | accesor de relación through personalizado |
 | `reverse_has(...)` / `generic_has(...)` | especificación de relación | accesor inverso has-many / inverso de FK genérica |
 | `required_db_features` / `required_db_vendor` | lista / proveedor | restricciones de validación de despliegue |
-| `db_table_comment` | `"…"` | COMMENT de tabla; las migraciones en archivo aún no lo escriben, y `makemigrations` avisa |
+| `db_table_comment` | `"…"` | COMMENT de tabla (Postgres, MySQL; SQLite no tiene) |
 | `admin(...)` | opciones de admin | configuración de la UI del admin (consulta [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | especificación | FK compuesta / FK genérica (content-type) |
 | `m2m(...)` / `generic_m2m(...)` | especificación | relación muchos-a-muchos / muchos-a-muchos genérica |

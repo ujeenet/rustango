@@ -2956,6 +2956,56 @@ async fn db_comment_change_applies(pool: &Pool) {
     assert_eq!(column_comment(pool, t, "c").await, expect(""));
 }
 
+#[derive(rustango::Model)]
+#[rustango(table = "mad_tc_note", db_table_comment = "first")]
+#[allow(dead_code)]
+pub struct TcNote {
+    #[rustango(primary_key)]
+    pub id: rustango::sql::Auto<i64>,
+}
+
+/// The table comment the catalog holds; `None` on SQLite.
+async fn table_comment(pool: &Pool, t: &str) -> Option<String> {
+    let sql = match pool.dialect().name() {
+        "postgres" => format!("SELECT COALESCE(obj_description('{t}'::regclass, 'pg_class'), '')"),
+        "mysql" => format!(
+            "SELECT CAST(TABLE_COMMENT AS CHAR) FROM information_schema.TABLES \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{t}'"
+        ),
+        _ => return None,
+    };
+    let got: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+        .await
+        .unwrap();
+    Some(got[0].0.clone())
+}
+
+/// A model's `db_table_comment` is created, changed, unapplied and dropped.
+async fn db_table_comment_applies(pool: &Pool) {
+    use rustango::core::Model as _;
+    let t = "mad_tc_note";
+    let chain = Chain::new(pool, "tc", &[t]).await;
+    let with = |comment: Option<&str>| {
+        let mut v = table(t, vec![id()]);
+        v["db_table_comment"] = json!(comment);
+        json!({ "tables": [v] })
+    };
+    let expect = |s: &str| (pool.dialect().name() != "sqlite").then(|| s.to_owned());
+    let model = serde_json::to_value(SchemaSnapshot::from_models(&[TcNote::SCHEMA])).unwrap();
+    chain.step(pool, model).await.expect("created");
+    assert_eq!(table_comment(pool, t).await, expect("first"));
+    let name = chain
+        .step(pool, with(Some("it's second")))
+        .await
+        .expect("changed");
+    assert_eq!(table_comment(pool, t).await, expect("it's second"));
+    chain.undo(pool, &name).await.expect("unapply");
+    assert_eq!(table_comment(pool, t).await, expect("first"));
+    chain.discard_head();
+    chain.step(pool, with(None)).await.expect("dropped");
+    assert_eq!(table_comment(pool, t).await, expect(""));
+}
+
 /// Dropping the index an FK uses, then its whole table; MySQL refused
 /// both with 1553 (#2244).
 async fn fk_index_drops(pool: &Pool) {
@@ -4797,6 +4847,7 @@ tri_dialect_test!(
         dropped_exclude_unapplies,
         case_insensitive_change_applies,
         db_comment_change_applies,
+        db_table_comment_applies,
         db_comment_on_create_and_add_column,
         fk_index_drops,
         fk_index_drop_keeps_a_served_fk,

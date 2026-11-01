@@ -91,6 +91,13 @@ pub enum SchemaChange {
         from: Option<String>,
         to: Option<String>,
     },
+    /// Change a table's `db_table_comment`; `None` drops it. SQLite has
+    /// no comments, so it writes nothing there.
+    AlterTableComment {
+        table: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
     /// Rename a table. `detect_changes` never emits this: a snapshot
     /// diff cannot tell a rename from a drop plus an add. Write it by
     /// hand with `manage makemigrations --empty <name>`, then edit
@@ -245,6 +252,7 @@ impl SchemaChange {
             | Self::AlterColumnDefault { table: t, .. }
             | Self::AlterColumnMaxLength { table: t, .. }
             | Self::AlterColumnComment { table: t, .. }
+            | Self::AlterTableComment { table: t, .. }
             | Self::RenameColumn { table: t, .. }
             | Self::AlterColumnUnique { table: t, .. }
             | Self::AlterFkOnDelete { table: t, .. }
@@ -421,6 +429,19 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 continue;
             };
             push_alter_changes(&ct.name, pf, cf, &mut changes);
+        }
+    }
+    // Table comments on tables that stay; a new table writes its own.
+    for ct in &current.tables {
+        let Some(pt) = prev.table(&ct.name) else {
+            continue;
+        };
+        if pt.db_table_comment != ct.db_table_comment {
+            changes.push(SchemaChange::AlterTableComment {
+                table: ct.name.clone(),
+                from: pt.db_table_comment.clone(),
+                to: ct.db_table_comment.clone(),
+            });
         }
     }
     // Dropped columns on remaining tables.
@@ -1343,6 +1364,10 @@ fn render_changes_split_inner(
                 for f in &table.fields {
                     out.immediate.extend(column_comment(name, f, dialect));
                 }
+                if let Some(comment) = &table.db_table_comment {
+                    out.immediate
+                        .extend(dialect.table_comment_statement(name, comment));
+                }
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
                         .extend(constraints_sql_from_snapshot(table, dialect, schema)?);
@@ -1674,6 +1699,9 @@ fn render_changes_split_inner(
                 column,
                 to.as_deref().unwrap_or(""),
             )),
+            SchemaChange::AlterTableComment { table, to, .. } => out
+                .immediate
+                .extend(dialect.alter_table_comment_statement(table, to.as_deref().unwrap_or(""))),
             SchemaChange::AlterColumnUnique {
                 table,
                 column,
@@ -2173,6 +2201,14 @@ pub(super) fn create_table_sql_as(
         }
     }
     sql.push(')');
+    // MySQL's trailer; PG's `COMMENT ON TABLE` follows the CREATE.
+    if let Some(inline) = t
+        .db_table_comment
+        .as_deref()
+        .and_then(|c| dialect.write_inline_table_comment(c))
+    {
+        sql.push_str(&inline);
+    }
     sql
 }
 
@@ -2803,6 +2839,7 @@ mod sql_type_tests {
                 model: "T".into(),
                 fields: vec![fs("i32", false)],
                 composite_fks: Vec::new(),
+                db_table_comment: None,
             }],
             ..Default::default()
         };
@@ -2839,6 +2876,7 @@ mod sql_type_tests {
                 model: "T".into(),
                 fields: vec![fs("i32", false), nullable],
                 composite_fks: Vec::new(),
+                db_table_comment: None,
             }],
             ..Default::default()
         };
@@ -2875,6 +2913,7 @@ mod sql_type_tests {
             model: name.into(),
             fields,
             composite_fks: Vec::new(),
+            db_table_comment: None,
         };
         let prev = SchemaSnapshot {
             tables: vec![
@@ -3037,6 +3076,7 @@ mod sql_type_tests {
                 ..fs("i64", false)
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         };
         SchemaSnapshot {
             tables: vec![uniq("a_b", "c"), uniq("a", "b_c")],
@@ -3103,6 +3143,7 @@ mod sql_type_tests {
                     },
                 ],
                 composite_fks: vec![],
+                db_table_comment: None,
             }],
             ..SchemaSnapshot::default()
         };
@@ -3137,6 +3178,7 @@ mod sql_type_tests {
                 ..fs("i64", false)
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         };
         child.fields.insert(0, fs("i64", true));
         let snap = SchemaSnapshot {
@@ -3198,6 +3240,7 @@ mod sql_type_tests {
                 ..fs("i64", false)
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         };
         let snap = SchemaSnapshot {
             tables: vec![child],
@@ -3239,6 +3282,7 @@ mod sql_type_tests {
                     },
                 ],
                 composite_fks: vec![],
+                db_table_comment: None,
             }],
             ..SchemaSnapshot::default()
         }
@@ -3365,6 +3409,7 @@ mod sql_type_tests {
                     string("name", false),
                 ],
                 composite_fks: vec![],
+                db_table_comment: None,
             }],
             ..SchemaSnapshot::default()
         }

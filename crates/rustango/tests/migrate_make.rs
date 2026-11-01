@@ -628,28 +628,43 @@ pub struct MkNoted {
     pub id: rustango::sql::Auto<i64>,
 }
 
-/// A model's `db_table_comment` is not tracked by file migrations yet,
-/// so `makemigrations` warns rather than dropping it silently.
+/// A model's `db_table_comment` reaches the snapshot, and a change to it
+/// is a migration of its own.
 #[cfg(all(feature = "runtime", feature = "testkit"))]
 #[test]
-fn untracked_table_comment_is_warned() {
+fn table_comment_is_tracked() {
     use rustango::core::Model as _;
-    let buf = rustango::testkit::CaptureWriter::default();
-    let sink = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || sink.clone())
-        .with_max_level(tracing::Level::WARN)
-        .finish();
     let dir = fresh_dir("table_comment");
     let current = SchemaSnapshot::from_models(&[MkNoted::SCHEMA]);
-    tracing::subscriber::with_default(subscriber, || {
-        make_migrations_from(&dir, &current, None).expect("make");
-    });
-    let logs = buf.contents();
-    assert!(
-        logs.contains("mk_noted") && logs.contains("db_table_comment"),
-        "{logs}"
+    let first = make_migrations_from(&dir, &current, None).unwrap().unwrap();
+    assert_eq!(
+        first.snapshot.tables[0].db_table_comment.as_deref(),
+        Some("kept notes")
     );
+    let mut next = current.clone();
+    next.tables[0].db_table_comment = None;
+    let second = make_migrations_from(&dir, &next, None).unwrap().unwrap();
+    assert_eq!(
+        second.forward,
+        vec![Operation::Schema(SchemaChange::AlterTableComment {
+            table: "mk_noted".into(),
+            from: Some("kept notes".into()),
+            to: None,
+        })]
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// An unchanged model with a table comment writes no second migration.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[test]
+fn unchanged_table_comment_writes_nothing() {
+    use rustango::core::Model as _;
+    let dir = fresh_dir("table_comment_again");
+    let current = SchemaSnapshot::from_models(&[MkNoted::SCHEMA]);
+    make_migrations_from(&dir, &current, None).unwrap().unwrap();
+    assert!(make_migrations_from(&dir, &current, None)
+        .unwrap()
+        .is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
