@@ -26,7 +26,7 @@ use serde_json::json;
 use crate::extractors::{Tenant, TenantScope};
 use crate::login_throttle::{ClientIp, LoginRefused, LoginScope};
 use crate::tenancy::jwt_lifecycle::{JwtIssueError, JwtLifecycle};
-use crate::tenancy::{AgentError, TenancyError};
+use crate::tenancy::{AgentError, TenancyError, TenantSlug};
 
 use super::router::AuthedMcpState;
 use super::transport::handle_message;
@@ -37,6 +37,8 @@ pub const CLAIM_KIND: &str = crate::tenancy::jwt_lifecycle::CLAIM_KIND;
 pub const KIND_AGENT: &str = "agent";
 /// Claim pinning the token to one tenant slug.
 pub const CLAIM_TENANT: &str = crate::tenancy::jwt_lifecycle::CLAIM_TENANT;
+/// Claim pinning the token to that tenant's org id.
+pub const CLAIM_ORG_ID: &str = crate::tenancy::jwt_lifecycle::CLAIM_ORG_ID;
 /// Claim listing the agent's granted skill codenames.
 pub const CLAIM_SKILLS: &str = "skills";
 /// Claim listing the tools those skills add up to.
@@ -75,7 +77,7 @@ pub struct McpAgent {
 pub fn issue_agent_token(
     jwt: &JwtLifecycle,
     agent_id: i64,
-    tenant: &str,
+    tenant: &TenantSlug,
     skills: &[String],
     tools: &[String],
     user_id: Option<i64>,
@@ -84,7 +86,8 @@ pub fn issue_agent_token(
     let mut custom = serde_json::Map::new();
     custom.insert(CLAIM_KIND.into(), json!(KIND_AGENT));
     custom.insert(CLAIM_KEY_PREFIX.into(), json!(secret_prefix));
-    custom.insert(CLAIM_TENANT.into(), json!(tenant));
+    custom.insert(CLAIM_TENANT.into(), json!(tenant.slug));
+    custom.insert(CLAIM_ORG_ID.into(), json!(tenant.org_id));
     custom.insert(CLAIM_SKILLS.into(), json!(skills));
     custom.insert(CLAIM_TOOLS.into(), json!(tools));
     if let Some(uid) = user_id {
@@ -107,7 +110,7 @@ pub fn issue_agent_token(
 pub async fn verify_agent_token(
     jwt: &JwtLifecycle,
     token: &str,
-    expected_tenant: &str,
+    expected_tenant: &TenantSlug,
 ) -> Option<McpAgent> {
     verify_agent_claims(jwt, token, expected_tenant)
         .await
@@ -118,14 +121,16 @@ pub async fn verify_agent_token(
 async fn verify_agent_claims(
     jwt: &JwtLifecycle,
     token: &str,
-    expected_tenant: &str,
+    expected_tenant: &TenantSlug,
 ) -> Option<(McpAgent, i64)> {
     let claims = jwt.verify_access(token).await?;
     if claims.get_custom::<String>(CLAIM_KIND).as_deref() != Some(KIND_AGENT) {
         return None;
     }
     let tenant = claims.get_custom::<String>(CLAIM_TENANT)?;
-    if tenant != expected_tenant {
+    // The org id too: a tenant that reuses a purged slug refuses its tokens.
+    let org_id = claims.get_custom::<i64>(CLAIM_ORG_ID)?;
+    if !expected_tenant.binds(&tenant, org_id) {
         return None;
     }
     // A token from before the claim existed cannot be checked for rotation.
@@ -207,13 +212,16 @@ async fn gated<T>(
 pub(crate) async fn mint_agent_jwt(
     jwt: &JwtLifecycle,
     pool: &crate::sql::Pool,
-    slug: &str,
+    tenant: &TenantSlug,
     name: &str,
     secret: &str,
     ip: &ClientIp,
 ) -> Result<MintedToken, MintError> {
     let check = crate::tenancy::authenticate_agent_pool(pool, name, secret);
-    let agent = match gated(slug, ip, check).await.map_err(MintError::Refused)? {
+    let agent = match gated(&tenant.slug, ip, check)
+        .await
+        .map_err(MintError::Refused)?
+    {
         Ok(Some(a)) => a,
         Ok(None) => return Err(MintError::Unauthorized),
         Err(AgentError::Tenancy(TenancyError::Busy)) => {
@@ -238,7 +246,7 @@ pub(crate) async fn mint_agent_jwt(
     let token = issue_agent_token(
         jwt,
         agent_id,
-        slug,
+        tenant,
         &skills,
         &tools,
         agent.user_id,
@@ -272,10 +280,13 @@ async fn agent_token_in(
     ip: ClientIp,
     input: AgentTokenInput,
 ) -> Response {
+    let Some(tenant) = TenantSlug::of(&t.org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     match mint_agent_jwt(
         &state.jwt,
         t.pool(),
-        &t.org.slug,
+        &tenant,
         &input.name,
         &input.secret,
         &ip,
@@ -363,11 +374,11 @@ impl BearerRejection {
 pub(crate) async fn authenticate_bearer(
     jwt: &JwtLifecycle,
     pool: &crate::sql::Pool,
-    slug: &str,
+    tenant: &TenantSlug,
     token: &str,
     ip: &ClientIp,
 ) -> Result<McpAgent, BearerRejection> {
-    authenticate_bearer_until(jwt, pool, slug, token, ip)
+    authenticate_bearer_until(jwt, pool, tenant, token, ip)
         .await
         .map(|(agent, _)| agent)
 }
@@ -376,11 +387,11 @@ pub(crate) async fn authenticate_bearer(
 pub(crate) async fn authenticate_bearer_until(
     jwt: &JwtLifecycle,
     pool: &crate::sql::Pool,
-    slug: &str,
+    tenant: &TenantSlug,
     token: &str,
     ip: &ClientIp,
 ) -> Result<(McpAgent, Option<i64>), BearerRejection> {
-    match verify_agent_claims(jwt, token, slug).await {
+    match verify_agent_claims(jwt, token, tenant).await {
         Some((mut agent, exp)) => {
             // The JWT holds no state, so check here that the agent,
             // and the owner of a user-owned key, still exist and are
@@ -411,12 +422,12 @@ pub(crate) async fn authenticate_bearer_until(
             // Only a cache miss runs this, so only Argon2 checks count.
             let hash_check = async {
                 let check = crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret);
-                match gated(slug, ip, check).await {
+                match gated(&tenant.slug, ip, check).await {
                     Ok(checked) => checked.map_err(BearerRejection::from),
                     Err(refused) => Err(BearerRejection::Refused(refused)),
                 }
             };
-            match verify_raw_with(pool, slug, token, prefix, hash_check).await? {
+            match verify_raw_with(pool, tenant, token, prefix, hash_check).await? {
                 Some(agent) => Ok((agent, None)),
                 None => Err(BearerRejection::Unauthorized),
             }
@@ -450,7 +461,10 @@ async fn post_authed_in(
         return unauthorized(&headers, &extensions, &uri);
     };
     let ip = ClientIp::from_parts(&extensions, &headers);
-    let agent = match authenticate_bearer(&state.jwt, t.pool(), &t.org.slug, token, &ip).await {
+    let Some(tenant) = TenantSlug::of(&t.org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
+    let agent = match authenticate_bearer(&state.jwt, t.pool(), &tenant, token, &ip).await {
         Ok(agent) => agent,
         Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
@@ -497,14 +511,14 @@ async fn post_authed_in(
 /// [`crate::tenancy::AgentError`] when a lookup or the hash check fails.
 pub async fn verify_raw_agent_credential(
     pool: &crate::sql::Pool,
-    slug: &str,
+    tenant: &TenantSlug,
     token: &str,
 ) -> Result<Option<McpAgent>, AgentError> {
     let Some((prefix, secret)) = split_raw_credential(token) else {
         return Ok(None);
     };
     let hash_check = crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret);
-    verify_raw_with(pool, slug, token, prefix, hash_check).await
+    verify_raw_with(pool, tenant, token, prefix, hash_check).await
 }
 
 /// Split a credential `<8-hex prefix>.<hex secret>`; see
@@ -520,12 +534,12 @@ fn split_raw_credential(token: &str) -> Option<(&str, &str)> {
 /// is awaited only on a cache miss.
 async fn verify_raw_with<E: From<AgentError>>(
     pool: &crate::sql::Pool,
-    slug: &str,
+    tenant: &TenantSlug,
     token: &str,
     prefix: &str,
     hash_check: impl std::future::Future<Output = Result<Option<crate::tenancy::Agent>, E>>,
 ) -> Result<Option<McpAgent>, E> {
-    let cache_key = raw_key_cache_key(slug, token);
+    let cache_key = raw_key_cache_key(&tenant.namespace(), token);
     let agent_id = match raw_key_cache_get(&cache_key) {
         Some(id) => id,
         None => {
@@ -576,7 +590,7 @@ async fn verify_raw_with<E: From<AgentError>>(
     let (skills, tools) = live.grants(pool).await?;
     Ok(Some(McpAgent {
         agent_id,
-        tenant: slug.to_owned(),
+        tenant: tenant.slug.clone(),
         skills,
         tools,
         user_id: live.agent.user_id,
@@ -610,10 +624,10 @@ fn raw_key_cache() -> &'static std::sync::Mutex<RawKeyCache> {
 /// The cache key: SHA-256 over the tenant and the token together.
 /// The tenant is in there so a credential verified against one
 /// tenant's pool can never authenticate on another.
-fn raw_key_cache_key(slug: &str, token: &str) -> [u8; 32] {
+fn raw_key_cache_key(namespace: &str, token: &str) -> [u8; 32] {
     use sha2::Digest as _;
     let mut hasher = sha2::Sha256::new();
-    hasher.update(slug.as_bytes());
+    hasher.update(namespace.as_bytes());
     hasher.update([0u8]);
     hasher.update(token.as_bytes());
     hasher.finalize().into()
@@ -892,16 +906,29 @@ mod tests {
             .await
             .unwrap();
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
-        let Ok(minted) =
-            mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token, &ClientIp::default()).await
+        let Ok(minted) = mint_agent_jwt(
+            &jwt,
+            &pool,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            "bot",
+            &bot.token,
+            &ClientIp::default(),
+        )
+        .await
         else {
             panic!("mint");
         };
         let tools = || async {
-            authenticate_bearer(&jwt, &pool, "acme", &minted.token, &ClientIp::default())
-                .await
-                .ok()
-                .map(|a| a.tools)
+            authenticate_bearer(
+                &jwt,
+                &pool,
+                &crate::tenancy::TenantSlug::new(1, "acme"),
+                &minted.token,
+                &ClientIp::default(),
+            )
+            .await
+            .ok()
+            .map(|a| a.tools)
         };
         assert_eq!(tools().await, Some(vec!["edit".to_owned()]));
         revoke_skill_pool(&pool, "acme", "bot", "editor")
@@ -947,17 +974,31 @@ mod tests {
             .unwrap();
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
         let ip = ClientIp::default();
-        let minted =
-            match mint_agent_jwt(&jwt, &pool, "acme", &key.agent.name, &key.token, &ip).await {
-                Ok(m) => m,
-                Err(MintError::Unauthorized) => panic!("mint: unauthorized"),
-                Err(MintError::Internal) => panic!("mint: internal"),
-                Err(MintError::Refused(_)) => panic!("mint: refused"),
-            };
+        let minted = match mint_agent_jwt(
+            &jwt,
+            &pool,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            &key.agent.name,
+            &key.token,
+            &ip,
+        )
+        .await
+        {
+            Ok(m) => m,
+            Err(MintError::Unauthorized) => panic!("mint: unauthorized"),
+            Err(MintError::Internal) => panic!("mint: internal"),
+            Err(MintError::Refused(_)) => panic!("mint: refused"),
+        };
         // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
         let agent = crate::test_assertions::assert_num_queries(
             6,
-            authenticate_bearer(&jwt, &pool, "acme", &minted.token, &ip),
+            authenticate_bearer(
+                &jwt,
+                &pool,
+                &crate::tenancy::TenantSlug::new(1, "acme"),
+                &minted.token,
+                &ip,
+            ),
         )
         .await
         .ok()
@@ -1004,7 +1045,7 @@ mod tests {
         let tries = crate::login_throttle::shared().limits().ip_limit + 5;
         let throttled = |r: LoginRefused| matches!(r, LoginRefused::Throttled { .. });
 
-        let (slug, ip) = ("t-mint-limit", client([10, 78, 0, 1]));
+        let (slug, ip) = (&TenantSlug::new(1, "t-mint-limit"), client([10, 78, 0, 1]));
         let mut refused = false;
         for _ in 0..tries {
             match mint_agent_jwt(&jwt, &pool, slug, "bot", "wrong", &ip).await {
@@ -1027,7 +1068,7 @@ mod tests {
             .await
             .is_ok());
 
-        let (slug, ip) = ("t-raw-limit", client([10, 78, 1, 1]));
+        let (slug, ip) = (&TenantSlug::new(1, "t-raw-limit"), client([10, 78, 1, 1]));
         let junk = "abcdef12.0123456789abcdef";
         let mut refused = false;
         for _ in 0..tries {
@@ -1057,14 +1098,14 @@ mod tests {
         let token = issue_agent_token(
             &jwt,
             5,
-            "acme",
+            &crate::tenancy::TenantSlug::new(1, "acme"),
             &["coach".into()],
             &["log".into()],
             Some(99),
             "abcd1234",
         )
         .expect("issue");
-        let agent = verify_agent_token(&jwt, &token, "acme")
+        let agent = verify_agent_token(&jwt, &token, &crate::tenancy::TenantSlug::new(1, "acme"))
             .await
             .expect("verify");
         assert_eq!(agent.agent_id, 5);
@@ -1072,14 +1113,42 @@ mod tests {
         assert_eq!(agent.tools, vec!["log"]);
 
         // A machine agent has no `uid`.
-        let token = issue_agent_token(&jwt, 5, "acme", &[], &[], None, "abcd1234").expect("issue");
+        let token = issue_agent_token(
+            &jwt,
+            5,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            &[],
+            &[],
+            None,
+            "abcd1234",
+        )
+        .expect("issue");
         assert_eq!(
-            verify_agent_token(&jwt, &token, "acme")
+            verify_agent_token(&jwt, &token, &crate::tenancy::TenantSlug::new(1, "acme"))
                 .await
                 .expect("verify")
                 .user_id,
             None
         );
+    }
+
+    /// A tenant that reuses a purged tenant's slug refuses its agent tokens,
+    /// and a token with no `org_id` is refused anywhere.
+    #[tokio::test]
+    async fn an_agent_token_is_bound_to_the_org_id() {
+        use crate::tenancy::jwt_lifecycle::JwtLifecycle;
+        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+        let (old, heir) = (TenantSlug::new(1, "acme"), TenantSlug::new(2, "acme"));
+        let token = issue_agent_token(&jwt, 5, &old, &[], &[], None, "abcd1234").unwrap();
+        assert!(verify_agent_token(&jwt, &token, &old).await.is_some());
+        assert!(verify_agent_token(&jwt, &token, &heir).await.is_none());
+
+        let mut custom = serde_json::Map::new();
+        custom.insert(CLAIM_KIND.into(), json!(KIND_AGENT));
+        custom.insert(CLAIM_KEY_PREFIX.into(), json!("abcd1234"));
+        custom.insert(CLAIM_TENANT.into(), json!("acme"));
+        let unbound = jwt.issue_access_with(5, custom).unwrap();
+        assert!(verify_agent_token(&jwt, &unbound, &old).await.is_none());
     }
 
     fn headers(host: &str) -> HeaderMap {
@@ -1169,7 +1238,7 @@ mod tests {
         let Err(e) = authenticate_bearer(
             &jwt,
             &pool,
-            "acme",
+            &crate::tenancy::TenantSlug::new(1, "acme"),
             "abcdef12.0123456789abcdef",
             &ClientIp::default(),
         )

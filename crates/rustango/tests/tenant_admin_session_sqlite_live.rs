@@ -55,6 +55,8 @@ struct Env {
     tenant: rustango::sql::Pool,
     secret: SessionSecret,
     slug: String,
+    /// Slug and org id, as tenant cookies bind them.
+    bound: rustango::tenancy::TenantSlug,
     host: String,
     reg_url: String,
     _dir: tempfile::TempDir,
@@ -96,6 +98,7 @@ async fn boot() -> Env {
         ..rustango::testkit::org()
     };
     org.insert_pool(&registry).await.expect("seed org");
+    let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
     let tenant = rustango::sql::Pool::connect(&tenant_url)
         .await
@@ -120,6 +123,7 @@ async fn boot() -> Env {
         tenant,
         secret,
         slug,
+        bound,
         host,
         reg_url,
         _dir: dir,
@@ -177,7 +181,7 @@ async fn a_password_change_in_the_login_second_ends_a_tenant_admin_session() {
 
     let login = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &user.password_hash),
     );
@@ -854,7 +858,7 @@ async fn ending_an_impersonation_revokes_a_copy_of_its_cookie() {
     let (op, _) = start_impersonation(&env).await;
     let mut legacy = TenantSessionPayload::impersonation(
         op.id.get().copied().unwrap(),
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &op.password_hash),
         "unused",
@@ -953,7 +957,7 @@ async fn a_short_new_password_is_refused_by_the_tenant_admin() {
     let uid = user.id.get().copied().unwrap();
     let login = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &user.password_hash),
     );
@@ -1009,7 +1013,7 @@ async fn tenant_pages_pass_a_strict_csp() {
     let uid = user.id.get().copied().unwrap();
     let login = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &user.password_hash),
     );

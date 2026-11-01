@@ -1216,7 +1216,12 @@ mod tests {
         // never matches.
         let s = secret();
         let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
-        let err = tenant_console::decode(&s, "acme", &member_value).unwrap_err();
+        let err = tenant_console::decode(
+            &s,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            &member_value,
+        )
+        .unwrap_err();
         assert!(
             matches!(err, SessionError::BadSignature),
             "member cookie must not validate as a tenant cookie, got {err:?}"
@@ -1228,7 +1233,12 @@ mod tests {
         let s = secret();
         let tenant_value = tenant_console::encode(
             &s,
-            &tenant_console::TenantSessionPayload::new(7, "acme", 3600, fp()),
+            &tenant_console::TenantSessionPayload::new(
+                7,
+                &crate::tenancy::TenantSlug::new(1, "acme"),
+                3600,
+                fp(),
+            ),
         );
         let err = decode(&s, "acme", &tenant_value).unwrap_err();
         assert!(

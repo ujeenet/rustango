@@ -68,6 +68,9 @@ pub struct TenantSessionPayload {
     pub uid: i64,
     /// Tenant slug the cookie was minted for.
     pub slug: String,
+    /// Org id the cookie was minted for, so a tenant that reuses the slug refuses it.
+    #[serde(default)]
+    pub org: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
     /// `Some(operator_id)` when this cookie was minted by the
@@ -100,14 +103,15 @@ impl TenantSessionPayload {
     #[must_use]
     pub fn new(
         user_id: i64,
-        slug: impl Into<String>,
+        tenant: &crate::tenancy::TenantSlug,
         ttl_secs: i64,
         pwf: PasswordFingerprint,
     ) -> Self {
         let now = chrono::Utc::now().timestamp();
         Self {
             uid: user_id,
-            slug: slug.into(),
+            slug: tenant.slug.clone(),
+            org: tenant.org_id,
             exp: now + ttl_secs,
             imp: None,
             iat: now,
@@ -124,7 +128,7 @@ impl TenantSessionPayload {
     #[must_use]
     pub fn impersonation(
         operator_id: i64,
-        slug: impl Into<String>,
+        tenant: &crate::tenancy::TenantSlug,
         ttl_secs: i64,
         pwf: PasswordFingerprint,
         sid: impl Into<String>,
@@ -132,7 +136,8 @@ impl TenantSessionPayload {
         let now = chrono::Utc::now().timestamp();
         Self {
             uid: 0,
-            slug: slug.into(),
+            slug: tenant.slug.clone(),
+            org: tenant.org_id,
             exp: now + ttl_secs,
             imp: Some(operator_id),
             iat: now,
@@ -166,18 +171,18 @@ pub fn encode(secret: &SessionSecret, payload: &TenantSessionPayload) -> String 
 
 /// Verify, deserialize, and tenant-bind-check a cookie value.
 ///
-/// `expected_slug` is the slug of the resolved tenant — the cookie's
-/// `slug` field must match (defense against a cookie minted for one
-/// tenant being replayed against another).
+/// `tenant` is the resolved tenant — the cookie's `slug` and `org` must
+/// match, so a cookie from another tenant, or from a purged tenant whose
+/// slug was reused, is refused.
 ///
 /// # Errors
 /// * [`SessionError::Malformed`] — bad split, non-base64, bad JSON.
 /// * [`SessionError::BadSignature`] — HMAC mismatch.
 /// * [`SessionError::Expired`] — `exp` in the past.
-/// * [`SessionError::WrongTenant`] — `payload.slug != expected_slug`.
+/// * [`SessionError::WrongTenant`] — another slug or org id.
 pub fn decode(
     secret: &SessionSecret,
-    expected_slug: &str,
+    tenant: &crate::tenancy::TenantSlug,
     value: &str,
 ) -> Result<TenantSessionPayload, SessionError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(SessionError::Malformed)?;
@@ -196,7 +201,7 @@ pub fn decode(
     if payload.is_expired() {
         return Err(SessionError::Expired);
     }
-    if payload.slug != expected_slug {
+    if !tenant.binds(&payload.slug, payload.org) {
         return Err(SessionError::WrongTenant);
     }
     Ok(payload)
@@ -229,10 +234,35 @@ mod tests {
         for sig in sigs {
             let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
             assert!(matches!(
-                decode(&secret, "acme", &format!("{b64}.{sig_b64}")),
+                decode(&secret, &acme(), &format!("{b64}.{sig_b64}")),
                 Err(SessionError::BadSignature)
             ));
         }
+    }
+
+    fn acme() -> crate::tenancy::TenantSlug {
+        crate::tenancy::TenantSlug::new(1, "acme")
+    }
+
+    /// A tenant that reuses a purged tenant's slug refuses its cookies,
+    /// impersonation included; a cookie with no `org` is refused too.
+    #[test]
+    fn rejects_cookie_minted_for_a_purged_tenant_with_the_slug() {
+        let secret = key();
+        let heir = crate::tenancy::TenantSlug::new(2, "acme");
+        for p in [
+            TenantSessionPayload::new(7, &acme(), 3600, fp()),
+            TenantSessionPayload::impersonation(9, &acme(), 3600, fp(), "s1"),
+        ] {
+            let err = decode(&secret, &heir, &encode(&secret, &p)).unwrap_err();
+            assert!(matches!(err, SessionError::WrongTenant));
+        }
+        let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+        let sig = crate::session::sign_tagged(&secret, TENANT_DOMAIN_TAG, b64.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let err = decode(&secret, &acme(), &format!("{b64}.{sig_b64}")).unwrap_err();
+        assert!(matches!(err, SessionError::WrongTenant));
     }
 
     fn fp() -> PasswordFingerprint {
@@ -242,18 +272,23 @@ mod tests {
     #[test]
     fn round_trip_valid_payload() {
         let secret = key();
-        let payload = TenantSessionPayload::new(7, "acme", 3600, fp());
+        let payload = TenantSessionPayload::new(7, &acme(), 3600, fp());
         let cookie = encode(&secret, &payload);
-        let back = decode(&secret, "acme", &cookie).unwrap();
+        let back = decode(&secret, &acme(), &cookie).unwrap();
         assert_eq!(back, payload);
     }
 
     #[test]
     fn rejects_cookie_minted_for_a_different_tenant() {
         let secret = key();
-        let payload = TenantSessionPayload::new(7, "acme", 3600, fp());
+        let payload = TenantSessionPayload::new(7, &acme(), 3600, fp());
         let cookie = encode(&secret, &payload);
-        let err = decode(&secret, "globex", &cookie).unwrap_err();
+        let err = decode(
+            &secret,
+            &crate::tenancy::TenantSlug::new(2, "globex"),
+            &cookie,
+        )
+        .unwrap_err();
         assert!(matches!(err, SessionError::WrongTenant));
     }
 
@@ -263,7 +298,7 @@ mod tests {
 
     #[test]
     fn impersonation_payload_has_imp_set() {
-        let p = TenantSessionPayload::impersonation(42, "acme", 3600, fp(), "s1");
+        let p = TenantSessionPayload::impersonation(42, &acme(), 3600, fp(), "s1");
         assert_eq!(p.uid, 0);
         assert_eq!(p.slug, "acme");
         assert_eq!(p.imp, Some(42));
@@ -272,7 +307,7 @@ mod tests {
 
     #[test]
     fn regular_payload_has_no_imp_field() {
-        let p = TenantSessionPayload::new(7, "acme", 3600, fp());
+        let p = TenantSessionPayload::new(7, &acme(), 3600, fp());
         assert_eq!(p.imp, None);
         assert!(!p.is_impersonation());
     }
@@ -280,9 +315,9 @@ mod tests {
     #[test]
     fn impersonation_round_trip_through_cookie() {
         let secret = key();
-        let p = TenantSessionPayload::impersonation(99, "acme", 3600, fp(), "s1");
+        let p = TenantSessionPayload::impersonation(99, &acme(), 3600, fp(), "s1");
         let cookie = encode(&secret, &p);
-        let back = decode(&secret, "acme", &cookie).unwrap();
+        let back = decode(&secret, &acme(), &cookie).unwrap();
         assert_eq!(back, p);
         assert_eq!(back.imp, Some(99));
     }
@@ -293,9 +328,14 @@ mod tests {
         // cookies — operator opening tenant A shouldn't have a
         // cookie that authenticates them at tenant B.
         let secret = key();
-        let p = TenantSessionPayload::impersonation(99, "acme", 3600, fp(), "s1");
+        let p = TenantSessionPayload::impersonation(99, &acme(), 3600, fp(), "s1");
         let cookie = encode(&secret, &p);
-        let err = decode(&secret, "globex", &cookie).unwrap_err();
+        let err = decode(
+            &secret,
+            &crate::tenancy::TenantSlug::new(2, "globex"),
+            &cookie,
+        )
+        .unwrap_err();
         assert!(matches!(err, SessionError::WrongTenant));
     }
 
@@ -305,12 +345,12 @@ mod tests {
         // must fill in `None` so a server upgrade doesn't sign
         // every operator out.
         let secret = key();
-        let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
+        let json = br#"{"uid":7,"slug":"acme","org":1,"exp":99999999999}"#;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
         let sig = crate::session::sign_tagged(&secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         let cookie = format!("{payload_b64}.{sig_b64}");
-        let back = decode(&secret, "acme", &cookie).unwrap();
+        let back = decode(&secret, &acme(), &cookie).unwrap();
         assert_eq!(back.uid, 7);
         assert_eq!(back.imp, None);
     }
@@ -318,13 +358,13 @@ mod tests {
     #[test]
     fn rejects_tampered_payload() {
         let secret = key();
-        let payload = TenantSessionPayload::new(7, "acme", 3600, fp());
+        let payload = TenantSessionPayload::new(7, &acme(), 3600, fp());
         let cookie = encode(&secret, &payload);
         let (_, sig) = cookie.split_once('.').unwrap();
         let evil = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"uid":999,"slug":"acme","exp":9999999999}"#);
         let tampered = format!("{evil}.{sig}");
-        let err = decode(&secret, "acme", &tampered).unwrap_err();
+        let err = decode(&secret, &acme(), &tampered).unwrap_err();
         assert!(matches!(err, SessionError::BadSignature));
     }
 
@@ -332,23 +372,23 @@ mod tests {
     fn rejects_wrong_secret() {
         let s1 = SessionSecret::from_bytes(b"first-test-secret-thirty-2-bytes".to_vec());
         let s2 = SessionSecret::from_bytes(b"second-test-secret-thirty2-bytes".to_vec());
-        let cookie = encode(&s1, &TenantSessionPayload::new(1, "acme", 3600, fp()));
-        let err = decode(&s2, "acme", &cookie).unwrap_err();
+        let cookie = encode(&s1, &TenantSessionPayload::new(1, &acme(), 3600, fp()));
+        let err = decode(&s2, &acme(), &cookie).unwrap_err();
         assert!(matches!(err, SessionError::BadSignature));
     }
 
     #[test]
     fn rejects_expired() {
         let secret = key();
-        let cookie = encode(&secret, &TenantSessionPayload::new(1, "acme", -10, fp()));
-        let err = decode(&secret, "acme", &cookie).unwrap_err();
+        let cookie = encode(&secret, &TenantSessionPayload::new(1, &acme(), -10, fp()));
+        let err = decode(&secret, &acme(), &cookie).unwrap_err();
         assert!(matches!(err, SessionError::Expired));
     }
 
     /// v0.28.4 (#77) — `iat` is set on every newly-minted payload.
     #[test]
     fn new_payload_stamps_iat_at_construction_time() {
-        let p = TenantSessionPayload::new(7, "acme", 3600, fp());
+        let p = TenantSessionPayload::new(7, &acme(), 3600, fp());
         let now = chrono::Utc::now().timestamp();
         // iat lands within ±2s of "now" — wide enough to absorb
         // schedule jitter, tight enough to fail if we forgot to
@@ -366,12 +406,12 @@ mod tests {
         // pre-0.28.4 cookie.
         use base64::Engine;
         let secret = key();
-        let json = br#"{"uid":7,"slug":"acme","exp":99999999999}"#;
+        let json = br#"{"uid":7,"slug":"acme","org":1,"exp":99999999999}"#;
         let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
         let sig = crate::session::sign_tagged(&secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
         let cookie = format!("{payload_b64}.{sig_b64}");
-        let p = decode(&secret, "acme", &cookie).expect("legacy cookie still parses");
+        let p = decode(&secret, &acme(), &cookie).expect("legacy cookie still parses");
         assert_eq!(p.uid, 7);
         assert_eq!(p.iat, 0, "missing iat should default to 0");
         assert_eq!(p.pwf, PasswordFingerprint::default());

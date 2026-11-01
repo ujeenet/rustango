@@ -59,6 +59,7 @@ use super::org::Org;
 use super::pools::{DefaultTenantDb, TenantPools};
 use super::resolver::OrgResolver;
 use super::tenant_console::{self, TenantSessionPayload};
+use super::TenantSlug;
 use crate::storage::BoxedStorage;
 
 /// Builder for the tenant-aware admin router.
@@ -640,7 +641,7 @@ where
             };
             // Best-effort: decode the session cookie so the signal
             // carries user_id / username. Receivers tolerate `None`.
-            let (uid, uname) = decode_session_user(&parts.headers, cfg, &org.slug);
+            let (uid, uname) = decode_session_user(&parts.headers, cfg, &org);
             let meta = meta_from_parts(
                 &parts.extensions,
                 &parts.headers,
@@ -648,7 +649,7 @@ where
             );
             // End the user's sessions everywhere. An impersonation logout
             // ends only that impersonation.
-            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
+            end_impersonation_session(&parts.headers, cfg, &org).await;
             let revoked =
                 match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool())
                     .await
@@ -697,7 +698,7 @@ where
         if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
-            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
+            end_impersonation_session(&parts.headers, cfg, &org).await;
             return end_impersonation_response(cookie_path, &cfg.link_apex);
         }
 
@@ -928,12 +929,15 @@ impl SessionActor {
 fn decode_session_user(
     headers: &HeaderMap,
     cfg: &TenantSessionConfig,
-    slug: &str,
+    org: &Org,
 ) -> (Option<i64>, Option<String>) {
     let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
         return (None, None);
     };
-    match tenant_console::decode(&cfg.secret, slug, &cookie_value) {
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (None, None);
+    };
+    match tenant_console::decode(&cfg.secret, &tenant, &cookie_value) {
         Ok(p) => (Some(p.uid), None),
         Err(_) => (None, None),
     }
@@ -952,7 +956,10 @@ async fn validate_session(
     let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
         return SessionCheck::Anonymous;
     };
-    let payload = match tenant_console::decode(&cfg.secret, &org.slug, &cookie_value) {
+    let Some(tenant) = TenantSlug::of(org) else {
+        return SessionCheck::Anonymous;
+    };
+    let payload = match tenant_console::decode(&cfg.secret, &tenant, &cookie_value) {
         Ok(p) => p,
         Err(_) => return SessionCheck::Anonymous,
     };
@@ -1352,16 +1359,13 @@ async fn login_submit(
         &user.password_hash,
     )
     .await;
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     let mut resp = Redirect::to(&next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        user_session_cookie(
-            &cfg.secret,
-            &org.slug,
-            cookie_path,
-            &user,
-            route_ttl(routes),
-        ),
+        user_session_cookie(&cfg.secret, &tenant, cookie_path, &user, route_ttl(routes)),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
@@ -1378,14 +1382,14 @@ async fn login_submit(
 /// A new tenant session cookie for the saved `user`, bound to its current hash.
 fn user_session_cookie(
     secret: &tenant_console::SessionSecret,
-    slug: &str,
+    tenant: &TenantSlug,
     cookie_path: &str,
     user: &super::auth::User,
     ttl_secs: i64,
 ) -> HeaderValue {
     let mut payload = TenantSessionPayload::new(
         user.id.get().copied().unwrap_or_default(),
-        slug,
+        tenant,
         ttl_secs,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
     );
@@ -1448,7 +1452,10 @@ async fn redeem_impersonation_handoff(
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
     };
-    let payload = match decode(&cfg.secret, &org.slug, &token) {
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
+    let payload = match decode(&cfg.secret, &tenant, &token) {
         Ok(p) => p,
         Err(e) => {
             tracing::info!(
@@ -1502,7 +1509,7 @@ async fn redeem_impersonation_handoff(
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
     let mut session = TenantSessionPayload::impersonation(
         payload.op,
-        &org.slug,
+        &tenant,
         ttl_secs,
         payload.pwf,
         payload.jti,
@@ -1558,8 +1565,11 @@ fn extract_token_param(query: &str) -> Option<String> {
 
 /// Revoke the request's impersonation cookie, if it is one; the
 /// operator stays signed in to the console (#2038).
-async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfig, slug: &str) {
-    let Some(value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
+async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfig, org: &Org) {
+    let (Some(value), Some(tenant)) = (
+        read_cookie(headers, tenant_console::COOKIE_NAME),
+        TenantSlug::of(org),
+    ) else {
         return;
     };
     if let Ok(TenantSessionPayload {
@@ -1567,7 +1577,7 @@ async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfi
         sid: Some(sid),
         exp,
         ..
-    }) = tenant_console::decode(&cfg.secret, slug, &value)
+    }) = tenant_console::decode(&cfg.secret, &tenant, &value)
     {
         cfg.jti().end_session(&sid, exp).await;
     }
@@ -1827,6 +1837,9 @@ async fn change_password_submit(
     // The old cookie no longer matches the hash: re-issue this one, so only
     // the other sessions end.
     user.password_hash = new_hash;
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     let mut resp = flash::signed_redirect(
         secret,
         &routes.change_password_url,
@@ -1837,7 +1850,7 @@ async fn change_password_submit(
         // The same session, re-bound to the new hash: it keeps its expiry.
         user_session_cookie(
             secret,
-            &org.slug,
+            &tenant,
             cookie_path,
             &user,
             route_ttl(routes)

@@ -456,7 +456,7 @@ async fn a_decorator_permission_read_error_is_a_503() {
     let secret = SessionSecret::from_bytes(b"test_tenant_secret_____32bytes!!".to_vec());
     let payload = TenantSessionPayload::new(
         *ann[0].id.get().expect("saved"),
-        "alpha",
+        &rustango::tenancy::TenantSlug::new(1, "alpha"),
         3600,
         PasswordFingerprint::of(&secret, &ann[0].password_hash),
     );

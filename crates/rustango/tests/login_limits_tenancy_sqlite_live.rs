@@ -555,7 +555,7 @@ async fn change_password_misses_lock_the_account() {
         .password_hash;
     let payload = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &rustango::tenancy::TenantSlug::new(env.org_id, env.slug.clone()),
         3600,
         PasswordFingerprint::of(&env.secret, &hash),
     );
@@ -1236,7 +1236,7 @@ async fn a_full_hash_queue_answers_503_everywhere() {
         .password_hash;
     let payload = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &rustango::tenancy::TenantSlug::new(env.org_id, env.slug.clone()),
         3600,
         PasswordFingerprint::of(&env.secret, &hash),
     );
@@ -1304,8 +1304,12 @@ async fn a_full_hash_queue_answers_503_everywhere() {
     let agent_auth =
         rustango::tenancy::authenticate_agent_pool(&env.tenant, "busy-bot", &agent.token).await;
     #[cfg(feature = "mcp")]
-    let raw_auth =
-        rustango::mcp::verify_raw_agent_credential(&env.tenant, &env.slug, &agent.token).await;
+    let raw_auth = rustango::mcp::verify_raw_agent_credential(
+        &env.tenant,
+        &rustango::tenancy::TenantSlug::new(env.org_id, env.slug.clone()),
+        &agent.token,
+    )
+    .await;
     drop(held);
     for (what, r) in answers {
         let status = r.status();

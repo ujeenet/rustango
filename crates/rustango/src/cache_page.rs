@@ -356,7 +356,7 @@ impl CachePageLayer {
     /// The page's tenant, or `None` when the layer does not key on tenants.
     fn page_tenant(&self, page: &PageKey) -> Option<OrgKey> {
         if tenant_keyed(self.tenant_agnostic) {
-            page.tenant.map(OrgKey::new)
+            page.tenant.clone().map(OrgKey)
         } else {
             None
         }
@@ -412,7 +412,7 @@ pub struct PageKey {
     path: String,
     query: String,
     host: String,
-    tenant: Option<i64>,
+    tenant: Option<String>,
     vary: Vec<(String, String)>,
 }
 
@@ -437,10 +437,11 @@ impl PageKey {
         self
     }
 
-    /// The org id of the tenant the page was resolved for.
+    /// The tenant the page was resolved for.
+    #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn tenant(mut self, org_id: i64) -> Self {
-        self.tenant = Some(org_id);
+    pub fn tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.tenant = Some(tenant.namespace());
         self
     }
 
@@ -551,7 +552,7 @@ where
             };
             let tenant = match tenant {
                 PageTenant::Unknown => return inner.call(req).await,
-                PageTenant::Org(id) => Some(OrgKey::new(id)),
+                PageTenant::Org(ns) => Some(OrgKey(ns)),
                 PageTenant::NoTenant => None,
             };
             let (host, uri) = request_page(&req);
@@ -766,8 +767,8 @@ fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
 enum PageTenant {
     /// No tenant: tenancy is off, or the route is tenant-agnostic.
     NoTenant,
-    /// The resolved org's id: a tenant that reuses a purged slug gets new keys.
-    Org(i64),
+    /// The resolved tenant's `#org:<id>:<slug>`: a reused slug gets new keys.
+    Org(String),
     /// No tenant context, no match, or resolution failed: never share a page.
     Unknown,
 }
@@ -777,16 +778,14 @@ enum PageTenant {
 #[cfg(feature = "tenancy")]
 async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
     if let Some(t) = req.extensions().get::<crate::tenancy::TenantSlug>() {
-        let id = t.org_id;
-        return (req, PageTenant::Org(id));
+        let ns = t.namespace();
+        return (req, PageTenant::Org(ns));
     }
     let (parts, body) = req.into_parts();
     let tenant = match crate::tenancy::middleware::request_org(&parts, &parts.extensions).await {
         // An org without an id cannot be told from a later one: never share its page.
-        Some(Ok(Some(org))) => org
-            .id
-            .get()
-            .map_or(PageTenant::Unknown, |&id| PageTenant::Org(id)),
+        Some(Ok(Some(org))) => crate::tenancy::TenantSlug::of(&org)
+            .map_or(PageTenant::Unknown, |t| PageTenant::Org(t.namespace())),
         // The route may still vary on an input the resolver ignored (#2045).
         Some(Ok(None)) => PageTenant::Unknown,
         Some(Err(e)) => {
@@ -899,14 +898,8 @@ fn generation_key(prefix: &str, path: &str, host: &str, tenant: Option<&OrgKey>)
     k
 }
 
-/// The tenant part of a key: `#org:<id>`, never a slug a later tenant may reuse.
+/// The tenant part of a key: [`TenantSlug::namespace`](crate::tenancy::TenantSlug).
 struct OrgKey(String);
-
-impl OrgKey {
-    fn new(org_id: i64) -> Self {
-        Self(format!("#org:{org_id}"))
-    }
-}
 
 /// The path's current generation; 0 when it was never invalidated.
 async fn read_generation(cache: &BoxedCache, key: &str) -> Result<u64, CacheError> {

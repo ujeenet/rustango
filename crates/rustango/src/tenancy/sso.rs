@@ -572,9 +572,12 @@ pub(super) async fn tenant_sso_callback(
     let route_ttl = i64::try_from(routes.tenant_session_ttl.as_secs())
         .unwrap_or(tenant_console::SESSION_TTL_SECS);
     let ttl = policy.session_ttl(route_ttl, user.is_superuser);
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return login_error(routes, REFUSED);
+    };
     let mut payload = TenantSessionPayload::new(
         uid,
-        &org.slug,
+        &tenant,
         ttl,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
     );

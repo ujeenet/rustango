@@ -153,7 +153,7 @@ JSON re-serialization) breaks verification.
 The tenant header and the port are not signed by default, and the layer knows
 no tenant. On a tenant-resolved app:
 
-- `.bind_tenants(tenant_of)` maps each key id to the tenant slug it may act
+- `.bind_tenants(tenant_of)` maps each key id to the tenant (`TenantSlug`: slug and org id) it may act
   for (a `KeyTenantResolver`; `None` means the key may act for any tenant).
   The layer resolves the request's tenant with the mounted tenant context and
   answers `403` when it differs, or when there is none. It runs after the
