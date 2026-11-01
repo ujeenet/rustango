@@ -28,6 +28,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The hook and scope macros are `register_object_permission!` and `register_queryset_scope!` under `rustango::object_permissions`; the `register_admin_*` names are deprecated.
 - `ViewSet::for_model` refuses `rustango_api_keys`, `rustango_agents` and the tables the admin never serves.
 - ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
+- A schema-mode tenant's `search_path` is its schema plus the schemas holding extensions; `public` is on it only when an extension lives there, and then a tenant missing tables that `public` has is refused instead of reading the shared copies.
 
 ### Fixed
 

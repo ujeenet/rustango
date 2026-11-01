@@ -131,13 +131,13 @@ where
         // Not `{e}`: a secrets error can echo the database URL into CI logs.
         Err(_) => return TenantFindings::failed(&org.slug, "could not open the tenant pool"),
     };
-    // A missing schema drops out of `search_path`, leaving `public`.
+    // A missing schema drops out of `search_path`, leaving at most the extension schemas.
     if matches!(
         StorageMode::parse(&org.storage_mode),
         Ok(StorageMode::Schema)
     ) {
         let want = org.effective_schema();
-        match crate::migrate::ensure::creation_schema(&tenant).await {
+        match crate::migrate::ensure::current_schema(&tenant).await {
             Ok(Some(got)) if got == want => {}
             Ok(_) => {
                 return TenantFindings::failed(&org.slug, format!("schema `{want}` is missing"))

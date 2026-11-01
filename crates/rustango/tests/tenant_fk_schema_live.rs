@@ -350,47 +350,30 @@ async fn migrate_is_quiet_about_passkeys_for_a_new_tenant() {
     );
 }
 
-/// Warnings logged while a fresh `TenantPools` builds `org`'s scoped pool.
+/// A scratch registry with the framework tables in `public` and an
+/// unmigrated schema tenant `slug`, plus `extensions` installed in `public`.
 #[cfg(all(feature = "runtime", feature = "testkit"))]
-async fn scoped_pool_warnings(registry: &sqlx::PgPool, org: &Org) -> String {
-    use tracing::instrument::WithSubscriber as _;
-    let buf = rustango::testkit::CaptureWriter::default();
-    let sink = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || sink.clone())
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    let pools = TenantPools::new(registry.clone());
-    let scoped = pools
-        .scoped_pool_dyn(org)
-        .with_subscriber(subscriber)
-        .await
-        .unwrap();
-    // The premise: a table the schema lacks resolves to `public`'s copy.
-    rustango::sql::raw_execute_pool(&scoped, "SELECT 1 FROM rustango_users LIMIT 1", Vec::new())
-        .await
-        .expect("search_path falls through to public");
-    scoped.close().await;
-    buf.contents()
-}
-
-/// A schema tenant missing a tenant table reads `public`'s copy through
-/// `search_path`; building its pool must say so, a migrated one stays quiet.
-#[cfg(all(feature = "runtime", feature = "testkit"))]
-#[tokio::test]
-async fn a_tenant_schema_missing_tables_warns_about_public_fallthrough() {
-    let Ok(admin_url) = std::env::var("DATABASE_URL") else {
-        return;
-    };
-    let db = ScratchDb::create(&admin_url, "rustango_tfallthrough").await;
+async fn unmigrated_schema_tenant(
+    prefix: &str,
+    slug: &str,
+    extensions: &[&str],
+) -> Option<(ScratchDb, sqlx::PgPool, TenantPools, Org)> {
+    let admin_url = std::env::var("DATABASE_URL").ok()?;
+    let db = ScratchDb::create(&admin_url, prefix).await;
     let url = db.url().to_owned();
     let registry = sqlx::PgPool::connect(&url).await.unwrap();
+    for ext in extensions {
+        sqlx::query(&format!(
+            "CREATE EXTENSION IF NOT EXISTS {ext} SCHEMA public"
+        ))
+        .execute(&registry)
+        .await
+        .unwrap();
+    }
     rustango::testkit::migrate_framework(&rustango::sql::Pool::from(registry.clone()))
         .await
         .unwrap();
     let pools = TenantPools::new(registry.clone());
-    let slug = "tfall-acme";
     run(
         &pools,
         &url,
@@ -404,19 +387,111 @@ async fn a_tenant_schema_missing_tables_warns_about_public_fallthrough() {
         .await
         .unwrap()
         .remove(0);
+    Some((db, registry, pools, org))
+}
 
-    let logs = scoped_pool_warnings(&registry, &org).await;
-    assert!(
-        logs.contains("rustango_users") && logs.contains(slug),
-        "no warning about tables read from public:\n{logs}"
-    );
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+async fn show_search_path(pool: &rustango::sql::Pool) -> String {
+    sqlx::query_scalar("SHOW search_path")
+        .fetch_one(pool.as_postgres().unwrap())
+        .await
+        .unwrap()
+}
 
-    run(&pools, &url, &["migrate-tenants"]).await.unwrap();
-    let logs = scoped_pool_warnings(&registry, &org).await;
+/// With no extension in `public`, a tenant's path leaves `public` out, so a
+/// table only `public` has is unreachable through the tenant's pools.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn a_table_only_in_public_is_unreachable_through_a_tenant_pool() {
+    let Some((db, registry, pools, org)) =
+        unmigrated_schema_tenant("rustango_tstrict", "tstrict-acme", &[]).await
+    else {
+        return;
+    };
+    let scoped = pools.scoped_pool_dyn(&org).await.unwrap();
+    let path = show_search_path(&scoped).await;
     assert!(
-        !logs.contains("rustango_users"),
-        "a migrated tenant was warned:\n{logs}"
+        !path.contains("public"),
+        "public on the tenant's path: {path}"
     );
+    let read = rustango::sql::raw_execute_pool(
+        &scoped,
+        "SELECT 1 FROM rustango_users LIMIT 1",
+        Vec::new(),
+    )
+    .await;
+    assert!(read.is_err(), "the tenant read public.rustango_users");
+    let mut held = pools.acquire(&org).await.unwrap();
+    let read = sqlx::query("SELECT 1 FROM rustango_users LIMIT 1")
+        .execute(&mut **held)
+        .await;
+    assert!(
+        read.is_err(),
+        "a held connection read public.rustango_users"
+    );
+    drop(held);
+    scoped.close().await;
     drop(pools);
     registry.close().await;
+    drop(db);
+}
+
+/// An extension in `public` keeps it on the path: a tenant missing tables
+/// `public` has is refused until `migrate-tenants` creates them.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn an_extension_in_public_refuses_a_tenant_missing_tables() {
+    let Some((db, registry, pools, org)) =
+        unmigrated_schema_tenant("rustango_trefuse", "trefuse-acme", &["citext"]).await
+    else {
+        return;
+    };
+    let err = pools.scoped_pool_dyn(&org).await.unwrap_err().to_string();
+    assert!(err.contains("rustango_users"), "unexpected error: {err}");
+    let err = pools.acquire(&org).await.err().expect("held pool refused");
+    assert!(err.to_string().contains("rustango_users"), "{err}");
+
+    // Migrate itself must not be refused: it creates those tables.
+    run(&pools, db.url(), &["migrate-tenants"]).await.unwrap();
+    let scoped = TenantPools::new(registry.clone())
+        .scoped_pool_dyn(&org)
+        .await
+        .unwrap();
+    let path = show_search_path(&scoped).await;
+    assert!(path.contains("public"), "extension schema missing: {path}");
+    scoped.close().await;
+    drop(pools);
+    registry.close().await;
+    drop(db);
+}
+
+/// citext in `public` still resolves through a tenant pool, and compares
+/// case-insensitively rather than falling back to text equality.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn citext_in_public_compares_case_insensitively_for_a_tenant() {
+    let Some((db, registry, pools, org)) =
+        unmigrated_schema_tenant("rustango_tcitext", "tcitext-acme", &["citext"]).await
+    else {
+        return;
+    };
+    run(&pools, db.url(), &["migrate-tenants"]).await.unwrap();
+    let scoped = pools.scoped_pool_dyn(&org).await.unwrap();
+    for sql in [
+        "CREATE TABLE ci_probe (email citext)",
+        "INSERT INTO ci_probe VALUES ('A@x.io')",
+    ] {
+        rustango::sql::raw_execute_pool(&scoped, sql, Vec::new())
+            .await
+            .unwrap();
+    }
+    let hits: i64 = sqlx::query_scalar("SELECT count(*) FROM ci_probe WHERE email = 'a@X.io'")
+        .fetch_one(scoped.as_postgres().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(hits, 1, "citext compared case-sensitively");
+    scoped.close().await;
+    drop(pools);
+    registry.close().await;
+    drop(db);
 }

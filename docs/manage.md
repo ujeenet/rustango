@@ -1131,8 +1131,8 @@ refusal runs before anything changes. See
 
 With several servers, deactivate first (`drop-tenant`) and wait 30 s. A
 server whose tenant cache still holds a schema-mode tenant keeps
-`search_path = <schema>, public`; once the schema is dropped, its queries
-fall through to `public` until the cache refreshes.
+its pool; once the schema is dropped, its queries fail until the cache
+refreshes.
 
 ### `rotate-tenant-password <slug>`
 

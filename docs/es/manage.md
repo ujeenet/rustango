@@ -1144,8 +1144,8 @@ cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode
 
 Con varios servidores, desactiva primero (`drop-tenant`) y espera 30 s. Un
 servidor cuya caché aún tiene un tenant en modo schema mantiene
-`search_path = <schema>, public`; al borrar el schema, sus consultas caen en
-`public` hasta que la caché se refresca.
+su pool; al borrar el schema, sus consultas fallan hasta que la caché se
+refresca.
 
 Cada paso se imprime al terminar y la purga queda registrada como una ejecución
 de tipo `purge` (`list-runs --kind purge`). Una base de datos que rustango creó

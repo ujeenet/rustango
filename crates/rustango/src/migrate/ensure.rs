@@ -264,11 +264,26 @@ pub(crate) async fn live_column_types(
 pub(crate) async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
     match pool {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(pg) => sqlx::query_scalar::<_, Option<String>>("SELECT current_schema()")
-            .fetch_one(pg)
+        Pool::Postgres(_) => current_schema(pool)
             .await?
             .map(Some)
             .ok_or_else(|| sqlx::Error::Protocol("search_path names no existing schema".into())),
+        #[allow(unreachable_patterns)]
+        _ => Ok(None),
+    }
+}
+
+/// Postgres's `current_schema()`: `None` when no schema on `search_path`
+/// exists, or on backends without schemas.
+#[cfg(any(feature = "postgres", all(feature = "tenancy", feature = "sso")))]
+pub(crate) async fn current_schema(pool: &Pool) -> Result<Option<String>, sqlx::Error> {
+    match pool {
+        #[cfg(feature = "postgres")]
+        Pool::Postgres(pg) => {
+            sqlx::query_scalar::<_, Option<String>>("SELECT current_schema()")
+                .fetch_one(pg)
+                .await
+        }
         #[allow(unreachable_patterns)]
         _ => Ok(None),
     }

@@ -20,7 +20,7 @@
 //!
 //! * **Schema mode** — the runner spins up an *ephemeral* PgPool
 //!   bound to the registry URL with an `after_connect` hook that
-//!   issues `SET search_path TO <schema>, public` on every fresh
+//!   issues `SET search_path TO <schema>, <extension schemas>, public` on every fresh
 //!   connection. The migration runner from `rustango-migrate` runs
 //!   unchanged against this pool; its ledger queries
 //!   (`__rustango_migrations__`) resolve to `<schema>.__rustango_migrations__`
@@ -1029,6 +1029,8 @@ async fn run_for_one_tenant(
                 warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
             }
             let applied = run?;
+            // Checked after the run: a fresh tenant's tables only exist once it has migrated.
+            super::pools::refuse_public_fallthrough(&pool, &schema).await?;
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -1088,7 +1090,7 @@ async fn run_for_one_tenant(
 }
 
 /// Build a short-lived `PgPool` whose every connection has its
-/// `search_path` pre-set to `<schema>, public` via an
+/// `search_path` pre-set to the tenant's plus `public` via an
 /// `after_connect` hook. Used only for schema-mode migrations —
 /// runtime requests use the shared registry pool with per-checkout
 /// `SET`.
@@ -1114,7 +1116,13 @@ async fn build_schema_scoped_pool(
         )));
     }
 
-    super::pools::connect_schema_scoped(registry_url, schema, 2).await
+    super::pools::connect_schema_scoped(
+        registry_url,
+        schema,
+        2,
+        super::pools::FallThrough::CheckAfterMigrate,
+    )
+    .await
 }
 
 /// Where a tenant's schema came from, by [`ensure_schema`].
