@@ -1424,7 +1424,9 @@ async fn real_tenant_migrations_create_the_link_table() {
                 pools.as_ref(),
                 &reg_url,
                 &migrations,
-                args,
+                rustango::testkit::routed_args(
+                    &args.iter().map(String::as_str).collect::<Vec<_>>(),
+                ),
                 &mut Vec::new(),
             )
             .await
