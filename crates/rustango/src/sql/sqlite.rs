@@ -795,6 +795,7 @@ mod tests {
         fk_on_delete: None,
         validators: &[],
         cast: None,
+        secret: None,
     }];
     static MODEL: ModelSchema = ModelSchema {
         name: "demo",

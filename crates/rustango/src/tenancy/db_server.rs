@@ -36,6 +36,7 @@ pub struct DbServer {
     #[rustango(max_length = 128)]
     pub admin_user: Option<String>,
     /// `enc:v1:` only. Private, so no caller can store a plain one.
+    #[rustango(secret)]
     admin_password: Option<String>,
     /// A [`TlsMode`] name.
     #[rustango(max_length = 16)]

@@ -375,7 +375,7 @@ pub struct ApiKey {
     /// `hmac-sha256$` (the secret itself) still verifies; argon2id rows are
     /// rewritten on first use.
     /// Never returned to callers.
-    #[rustango(max_length = 255)]
+    #[rustango(secret, max_length = 255)]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
     #[rustango(max_length = 100)]

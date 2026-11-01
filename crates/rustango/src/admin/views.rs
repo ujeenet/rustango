@@ -739,7 +739,7 @@ pub(crate) async fn table_view(
                 .enumerate()
                 .map(|(idx, item)| {
                     let inner = match item {
-                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f.name) => {
+                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f) => {
                             render_secret_cell(row, f)
                         }
                         DisplayItem::Field(f) => {
@@ -987,7 +987,7 @@ async fn compute_facets(
         // A secret's facet would list its values.
         let Some(field) = model
             .field(filter_name)
-            .filter(|f| !is_secret_field(admin_cfg, f.name))
+            .filter(|f| !is_secret_field(admin_cfg, f))
         else {
             continue;
         };
@@ -1836,7 +1836,7 @@ pub(crate) async fn detail_view(
     let mut cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
         .map(|f| {
-            let value = if is_secret_field(&detail_cfg, f.name) {
+            let value = if is_secret_field(&detail_cfg, f) {
                 render_secret_cell(&row, f)
             } else {
                 render_cell_json(&row, f, &fk_map, &state.config.admin_prefix)
@@ -2637,7 +2637,7 @@ pub(crate) async fn update_submit(
     skip.extend(
         model
             .scalar_fields()
-            .filter(|f| is_secret_field(&admin_cfg, f.name))
+            .filter(|f| is_secret_field(&admin_cfg, f))
             .filter(|f| form.get(f.name).is_none_or(String::is_empty))
             .map(|f| f.name),
     );

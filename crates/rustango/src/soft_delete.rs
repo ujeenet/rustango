@@ -262,6 +262,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         },
         FieldSchema {
             name: "title",
@@ -288,6 +289,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         },
         FieldSchema {
             name: "deleted_at",
@@ -314,6 +316,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         },
     ];
 

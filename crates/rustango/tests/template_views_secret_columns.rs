@@ -27,6 +27,15 @@ pub struct Account {
     pub password_hash: String,
     #[rustango(max_length = 32)]
     pub note: String,
+    /// Secret by attribute, not by name.
+    #[rustango(secret, max_length = 64)]
+    pub recovery: String,
+    /// Secret by the `*_token` name rule.
+    #[rustango(max_length = 64)]
+    pub reset_token: String,
+    /// A `*_token` name opted out with `secret = false`.
+    #[rustango(secret = false, max_length = 64)]
+    pub share_token: String,
 }
 
 const CSRF: &str = "tvsecret-csrf-token-tvsecret-csrf-token-xxxx";
@@ -44,7 +53,7 @@ fn app(pool: &Pool) -> axum::Router {
         .template("one.html")
         .router("/acc", t.clone(), pool.clone())
         .merge(
-            UpdateView::for_model(Account::SCHEMA, &["name", "password_hash"])
+            UpdateView::for_model(Account::SCHEMA, &["name", "password_hash", "recovery"])
                 .template("one.html")
                 .router("/listed", t.clone(), pool.clone()),
         )
@@ -109,6 +118,9 @@ async fn credential_columns_stay_out_of_the_context() {
         name: "ada".into(),
         password_hash: "argon2-SECRET".into(),
         note: "UNLISTED".into(),
+        recovery: "RECOVERY-SECRET".into(),
+        reset_token: "TOKEN-SECRET".into(),
+        share_token: "SHARE-PUBLIC".into(),
     };
     row.insert_pool(&pool).await.expect("seed");
     let pk = *row.id.get().unwrap();
@@ -140,6 +152,10 @@ async fn credential_columns_stay_out_of_the_context() {
     }
     // Without `.fields()`, DetailView and the confirm page show every non-secret column.
     assert!(detail.contains("UNLISTED"), "{detail}");
+    assert!(
+        detail.contains("SHARE-PUBLIC"),
+        "`secret = false` opts out: {detail}"
+    );
     let all = send(
         &pool,
         Method::POST,
@@ -153,10 +169,23 @@ async fn credential_columns_stay_out_of_the_context() {
     );
     // A view that lists the column on purpose still gets it.
     let out = send(&pool, Method::GET, &format!("/listed/{pk}/edit"), "").await;
-    assert!(out.contains("SECRET"), "{out}");
+    assert!(
+        out.contains("argon2-SECRET") && out.contains("RECOVERY-SECRET"),
+        "{out}"
+    );
+    assert!(!out.contains("TOKEN-SECRET"), "{out}");
     // `.context_fields()` opts a read-only column in.
     let out = send(&pool, Method::GET, &format!("/ctx/{pk}/edit"), "").await;
     assert!(out.contains("UNLISTED") && !out.contains("SECRET"), "{out}");
+}
+
+#[test]
+fn the_secret_attribute_reaches_the_schema() {
+    let field = |n| Account::SCHEMA.field(n).unwrap();
+    assert!(field("recovery").secret == Some(true) && field("recovery").is_credential());
+    assert!(field("reset_token").secret.is_none() && field("reset_token").is_credential());
+    assert!(field("share_token").secret == Some(false) && !field("share_token").is_credential());
+    assert!(!field("note").is_credential());
 }
 
 #[test]
