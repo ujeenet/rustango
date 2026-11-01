@@ -18,7 +18,6 @@
 //! building a `lettre::transport::smtp::client::Tls` manually and
 //! passing through [`SmtpMailer::with_transport`].
 
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use lettre::message::{
@@ -425,7 +424,7 @@ pub fn from_settings(
     if let Some(secs) = s.smtp_timeout_secs {
         b = b.timeout(std::time::Duration::from_secs(secs));
     }
-    Ok(Some(Arc::new(b.build()?)))
+    Ok(Some(std::sync::Arc::new(b.build()?)))
 }
 
 #[cfg(test)]
@@ -506,6 +505,7 @@ mod tests {
         drop(m);
     }
 
+    #[cfg(feature = "config")]
     #[tokio::test]
     async fn from_settings_accepts_smtp_timeout_secs() {
         // The `smtp_timeout_secs` TOML field has to thread through
