@@ -485,9 +485,12 @@ fn mistyped_override(var: &str) -> Option<String> {
 /// the parser sees a valid pair, then the value side is taken.
 fn parse_env_value(_var: &str, raw: &str) -> Result<toml::Value, ConfigError> {
     let probe = format!("__rustango_envvar = {raw}");
-    if let Ok(t) = probe.parse::<toml::Table>() {
-        if let Some(v) = t.into_iter().next().map(|(_, v)| v) {
-            return Ok(v);
+    // Only the probe key: a raw value with a newline could add others.
+    if let Ok(mut t) = probe.parse::<toml::Table>() {
+        if t.len() == 1 {
+            if let Some(v) = t.remove("__rustango_envvar") {
+                return Ok(v);
+            }
         }
     }
     // Otherwise treat it as a string. That covers the common
@@ -613,6 +616,19 @@ mod tests {
         ] {
             assert_eq!(mistyped_override(ok), None, "{ok}");
         }
+    }
+
+    /// A raw value that smuggles in a second key is taken as a string,
+    /// never as the other key's value.
+    #[test]
+    fn env_value_with_a_second_key_stays_a_string() {
+        let raw = "\"x\"\nA = \"y\"";
+        let v = super::parse_env_value("RUSTANGO__X", raw).unwrap();
+        assert_eq!(v, toml::Value::String(raw.to_owned()));
+        assert_eq!(
+            super::parse_env_value("RUSTANGO__X", "12").unwrap(),
+            toml::Value::Integer(12)
+        );
     }
 
     #[test]
