@@ -1484,6 +1484,15 @@ impl Cli {
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
         }
+        // The tenant admin's title, as `[admin] title` documents it.
+        #[cfg(feature = "config")]
+        if let Some(title) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(admin_title_setting)
+        {
+            builder = builder.admin_title(title);
+        }
         // The api router got it in `apply_settings_layers`; the admin and console did not.
         #[cfg(feature = "config")]
         if let Some(layer) = self
@@ -2441,6 +2450,18 @@ async fn open_registry(
     })
 }
 
+/// `[admin] title`, else `[brand] name`: the admin title the settings name.
+#[cfg(all(feature = "config", feature = "tenancy"))]
+fn admin_title_setting(s: &crate::config::Settings) -> Option<String> {
+    let set = |t: &&String| !t.is_empty();
+    s.admin
+        .title
+        .as_ref()
+        .filter(set)
+        .or(s.brand.name.as_ref().filter(set))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3099,6 +3120,20 @@ mod tests {
             res.headers()["access-control-allow-origin"],
             "https://app.example"
         );
+    }
+
+    /// The tenant admin's title is `[admin] title`, else `[brand] name`.
+    #[cfg(all(feature = "tenancy", feature = "config"))]
+    #[test]
+    fn the_admin_title_setting_falls_back_to_the_brand_name() {
+        let mut s = crate::config::Settings::default();
+        assert_eq!(admin_title_setting(&s), None);
+        s.brand.name = Some("Acme".into());
+        assert_eq!(admin_title_setting(&s).as_deref(), Some("Acme"));
+        s.admin.title = Some("Acme Admin".into());
+        assert_eq!(admin_title_setting(&s).as_deref(), Some("Acme Admin"));
+        s.admin.title = Some(String::new());
+        assert_eq!(admin_title_setting(&s).as_deref(), Some("Acme"));
     }
 
     /// #1699, #1700 — what both tenancy paths hand the builder, checked

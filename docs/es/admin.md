@@ -551,11 +551,12 @@ ese inquilino, en `/admin` (`RouteConfig::admin_url`; el valor por defecto
 siguen llegando a él, salvo que `RouteConfig::legacy()` haga de `/__admin` la
 ruta principal.
 
-El admin de inquilino no lee `[admin]` ni `[brand]`. Toma su marca de la fila
-`Org` del tenant: el nombre es `brand_name`, o si no el nombre visible del
-tenant; el logo es el subido en la página de edición de la consola, o si no el
+El admin de inquilino toma su nombre de `brand_name` de la fila `Org`, o si no
+de `[admin] title`, o de `[brand] name`, o del nombre visible del tenant; la
+barra lateral, el `<title>` y el encabezado lo muestran. El resto viene de la
+fila `Org`: el logo es el subido en la página de edición de la consola, o si no el
 logo del framework (`rustango.png` bajo la URL estática); el tema es
-`theme_mode` y el color de acento `primary_color`. Ver
+`theme_mode` y el color de acento `primary_color`, que también colorea los enlaces. Ver
 [marca por tenant](operator-console.md#marca-por-tenant).
 
 ---

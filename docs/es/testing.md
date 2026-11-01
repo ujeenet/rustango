@@ -228,7 +228,7 @@ ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
 | Variable | Suites | Qué necesitan |
 |---|---:|---|
 | *(ninguna)* | 229 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
-| `DATABASE_URL` | 185 | Un servidor PostgreSQL accesible. |
+| `DATABASE_URL` | 186 | Un servidor PostgreSQL accesible. |
 | `MYSQL_TEST_URL` | 117 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis accesible. |
 

@@ -342,8 +342,11 @@ fn build_brand_css_from_color(primary_color: Option<&str>) -> Option<String> {
     let hex = validate_hex_color(raw)?;
     let hover = shade(&hex, 0.85);
     let soft = tint(&hex, 0.88);
-    let mut out = String::with_capacity(160);
-    out.push_str("--color-accent: ");
+    let mut out = String::with_capacity(180);
+    // Links take the accent too, not only buttons and the sidebar.
+    out.push_str("--color-link: ");
+    out.push_str(&hex);
+    out.push_str("; --color-accent: ");
     out.push_str(&hex);
     out.push_str("; --color-accent-hover: ");
     out.push_str(&hover);
@@ -507,7 +510,8 @@ mod tests {
     #[test]
     fn build_brand_css_emits_safe_assignments() {
         let css = build_brand_css_from_color(Some("#b04a2c")).unwrap();
-        assert!(css.starts_with("--color-accent: #b04a2c"), "got: {css}");
+        assert!(css.starts_with("--color-link: #b04a2c"), "got: {css}");
+        assert!(css.contains("--color-accent: #b04a2c"), "got: {css}");
         assert!(css.contains("--color-accent-hover: #"));
         assert!(css.contains("--color-accent-bg-soft: #"));
         // No path through the function can introduce </style> tokens.

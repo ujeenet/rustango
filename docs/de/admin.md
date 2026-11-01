@@ -547,11 +547,12 @@ In einem Tenancy-Projekt läuft der Admin jedes Tenants auf dessen Host unter
 nicht). Alte `/__admin`-Links erreichen ihn weiterhin, außer
 `RouteConfig::legacy()` macht `/__admin` zum Hauptpfad.
 
-Der Tenant-Admin liest weder `[admin]` noch `[brand]`. Er nimmt seine Marke aus
-der `Org`-Zeile des Tenants: Der Name ist `brand_name`, sonst der Anzeigename
-des Tenants; das Logo ist das auf der Bearbeitungsseite der Konsole hochgeladene,
+Der Tenant-Admin nimmt seinen Namen aus `brand_name` der `Org`-Zeile, sonst
+`[admin] title`, sonst `[brand] name`, sonst dem Anzeigenamen des Tenants;
+Seitenleiste, `<title>` und Überschrift zeigen ihn. Der Rest kommt aus der
+`Org`-Zeile: Das Logo ist das auf der Bearbeitungsseite der Konsole hochgeladene,
 sonst das Framework-Logo (`rustango.png` unter der Static-URL); das Theme ist
-`theme_mode` und die Akzentfarbe `primary_color`. Siehe
+`theme_mode` und die Akzentfarbe `primary_color`, die auch Links färbt. Siehe
 [Branding pro Tenant](operator-console.md#branding-pro-tenant).
 
 ---
