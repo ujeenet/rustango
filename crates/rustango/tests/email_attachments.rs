@@ -143,20 +143,20 @@ async fn unattached_email_still_serializes_cleanly() {
 
 // ------------------------------------------------------------------ serde
 
-/// Still written as an integer array, so workers not yet upgraded can read it.
+/// Written as base64 text, a quarter of the integer array's size.
 #[test]
-fn attachment_still_writes_an_integer_array() {
+fn attachment_writes_base64() {
     let e = base_email().attach("a.bin", vec![0u8, 1, 2, 255], None::<&str>);
     let v = serde_json::to_value(&e).unwrap();
     assert_eq!(
         v["attachments"][0]["content"],
-        serde_json::json!([0, 1, 2, 255])
+        serde_json::json!("AAEC/w==")
     );
     let back: Email = serde_json::from_value(v).unwrap();
     assert_eq!(back.attachments[0].content, vec![0u8, 1, 2, 255]);
 }
 
-/// Both forms read: the array written now and the base64 a later release writes.
+/// Both forms read: base64, and the array that releases before 0.62.0 wrote.
 #[test]
 fn attachment_reads_an_array_or_base64() {
     for content in [

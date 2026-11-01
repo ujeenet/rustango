@@ -94,18 +94,26 @@ pub struct Attachment {
     pub filename: String,
     /// Raw bytes. Plain-text attachments can be built via
     /// [`Email::attach_text`] which UTF-8 encodes a `&str`.
-    /// Written as an integer array; base64 text also reads.
-    #[serde(deserialize_with = "base64_bytes::deserialize")]
+    /// Written as base64 text; the integer array older releases wrote
+    /// also reads.
+    #[serde(with = "base64_bytes")]
     pub content: Vec<u8>,
     /// MIME type. `None` = `application/octet-stream`. Common values:
     /// `text/plain`, `text/csv`, `application/pdf`, `image/png`.
     pub mimetype: Option<String>,
 }
 
-/// Reads [`Attachment::content`] as an integer array or base64 text, so
-/// this release reads jobs a later one queues with base64.
+/// Writes [`Attachment::content`] as base64 text and reads that or an
+/// integer array, so jobs queued by releases before 0.62.0 still send.
 mod base64_bytes {
     use base64::Engine as _;
+
+    pub(super) fn serialize<S: serde::Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        if !s.is_human_readable() {
+            return serde::Serialize::serialize(v, s);
+        }
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(v))
+    }
 
     pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         struct V;

@@ -28,6 +28,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The hook and scope macros are `register_object_permission!` and `register_queryset_scope!` under `rustango::object_permissions`; the `register_admin_*` names are deprecated.
 - `ViewSet::for_model` refuses `rustango_api_keys`, `rustango_agents` and the tables the admin never serves.
 - ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
+- `AccessLogLayer` is `#[non_exhaustive]` and gains `skip_paths`, which keeps health and readiness probes out of the log by whole path segment.
+- Queued email attachments are written as base64 text instead of an integer array; both forms still read.
 
 ### Fixed
 

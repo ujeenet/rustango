@@ -182,7 +182,7 @@ async fn run(&self) -> Result<(), JobError> {
 `email_jobs` (features `email` + `jobs`) wires this up for you: call
 `register_email_job(&queue, EmailJobConfig::new(mailer))` once at startup, then
 `dispatch_email(&queue, &email)` in the handler. It validates before queueing,
-and only a `Transport` failure retries.
+and only a `Transport` failure retries. Attachment bytes are queued as base64.
 
 ---
 

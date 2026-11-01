@@ -179,6 +179,8 @@ untouched.
 - `TableSnapshot` is `#[non_exhaustive]` and gains `db_table_comment`: build it with `SchemaSnapshot::from_models` or serde, not a struct literal. `SchemaChange` gains `AlterTableComment`. The next `makemigrations` writes a migration for each model that sets a table comment.
 - `config::ServerSettings` is `#[non_exhaustive]`: build it from `Default` and set fields, not with a struct literal.
 - Operator console cookies, tenant admin cookies and impersonation handoff tokens are signed under a per-kind tag. Every existing operator and tenant session ends once on upgrade; users sign in again.
+- `AccessLogLayer` is `#[non_exhaustive]`: build it with `AccessLogLayer::new()` and the setters (or set fields on it), not a struct literal.
+- `email::Attachment::content` is queued as base64 text. Workers must run 0.61.3+ (or drain the email queue) before 0.62.0 web nodes enqueue mail.
 - `M2MManager::all` and `GenericM2MManager::all` are generic over the key type and `all_as` is gone: write `m.all::<i64>(&pool)` (or annotate `let ids: Vec<i64>`); use `String` / `Uuid` for those keys.
 - The deprecated `M2MManager` `_pool` aliases (`all_pool`, `add_pool`, `remove_pool`, `set_pool`, `clear_pool`, `contains_pool`) are removed; drop the suffix.
 - `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).

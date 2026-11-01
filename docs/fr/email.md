@@ -180,7 +180,7 @@ async fn run(&self) -> Result<(), JobError> {
 `email_jobs` (fonctionnalités `email` + `jobs`) câble cela pour vous : appelez
 `register_email_job(&queue, EmailJobConfig::new(mailer))` une fois au démarrage, puis
 `dispatch_email(&queue, &email)` dans le handler. Il valide avant la mise en file,
-et seul un échec `Transport` est réessayé.
+et seul un échec `Transport` est réessayé. Les pièces jointes sont mises en file en base64.
 
 ---
 

@@ -393,6 +393,7 @@ AccessLogLayer::default()
     .slow_threshold_ms(250)      // was als langsam gilt
     .without_ip()                // Client-IP weglassen
     .use_real_ip(true)           // TrustedRealIp aus RealIpLayer, nie rohe Header
+    .skip_paths(["/health", "/ready"]) // keine Zeile für Probes; ganze Segmente
 ```
 
 `RealIpLayer` muss vor dem Access-Log laufen. Mit `server::Builder` übergeben Sie
