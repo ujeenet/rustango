@@ -2008,8 +2008,9 @@ fn render_changes_split_inner(
                     .push(composite_fk_sql(table, name, to, from, on, dialect, schema));
             }
             SchemaChange::DropCompositeFk { table, name } => {
-                // Same single owner as the CHECK arm above.
-                let Some(sql) = dialect.drop_foreign_key_sql(table, name) else {
+                // The usual name; the runner finds the live one by its columns.
+                let fk = super::ddl::fk_constraint_name(table, name);
+                let Some(sql) = dialect.drop_foreign_key_sql(table, &fk) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
                          dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
@@ -2197,18 +2198,18 @@ fn constraints_sql_from_snapshot(
     Ok(out)
 }
 
-/// Each composite FK of `t` by name, with its `ADD CONSTRAINT … FOREIGN KEY`.
+/// Each composite FK of `t` by its columns, with its `ADD CONSTRAINT … FOREIGN KEY`.
 pub(crate) fn composite_fks(
     t: &TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
-) -> Vec<(String, String)> {
+) -> Vec<(Vec<String>, String)> {
     t.composite_fks
         .iter()
         .map(|cf| {
             let sql =
                 composite_fk_sql(&t.name, &cf.name, &cf.to, &cf.from, &cf.on, dialect, schema);
-            (cf.name.clone(), sql)
+            (cf.from.clone(), sql)
         })
         .collect()
 }
@@ -2231,7 +2232,7 @@ fn composite_fk_sql(
     format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         dialect.quote_ident(table),
-        dialect.quote_ident(name),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(table, name)),
         cols(from),
         fk_target(dialect, schema, to),
         cols(on),
@@ -4059,7 +4060,8 @@ mod sql_type_tests {
         assert_eq!(out.deferred_fks.len(), 1);
         let stmt = &out.deferred_fks[0];
         assert!(stmt.contains(r#"ALTER TABLE "child""#));
-        assert!(stmt.contains(r#"ADD CONSTRAINT "fk_child_parent_composite""#));
+        // Per table: MySQL names FKs per database.
+        assert!(stmt.contains(r#"ADD CONSTRAINT "child_fk_child_parent_composite_fkey""#));
         assert!(stmt.contains(r#"FOREIGN KEY ("pa_id", "pb_id")"#));
         assert!(stmt.contains(r#"REFERENCES "parent" ("a_id", "b_id")"#));
     }
@@ -4144,7 +4146,7 @@ mod sql_type_tests {
         assert_eq!(out.deferred_fks.len(), 1);
         let stmt = &out.deferred_fks[0];
         assert!(stmt.contains("ALTER TABLE `child`"));
-        assert!(stmt.contains("ADD CONSTRAINT `fk_child_parent_composite`"));
+        assert!(stmt.contains("ADD CONSTRAINT `child_fk_child_parent_composite_fkey`"));
         assert!(stmt.contains("FOREIGN KEY (`pa_id`, `pb_id`)"));
         assert!(stmt.contains("REFERENCES `parent` (`a_id`, `b_id`)"));
         assert!(
@@ -4164,7 +4166,7 @@ mod sql_type_tests {
             render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
         assert_eq!(
             out.immediate,
-            vec![r#"ALTER TABLE "child" DROP CONSTRAINT IF EXISTS "fk_x""#.to_string()]
+            vec![r#"ALTER TABLE "child" DROP CONSTRAINT IF EXISTS "child_fk_x_fkey""#.to_string()]
         );
     }
 
@@ -4186,7 +4188,7 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `child` DROP FOREIGN KEY `fk_x`".to_string()]
+            vec!["ALTER TABLE `child` DROP FOREIGN KEY `child_fk_x_fkey`".to_string()]
         );
         assert!(
             !out.immediate[0].contains("IF EXISTS"),

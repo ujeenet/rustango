@@ -476,6 +476,13 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for the FKs on one table, binding `(table)`: one `(name, column)`
+    /// row per key column, by name then key order. A table rename keeps the
+    /// names, so drops match on columns. `None` where FKs drop by rebuild.
+    fn foreign_key_columns_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Query for an index's first column when no other index starts with it,
     /// binding `(table, index)`, where an FK refuses to lose the only index
     /// it can use (MySQL, 1553; #2244).

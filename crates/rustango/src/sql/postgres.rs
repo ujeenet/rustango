@@ -327,6 +327,16 @@ impl Dialect for Postgres {
         )
     }
 
+    fn foreign_key_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT c.conname::text, a.attname::text FROM pg_constraint c \
+             CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
+             ORDER BY c.conname, k.ord",
+        )
+    }
+
     /// A renamed column keeps its UNIQUE constraint's old name (#2133).
     fn unique_index_names_sql(&self) -> Option<&'static str> {
         Some(

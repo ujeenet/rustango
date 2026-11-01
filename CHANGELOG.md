@@ -27,6 +27,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - SSL-redirect exempt prefixes no longer match inside a segment (`/health` exempted `/healthz`).
 - On the prod tier an unset mail backend no longer falls back to the console mailer, which printed reset links to the log.
 - A bad `[cache].backend` no longer silently becomes a per-process cache.
+- Migrations: two tables with a composite FK of the same name no longer fail on MySQL (1826); a composite FK drop finds the live constraint by its columns.
 - `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
 

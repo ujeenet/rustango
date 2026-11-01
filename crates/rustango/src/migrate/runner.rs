@@ -703,12 +703,14 @@ async fn reconcile_and_apply_pg(
         }
         // Unreachable with `fake_initial` off; a plain run for totality.
         ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-            apply_one(pool, &on_live_branches(all, done, mig), ledger).await?;
+            let before = snapshot_before(all, mig).unwrap_or_default();
+            apply_one(pool, &on_live_branches(all, done, mig), &before, ledger).await?;
             Outcome::Ran
         }
         ReconcileAction::RunOutside(existing) => {
             let run = outside_tables(mig, &existing);
-            apply_one(pool, &on_live_branches(all, done, &run), ledger).await?;
+            let before = snapshot_before(all, mig).unwrap_or_default();
+            apply_one(pool, &on_live_branches(all, done, &run), &before, ledger).await?;
             Outcome::RanPartial { skipped: existing }
         }
     })
@@ -948,18 +950,25 @@ fn prev_snapshot(
     let Some(prev_name) = &mig.prev else {
         return Ok(SchemaSnapshot::default());
     };
-    // With the parent's hand-written renames, as makemigrations reads it.
+    snapshot_before(all, mig).ok_or_else(|| {
+        MigrateError::Validation(format!(
+            "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
+            mig.name,
+            dir.display()
+        ))
+    })
+}
+
+/// The schema before `mig`, with its parent's hand-written renames as
+/// makemigrations reads it; `None` if its `prev` is missing from `all`.
+fn snapshot_before(all: &[Migration], mig: &Migration) -> Option<SchemaSnapshot> {
+    let Some(prev_name) = &mig.prev else {
+        return Some(SchemaSnapshot::default());
+    };
     let chain: Vec<&Migration> = all.iter().collect();
     all.iter()
         .find(|m| &m.name == prev_name)
         .map(|m| super::make::effective_snapshot(&chain, m))
-        .ok_or_else(|| {
-            MigrateError::Validation(format!(
-                "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
-                mig.name,
-                dir.display()
-            ))
-        })
 }
 
 /// Build a [`MigrationPreview`] for a single migration. Pure — no DB
@@ -1033,7 +1042,15 @@ fn preview_schema_op(
     live: &mut LiveFks,
     statements: &mut Vec<String>,
 ) -> Result<Vec<String>, MigrateError> {
-    let step = render_step(change, ops, after, dialect, None, &EmptyTables::default())?;
+    let step = render_step(
+        change,
+        ops,
+        before,
+        after,
+        dialect,
+        None,
+        &EmptyTables::default(),
+    )?;
     // The runner looks these names up live; this is the name it has then.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
         if let Some(name) = live.take(&fk.table, &fk.column) {
@@ -1110,7 +1127,7 @@ fn preview_schema_op(
     // The composite FKs only this index serves, as apply finds them (#2326).
     if let Some((ix, index)) = dropped {
         let covers = |cols: &[String], fk: &[String]| cols.starts_with(fk);
-        let names: Vec<String> = before
+        let names: Vec<(String, Vec<String>)> = before
             .table(&ix.table)
             .map_or(&[][..], |t| t.composite_fks.as_slice())
             .iter()
@@ -1120,13 +1137,22 @@ fn preview_schema_op(
                     .iter()
                     .any(|(n, cols)| *n != ix.index && covers(cols, &cf.from))
             })
-            .map(|cf| cf.name.clone())
+            .map(|cf| {
+                let columns = super::rebuild::columns_at_end(&ix.table, &cf.from, earlier);
+                (ddl::fk_constraint_name(&ix.table, &cf.name), columns)
+            })
             .collect();
         let (d, r) = ix.plan_composites(&names, dialect);
         drops.extend(d);
         readd.extend(r);
     }
     statements.extend(drops);
+    // Apply finds these by their columns; this is the usual name.
+    statements.extend(
+        step.drop_composite_fks
+            .iter()
+            .filter_map(|fk| dialect.drop_foreign_key_sql(&fk.table, &fk.usual_name())),
+    );
     statements.extend(step.batch.immediate);
     if let Some(retry) = &step.retry {
         statements.extend(retry.preview().map(|l| format!("-- {l}")));
@@ -1262,7 +1288,12 @@ pub fn render_changes_between(
 }
 
 #[cfg(feature = "postgres")]
-async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+async fn apply_atomic(
+    pool: &PgPool,
+    mig: &Migration,
+    before: &SchemaSnapshot,
+    ledger: &str,
+) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic)");
     let schema = pg_creation_schema(pool).await?;
     let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
@@ -1274,6 +1305,7 @@ async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<()
                 let step = render_step(
                     change,
                     &mig.forward,
+                    before,
                     &mig.snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
@@ -1425,13 +1457,15 @@ async fn migrate_embedded_with_ledger(
 
         let applied = applied_set_for(pool, ledger).await?;
         let pending: Vec<Migration> = all
-            .into_iter()
+            .iter()
             .filter(|m| !applied.contains(&m.name))
+            .cloned()
             .collect();
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            apply_one(pool, &mig, ledger).await?;
+            let before = snapshot_before(&all, &mig).unwrap_or_default();
+            apply_one(pool, &mig, &before, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -1483,12 +1517,17 @@ async fn downgrade_with_ledger(
 }
 
 #[cfg(feature = "postgres")]
-async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+async fn apply_one(
+    pool: &PgPool,
+    mig: &Migration,
+    before: &SchemaSnapshot,
+    ledger: &str,
+) -> Result<(), MigrateError> {
     refuse_duplicate_keys(&pool.clone().into(), mig).await?;
     if mig.atomic {
-        apply_atomic(pool, mig, ledger).await
+        apply_atomic(pool, mig, before, ledger).await
     } else {
-        apply_loose(pool, mig, ledger).await
+        apply_loose(pool, mig, before, ledger).await
     }
 }
 
@@ -1681,6 +1720,7 @@ async fn unapply_atomic(
                 let step = render_step(
                     change,
                     inverted,
+                    &target.snapshot,
                     snapshot,
                     &crate::sql::Postgres,
                     schema.as_deref(),
@@ -1722,6 +1762,7 @@ async fn unapply_loose(
     let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
     let mut steps = render_steps(
         inverted,
+        &target.snapshot,
         snapshot,
         &crate::sql::Postgres,
         schema.as_deref(),
@@ -1757,13 +1798,19 @@ async fn unapply_loose(
 }
 
 #[cfg(feature = "postgres")]
-async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
+async fn apply_loose(
+    pool: &PgPool,
+    mig: &Migration,
+    before: &SchemaSnapshot,
+    ledger: &str,
+) -> Result<(), MigrateError> {
     let callbacks = Callbacks::resolve(&mig.forward)?;
     tracing::info!(migration = %mig.name, "applying (non-atomic)");
     let schema = pg_creation_schema(pool).await?;
     let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
     let mut steps = render_steps(
         &mig.forward,
+        before,
         &mig.snapshot,
         &crate::sql::Postgres,
         schema.as_deref(),
@@ -2201,7 +2248,14 @@ async fn reconcile_and_apply(
                 ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
-            apply_one_pool(pool, &on_live_branches(all, done, &effective), ledger).await?;
+            let before = snapshot_before(all, mig).unwrap_or_default();
+            apply_one_pool(
+                pool,
+                &on_live_branches(all, done, &effective),
+                &before,
+                ledger,
+            )
+            .await?;
             Ok(outcome)
         }
     }
@@ -3315,6 +3369,9 @@ struct Step {
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
+    /// Composite FKs to drop, found in the catalog by their columns.
+    #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+    drop_composite_fks: Vec<CompositeFkRef>,
     /// A MySQL index drop, which the FKs it serves refuse (1553; #2244, #2326). Boxed: `Step`
     /// sits in every migrate future, near a debug test thread's 2 MiB stack.
     index_fks: Option<Box<IndexFks>>,
@@ -3333,9 +3390,9 @@ struct IndexFks {
     /// missing here goes away later, or an earlier op already defers its
     /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
-    /// The table's composite FKs at the op by name, with their re-add; one
-    /// missing here just drops; `None` if the whole table goes (#2326).
-    composites: Option<Vec<(String, String)>>,
+    /// The table's composite FKs at the op by columns, with their re-add;
+    /// one missing here just drops; `None` if the whole table goes (#2326).
+    composites: Option<Vec<(Vec<String>, String)>>,
 }
 
 /// The indexes on `table` that start with `column` once `earlier` ran on
@@ -3469,18 +3526,19 @@ impl IndexFks {
         })
     }
 
-    /// The drops of the live composite FKs `names` only the index serves,
-    /// then the re-adds of those still declared; an undeclared one stays.
+    /// The drops of the live composite FKs `live` only the index serves, by
+    /// name and columns, then the re-adds of those still declared; an
+    /// undeclared one stays.
     fn plan_composites(
         &self,
-        names: &[String],
+        live: &[(String, Vec<String>)],
         dialect: &dyn crate::sql::Dialect,
     ) -> (Vec<String>, Vec<String>) {
         let (mut drops, mut readds) = (Vec::new(), Vec::new());
-        for name in names {
+        for (name, columns) in live {
             let readd = match &self.composites {
                 None => None,
-                Some(cs) => match cs.iter().find(|(n, _)| n == name) {
+                Some(cs) => match cs.iter().find(|(c, _)| same_columns(c, columns)) {
                     Some((_, sql)) => Some(sql.clone()),
                     None => continue,
                 },
@@ -3560,10 +3618,113 @@ struct ColumnRef {
     keep: Vec<String>,
 }
 
-/// Render `change`, one of `ops`, which together move the schema to `after`.
+/// A composite FK a step drops. Apply finds it in the catalog by its columns:
+/// an older migration named it bare, and a table rename keeps its name.
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+struct CompositeFkRef {
+    table: String,
+    name: String,
+    /// Its columns at the op; `None` if no snapshot or earlier op has it.
+    columns: Option<Vec<String>>,
+}
+
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+impl CompositeFkRef {
+    /// `table.name` as `earlier`, run on `before`, leaves it.
+    fn at(table: &str, name: &str, before: &SchemaSnapshot, earlier: &[Operation]) -> Self {
+        use super::SchemaChange as SC;
+        let added = earlier
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(j, op)| match op {
+                Operation::Schema(SC::AddCompositeFk {
+                    table: t,
+                    name: n,
+                    from,
+                    ..
+                }) if n == name && super::rebuild::name_at_end(t, &earlier[j + 1..]) == table => {
+                    Some(super::rebuild::columns_at_end(t, from, &earlier[j + 1..]))
+                }
+                _ => None,
+            });
+        let start = earlier
+            .iter()
+            .rev()
+            .fold(table.to_owned(), |t, op| match op {
+                Operation::Schema(SC::RenameTable { old_name, new_name }) if *new_name == t => {
+                    old_name.clone()
+                }
+                _ => t,
+            });
+        let columns = added.or_else(|| {
+            let cf = before.table(&start)?.composite_fk(name)?;
+            Some(super::rebuild::columns_at_end(&start, &cf.from, earlier))
+        });
+        Self {
+            table: table.to_owned(),
+            name: name.to_owned(),
+            columns,
+        }
+    }
+
+    /// The live FKs it is, from the catalog's FKs on its table.
+    fn live_names(&self, live: Vec<(String, Vec<String>)>) -> Vec<String> {
+        let named =
+            |n: &str| n == self.name || n == ddl::fk_constraint_name(&self.table, &self.name);
+        let Some(columns) = &self.columns else {
+            return live
+                .into_iter()
+                .map(|(n, _)| n)
+                .filter(|n| named(n))
+                .collect();
+        };
+        let found: Vec<String> = live
+            .into_iter()
+            .filter(|(_, cs)| same_columns(cs, columns))
+            .map(|(n, _)| n)
+            .collect();
+        // Several on its columns: the one its name gives, if any.
+        if found.iter().any(|n| named(n)) {
+            found.into_iter().filter(|n| named(n)).collect()
+        } else {
+            found
+        }
+    }
+
+    /// The name apply usually finds, for a preview.
+    fn usual_name(&self) -> String {
+        ddl::fk_constraint_name(&self.table, &self.name)
+    }
+}
+
+/// Whether two FK column lists hold the same columns.
+fn same_columns(a: &[String], b: &[String]) -> bool {
+    let (mut a, mut b) = (a.to_vec(), b.to_vec());
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
+/// The catalog's `(name, column)` FK rows, in key order, by constraint.
+#[cfg(any(feature = "mysql", feature = "postgres"))]
+fn group_fk_columns(rows: Vec<(String, String)>) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for (name, column) in rows {
+        match out.last_mut() {
+            Some((n, cs)) if *n == name => cs.push(column),
+            _ => out.push((name, vec![column])),
+        }
+    }
+    out
+}
+
+/// Render `change`, one of `ops`, which together move the schema from
+/// `before` to `after`.
 fn render_step(
     change: &super::SchemaChange,
     ops: &[Operation],
+    before: &SchemaSnapshot,
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -3575,6 +3736,14 @@ fn render_step(
         .iter()
         .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)));
     let later = at_op.map_or(&[][..], |i| &ops[i + 1..]);
+    let earlier = at_op.map_or(&[][..], |i| &ops[..i]);
+    // Dropped by the name the catalog has, not rendered by its usual one.
+    let mut drop_composite_fks: Vec<CompositeFkRef> = match change {
+        SC::DropCompositeFk { table, name } if dialect.foreign_key_columns_sql().is_some() => {
+            vec![CompositeFkRef::at(table, name, before, earlier)]
+        }
+        _ => Vec::new(),
+    };
     // Its FK is deferred past the later renames, so it takes their names (#2190).
     let ended = match change {
         SC::AddCompositeFk {
@@ -3592,7 +3761,11 @@ fn render_step(
         }),
         _ => None,
     };
-    let changes = std::slice::from_ref(ended.as_ref().unwrap_or(change));
+    let changes = if drop_composite_fks.is_empty() {
+        std::slice::from_ref(ended.as_ref().unwrap_or(change))
+    } else {
+        &[]
+    };
     let render = |snap: &SchemaSnapshot| {
         if empty.holds(change) {
             super::diff::render_changes_split_for_empty(changes, snap, dialect, schema)
@@ -3752,29 +3925,21 @@ fn render_step(
     }
     if let Some(at) = at_op.filter(|_| dialect.sole_leading_column_sql().is_some()) {
         let hoisted = hoisted_composite_drops(ops);
+        // Its drop runs at the index drop instead.
         if hoisted.iter().any(|(_, drop)| *drop == at) {
             batch = super::diff::render_changes_split_in_schema(&[], snap, dialect, schema)
                 .map_err(MigrateError::Validation)?;
+            drop_composite_fks.clear();
         }
         if let SC::DropIndex { table, .. } = change {
-            let drops: Vec<SC> = hoisted
-                .iter()
-                .filter(|(index, _)| *index == at)
-                .filter_map(|(_, drop)| match &ops[*drop] {
+            drop_composite_fks.extend(hoisted.iter().filter(|(index, _)| *index == at).filter_map(
+                |(_, drop)| match &ops[*drop] {
                     Operation::Schema(SC::DropCompositeFk { name, .. }) => {
-                        Some(SC::DropCompositeFk {
-                            table: table.clone(),
-                            name: name.clone(),
-                        })
+                        Some(CompositeFkRef::at(table, name, before, earlier))
                     }
                     _ => None,
-                })
-                .collect();
-            let mut first =
-                super::diff::render_changes_split_in_schema(&drops, snap, dialect, schema)
-                    .map_err(MigrateError::Validation)?;
-            first.immediate.append(&mut batch.immediate);
-            batch.immediate = first.immediate;
+                },
+            ));
         }
     }
     if let Some((true, sql)) = renamed_fk {
@@ -3860,6 +4025,7 @@ fn render_step(
         drop_referencing,
         drop_composites,
         drop_unique,
+        drop_composite_fks,
         index_fks,
         readded_now,
     })
@@ -3923,6 +4089,7 @@ impl Rendered {
 
 fn render_steps(
     ops: &[Operation],
+    before: &SchemaSnapshot,
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -3931,9 +4098,9 @@ fn render_steps(
     let steps: Result<Vec<Step>, MigrateError> = ops
         .iter()
         .filter_map(|op| match op {
-            Operation::Schema(change) => {
-                Some(render_step(change, ops, after, dialect, schema, empty))
-            }
+            Operation::Schema(change) => Some(render_step(
+                change, ops, before, after, dialect, schema, empty,
+            )),
             _ => None,
         })
         .collect();
@@ -4258,10 +4425,19 @@ fn rebuilds(
         return Ok(false);
     };
     Ok(
-        render_step(change, ops, after, &crate::sql::Sqlite, None, empty)?
-            .batch
-            .rebuild
-            .is_some(),
+        // SQLite drops a composite FK by rebuild, so needs no `before`.
+        render_step(
+            change,
+            ops,
+            &SchemaSnapshot::default(),
+            after,
+            &crate::sql::Sqlite,
+            None,
+            empty,
+        )?
+        .batch
+        .rebuild
+        .is_some(),
     )
 }
 
@@ -4340,6 +4516,19 @@ macro_rules! step_statements {
                     .filter(|n| !u.keep.contains(n))
                     .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
             );
+        }
+        if let Some(sql) = dialect.foreign_key_columns_sql() {
+            for fk in &step.drop_composite_fks {
+                let rows: Vec<(String, String)> = sqlx::query_as(sql)
+                    .bind(&fk.table)
+                    .fetch_all(&mut *$conn)
+                    .await?;
+                out.extend(
+                    fk.live_names(group_fk_columns(rows))
+                        .iter()
+                        .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                );
+            }
         }
         out.extend(step.batch.immediate.iter().cloned());
         Ok(out)
@@ -4420,10 +4609,11 @@ async fn mysql_index_fks(
 ) -> Result<(Vec<String>, Vec<String>), sqlx::Error> {
     use crate::sql::Dialect as _;
     let dialect = crate::sql::MySql;
-    let (Some(lead_sql), Some(names_sql), Some(composite_sql)) = (
+    let (Some(lead_sql), Some(names_sql), Some(composite_sql), Some(columns_sql)) = (
         dialect.sole_leading_column_sql(),
         dialect.foreign_key_names_sql(),
         dialect.composite_fks_needing_index_sql(),
+        dialect.foreign_key_columns_sql(),
     ) else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -4449,7 +4639,19 @@ async fn mysql_index_fks(
         .bind(&ix.index)
         .fetch_all(&mut *conn)
         .await?;
-    let (d, r) = ix.plan_composites(&names, &dialect);
+    let live: Vec<(String, Vec<String>)> = if names.is_empty() {
+        Vec::new()
+    } else {
+        let rows = sqlx::query_as(columns_sql)
+            .bind(&ix.table)
+            .fetch_all(&mut *conn)
+            .await?;
+        group_fk_columns(rows)
+            .into_iter()
+            .filter(|(n, _)| names.contains(n))
+            .collect()
+    };
+    let (d, r) = ix.plan_composites(&live, &dialect);
     drops.extend(d);
     readds.extend(r);
     Ok((drops, readds))
@@ -4478,6 +4680,7 @@ async fn atomic_mysql(
     my: &sqlx::MySqlPool,
     name: &str,
     ops: &[Operation],
+    before: &SchemaSnapshot,
     after: &SchemaSnapshot,
     schema: Option<&str>,
     ledger: LedgerWrite<'_>,
@@ -4488,7 +4691,7 @@ async fn atomic_mysql(
         return Err(callback_in_atomic(name, c));
     }
     let empty = EmptyTables::probe(&my.clone().into(), ops, after).await;
-    let mut steps = render_steps(ops, after, &crate::sql::MySql, schema, &empty)?;
+    let mut steps = render_steps(ops, before, after, &crate::sql::MySql, schema, &empty)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
@@ -4718,7 +4921,17 @@ async fn atomic_sqlite_segment(
         for op in &ops[range] {
             match op {
                 Operation::Schema(change) => {
-                    let step = render_step(change, ops, after, &crate::sql::Sqlite, None, empty)?;
+                    // As in `rebuilds`: SQLite needs no `before`.
+                    let before = SchemaSnapshot::default();
+                    let step = render_step(
+                        change,
+                        ops,
+                        &before,
+                        after,
+                        &crate::sql::Sqlite,
+                        None,
+                        empty,
+                    )?;
                     deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                 }
                 Operation::Data(d) => {
@@ -4814,6 +5027,11 @@ async fn run_step_pool(
 async fn apply_atomic_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
@@ -4836,6 +5054,7 @@ async fn apply_atomic_pool(
                         let step = render_step(
                             change,
                             &mig.forward,
+                            before,
                             &mig.snapshot,
                             dialect,
                             schema.as_deref(),
@@ -4877,6 +5096,7 @@ async fn apply_atomic_pool(
                 my,
                 &mig.name,
                 &mig.forward,
+                before,
                 &mig.snapshot,
                 schema.as_deref(),
                 LedgerWrite::Insert(ledger),
@@ -4904,6 +5124,7 @@ async fn apply_atomic_pool(
 async fn apply_nonatomic_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     let callbacks = Callbacks::resolve(&mig.forward)?;
@@ -4912,6 +5133,7 @@ async fn apply_nonatomic_pool(
     let empty = EmptyTables::probe(pool, &mig.forward, &mig.snapshot).await;
     let mut steps = render_steps(
         &mig.forward,
+        before,
         &mig.snapshot,
         pool.dialect(),
         schema.as_deref(),
@@ -5309,13 +5531,14 @@ pub async fn migrate_dry_run_pool_with_ledger(
 async fn apply_one_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     refuse_duplicate_keys(pool, mig).await?;
     if mig.atomic {
-        apply_atomic_pool(pool, mig, ledger).await
+        apply_atomic_pool(pool, mig, before, ledger).await
     } else {
-        apply_nonatomic_pool(pool, mig, ledger).await
+        apply_nonatomic_pool(pool, mig, before, ledger).await
     }
 }
 
@@ -5500,6 +5723,7 @@ async fn unapply_atomic_pool(
                         let step = render_step(
                             change,
                             inverted,
+                            &target.snapshot,
                             snapshot,
                             pool.dialect(),
                             schema.as_deref(),
@@ -5538,6 +5762,7 @@ async fn unapply_atomic_pool(
                 my,
                 &target.name,
                 inverted,
+                &target.snapshot,
                 snapshot,
                 schema.as_deref(),
                 LedgerWrite::Delete(ledger),
@@ -5611,7 +5836,8 @@ async fn migrate_embedded_pool_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            apply_one_pool(pool, &mig, ledger).await?;
+            let before = snapshot_before(&all, &mig).unwrap_or_default();
+            apply_one_pool(pool, &mig, &before, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -5632,6 +5858,7 @@ async fn unapply_nonatomic_pool(
     let empty = EmptyTables::probe(pool, inverted, snapshot).await;
     let mut steps = render_steps(
         inverted,
+        &target.snapshot,
         snapshot,
         pool.dialect(),
         schema.as_deref(),
@@ -5852,9 +6079,15 @@ mod tests {
         // `(code, p_id)` has the FK's columns in the wrong order.
         for other in [&[][..], &["code", "p_id"]] {
             let out = render(other);
-            assert!(out[0].contains("DROP FOREIGN KEY `child_pc_fk`"), "{out:?}");
+            assert!(
+                out[0].contains("DROP FOREIGN KEY `child_child_pc_fk_fkey`"),
+                "{out:?}"
+            );
             assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
-            assert!(out[2].contains("ADD CONSTRAINT `child_pc_fk`"), "{out:?}");
+            assert!(
+                out[2].contains("ADD CONSTRAINT `child_child_pc_fk_fkey`"),
+                "{out:?}"
+            );
             assert_eq!(out.len(), 3, "{out:?}");
         }
         let out = render(&["p_id", "code"]);

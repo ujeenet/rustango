@@ -3184,7 +3184,7 @@ async fn composite_fk_index_drops(pool: &Pool) {
         .expect("an index the other one covers drops");
     assert_eq!(
         needing("mad_ci_book_acn_idx").await,
-        mysql(&["mad_ci_author_code"]),
+        mysql(&["mad_ci_book_mad_ci_author_code_fkey"]),
         "`(code, author_id)` does not serve it"
     );
     chain
