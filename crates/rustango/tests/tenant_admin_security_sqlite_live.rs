@@ -137,6 +137,8 @@ struct Env {
     tenant: rustango::sql::Pool,
     secret: SessionSecret,
     slug: String,
+    /// Slug and org id, as tenant cookies bind them.
+    bound: rustango::tenancy::TenantSlug,
     host: String,
     _pools: Arc<TenantPools<sqlx::Sqlite>>,
     _dir: tempfile::TempDir,
@@ -176,6 +178,7 @@ async fn boot() -> Env {
         ..rustango::testkit::org()
     };
     org.insert_pool(&registry).await.expect("seed org");
+    let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
     let tenant = rustango::sql::Pool::connect(&tenant_url)
         .await
@@ -216,6 +219,7 @@ async fn boot() -> Env {
         tenant,
         secret,
         slug,
+        bound,
         host,
         _pools: pools,
         _dir: dir,
@@ -245,7 +249,7 @@ impl Env {
         }
         let login = TenantSessionPayload::new(
             uid,
-            &self.slug,
+            &self.bound,
             3600,
             PasswordFingerprint::of(&self.secret, &user.password_hash),
         );

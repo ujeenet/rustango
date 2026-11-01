@@ -155,6 +155,19 @@ impl TenantSlug {
     pub fn of(org: &super::Org) -> Option<Self> {
         org.id.get().map(|&id| Self::new(id, org.slug.clone()))
     }
+
+    /// Whether a credential minted for `slug` / `org_id` belongs to this tenant.
+    #[must_use]
+    pub(crate) fn binds(&self, slug: &str, org_id: i64) -> bool {
+        self.slug == slug && self.org_id == org_id
+    }
+
+    /// `#org:<id>:<slug>`: the tenant part of cache keys. Both halves, so a
+    /// hand-built id shared by two slugs still keeps them apart.
+    #[must_use]
+    pub(crate) fn namespace(&self) -> String {
+        format!("#org:{}:{}", self.org_id, self.slug)
+    }
 }
 
 /// Rejection for the [`Principal`] extractor: 401, never 403 — the request did

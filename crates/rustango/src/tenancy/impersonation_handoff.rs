@@ -97,6 +97,9 @@ pub struct HandoffPayload {
     /// Tenant slug this token was minted for. Checked against the
     /// resolved org, so a leaked URL cannot be used on another tenant.
     pub slug: String,
+    /// Org id this token was minted for; checked with the slug.
+    #[serde(default)]
+    pub org: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
     /// Single-use id: 16 random bytes, base64url. Recorded in
@@ -117,7 +120,7 @@ impl HandoffPayload {
     #[must_use]
     pub fn new(
         op_id: i64,
-        slug: impl Into<String>,
+        tenant: &crate::tenancy::TenantSlug,
         ttl_secs: i64,
         pwf: PasswordFingerprint,
     ) -> Self {
@@ -131,7 +134,8 @@ impl HandoffPayload {
         let jti = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         Self {
             op: op_id,
-            slug: slug.into(),
+            slug: tenant.slug.clone(),
+            org: tenant.org_id,
             exp: now + ttl_secs,
             jti,
             pwf,
@@ -156,7 +160,7 @@ pub fn mint(secret: &SessionSecret, payload: &HandoffPayload) -> String {
 }
 
 /// Verify a handoff token, decode it, and check it is bound to
-/// `expected_slug`.
+/// `tenant` (slug and org id).
 ///
 /// It does not check the `jti`. The caller does that, so it can
 /// `mark_used` in the same step that mints the cookie.
@@ -165,7 +169,7 @@ pub fn mint(secret: &SessionSecret, payload: &HandoffPayload) -> String {
 /// See [`HandoffError`].
 pub fn decode(
     secret: &SessionSecret,
-    expected_slug: &str,
+    tenant: &crate::tenancy::TenantSlug,
     value: &str,
 ) -> Result<HandoffPayload, HandoffError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(HandoffError::Malformed)?;
@@ -184,7 +188,7 @@ pub fn decode(
     if payload.is_expired() {
         return Err(HandoffError::Expired);
     }
-    if payload.slug != expected_slug {
+    if !tenant.binds(&payload.slug, payload.org) {
         return Err(HandoffError::WrongTenant);
     }
     Ok(payload)
@@ -266,8 +270,24 @@ mod tests {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
     }
 
+    fn acme() -> crate::tenancy::TenantSlug {
+        crate::tenancy::TenantSlug::new(1, "acme")
+    }
+
+    /// A tenant that reuses a purged tenant's slug refuses its handoff tokens.
+    #[test]
+    fn rejects_token_minted_for_a_purged_tenant_with_the_slug() {
+        let secret = key();
+        let token = mint(&secret, &payload(60));
+        let heir = crate::tenancy::TenantSlug::new(2, "acme");
+        assert_eq!(
+            decode(&secret, &heir, &token).unwrap_err(),
+            HandoffError::WrongTenant,
+        );
+    }
+
     fn payload(ttl: i64) -> HandoffPayload {
-        HandoffPayload::new(7, "acme", ttl, PasswordFingerprint::of(&key(), "$h"))
+        HandoffPayload::new(7, &acme(), ttl, PasswordFingerprint::of(&key(), "$h"))
     }
 
     #[test]
@@ -275,7 +295,7 @@ mod tests {
         let secret = key();
         let payload = payload(60);
         let token = mint(&secret, &payload);
-        let back = decode(&secret, "acme", &token).unwrap();
+        let back = decode(&secret, &acme(), &token).unwrap();
         assert_eq!(back, payload);
     }
 
@@ -285,7 +305,12 @@ mod tests {
         let payload = payload(60);
         let token = mint(&secret, &payload);
         assert_eq!(
-            decode(&secret, "globex", &token).unwrap_err(),
+            decode(
+                &secret,
+                &crate::tenancy::TenantSlug::new(2, "globex"),
+                &token
+            )
+            .unwrap_err(),
             HandoffError::WrongTenant,
         );
     }
@@ -308,7 +333,7 @@ mod tests {
         bytes[mid_sig] = if bytes[mid_sig] == b'A' { b'B' } else { b'A' };
         let tampered = String::from_utf8(bytes).unwrap();
         assert_eq!(
-            decode(&secret, "acme", &tampered).unwrap_err(),
+            decode(&secret, &acme(), &tampered).unwrap_err(),
             HandoffError::BadSignature,
         );
     }
@@ -319,7 +344,7 @@ mod tests {
         let s2 = SessionSecret::from_bytes(b"b-other-secret-thirty-two-bytes-x".to_vec());
         let token = mint(&s1, &payload(60));
         assert_eq!(
-            decode(&s2, "acme", &token).unwrap_err(),
+            decode(&s2, &acme(), &token).unwrap_err(),
             HandoffError::BadSignature,
         );
     }
@@ -329,7 +354,7 @@ mod tests {
         let secret = key();
         let token = mint(&secret, &payload(-10));
         assert_eq!(
-            decode(&secret, "acme", &token).unwrap_err(),
+            decode(&secret, &acme(), &token).unwrap_err(),
             HandoffError::Expired,
         );
     }
@@ -338,13 +363,13 @@ mod tests {
     fn rejects_malformed_token() {
         let secret = key();
         assert_eq!(
-            decode(&secret, "acme", "not-a-token").unwrap_err(),
+            decode(&secret, &acme(), "not-a-token").unwrap_err(),
             HandoffError::Malformed,
         );
         // A malformed sig segment (non-base64) reports Malformed
         // before any constant-time compare runs.
         assert_eq!(
-            decode(&secret, "acme", "abc.!!!").unwrap_err(),
+            decode(&secret, &acme(), "abc.!!!").unwrap_err(),
             HandoffError::Malformed,
         );
     }

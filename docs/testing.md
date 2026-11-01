@@ -123,7 +123,7 @@ browser and returns the final response with the `(status, location)` chain.
   then posts the fields. The session cookie stays in the jar.
 - `client.logout(Some(path))` posts to the logout route; `logout(None)` only
   empties the jar.
-- With `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)`
+- With `tenancy`, `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)`
   and `force_login_operator(&secret, &operator, ttl_secs)` put a session
   cookie in the jar without the form. The row must be saved.
 

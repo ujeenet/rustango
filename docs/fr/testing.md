@@ -126,7 +126,7 @@ raccourci `GET`.
   puis envoie les champs. Le cookie de session reste dans le jar.
 - `client.logout(Some(path))` poste vers la route de déconnexion ;
   `logout(None)` vide seulement le jar.
-- Avec `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)` et
+- Avec `tenancy`, `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)` et
   `force_login_operator(&secret, &operator, ttl_secs)` mettent un cookie de
   session dans le jar sans le formulaire. La ligne doit être enregistrée.
 

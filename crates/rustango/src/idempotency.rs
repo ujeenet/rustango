@@ -246,7 +246,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             .run(Request::from_parts(parts, Body::from(req_bytes)))
             .await;
     };
-    let cache_key = cache_key(&cfg.scope, &parts, tenant, &key);
+    let cache_key = cache_key(&cfg.scope, &parts, tenant.as_deref(), &key);
     let request_sha256 = hex(&Sha256::digest(&req_bytes));
 
     // Hit: replay the stored response, if it answered this same body.
@@ -507,7 +507,7 @@ fn too_large() -> Response<Body> {
 }
 
 /// Cache key for who sent the request, where, and with which client key.
-fn cache_key(scope: &str, parts: &Parts, tenant: Option<i64>, key: &str) -> String {
+fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> String {
     let mut h = KeyHasher(Sha256::new());
     h.field(scope.as_bytes());
     let host = parts
@@ -516,7 +516,7 @@ fn cache_key(scope: &str, parts: &Parts, tenant: Option<i64>, key: &str) -> Stri
         .map(|a| a.as_str().as_bytes())
         .or_else(|| parts.headers.get(HOST).map(HeaderValue::as_bytes));
     h.opt(host);
-    h.opt(tenant.map(i64::to_le_bytes).as_ref().map(|b| &b[..]));
+    h.opt(tenant.map(str::as_bytes));
     // A resolved identity survives a token refresh; raw headers do not.
     if !principal_fields(&mut h, parts) {
         for name in CREDENTIAL_HEADERS {
@@ -555,19 +555,19 @@ fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
     false
 }
 
-/// The request's org id, not its slug: a tenant that reuses a purged slug
+/// The request's `#org:<id>:<slug>`, not its slug alone: a tenant that reuses a purged slug
 /// must not replay the old one's responses. `Err` when it cannot be resolved.
 #[cfg(feature = "tenancy")]
-async fn request_tenant(parts: &Parts) -> Result<Option<i64>, ()> {
+async fn request_tenant(parts: &Parts) -> Result<Option<String>, ()> {
     use crate::tenancy::TenantSlug;
     if let Some(t) = parts.extensions.get::<TenantSlug>() {
-        return Ok(Some(t.org_id));
+        return Ok(Some(t.namespace()));
     }
     match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
         None => Ok(None),
         Some(Ok(None)) => Ok(None),
-        Some(Ok(Some(org))) => match org.id.get() {
-            Some(&id) => Ok(Some(id)),
+        Some(Ok(Some(org))) => match TenantSlug::of(&org) {
+            Some(t) => Ok(Some(t.namespace())),
             None => {
                 tracing::warn!(slug = %org.slug, "idempotency: org has no id, key not used");
                 Err(())
@@ -581,7 +581,7 @@ async fn request_tenant(parts: &Parts) -> Result<Option<i64>, ()> {
 }
 
 #[cfg(not(feature = "tenancy"))]
-async fn request_tenant(_parts: &Parts) -> Result<Option<i64>, ()> {
+async fn request_tenant(_parts: &Parts) -> Result<Option<String>, ()> {
     Ok(None)
 }
 
@@ -1138,7 +1138,7 @@ mod tests {
     fn host_tenant_and_credentials_are_key_components() {
         let base = || Request::builder().uri("/a").header("host", "one.example");
         let k =
-            |b: axum::http::request::Builder, t: Option<i64>| cache_key("", &parts_for(b), t, "k");
+            |b: axum::http::request::Builder, t: Option<&str>| cache_key("", &parts_for(b), t, "k");
         let plain = k(base(), None);
         assert_ne!(
             plain,
@@ -1147,8 +1147,11 @@ mod tests {
                 None
             )
         );
-        assert_ne!(plain, k(base(), Some(1)));
-        assert_ne!(k(base(), Some(1)), k(base(), Some(2)));
+        assert_ne!(plain, k(base(), Some("#org:1:acme")));
+        assert_ne!(
+            k(base(), Some("#org:1:acme")),
+            k(base(), Some("#org:2:acme"))
+        );
         assert_ne!(plain, k(base().header("cookie", "sid=1"), None));
         assert_ne!(plain, k(base().header("x-api-key", "live_1"), None));
         assert_ne!(
@@ -1554,7 +1557,7 @@ mod tests {
         assert_eq!(body_string(r).await, "call-1:");
     }
 
-    /// Inserts `Principal::user(<x-test-user>)` and `TenantSlug` for `<x-test-org>` of slug `acme`,
+    /// Inserts `Principal::user(<x-test-user>)` and `TenantSlug` for `<x-test-org>` (`<id>:<slug>`),
     /// standing in for an auth layer mounted outside the idempotency layer.
     #[cfg(feature = "tenancy")]
     fn with_test_identity(app: Router) -> Router {
@@ -1569,13 +1572,14 @@ mod tests {
                 let org = h
                     .get("x-test-org")
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<i64>().ok());
+                    .and_then(|s| s.split_once(':'))
+                    .and_then(|(id, slug)| Some(TenantSlug::new(id.parse().ok()?, slug)));
                 if let Some(id) = user {
                     req.extensions_mut()
                         .insert(Principal::user(id, false, None));
                 }
-                if let Some(id) = org {
-                    req.extensions_mut().insert(TenantSlug::new(id, "acme"));
+                if let Some(t) = org {
+                    req.extensions_mut().insert(t);
                 }
                 next.run(req).await
             },
@@ -1620,9 +1624,30 @@ mod tests {
                 .body(Body::empty())
                 .unwrap()
         };
-        let r = app.clone().oneshot(send("1")).await.unwrap();
+        let r = app.clone().oneshot(send("1:acme")).await.unwrap();
         assert_eq!(body_string(r).await, "call-0:");
-        let r = app.oneshot(send("2")).await.unwrap();
+        let r = app.oneshot(send("2:acme")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-1:");
+    }
+
+    /// Two hand-built `TenantSlug`s sharing id 0 stay apart by slug.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn same_key_under_one_org_id_and_two_slugs_does_not_replay() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = with_test_identity(counting_app(
+            counter.clone(),
+            IdempotencyLayer::new(cache()),
+        ));
+        let send = |org: &'static str| {
+            keyed("/a")
+                .header("x-test-org", org)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(send("0:acme")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let r = app.oneshot(send("0:globex")).await.unwrap();
         assert_eq!(body_string(r).await, "call-1:");
     }
 

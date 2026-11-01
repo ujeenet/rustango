@@ -180,14 +180,14 @@ async fn permission_grants_flow_into_a_user_key() {
     let token = issue_agent_token(
         &jwt,
         agent_id,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         &skills,
         &tools,
         Some(uid),
         &agent_row.secret_prefix,
     )
     .expect("issue");
-    let agent = verify_agent_token(&jwt, &token, "acme")
+    let agent = verify_agent_token(&jwt, &token, &rustango::tenancy::TenantSlug::new(1, "acme"))
         .await
         .expect("verify");
     assert_eq!(agent.user_id, Some(uid));
@@ -622,7 +622,8 @@ async fn a_user_key_request_reads_each_row_once() {
         .await
         .expect("key");
     // The first call runs the hash check and fills the raw-key cache.
-    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, "acme", &issued.token);
+    let acme = rustango::tenancy::TenantSlug::new(1, "acme");
+    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, &acme, &issued.token);
     verify().await.expect("verify").expect("valid");
     // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
     let agent = rustango::test_assertions::assert_num_queries(6, verify())
@@ -644,7 +645,8 @@ async fn a_superuser_key_request_skips_the_permission_lookups() {
     let issued = create_user_key_pool(&pool, uid, "root", &[])
         .await
         .expect("key");
-    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, "acme", &issued.token);
+    let acme = rustango::tenancy::TenantSlug::new(1, "acme");
+    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, &acme, &issued.token);
     verify().await.expect("verify").expect("valid");
     // Agent, owner, pinned grants, skills with tools.
     let agent = rustango::test_assertions::assert_num_queries(4, verify())

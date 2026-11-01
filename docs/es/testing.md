@@ -127,7 +127,7 @@ atajo para `GET`.
   uno y luego envía los campos. La cookie de sesión queda en el jar.
 - `client.logout(Some(path))` envía un POST a la ruta de cierre de sesión;
   `logout(None)` solo vacía el jar.
-- Con `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)` y
+- Con `tenancy`, `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)` y
   `force_login_operator(&secret, &operator, ttl_secs)` ponen una cookie de
   sesión en el jar sin el formulario. La fila debe estar guardada.
 

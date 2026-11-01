@@ -304,7 +304,8 @@ async fn invalidate_purges_one_tenants_page() {
     fetch(&app, "globex").await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 
-    let page = PageKey::new("/page", "app.test").tenant(1);
+    let page =
+        PageKey::new("/page", "app.test").tenant(&rustango::tenancy::TenantSlug::new(1, "acme"));
     layer.invalidate([&page]).await.unwrap();
     fetch(&app, "globex").await;
     assert_eq!(hits.load(Ordering::SeqCst), 2, "globex was purged");
@@ -350,4 +351,24 @@ async fn a_reused_slug_does_not_get_the_purged_tenants_page() {
         2,
         "the heir got the purged page"
     );
+}
+
+/// Hand-built `TenantSlug`s that share an id keep their own pages by slug.
+#[tokio::test]
+async fn one_org_id_under_two_slugs_does_not_share_a_page() {
+    use rustango::tenancy::TenantSlug;
+    let hits = Arc::new(AtomicU32::new(0));
+    let layer = CachePageLayer::new(Arc::new(InMemoryCache::new()));
+    let ctx = context().await;
+    let acme = page(hits.clone())
+        .layer(layer.clone())
+        .layer(Extension(TenantSlug::new(0, "acme")))
+        .layer(Extension(ctx.clone()));
+    let globex = page(hits.clone())
+        .layer(layer)
+        .layer(Extension(TenantSlug::new(0, "globex")))
+        .layer(Extension(ctx));
+    get_with(&acme, None).await;
+    get_with(&globex, None).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "globex got acme's page");
 }

@@ -146,7 +146,8 @@ async fn a_user_key_request_reads_each_row_once() {
         .await
         .expect("key");
     // The first call runs the hash check and fills the raw-key cache.
-    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, "acme", &issued.token);
+    let acme = rustango::tenancy::TenantSlug::new(1, "acme");
+    let verify = || rustango::mcp::verify_raw_agent_credential(&pool, &acme, &issued.token);
     verify().await.expect("verify").expect("valid");
     // Agent, owner, permissions, skill mappings, pinned grants, skills with tools.
     let agent = rustango::test_assertions::assert_num_queries(6, verify())

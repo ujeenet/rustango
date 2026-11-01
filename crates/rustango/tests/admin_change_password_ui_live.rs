@@ -160,7 +160,7 @@ async fn change_password_authenticated_get_renders_form() {
 
     let payload = TenantSessionPayload::new(
         user_id,
-        &slug,
+        &rustango::tenancy::TenantSlug::of(&org).expect("org id"),
         3600,
         PasswordFingerprint::of(&secret, &hash),
     );
@@ -247,7 +247,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
 
     let payload = TenantSessionPayload::new(
         user_id,
-        &slug,
+        &rustango::tenancy::TenantSlug::of(&org).expect("org id"),
         3600,
         PasswordFingerprint::of(&secret, &hash),
     );
@@ -338,7 +338,7 @@ async fn change_password_post_rejects_wrong_current() {
 
     let payload = TenantSessionPayload::new(
         user_id,
-        &slug,
+        &rustango::tenancy::TenantSlug::of(&org).expect("org id"),
         3600,
         PasswordFingerprint::of(&secret, &hash),
     );
@@ -446,7 +446,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
     let now_ts = chrono::Utc::now().timestamp();
     let mut payload = TenantSessionPayload::new(
         user_id,
-        &slug,
+        &rustango::tenancy::TenantSlug::of(&org).expect("org id"),
         3600,
         PasswordFingerprint::of(&secret, &hash),
     );
