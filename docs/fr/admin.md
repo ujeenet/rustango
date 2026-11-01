@@ -550,9 +550,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Préfixe de chaque lien de l'admin. Montez le routeur au même chemin : `Builder::settings_prefix(&settings)` le renvoie, et le projet généré se replie sur `/admin` |
 | `allowed_tables` | `[]`, chaque modèle | | Comme `show_only` |
 | `read_only_tables` | `[]` | | Comme `read_only` |
-| `primary_color` | | | Sans effet pour l'instant ; seul `manage check --deploy` le lit |
-| `csrf_cookie_secure` | | | Sans effet pour l'instant ; le cookie CSRF suit `[security] secure_cookies` |
-| `session_timeout_minutes` | | | Sans effet pour l'instant ; l'admin n'a pas de délai d'inactivité |
 
 `[brand]` habille aussi les pages d'erreur intégrées, qu'active `[errors]` ; voir [Pages d'erreur](html-views.md#pages-derreur).
 

@@ -53,6 +53,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MCP agent tokens no longer sign with a passphrase `RUSTANGO_SESSION_SECRET`'s raw text.
 - `apply_all` fails on an index it cannot create instead of skipping it.
 - `TestClient` panics on a response body that fails or passes 16 MiB, instead of returning it empty.
+- Settings that reached nothing are removed and refused at load instead of warned about; `audit-cleanup` reads `[audit] retention_days` when given no flag.
 
 ## [0.61.16] — 2026-10-31
 

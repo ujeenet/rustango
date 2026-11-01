@@ -251,14 +251,11 @@ Die Dev- und Staging-Dateien setzen eine `[brand] tagline` von `dev` bzw. `stagi
 
 ### Einstellungen, die nicht von selbst wirken
 
-Nicht jeden Schlüssel liest das Framework. `Cli::with_settings` warnt beim Start, einmal pro Schlüssel, wenn einer aus der ersten Gruppe gesetzt ist.
+Nicht jeden Schlüssel liest das Framework. Schlüssel ohne Wirkung wurden in 0.62.0 entfernt (`[sso]`, `[auth.jwt] issuer` / `audience`, `[admin] primary_color` / `csrf_cookie_secure` / `session_timeout_minutes`); eine Datei oder `RUSTANGO__*`-Variable, die noch einen setzt, lädt nicht und nennt den Ersatz.
 
 | Schlüssel | Status |
 |---|---|
-| `[sso]` (jeder Schlüssel) | Noch ohne Wirkung. Richte Admin-SSO in der Admin-UI ein. |
-| `[auth.jwt] issuer`, `audience` | Noch ohne Wirkung. |
-| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Noch ohne Wirkung; nur `check --deploy` liest sie. |
-| `[audit] retention_days` | Nichts räumt danach auf; plane `audit-cleanup --days <N>` ein. |
+| `[audit] retention_days` | Liest `audit-cleanup` ohne `--days` und `--keep-last`; plane dieses Kommando ein. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]`-TTLs, `[admin]` | Vom Benutzer verdrahtet: nur vom Konstruktor gelesen, den du aufrufst (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
 ### Erster Lauf

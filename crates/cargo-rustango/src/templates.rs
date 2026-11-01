@@ -1221,7 +1221,6 @@ pub fn config_default_toml(name: &str, backend: Backend) -> String {
 # [auth.jwt]
 # access_ttl_secs   = 900       # 15 min
 # refresh_ttl_secs  = 604800    # 7 days
-# issuer            = "{name}"
 
 # [brand]
 # name           = "{name}"

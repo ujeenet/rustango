@@ -50,7 +50,7 @@ pub use sections::{
     AdminSettings, AuditSettings, AuthSettings, BrandSettings, CacheSettings, DatabaseSettings,
     DiskSettings, ErrorsSettings, I18nSettings, JobsSettings, JwtSettings, LoggingSettings,
     MailSettings, McpSettings, RoutesSettings, SecuritySettings, ServerSettings, Settings,
-    SsoSettings, StorageSettings, TenancySettings,
+    StorageSettings, TenancySettings,
 };
 
 impl Settings {

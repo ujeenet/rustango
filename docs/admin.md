@@ -506,9 +506,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Prefix of every admin link. Nest the router at the same path: `Builder::settings_prefix(&settings)` returns it, and the scaffold falls back to `/admin` |
 | `allowed_tables` | `[]`, every model | | Same as `show_only` |
 | `read_only_tables` | `[]` | | Same as `read_only` |
-| `primary_color` | | | No effect yet; only `manage check --deploy` reads it |
-| `csrf_cookie_secure` | | | No effect yet; the CSRF cookie follows `[security] secure_cookies` |
-| `session_timeout_minutes` | | | No effect yet; the admin has no idle timeout |
 
 `[brand]` also styles the built-in error pages, which `[errors]` turns on; see [Error pages](html-views.md#error-pages).
 
