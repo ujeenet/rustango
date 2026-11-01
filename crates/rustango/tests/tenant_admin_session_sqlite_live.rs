@@ -700,14 +700,15 @@ async fn a_console_route_wins_over_a_tenant_prefix() {
             "not the console's tenant list"
         );
     }
+    // The shadow check logs from a spawned task: wait for it, then make
+    // sure it warned once, not once per request.
+    let warned = |s: &str| s.matches("shadowed by an operator console route").count();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while warned(&out.contents()) == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let logged = out.contents();
-    assert_eq!(
-        logged
-            .matches("shadowed by an operator console route")
-            .count(),
-        1,
-        "{logged}"
-    );
+    assert_eq!(warned(&logged), 1, "{logged}");
     let anon = apex_request(&app, "GET", "/orgs/__admin/", "", String::new()).await;
     let to = anon.headers()["location"].to_str().unwrap();
     assert!(to.starts_with("/orgs/__login"), "got {to}");
