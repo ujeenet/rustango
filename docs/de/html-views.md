@@ -299,7 +299,7 @@ Jeder View stempelt einen konsistenten Kontext ein, damit Templates sauber zwisc
 | `ListView` | `object_list` (die Zeilen der Seite), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (die Zeile) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **kein `object`** |
-| `UpdateView` | `form` (`.fields`, `.errors`), `object` (die Zeile), `pk`, `is_create` (false), `is_update` (true) |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (die gelisteten Felder, der Primärschlüssel und `.context_fields()`), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (die zu bestätigende Zeile) |
 
 Zeilen werden als schlichte, nach Spaltennamen indizierte Maps bereitgestellt (`{{ post.title }}`),

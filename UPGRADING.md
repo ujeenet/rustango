@@ -175,6 +175,7 @@ untouched.
 - The deprecated `M2MManager` `_pool` aliases (`all_pool`, `add_pool`, `remove_pool`, `set_pool`, `clear_pool`, `contains_pool`) are removed; drop the suffix.
 - `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
+- UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
 
 ---
 
