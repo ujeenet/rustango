@@ -90,10 +90,12 @@ pub use manage_admin::reset_admin_totp_cmd;
 pub use manage_admin::{
     change_password_cmd, create_admin_cmd, reset_password_cmd, set_admin_active_cmd,
 };
-pub use object_permissions::{
-    AdminObjectPermission, AdminSuperuserFields, AdminWrite, ObjectPermissionFn,
-};
-pub use queryset_hooks::{AdminQuerySetHook, QuerySetHookFn};
+#[allow(deprecated)]
+pub use object_permissions::AdminObjectPermission;
+pub use object_permissions::{AdminSuperuserFields, AdminWrite, ObjectPermissionFn};
+#[allow(deprecated)]
+pub use queryset_hooks::AdminQuerySetHook;
+pub use queryset_hooks::QuerySetHookFn;
 pub use session::{AdminSession, AdminSessionSecret};
 #[cfg(feature = "admin-sso")]
 pub use sso_provider::SsoProvider;

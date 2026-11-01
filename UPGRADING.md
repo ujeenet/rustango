@@ -175,6 +175,12 @@ untouched.
 - The deprecated `M2MManager` `_pool` aliases (`all_pool`, `add_pool`, `remove_pool`, `set_pool`, `clear_pool`, `contains_pool`) are removed; drop the suffix.
 - `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
+- ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.63.0. `ObjectPermission` gains `origin`: build it with the macro.
+- A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
+- `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
+- A ViewSet list under a `view` hook returns `count: null` and `last_page: null` past `view_hook_scan_cap` rows; add a queryset scope for big tables.
+- The admin answers 404 instead of 403 on the item pages of a row its `view` hook hides.
 
 ---
 

@@ -36,6 +36,10 @@
 //! in a write body unless the request's `AuthenticatedUser` is a superuser.
 //! A create that sets a locked NOT NULL field with no default is a `403`.
 //!
+//! The [`object_permissions`](crate::object_permissions) hooks and queryset
+//! scopes run as in the admin: a row `view` hides is a `404`, a refused
+//! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`].
+//!
 //! ## Query parameters (list endpoint)
 //!
 //! ### Page-number pagination (default)
@@ -692,9 +696,11 @@ where
     }
 }
 
-/// SSO tables: their admin hooks are superuser-only, which a ViewSet
-/// does not run, so [`ViewSet::for_model`] refuses them.
+/// Tables only the admin or their own flows write: SSO configuration, and
+/// credentials minted once with their secret. [`ViewSet::for_model`] refuses them.
 const ADMIN_ONLY_TABLES: &[&str] = &[
+    "rustango_api_keys",
+    "rustango_agents",
     "rustango_sso_providers",
     "rustango_shared_sso_providers",
     "rustango_sso_links",
@@ -744,8 +750,10 @@ pub struct ViewSet {
     pk_param: String,
     /// Most rows one bulk create may carry. See [`ViewSet::max_bulk_create`].
     max_bulk_create: usize,
-    /// Run the admin's `add` hooks on create. See [`ViewSet::admin_add_hooks`].
-    admin_add_hooks: bool,
+    /// The object-permission hooks it runs. See [`ViewSet::skip_object_permissions`].
+    hooks: crate::object_permissions::Hooks,
+    /// Rows a list's "view" hook scan reads. See [`ViewSet::view_hook_scan_cap`].
+    view_hook_scan_cap: usize,
     /// Per FK field, the rows a write may point it at. See [`ViewSet::related_filter`].
     related_filters: Vec<(String, std::sync::Arc<dyn ViewSetFilter>)>,
 }
@@ -768,14 +776,15 @@ impl ViewSet {
     ///
     /// If a name in `fields` is not a field of the model. The same holds
     /// for `filter_fields`, `search_fields`, `ordering_fields`, `ordering`
-    /// and `related_filter`. Also if `schema` is an SSO table: only the
-    /// admin, with its superuser-only hooks, may write those.
+    /// and `related_filter`. Also if `schema` is an SSO table, or
+    /// `rustango_api_keys` / `rustango_agents`: only the admin or their own
+    /// flows may write those.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
         assert!(
             !ADMIN_ONLY_TABLES.contains(&schema.table),
-            "ViewSet::for_model: `{}` holds SSO configuration and is managed through the admin \
-             only; a ViewSet would skip its superuser-only checks",
+            "ViewSet::for_model: `{}` is admin only (or written by its own flow); \
+             a ViewSet cannot serve it",
             schema.table
         );
         let vs = Self {
@@ -797,7 +806,8 @@ impl ViewSet {
             max_page_size: 100,
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
-            admin_add_hooks: false,
+            hooks: crate::object_permissions::Hooks::All,
+            view_hook_scan_cap: 10_000,
             related_filters: Vec::new(),
         };
         vs.assert_known_names("fields", fields.iter().copied(), false);
@@ -1059,12 +1069,20 @@ impl ViewSet {
         self
     }
 
-    /// Run the admin's `register_admin_object_permission!(table, "add", …)`
-    /// hooks on create: on the request, then on each written row; a refusal
-    /// is a `403` and writes nothing. Off by default.
+    /// Skip the app's `register_object_permission!` hooks and
+    /// `register_queryset_scope!` scopes, for an API that guards its rows
+    /// itself. The framework's own hooks still run.
     #[must_use]
-    pub fn admin_add_hooks(mut self) -> Self {
-        self.admin_add_hooks = true;
+    pub fn skip_object_permissions(mut self) -> Self {
+        self.hooks = crate::object_permissions::Hooks::FrameworkOnly;
+        self
+    }
+
+    /// Most rows a list reads to run the "view" hook (default 10 000).
+    /// Past it the list hides `count` and `last_page`; a queryset scope scales.
+    #[must_use]
+    pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
+        self.view_hook_scan_cap = rows;
         self
     }
 
@@ -1266,21 +1284,6 @@ impl ViewSet {
                 "ViewSet write actions need no permission, so any caller that reaches this \
                  router can run them; set .permissions_for_model(), .read_only(), or \
                  .allow_anonymous() if this is intended"
-            );
-        }
-        // Enforcing these would change who may write; planned for 0.62.0.
-        let ignored: Vec<&str> = ["change", "delete", "view"]
-            .into_iter()
-            .filter(|a| crate::admin::object_permissions::has_hook(self.schema.table, a))
-            .collect();
-        if !ignored.is_empty() {
-            tracing::warn!(
-                target: "rustango::viewset",
-                model = self.schema.table,
-                prefix,
-                hooks = ?ignored,
-                "ViewSet does not run the admin object-permission hooks registered for \
-                 these actions; 0.62.0 will enforce them"
             );
         }
         let state = Arc::new(ViewSetState {
@@ -1995,28 +1998,34 @@ struct WriteSet {
     superuser_only: Vec<&'static str>,
     /// FK fields whose target rows are narrowed for this principal.
     fk_targets: Vec<FkTarget>,
+    /// The request and hooks a target's "view" hook judges with.
+    view_gate: (axum::http::request::Parts, crate::object_permissions::Hooks),
 }
 
 /// Every FK of `writable` whose target hides rows: its global scopes,
-/// soft delete and the ViewSet's `related_filter`s. Others need no read.
+/// soft delete, queryset scopes, "view" hook and the ViewSet's
+/// `related_filter`s. Others need no read.
 fn fk_targets(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     writable: &[&'static crate::core::FieldSchema],
 ) -> Vec<FkTarget> {
     let no_params = HashMap::new();
+    let hooks = state.vs.hooks;
     writable
         .iter()
         .filter_map(|&field| {
             FkTarget::of(field, |model| {
                 let mut scope = model.global_scope_exprs(&[]);
                 scope.extend(crate::soft_delete::active_filter(model));
+                let scopes = hooks.scope_filters(model.table, parts);
+                scope.extend(scopes.into_iter().map(WhereExpr::Predicate));
                 for (name, backend) in &state.vs.related_filters {
                     if name == field.name {
                         scope.extend(backend.filter_with(parts, &no_params, model));
                     }
                 }
-                (scope, false)
+                (scope, hooks.any(model.table, "view"))
             })
         })
         .collect()
@@ -2109,6 +2118,7 @@ impl WriteSet {
             pinned,
             superuser_only,
             fk_targets,
+            view_gate: (parts.clone(), state.vs.hooks),
         })
     }
 
@@ -2122,6 +2132,9 @@ impl WriteSet {
         values: &[(&'static str, SqlValue)],
         stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
     ) -> Result<Result<(), Refusal>, crate::sql::ExecError> {
+        let (parts, hooks) = &self.view_gate;
+        let admits =
+            |t: &FkTarget, row: &Value| hooks.allows(t.model.table, "view", parts, Some(row));
         let hidden = fk_target::first_hidden(
             &acq.pool,
             tx,
@@ -2129,7 +2142,7 @@ impl WriteSet {
             &self.fk_targets,
             values,
             stored,
-            |_, _| true,
+            admits,
         )
         .await?;
         Ok(match hidden {
@@ -2328,16 +2341,25 @@ macro_rules! or_500 {
     };
 }
 
-/// The model's global scopes, its soft-delete liveness and every filter
-/// backend's predicates, to be ANDed into whatever query the action runs.
+/// The model's global scopes, its soft-delete liveness, its queryset scopes
+/// and every filter backend's predicates, ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    let mut all = state.vs.schema.global_scope_exprs(&[]);
+    let schema = state.vs.schema;
+    let mut all = schema.global_scope_exprs(&[]);
     // A soft-deleted row reads as gone to every action (#1998).
-    all.extend(crate::soft_delete::active_filter(state.vs.schema));
+    all.extend(crate::soft_delete::active_filter(schema));
+    all.extend(
+        state
+            .vs
+            .hooks
+            .scope_filters(schema.table, parts)
+            .into_iter()
+            .map(WhereExpr::Predicate),
+    );
     all.extend(
         state
             .vs
@@ -2346,6 +2368,22 @@ fn scope_filters(
             .flat_map(|b| b.filter_with(parts, params, state.vs.schema)),
     );
     all
+}
+
+/// `pk IN (pks)`, or no row when `pks` is empty: SQL has no `IN ()`.
+fn pk_in(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pks: Vec<SqlValue>,
+) -> WhereExpr {
+    if pks.is_empty() {
+        return match_nothing(schema);
+    }
+    WhereExpr::Predicate(Filter {
+        column: pk_field.column,
+        op: Op::In,
+        value: SqlValue::List(pks),
+    })
 }
 
 /// `expr` narrowed by `extra`. An empty `extra` returns `expr`
@@ -2394,10 +2432,18 @@ async fn enter(
     codenames: &[String],
     action: &'static str,
 ) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
-    let (parts, body) = req.into_parts();
+    #[cfg_attr(not(feature = "tenancy"), allow(unused_mut))]
+    let (mut parts, body) = req.into_parts();
     // Resolve, throttle, then connect: the budget is per tenant, and a
     // throttled request must not touch the tenant pool (#2076).
     let scope = state.resolve(&parts).await?;
+    // Hooks see a credential for another tenant as nobody.
+    #[cfg(feature = "tenancy")]
+    if let Scope::Tenant(org) = &scope {
+        parts
+            .extensions
+            .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
+    }
     if let Some(resp) = check_throttle(state, action, &parts, &scope) {
         return Err(resp);
     }
@@ -2813,7 +2859,7 @@ async fn run_list(
     // `filter_fields` parsed above.
     filters.extend(scope_filters(&state, parts, &params));
 
-    let where_clause = if filters.len() == 1 {
+    let mut where_clause = if filters.len() == 1 {
         filters.remove(0)
     } else if filters.is_empty() {
         WhereExpr::And(vec![])
@@ -2859,6 +2905,31 @@ async fn run_list(
 
     let fields = state.effective_fields();
 
+    // The "view" hook as one PK filter, so the count and the pages leave its
+    // denied rows out; past the scan cap only each page is filtered, uncounted.
+    // A cursor page scans from its position instead.
+    let mut withheld = false;
+    if !matches!(state.vs.pagination, PaginationStyle::Cursor { .. }) {
+        use crate::object_permissions::ViewHookRows;
+        let hooks = (parts, state.vs.hooks);
+        let query = (where_clause.clone(), search_clause.clone());
+        let cap = state.vs.view_hook_scan_cap;
+        match crate::object_permissions::view_hook_rows(
+            &acq.pool,
+            hooks,
+            state.vs.schema,
+            query,
+            cap,
+        )
+        .await
+        {
+            Ok(ViewHookRows::All) => {}
+            Ok(ViewHookRows::Only(f)) => where_clause.push_and(WhereExpr::Predicate(f)),
+            Ok(ViewHookRows::TooMany) => withheld = true,
+            Err(e) => return json_server_error("viewset::list::view_hook", &e),
+        }
+    }
+
     match &state.vs.pagination {
         PaginationStyle::PageNumber => {
             let page = crate::list_params::parse_page(&params);
@@ -2888,6 +2959,17 @@ async fn run_list(
             // `render_list` goes through the registered serializer
             // when there is one, else the default
             // `select_rows_as_json` projection.
+            if withheld {
+                let results =
+                    or_500!(render_admitted(&state, &mut acq, parts, select_q, &fields).await);
+                return json_response(json!({
+                    "count": null,
+                    "page": page,
+                    "page_size": page_size,
+                    "last_page": null,
+                    "results": results,
+                }));
+            }
             let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
             let count = or_500!(acq.count_rows(&count_q).await);
             let last_page = ((count - 1).max(0) / page_size) + 1;
@@ -2905,7 +2987,7 @@ async fn run_list(
         } => {
             handle_list_cursor(
                 state.as_ref(),
-                &mut acq,
+                (&mut acq, parts),
                 params,
                 where_clause,
                 search_clause,
@@ -2947,6 +3029,16 @@ async fn run_list(
                 search: search_clause,
                 source: None,
             };
+            if withheld {
+                let results =
+                    or_500!(render_admitted(&state, &mut acq, parts, select_q, &fields).await);
+                return json_response(json!({
+                    "count": null,
+                    "limit": limit,
+                    "offset": offset,
+                    "results": results,
+                }));
+            }
             let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
             let count = or_500!(acq.count_rows(&count_q).await);
             json_response(json!({
@@ -2957,6 +3049,35 @@ async fn run_list(
             }))
         }
     }
+}
+
+/// The page `window` selects, with the rows the "view" hook denies left out:
+/// for a list past the scan cap, where no PK filter covers the whole set.
+async fn render_admitted(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    parts: &axum::http::request::Parts,
+    window: SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Vec<Value>, crate::sql::ExecError> {
+    let schema = state.vs.schema;
+    let Some(pk_field) = schema.primary_key() else {
+        return Ok(Vec::new());
+    };
+    let scalar: Vec<_> = schema.scalar_fields().collect();
+    let rows = acq.select_rows_as_json(&window, &scalar).await?;
+    let hooks = state.vs.hooks;
+    let admitted: Vec<SqlValue> = rows
+        .iter()
+        .filter(|row| hooks.allows(schema.table, "view", parts, Some(row)))
+        .filter_map(|row| crate::object_permissions::row_pk(row, pk_field))
+        .collect();
+    let q = SelectQuery {
+        where_clause: pk_in(schema, pk_field, admitted),
+        order_by: window.order_by,
+        ..SelectQuery::new(schema)
+    };
+    render_list(state, acq, &q, fields).await
 }
 
 /// `.ordering(..)`, else the model's `default_order`, as ListView and the admin do (#2047).
@@ -3084,7 +3205,7 @@ fn json_value_to_param(v: &Value) -> String {
 
 async fn handle_list_cursor(
     state: &ViewSetState,
-    acq: &mut AcquiredConn,
+    (acq, parts): (&mut AcquiredConn, &axum::http::request::Parts),
     params: HashMap<String, String>,
     where_clause: WhereExpr,
     search_clause: Option<SearchClause>,
@@ -3191,6 +3312,16 @@ async fn handle_list_cursor(
         order_by.push(crate::core::OrderItem::column(pk.column, desc));
     }
 
+    if state.vs.hooks.any(state.vs.schema.table, "view") {
+        let scan = SelectQuery {
+            where_clause: final_where,
+            search: search_clause,
+            order_by,
+            ..SelectQuery::new(state.vs.schema)
+        };
+        return cursor_page_admitted(state, (acq, parts), scan, &fields, page_size, tiebreak).await;
+    }
+
     // Fetch `page_size + 1` rows to tell whether a next page exists.
     let select_q = SelectQuery {
         where_clause: final_where,
@@ -3280,6 +3411,78 @@ async fn handle_list_cursor(
     json_response(json!({
         "page_size": page_size,
         "next": next_cursor,
+        "results": results,
+    }))
+}
+
+/// A cursor page under a "view" hook: scan forward from the position, at
+/// most the scan cap, and keep the first `page_size` rows the hook admits.
+/// Past the cap with the page short, `next` resumes after the last scanned row.
+async fn cursor_page_admitted(
+    state: &ViewSetState,
+    (acq, parts): (&mut AcquiredConn, &axum::http::request::Parts),
+    scan: SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+    page_size: i64,
+    tiebreak: Option<&'static crate::core::FieldSchema>,
+) -> Response {
+    let schema = state.vs.schema;
+    let PaginationStyle::Cursor { field, .. } = state.vs.pagination else {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, "not a cursor list");
+    };
+    let Some(pk_field) = schema.primary_key() else {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a cursor list needs a primary key",
+        );
+    };
+    let cap = state.vs.view_hook_scan_cap.max(1);
+    let scalar: Vec<_> = schema.scalar_fields().collect();
+    let window = SelectQuery {
+        limit: Some(i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1)),
+        ..scan.clone()
+    };
+    let mut rows = or_500!(acq.select_rows_as_json(&window, &scalar).await);
+    let truncated = rows.len() > cap;
+    rows.truncate(cap);
+    let hooks = state.vs.hooks;
+    let admitted: Vec<&Value> = rows
+        .iter()
+        .filter(|row| hooks.allows(schema.table, "view", parts, Some(row)))
+        .collect();
+    let size = usize::try_from(page_size).unwrap_or(usize::MAX);
+    let page = &admitted[..admitted.len().min(size)];
+    let resume = if admitted.len() > size {
+        page.last().copied()
+    } else if truncated {
+        crate::object_permissions::warn_scan_cap(schema.table, cap);
+        rows.last()
+    } else {
+        None
+    };
+    let pks: Vec<SqlValue> = page
+        .iter()
+        .filter_map(|row| crate::object_permissions::row_pk(row, pk_field))
+        .collect();
+    let q = SelectQuery {
+        where_clause: pk_in(schema, pk_field, pks),
+        order_by: scan.order_by,
+        ..SelectQuery::new(schema)
+    };
+    let results = or_500!(render_list(state, acq, &q, fields).await);
+    let name = schema.field(field).map_or(field, |f| f.name);
+    let next = resume.and_then(|row| {
+        let pk = tiebreak.map(|pk| cursor_value_of(row, pk.name));
+        let pk = match pk {
+            Some(None) => return None,
+            Some(Some(v)) => Some(v),
+            None => None,
+        };
+        Some(encode_cursor(&cursor_value_of(row, name)?, pk.as_deref()))
+    });
+    json_response(json!({
+        "page_size": page_size,
+        "next": next,
         "results": results,
     }))
 }
@@ -3409,10 +3612,14 @@ async fn handle_retrieve(
         Err(resp) => return resp,
     };
 
-    let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     // Narrowed by the filter backends, so a row this principal may
     // not see reads as absent. A 403 would confirm the id exists.
     let scope = scope_filters(&state, &parts, &HashMap::new());
+    if let Err(resp) = gate_item(&state, &mut acq, &parts, (pk_field, &pk_val), &scope, None).await
+    {
+        return resp;
+    }
+    let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     select_q.where_clause = narrow(select_q.where_clause, scope);
 
     let fields = state.effective_fields();
@@ -3420,6 +3627,43 @@ async fn handle_retrieve(
         Ok(Some(row)) => json_response(row),
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => json_server_error("viewset::retrieve", &e),
+    }
+}
+
+/// Run the "view" hook, then `action`'s, on the stored row inside `scope`:
+/// hidden or missing is a `404`, refused a `403`. Reads only when hooked.
+async fn gate_item(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    parts: &axum::http::request::Parts,
+    (pk_field, pk): (&'static crate::core::FieldSchema, &SqlValue),
+    scope: &[WhereExpr],
+    action: Option<&'static str>,
+) -> Result<(), Response> {
+    let (schema, hooks) = (state.vs.schema, state.vs.hooks);
+    let mut actions = std::iter::once("view").chain(action);
+    if !actions.any(|a| hooks.any(schema.table, a)) {
+        return Ok(());
+    }
+    let mut q = SelectQuery::by_pk(schema, pk_field.column, pk.clone());
+    q.where_clause = narrow(q.where_clause, scope.to_vec());
+    let fields: Vec<_> = schema.scalar_fields().collect();
+    let row = acq
+        .select_one_as_json(&q, &fields)
+        .await
+        .map_err(|e| json_server_error("viewset::object_permissions", &e))?;
+    let not_found = || json_error(StatusCode::NOT_FOUND, "not found");
+    let Some(row) = row else {
+        return Err(not_found());
+    };
+    if !hooks.allows(schema.table, "view", parts, Some(&row)) {
+        return Err(not_found());
+    }
+    match action {
+        Some(a) if !hooks.allows(schema.table, a, parts, Some(&row)) => {
+            Err(json_error(StatusCode::FORBIDDEN, "forbidden"))
+        }
+        _ => Ok(()),
     }
 }
 
@@ -3575,27 +3819,24 @@ async fn insert_and_fetch_one(
         })
 }
 
-/// The admin's `add` hooks for a create, run as the admin runs them: on
-/// the request, then on each written row inside the write's transaction.
+/// The `add` hooks for a create, run as the admin runs them: on the
+/// request, then on each written row inside the write's transaction.
 struct AddHooks {
+    hooks: crate::object_permissions::Hooks,
     /// The request, kept only when a hook is registered for a row check.
     parts: Option<axum::http::request::Parts>,
 }
 
 impl AddHooks {
-    /// None unless the ViewSet opted in. `Err` is a `403` when a hook
-    /// refuses the request itself.
+    /// `Err` is a `403` when a hook refuses the request itself.
     fn of(vs: &ViewSet, parts: &axum::http::request::Parts) -> Result<Self, Response> {
-        use crate::admin::object_permissions::{has_hook, is_allowed};
-        let table = vs.schema.table;
-        if !vs.admin_add_hooks {
-            return Ok(Self { parts: None });
-        }
-        if !is_allowed(table, "add", parts, None) {
+        let (table, hooks) = (vs.schema.table, vs.hooks);
+        if !hooks.allows(table, "add", parts, None) {
             return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
         }
         Ok(Self {
-            parts: has_hook(table, "add").then(|| parts.clone()),
+            hooks,
+            parts: hooks.any(table, "add").then(|| parts.clone()),
         })
     }
 
@@ -3617,9 +3858,7 @@ impl AddHooks {
         let fields: Vec<_> = model.scalar_fields().collect();
         let select = SelectQuery::by_pk(model, pk_field.column, pk);
         let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
-        Ok(row.is_some_and(|row| {
-            crate::admin::object_permissions::is_allowed(model.table, "add", parts, Some(&row))
-        }))
+        Ok(row.is_some_and(|row| self.hooks.allows(model.table, "add", parts, Some(&row))))
     }
 }
 
@@ -4060,10 +4299,11 @@ async fn create_many(
                     }
                     Ok(false) => {
                         let _ = tx.rollback().await;
-                        return json_error(
-                            StatusCode::FORBIDDEN,
-                            &format!("bulk entry {i}: forbidden"),
-                        );
+                        return crate::api_errors::ApiError::forbidden(format!(
+                            "bulk entry {i}: forbidden"
+                        ))
+                        .with_details(json!({ "index": i }))
+                        .into_response();
                     }
                     Err(e) => {
                         let _ = tx.rollback().await;
@@ -4129,13 +4369,10 @@ async fn fetch_many_by_pk_scoped(
     };
     let mut out = Vec::with_capacity(pks.len());
     for chunk in pks.chunks(READ_BACK_CHUNK) {
+        let visible = read_back.visible(state, acq, pk_field, chunk).await?;
         let mut q = SelectQuery::new(state.vs.schema);
         q.where_clause = narrow(
-            WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::In,
-                value: SqlValue::List(chunk.to_vec()),
-            }),
+            pk_in(state.vs.schema, pk_field, visible),
             read_back.scope().to_vec(),
         );
         let rows = read_back.render(state, acq, &q, pk_field, fields).await?;
@@ -4202,6 +4439,11 @@ async fn update_inner(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    // The stored row decides; moving a row out is for pins and scopes.
+    let item = (pk_field, &pk_val);
+    if let Err(resp) = gate_item(&state, &mut acq, &parts, item, &scope, Some("change")).await {
+        return resp;
+    }
 
     let (form, json) = match extract_form_body(parts, body, Some(body_types(&state))).await {
         Ok(b) => b,
@@ -4376,6 +4618,11 @@ async fn handle_destroy(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    // Before either path: a soft delete is a delete to the hook.
+    let item = (pk_field, &pk_val);
+    if let Err(resp) = gate_item(&state, &mut acq, &parts, item, &scope, Some("delete")).await {
+        return resp;
+    }
 
     // A soft-delete model stamps its column, as the admin does (#1998).
     let deleted = if let Some(col) = state.vs.schema.soft_delete_column {
@@ -4427,11 +4674,13 @@ fn wrote(state: &ViewSetState) {
     let _ = state;
 }
 
-/// What a write echoes of a row inside the scope: all of it, or only
-/// its primary key to a caller without the retrieve permission.
-enum ReadBack {
-    Row(Vec<WhereExpr>),
-    PkOnly(Vec<WhereExpr>),
+/// What a write echoes of a row inside the scope and the "view" hook:
+/// all of it, or only its primary key to a caller without the retrieve permission.
+struct ReadBack {
+    pk_only: bool,
+    scope: Vec<WhereExpr>,
+    /// The request, kept only when a "view" hook judges the row.
+    view_gate: Option<axum::http::request::Parts>,
 }
 
 impl ReadBack {
@@ -4441,21 +4690,49 @@ impl ReadBack {
         acq: &mut AcquiredConn,
         scope: Vec<WhereExpr>,
     ) -> Self {
-        match state.check_perm(&state.vs.perms.retrieve, parts, acq).await {
-            PermOutcome::Allow => Self::Row(scope),
-            PermOutcome::Unauthenticated | PermOutcome::Forbidden => Self::PkOnly(scope),
+        let pk_only = match state.check_perm(&state.vs.perms.retrieve, parts, acq).await {
+            PermOutcome::Allow => false,
+            PermOutcome::Unauthenticated | PermOutcome::Forbidden => true,
             // The write is done; echo only the key rather than fail it.
             PermOutcome::Unavailable(e) => {
                 tracing::warn!(target: "rustango::viewset", error = %e, "permission read failed; echoing the key only");
-                Self::PkOnly(scope)
+                true
             }
+        };
+        let hooked = state.vs.hooks.any(state.vs.schema.table, "view");
+        Self {
+            pk_only,
+            scope,
+            view_gate: hooked.then(|| parts.clone()),
         }
     }
 
     fn scope(&self) -> &[WhereExpr] {
-        match self {
-            Self::Row(scope) | Self::PkOnly(scope) => scope,
-        }
+        &self.scope
+    }
+
+    /// The `pks` the "view" hook admits, in order: all of them when unhooked.
+    async fn visible(
+        &self,
+        state: &ViewSetState,
+        acq: &mut AcquiredConn,
+        pk_field: &'static crate::core::FieldSchema,
+        pks: &[SqlValue],
+    ) -> Result<Vec<SqlValue>, crate::sql::ExecError> {
+        let Some(parts) = &self.view_gate else {
+            return Ok(pks.to_vec());
+        };
+        let schema = state.vs.schema;
+        let mut q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+        q.where_clause = narrow(q.where_clause, self.scope.clone());
+        let fields: Vec<_> = schema.scalar_fields().collect();
+        let rows = acq.select_rows_as_json(&q, &fields).await?;
+        let hooks = state.vs.hooks;
+        Ok(rows
+            .iter()
+            .filter(|row| hooks.allows(schema.table, "view", parts, Some(row)))
+            .filter_map(|row| crate::object_permissions::row_pk(row, pk_field))
+            .collect())
     }
 
     /// The rows matching `q`, rendered as this read-back allows.
@@ -4467,15 +4744,16 @@ impl ReadBack {
         pk_field: &'static crate::core::FieldSchema,
         fields: &[&'static crate::core::FieldSchema],
     ) -> Result<Vec<Value>, crate::sql::ExecError> {
-        match self {
-            Self::Row(_) => render_list(state, acq, q, fields).await,
-            Self::PkOnly(_) => acq.select_rows_as_json(q, &[pk_field]).await,
+        if self.pk_only {
+            acq.select_rows_as_json(q, &[pk_field]).await
+        } else {
+            render_list(state, acq, q, fields).await
         }
     }
 }
 
 /// The read-back after a write, per `read_back`: `None` when the
-/// written row is outside the scope, so it is never echoed.
+/// written row is outside the scope or hidden, so it is never echoed.
 async fn fetch_by_pk_scoped(
     state: &ViewSetState,
     acq: &mut AcquiredConn,
@@ -4484,11 +4762,18 @@ async fn fetch_by_pk_scoped(
     fields: &[&'static crate::core::FieldSchema],
     read_back: &ReadBack,
 ) -> Result<Option<Value>, crate::sql::ExecError> {
+    let visible = read_back
+        .visible(state, acq, pk_field, std::slice::from_ref(&pk_val))
+        .await?;
+    if visible.is_empty() {
+        return Ok(None);
+    }
     let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     select_q.where_clause = narrow(select_q.where_clause, read_back.scope().to_vec());
-    match read_back {
-        ReadBack::Row(_) => render_single(state, acq, &select_q, fields).await,
-        ReadBack::PkOnly(_) => acq.select_one_as_json(&select_q, &[pk_field]).await,
+    if read_back.pk_only {
+        acq.select_one_as_json(&select_q, &[pk_field]).await
+    } else {
+        render_single(state, acq, &select_q, fields).await
     }
 }
 

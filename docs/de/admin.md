@@ -400,13 +400,13 @@ Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrier
   und ein POST/PUT/PATCH/DELETE `{table}.change`; ergänze `perm = "publish"`, um
   `{table}.publish` zu verlangen.
 - **Queryset-Einschränkung** —
-  `register_admin_queryset!("posts", hook)`, wobei `hook: fn(&Parts) -> Vec<Filter>`
+  `register_queryset_scope!("posts", hook)`, wobei `hook: fn(&Parts) -> Vec<Filter>`
   einschränkt, was eine Anfrage sehen kann (z. B. nur die Zeilen des aktuellen
   Benutzers). Mehrere Hooks auf einer Tabelle fügen sich zusammen. Ein Anlegen,
   Bearbeiten oder eine Inline-Zeile, deren FK auf eine Zielzeile zeigt, die deren Hooks,
   Soft Delete oder `view`-Hook verbergen, wird mit "no such object" abgelehnt.
 - **Berechtigungen auf Zeilenebene** —
-  `register_admin_object_permission!("posts", "change", check)`, wobei
+  `register_object_permission!("posts", "change", check)`, wobei
   `check: fn(&Parts, Option<&Value>) -> bool` pro Zeile erlaubt oder verweigert.
   Eingebaute Handler konsultieren die Aktionen `add`, `change`, `delete` und `view`;
   mehrere Hooks werden mit UND verknüpft. Ein `view`-Hook verbirgt Zeilen auch in der

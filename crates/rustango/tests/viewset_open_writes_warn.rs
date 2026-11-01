@@ -77,32 +77,3 @@ async fn open_writes_warn_unless_acknowledged() {
         assert!(!logs.contains("WARN"), "{what}: {logs}");
     }
 }
-
-fn deny(_: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
-    false
-}
-rustango::register_admin_object_permission!("vs_hooked_note", "change", deny);
-
-#[derive(Model, Debug, Clone)]
-#[rustango(table = "vs_hooked_note")]
-pub struct HookedNote {
-    #[rustango(primary_key)]
-    pub id: Auto<i64>,
-}
-
-/// Admin change/delete/view hooks are not run by a ViewSet yet: say so.
-#[tokio::test]
-async fn unenforced_admin_hooks_warn() {
-    let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
-    let logs = mount_logs(
-        ViewSet::for_model(HookedNote::SCHEMA, &["id"]).allow_anonymous(),
-        pool.clone(),
-    );
-    assert!(logs.contains("object-permission hooks"), "{logs}");
-    assert!(logs.contains("\"change\""), "{logs}");
-    let quiet = mount_logs(
-        ViewSet::for_model(Note::SCHEMA, &["id", "title"]).allow_anonymous(),
-        pool,
-    );
-    assert!(!quiet.contains("object-permission hooks"), "{quiet}");
-}

@@ -393,15 +393,16 @@ Three more registration macros hook into a model's admin pages:
   with a warning.) Under `with_user_perms` a GET needs `{table}.view` and a
   POST/PUT/PATCH/DELETE `{table}.change`; add `perm = "publish"` to require `{table}.publish`.
 - **Queryset scoping** —
-  `register_admin_queryset!("posts", hook)` where `hook: fn(&Parts) -> Vec<Filter>`
+  `register_queryset_scope!("posts", hook)` where `hook: fn(&Parts) -> Vec<Filter>`
   narrows what a request can see (e.g. only the current user's rows). Multiple
   hooks on a table compose. A create, edit or inline row that points an FK at a
   target row its hooks, soft delete or `view` hook hide is refused with "no such object".
 - **Row-level permissions** —
-  `register_admin_object_permission!("posts", "change", check)` where
+  `register_object_permission!("posts", "change", check)` where
   `check: fn(&Parts, Option<&Value>) -> bool` allows or denies per row. Built-in
   handlers consult the `add`, `change`, `delete` and `view` actions; multiple
-  hooks AND together. A `view` hook also hides rows from the list, autocomplete,
+  hooks AND together. A row the `view` hook hides is a 404 on its item pages.
+  ViewSets run the same hooks and scopes (see [viewsets.md](viewsets.md)). A `view` hook also hides rows from the list, autocomplete,
   FK facet names and FK cell names. The list runs it over every row its filters
   and search match, so totals, facets, date buckets and search leave hidden rows
   out; past 10 000 rows (`Builder::view_hook_scan_cap`) it withholds them instead.

@@ -1,4 +1,4 @@
-//! Issue #360 — `register_admin_queryset!` adds a
+//! Issue #360 — `register_queryset_scope!` adds a
 //! request-aware Filter contribution to the admin's list view
 //! WHERE clause. End-to-end: register a hook that hides
 //! `archived = true` rows, seed both kinds of rows, fetch the list
@@ -37,7 +37,7 @@ pub struct QhPost {
 fn hide_archived(_parts: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("archived", Op::Eq, SqlValue::Bool(false))]
 }
-rustango::register_admin_queryset!("qh_post", hide_archived);
+rustango::register_queryset_scope!("qh_post", hide_archived);
 
 fn build_app(pool: Pool) -> axum::Router {
     rustango::admin::Builder::new(pool).admin_prefix("").build()

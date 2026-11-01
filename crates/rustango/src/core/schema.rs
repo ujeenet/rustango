@@ -980,7 +980,7 @@ pub struct ModelSchema {
     ///
     /// `ViewSet` and the template views apply them too. The admin does
     /// not, so staff can reach every row; narrow it with
-    /// `register_admin_queryset!`.
+    /// `register_queryset_scope!`.
     pub global_scopes: &'static [GlobalScope],
 }
 

@@ -167,15 +167,27 @@ inventory::submit! {
     }
 }
 
-fn superuser_only(parts: &Parts, _: Option<&serde_json::Value>) -> bool {
-    crate::admin::session::is_superuser(parts)
-}
-
 // A shared row decides sign-in for every tenant.
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "add", superuser_only);
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "change", superuser_only);
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "delete", superuser_only);
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "view", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "add",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "change",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "delete",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "view",
+    crate::object_permissions::superuser_only
+);
 
 /// Enabled providers for this tenant's login page: the tenant's own
 /// [`SsoProvider`] rows merged with the registry-wide [`SharedSsoProvider`]

@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `[cache] redis_connect_timeout_ms` and `redis_command_timeout_ms` bound the Redis cache built by `cache::from_settings_async` (defaults 5000 and 2000).
 - `[server] trusted_proxies` (and `RUSTANGO__SERVER__TRUSTED_PROXIES`) installs the real-IP layer for `Cli` apps; `Cli::with_trusted_proxies` in code wins and an invalid entry stops `run`.
+- `object_permissions::Actor` tells a hook who is asking (admin session, user token, agent, nobody), bound to the routed tenant; `ViewSet::skip_object_permissions` and `view_hook_scan_cap`.
 
 ### Changed
 
@@ -19,10 +20,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `M2mChangedContext` is `#[non_exhaustive]` and carries `content_type_id` for generic M2M plus the `added` / `removed` keys of a change (both empty when `set` cannot read the old keys).
 - `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
 - An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
+- ViewSets run the object-permission hooks and queryset scopes the admin runs: `add` on create, `view` (404) then `change` / `delete` (403) on item routes, `view` on lists and FK targets. `admin_add_hooks()` is gone.
+- The hook and scope macros are `register_object_permission!` and `register_queryset_scope!` under `rustango::object_permissions`; the `register_admin_*` names are deprecated.
+- `ViewSet::for_model` refuses `rustango_api_keys` and `rustango_agents`.
 
 ### Fixed
 
 - `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
+- Admin detail, edit, update and delete answer 404, not 403, for a row the `view` hook hides.
 - Tenancy: a tenant URL that reaches the registry's database under another name, a resume onto the registry, and migrating into a schema another app owns are refused instead of warned.
 - A Postgres `Tenant` no longer holds a pool connection for the whole request: it takes one on the first `conn()`, so handlers that only use `t.pool()` cannot exhaust the held pool.
 - Media: replacing a row's tags could create new tag rows with only the media `change` permission; a new slug now also needs `Add(NewTag)`.

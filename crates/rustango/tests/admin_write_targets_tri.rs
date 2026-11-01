@@ -33,7 +33,7 @@ pub struct Project {
 fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(1))]
 }
-rustango::register_admin_queryset!("wt_project", owner_one);
+rustango::register_queryset_scope!("wt_project", owner_one);
 
 /// The "view" hook hides `secret*` labels.
 #[derive(Model, Debug, Clone)]
@@ -50,7 +50,7 @@ fn not_secret(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -
     row.and_then(|r| r["name"].as_str())
         .is_none_or(|n| !n.starts_with("secret"))
 }
-rustango::register_admin_object_permission!("wt_label", "view", not_secret);
+rustango::register_object_permission!("wt_label", "view", not_secret);
 
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "wt_sprint", display = "name")]

@@ -592,7 +592,8 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
-| `admin_add_hooks()` | Run the admin's `"add"` object-permission hooks on create, on the request and on each written row; a refusal is a `403`. Off by default. |
+| `skip_object_permissions()` | Skip the app's object-permission hooks and queryset scopes, for an API that guards its rows itself. The framework's own hooks still run. |
+| `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 10 000); past it `count` and `last_page` are `null`. |
 | `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
 | `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
@@ -755,9 +756,27 @@ is denied. `.permissions_for_model::<Post>()` auto-fills the standard
 `<table>.view` / `.add` / `.change` / `.delete` codenames (`posts.view`, … for
 the `posts` table).
 
-A ViewSet does not run the admin's `change`, `delete` or `view`
-object-permission hooks yet. When its model has any, mounting it logs a
-warning; 0.62.0 will run them on update, delete and read.
+**Object permissions.** A ViewSet runs the same hooks as the admin
+(`register_object_permission!`, `register_queryset_scope!`):
+
+- `add` on create, on the request and on each written row; a bulk create is all
+  or nothing, and a refusal is a `403` with `{"details": {"index": i}}`;
+- `view` on retrieve, update and delete: a hidden row is a `404`, so its id
+  is not confirmed; then `change` on update and `delete` on delete (soft
+  delete too), a `403`. Hooks see every scalar field of the stored row;
+- `view` on lists: hidden rows are left out of the page and the count. Past
+  `view_hook_scan_cap` rows, `count` and `last_page` are `null`; a queryset
+  scope does the same in SQL and scales;
+- queryset scopes narrow every read and write; an FK may not name a target
+  row its scopes or `view` hook hide (`422`).
+
+`change` checks the stored row only: to stop a row being moved to another
+owner, pin the column (`OwnedBy`, `WritePin`) or scope it.
+`object_permissions::Actor::of(&parts)` tells a hook who is asking (an admin
+session, a user token, an agent, nobody); `object_permissions::is_superuser`
+is the superuser rule, and an agent token is never a superuser.
+`rustango_api_keys`, `rustango_agents` and the SSO tables are refused by
+`ViewSet::for_model`.
 
 **Throttling** applies fixed-window per-client limits, per action:
 
