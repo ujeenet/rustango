@@ -600,7 +600,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `filter_backend(closure)` | Ajouter des prédicats `WHERE` personnalisés au-delà de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
 | `skip_object_permissions()` | Ignore les hooks de permission objet et les scopes de queryset de l'application, pour une API qui protège ses lignes elle-même. Les hooks du framework s'exécutent toujours. |
-| `view_hook_scan_cap(n)` | Nombre maximal de lignes qu'une liste lit pour le hook `"view"` (10 000 par défaut) ; au-delà, `count` et `last_page` valent `null`. |
+| `view_hook_scan_cap(n)` | Nombre maximal de lignes qu'une liste lit pour le hook `"view"` (10 000 par défaut) ; au-delà, une liste paginée ou à offset donne un `400` (le mode curseur fonctionne toujours). |
 | `router(prefix, pgpool)` | Monter (Postgres uniquement, `PgPool` statique ; feature `postgres`). |
 | `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(multi-location)* monter avec résolution du locataire par requête. |
@@ -772,7 +772,8 @@ création (un bulk create est tout ou rien, `403` avec `{"details": {"index": i}
 `view` à la lecture, la mise à jour et la suppression (masqué donne `404`), puis
 `change` ou `delete` (`403`, soft delete compris) ; `view` sur les listes (les
 lignes masquées sortent de la page et du `count` ; au-delà de
-`view_hook_scan_cap`, `count` et `last_page` valent `null`). Les scopes de
+`view_hook_scan_cap`, une liste paginée ou à offset donne un `400` : ajoutez un
+scope de queryset ou passez en pagination par curseur). Les scopes de
 queryset restreignent chaque lecture et écriture ; une écriture dont la ligne en
 sortirait donne un `403`. Les hooks lisent la ligne verrouillée dans la
 transaction d'écriture ; un identifiant d'un autre tenant donne un `403`. `change` ne vérifie que la

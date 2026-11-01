@@ -1087,8 +1087,8 @@ impl ViewSet {
     }
 
     /// Most rows a list reads to run the "view" hook (default 10 000, at
-    /// most 100 000). Past it the list hides `count` and `last_page`; a
-    /// queryset scope scales.
+    /// most 100 000). Past it a page or offset list is a `400`; a queryset
+    /// scope or cursor pagination scales.
     #[must_use]
     pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
         self.view_hook_scan_cap = rows.clamp(1, MAX_VIEW_HOOK_SCAN_CAP);
@@ -2938,12 +2938,12 @@ async fn run_list(
     let fields = state.effective_fields();
 
     // The "view" hook as one PK filter, so the count and the pages leave its
-    // denied rows out; past the scan cap only each page is filtered, uncounted.
-    // A cursor page scans from its position instead.
+    // denied rows out. Past the scan cap a page or offset list is refused: a
+    // window counted over hidden rows would reveal their positions. A cursor
+    // page scans from its position instead.
     // A page is still judged row by row when rendered: a row that changed
     // since the scan never reaches the client.
     let hooked = state.vs.hooks.any(state.vs.schema.table, "view");
-    let mut withheld = false;
     if hooked && !matches!(state.vs.pagination, PaginationStyle::Cursor { .. }) {
         use crate::object_permissions::ViewHookRows;
         let hooks = (parts, state.vs.hooks);
@@ -2964,7 +2964,13 @@ async fn run_list(
         {
             Ok(ViewHookRows::All) => {}
             Ok(ViewHookRows::Only(f)) => where_clause.push_and(WhereExpr::Predicate(f)),
-            Ok(ViewHookRows::TooMany) => withheld = true,
+            Ok(ViewHookRows::TooMany) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "this list matches more rows than its \"view\" hook can scan; narrow it \
+                     with filters, register a queryset scope, or use cursor pagination",
+                )
+            }
             Err(e) => return json_server_error("viewset::list::view_hook", &e),
         }
     }
@@ -3003,15 +3009,6 @@ async fn run_list(
             } else {
                 or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
             };
-            if withheld {
-                return json_response(json!({
-                    "count": null,
-                    "page": page,
-                    "page_size": page_size,
-                    "last_page": null,
-                    "results": results,
-                }));
-            }
             let count = or_500!(acq.count_rows(&count_q).await);
             let last_page = ((count - 1).max(0) / page_size) + 1;
             json_response(json!({
@@ -3075,14 +3072,6 @@ async fn run_list(
             } else {
                 or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
             };
-            if withheld {
-                return json_response(json!({
-                    "count": null,
-                    "limit": limit,
-                    "offset": offset,
-                    "results": results,
-                }));
-            }
             let count = or_500!(acq.count_rows(&count_q).await);
             json_response(json!({
                 "count": count,
@@ -3095,8 +3084,7 @@ async fn run_list(
 }
 
 /// The page `window` selects, with the rows the "view" hook denies left out:
-/// past the scan cap no PK filter covers the set, and within it a row may
-/// have changed since the scan.
+/// a row may have changed since the scan.
 async fn render_admitted(
     state: &ViewSetState,
     acq: &mut AcquiredConn,

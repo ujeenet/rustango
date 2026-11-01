@@ -221,9 +221,22 @@ fn not_hide_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value
 }
 rustango::register_object_permission!("rowscope_doc", "view", not_hide_title);
 
+/// Bulk actions on a table whose view hook hides `hide*` titles.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_bulk", admin(actions = "delete_selected"))]
+#[allow(dead_code)]
+pub struct Bulk {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+rustango::register_object_permission!("rowscope_bulk", "view", not_hide_title);
+
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     fresh_table::<Doc>(pool).await;
+    fresh_table::<Bulk>(pool).await;
     drop_table(pool, "rowscope_note").await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Note>(pool).await;
@@ -892,9 +905,41 @@ async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
     );
 }
 
+/// A bulk action skips rows the `view` hook hides, as the item pages do:
+/// a hidden row is neither changed nor confirmed by a refusal.
+async fn bulk_actions_skip_hidden_rows(pool: &Pool) {
+    let mut ids = Vec::new();
+    for title in ["ok-bulk", "hide-bulk"] {
+        let mut b = Bulk {
+            id: Auto::default(),
+            title: title.into(),
+        };
+        b.insert_pool(pool).await.expect("insert");
+        ids.push(*b.id.get().expect("pk"));
+    }
+    let form = format!(
+        "action=delete_selected&_selected={}&_selected={}",
+        ids[0], ids[1]
+    );
+    let (status, body) = post(pool, "/rowscope_bulk/__action", &form).await;
+    assert!(
+        status.is_redirection() || status.is_success(),
+        "{status}: {body}"
+    );
+    let left: Vec<String> = Bulk::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|b| b.title)
+        .collect();
+    assert_eq!(left, ["hide-bulk"], "the hidden row was acted on");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        bulk_actions_skip_hidden_rows,
         nullable_bool_round_trips_in_admin_form,
         nullable_bool_round_trips_in_inline,
         hidden_rows_are_404_and_uncounted,
