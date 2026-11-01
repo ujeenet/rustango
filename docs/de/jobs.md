@@ -272,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Deploye es als eigenen Container/Service und skaliere auf **N Replicas** — sie
 ziehen alle sicher aus der geteilten Tabelle. Der Web-Prozess muss dann nur noch
-`dispatch` (er muss keine Worker `start()`). Kopple den Worker mit einem
+`dispatch`, muss aber jeden Job-Typ, den er sendet, `register`n (ohne `start()`), oder seine Queue mit `.allow_unregistered_dispatch()` bauen; ein nicht registrierter Dispatch wird abgelehnt. Kopple den Worker mit einem
 periodischen [`reclaim_stuck_jobs_pool`](#die-persistente-queue-produktion)-Sweep,
 um Jobs eines abgestürzten Workers zurückzuholen.
 

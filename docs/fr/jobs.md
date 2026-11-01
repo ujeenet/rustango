@@ -274,8 +274,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Déployez-le comme son propre conteneur/service et mettez-le à l'échelle sur **N
 réplicas** — ils tirent tous de la table partagée en toute sécurité. Le
-processus web n'a alors besoin que de `dispatch` (il n'a pas à `start()` de
-workers). Associez le worker à un balayage périodique
+processus web n'a alors besoin que de `dispatch`, mais doit `register` chaque type de job qu'il envoie (sans `start()`), ou construire sa file avec `.allow_unregistered_dispatch()` ; un dispatch non enregistré est refusé. Associez le worker à un balayage périodique
 [`reclaim_stuck_jobs_pool`](#la-file-persistante-production) pour récupérer les
 tâches d'un worker crashé.
 

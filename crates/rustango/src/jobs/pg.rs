@@ -576,7 +576,14 @@ impl JobQueue for PgJobQueue {
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
         use crate::core::SqlValue;
         if !self.allow_unregistered {
-            self.registry.lock().await.require(T::NAME)?;
+            self.registry.lock().await.require(T::NAME).map_err(|_| {
+                JobError::Queue(format!(
+                    "job `{}` has no handler on this queue; register it here (no `start()` \
+                     needed), or build the queue with `.allow_unregistered_dispatch()` when \
+                     a worker in another process runs it",
+                    T::NAME
+                ))
+            })?;
         }
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let max_attempts = i32::try_from(super::max_attempts(payload)).unwrap_or(i32::MAX);
