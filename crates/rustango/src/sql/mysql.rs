@@ -628,6 +628,14 @@ impl Dialect for MySql {
             .collect()
     }
 
+    fn referencing_tables_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT DISTINCT CAST(TABLE_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_SCHEMA = DATABASE() \
+             AND REFERENCED_TABLE_NAME = ?",
+        )
+    }
+
     /// `CAST AS CHAR`: information_schema columns decode as binary otherwise.
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         Some(

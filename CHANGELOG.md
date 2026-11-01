@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- `Model::truncate` is a `DELETE` on every backend, so a `RESTRICT` row refuses it with `ExecError::TruncateReferenced`; `Model::truncate_cascade` empties every referencing table on all three.
 - Admin bulk actions run only in the admin's transaction, their audit rows with them: the `&Pool` `register_action*` path is removed (`register_tx_action*` stays), and the SSO unlink and relink actions write in that transaction.
 - `testkit::create_tables` creates the M2M junctions whose two ends it is given, so test setups match a migrated schema.
 - `toml` 1.1 replaces 0.8, so apps on `toml` 1.x no longer build two copies (and the old `toml_edit` / `toml_datetime` duplicates are gone).

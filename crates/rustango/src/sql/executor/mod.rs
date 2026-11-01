@@ -2050,60 +2050,132 @@ pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, 
     run_delete_plan_tx(tx, plan).await
 }
 
-/// `Model::truncate`'s statement: `TRUNCATE … RESTART IDENTITY CASCADE`
-/// on Postgres, `DELETE FROM` elsewhere. Not part of the public API.
-#[doc(hidden)]
-#[must_use]
-pub fn truncate_sql(d: &dyn crate::sql::Dialect, table: &str) -> String {
-    let quoted = d.quote_ident(table);
-    if truncate_cascades_every_fk(d) {
-        format!("TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
-    } else {
-        format!("DELETE FROM {quoted}")
+/// How far a truncate reaches past its own table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TruncateMode {
+    /// Delete every row; each FK's `ON DELETE` applies, so a row that
+    /// restricts the delete refuses the truncate.
+    Plain,
+    /// Also empty every table that references it, transitively, whatever
+    /// its `ON DELETE`.
+    Cascade,
+}
+
+/// The tables with an FK to `table`, transitively, from the catalog.
+async fn referencing_tables(tx: &mut PoolTx<'_>, table: &str) -> Result<Vec<String>, ExecError> {
+    let Some(sql) = tx.dialect().referencing_tables_sql() else {
+        return Ok(Vec::new());
+    };
+    let mut seen = vec![table.to_owned()];
+    let mut frontier = vec![table.to_owned()];
+    while let Some(parent) = frontier.pop() {
+        let rows: Vec<(String,)> = raw_query_tx(tx, sql, vec![SqlValue::String(parent)]).await?;
+        for (child,) in rows {
+            if !seen.iter().any(|t| t.eq_ignore_ascii_case(&child)) {
+                seen.push(child.clone());
+                frontier.push(child);
+            }
+        }
+    }
+    seen.remove(0);
+    Ok(seen)
+}
+
+/// An FK refusal. SQLite reports a `RESTRICT` one as a trigger failure (1811).
+fn is_fk_refusal(db: &dyn sqlx::error::DatabaseError) -> bool {
+    db.is_foreign_key_violation()
+        || (db.code().as_deref() == Some("1811") && db.message() == "FOREIGN KEY constraint failed")
+}
+
+/// A plain truncate's FK refusal, named for the table.
+pub(crate) fn truncate_refusal(table: &'static str, mode: TruncateMode, e: ExecError) -> ExecError {
+    match e {
+        ExecError::Driver(sqlx::Error::Database(db))
+            if mode == TruncateMode::Plain && is_fk_refusal(db.as_ref()) =>
+        {
+            ExecError::TruncateReferenced {
+                table,
+                source: sqlx::Error::Database(db),
+            }
+        }
+        other => other,
     }
 }
 
-/// Whether [`truncate_sql`] is PG's `TRUNCATE … CASCADE`, which empties
-/// every table with an FK to it, whatever its `ON DELETE`.
-pub(crate) fn truncate_cascades_every_fk(d: &dyn crate::sql::Dialect) -> bool {
-    d.name() == "postgres"
-}
-
-/// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
-/// generic M2M junction rows, so a reused id inherits no links. The
-/// audited tables it takes rows from through FKs get a bulk `delete` entry.
+/// Truncate `table` in `tx` after clearing its generic M2M junction rows,
+/// so a reused id inherits no links. The audited tables it takes rows from
+/// through FKs get a bulk entry. Returns a plain truncate's deleted rows.
 pub(crate) async fn truncate_tx(
     tx: &mut PoolTx<'_>,
-    table: &str,
-    sql: &str,
+    table: &'static str,
+    mode: TruncateMode,
 ) -> Result<u64, ExecError> {
     for link in crate::sql::m2m::generic_m2m_truncate_links(table) {
         let stmt = tx.dialect().compile_delete(&link)?;
         execute_tx(tx, &stmt.sql, stmt.params).await?;
     }
-    let before = crate::audit::cascade::truncate_counts(tx, table).await?;
-    let affected = execute_tx(tx, sql, Vec::new()).await?;
+    let referencing = match mode {
+        TruncateMode::Plain => Vec::new(),
+        TruncateMode::Cascade => referencing_tables(tx, table).await?,
+    };
+    let before = crate::audit::cascade::truncate_counts(tx, table, mode).await?;
+    let mut affected = 0;
+    for sql in tx.dialect().truncate_sql(table, mode, &referencing) {
+        affected = execute_tx(tx, &sql, Vec::new())
+            .await
+            .map_err(|e| truncate_refusal(table, mode, e))?;
+    }
     crate::audit::cascade::emit_truncated(tx, table, before).await?;
-    Ok(affected)
+    // A plain truncate is one `DELETE`; `TRUNCATE` reports no count.
+    Ok(if mode == TruncateMode::Plain {
+        affected
+    } else {
+        0
+    })
 }
 
-/// Empty `model`'s table and its generic M2M junction rows in one
-/// transaction. Backs the derived `Model::truncate`.
+/// `DELETE` every row of `model`'s table, and its generic M2M junction
+/// rows, in one transaction. Backs the derived `Model::truncate`.
 ///
-/// On Postgres `CASCADE` also empties every table with an FK to it, even
-/// `ON DELETE RESTRICT`; MySQL / SQLite follow each FK's `ON DELETE`.
+/// Each FK's `ON DELETE` applies on every backend: a `RESTRICT` / `NO ACTION`
+/// row still pointing here refuses the whole truncate. Ids keep counting.
 ///
 /// # Errors
-/// As [`raw_execute_tx`].
+/// [`ExecError::TruncateReferenced`] while such a row exists; driver errors.
 pub async fn truncate(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<u64, ExecError> {
+    run_truncate(pool, model.table, TruncateMode::Plain).await
+}
+
+/// [`truncate`], also emptying every table that references `model`'s,
+/// transitively and whatever its `ON DELETE`. `TRUNCATE … CASCADE` on
+/// Postgres; on MySQL / SQLite a `DELETE` per table, FK checks off / deferred.
+///
+/// # Errors
+/// Driver errors; nothing is emptied then.
+pub async fn truncate_cascade(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+) -> Result<(), ExecError> {
+    run_truncate(pool, model.table, TruncateMode::Cascade)
+        .await
+        .map(drop)
+}
+
+async fn run_truncate(
+    pool: &Pool,
+    table: &'static str,
+    mode: TruncateMode,
+) -> Result<u64, ExecError> {
     crate::audit::cascade::via_pool(pool, async {
         let mut tx = tx::write_transaction(pool).await?;
-        let sql = truncate_sql(tx.dialect(), model.table);
-        let affected = truncate_tx(&mut tx, model.table, &sql).await?;
-        tx.commit().await?;
+        let affected = truncate_tx(&mut tx, table, mode).await?;
+        tx.commit()
+            .await
+            .map_err(|e| truncate_refusal(table, mode, e.into()))?;
         Ok(affected)
     })
     .await

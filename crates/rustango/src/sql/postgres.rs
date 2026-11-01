@@ -309,6 +309,25 @@ impl Dialect for Postgres {
         )]
     }
 
+    fn referencing_tables_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// `CASCADE` finds the referencing tables itself; ids keep counting, as
+    /// a `DELETE` leaves them on MySQL / SQLite.
+    fn truncate_sql(
+        &self,
+        table: &str,
+        mode: crate::sql::TruncateMode,
+        _referencing: &[String],
+    ) -> Vec<String> {
+        let quoted = self.quote_ident(table);
+        match mode {
+            crate::sql::TruncateMode::Plain => vec![format!("DELETE FROM {quoted}")],
+            crate::sql::TruncateMode::Cascade => vec![format!("TRUNCATE TABLE {quoted} CASCADE")],
+        }
+    }
+
     fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",

@@ -1405,6 +1405,8 @@ Internamente desciende a `save_partial` — mismo estrechamiento de auditoría, 
 > validación por fila. Úsalas por velocidad; baja a `save_pool()` / `delete_pool()` por fila
 > cuando necesites esos efectos secundarios.
 
+**Vaciar una tabla.** `Model::truncate(&pool)` ejecuta `DELETE FROM` en todos los backends y devuelve las filas borradas. Se aplica el `on_delete` de cada FK: mientras una fila `restrict` apunte a la tabla, falla con `ExecError::TruncateReferenced` y no cambia nada. `Model::truncate_cascade(&pool)` vacía además cada tabla que la referencia, de forma transitiva y sea cual sea su `on_delete`: `TRUNCATE … CASCADE` en PostgreSQL, un `DELETE` por tabla con las comprobaciones de FK desactivadas (MySQL) o diferidas (SQLite). Ninguno reinicia los ids. En MySQL y SQLite, una tabla que se referencia a sí misma con `restrict` puede rechazar un truncate simple; usa `truncate_cascade`.
+
 Inserta, actualiza o elimina muchas filas en una sentencia en lugar de emitir una sentencia por fila. El import `as _` trae los métodos de un trait al ámbito sin nombrar el trait directamente.
 
 ```rust
@@ -1632,7 +1634,7 @@ with_source(
 
 El panel de historial por fila del admin lee de esta tabla; el feed entre modelos está en `<admin prefix>/__audit` (`Builder::audit_url` lo cambia; el admin de tenant usa `RouteConfig::audit_url`, por defecto `/audit`).
 
-Las filas auditadas que elimina una FK `on_delete = "cascade"` reciben una entrada `delete`, leída antes del borrado dentro de su transacción. Las filas cambiadas por `set_null` / `set_default`, y las tablas hijas que vacía el `Model::truncate` de PostgreSQL con `CASCADE`, no se auditan. Funciona en los caminos de pool y de transacción (`delete_pool`, `PoolTx`, `PoolConn`), de 500 filas borradas en 500: las filas en cascada de cada bloque se leen con `FOR UPDATE` y se guardan en memoria con sus entradas hasta que se borra el bloque. Un executor sqlx crudo (`Model::delete(&PgPool)`, `delete_on`) ejecuta un único DELETE simple y en su lugar registra una advertencia una sola vez. Una FK `DEFERRABLE INITIALLY DEFERRED` solo propaga en cascada en el commit, así que sus filas no reciben entradas.
+Las filas auditadas que elimina una FK `on_delete = "cascade"` reciben una entrada `delete`, leída antes del borrado dentro de su transacción. Las filas cambiadas por `set_null` / `set_default` reciben una entrada `update`, y `Model::truncate` / `truncate_cascade` escriben una entrada agrupada por cada tabla auditada que cambian. Funciona en los caminos de pool y de transacción (`delete_pool`, `PoolTx`, `PoolConn`), de 500 filas borradas en 500: las filas en cascada de cada bloque se leen con `FOR UPDATE` y se guardan en memoria con sus entradas hasta que se borra el bloque. Un executor sqlx crudo (`Model::delete(&PgPool)`, `delete_on`) ejecuta un único DELETE simple y en su lugar registra una advertencia una sola vez. Una FK `DEFERRABLE INITIALLY DEFERRED` solo propaga en cascada en el commit, así que sus filas no reciben entradas.
 
 Limpieza:
 

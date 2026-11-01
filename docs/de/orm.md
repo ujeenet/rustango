@@ -1406,6 +1406,8 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 > keine Per-Zeile-Validierung aus. Verwende sie für Geschwindigkeit; wechsle zu Per-Zeile-`save_pool()` /
 > `delete_pool()`, wenn du diese Seiteneffekte brauchst.
 
+**Eine Tabelle leeren.** `Model::truncate(&pool)` führt auf jedem Backend `DELETE FROM` aus und gibt die gelöschten Zeilen zurück. Das `on_delete` jedes FK gilt: Solange eine `restrict`-Zeile auf die Tabelle zeigt, schlägt es mit `ExecError::TruncateReferenced` fehl und ändert nichts. `Model::truncate_cascade(&pool)` leert zusätzlich jede Tabelle, die auf sie verweist, transitiv und unabhängig von ihrem `on_delete`: `TRUNCATE … CASCADE` auf PostgreSQL, ein `DELETE` pro Tabelle mit abgeschalteten (MySQL) bzw. aufgeschobenen (SQLite) FK-Prüfungen. Keines von beiden setzt IDs zurück. Auf MySQL und SQLite kann eine Tabelle, die mit `restrict` auf sich selbst verweist, ein einfaches truncate ablehnen; nutze dann `truncate_cascade`.
+
 Füge viele Zeilen in einem Statement ein, aktualisiere oder lösche sie, statt eine Anweisung pro Zeile abzusetzen. Der `as _`-Import bringt die Methoden eines Traits in Scope, ohne den Trait direkt zu benennen.
 
 ```rust
@@ -1632,7 +1634,7 @@ with_source(
 
 Das Per-Zeile-Verlaufspanel des Admins liest aus dieser Tabelle; der modellübergreifende Feed ist unter `<admin prefix>/__audit` (`Builder::audit_url` ändert das; der Tenant-Admin nutzt `RouteConfig::audit_url`, Standard `/audit`).
 
-Auditierte Zeilen, die ein FK `on_delete = "cascade"` entfernt, bekommen einen `delete`-Eintrag, gelesen vor dem Löschen in dessen Transaktion. Zeilen, die `set_null` / `set_default` ändern, und Kindtabellen, die `Model::truncate` auf PostgreSQL mit `CASCADE` leert, werden nicht auditiert. Das läuft auf Pool- und Transaktionspfaden (`delete_pool`, `PoolTx`, `PoolConn`), 500 gelöschte Zeilen auf einmal: Die kaskadierten Zeilen jedes Blocks werden mit `FOR UPDATE` gelesen und mit ihren Einträgen im Speicher gehalten, bis der Block gelöscht ist. Ein roher sqlx-Executor (`Model::delete(&PgPool)`, `delete_on`) führt ein schlichtes DELETE aus und loggt stattdessen einmalig eine Warnung. Ein `DEFERRABLE INITIALLY DEFERRED`-FK kaskadiert erst beim Commit, seine Zeilen bekommen also keine Einträge.
+Auditierte Zeilen, die ein FK `on_delete = "cascade"` entfernt, bekommen einen `delete`-Eintrag, gelesen vor dem Löschen in dessen Transaktion. Zeilen, die `set_null` / `set_default` ändern, bekommen einen `update`-Eintrag, und `Model::truncate` / `truncate_cascade` schreiben einen Sammeleintrag pro auditierter Tabelle, die sie ändern. Das läuft auf Pool- und Transaktionspfaden (`delete_pool`, `PoolTx`, `PoolConn`), 500 gelöschte Zeilen auf einmal: Die kaskadierten Zeilen jedes Blocks werden mit `FOR UPDATE` gelesen und mit ihren Einträgen im Speicher gehalten, bis der Block gelöscht ist. Ein roher sqlx-Executor (`Model::delete(&PgPool)`, `delete_on`) führt ein schlichtes DELETE aus und loggt stattdessen einmalig eine Warnung. Ein `DEFERRABLE INITIALLY DEFERRED`-FK kaskadiert erst beim Commit, seine Zeilen bekommen also keine Einträge.
 
 Bereinigung:
 
