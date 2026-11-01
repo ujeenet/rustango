@@ -16,7 +16,7 @@
 //!   - `select_related` (FK join decoded via LoadRelatedSqlite)
 //!   - `fetch_with_prefetch_pool` (parents + their children, two trips)
 //!   - `bulk_insert_pool` via the IR (`BulkInsertQuery`)
-//!   - Transactions via `transaction_pool` + `PoolTx::Sqlite`
+//!   - Transactions via `transaction_pool` + `TxConn::Sqlite`
 //!   - Raw query / raw execute helpers
 //!   - Aggregations via `fetch_aggregate_pool` + `AggregateBuilder`
 
@@ -27,7 +27,7 @@ use rustango::core::{AggregateExpr, BulkInsertQuery, Model as _, Op, SqlValue};
 use rustango::query::QuerySet;
 use rustango::sql::{
     raw_execute_pool, raw_query_pool, transaction_pool, Auto, CounterPool, FetcherPool, ForeignKey,
-    Pool, PoolTx,
+    Pool, TxConn,
 };
 use rustango::Model;
 
@@ -234,8 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== 7. transaction_pool — BEGIN / COMMIT around two writes ==");
     {
         let mut tx = transaction_pool(&pool).await?;
-        match &mut tx {
-            PoolTx::Sqlite(t) => {
+        match tx.conn() {
+            TxConn::Sqlite(t) => {
                 sqlx::query("UPDATE demo_post SET views = views + 1 WHERE author_id = ?")
                     .bind(alice_id)
                     .execute(&mut **t)
@@ -245,10 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .execute(&mut **t)
                     .await?;
             }
-            #[cfg(feature = "postgres")]
-            PoolTx::Postgres(_) => unreachable!("pool is sqlite"),
-            #[cfg(feature = "mysql")]
-            PoolTx::Mysql(_) => unreachable!("pool is sqlite"),
+            _ => unreachable!("pool is sqlite"),
         }
         tx.commit().await?;
     }

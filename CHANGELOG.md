@@ -30,9 +30,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
 - `AccessLogLayer` is `#[non_exhaustive]` and gains `skip_paths`, which keeps health and readiness probes out of the log by whole path segment.
 - Queued email attachments are written as base64 text instead of an integer array; both forms still read.
+- `PreMigrateContext` and `PostMigrateContext` carry the run's `pool` and `tenant` and are `#[non_exhaustive]`; the `connect_*_migrate_with_target` receivers and `MigrateTarget` are removed.
 
 ### Fixed
 
+- Cascade audit rows written in a caller's `PoolTx` (`delete_tx`, `delete_on(&mut tx)`) keep a tenant-bound source on that tenant's pool instead of `system`; `PoolTx` is a struct that remembers its pool, matched through `tx.conn()` (`TxConn`).
 - On SQLite, an admin, ViewSet or template-view delete that a `restrict` reference blocks answers 409 instead of 500.
 - Tenant admin: the sidebar, `<title>` and heading show one name (`Org.brand_name`, then `[admin] title`, then `[brand] name`, then the display name), links take the org's `primary_color`, and the operator console serves `/favicon.ico`.
 - A schema-mode tenant whose schema has a database role's name no longer opens: its pools and `migrate-tenants` refuse it, and `check --deploy` reports it as an error.

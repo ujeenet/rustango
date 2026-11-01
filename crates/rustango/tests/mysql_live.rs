@@ -22,7 +22,7 @@
 
 #![cfg(feature = "mysql")]
 
-use rustango::sql::{Auto, CounterPool, FetcherPool, Pool, PoolTx};
+use rustango::sql::{Auto, CounterPool, FetcherPool, Pool, TxConn};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -251,23 +251,23 @@ async fn transaction_pool_commit_persists() {
     let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
-    let tx = rustango::sql::transaction_pool(&pool)
+    let mut tx = rustango::sql::transaction_pool(&pool)
         .await
         .expect("begin tx");
-    match tx {
-        PoolTx::Mysql(mut t) => {
+    match tx.conn() {
+        TxConn::Mysql(t) => {
             sqlx::query("INSERT INTO `live_users` (`name`, `is_active`) VALUES (?, ?)")
                 .bind("inside-tx")
                 .bind(true)
-                .execute(&mut *t)
+                .execute(&mut **t)
                 .await
                 .expect("insert in tx");
-            // Commit via the wrapper.
-            PoolTx::Mysql(t).commit().await.expect("commit");
         }
         #[allow(unreachable_patterns)]
         _ => unreachable!("test runs with mysql feature"),
     }
+    // Commit via the wrapper.
+    tx.commit().await.expect("commit");
 
     let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 1);

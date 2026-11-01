@@ -2795,7 +2795,7 @@ Every `_pool` executor function has a SQLite arm now. The
 | FK join (`select_related`)    | `QuerySet::select_related` (`LoadRelatedSqlite`) |
 | Parents + children prefetch   | `fetch_with_prefetch_pool`                   |
 | Filtered/ordered prefetch     | `fetch_with_prefetch_filtered` (prefetch a narrowed child set) |
-| `BEGIN` / `COMMIT`            | `transaction_pool` → `PoolTx::Sqlite(tx)`    |
+| `BEGIN` / `COMMIT`            | `transaction_pool` → `TxConn::Sqlite(tx)`    |
 | `GROUP BY` + `MIN/MAX/AVG/SUM/COUNT` | `QuerySet::aggregate().compile()` + `fetch_aggregate_pool` |
 | Raw SQL (typed)               | `raw_query_pool::<T>(sql, binds, &pool)`     |
 | Raw SQL (rows affected)       | `raw_execute_pool(&pool, sql, binds)`        |

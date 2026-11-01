@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- `PoolTx` is a struct: match `tx.conn()` (a `#[non_exhaustive]` `TxConn`) instead of the tx. Before: `match &mut tx { PoolTx::Postgres(t) => … }`. After: `match tx.conn() { TxConn::Postgres(t) => …, _ => … }`.
+- Migrate signal receivers read `ctx.pool` and `ctx.tenant`; build contexts with `PreMigrateContext::new` / `PostMigrateContext::new`. Before: `connect_post_migrate_with_target(|ctx, t| … t.pool …)`. After: `connect_post_migrate(|ctx| … ctx.pool …)`.
 - On Postgres `Model::truncate` no longer cascades or restarts ids: it fails while `RESTRICT` / `NO ACTION` rows point at the table. Call `Model::truncate_cascade` (or `sql::truncate_cascade`) to empty them too. `sql::truncate_sql` is gone; `audit::truncate_with_audit` takes a `TruncateMode`.
 - A schema-mode tenant whose schema has a database role's name is refused when its pool opens (requests and `migrate-tenants`); `check --deploy` lists it as an error. Rename the role or move the tenant to another schema before upgrading.
 - On Postgres, the server (`migrate`, `seed_with`, `serve`) and every tenancy CLI verb refuse to run when a schema named after the database role holds a registry table that also exists later in `search_path`. Drop or rename one copy, or pin `search_path` on the registry URL.

@@ -177,10 +177,8 @@ répété pour réparer une série de lignes en une seule commande.
 ## Signaux de migration
 
 Les receivers `rustango::signals::migrate::connect_pre_migrate` et
-`connect_post_migrate` s'exécutent avant et après un passage de `migrate`. Les
-receivers `connect_pre_migrate_with_target` et
-`connect_post_migrate_with_target` reçoivent aussi un `MigrateTarget` : le
-`pool` du passage et son slug `tenant` (`None` pour le registre ou un passage
+`connect_post_migrate` s'exécutent avant et après un passage de `migrate`. Leur
+contexte porte le `pool` du passage et son slug `tenant` (`None` pour le registre ou un passage
 sur une seule base). Un passage par tenant envoie le signal une fois par
 tenant avec le pool de ce tenant, sur chaque backend, donc un receiver
 `post_migrate` peut initialiser les données de chaque tenant.

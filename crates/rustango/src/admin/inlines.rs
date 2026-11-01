@@ -2059,7 +2059,7 @@ pub(crate) enum InlineApplyError {
 /// Run a checked plan in the parent's `tx`; the caller rolls back on error.
 /// Audit entries go in `tx` for an `audit(...)` child, else to the caller for after the commit.
 pub(crate) async fn apply_plan_tx(
-    tx: &mut crate::audit::PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'static>,
     parts: &Parts,
     plan: InlinePlan,
 ) -> Result<InlineApplied, InlineApplyError> {
@@ -2174,7 +2174,7 @@ pub(crate) async fn apply_plan_tx(
                     search: None,
                     source: None,
                 };
-                let n = crate::sql::count_rows_on(&mut **tx, &count)
+                let n = crate::sql::count_rows_on(&mut *tx, &count)
                     .await
                     .map_err(refused)?;
                 usize::try_from(n).unwrap_or(usize::MAX)

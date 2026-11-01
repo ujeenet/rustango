@@ -164,7 +164,7 @@ async fn disconnect_removes_only_named_receiver() {
     assert_eq!(*counter.lock().await, 2);
 }
 
-/// A `*_with_target` receiver gets the pool the run migrated, so it can
+/// A receiver gets the pool the run migrated, so it can
 /// seed that database rather than one it captured.
 #[tokio::test]
 async fn target_receivers_get_the_migrated_pool() {
@@ -172,7 +172,7 @@ async fn target_receivers_get_the_migrated_pool() {
     clear_all();
     let seen: Arc<Mutex<Vec<(bool, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
     let s = seen.clone();
-    let id = rustango::signals::migrate::connect_post_migrate_with_target(move |_, target| {
+    let id = rustango::signals::migrate::connect_post_migrate(move |target| {
         let s = s.clone();
         async move {
             // The bootstrap walk has just made the widget table here.
@@ -201,14 +201,14 @@ async fn migrate_verb_fires_pre_and_post_migrate() {
     let trace: Arc<Mutex<Vec<(&'static str, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     {
         let trace = trace.clone();
-        rustango::signals::migrate::connect_pre_migrate_with_target(move |_, target| {
+        rustango::signals::migrate::connect_pre_migrate(move |target| {
             let trace = trace.clone();
             async move { trace.lock().await.push(("pre", target.tenant.is_none())) }
         });
     }
     {
         let trace = trace.clone();
-        rustango::signals::migrate::connect_post_migrate_with_target(move |_, target| {
+        rustango::signals::migrate::connect_post_migrate(move |target| {
             let trace = trace.clone();
             async move { trace.lock().await.push(("post", target.tenant.is_none())) }
         });

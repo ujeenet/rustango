@@ -4154,7 +4154,7 @@ async fn insert_admitted(
             .begin(&acq.pool, &SqlValue::Null)
             .await
             .map_err(|e| e.into_failure("viewset::create"))?;
-        let pk = match crate::audit::insert_tx_on(&acq.pool, &mut tx, query, pk_field).await {
+        let pk = match crate::audit::insert_tx_on(&mut tx, query, pk_field).await {
             Ok(pk) => pk,
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -4213,7 +4213,7 @@ async fn update_claimed(
             Err(e) if e.is_deadlock() && std::mem::take(&mut retry) => continue,
             Err(e) => return Err(e.into_failure("viewset::update")),
         };
-        let n = match update.run(&mut tx, pool, query, pk.clone()).await {
+        let n = match update.run(&mut tx, query, pk.clone()).await {
             Ok(n) => n,
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -4424,7 +4424,7 @@ async fn create_many(
                 on_conflict: None,
                 generated: vec![],
             };
-            match crate::audit::insert_tx_on(&acq.pool, &mut tx, &query, pk_field).await {
+            match crate::audit::insert_tx_on(&mut tx, &query, pk_field).await {
                 Ok(pk) => match add_hooks
                     .admit(&mut tx, query.model, pk_field, pk.clone())
                     .await
@@ -4724,7 +4724,7 @@ async fn update_inner(
     };
 
     let updated = match locked.as_mut() {
-        Some((u, tx)) => match u.run(tx, &acq.pool, &query, pk_val.clone()).await {
+        Some((u, tx)) => match u.run(tx, &query, pk_val.clone()).await {
             Ok(0) => Ok(0),
             // A write may not move the row out of the queryset scopes.
             Ok(n) => match stays_in_scope(&state, tx, item, &qs_scope).await {
@@ -4816,8 +4816,7 @@ async fn handle_destroy(
         query.where_clause = narrow(query.where_clause, scope.clone());
         query
     });
-    let deleted =
-        crate::audit::remove_one_tx(&acq.pool, &mut tx, schema, (row, by_pk), stamp.as_ref()).await;
+    let deleted = crate::audit::remove_one_tx(&mut tx, schema, (row, by_pk), stamp.as_ref()).await;
     let deleted = match deleted {
         Ok(n) if n > 0 => tx.commit().await.map(|()| n).map_err(Into::into),
         other => other,

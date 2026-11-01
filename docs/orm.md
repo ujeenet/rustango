@@ -1466,8 +1466,8 @@ Post::bulk_upsert_pool(
 > `#[cfg(feature = "postgres")]`.
 >
 > The multi-backend entry points are `rustango::sql::transaction_pool(&pool)`
-> and `rustango::sql::atomic(&pool, …)` (via `tx.lock().await?`). Both hand you a `PoolTx` — an enum you
-> `match` on per backend — rather than a driver transaction, so a tri-dialect
+> and `rustango::sql::atomic(&pool, …)` (via `tx.lock().await?`). Both hand you a `PoolTx`; you
+> `match` its `tx.conn()` (a `TxConn`) per backend — rather than a driver transaction, so a tri-dialect
 > transaction is written per-arm, not by swapping the pool type.
 
 

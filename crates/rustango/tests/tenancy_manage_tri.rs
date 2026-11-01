@@ -527,15 +527,15 @@ async fn tenant_migrate_sends_migrate_signals(pool: &Pool) {
     let seen: Arc<Mutex<Vec<(&'static str, Option<String>)>>> = Arc::default();
     let pre = {
         let seen = seen.clone();
-        sig::connect_pre_migrate_with_target(move |_, t| {
+        sig::connect_pre_migrate(move |t| {
             seen.lock().unwrap().push(("pre", t.tenant));
             async {}
         })
     };
     let post = {
         let seen = seen.clone();
-        sig::connect_post_migrate_with_target(move |ctx, t| {
-            if ctx.applied.iter().any(|m| m == "0001_sig") {
+        sig::connect_post_migrate(move |t| {
+            if t.applied.iter().any(|m| m == "0001_sig") {
                 seen.lock().unwrap().push(("post", t.tenant));
             }
             async {}

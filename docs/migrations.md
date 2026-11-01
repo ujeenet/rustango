@@ -178,8 +178,7 @@ repeated to repair a stretch of rows in one command.
 ## Migrate signals
 
 `rustango::signals::migrate::connect_pre_migrate` and `connect_post_migrate`
-receivers run before and after a migrate run. The `connect_pre_migrate_with_target`
-and `connect_post_migrate_with_target` receivers also get a `MigrateTarget`:
+receivers run before and after a migrate run. Their context carries
 the run's `pool` and its `tenant` slug (`None` for the registry or a
 single-database run). A tenant run sends once per tenant with that tenant's
 pool, on every backend, so a `post_migrate` receiver can seed each tenant.

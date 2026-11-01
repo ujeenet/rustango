@@ -1046,7 +1046,7 @@ where
 mod decode;
 
 mod tx;
-pub use tx::{transaction_pool, write_transaction, PoolTx};
+pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
 
 // One executor for every `_on` method.
 mod on;
@@ -1147,7 +1147,7 @@ pub(crate) async fn insert_or_ignore_tx(
     #[allow(irrefutable_let_patterns)]
     {
         let gate = atomic::gate(tx)?;
-        if let PoolTx::Mysql(t) = tx {
+        if let TxConn::Mysql(t) = &mut tx.conn {
             // A skip reports one affected row too: read the insert id instead.
             crate::test_assertions::query_counter::bump();
             let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
@@ -1502,7 +1502,7 @@ pub async fn __rustango_delete_all_or_none(
         .iter()
         .map(|q| crate::sql::compile_delete_plan(pool.dialect(), q))
         .collect::<Result<Vec<_>, _>>()?;
-    let run = atomic(pool, move |tx| {
+    atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             let mut deleted = 0;
@@ -1511,8 +1511,8 @@ pub async fn __rustango_delete_all_or_none(
             }
             Ok(deleted)
         })
-    });
-    crate::audit::cascade::via_pool(pool, run).await
+    })
+    .await
 }
 
 /// Run a [`DeletePlan`](crate::sql::DeletePlan) on `pool`, in one
@@ -1524,13 +1524,13 @@ pub(crate) async fn delete_plan_pool(
     if plan.is_one_statement() {
         return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
     }
-    let run = atomic(pool, move |tx| {
+    atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             run_delete_plan_tx(&mut guard, plan).await
         })
-    });
-    crate::audit::cascade::via_pool(pool, run).await
+    })
+    .await
 }
 
 /// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the
@@ -1731,9 +1731,9 @@ pub async fn raw_execute_tx(
         async {
             // Counts toward `assert_num_queries`; a no-op outside tests.
             crate::test_assertions::query_counter::bump();
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                tx::PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
                     for v in binds {
                         q = bind_query(q, v);
@@ -1741,7 +1741,7 @@ pub async fn raw_execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "mysql")]
-                tx::PoolTx::Mysql(t) => {
+                TxConn::Mysql(t) => {
                     let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                         sqlx::query(sql);
                     for v in binds {
@@ -1750,7 +1750,7 @@ pub async fn raw_execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "sqlite")]
-                tx::PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let mut q: sqlx::query::Query<
                         '_,
                         sqlx::Sqlite,
@@ -1873,9 +1873,9 @@ async fn execute_tx(
     gate.check(
         async {
             crate::test_assertions::query_counter::bump();
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
                     for v in binds {
                         q = bind_query(q, v);
@@ -1883,7 +1883,7 @@ async fn execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "mysql")]
-                PoolTx::Mysql(t) => {
+                TxConn::Mysql(t) => {
                     let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                         sqlx::query(sql);
                     for v in binds {
@@ -1892,7 +1892,7 @@ async fn execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "sqlite")]
-                PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let mut q: sqlx::query::Query<
                         '_,
                         sqlx::Sqlite,
@@ -1937,16 +1937,16 @@ pub async fn insert_returning_tx(
             if query.returning.is_empty() {
                 return Err(ExecError::EmptyReturning);
             }
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let row = insert_returning_on(&mut **t, query).await?;
                     Ok(InsertReturningPool::PgRow(row))
                 }
                 #[cfg(feature = "mysql")]
-                PoolTx::Mysql(t) => insert_mysql_auto_id(&mut **t, query).await,
+                TxConn::Mysql(t) => insert_mysql_auto_id(&mut **t, query).await,
                 #[cfg(feature = "sqlite")]
-                PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let stmt = super::sqlite::DIALECT.compile_insert(query)?;
                     let mut q: sqlx::query::Query<
                         '_,
@@ -1987,7 +1987,7 @@ pub(crate) async fn bulk_insert_pks_tx(
     };
     // Before compiling: the MySQL writer refuses RETURNING itself.
     #[cfg(feature = "mysql")]
-    if matches!(tx, PoolTx::Mysql(_)) && !query.rows.is_empty() {
+    if matches!(tx.conn, TxConn::Mysql(_)) && !query.rows.is_empty() {
         return Err(no_returning());
     }
     let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), query.rows.clone())
@@ -1997,9 +1997,9 @@ pub(crate) async fn bulk_insert_pks_tx(
     let mut pks = Vec::with_capacity(query.rows.len());
     for stmt in stmts {
         crate::test_assertions::query_counter::bump();
-        let rows: Result<Vec<InsertReturningPool>, ExecError> = match tx {
+        let rows: Result<Vec<InsertReturningPool>, ExecError> = match &mut tx.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => Ok(stmt
+            TxConn::Postgres(t) => Ok(stmt
                 .params
                 .into_iter()
                 .fold(sqlx::query(&stmt.sql), bind_query)
@@ -2009,12 +2009,12 @@ pub(crate) async fn bulk_insert_pks_tx(
                 .map(InsertReturningPool::PgRow)
                 .collect()),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(_) => {
+            TxConn::Mysql(_) => {
                 drop(stmt);
                 Err(no_returning())
             }
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => Ok(stmt
+            TxConn::Sqlite(t) => Ok(stmt
                 .params
                 .into_iter()
                 .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
@@ -2170,15 +2170,12 @@ async fn run_truncate(
     table: &'static str,
     mode: TruncateMode,
 ) -> Result<u64, ExecError> {
-    crate::audit::cascade::via_pool(pool, async {
-        let mut tx = tx::write_transaction(pool).await?;
-        let affected = truncate_tx(&mut tx, table, mode).await?;
-        tx.commit()
-            .await
-            .map_err(|e| truncate_refusal(table, mode, e.into()))?;
-        Ok(affected)
-    })
-    .await
+    let mut tx = tx::write_transaction(pool).await?;
+    let affected = truncate_tx(&mut tx, table, mode).await?;
+    tx.commit()
+        .await
+        .map_err(|e| truncate_refusal(table, mode, e.into()))?;
+    Ok(affected)
 }
 
 /// [`bulk_insert_pool`] inside an open transaction, split to fit the
@@ -2555,9 +2552,9 @@ where
         async {
             // Counts toward `assert_num_queries`; a no-op outside tests.
             crate::test_assertions::query_counter::bump();
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                tx::PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
                         sqlx::query_as::<_, T>(sql);
                     for v in binds {
@@ -2566,7 +2563,7 @@ where
                     Ok(q.fetch_all(&mut **t).await?)
                 }
                 #[cfg(feature = "mysql")]
-                tx::PoolTx::Mysql(t) => {
+                TxConn::Mysql(t) => {
                     let mut q: sqlx::query::QueryAs<
                         '_,
                         sqlx::MySql,
@@ -2579,7 +2576,7 @@ where
                     Ok(q.fetch_all(&mut **t).await?)
                 }
                 #[cfg(feature = "sqlite")]
-                tx::PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let mut q: sqlx::query::QueryAs<
                         '_,
                         sqlx::Sqlite,
