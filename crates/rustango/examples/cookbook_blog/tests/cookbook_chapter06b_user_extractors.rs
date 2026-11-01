@@ -157,7 +157,7 @@ impl rustango::tenancy::OrgResolver for CookbookTenant {
         _registry: &rustango::sql::Pool,
     ) -> Result<Option<rustango::tenancy::Org>, rustango::tenancy::TenancyError> {
         Ok(Some(rustango::tenancy::Org {
-            id: rustango::sql::Auto::default(),
+            id: rustango::sql::Auto::Set(1),
             slug: TENANT.to_owned(),
             display_name: TENANT.to_owned(),
             storage_mode: "schema".into(),

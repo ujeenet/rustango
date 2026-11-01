@@ -333,7 +333,7 @@ par défaut). Il est sûr par défaut :
 
 Pour retirer une page après une écriture, appelez
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sur un clone de la
-couche (ajoutez `.tenant(slug)` à la clé en multi-tenancy). Cela purge chaque
+couche (ajoutez `.tenant(org_id)` à la clé en multi-tenancy). Cela purge chaque
 variante en cache de ce chemin : toute chaîne de requête, toute valeur
 `vary_on`, GET et `QUERY` confondus. Cela passe par un compteur de génération
 par chemin, donc chaque GET en cache lit une petite clé de cache de plus.

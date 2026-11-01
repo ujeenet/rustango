@@ -197,18 +197,21 @@ async fn auth_middleware(
         Ok(t) => t,
         Err(resp) => return resp,
     };
+    // Tokens bind to the org id, so an org without one cannot authenticate.
+    let Some(tenant) = super::TenantSlug::of(&org) else {
+        tracing::error!(slug = %org.slug, "require_auth: resolved org has no id");
+        return ApiError::internal("tenant has no id").into_response();
+    };
     // An outer layer already bound another tenant: never mix the two.
     if req
         .extensions()
         .get::<super::TenantSlug>()
-        .is_some_and(|s| s.0 != org.slug)
+        .is_some_and(|t| *t != tenant)
     {
         return ApiError::forbidden("tenant mismatch").into_response();
     }
     // Scope the Basic and API-key limits to this tenant and client.
-    dummy_parts
-        .extensions
-        .insert(super::TenantSlug(org.slug.clone()));
+    dummy_parts.extensions.insert(tenant.clone());
     dummy_parts
         .extensions
         .insert(crate::login_throttle::ClientIp::from_parts(
@@ -256,7 +259,7 @@ async fn auth_middleware(
     match authenticated {
         Some(user) => {
             req.extensions_mut().insert(AuthenticatedUser::from(user));
-            req.extensions_mut().insert(super::TenantSlug(org.slug));
+            req.extensions_mut().insert(tenant);
             next.run(req).await
         }
         None if state.required => crate::bearer::challenge(

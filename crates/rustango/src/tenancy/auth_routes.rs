@@ -50,6 +50,7 @@ use crate::sql::sqlx::Database;
 use crate::sql::FetcherPool as _;
 use crate::tenancy::jwt_lifecycle::{JwtLifecycle, UserTokenScope};
 use crate::tenancy::DefaultTenantDb;
+use crate::tenancy::TenantSlug;
 
 // ---------------------------------------------------------------- Config
 
@@ -349,10 +350,11 @@ impl JwtAuth {
         tenant: &Tenant<DB>,
     ) -> impl std::future::Future<Output = Result<i64, &'static str>> + Send + 'static {
         let (auth, bearer) = (self.clone(), bearer.to_owned());
-        let (slug, pool) = (tenant.org.slug.clone(), tenant.pool().clone());
+        let (bound, pool) = (TenantSlug::of(&tenant.org), tenant.pool().clone());
         async move {
             const REFUSED: &str = "invalid or expired token";
-            match session_user_in(&auth, &bearer, &slug, &pool).await {
+            let bound = bound.ok_or("tenant has no id")?;
+            match session_user_in(&auth, &bearer, &bound, &pool).await {
                 Ok(Some(u)) if u.active => u.id.get().copied().ok_or(REFUSED),
                 Ok(_) | Err(SessionLookup::Refused) => Err(REFUSED),
                 Err(SessionLookup::Db(e)) => {
@@ -372,7 +374,7 @@ fn verify_for_tenant_is_send<DB: Database>(auth: &JwtAuth, t: &Tenant<DB>) {
 }
 
 /// Claims for a freshly issued login pair: the app's hook first, then
-/// the router's own `tenant`.
+/// the router's own `tenant` and `org_id`.
 ///
 /// The order is the point. `tenant` is what stops a token signed on
 /// one subdomain being replayed on another, so a hook must not be able
@@ -381,12 +383,10 @@ fn verify_for_tenant_is_send<DB: Database>(auth: &JwtAuth, t: &Tenant<DB>) {
 fn login_claims(
     hook: Option<&ClaimsHook>,
     ctx: &ClaimsContext<'_>,
+    tenant: &TenantSlug,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut custom = hook.map_or_else(serde_json::Map::new, |h| h(ctx));
-    custom.insert(
-        "tenant".to_owned(),
-        serde_json::Value::String(ctx.tenant_slug.to_owned()),
-    );
+    crate::tenancy::jwt_lifecycle::write_tenant_claims(&mut custom, tenant);
     custom
 }
 
@@ -498,19 +498,19 @@ impl JwtAuth {
     }
 }
 
-/// The login pair for `user` on `slug`: hook claims, then the router's own.
+/// The login pair for `user` on `tenant`: hook claims, then the router's own.
 fn issue_login_pair(
     auth: &JwtAuth,
     user: &crate::tenancy::auth::User,
     user_id: i64,
-    slug: &str,
+    tenant: &TenantSlug,
 ) -> Result<crate::tenancy::jwt_lifecycle::JwtTokenPair, crate::tenancy::jwt_lifecycle::JwtIssueError>
 {
     let custom = session_claims(
         auth,
         user,
         user_id,
-        slug,
+        tenant,
         &RefreshSession::start(auth, user),
     )?;
     auth.lifecycle().issue_pair_with(user_id, custom)
@@ -522,7 +522,7 @@ fn session_claims(
     auth: &JwtAuth,
     user: &crate::tenancy::auth::User,
     user_id: i64,
-    slug: &str,
+    tenant: &TenantSlug,
     session: &RefreshSession,
 ) -> Result<serde_json::Map<String, serde_json::Value>, crate::tenancy::jwt_lifecycle::JwtIssueError>
 {
@@ -532,8 +532,9 @@ fn session_claims(
             user_id,
             username: &user.username,
             is_superuser: user.is_superuser,
-            tenant_slug: slug,
+            tenant_slug: &tenant.slug,
         },
+        tenant,
     );
     // A `kind` claim marks a non-user token, which every bearer check refuses.
     let kind = crate::tenancy::jwt_lifecycle::CLAIM_KIND;
@@ -608,6 +609,7 @@ async fn login_in(
     };
     use crate::tenancy::auth::User;
 
+    let tenant = bound_tenant(&t)?;
     let meta = meta_from_parts(&extensions, &headers, Some("/auth/login"));
     let fire_failed = |reason: AuthFailureReason| -> UserLoginFailedContext {
         UserLoginFailedContext {
@@ -703,14 +705,14 @@ async fn login_in(
         tenant: Some(t.org.slug.clone()),
     })
     .await;
-    // Bake the resolved tenant's slug into the token so a JWT
+    // Bake the resolved tenant's slug and org id into the token so a JWT
     // signed on `acme.<apex>` cannot be replayed on
     // `sju.<apex>` — even though both tenants share
     // RUSTANGO_SESSION_SECRET. Without this binding, `sub: 1`
     // means "the user with id=1", and id=1 likely exists on
     // every tenant. With the binding, verify checks the resolved
     // request's tenant slug against the claim.
-    let pair = issue_login_pair(&auth, &user, user_id, &t.org.slug)
+    let pair = issue_login_pair(&auth, &user, user_id, &tenant)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     Ok(Json(LoginOutput {
@@ -752,6 +754,7 @@ async fn refresh_in(
     body: RefreshInput,
 ) -> Result<Json<RefreshOutput>, Response> {
     let refused = || err(StatusCode::UNAUTHORIZED, "invalid or expired refresh token");
+    let tenant = bound_tenant(&t)?;
     let jwt = auth.lifecycle();
     // Revocation is checked by the rotation below; decoding without it
     // lets a replayed token be told apart and its family revoked (#1854).
@@ -760,10 +763,8 @@ async fn refresh_in(
     // refresh token minted on tenant A could be POSTed to tenant B's
     // /refresh (they share the session secret) and rotated — burning A's
     // refresh token (a cross-tenant DoS / rotation oracle). Verify the
-    // token's `tenant` claim matches this subdomain BEFORE rotating.
-    let tenant_ok =
-        claims.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str());
-    if !tenant_ok {
+    // token's `tenant` and `org_id` claims match this tenant BEFORE rotating.
+    if claims.user_id_in(UserTokenScope::Tenant(&tenant)).is_err() {
         return Err(err(
             StatusCode::UNAUTHORIZED,
             "refresh token issued for a different tenant",
@@ -791,7 +792,7 @@ async fn refresh_in(
         }
         user
     };
-    let custom = session_claims(&auth, &user, claims.sub, &t.org.slug, &session)
+    let custom = session_claims(&auth, &user, claims.sub, &tenant, &session)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let grace = auth.0.reuse_grace_secs;
     jwt.note_refresh_attempt(&claims.jti, grace).await;
@@ -856,6 +857,10 @@ async fn logout_in(
 ) -> Result<StatusCode, Response> {
     let jwt = auth.lifecycle();
     use crate::signals::auth::{meta_from_parts, send_user_logged_out, UserLoggedOutContext};
+    let tenant = bound_tenant(&t)?;
+    let ours = |c: &crate::tenancy::jwt_lifecycle::JwtClaims| {
+        c.user_id_in(UserTokenScope::Tenant(&tenant)).is_ok()
+    };
     // Best-effort: decode the bearer to recover the user id for the
     // signal. We don't reject on verify-failure here — the revoke
     // call below still runs, and a stale/expired token logout is a
@@ -865,7 +870,7 @@ async fn logout_in(
     // don't let this subdomain's endpoint revoke it. (An unverifiable /
     // expired token falls through to a best-effort revoke as before.)
     if let Some(c) = &claims {
-        if c.custom_value("tenant").and_then(|v| v.as_str()) != Some(t.org.slug.as_str()) {
+        if !ours(c) {
             return Err(err(
                 StatusCode::UNAUTHORIZED,
                 "token issued for a different tenant",
@@ -883,7 +888,7 @@ async fn logout_in(
         let Some(c) = jwt.decode_signed(token) else {
             continue;
         };
-        if c.custom_value("tenant").and_then(|v| v.as_str()) != Some(t.org.slug.as_str()) {
+        if !ours(&c) {
             continue;
         }
         if let Some(session) = RefreshSession::read(&c.custom) {
@@ -903,9 +908,7 @@ async fn logout_in(
     // revoke another tenant's token by posting it here.
     if let Some(refresh) = refresh.as_deref() {
         let ok = match jwt.verify_refresh(refresh).await {
-            Some(c) => {
-                c.custom_value("tenant").and_then(|v| v.as_str()) == Some(t.org.slug.as_str())
-            }
+            Some(c) => ours(&c),
             // Unverifiable or expired: revoke best-effort, matching
             // how the bearer is treated above. A stale token being
             // logged out is still a valid thing to record.
@@ -1063,7 +1066,7 @@ async fn session_user(
 ) -> Result<Option<crate::tenancy::auth::User>, Response> {
     // The reason is deliberately not echoed: "expired" vs "wrong tenant"
     // vs "revoked" tells a prober which of those they achieved.
-    session_user_in(auth, token, &t.org.slug, t.pool())
+    session_user_in(auth, token, &bound_tenant(t)?, t.pool())
         .await
         .map_err(|e| match e {
             SessionLookup::Refused => unauthorized("invalid or expired token"),
@@ -1080,7 +1083,7 @@ enum SessionLookup {
 async fn session_user_in(
     auth: &JwtAuth,
     token: &str,
-    slug: &str,
+    tenant: &TenantSlug,
     pool: &crate::sql::Pool,
 ) -> Result<Option<crate::tenancy::auth::User>, SessionLookup> {
     let claims = auth
@@ -1090,7 +1093,7 @@ async fn session_user_in(
         .await
         .ok_or(SessionLookup::Refused)?;
     let user_id = claims
-        .user_id_in(UserTokenScope::Tenant(slug))
+        .user_id_in(UserTokenScope::Tenant(tenant))
         .map_err(|_| SessionLookup::Refused)?;
     // Tokens the login route did not mint carry no session: fail closed.
     let Some(session) = RefreshSession::read(&claims.custom) else {
@@ -1108,6 +1111,16 @@ async fn session_user_in(
         .admits(&auth.session_check(), &user)
         .await
         .then_some(user))
+}
+
+/// The resolved tenant tokens bind to; a 500 for an org with no id.
+fn bound_tenant(t: &TenantScope) -> Result<TenantSlug, Response> {
+    TenantSlug::of(&t.org).ok_or_else(|| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format_args!("tenant {} has no id", t.org.slug),
+        )
+    })
 }
 
 /// A 401 for a token that was sent and refused.
@@ -1155,6 +1168,18 @@ impl<S: Send + Sync> FromRequestParts<S> for Bearer {
 mod tests {
     use super::*;
 
+    /// `testkit::org()` with an id, as a registry row has.
+    fn org() -> crate::tenancy::Org {
+        crate::tenancy::Org {
+            id: crate::sql::Auto::Set(1),
+            ..crate::testkit::org()
+        }
+    }
+
+    fn tenant() -> TenantSlug {
+        TenantSlug::of(&org()).unwrap()
+    }
+
     #[test]
     fn login_input_debug_hides_the_password() {
         let i = LoginInput {
@@ -1186,9 +1211,13 @@ mod tests {
         };
 
         // No hook: the tenant binding alone.
-        let plain = login_claims(None, &ctx);
+        let plain = login_claims(None, &ctx, &tenant());
         assert_eq!(plain.get("tenant").and_then(|v| v.as_str()), Some("acme"));
-        assert_eq!(plain.len(), 1);
+        assert_eq!(
+            plain.get("org_id").and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(plain.len(), 2);
 
         // A hook adding its own claims — the case the issue was filed
         // for (`fam` is a token family, for replay detection).
@@ -1202,7 +1231,7 @@ mod tests {
             );
             m
         });
-        let out = login_claims(Some(&hook), &ctx);
+        let out = login_claims(Some(&hook), &ctx, &tenant());
         assert_eq!(out.get("fam").and_then(|v| v.as_str()), Some("f-1"));
         assert_eq!(
             out.get("su").and_then(serde_json::Value::as_bool),
@@ -1215,15 +1244,88 @@ mod tests {
         let evil: ClaimsHook = Arc::new(|_: &ClaimsContext<'_>| {
             let mut m = serde_json::Map::new();
             m.insert("tenant".into(), serde_json::Value::String("victim".into()));
+            m.insert("org_id".into(), 99.into());
             m
         });
-        let out = login_claims(Some(&evil), &ctx);
+        let out = login_claims(Some(&evil), &ctx, &tenant());
         assert_eq!(
             out.get("tenant").and_then(|v| v.as_str()),
             Some("acme"),
             "the router's tenant binding must win — it is what stops \
              cross-subdomain replay"
         );
+        assert_eq!(
+            out.get("org_id").and_then(serde_json::Value::as_i64),
+            Some(1)
+        );
+    }
+
+    /// A tenant that reuses a purged tenant's slug gets a new org id. The old
+    /// tenant's login pair, or one with no `org_id`, is refused on every path.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_purged_tenants_tokens_are_refused_by_its_slug_heir() {
+        let (auth, pool, user) = verify_env("jwt_slug_heir").await;
+        let id = *user.id.get().unwrap();
+        let heir = crate::tenancy::Org {
+            id: crate::sql::Auto::Set(2),
+            ..org()
+        };
+        let t = Tenant::for_test_sqlite(heir.clone(), pool.as_sqlite().unwrap().clone());
+        let scope = || TenantScope::for_test(heir.clone(), pool.clone());
+        let unbound = {
+            let mut c = session_claims(
+                &auth,
+                &user,
+                id,
+                &tenant(),
+                &RefreshSession::start(&auth, &user),
+            )
+            .unwrap();
+            c.remove("org_id");
+            auth.lifecycle().issue_pair_with(id, c).unwrap()
+        };
+        let own = issue_login_pair(&auth, &user, id, &TenantSlug::of(&heir).unwrap()).unwrap();
+        assert_eq!(auth.verify_for_tenant(&own.access, &t).await, Ok(id));
+        for pair in [
+            issue_login_pair(&auth, &user, id, &tenant()).unwrap(),
+            unbound,
+        ] {
+            assert!(
+                auth.verify_for_tenant(&pair.access, &t).await.is_err(),
+                "bearer"
+            );
+            assert!(
+                me_in(auth.clone(), scope(), Bearer(pair.access.clone()))
+                    .await
+                    .is_err(),
+                "me"
+            );
+            let body = RefreshInput {
+                refresh: pair.refresh.clone(),
+            };
+            assert!(
+                refresh_in(auth.clone(), scope(), body).await.is_err(),
+                "refresh"
+            );
+            // Logout on the heir must not revoke the old tenant's tokens.
+            let out = LogoutInput {
+                refresh: Some(pair.refresh.clone()),
+            };
+            let _ = logout_in(
+                auth.clone(),
+                scope(),
+                axum::http::Extensions::new(),
+                axum::http::HeaderMap::new(),
+                Bearer(pair.access.clone()),
+                Some(Json(out)),
+            )
+            .await;
+            assert!(
+                auth.lifecycle().verify_access(&pair.access).await.is_some(),
+                "logout"
+            );
+        }
     }
 
     /// A custom store reaches the lifecycle the router hands its
@@ -1266,7 +1368,7 @@ mod tests {
     /// A `Tenant` for `testkit::org()` over `pool`, for `verify_for_tenant`.
     #[cfg(feature = "sqlite")]
     async fn sqlite_tenant(pool: &crate::sql::Pool) -> Tenant<sqlx::Sqlite> {
-        Tenant::for_test_sqlite(crate::testkit::org(), pool.as_sqlite().unwrap().clone())
+        Tenant::for_test_sqlite(org(), pool.as_sqlite().unwrap().clone())
     }
 
     /// A shared in-memory SQLite, so the held `Tenant` conn and the pool agree.
@@ -1289,9 +1391,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     fn login_access(auth: &JwtAuth, user: &crate::tenancy::auth::User) -> String {
         let id = user.id.get().copied().unwrap();
-        issue_login_pair(auth, user, id, &crate::testkit::org().slug)
-            .unwrap()
-            .access
+        issue_login_pair(auth, user, id, &tenant()).unwrap().access
     }
 
     /// Two configs stay two. Under the old `OnceLock` the first one's key
@@ -1321,7 +1421,7 @@ mod tests {
         let (auth, pool, user) = verify_env("jwt_agent_1848").await;
         let t = sqlite_tenant(&pool).await;
         let mut custom = serde_json::Map::new();
-        custom.insert("tenant".into(), crate::testkit::org().slug.into());
+        custom.insert("tenant".into(), org().slug.into());
         custom.insert("kind".into(), "agent".into());
         let id = *user.id.get().unwrap();
         let token = auth.lifecycle().issue_access_with(id, custom).unwrap();
@@ -1401,7 +1501,7 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     async fn rotate(auth: &JwtAuth, pool: &crate::sql::Pool, refresh: &str) -> Option<String> {
-        let scope = TenantScope::for_test(crate::testkit::org(), pool.clone());
+        let scope = TenantScope::for_test(org(), pool.clone());
         let body = RefreshInput {
             refresh: refresh.to_owned(),
         };
@@ -1414,9 +1514,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     fn login(auth: &JwtAuth, user: &crate::tenancy::auth::User) -> String {
         let id = user.id.get().copied().unwrap();
-        issue_login_pair(auth, user, id, &crate::testkit::org().slug)
-            .unwrap()
-            .refresh
+        issue_login_pair(auth, user, id, &tenant()).unwrap().refresh
     }
 
     /// #1854 — a password change ends the refresh chain.
@@ -1547,16 +1645,15 @@ mod tests {
             ..Config::default()
         });
         let backend = JwtBackend::new(vec![7; 32]).with_jti_store(store);
-        let slug = crate::testkit::org().slug;
         let check = |token: String| {
-            let (backend, pool, slug) = (&backend, &pool, slug.clone());
+            let (backend, pool) = (&backend, &pool);
             async move {
                 let (mut parts, ()) = axum::http::Request::builder()
                     .header("authorization", format!("Bearer {token}"))
                     .body(())
                     .unwrap()
                     .into_parts();
-                parts.extensions.insert(crate::tenancy::TenantSlug(slug));
+                parts.extensions.insert(tenant());
                 backend
                     .authenticate(&parts, pool)
                     .await
@@ -1564,7 +1661,7 @@ mod tests {
             }
         };
         let pair = |user: &crate::tenancy::auth::User| {
-            issue_login_pair(&auth, user, id, &crate::testkit::org().slug).unwrap()
+            issue_login_pair(&auth, user, id, &tenant()).unwrap()
         };
 
         let p = pair(&user);
@@ -1613,7 +1710,7 @@ mod tests {
             id: crate::sql::Auto::Set(1),
             ..crate::testkit::user()
         };
-        assert!(issue_login_pair(&auth, &user, 1, "acme").is_err());
+        assert!(issue_login_pair(&auth, &user, 1, &tenant()).is_err());
     }
 
     /// A refresh re-runs the hook on the current row, so a demoted
@@ -1645,7 +1742,7 @@ mod tests {
 
         user.is_superuser = false;
         user.save_pool(&pool).await.unwrap();
-        let scope = TenantScope::for_test(crate::testkit::org(), pool.clone());
+        let scope = TenantScope::for_test(org(), pool.clone());
         let Json(pair) = refresh_in(auth.clone(), scope, RefreshInput { refresh: first })
             .await
             .expect("rotates");
@@ -1689,7 +1786,7 @@ mod tests {
             ..Config::default()
         });
         let first = login(&auth, &user);
-        let scope = || TenantScope::for_test(crate::testkit::org(), pool.clone());
+        let scope = || TenantScope::for_test(org(), pool.clone());
 
         user.is_superuser = false;
         user.save_pool(&pool).await.unwrap();

@@ -89,6 +89,7 @@ struct Env {
     tenant: Pool,
     secret: SessionSecret,
     slug: String,
+    org_id: i64,
     host: String,
     _dir: tempfile::TempDir,
 }
@@ -129,7 +130,7 @@ async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Con
 
     let slug = unique("t");
     let host = format!("{slug}.app.test");
-    let org = Org {
+    let mut org = Org {
         slug: slug.clone(),
         storage_mode: "database".into(),
         backend_kind: "sqlite".into(),
@@ -137,8 +138,9 @@ async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Con
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    let mut row = org.clone();
-    row.insert_pool(&registry).await.expect("seed org");
+    // The resolver hands out the stored row: tokens bind to its id.
+    org.insert_pool(&registry).await.expect("seed org");
+    let org_id = *org.id.get().expect("org id");
 
     let tenant = Pool::connect(&tenant_url).await.expect("tenant");
     rustango::testkit::create_tables_for::<User>(&tenant)
@@ -215,6 +217,7 @@ async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Con
         tenant,
         secret,
         slug,
+        org_id,
         host,
         _dir: dir,
     }
@@ -840,6 +843,7 @@ async fn a_token_without_a_session_is_refused() {
         });
     let mut custom = serde_json::Map::new();
     custom.insert("tenant".into(), env.slug.clone().into());
+    custom.insert("org_id".into(), env.org_id.into());
     let token = jwt.lifecycle().issue_access_with(id, custom).unwrap();
     assert_eq!(
         env.bearer_status("/bearer", &token).await,

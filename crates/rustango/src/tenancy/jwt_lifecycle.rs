@@ -111,14 +111,25 @@ impl JwtClaims {
 pub const CLAIM_KIND: &str = "kind";
 /// Claim pinning a token to one tenant slug.
 pub const CLAIM_TENANT: &str = "tenant";
+/// Claim pinning a token to one org id, so a tenant that reuses a purged slug refuses it.
+pub const CLAIM_ORG_ID: &str = "org_id";
+
+/// Write the `tenant` and `org_id` claims that bind a user token to `tenant`.
+pub(crate) fn write_tenant_claims(
+    claims: &mut serde_json::Map<String, serde_json::Value>,
+    tenant: &crate::tenancy::TenantSlug,
+) {
+    claims.insert(CLAIM_TENANT.to_owned(), tenant.slug.clone().into());
+    claims.insert(CLAIM_ORG_ID.to_owned(), tenant.org_id.into());
+}
 
 /// Where a user access token is presented. The one check that decides
 /// whether its `sub` names a user there (#1848).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UserTokenScope<'a> {
-    /// A resolved tenant: the `tenant` claim must equal this slug.
-    Tenant(&'a str),
+    /// A resolved tenant: the `tenant` and `org_id` claims must equal its own.
+    Tenant(&'a crate::tenancy::TenantSlug),
     /// No tenant resolved: only a token with no `tenant` claim.
     Unscoped,
 }
@@ -135,7 +146,13 @@ impl UserTokenScope<'_> {
         }
         let bound = claims.get(CLAIM_TENANT);
         match (self, bound) {
-            (Self::Tenant(slug), Some(v)) if v.as_str() == Some(slug) => Ok(()),
+            (Self::Tenant(t), Some(v)) if v.as_str() == Some(t.slug.as_str()) => {
+                match claims.get(CLAIM_ORG_ID).and_then(serde_json::Value::as_i64) {
+                    Some(id) if id == t.org_id => Ok(()),
+                    Some(_) => Err("token issued for a purged tenant"),
+                    None => Err("token missing org binding"),
+                }
+            }
             (Self::Tenant(_), Some(_)) => Err("token issued for different tenant"),
             (Self::Tenant(_), None) => Err("token missing tenant binding"),
             (Self::Unscoped, None) => Ok(()),

@@ -30,7 +30,7 @@ async fn create_api_key_never_writes_a_key_file() {
                 .map_err(|e| e.to_string())
         }
     };
-    let argv = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let argv = |a: &[&str]| rustango::testkit::routed_args(a);
     run(argv(&["migrate-registry"])).await.expect("registry");
     let db = tmp.path().join("acme.db");
     run(argv(&[
@@ -109,7 +109,7 @@ async fn cli_minted_key_verifies_in_a_server_process() {
     let addr: std::net::SocketAddr = "10.64.0.1:1".parse().unwrap();
     let (parts, ()) = axum::http::Request::builder()
         .header("authorization", format!("Bearer {token}"))
-        .extension(rustango::tenancy::TenantSlug("acme".into()))
+        .extension(rustango::tenancy::TenantSlug::new(1, "acme"))
         .extension(axum::extract::ConnectInfo(addr))
         .body(())
         .unwrap()

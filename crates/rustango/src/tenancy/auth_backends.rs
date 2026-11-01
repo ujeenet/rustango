@@ -102,7 +102,7 @@ fn client_ip(parts: &Parts) -> ClientIp {
 
 fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
     match parts.extensions.get::<super::TenantSlug>() {
-        Some(slug) => Ok(&slug.0),
+        Some(t) => Ok(&t.slug),
         None => {
             tracing::error!(
                 "auth backend ran without a TenantSlug; use require_auth / optional_auth"
@@ -835,11 +835,11 @@ impl JwtBackend {
         self.sign_payload(&self.claims(user_id, None))
     }
 
-    /// [`Self::issue`] bound to tenant `slug`, for `require_auth` routes (#1848).
+    /// [`Self::issue`] bound to `tenant`'s slug and org id, for `require_auth` routes.
     /// Right after a logout-all, use [`Self::issue_for_tenant_user`].
     #[must_use]
-    pub fn issue_for_tenant(&self, user_id: i64, slug: &str) -> String {
-        self.sign_payload(&self.claims(user_id, Some(slug)))
+    pub fn issue_for_tenant(&self, user_id: i64, tenant: &super::TenantSlug) -> String {
+        self.sign_payload(&self.claims(user_id, Some(tenant)))
     }
 
     /// [`Self::issue`] for `user`, also ended when its password hash changes.
@@ -851,24 +851,32 @@ impl JwtBackend {
 
     /// [`Self::issue_for_tenant`] for `user`, also ended when its password hash changes.
     #[must_use]
-    pub fn issue_for_tenant_user(&self, user: &super::auth::User, slug: &str) -> String {
-        self.sign_payload(&self.user_claims(user, Some(slug)))
+    pub fn issue_for_tenant_user(
+        &self,
+        user: &super::auth::User,
+        tenant: &super::TenantSlug,
+    ) -> String {
+        self.sign_payload(&self.user_claims(user, Some(tenant)))
     }
 
-    fn claims(&self, user_id: i64, tenant: Option<&str>) -> serde_json::Value {
+    fn claims(&self, user_id: i64, tenant: Option<&super::TenantSlug>) -> serde_json::Value {
         let now = chrono::Utc::now().timestamp();
         let mut payload = serde_json::json!({"sub": user_id, "exp": self.exp(), "iat": now});
         // Only a store can revoke a jti; without one it would only warn.
         if self.jti_store.is_some() {
             payload["jti"] = super::jwt_lifecycle::random_jti().into();
         }
-        if let Some(slug) = tenant {
-            payload[super::jwt_lifecycle::CLAIM_TENANT] = slug.into();
+        if let (Some(t), Some(claims)) = (tenant, payload.as_object_mut()) {
+            super::jwt_lifecycle::write_tenant_claims(claims, t);
         }
         payload
     }
 
-    fn user_claims(&self, user: &super::auth::User, tenant: Option<&str>) -> serde_json::Value {
+    fn user_claims(
+        &self,
+        user: &super::auth::User,
+        tenant: Option<&super::TenantSlug>,
+    ) -> serde_json::Value {
         let mut payload = self.claims(user.id.get().copied().unwrap_or(0), tenant);
         // Past the logout stamp, like the session claims below.
         payload["iat"] = crate::session::issued_at(user.sessions_revoked_at).into();
@@ -1030,9 +1038,9 @@ impl AuthBackend for JwtBackend {
         }
 
         // All tenants share one key, so a resolved tenant must match the
-        // token's `tenant` claim (#1848).
+        // token's `tenant` and `org_id` claims (#1848).
         let scope = match parts.extensions.get::<super::TenantSlug>() {
-            Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
+            Some(t) => super::jwt_lifecycle::UserTokenScope::Tenant(t),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,
         };
         let Some(VerifiedClaims {
@@ -1275,7 +1283,7 @@ mod tests {
         let creds = base64::engine::general_purpose::STANDARD.encode("locked-user:pw");
         let (parts, ()) = axum::http::Request::builder()
             .header("authorization", format!("Basic {creds}"))
-            .extension(super::super::TenantSlug("t-prelock".into()))
+            .extension(super::super::TenantSlug::new(1, "t-prelock"))
             .body(())
             .unwrap()
             .into_parts();
@@ -1327,7 +1335,7 @@ mod tests {
                         [10, 64, 0, 2],
                         1,
                     ))))
-                    .extension(super::super::TenantSlug("t-burst-key".into()))
+                    .extension(super::super::TenantSlug::new(1, "t-burst-key"))
                     .body(())
                     .unwrap()
                     .into_parts();
@@ -1404,7 +1412,7 @@ mod tests {
                         [10, 66, 0, 1],
                         1,
                     ))))
-                    .extension(super::super::TenantSlug("t-burst-basic".into()))
+                    .extension(super::super::TenantSlug::new(1, "t-burst-basic"))
                     .body(())
                     .unwrap()
                     .into_parts();
@@ -1486,7 +1494,7 @@ mod tests {
                         [10, 64, 0, 1],
                         1,
                     ))))
-                    .extension(super::super::TenantSlug("t-quiet-key".into()))
+                    .extension(super::super::TenantSlug::new(1, "t-quiet-key"))
                     .body(())
                     .unwrap()
                     .into_parts();
@@ -1528,10 +1536,52 @@ mod tests {
         let mut req =
             axum::http::Request::builder().header("authorization", format!("Bearer {token}"));
         if let Some(slug) = tenant {
-            req = req.extension(super::super::TenantSlug(slug.into()));
+            req = req.extension(super::super::TenantSlug::new(1, slug));
         }
         let (parts, ()) = req.body(()).unwrap().into_parts();
         backend.authenticate(&parts, pool).await
+    }
+
+    /// The tenant `bearer` binds a slug to: org 1.
+    fn acme() -> super::super::TenantSlug {
+        super::super::TenantSlug::new(1, "acme")
+    }
+
+    /// A tenant that reuses a purged tenant's slug has a new org id: the old
+    /// tenant's token, or one with no `org_id`, is refused there.
+    #[tokio::test]
+    async fn a_token_of_a_purged_tenant_is_refused_by_its_slug_heir() {
+        let (pool, user) = jwt_user("jwt_slug_heir").await;
+        let id = *user.id.get().unwrap();
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let heir = super::super::TenantSlug::new(2, "acme");
+        let auth = |token: String| {
+            let (backend, pool, heir) = (&backend, &pool, heir.clone());
+            async move {
+                let (mut parts, ()) = axum::http::Request::builder()
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                parts.extensions.insert(heir);
+                backend.authenticate(&parts, pool).await
+            }
+        };
+        assert!(matches!(
+            auth(backend.issue_for_tenant(id, &heir)).await,
+            Ok(Some(_))
+        ));
+        for token in [
+            backend.issue_for_tenant(id, &acme()),
+            backend.issue_for_tenant_user(&user, &acme()),
+            backend.sign_payload(&serde_json::json!({
+                "sub": id, "exp": backend.exp(), "iat": chrono::Utc::now().timestamp(),
+                "tenant": "acme",
+            })),
+        ] {
+            let r = auth(token).await;
+            assert!(matches!(r, Err(AuthError::InvalidToken)), "{r:?}");
+        }
     }
 
     /// `issue` / `issue_for_tenant` tokens end on logout-all and on a password change.
@@ -1541,7 +1591,7 @@ mod tests {
         let id = *user.id.get().unwrap();
         let backend = JwtBackend::new(vec![7u8; 32]);
         let plain = backend.issue(id);
-        let bound = backend.issue_for_tenant(id, "acme");
+        let bound = backend.issue_for_tenant(id, &acme());
         assert!(bearer(&backend, &plain, None, &pool)
             .await
             .unwrap()
@@ -1572,7 +1622,7 @@ mod tests {
         let backend = JwtBackend::new(vec![7u8; 32]);
         for (token, tenant) in [
             (backend.issue_for_user(&user), None),
-            (backend.issue_for_tenant_user(&user, "acme"), Some("acme")),
+            (backend.issue_for_tenant_user(&user, &acme()), Some("acme")),
         ] {
             let r = bearer(&backend, &token, tenant, &pool).await;
             assert!(matches!(r, Ok(Some(_))), "{tenant:?}: {r:?}");
@@ -1584,7 +1634,7 @@ mod tests {
     async fn user_bound_tokens_end_with_the_password_hash() {
         let (pool, mut user) = jwt_user("jwt_user_bound_pwf").await;
         let backend = JwtBackend::new(vec![7u8; 32]);
-        let token = backend.issue_for_tenant_user(&user, "acme");
+        let token = backend.issue_for_tenant_user(&user, &acme());
         assert!(bearer(&backend, &token, Some("acme"), &pool)
             .await
             .unwrap()

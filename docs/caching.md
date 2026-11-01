@@ -311,7 +311,7 @@ by default:
 
 To drop a page after a write, call
 `layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
-(add `.tenant(slug)` to the key under tenancy). It purges every cached variant
+(add `.tenant(org_id)` to the key under tenancy). It purges every cached variant
 of that path: any query string, any `vary_on` value, GET and `QUERY` alike. It
 works through a per-path generation counter, so each cached GET reads one more
 small cache key.

@@ -88,9 +88,24 @@ async fn purge_unlinks_its_unsucceeded_runs(pool: &Pool) {
     );
 }
 
+/// Tokens and cache keys bind to the org id, so a slug reused after a
+/// purge must get a new one, on every backend.
+async fn a_reused_slug_gets_a_new_org_id(pool: &Pool) {
+    let (slug, old) = tenant_with_host(pool, "reuse").await;
+    purge_on(pool, &slug).await.expect("purge");
+    let (again, new) = tenant_with_host(pool, "reuse").await;
+    assert_eq!(again, slug);
+    assert_ne!(new, old, "the heir reused the purged org id");
+    purge_on(pool, &slug).await.expect("cleanup");
+}
+
 tri_dialect_test!(
     setup: setup,
-    scenarios: [purge_deletes_org_with_extra_host, purge_unlinks_its_unsucceeded_runs]
+    scenarios: [
+        purge_deletes_org_with_extra_host,
+        purge_unlinks_its_unsucceeded_runs,
+        a_reused_slug_gets_a_new_org_id
+    ]
 );
 
 /// #2569 — purge deletes the tenant's media objects, lists what it had

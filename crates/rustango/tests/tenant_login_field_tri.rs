@@ -55,7 +55,7 @@ fn parts(user: &str, pass: &str) -> Parts {
     let creds = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     Request::builder()
         .header(header::AUTHORIZATION, format!("Basic {creds}"))
-        .extension(TenantSlug("login-field".into()))
+        .extension(TenantSlug::new(1, "login-field"))
         .extension(axum::extract::ConnectInfo(addr))
         .body(())
         .unwrap()
