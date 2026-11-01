@@ -213,8 +213,7 @@ pub async fn reset_password_cmd<W: Write + Send>(
     audit_account(pool, &user, "password_reset").await?;
     writeln!(w, "password reset for admin user `{username}`")?;
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }
@@ -269,8 +268,7 @@ pub async fn change_password_cmd<W: Write + Send>(
     audit_account(pool, &user, "password_change").await?;
     writeln!(w, "password changed for admin user `{username}`")?;
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }

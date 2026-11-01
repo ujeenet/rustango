@@ -685,7 +685,7 @@ impl MediaManager {
     pub async fn delete(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
-            _ => return Err(MediaError::Other("Media has no id".into())),
+            _ => return Err(no_id()),
         };
         use crate::sql::UpdaterPool as _;
         Media::objects()
@@ -714,7 +714,7 @@ impl MediaManager {
     pub async fn purge(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
-            _ => return Err(MediaError::Other("Media has no id".into())),
+            _ => return Err(no_id()),
         };
         // The storage delete is what revokes access, and this row is
         // the only record that the object exists: `orphans_older_than`
@@ -942,7 +942,7 @@ impl MediaManager {
     async fn purge_unconfirmed(&self, m: &Media) -> Result<bool, MediaError> {
         use crate::sql::UpdaterPool as _;
         let Auto::Set(id) = m.id else {
-            return Err(MediaError::Other("Media has no id".into()));
+            return Err(no_id());
         };
         let storage = self.resolve_disk(&m.disk)?;
         let claimed = Media::objects()
@@ -1937,6 +1937,11 @@ async fn lock_live_collection_tx(
 /// Not "not found": the router would answer 404 for a bad body.
 fn dead_collection(id: i64) -> MediaError {
     MediaError::Other(format!("collection {id} is missing or deleted"))
+}
+
+/// A `Media` that was never saved.
+fn no_id() -> MediaError {
+    MediaError::Other("Media has no id".into())
 }
 
 /// `root` and its live descendants, each level locked `FOR UPDATE`, so a

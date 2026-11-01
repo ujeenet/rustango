@@ -74,7 +74,7 @@ impl ServerKeys {
     /// Panics on the prod tier without a valid `RUSTANGO_SESSION_SECRET`.
     pub(crate) fn load() -> Self {
         let tier = crate::session::tier_from_env();
-        let env = std::env::var("RUSTANGO_SESSION_SECRET").ok();
+        let env = std::env::var(crate::session::SESSION_SECRET_ENV).ok();
         if let Some(msg) = per_pod_key_warning(&tier, env.as_deref()) {
             tracing::warn!(target: "rustango::server", "{msg}");
         }
@@ -130,7 +130,9 @@ pub(crate) fn existing_tenant_secret(
 ) -> Result<(SessionSecret, KeySource), super::TenancyError> {
     use crate::session::{is_prod_tier, tier_from_env};
     existing_tenant_secret_at(
-        std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
+        std::env::var(crate::session::SESSION_SECRET_ENV)
+            .ok()
+            .as_deref(),
         is_prod_tier(&tier_from_env()),
         std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
         dev_key,
@@ -178,7 +180,7 @@ fn existing_tenant_secret_at(
         DevKeyFile::LoadOrCreate => crate::session::load_or_create_key_file(
             dev_file,
             "session secret",
-            "RUSTANGO_SESSION_SECRET",
+            crate::session::SESSION_SECRET_ENV,
         )
         .map(|bytes| (SessionSecret::from_bytes(bytes), KeySource::DevFile))
         .map_err(|e| {

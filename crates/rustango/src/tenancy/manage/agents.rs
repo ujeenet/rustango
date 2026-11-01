@@ -63,8 +63,7 @@ where
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     let id = issued.agent.id.get().copied().unwrap_or_default();
     writeln!(w, "created agent `{name}` (id {id}) in tenant `{slug}`")?;
-    writeln!(w, "  secret: {}", issued.token)?;
-    writeln!(w, "  store this safely — it won't be shown again")?;
+    crate::manage_interactive::print_secret_once(w, "secret", &issued.token)?;
     Ok(())
 }
 
@@ -341,8 +340,7 @@ where
         w,
         "created key #{id} for user `{username}` in tenant `{slug}` (label `{label}`, scope {scope})"
     )?;
-    writeln!(w, "  token: {}", issued.token)?;
-    writeln!(w, "  store this safely — it won't be shown again")?;
+    crate::manage_interactive::print_secret_once(w, "token", &issued.token)?;
     Ok(())
 }
 
