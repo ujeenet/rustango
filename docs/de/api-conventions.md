@@ -251,10 +251,10 @@ Verwenden, wenn:
 ### Config-Struct: Felder direkt setzen, auf `Default` zurückfallen
 
 ```rust
-let l = AccessLogLayer {
-    log_success: false,
-    include_ip: true,
-    slow_threshold_ms: 500,
+let e = Email {
+    to: vec!["ada@example.com".into()],
+    subject: "Welcome".into(),
+    body: "Hello".into(),
     ..Default::default()
 };
 ```
@@ -264,7 +264,7 @@ Verwenden, wenn:
 - Reflection / Serialisierung von Bedeutung ist
 - In-Place-Aktualisierung üblich ist (`config.field = ...`)
 
-**Als Regel verwendet **Rustango** Builder** für HTTP-Middleware (`security_headers`, `cors`, `rate_limit` und so weiter) und Config-Structs für einfache Datenträger (`Email`, `AccessLogLayer`, den internen Zustand von `RateLimitLayer`).
+**Als Regel verwendet **Rustango** Builder** für HTTP-Middleware (`security_headers`, `cors`, `rate_limit`, `access_log` und so weiter) und Config-Structs für einfache Datenträger (`Email`, den internen Zustand von `RateLimitLayer`).
 
 ---
 

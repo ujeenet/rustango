@@ -396,6 +396,7 @@ AccessLogLayer::default()
     .slow_threshold_ms(250)      // ce qui compte comme lent
     .without_ip()                // omettre l'IP du client
     .use_real_ip(true)           // TrustedRealIp de RealIpLayer, jamais les en-têtes bruts
+    .skip_paths(["/health", "/ready"]) // aucune ligne pour les sondes ; segments entiers
 ```
 
 `RealIpLayer` doit s'exécuter avant le journal d'accès. Avec `server::Builder`,

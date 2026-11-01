@@ -251,10 +251,10 @@ let l = SecurityHeadersLayer::strict()
 ### Struct de config : définir les champs directement, se rabattre sur `Default`
 
 ```rust
-let l = AccessLogLayer {
-    log_success: false,
-    include_ip: true,
-    slow_threshold_ms: 500,
+let e = Email {
+    to: vec!["ada@example.com".into()],
+    subject: "Welcome".into(),
+    body: "Hello".into(),
     ..Default::default()
 };
 ```
@@ -264,7 +264,7 @@ let l = AccessLogLayer {
 - La réflexion / sérialisation importe
 - La mise à jour sur place est courante (`config.field = ...`)
 
-**En règle générale, **Rustango** utilise des builders** pour les middlewares HTTP (`security_headers`, `cors`, `rate_limit`, et ainsi de suite) et des structs de config pour les simples porteurs de données (`Email`, `AccessLogLayer`, l'état interne de `RateLimitLayer`).
+**En règle générale, **Rustango** utilise des builders** pour les middlewares HTTP (`security_headers`, `cors`, `rate_limit`, `access_log`, et ainsi de suite) et des structs de config pour les simples porteurs de données (`Email`, l'état interne de `RateLimitLayer`).
 
 ---
 
