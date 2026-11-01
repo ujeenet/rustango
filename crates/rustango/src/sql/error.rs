@@ -431,7 +431,8 @@ impl ExecError {
         };
         match db.kind() {
             ErrorKind::UniqueViolation => Some(Refusal::Unique),
-            ErrorKind::ForeignKeyViolation => Some(Refusal::ForeignKey),
+            // SQLite reports a RESTRICT refusal as code 1811, which sqlx leaves unkinded.
+            _ if super::executor::is_fk_refusal(db.as_ref()) => Some(Refusal::ForeignKey),
             ErrorKind::NotNullViolation => Some(Refusal::NotNull),
             ErrorKind::CheckViolation => Some(Refusal::Check),
             _ => None,
@@ -702,5 +703,35 @@ mod mysql_duplicate_tests {
         assert!(!decide(1072), "unknown column in key");
         assert!(!decide(1170), "BLOB/TEXT in key without a length");
         assert!(!decide(1062), "ER_DUP_ENTRY: the index genuinely failed");
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod refusal_tests {
+    use super::{ExecError, Refusal};
+
+    /// A RESTRICT child refuses a SQLite delete with code 1811, not as an FK kind.
+    #[tokio::test]
+    async fn a_sqlite_restrict_refusal_is_a_foreign_key_refusal() {
+        // One connection: each `:memory:` connection is its own database.
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        for sql in [
+            "PRAGMA foreign_keys = ON",
+            "CREATE TABLE p (id INTEGER PRIMARY KEY)",
+            "CREATE TABLE c (id INTEGER PRIMARY KEY, p INTEGER REFERENCES p(id) ON DELETE RESTRICT)",
+            "INSERT INTO p VALUES (1)",
+            "INSERT INTO c VALUES (1, 1)",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let err = sqlx::query("DELETE FROM p")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert_eq!(ExecError::Driver(err).refusal(), Some(Refusal::ForeignKey));
     }
 }

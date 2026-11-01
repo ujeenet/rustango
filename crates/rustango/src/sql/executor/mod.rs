@@ -2083,7 +2083,7 @@ async fn referencing_tables(tx: &mut PoolTx<'_>, table: &str) -> Result<Vec<Stri
 }
 
 /// An FK refusal. SQLite reports a `RESTRICT` one as a trigger failure (1811).
-fn is_fk_refusal(db: &dyn sqlx::error::DatabaseError) -> bool {
+pub(crate) fn is_fk_refusal(db: &dyn sqlx::error::DatabaseError) -> bool {
     db.is_foreign_key_violation()
         || (db.code().as_deref() == Some("1811") && db.message() == "FOREIGN KEY constraint failed")
 }
