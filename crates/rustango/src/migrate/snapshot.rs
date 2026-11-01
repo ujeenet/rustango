@@ -168,6 +168,9 @@ pub struct TableSnapshot {
     /// diff-clean.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub composite_fks: Vec<CompositeFkSnapshot>,
+    /// Table comment from `db_table_comment = "..."`; absent in older snapshots.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub db_table_comment: Option<String>,
 }
 
 /// Serialized [`crate::core::CompositeFkRelation`], stored per table
@@ -874,6 +877,7 @@ impl TableSnapshot {
             model: s.name.to_owned(),
             fields,
             composite_fks,
+            db_table_comment: s.db_table_comment.map(str::to_owned),
         }
     }
 

@@ -1061,6 +1061,12 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Set the comment on an existing table; `""` drops it. Defaults to
+    /// [`Self::table_comment_statement`]; MySQL alters the table instead.
+    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+        self.table_comment_statement(table, comment)
+    }
+
     // ---- Server administration: tenant databases and logins ----
     // `None` / empty where the backend has no such object (SQLite).
 

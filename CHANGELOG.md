@@ -25,6 +25,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - On the prod tier an unset mail backend no longer falls back to the console mailer, which printed reset links to the log.
 - A bad `[cache].backend` no longer silently becomes a per-process cache.
 - `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
+- File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
 
 ## [0.61.16] — 2026-10-31

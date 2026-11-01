@@ -430,7 +430,7 @@ spezifischer.
 | `through(...)` | Relationsspezifikation | benutzerdefinierter Through-Relation-Accessor |
 | `reverse_has(...)` / `generic_has(...)` | Relationsspezifikation | Rückwärts-has-many / Rückwärts-generischer-FK-Accessor |
 | `required_db_features` / `required_db_vendor` | Liste / Vendor | Deployment-Validierungs-Constraints |
-| `db_table_comment` | `"…"` | Tabellen-COMMENT; Datei-Migrationen schreiben ihn noch nicht, und `makemigrations` warnt |
+| `db_table_comment` | `"…"` | Tabellen-COMMENT (Postgres, MySQL; SQLite hat keinen) |
 | `admin(...)` | Admin-Optionen | Admin-UI-Konfiguration (siehe [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | Spezifikation | zusammengesetzter FK / generischer (Content-Type-) FK |
 | `m2m(...)` / `generic_m2m(...)` | Spezifikation | Viele-zu-viele- / generische Viele-zu-viele-Beziehung |

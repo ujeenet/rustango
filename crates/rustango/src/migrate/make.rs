@@ -393,7 +393,6 @@ fn plan_scoped(
     }
 
     refuse_unkeyed_composite_fks(&prev_snapshot, current)?;
-    warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
@@ -468,24 +467,6 @@ fn check_drops(
         tracing::warn!(target: "rustango::migrate", "{w}");
     }
     Ok(())
-}
-
-/// Snapshots do not carry `db_table_comment` yet, so file migrations
-/// never write it; say so instead of dropping it silently.
-fn warn_untracked_table_comments(current: &SchemaSnapshot) {
-    for e in crate::core::inventory::iter::<crate::core::ModelEntry> {
-        let Some(comment) = e.schema.db_table_comment else {
-            continue;
-        };
-        if current.tables.iter().any(|t| t.name == e.schema.table) {
-            tracing::warn!(
-                target: "rustango::migrate",
-                "`{}`: db_table_comment {comment:?} is not written by file migrations yet; \
-                 add it with a data migration",
-                e.schema.table,
-            );
-        }
-    }
 }
 
 /// Generate the framework's own **system-app** migrations into
@@ -766,7 +747,6 @@ fn plan_from(
     }
 
     refuse_unkeyed_composite_fks(&prev_snapshot, current)?;
-    warn_untracked_table_comments(current);
     let changes = detect_changes(&prev_snapshot, current);
     if changes.is_empty() {
         return Ok(None);
@@ -1177,6 +1157,7 @@ fn auto_name(changes: &[SchemaChange], is_first: bool) -> String {
         [SchemaChange::AlterColumnComment { table, column, .. }] => {
             format!("alter_comment_of_{column}_on_{table}")
         }
+        [SchemaChange::AlterTableComment { table, .. }] => format!("alter_comment_on_{table}"),
         [SchemaChange::AlterFkOnDelete { table, column, .. }] => {
             format!("alter_on_delete_of_{column}_on_{table}")
         }
@@ -1434,6 +1415,7 @@ mod tests {
                 fk: None,
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         }
     }
 
