@@ -109,6 +109,8 @@ pub struct MemberSessionPayload {
     pub uid: i64,
     /// Tenant slug the cookie was minted for (cross-tenant replay guard).
     pub slug: String,
+    /// Org id it was minted for, so a tenant that reuses the slug refuses it.
+    pub org: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
     /// Issued-at as Unix seconds. A session issued before
@@ -127,11 +129,17 @@ impl MemberSessionPayload {
     /// is now and `exp` is `iat + ttl_secs`. `pwf` is the
     /// [`PasswordFingerprint`] of the user's current hash.
     #[must_use]
-    pub fn new(uid: i64, slug: impl Into<String>, ttl_secs: i64, pwf: PasswordFingerprint) -> Self {
+    pub fn new(
+        uid: i64,
+        tenant: &crate::tenancy::TenantSlug,
+        ttl_secs: i64,
+        pwf: PasswordFingerprint,
+    ) -> Self {
         let iat = chrono::Utc::now().timestamp();
         Self {
             uid,
-            slug: slug.into(),
+            slug: tenant.slug.clone(),
+            org: tenant.org_id,
             exp: iat + ttl_secs,
             iat,
             aud: "member".to_owned(),
@@ -188,10 +196,10 @@ pub fn encode(secret: &SessionSecret, payload: &MemberSessionPayload) -> String 
 /// * [`MemberSessionError::BadSignature`] — HMAC mismatch.
 /// * [`MemberSessionError::WrongAudience`] — `aud != "member"`.
 /// * [`MemberSessionError::Expired`] — `exp` in the past.
-/// * [`MemberSessionError::WrongTenant`] — `slug != expected_slug`.
+/// * [`MemberSessionError::WrongTenant`] — another slug or org id.
 pub fn decode(
     secret: &SessionSecret,
-    expected_slug: &str,
+    tenant: &crate::tenancy::TenantSlug,
     value: &str,
 ) -> Result<MemberSessionPayload, MemberSessionError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(MemberSessionError::Malformed)?;
@@ -213,7 +221,7 @@ pub fn decode(
     if payload.is_expired() {
         return Err(MemberSessionError::Expired);
     }
-    if payload.slug != expected_slug {
+    if !tenant.binds(&payload.slug, payload.org) {
         return Err(MemberSessionError::WrongTenant);
     }
     Ok(payload)
@@ -238,19 +246,30 @@ fn secure_suffix() -> &'static str {
 /// # Panics
 /// If `user` has no id (was never saved).
 #[must_use]
-pub fn mint_cookie(secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
-    mint_cookie_at(secret, user, slug, ttl, "/")
+pub fn mint_cookie(
+    secret: &SessionSecret,
+    user: &User,
+    tenant: &crate::tenancy::TenantSlug,
+    ttl: i64,
+) -> String {
+    mint_cookie_at(secret, user, tenant, ttl, "/")
 }
 
 /// [`mint_cookie`] scoped to `path`, a path-prefix tenant's prefix (#2098).
-fn mint_cookie_at(secret: &SessionSecret, user: &User, slug: &str, ttl: i64, path: &str) -> String {
+fn mint_cookie_at(
+    secret: &SessionSecret,
+    user: &User,
+    tenant: &crate::tenancy::TenantSlug,
+    ttl: i64,
+    path: &str,
+) -> String {
     let uid = user
         .id
         .get()
         .copied()
         .expect("mint_cookie needs a saved user row");
     let pwf = PasswordFingerprint::of(secret, &user.password_hash);
-    let mut payload = MemberSessionPayload::new(uid, slug, ttl, pwf);
+    let mut payload = MemberSessionPayload::new(uid, tenant, ttl, pwf);
     payload.iat = crate::session::issued_at(user.sessions_revoked_at);
     let value = encode(secret, &payload);
     format!(
@@ -344,7 +363,10 @@ impl<S: Send + Sync> FromRequestParts<S> for CurrentMember {
             None => return Ok(CurrentMember(None)),
         };
 
-        let payload = match decode(keys.session, &org.slug, &cookie_value) {
+        let Some(tenant) = crate::tenancy::TenantSlug::of(&org) else {
+            return Ok(CurrentMember(None));
+        };
+        let payload = match decode(keys.session, &tenant, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(CurrentMember(None)),
         };
@@ -488,8 +510,14 @@ impl Mount {
     }
 
     /// Mint `user`'s member cookie under this mount.
-    fn mint_cookie(&self, secret: &SessionSecret, user: &User, slug: &str, ttl: i64) -> String {
-        mint_cookie_at(secret, user, slug, ttl, &self.path)
+    fn mint_cookie(
+        &self,
+        secret: &SessionSecret,
+        user: &User,
+        tenant: &crate::tenancy::TenantSlug,
+        ttl: i64,
+    ) -> String {
+        mint_cookie_at(secret, user, tenant, ttl, &self.path)
     }
 
     /// Expire the member cookie [`Self::mint_cookie`] set.
@@ -650,9 +678,12 @@ async fn sso_begin_in(
     let begin: BeginParams =
         serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
     flow.next = begin.next.as_deref().and_then(|n| mount.next(n));
+    let Some(tenant) = crate::tenancy::TenantSlug::of(&t.org) else {
+        return sso_error(SsoFailure::Incomplete, &mount);
+    };
     let sealed = seal_flow(
         &flow,
-        FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
+        FlowScope::for_tenant(FlowPurpose::Member, &tenant, slug),
         secret.key(),
     );
     let flow_cookie = flow_cookie(&mount.path).set(&sealed, FLOW_TTL_SECS);
@@ -699,9 +730,12 @@ async fn sso_callback_in(
     let Some(sealed) = flow_cookie(&mount.path).read(&parts.headers) else {
         return sso_error(SsoFailure::Expired, &mount);
     };
+    let Some(tenant) = crate::tenancy::TenantSlug::of(&t.org) else {
+        return sso_error(SsoFailure::Incomplete, &mount);
+    };
     let flow = match open_flow(
         sealed,
-        FlowScope::new(FlowPurpose::Member, &t.org.slug, slug),
+        FlowScope::for_tenant(FlowPurpose::Member, &tenant, slug),
         secret.key(),
     ) {
         Ok(f) => f,
@@ -806,7 +840,7 @@ async fn sso_callback_in(
     };
     attempt.succeeded().await;
     let ttl = policy.session_ttl(config.session_ttl, member.is_superuser);
-    let cookie = mount.mint_cookie(&secret, &member, &t.org.slug, ttl);
+    let cookie = mount.mint_cookie(&secret, &member, &tenant, ttl);
     let landing = safe_landing(flow.next.as_deref(), &mount.url(&config.landing_url));
     crate::signals::auth::send_user_logged_in(crate::signals::auth::UserLoggedInContext {
         source: MEMBER_SIGNAL_SOURCE,
@@ -1202,8 +1236,8 @@ mod tests {
     #[test]
     fn member_cookie_round_trips() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
-        let back = decode(&s, "acme", &value).expect("round-trips");
+        let value = encode(&s, &MemberSessionPayload::new(7, &acme(), 3600, fp()));
+        let back = decode(&s, &acme(), &value).expect("round-trips");
         assert_eq!(back.uid, 7);
         assert_eq!(back.slug, "acme");
         assert_eq!(back.aud, "member");
@@ -1215,7 +1249,7 @@ mod tests {
         // the domain tag makes the signed message disjoint, so the HMAC
         // never matches.
         let s = secret();
-        let member_value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
+        let member_value = encode(&s, &MemberSessionPayload::new(7, &acme(), 3600, fp()));
         let err = tenant_console::decode(
             &s,
             &crate::tenancy::TenantSlug::new(1, "acme"),
@@ -1240,7 +1274,7 @@ mod tests {
                 fp(),
             ),
         );
-        let err = decode(&s, "acme", &tenant_value).unwrap_err();
+        let err = decode(&s, &acme(), &tenant_value).unwrap_err();
         assert!(
             matches!(err, MemberSessionError::BadSignature),
             "tenant cookie must not validate as a member cookie, got {err:?}"
@@ -1250,9 +1284,9 @@ mod tests {
     #[test]
     fn member_decode_rejects_wrong_slug() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
+        let value = encode(&s, &MemberSessionPayload::new(7, &acme(), 3600, fp()));
         assert_eq!(
-            decode(&s, "globex", &value).unwrap_err(),
+            decode(&s, &crate::tenancy::TenantSlug::new(2, "globex"), &value).unwrap_err(),
             MemberSessionError::WrongTenant
         );
     }
@@ -1260,9 +1294,9 @@ mod tests {
     #[test]
     fn member_decode_rejects_expired() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", -10, fp()));
+        let value = encode(&s, &MemberSessionPayload::new(7, &acme(), -10, fp()));
         assert_eq!(
-            decode(&s, "acme", &value).unwrap_err(),
+            decode(&s, &acme(), &value).unwrap_err(),
             MemberSessionError::Expired
         );
     }
@@ -1270,14 +1304,43 @@ mod tests {
     #[test]
     fn member_decode_rejects_tampered_signature() {
         let s = secret();
-        let value = encode(&s, &MemberSessionPayload::new(7, "acme", 3600, fp()));
+        let value = encode(&s, &MemberSessionPayload::new(7, &acme(), 3600, fp()));
         let (_, sig) = value.split_once('.').unwrap();
         let evil = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(br#"{"uid":999,"slug":"acme","exp":9999999999,"iat":0,"aud":"member"}"#);
         let tampered = format!("{evil}.{sig}");
         assert_eq!(
-            decode(&s, "acme", &tampered).unwrap_err(),
+            decode(&s, &acme(), &tampered).unwrap_err(),
             MemberSessionError::BadSignature
+        );
+    }
+
+    fn acme() -> crate::tenancy::TenantSlug {
+        crate::tenancy::TenantSlug::new(1, "acme")
+    }
+
+    /// A tenant that reuses a purged tenant's slug refuses its member cookies,
+    /// and a cookie with no `org` does not parse.
+    #[test]
+    fn member_decode_rejects_a_purged_tenants_cookie() {
+        let s = secret();
+        let value = encode(&s, &MemberSessionPayload::new(7, &acme(), 3600, fp()));
+        let heir = crate::tenancy::TenantSlug::new(2, "acme");
+        assert_eq!(
+            decode(&s, &heir, &value).unwrap_err(),
+            MemberSessionError::WrongTenant
+        );
+        let mut json =
+            serde_json::to_value(MemberSessionPayload::new(7, &acme(), 3600, fp())).unwrap();
+        json.as_object_mut().unwrap().remove("org");
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json).unwrap());
+        let sig = crate::session::sign_tagged(&s, MEMBER_DOMAIN_TAG, b64.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let zero = crate::tenancy::TenantSlug::new(0, "acme");
+        assert_eq!(
+            decode(&s, &zero, &format!("{b64}.{sig_b64}")).unwrap_err(),
+            MemberSessionError::Malformed
         );
     }
 
@@ -1289,6 +1352,7 @@ mod tests {
         let payload = MemberSessionPayload {
             uid: 7,
             slug: "acme".to_owned(),
+            org: 1,
             exp: chrono::Utc::now().timestamp() + 3600,
             iat: chrono::Utc::now().timestamp(),
             aud: "admin".to_owned(),
@@ -1296,7 +1360,7 @@ mod tests {
         };
         let value = encode(&s, &payload);
         assert_eq!(
-            decode(&s, "acme", &value).unwrap_err(),
+            decode(&s, &acme(), &value).unwrap_err(),
             MemberSessionError::WrongAudience
         );
     }
@@ -1305,7 +1369,7 @@ mod tests {
     fn member_decode_rejects_malformed() {
         let s = secret();
         assert_eq!(
-            decode(&s, "acme", "not-a-cookie").unwrap_err(),
+            decode(&s, &acme(), "not-a-cookie").unwrap_err(),
             MemberSessionError::Malformed
         );
     }
@@ -1429,7 +1493,7 @@ mod tests {
         let minted = Mount::at(&org, "/acme/auth/sso/corp/callback", "/auth").mint_cookie(
             &secret(),
             &user,
-            &org.slug,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
             60,
         );
         let cleared = logout_at(&pool, &user, &org, "/acme/logout").await.unwrap();

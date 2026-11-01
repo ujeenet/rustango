@@ -34,6 +34,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The server and the tenancy CLI refuse to start on Postgres when a schema named after the database role holds a registry table: `search_path` reads it first, so the real registry was silently hidden.
 - Tenancy: a tenant that reuses a purged tenant's slug no longer accepts its JWTs or serves its cached pages and idempotent replays; tokens carry an `org_id` claim and those keys hold the org id.
 - Tenancy: tenant session and impersonation cookies, handoff tokens, MCP agent tokens and bound HMAC keys also check the org id, and cache keys hold `#org:<id>:<slug>`.
+- Tenancy: member cookies, SSO flows, `ScopedCache::for_tenant` and `DistributedLock::for_tenant` bind to the org id too; a cookie or token without `org` no longer reads as org 0, and an org with no id verifies no password link.
 - `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
 - Admin detail, edit, update and delete answer 404, not 403, for a row the `view` hook hides.
 - Admin bulk actions skip rows the `view` hook hides instead of acting on them; ViewSet page and offset lists past the `view` hook scan cap answer 400 instead of windows that reveal hidden rows.

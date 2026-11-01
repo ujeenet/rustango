@@ -907,20 +907,41 @@ impl FlowPurpose {
 }
 
 /// The one provider of one tenant, on one surface, a sealed flow is good
-/// for (#1992). Use `""` as the tenant when single-tenant.
+/// for (#1992). Use `""` as the tenant when single-tenant; a tenancy org
+/// uses [`Self::for_tenant`], which binds its org id too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowScope<'a> {
     purpose: FlowPurpose,
     tenant: &'a str,
+    /// The tenancy org id, so a tenant that reuses a purged slug refuses its flows.
+    org: Option<i64>,
     provider: &'a str,
 }
 
 impl<'a> FlowScope<'a> {
+    /// `tenant` is an app-chosen key, such as an [`OAuth2Registry`] tenant.
     #[must_use]
     pub fn new(purpose: FlowPurpose, tenant: &'a str, provider: &'a str) -> Self {
         Self {
             purpose,
             tenant,
+            org: None,
+            provider,
+        }
+    }
+
+    /// A tenancy org's flow: its slug and org id.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn for_tenant(
+        purpose: FlowPurpose,
+        tenant: &'a crate::tenancy::TenantSlug,
+        provider: &'a str,
+    ) -> Self {
+        Self {
+            purpose,
+            tenant: &tenant.slug,
+            org: Some(tenant.org_id),
             provider,
         }
     }
@@ -929,7 +950,8 @@ impl<'a> FlowScope<'a> {
     /// scopes share an input.
     fn mac(self, secret: &[u8], payload_b64: &str) -> Hmac<Sha256> {
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key");
-        for part in [self.purpose.tag(), self.tenant, self.provider] {
+        let org = self.org.map(|id| id.to_string()).unwrap_or_default();
+        for part in [self.purpose.tag(), self.tenant, &org, self.provider] {
             mac.update(&(part.len() as u64).to_be_bytes());
             mac.update(part.as_bytes());
         }
@@ -1755,8 +1777,34 @@ mod tests {
     const SCOPE: FlowScope<'static> = FlowScope {
         purpose: FlowPurpose::Member,
         tenant: "acme",
+        org: None,
         provider: "google",
     };
+
+    /// A flow begun on a purged tenant does not open on a new tenant that
+    /// reuses its slug.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn open_flow_rejects_a_purged_tenants_flow() {
+        use crate::tenancy::TenantSlug;
+        let flow = OAuth2Flow {
+            state: "s".into(),
+            pkce_verifier: "v".into(),
+            created_at: 0,
+            nonce: None,
+            next: None,
+        };
+        let (old, heir) = (TenantSlug::new(1, "acme"), TenantSlug::new(2, "acme"));
+        let sealed = seal_flow(
+            &flow,
+            FlowScope::for_tenant(FlowPurpose::Member, &old, "g"),
+            b"k",
+        );
+        let own = FlowScope::for_tenant(FlowPurpose::Member, &old, "g");
+        assert!(open_flow(&sealed, own, b"k").is_ok());
+        let other = FlowScope::for_tenant(FlowPurpose::Member, &heir, "g");
+        assert!(open_flow(&sealed, other, b"k").is_err());
+    }
 
     /// #1992 — a flow begun for one tenant's provider opens for no other.
     #[test]

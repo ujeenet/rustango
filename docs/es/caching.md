@@ -255,9 +255,10 @@ aplique por ti y el sitio de llamada no pueda olvidarlo:
 use rustango::cache::ScopedCache;
 
 // From the Org the resolver already produced:
-let cache = ScopedCache::for_tenant(shared.clone(), &t.org.slug);
+let tenant = TenantSlug::of(&t.org).expect("a registry org");
+let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```

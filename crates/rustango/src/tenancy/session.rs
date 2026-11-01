@@ -379,7 +379,10 @@ mod tests {
         let (cli, _) =
             existing_tenant_secret_at(None, false, &file, DevKeyFile::LoadOrCreate).unwrap();
         let server = ServerKeys::dev_at(None, root.path());
-        let scope = crate::auth_flows::LinkScope::from(&crate::testkit::org());
+        let scope = crate::auth_flows::LinkScope::from(&crate::tenancy::Org {
+            id: crate::sql::Auto::Set(1),
+            ..crate::testkit::org()
+        });
         let link = crate::auth_flows::PasswordReset::issue(
             &scope,
             "/change-password",

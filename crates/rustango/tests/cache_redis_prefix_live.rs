@@ -54,8 +54,8 @@ async fn scoped_clear_does_not_flush_other_namespaces() {
     redis.clear().await.expect("start from an empty db");
 
     let shared: BoxedCache = Arc::new(redis);
-    let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-    let globex = ScopedCache::for_tenant(shared.clone(), "globex");
+    let acme = ScopedCache::new(shared.clone(), "tenant:acme");
+    let globex = ScopedCache::new(shared.clone(), "tenant:globex");
 
     acme.set("stats", "acme-value", None).await.unwrap();
     globex.set("stats", "globex-value", None).await.unwrap();
@@ -190,7 +190,7 @@ async fn bytes_are_stored_raw() {
     };
     redis.clear().await.expect("start from an empty db");
     let shared: BoxedCache = Arc::new(redis);
-    let acme = ScopedCache::for_tenant(shared.clone(), "acme");
+    let acme = ScopedCache::new(shared.clone(), "tenant:acme");
 
     let raw: &[u8] = b"\xff\x00page\xfe";
     acme.set_bytes("bin", raw, Some(std::time::Duration::from_secs(60)))

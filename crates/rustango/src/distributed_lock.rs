@@ -67,10 +67,8 @@
 //!   so looping over tenants with one `with_lock("daily_report")`
 //!   lets the first tenant win and skips the rest for a whole TTL,
 //!   and nothing is logged, because a refused acquire is normal. Use
-//!   [`DistributedLock::for_tenant`] to give each tenant its own
+//!   `DistributedLock::for_tenant` to give each tenant its own
 //!   lock. Stay unscoped only for process-wide work.
-//!
-//! [`DistributedLock::for_tenant`]: crate::distributed_lock::DistributedLock::for_tenant
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -84,7 +82,7 @@ const KEY_PREFIX: &str = "lock";
 pub struct DistributedLock {
     cache: BoxedCache,
     /// Prefix on every lock name. `None` is process-wide;
-    /// [`Self::for_tenant`] sets `tenant:{slug}`.
+    /// `for_tenant` sets `tenant:#org:<id>:<slug>`.
     scope: Option<String>,
 }
 
@@ -100,23 +98,25 @@ impl DistributedLock {
     /// Use this for any per-tenant job. Unscoped, a loop over tenants
     /// makes them all contend for one `lock:daily_report`: the first
     /// wins and the rest are skipped for a whole TTL, without a log
-    /// line. Scoped, each gets `lock:tenant:{slug}:daily_report`.
+    /// line. Scoped, each gets `lock:tenant:#org:<id>:<slug>:daily_report`;
+    /// the org id keeps a tenant that reuses a purged slug out of its locks.
     ///
     /// ```ignore
-    /// let lock = DistributedLock::new(cache).for_tenant(&org.slug);
+    /// let lock = DistributedLock::new(cache).for_tenant(&tenant);
     /// lock.with_lock("daily_report", ttl, || async { … }).await;
     /// ```
     ///
     /// Stay unscoped only when "one replica, ever" is the point, such
     /// as registry cleanup or a cross-tenant rollup.
+    #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn for_tenant(mut self, slug: impl AsRef<str>) -> Self {
-        self.scope = Some(format!("tenant:{}", slug.as_ref()));
+    pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.scope = Some(format!("tenant:{}", tenant.namespace()));
         self
     }
 
-    /// Scope lock names under any namespace. [`Self::for_tenant`] is
-    /// this with a `tenant:` prefix.
+    /// Scope lock names under any namespace. `for_tenant` is this with
+    /// a `tenant:` prefix.
     #[must_use]
     pub fn scoped(mut self, namespace: impl AsRef<str>) -> Self {
         self.scope = Some(namespace.as_ref().to_owned());
@@ -742,8 +742,8 @@ mod tests {
     #[tokio::test]
     async fn scoped_locks_do_not_contend_across_tenants() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let acme_lock = DistributedLock::new(cache.clone()).for_tenant("acme");
-        let globex_lock = DistributedLock::new(cache).for_tenant("globex");
+        let acme_lock = DistributedLock::new(cache.clone()).scoped("tenant:acme");
+        let globex_lock = DistributedLock::new(cache).scoped("tenant:globex");
 
         let acme = acme_lock
             .try_acquire("daily_report", Duration::from_secs(30))
@@ -760,7 +760,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_lock_still_excludes_within_a_tenant() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let lock = DistributedLock::new(cache).for_tenant("acme");
+        let lock = DistributedLock::new(cache).scoped("tenant:acme");
 
         let first = lock
             .try_acquire("daily_report", Duration::from_secs(30))
@@ -778,8 +778,8 @@ mod tests {
     #[tokio::test]
     async fn tenant_scopes_are_separated_by_slug() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let acme = DistributedLock::new(cache.clone()).for_tenant("acme");
-        let acme_corp = DistributedLock::new(cache).for_tenant("acme-corp");
+        let acme = DistributedLock::new(cache.clone()).scoped("tenant:acme");
+        let acme_corp = DistributedLock::new(cache).scoped("tenant:acme-corp");
 
         assert!(acme
             .try_acquire("j", Duration::from_secs(30))
@@ -794,16 +794,31 @@ mod tests {
         );
     }
 
+    /// A tenant that reuses a purged tenant's slug does not wait on its locks.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_reused_slug_does_not_contend_with_the_purged_tenant() {
+        use crate::tenancy::TenantSlug;
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let old = DistributedLock::new(cache.clone()).for_tenant(&TenantSlug::new(1, "acme"));
+        let heir = DistributedLock::new(cache).for_tenant(&TenantSlug::new(2, "acme"));
+        let ttl = Duration::from_secs(30);
+        let _held = old.try_acquire("j", ttl).await.expect("old");
+        assert!(heir.try_acquire("j", ttl).await.is_some(), "heir blocked");
+    }
+
     /// A tenant cache clear must not free a lock a running job holds.
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn tenant_cache_clear_keeps_tenant_locks() {
         use crate::cache::{Cache as _, ScopedCache};
+        let tenant = crate::tenancy::TenantSlug::new(1, "acme");
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let acme = DistributedLock::new(cache.clone()).for_tenant("acme");
+        let acme = DistributedLock::new(cache.clone()).for_tenant(&tenant);
         let ttl = Duration::from_secs(30);
         let _held = acme.try_acquire("j", ttl).await.expect("acme");
 
-        ScopedCache::for_tenant(cache, "acme")
+        ScopedCache::for_tenant(cache, &tenant)
             .clear()
             .await
             .unwrap();

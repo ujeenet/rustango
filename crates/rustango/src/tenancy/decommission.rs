@@ -34,7 +34,7 @@ use super::server_tenant::ServerTenant;
 use crate::core::Column as _;
 use crate::sql::{FetcherPool as _, UpdaterPool as _};
 
-/// Caches whose `tenant:{slug}:` keys a purge deletes.
+/// Caches whose `ScopedCache::for_tenant` keys a purge deletes.
 static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
     std::sync::RwLock::new(Vec::new());
 
@@ -48,12 +48,12 @@ pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
         .push(cache);
 }
 
-/// Forget the state keyed by the slug alone, which a new tenant may reuse.
+/// Forget the state a new tenant reusing the slug could still reach.
 /// Best-effort: what stays is noted in the report.
-async fn forget_slug(slug: &str, report: &mut Report) {
+async fn forget_slug(org: &Org, report: &mut Report) {
     use crate::cache::Cache as _;
     crate::contenttypes::clear_cache();
-    if let Err(e) = crate::login_throttle::forget_tenant(slug).await {
+    if let Err(e) = crate::login_throttle::forget_tenant(&org.slug).await {
         report
             .notes
             .push(format!("the tenant's account locks were not cleared: {e}"));
@@ -62,8 +62,11 @@ async fn forget_slug(slug: &str, report: &mut Report) {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return;
+    };
     for cache in caches {
-        if let Err(e) = crate::cache::ScopedCache::for_tenant(cache, slug)
+        if let Err(e) = crate::cache::ScopedCache::for_tenant(cache, &tenant)
             .clear()
             .await
         {
@@ -823,7 +826,7 @@ where
         return rep.fail(Step::RemoveOrg, e).await;
     }
     report.row_deleted = true;
-    forget_slug(slug, report).await;
+    forget_slug(org, report).await;
     rep.ok(Step::RemoveOrg).await;
 
     // Last: while the org stays, a retry finds the record and goes by the

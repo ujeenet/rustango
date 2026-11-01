@@ -97,8 +97,8 @@ pub struct HandoffPayload {
     /// Tenant slug this token was minted for. Checked against the
     /// resolved org, so a leaked URL cannot be used on another tenant.
     pub slug: String,
-    /// Org id this token was minted for; checked with the slug.
-    #[serde(default)]
+    /// Org id this token was minted for; checked with the slug. Required:
+    /// a token without it fails to parse rather than reading as org 0.
     pub org: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
@@ -283,6 +283,23 @@ mod tests {
         assert_eq!(
             decode(&secret, &heir, &token).unwrap_err(),
             HandoffError::WrongTenant,
+        );
+    }
+
+    /// A token with no `org` fails to parse, so it cannot pass for org 0.
+    #[test]
+    fn rejects_token_without_an_org() {
+        let secret = key();
+        let mut json = serde_json::to_value(payload(60)).unwrap();
+        json.as_object_mut().unwrap().remove("org");
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&json).unwrap());
+        let sig = crate::session::sign_tagged(&secret, HANDOFF_DOMAIN_TAG, b64.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
+        let zero = crate::tenancy::TenantSlug::new(0, "acme");
+        assert_eq!(
+            decode(&secret, &zero, &format!("{b64}.{sig_b64}")).unwrap_err(),
+            HandoffError::Malformed,
         );
     }
 

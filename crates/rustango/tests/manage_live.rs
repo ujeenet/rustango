@@ -806,8 +806,16 @@ async fn purge_tenant_forgets_slug_keyed_state() {
 
     let cache: BoxedCache = std::sync::Arc::new(InMemoryCache::new());
     rustango::tenancy::decommission::clear_on_purge(cache.clone());
-    let mine = ScopedCache::for_tenant(cache.clone(), &slug);
-    let theirs = ScopedCache::for_tenant(cache.clone(), format!("{slug}x"));
+    let org = Org::objects()
+        .where_(Org::slug.eq(slug.clone()))
+        .fetch_on(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    let tenant = rustango::tenancy::TenantSlug::of(&org).expect("org id");
+    let mine = ScopedCache::for_tenant(cache.clone(), &tenant);
+    let other = rustango::tenancy::TenantSlug::new(tenant.org_id + 1, format!("{slug}x"));
+    let theirs = ScopedCache::for_tenant(cache.clone(), &other);
     mine.set_forever("stats", "old").await.unwrap();
     theirs.set_forever("stats", "kept").await.unwrap();
 

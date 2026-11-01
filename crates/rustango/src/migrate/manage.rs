@@ -8967,9 +8967,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             !out.warnings.iter().any(|w| w.contains("account lockout")),
             "{out:?}"
         );
-        let scoped = crate::cache::ScopedCache::for_tenant(
+        let scoped = crate::cache::ScopedCache::new(
             Arc::new(crate::cache::InMemoryCache::new()),
-            "acme",
+            "tenant:acme",
         );
         assert!(Lockout::new(Arc::new(scoped)).is_process_local());
         // A store shared across replicas: nothing to say.
@@ -8988,7 +8988,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
         // Also behind a tenant scope.
         let scoped =
-            crate::cache::ScopedCache::for_tenant(Arc::new(crate::cache::NullCache), "acme");
+            crate::cache::ScopedCache::new(Arc::new(crate::cache::NullCache), "tenant:acme");
         let mut out = DeployAuditFindings::default();
         login_store_audit(&Lockout::new(Arc::new(scoped)), &mut out);
         assert!(

@@ -69,7 +69,7 @@ pub struct TenantSessionPayload {
     /// Tenant slug the cookie was minted for.
     pub slug: String,
     /// Org id the cookie was minted for, so a tenant that reuses the slug refuses it.
-    #[serde(default)]
+    /// Required: a cookie without it fails to parse rather than reading as org 0.
     pub org: i64,
     /// Expiry as Unix seconds.
     pub exp: i64,
@@ -261,8 +261,10 @@ mod tests {
         let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
         let sig = crate::session::sign_tagged(&secret, TENANT_DOMAIN_TAG, b64.as_bytes());
         let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-        let err = decode(&secret, &acme(), &format!("{b64}.{sig_b64}")).unwrap_err();
-        assert!(matches!(err, SessionError::WrongTenant));
+        // No `org`, even for org 0: the cookie does not parse.
+        let zero = crate::tenancy::TenantSlug::new(0, "acme");
+        let err = decode(&secret, &zero, &format!("{b64}.{sig_b64}")).unwrap_err();
+        assert!(matches!(err, SessionError::Malformed));
     }
 
     fn fp() -> PasswordFingerprint {
