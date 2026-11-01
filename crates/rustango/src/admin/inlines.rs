@@ -2523,7 +2523,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         };
         let cfg = crate::core::AdminConfig::DEFAULT;
         let html = render_prefixed_input(&cfg, &f, "s3cret", ("c", 0, WriteKind::Update), false);

@@ -8080,7 +8080,7 @@ mod gen_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         }
     }
 

@@ -1064,11 +1064,15 @@ mod tests {
         }
         assert!(!is_secret_field(&cfg, &named("username")));
         let mut flagged = named("recovery_codes");
-        flagged.secret = true;
+        flagged.secret = Some(true);
         assert!(is_secret_field(&cfg, &flagged));
         let mut sealed = named("note");
         sealed.cast = Some(crate::core::FieldCast::Sealed);
+        sealed.secret = Some(false);
         assert!(is_secret_field(&cfg, &sealed));
+        let mut opted_out = named("share_token");
+        opted_out.secret = Some(false);
+        assert!(!is_secret_field(&cfg, &opted_out));
     }
 
     /// List and detail FK cells link under the mounted prefix (#1916).

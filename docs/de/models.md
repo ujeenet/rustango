@@ -454,7 +454,7 @@ spezifischer.
 | `min` / `max` | Zahl | Bereichsvalidierung |
 | `blank` | Flag | Leereingabe in Formularen/Admin erlauben |
 | `editable` | `true`/`false` | Bearbeitbarkeit in Formular/Admin |
-| `secret` | Flag | Zugangsdaten: Template-Views und Admin zeigen das Feld nur, wenn eine View es auflistet |
+| `secret` | Flag oder `= false` | Zugangsdaten: Template-Views zeigen das Feld nur, wenn eine View es auflistet, der Admin maskiert es immer; `secret = false` nimmt einen Namen aus |
 | `verbose_name` | `"Label"` | Lesbare Feldbezeichnung in Formular/Admin |
 | `help_text` | `"…"` | Hilfetext unter dem Formular-/Admin-Widget |
 | `validators` | `"name, name"` | benannte Validatoren für dieses Feld |

@@ -196,9 +196,9 @@ pub struct FieldSchema {
     pub validators: &'static [&'static str],
     /// The cast of a `Cast<C>` field; `None` for any other field.
     pub cast: Option<FieldCast>,
-    /// `#[rustango(secret)]`: a credential, kept out of every view that does
-    /// not list it. See [`Self::is_credential`] for the name rules.
-    pub secret: bool,
+    /// `#[rustango(secret)]` is `Some(true)`, `secret = false` is `Some(false)`
+    /// (overrides the name rules); `None` leaves it to [`Self::is_credential`]'s names.
+    pub secret: Option<bool>,
 }
 
 /// How a `Cast<C>` field stores its value.
@@ -376,7 +376,7 @@ impl FieldSchema {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         }
     }
 
@@ -388,15 +388,14 @@ impl FieldSchema {
         self.verbose_name.unwrap_or(self.name)
     }
 
-    /// `true` for a credential: `#[rustango(secret)]`, a sealed cast, or a
-    /// credential name on the field or its column. Views without an explicit
-    /// field list never render it.
+    /// `true` for a credential: a sealed cast, `#[rustango(secret)]`, or, unless
+    /// `secret = false`, a credential name on the field or its column.
     #[must_use]
     pub fn is_credential(&self) -> bool {
-        self.secret
-            || matches!(self.cast, Some(FieldCast::Sealed))
-            || is_credential_name(self.name)
-            || is_credential_name(self.column)
+        matches!(self.cast, Some(FieldCast::Sealed))
+            || self
+                .secret
+                .unwrap_or_else(|| is_credential_name(self.name) || is_credential_name(self.column))
     }
 
     /// `true` for a server-assigned timestamp: an
@@ -1969,7 +1968,7 @@ pub struct FieldSchemaParts {
     pub fk_on_delete: Option<OnDeleteAction>,
     pub validators: &'static [&'static str],
     pub cast: Option<FieldCast>,
-    pub secret: bool,
+    pub secret: Option<bool>,
 }
 
 impl FieldSchema {

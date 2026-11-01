@@ -33,6 +33,9 @@ pub struct Account {
     /// Secret by the `*_token` name rule.
     #[rustango(max_length = 64)]
     pub reset_token: String,
+    /// A `*_token` name opted out with `secret = false`.
+    #[rustango(secret = false, max_length = 64)]
+    pub share_token: String,
 }
 
 const CSRF: &str = "tvsecret-csrf-token-tvsecret-csrf-token-xxxx";
@@ -117,6 +120,7 @@ async fn credential_columns_stay_out_of_the_context() {
         note: "UNLISTED".into(),
         recovery: "RECOVERY-SECRET".into(),
         reset_token: "TOKEN-SECRET".into(),
+        share_token: "SHARE-PUBLIC".into(),
     };
     row.insert_pool(&pool).await.expect("seed");
     let pk = *row.id.get().unwrap();
@@ -148,6 +152,10 @@ async fn credential_columns_stay_out_of_the_context() {
     }
     // Without `.fields()`, DetailView and the confirm page show every non-secret column.
     assert!(detail.contains("UNLISTED"), "{detail}");
+    assert!(
+        detail.contains("SHARE-PUBLIC"),
+        "`secret = false` opts out: {detail}"
+    );
     let all = send(
         &pool,
         Method::POST,
@@ -174,8 +182,9 @@ async fn credential_columns_stay_out_of_the_context() {
 #[test]
 fn the_secret_attribute_reaches_the_schema() {
     let field = |n| Account::SCHEMA.field(n).unwrap();
-    assert!(field("recovery").secret && field("recovery").is_credential());
-    assert!(!field("reset_token").secret && field("reset_token").is_credential());
+    assert!(field("recovery").secret == Some(true) && field("recovery").is_credential());
+    assert!(field("reset_token").secret.is_none() && field("reset_token").is_credential());
+    assert!(field("share_token").secret == Some(false) && !field("share_token").is_credential());
     assert!(!field("note").is_credential());
 }
 

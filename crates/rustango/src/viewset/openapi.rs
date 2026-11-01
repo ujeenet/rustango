@@ -595,7 +595,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         }
     }
 
@@ -625,7 +625,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         }
     }
 
@@ -655,7 +655,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         }
     }
 
@@ -686,7 +686,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
-                secret: false,
+                secret: None,
             },
             FieldSchema {
                 name: "title",
@@ -713,7 +713,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
-                secret: false,
+                secret: None,
             },
             FieldSchema {
                 name: "author_id",
@@ -740,7 +740,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
-                secret: false,
+                secret: None,
             },
         ];
         // Suppress unused warnings on field helpers if we keep them.
@@ -1150,7 +1150,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
-            secret: false,
+            secret: None,
         }
     }
 
