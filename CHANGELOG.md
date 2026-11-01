@@ -31,6 +31,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- On SQLite, an admin, ViewSet or template-view delete that a `restrict` reference blocks answers 409 instead of 500.
 - Tenant admin: the sidebar, `<title>` and heading show one name (`Org.brand_name`, then `[admin] title`, then `[brand] name`, then the display name), links take the org's `primary_color`, and the operator console serves `/favicon.ico`.
 - A schema-mode tenant whose schema has a database role's name no longer opens: its pools and `migrate-tenants` refuse it, and `check --deploy` reports it as an error.
 - The server and the tenancy CLI refuse to start on Postgres when a schema named after the database role holds a registry table: `search_path` reads it first, so the real registry was silently hidden.
