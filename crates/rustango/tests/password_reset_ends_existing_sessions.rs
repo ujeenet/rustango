@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use rustango::auth_flows::{
     confirm_password_reset_pool, confirm_password_reset_pool_into, LinkScope, LinkTarget,
-    PasswordReset,
+    PasswordReset, SingleDb,
 };
 use rustango::sql::Pool;
 
@@ -61,9 +61,9 @@ async fn password_changed_at(pool: &Pool) -> Option<String> {
         .expect("column")
 }
 
-fn link() -> String {
+fn link(pool: &Pool) -> String {
     PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -77,9 +77,14 @@ async fn a_reset_stamps_password_changed_at() {
     let pool = pool().await;
     assert_eq!(password_changed_at(&pool).await, None, "precondition");
 
-    confirm_password_reset_pool(LinkTarget::audience(&pool, "app"), &link(), STRONG, SECRET)
-        .await
-        .expect("reset");
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
+        &link(&pool),
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("reset");
 
     assert!(
         password_changed_at(&pool).await.is_some(),
@@ -98,8 +103,8 @@ async fn the_caller_named_form_does_not_stamp() {
     let pool = pool().await;
 
     confirm_password_reset_pool_into(
-        LinkTarget::audience(&pool, "app"),
-        &link(),
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
+        &link(&pool),
         STRONG,
         SECRET,
         "rustango_users",
@@ -124,9 +129,14 @@ async fn the_hash_still_rotates_alongside_the_stamp() {
     use sqlx::Row;
     let pool = pool().await;
 
-    confirm_password_reset_pool(LinkTarget::audience(&pool, "app"), &link(), STRONG, SECRET)
-        .await
-        .expect("reset");
+    confirm_password_reset_pool(
+        LinkTarget::audience(SingleDb::new(&pool), "app"),
+        &link(&pool),
+        STRONG,
+        SECRET,
+    )
+    .await
+    .expect("reset");
 
     let sq = match &pool {
         Pool::Sqlite(sq) => sq,
