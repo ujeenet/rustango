@@ -779,6 +779,8 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let resolver_for_admin = self.resolver();
         // Picks the prefixed admin routes for a path under its tenant's prefix.
         let dispatch_resolver = Arc::new(self.resolver());
