@@ -77,7 +77,7 @@ async fn drop_schema(pool: &sqlx::PgPool, name: &str) {
 }
 
 fn args_vec(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|s| (*s).to_string()).collect()
+    rustango::testkit::routed_args(parts)
 }
 
 async fn run(
@@ -1514,7 +1514,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "slug={shared}&storage_mode=schema&backend_kind=postgres&no_migrate=1"
+                    "slug={shared}&host_pattern=new-{shared}.localhost&storage_mode=schema&backend_kind=postgres&no_migrate=1"
                 )))
                 .unwrap(),
         )

@@ -88,7 +88,7 @@ async fn the_engine_provisions_without_argv_or_a_writer() {
         &pools,
         &url,
         migrations.path(),
-        &request,
+        &rustango::testkit::routed(request.clone()),
         Some(&rec.observer()),
     )
     .await
@@ -151,7 +151,7 @@ async fn migrations_can_be_skipped() {
         &pools,
         &url,
         migrations.path(),
-        &request,
+        &rustango::testkit::routed(request.clone()),
         Some(&rec.observer()),
     )
     .await
@@ -191,16 +191,22 @@ async fn a_duplicate_slug_fails_at_validate_and_says_so() {
     let mut request =
         ProvisionRequest::database("dup", format!("sqlite://{}?mode=rwc", tenant_db.display()));
     request.run_migrations = false;
-    provision::provision_tenant(&pools, &url, migrations.path(), &request, None)
-        .await
-        .expect("first provision");
+    provision::provision_tenant(
+        &pools,
+        &url,
+        migrations.path(),
+        &rustango::testkit::routed(request.clone()),
+        None,
+    )
+    .await
+    .expect("first provision");
 
     let rec = Recorder::default();
     let err = provision::provision_tenant(
         &pools,
         &url,
         migrations.path(),
-        &request,
+        &rustango::testkit::routed(request.clone()),
         Some(&rec.observer()),
     )
     .await
@@ -242,7 +248,7 @@ async fn another_backend_is_rejected_before_any_write() {
         &pools,
         &url,
         migrations.path(),
-        &request,
+        &rustango::testkit::routed(request.clone()),
         Some(&rec.observer()),
     )
     .await
@@ -286,7 +292,7 @@ async fn schema_mode_on_sqlite_is_refused_with_a_useful_message() {
         &pools,
         &url,
         migrations.path(),
-        &request,
+        &rustango::testkit::routed(request.clone()),
         Some(&rec.observer()),
     )
     .await
@@ -322,9 +328,15 @@ async fn provisioning_unobserved_works_the_same() {
         format!("sqlite://{}?mode=rwc", tenant_db.display()),
     );
 
-    let outcome = provision::provision_tenant(&pools, &url, migrations.path(), &request, None)
-        .await
-        .expect("provision");
+    let outcome = provision::provision_tenant(
+        &pools,
+        &url,
+        migrations.path(),
+        &rustango::testkit::routed(request.clone()),
+        None,
+    )
+    .await
+    .expect("provision");
 
     assert_eq!(outcome.slug, "quiet");
     assert!(outcome.org_id > 0);
@@ -362,7 +374,7 @@ async fn an_unreachable_database_is_caught_before_the_org_row_is_written() {
         &pools,
         &url,
         migrations.path(),
-        &request,
+        &rustango::testkit::routed(request.clone()),
         Some(&rec.observer()),
     )
     .await

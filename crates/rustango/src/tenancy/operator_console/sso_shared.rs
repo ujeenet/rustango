@@ -244,11 +244,9 @@ impl Callbacks {
     /// `{ pattern, example?, example_tenant? }` for `slug`.
     fn view(&self, slug: &str) -> serde_json::Value {
         let path = callback_path(&self.login_url, slug);
-        let example = self.example.as_ref().map(|(org, host, apex)| {
-            (
-                org.slug.clone(),
-                tenant_link(org, &path, host.as_deref(), apex),
-            )
+        let example = self.example.as_ref().and_then(|(org, host, apex)| {
+            let link = tenant_link(org, &path, host.as_deref(), apex).ok()?;
+            Some((org.slug.clone(), link))
         });
         serde_json::json!({
             "pattern": format!("https://<tenant host>{path}"),

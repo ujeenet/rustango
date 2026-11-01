@@ -218,6 +218,7 @@ pub(crate) async fn apply_values_if(
     };
     let mut set: Vec<crate::core::Assignment> = Vec::new();
     let mut touched: Vec<&'static str> = Vec::new();
+    let mut routing: Vec<(&str, SqlValue)> = Vec::new();
     let mut database_url_rotated = false;
     // Claimed in the UPDATE's transaction below.
     let mut claims: Vec<ClaimKey> = Vec::new();
@@ -292,6 +293,9 @@ pub(crate) async fn apply_values_if(
             }
             (_, v) => v,
         };
+        if matches!(column, "host_pattern" | "path_prefix" | "port") {
+            routing.push((column, value.clone()));
+        }
         touched.push(column);
         set.push(assign(column, value));
     }
@@ -299,6 +303,25 @@ pub(crate) async fn apply_values_if(
     if set.is_empty() {
         return Err(TenancyError::Validation(
             "nothing to change — pass at least one field".into(),
+        ));
+    }
+    // The routing keys as the edit leaves them: one must remain.
+    let after = |column: &str| routing.iter().find(|(c, _)| *c == column).map(|(_, v)| v);
+    let text = |column: &str, kept: Option<&str>| match after(column) {
+        Some(SqlValue::String(v)) => Some(v.clone()),
+        Some(_) => None,
+        None => kept.map(str::to_owned),
+    };
+    let host = text("host_pattern", existing.host_pattern.as_deref());
+    let prefix = text("path_prefix", existing.path_prefix.as_deref());
+    let port = match after("port") {
+        Some(SqlValue::I32(n)) => Some(*n),
+        Some(_) => None,
+        None => existing.port,
+    };
+    if !crate::tenancy::provision::is_routable(host.as_deref(), prefix.as_deref(), port) {
+        return Err(TenancyError::Validation(
+            crate::tenancy::provision::unroutable(slug),
         ));
     }
 
@@ -366,6 +389,7 @@ mod tests {
             slug: "cas".into(),
             backend_kind: "sqlite".into(),
             database_url: Some(first.into()),
+            host_pattern: Some("cas.localhost".into()),
             ..crate::testkit::org()
         };
         org.save_pool(&pool).await.unwrap();

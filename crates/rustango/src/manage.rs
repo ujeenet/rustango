@@ -2595,6 +2595,8 @@ mod tests {
                 "sqlite",
                 "--database-url",
                 &tenant_url,
+                "--host-pattern",
+                "acme.localhost",
                 "--no-migrate",
             ]),
             run(&["prewarm-pools"]),

@@ -160,7 +160,7 @@ impl Env {
         slug: &str,
         opts: CreateTenantOpts,
     ) -> Result<Org, TenancyError> {
-        typed!(self.registry, p => create_tenant(&p, &self.url, dir, slug, opts).await)
+        typed!(self.registry, p => create_tenant(&p, &self.url, dir, slug, rustango::testkit::routed_opts(slug, opts)).await)
     }
 
     async fn create_if_missing(
@@ -169,7 +169,7 @@ impl Env {
         slug: &str,
         opts: CreateTenantOpts,
     ) -> Result<Org, TenancyError> {
-        typed!(self.registry, p => create_tenant_if_missing(&p, &self.url, dir, slug, opts).await)
+        typed!(self.registry, p => create_tenant_if_missing(&p, &self.url, dir, slug, rustango::testkit::routed_opts(slug, opts)).await)
     }
 
     /// Apply `dir` to `org` alone.
@@ -231,10 +231,10 @@ impl Env {
     }
 
     fn db_request(&self, slug: &str, url: &str) -> ProvisionRequest {
-        ProvisionRequest {
+        rustango::testkit::routed(ProvisionRequest {
             backend: Some(self.backend()),
             ..ProvisionRequest::database(slug, url)
-        }
+        })
     }
 
     async fn provision(
@@ -242,7 +242,7 @@ impl Env {
         request: &ProvisionRequest,
     ) -> Result<ProvisionOutcome, TenancyError> {
         let dir = self.dir("migrations");
-        typed!(self.registry, p => provision_tenant(&p, &self.url, &dir, request, None).await)
+        typed!(self.registry, p => provision_tenant(&p, &self.url, &dir, &rustango::testkit::routed(request.clone()), None).await)
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> Result<(), TenancyError> {
@@ -250,7 +250,7 @@ impl Env {
     }
 
     async fn run_out(&self, dir: &Path, args: &[&str]) -> Result<String, TenancyError> {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let mut out = Vec::new();
         typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
         Ok(String::from_utf8_lossy(&out).into_owned())
@@ -258,7 +258,7 @@ impl Env {
 
     /// The verb's result and its output, also on an error.
     async fn run_both(&self, dir: &Path, args: &[&str]) -> (Result<(), TenancyError>, String) {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let mut out = Vec::new();
         let res = typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await);
         (res, String::from_utf8_lossy(&out).into_owned())
@@ -614,7 +614,7 @@ fn schema_opts(backend: BackendKind, schema: &str) -> CreateTenantOpts {
 fn schema_request(slug: &str, schema: &str, host: Option<String>) -> ProvisionRequest {
     ProvisionRequest {
         backend: Some(BackendKind::Postgres),
-        host_pattern: host,
+        host_pattern: host.or_else(|| Some(format!("{slug}.localhost"))),
         run_migrations: false,
         ..ProvisionRequest::new(
             slug,
@@ -1289,6 +1289,7 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
         display_name: "plain".into(),
         backend_kind: env.backend().as_str().into(),
         database_url: Some(url.clone()),
+        host_pattern: Some("plain.localhost".into()),
         ..rustango::testkit::org()
     };
     org.save_pool(&env.registry).await.expect("insert org");

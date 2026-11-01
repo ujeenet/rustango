@@ -294,14 +294,14 @@ impl Env {
 
     async fn provision(&self, dir: &Path, request: &ProvisionRequest) -> Result<(), TenancyError> {
         typed!(self.registry, p => provision::provision_tenant_recorded(
-            &p, &self.url, dir, request, None, None, None,
+            &p, &self.url, dir, &rustango::testkit::routed(request.clone()), None, None, None,
         )
         .await)
         .map(drop)
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> Result<String, TenancyError> {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let mut out = Vec::new();
         typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
         Ok(String::from_utf8_lossy(&out).into_owned())
@@ -564,7 +564,7 @@ impl Console {
     async fn create(&self, slug: &str) -> axum::response::Response {
         self.post(
             "/orgs/new",
-            &format!("slug={slug}&storage_mode=database&database_source=server&server=main"),
+            &format!("slug={slug}&host_pattern={slug}.localhost&storage_mode=database&database_source=server&server=main"),
         )
         .await
     }
@@ -634,7 +634,7 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
         c.post(
             "/orgs/new",
             &format!(
-                "slug={a}&storage_mode=database&database_source=url&database_url={foreign}%3A%2F%2Fu%3A{leak}%40h%2Fx"
+                "slug={a}&host_pattern={a}.localhost&storage_mode=database&database_source=url&database_url={foreign}%3A%2F%2Fu%3A{leak}%40h%2Fx"
             ),
         )
         .await,
@@ -662,7 +662,7 @@ async fn the_console_creates_a_tenant_on_a_saved_server(pool: &Pool) {
     let probe = body(
         c.post(
             "/orgs/test-connection",
-            &format!("slug={a}&storage_mode=database&database_source=server&server=main"),
+            &format!("slug={a}&host_pattern={a}.localhost&storage_mode=database&database_source=server&server=main"),
         )
         .await,
     )
@@ -924,7 +924,7 @@ async fn an_existing_database_is_refused_and_kept(pool: &Pool) {
     let probe = body(
         c.post(
             "/orgs/test-connection",
-            &format!("slug={a}&storage_mode=database&database_source=server&server=main"),
+            &format!("slug={a}&host_pattern={a}.localhost&storage_mode=database&database_source=server&server=main"),
         )
         .await,
     )
@@ -1121,7 +1121,7 @@ async fn a_limited_admin_is_told_what_to_grant(pool: &Pool) {
         ),
         (
             "/orgs/test-connection".to_owned(),
-            format!("slug={a}&storage_mode=database&database_source=server&server=main"),
+            format!("slug={a}&host_pattern={a}.localhost&storage_mode=database&database_source=server&server=main"),
         ),
     ] {
         let probe = body(c.post(&uri, &form).await).await;
@@ -1288,10 +1288,10 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
         assert!(!text.contains("regpw"), "{text}");
     };
 
-    let req = ProvisionRequest::new(
+    let req = rustango::testkit::routed(ProvisionRequest::new(
         &a,
         rustango::tenancy::provision::TenantStorage::Schema(None),
-    );
+    ));
     let err = typed!(restricted, p => provision::provision_tenant_recorded(
         &p, &url, &env.dir("good"), &req, None, None, None,
     )
@@ -1301,7 +1301,7 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
     has_all(&err.to_string());
     let cli = typed!(restricted, p => rustango::tenancy::manage::run_with_writer(
         &p, &url, &env.dir("good"),
-        vec!["create-tenant".into(), a.clone(), "--mode".into(), "schema".into()],
+        rustango::testkit::routed_args(&["create-tenant", a.as_str(), "--mode", "schema"]),
         &mut Vec::new(),
     ).await)
     .expect_err("refused")
@@ -1311,7 +1311,7 @@ async fn a_registry_login_without_create_is_refused_for_schemas(pool: &Pool) {
     let probe = body(
         c.post(
             "/orgs/test-connection",
-            &format!("slug={a}&storage_mode=schema"),
+            &format!("slug={a}&host_pattern={a}.localhost&storage_mode=schema"),
         )
         .await,
     )
@@ -1376,7 +1376,7 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
         database_url: Some("x".into()),
         ..opts()
     };
-    let err = typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, both).await)
+    let err = typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, rustango::testkit::routed_opts(&a, both)).await)
         .expect_err("both sources");
     assert!(err.to_string().contains("not both"), "{err}");
     let other = if env.server_backend() {
@@ -1388,11 +1388,11 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
         backend: Some(other),
         ..opts()
     };
-    let err = typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, wrong).await)
+    let err = typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, rustango::testkit::routed_opts(&a, wrong)).await)
         .expect_err("another backend");
     assert!(err.to_string().contains("registry runs on"), "{err}");
 
-    typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, opts()).await)
+    typed!(env.registry, p => create_tenant(&p, &env.url, &good, &a, rustango::testkit::routed_opts(&a, opts())).await)
         .expect("created");
     assert_provisioned(&env, &a).await;
     env.clean(&[&a]).await;
@@ -1682,7 +1682,7 @@ async fn the_api_runs_the_engine_steps(pool: &Pool) {
         ..CreateTenantOpts::default()
     };
     let root = project_root(&env);
-    typed!(env.registry, p => create_tenant(&p, &env.url, &root, &a, opts).await).expect("created");
+    typed!(env.registry, p => create_tenant(&p, &env.url, &root, &a, rustango::testkit::routed_opts(&a, opts)).await).expect("created");
     let url = assert_provisioned(&env, &a).await;
     assert_app_migrated(&url).await;
     let steps = env.steps(&a).await;

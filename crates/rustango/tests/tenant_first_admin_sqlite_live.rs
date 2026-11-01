@@ -79,7 +79,7 @@ impl Env {
             self.pools.as_ref(),
             &self.url,
             &self.migrations,
-            args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            rustango::testkit::routed_args(args),
             &mut out,
         )
         .await
@@ -769,9 +769,11 @@ async fn a_resumed_run_never_adds_a_second_superuser() {
     let _suite = SUITE.lock().await;
     let env = Env::new().await;
     let slug = unique("resume");
-    let request = |email: &str, username: &str| ProvisionRequest {
-        first_admin: Some(rustango::tenancy::FirstAdmin::new(email, Some(username)).unwrap()),
-        ..ProvisionRequest::database(&slug, env.tenant_url(&slug))
+    let request = |email: &str, username: &str| {
+        rustango::testkit::routed(ProvisionRequest {
+            first_admin: Some(rustango::tenancy::FirstAdmin::new(email, Some(username)).unwrap()),
+            ..ProvisionRequest::database(&slug, env.tenant_url(&slug))
+        })
     };
     let run = |request: ProvisionRequest| {
         let env = &env;

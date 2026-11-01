@@ -56,7 +56,7 @@ async fn boot() -> Booted {
 impl Booted {
     async fn run(&self, args: &[&str]) -> Result<String, String> {
         let mut buf: Vec<u8> = Vec::new();
-        let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let argv = rustango::testkit::routed_args(args);
         rustango::tenancy::manage::run_with_writer(
             self.pools.as_ref(),
             &self.url,
@@ -174,16 +174,28 @@ async fn a_value_the_resolver_could_never_match_is_refused() {
 
     // And none of it was written.
     let org = b.org("acme").await;
-    assert!(org.host_pattern.is_none(), "nothing should have landed");
+    assert_eq!(
+        org.host_pattern.as_deref(),
+        Some("acme.localhost"),
+        "nothing should have landed"
+    );
 }
 
 #[tokio::test]
 async fn clear_empties_a_field_that_was_set() {
     let b = boot().await;
     b.tenant("acme").await;
-    b.run(&["edit-tenant", "acme", "--host-pattern", "shop.example.com"])
-        .await
-        .expect("set");
+    // A port keeps the tenant routable once its host is gone.
+    b.run(&[
+        "edit-tenant",
+        "acme",
+        "--host-pattern",
+        "shop.example.com",
+        "--port",
+        "8081",
+    ])
+    .await
+    .expect("set");
 
     b.run(&["edit-tenant", "acme", "--clear", "host-pattern"])
         .await
@@ -192,6 +204,25 @@ async fn clear_empties_a_field_that_was_set() {
         b.org("acme").await.host_pattern.is_none(),
         "should be NULL, not an empty string"
     );
+}
+
+/// No resolver routes a tenant without a host, path prefix or port.
+#[tokio::test]
+async fn clearing_the_last_routing_key_is_refused() {
+    let b = boot().await;
+    b.tenant("acme").await;
+    let before = b.org("acme").await.host_pattern;
+    assert!(before.is_some(), "the fixture routes by host");
+
+    let err = b
+        .run(&["edit-tenant", "acme", "--clear", "host-pattern"])
+        .await
+        .expect_err("an unroutable tenant must be refused");
+    assert!(
+        err.contains("needs a host, a path prefix or a port"),
+        "{err}"
+    );
+    assert_eq!(b.org("acme").await.host_pattern, before, "row unchanged");
 }
 
 #[tokio::test]
@@ -330,7 +361,10 @@ async fn a_host_another_tenant_uses_is_refused() {
             .expect_err("claimed by acme");
         assert!(err.contains("another tenant"), "{taken}: {err}");
     }
-    assert!(b.org("beta").await.host_pattern.is_none());
+    assert_eq!(
+        b.org("beta").await.host_pattern.as_deref(),
+        Some("beta.localhost")
+    );
 
     // Re-saving a tenant's own host is not a clash.
     b.run(&["edit-tenant", "acme", "--host-pattern", "shop.example.com"])
@@ -447,13 +481,16 @@ async fn no_path_points_a_tenant_at_the_registry_database() {
         &b.url,
         b.migrations.path(),
         "globex",
-        CreateTenantOpts {
-            mode: StorageMode::Database,
-            backend: Some(BackendKind::Sqlite),
-            database_url: Some(registry.clone()),
-            no_migrate: true,
-            ..CreateTenantOpts::default()
-        },
+        rustango::testkit::routed_opts(
+            "globex",
+            CreateTenantOpts {
+                mode: StorageMode::Database,
+                backend: Some(BackendKind::Sqlite),
+                database_url: Some(registry.clone()),
+                no_migrate: true,
+                ..CreateTenantOpts::default()
+            },
+        ),
     )
     .await
     .expect_err("create on the registry");
