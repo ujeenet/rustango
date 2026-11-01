@@ -229,7 +229,7 @@ pub struct PostWithTags {
 }
 
 // usage
-let tag_ids = post.tags_m2m().all(&pool).await?;   // ids, not rows
+let tag_ids: Vec<i64> = post.tags_m2m().all(&pool).await?;   // ids, not rows
 let tags = Tag::find_many(tag_ids, &pool).await?;
 let mut s = PostWithTags::from_model(&post);
 s.set_tags(&tags);                       // generated setter, named set_<field>

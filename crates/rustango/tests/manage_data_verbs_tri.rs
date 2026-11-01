@@ -811,7 +811,7 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
     post.tags_m2m().add(tag_id, pool).await.expect("link");
 
     let out = manage(pool, &["flush", "--yes", "--app", "cli2317"]).await;
-    let links = post.tags_m2m().all(pool).await.expect("links");
+    let links = post.tags_m2m().all::<i64>(pool).await.expect("links");
     let left = [
         M2mPost::objects().count(pool).await.expect("posts"),
         M2mTag::objects().count(pool).await.expect("tags"),
@@ -861,7 +861,7 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
 
     fresh_m2m(pool).await;
     let out = manage(pool, &["loaddata", fixture.to_str().unwrap()]).await;
-    let mut links = post.tags_m2m().all(pool).await.expect("links");
+    let mut links = post.tags_m2m().all::<i64>(pool).await.expect("links");
     rustango::testkit::matrix::drop_table(pool, "cli2317_post_tags").await;
     out.expect("loaddata");
     links.sort_unstable();

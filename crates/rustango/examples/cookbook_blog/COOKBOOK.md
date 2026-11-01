@@ -764,15 +764,13 @@ example (`schema_self_fk_resolves_to_own_table`, `live_self_fk_round_trip`).
 pub struct Post { ... }
 
 // CRUD on the junction — bare-name methods:
-post.tags_m2m().all(&pool).await?;                  // -> Vec<i64>
+post.tags_m2m().all::<i64>(&pool).await?;           // the target's key type
 post.tags_m2m().add(42, &pool).await?;
 post.tags_m2m().remove(42, &pool).await?;
 post.tags_m2m().set(&[1, 2, 3], &pool).await?;
 post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
-
-The older `_pool`-suffixed names (`all_pool` / `add_pool` / …) still work but are deprecated forwarders to the bare-name methods — each emits one deprecation warning.
 
 **Verified by**: `m2m_through_junction_table_round_trips`
 

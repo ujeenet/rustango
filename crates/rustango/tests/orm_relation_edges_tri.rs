@@ -394,7 +394,7 @@ async fn race_sets(pool: &Pool, manager: impl Fn() -> rustango::sql::M2MManager)
         let (a, b) = tokio::join!(run(&[1, 2]), run(&[3, 4]));
         a.unwrap_or_else(|e| panic!("round {round}: first set: {e}"));
         b.unwrap_or_else(|e| panic!("round {round}: second set: {e}"));
-        let mut got = manager().all(pool).await.expect("all");
+        let mut got = manager().all::<i64>(pool).await.expect("all");
         got.sort_unstable();
         assert!(got == [1, 2] || got == [3, 4], "round {round}: {got:?}");
     }

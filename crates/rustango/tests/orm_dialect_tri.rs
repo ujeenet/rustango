@@ -453,6 +453,66 @@ async fn pg_bulk_insert_chunks_past_the_bind_cap() {
     assert_eq!(WideFixed::objects().count(&pool).await.unwrap(), 10_000);
 }
 
+/// `bulk_insert_on` chunks past the bind cap on a connection or pool, keeps
+/// read-back order, and a failing later chunk writes nothing.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_bulk_insert_on_chunks_and_stays_atomic() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    fresh_table::<Wide>(&pool).await;
+    fresh_table::<WideFixed>(&pool).await;
+    let pg = pool.as_postgres().expect("pg");
+    // 12 000 rows x 6 columns is past the 65 535 bind cap.
+    let mut rows: Vec<Wide> = (0..12_000_i64)
+        .map(|n| Wide {
+            id: Auto::default(),
+            a: n,
+            b: n,
+            c: n,
+            d: n,
+            e: n,
+            f: n,
+        })
+        .collect();
+    let mut tx = pg.begin().await.unwrap();
+    Wide::bulk_insert_on(&mut rows, &mut *tx)
+        .await
+        .expect("chunked bulk on a transaction");
+    tx.commit().await.unwrap();
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| *r.id.get().expect("read back"))
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "keys in input order");
+    assert_eq!(Wide::objects().count(&pool).await.unwrap(), 12_000);
+
+    // The last row repeats the first key, so only the final chunk fails.
+    let mut fixed: Vec<WideFixed> = (0..10_000_i64)
+        .map(|n| WideFixed {
+            id: n,
+            a: n,
+            b: n,
+            c: n,
+            d: n,
+            e: n,
+            f: n,
+        })
+        .collect();
+    fixed.last_mut().unwrap().id = 0;
+    WideFixed::bulk_insert_on(&fixed, pg)
+        .await
+        .expect_err("duplicate key in the last chunk");
+    assert_eq!(
+        WideFixed::objects().count(&pool).await.unwrap(),
+        0,
+        "earlier chunks rolled back"
+    );
+}
+
 /// Every row `qs.iterator(2)` yields.
 async fn drain(pool: &Pool, qs: rustango::query::QuerySet<Post>) -> Vec<String> {
     let mut it = qs.iterator(2).expect("compile");

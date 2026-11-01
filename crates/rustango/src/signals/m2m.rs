@@ -69,9 +69,9 @@ pub enum M2mAction {
     Add,
     /// One destination removed, through `M2MManager::remove_pool`.
     Remove,
-    /// The whole set replaced, through `M2MManager::set_pool`.
+    /// The whole set replaced, through `M2MManager::set`.
     Set,
-    /// Every destination removed, through `M2MManager::clear_pool`.
+    /// Every destination removed, through `M2MManager::clear`.
     Clear,
 }
 

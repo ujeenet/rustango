@@ -268,7 +268,7 @@ async fn m2m_prefetch_runs_constant_queries(pool: &Pool) {
     let per_instance = QueryCounter::scope(async {
         let posts = Post::objects().fetch(pool).await.unwrap();
         for p in &posts {
-            let ids = p.tags_m2m().all(pool).await.unwrap();
+            let ids = p.tags_m2m().all::<i64>(pool).await.unwrap();
             if ids.is_empty() {
                 continue;
             }

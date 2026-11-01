@@ -438,7 +438,7 @@ async fn an_i32_pk_junction_gets_its_foreign_keys(pool: &Pool) {
     let tag_id = tag.id.get().copied().expect("tag id");
     post.tags_m2m().add(tag_id, pool).await.expect("add");
     assert_eq!(
-        post.tags_m2m().all(pool).await.expect("all"),
+        post.tags_m2m().all::<i64>(pool).await.expect("all"),
         vec![i64::from(tag_id)]
     );
     drop_all().await;

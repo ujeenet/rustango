@@ -253,19 +253,19 @@ async fn string_pk_rows_stay_per_source(pool: &Pool) {
     abc.tags_m2m().add(1, pool).await.expect("add abc");
     def.tags_m2m().add(2, pool).await.expect("add def");
 
-    assert_eq!(abc.tags_m2m().all(pool).await.expect("all"), vec![1]);
+    assert_eq!(abc.tags_m2m().all::<i64>(pool).await.expect("all"), vec![1]);
     assert!(abc.tags_m2m().contains(1, pool).await.expect("contains"));
     assert!(!abc.tags_m2m().contains(2, pool).await.expect("contains"));
 
     abc.tags_m2m().set(&[3, 4], pool).await.expect("set");
-    let mut got = abc.tags_m2m().all(pool).await.expect("all");
+    let mut got = abc.tags_m2m().all::<i64>(pool).await.expect("all");
     got.sort_unstable();
     assert_eq!(got, vec![3, 4]);
-    assert_eq!(def.tags_m2m().all(pool).await.expect("all"), vec![2]);
+    assert_eq!(def.tags_m2m().all::<i64>(pool).await.expect("all"), vec![2]);
 
     abc.tags_m2m().remove(3, pool).await.expect("remove");
     abc.tags_m2m().clear(pool).await.expect("clear");
-    assert_eq!(def.tags_m2m().all(pool).await.expect("all"), vec![2]);
+    assert_eq!(def.tags_m2m().all::<i64>(pool).await.expect("all"), vec![2]);
     let stored = PostTag::objects()
         .filter("post_id", "def-slug")
         .count(pool)
@@ -296,12 +296,12 @@ async fn unregistered_junction_round_trips(pool: &Pool) {
     a.tags_m2m().add(1, pool).await.expect("add");
     a.tags_m2m().add(1, pool).await.expect("duplicate add");
     b.tags_m2m().set(&[2, 3], pool).await.expect("set");
-    assert_eq!(a.tags_m2m().all(pool).await.expect("all"), vec![1]);
+    assert_eq!(a.tags_m2m().all::<i64>(pool).await.expect("all"), vec![1]);
     assert!(b.tags_m2m().contains(3, pool).await.expect("contains"));
     b.tags_m2m().remove(3, pool).await.expect("remove");
-    assert_eq!(b.tags_m2m().all(pool).await.expect("all"), vec![2]);
+    assert_eq!(b.tags_m2m().all::<i64>(pool).await.expect("all"), vec![2]);
     a.tags_m2m().clear(pool).await.expect("clear");
-    assert!(a.tags_m2m().all(pool).await.expect("all").is_empty());
+    assert!(a.tags_m2m().all::<i64>(pool).await.expect("all").is_empty());
 }
 
 /// The junction's ends take the models' pk types, so text keys bind.
@@ -326,7 +326,7 @@ async fn text_keys_on_an_unregistered_junction(pool: &Pool) {
         .remove("satire", pool)
         .await
         .expect("remove");
-    let got: Vec<String> = bob.genres_m2m().all_as(pool).await.expect("all_as");
+    let got: Vec<String> = bob.genres_m2m().all(pool).await.expect("all_as");
     assert_eq!(got, ["drama"]);
 }
 
@@ -348,9 +348,9 @@ async fn uuid_pk_rows_stay_per_source(pool: &Pool) {
     a.tags_m2m().add(1, pool).await.expect("add a");
     b.tags_m2m().set(&[2, 3], pool).await.expect("set b");
 
-    assert_eq!(a.tags_m2m().all(pool).await.expect("all"), vec![1]);
+    assert_eq!(a.tags_m2m().all::<i64>(pool).await.expect("all"), vec![1]);
     a.tags_m2m().clear(pool).await.expect("clear");
-    let mut got = b.tags_m2m().all(pool).await.expect("all");
+    let mut got = b.tags_m2m().all::<i64>(pool).await.expect("all");
     got.sort_unstable();
     assert_eq!(got, vec![2, 3]);
     let stored = DocTag::objects()
@@ -386,11 +386,11 @@ async fn string_destination_keys_round_trip(pool: &Pool) {
         .await
         .expect("contains"));
     assert!(!a.labels_m2m().contains("go", pool).await.expect("contains"));
-    let mut got: Vec<String> = b.labels_m2m().all_as(pool).await.expect("all_as");
+    let mut got: Vec<String> = b.labels_m2m().all(pool).await.expect("all_as");
     got.sort_unstable();
     assert_eq!(got, ["go", "zig"]);
     b.labels_m2m().remove("go", pool).await.expect("remove");
-    let got: Vec<String> = b.labels_m2m().all_as(pool).await.expect("all_as");
+    let got: Vec<String> = b.labels_m2m().all(pool).await.expect("all_as");
     assert_eq!(got, ["zig"]);
     assert_eq!(ShelfLabel::objects().count(pool).await.expect("count"), 2);
 }
@@ -402,10 +402,10 @@ async fn uuid_destination_keys_round_trip(pool: &Pool) {
     let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     rack.badges_m2m().add(a, pool).await.expect("add");
     assert!(rack.badges_m2m().contains(a, pool).await.expect("contains"));
-    let got: Vec<uuid::Uuid> = rack.badges_m2m().all_as(pool).await.expect("all_as");
+    let got: Vec<uuid::Uuid> = rack.badges_m2m().all(pool).await.expect("all_as");
     assert_eq!(got, [a]);
     rack.badges_m2m().set(&[a, b], pool).await.expect("set");
-    let mut got: Vec<uuid::Uuid> = rack.badges_m2m().all_as(pool).await.expect("all_as");
+    let mut got: Vec<uuid::Uuid> = rack.badges_m2m().all(pool).await.expect("all_as");
     got.sort_unstable();
     let mut want = vec![a, b];
     want.sort_unstable();
@@ -420,11 +420,7 @@ async fn uuid_destination_keys_round_trip(pool: &Pool) {
         .execute(sq)
         .await
         .expect("text row");
-        let got: Vec<uuid::Uuid> = Rack { id: 2 }
-            .badges_m2m()
-            .all_as(pool)
-            .await
-            .expect("text");
+        let got: Vec<uuid::Uuid> = Rack { id: 2 }.badges_m2m().all(pool).await.expect("text");
         assert_eq!(got, [c]);
     }
 }
@@ -436,7 +432,7 @@ async fn mistyped_destination_keys_are_checked(pool: &Pool) {
         .add("7", pool)
         .await
         .expect("numeric text converts");
-    assert_eq!(p.tags_m2m().all(pool).await.expect("all"), vec![7]);
+    assert_eq!(p.tags_m2m().all::<i64>(pool).await.expect("all"), vec![7]);
     let err = p.tags_m2m().add("seven", pool).await.expect_err("text key");
     assert!(
         matches!(

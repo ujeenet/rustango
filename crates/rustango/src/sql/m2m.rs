@@ -64,20 +64,12 @@ pub struct M2MManager {
 }
 
 impl M2MManager {
-    /// Return all destination PKs linked to the source instance.
-    /// Tri-dialect via [`Pool`] dispatch.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
-        self.all_as::<i64>(pool).await
-    }
-
-    /// [`Self::all`] decoded as `K`, for a `String` / `Uuid` target PK (#1950).
+    /// Every destination PK linked to the source instance, decoded as the
+    /// target's key type `K` (`i64`, `String`, `Uuid`, ...).
     ///
     /// # Errors
     /// Driver failures, including a `dst` column that does not decode as `K`.
-    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
+    pub async fn all<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let src = self.src_key()?;
         fetch_dst(
             self.junction(),
@@ -740,20 +732,13 @@ impl GenericM2MManager {
         .await;
     }
 
-    /// Related PKs linked to this instance (scoped to its content type).
-    /// Decoded as `i64`; use [`Self::all_as`] for a non-integer target PK (#2050).
+    /// Related PKs linked to this instance (scoped to its content type),
+    /// decoded as the target's key type `K`.
     ///
     /// # Errors
-    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
-    pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
-        self.all_as::<i64>(pool).await
-    }
-
-    /// [`Self::all`] decoded as `K`, for a `String` / `Uuid` target PK (#1950).
-    ///
-    /// # Errors
-    /// Driver failures, including a `dst` column that does not decode as `K`.
-    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
+    /// Driver failures, a `dst` column that does not decode as `K`, or
+    /// [`ExecError::ContentTypeNotRegistered`].
+    pub async fn all<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let owner = self.owner(pool).await?;
         fetch_dst(self.junction(), self.dst_col, owner, pool).await
     }
@@ -876,43 +861,5 @@ impl GenericM2MManager {
         let mut filters = self.owner(pool).await?;
         filters.push(eq(self.dst_col, dst));
         exists(self.junction(), filters, pool).await
-    }
-}
-
-// ============================================================ deprecated _pool aliases
-
-/// Source-compat shims for callers still using the pre-#891
-/// `_pool`-suffixed names. Each forwards verbatim to the bare-name
-/// method above. Slated for removal in the next major version —
-/// the deprecation attribute is the canary.
-impl M2MManager {
-    #[deprecated(note = "renamed to `all` — drop the `_pool` suffix")]
-    pub async fn all_pool(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
-        self.all(pool).await
-    }
-
-    #[deprecated(note = "renamed to `add` — drop the `_pool` suffix")]
-    pub async fn add_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
-        self.add(dst_id, pool).await
-    }
-
-    #[deprecated(note = "renamed to `remove` — drop the `_pool` suffix")]
-    pub async fn remove_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
-        self.remove(dst_id, pool).await
-    }
-
-    #[deprecated(note = "renamed to `set` — drop the `_pool` suffix")]
-    pub async fn set_pool(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
-        self.set(ids, pool).await
-    }
-
-    #[deprecated(note = "renamed to `clear` — drop the `_pool` suffix")]
-    pub async fn clear_pool(&self, pool: &Pool) -> Result<(), ExecError> {
-        self.clear(pool).await
-    }
-
-    #[deprecated(note = "renamed to `contains` — drop the `_pool` suffix")]
-    pub async fn contains_pool(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
-        self.contains(dst_id, pool).await
     }
 }

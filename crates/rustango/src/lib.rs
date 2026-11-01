@@ -1432,6 +1432,50 @@ pub use axum as __axum;
 /// }
 /// # fn main() {}
 /// ```
+///
+/// A `reverse_has` / `generic_has` `self_pk_column` names a column of the model:
+///
+/// ```
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post", reverse_has(name = "notes", child = "PostNote",
+///     child_fk_column = "post_slug", self_pk_column = "slug"))]
+/// pub struct Post {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50, unique)]
+///     pub slug: String,
+/// }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post_note")]
+/// pub struct PostNote {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50)]
+///     pub post_slug: String,
+/// }
+/// # fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post", reverse_has(name = "notes", child = "PostNote",
+///     child_fk_column = "post_slug", self_pk_column = "slgu"))]
+/// pub struct Post {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50, unique)]
+///     pub slug: String,
+/// }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post_note")]
+/// pub struct PostNote {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50)]
+///     pub post_slug: String,
+/// }
+/// # fn main() {}
+/// ```
 pub use rustango_macros::Model;
 
 /// Re-exported for `register_admin_computed!` and any user code that

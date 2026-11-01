@@ -168,8 +168,7 @@ pub use executor::{annotate_count_children_on, fetch_aggregate_on};
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use super::executor::{
-        bulk_insert_on, bulk_insert_rows_per_statement, delete_on, fetch_with_prefetch, insert_on,
-        insert_returning_on, update_on,
+        bulk_insert_on, delete_on, fetch_with_prefetch, insert_on, insert_returning_on, update_on,
     };
 }
 

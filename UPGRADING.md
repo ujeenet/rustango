@@ -148,6 +148,15 @@ untouched.
 
 ---
 
+## Unreleased
+
+- `M2MManager::all` and `GenericM2MManager::all` are generic over the key type and `all_as` is gone: write `m.all::<i64>(&pool)` (or annotate `let ids: Vec<i64>`); use `String` / `Uuid` for those keys.
+- The deprecated `M2MManager` `_pool` aliases (`all_pool`, `add_pool`, `remove_pool`, `set_pool`, `clear_pool`, `contains_pool`) are removed; drop the suffix.
+- `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
+- `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
+
+---
+
 ## 0.61.16
 
 - `HeaderResolver` and `PortResolver` now cache for 30 s like the host resolvers. A tenant created, suspended or re-slugged by another process is seen within the fingerprint poll (`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 s by default); writes through rustango in the same process are seen at once.

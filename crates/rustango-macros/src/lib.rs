@@ -803,6 +803,27 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let model_name = struct_name.to_string();
 
     let collected = collect_fields(named, &table)?;
+    // An explicit `self_pk_column` must name a column of this model.
+    let explicit_pks = container
+        .reverse_has_relations
+        .iter()
+        .map(|r| (&r.self_pk_column, r.self_pk_span))
+        .chain(
+            container
+                .generic_has_relations
+                .iter()
+                .map(|r| (&r.self_pk_column, r.self_pk_span)),
+        );
+    for (column, span) in explicit_pks {
+        if let (Some(column), Some(span)) = (column, span) {
+            if !collected.column_entries.iter().any(|c| &c.column == column) {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`self_pk_column = \"{column}\"` names no column of `{model_name}`"),
+                ));
+            }
+        }
+    }
     // `reverse_has` / `generic_has` join on the PK column unless they name another.
     if let Some((_, pk_column)) = &collected.primary_key {
         for rel in &mut container.reverse_has_relations {
@@ -3304,31 +3325,27 @@ fn inherent_impl_tokens(
     } else {
         quote!(self.delete_on(pool).await)
     };
-    // Past the bind cap one statement per chunk, all in one transaction.
-    let bulk_columns = fields.bulk_columns_all.len();
-    let one_statement = if audited_fields.is_some() {
-        quote!()
-    } else {
+    // `bulk_insert_on` chunks past the bind cap itself; audited models
+    // still need a connection for the audit rows.
+    let pool_to_bulk_insert_on = if audited_fields.is_some() {
         quote! {
-            if rows.len() <= _per {
-                return Self::bulk_insert_on(rows, pool).await;
-            }
-        }
-    };
-    let pool_to_bulk_insert_on = |chunks: TokenStream2| {
-        quote! {
-            let _per = #root::sql::__macro_internals::bulk_insert_rows_per_statement(#bulk_columns);
-            #one_statement
             let mut _tx = pool.begin().await?;
-            for _chunk in rows.#chunks(_per) {
-                Self::bulk_insert_on(_chunk, &mut *_tx).await?;
-            }
+            Self::bulk_insert_on(rows, &mut *_tx).await?;
             _tx.commit().await?;
             ::core::result::Result::Ok(())
         }
+    } else {
+        quote!(Self::bulk_insert_on(rows, pool).await)
     };
-    let pool_to_bulk_insert_mut = pool_to_bulk_insert_on(quote!(chunks_mut));
-    let pool_to_bulk_insert_on = pool_to_bulk_insert_on(quote!(chunks));
+    // `bulk_insert_on` takes anything it can acquire a connection from.
+    let bulk_executor_where = if audited_fields.is_some() {
+        quote!()
+    } else {
+        quote! {
+            where
+                _E: #root::sql::sqlx::Acquire<'_c, Database = #root::sql::sqlx::Postgres>,
+        }
+    };
     // Pre-existing bug surfaced by batch 22's first audited Auto<T>
     // PK test model: `upsert(&PgPool)` body called `self.upsert_on(pool)`
     // directly, but `upsert_on` for audited models takes
@@ -7677,7 +7694,7 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 pool: &#root::sql::sqlx::PgPool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_mut
+                #pool_to_bulk_insert_on
             }
 
             /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
@@ -7690,7 +7707,7 @@ fn inherent_impl_tokens(
                 rows: &mut [Self],
                 #executor_param,
             ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
+            #bulk_executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
@@ -7772,7 +7789,7 @@ fn inherent_impl_tokens(
                 rows: &[Self],
                 #executor_param,
             ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
+            #bulk_executor_where
             {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
@@ -8841,6 +8858,8 @@ struct ReverseHasAttr {
     /// Column on **this** model's table the child FK references — the
     /// `OuterRef` target. Defaults to the PK column (`"id"` without one).
     self_pk_column: Option<String>,
+    /// Where an explicit `self_pk_column` was written, for its error.
+    self_pk_span: Option<proc_macro2::Span>,
 }
 
 impl ReverseHasAttr {
@@ -8869,6 +8888,8 @@ struct GenericHasAttr {
     /// SQL primary-key column on **this** (parent) model's table.
     /// Defaults to the PK column (`"id"` without one).
     self_pk_column: Option<String>,
+    /// Where an explicit `self_pk_column` was written, for its error.
+    self_pk_span: Option<proc_macro2::Span>,
 }
 
 impl GenericHasAttr {
@@ -9622,6 +9643,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut child_ident: Option<syn::Ident> = None;
                 let mut child_fk_column: Option<String> = None;
                 let mut self_pk_column: Option<String> = None;
+                let mut self_pk_span: Option<proc_macro2::Span> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9672,6 +9694,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             ));
                         }
                         self_pk_column = Some(trimmed.to_owned());
+                        self_pk_span = Some(s.span());
                         return Ok(());
                     }
                     Err(inner.error(
@@ -9712,6 +9735,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     child,
                     child_fk_column,
                     self_pk_column,
+                    self_pk_span,
                 });
                 return Ok(());
             }
@@ -9727,6 +9751,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut ct_column: Option<String> = None;
                 let mut pk_column: Option<String> = None;
                 let mut self_pk_column: Option<String> = None;
+                let mut self_pk_span: Option<proc_macro2::Span> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9786,6 +9811,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             ));
                         }
                         self_pk_column = Some(trimmed);
+                        self_pk_span = Some(s.span());
                         return Ok(());
                     }
                     Err(inner.error(
@@ -9823,6 +9849,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ct_column,
                     pk_column,
                     self_pk_column,
+                    self_pk_span,
                 });
                 return Ok(());
             }
