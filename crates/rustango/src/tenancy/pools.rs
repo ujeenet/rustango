@@ -734,6 +734,53 @@ impl TenantPools<sqlx::Postgres> {
     }
 }
 
+/// A registry table that `search_path` resolves to the schema named after
+/// the current role while a same-named table sits in a later schema: that
+/// schema shadows the registry. Returns `(schema, table)`.
+#[cfg(feature = "postgres")]
+pub(crate) async fn registry_shadow(pg: &PgPool) -> Result<Option<(String, String)>, sqlx::Error> {
+    let tables: Vec<String> = inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .map(|e| e.schema)
+        .filter(|s| s.scope == crate::core::ModelScope::Registry && s.managed && !s.is_view)
+        .map(|s| s.table.to_owned())
+        .collect();
+    sqlx::query_as(
+        "SELECT n.nspname::text, c.relname::text \
+         FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace \
+         WHERE n.nspname = current_user AND c.relname = ANY($1) \
+           AND array_position(current_schemas(false), n.nspname) IS NOT NULL \
+           AND EXISTS (SELECT 1 FROM pg_catalog.pg_class c2 \
+                       JOIN pg_catalog.pg_namespace n2 ON n2.oid = c2.relnamespace \
+                       WHERE c2.relname = c.relname AND n2.nspname <> n.nspname \
+                         AND array_position(current_schemas(false), n2.nspname) \
+                             > array_position(current_schemas(false), n.nspname)) \
+         LIMIT 1",
+    )
+    .bind(tables)
+    .fetch_optional(pg)
+    .await
+}
+
+/// Refuse to run when [`registry_shadow`] finds a shadowing schema.
+#[cfg(feature = "postgres")]
+pub(crate) async fn refuse_registry_shadow<DB: Database>(
+    pools: &TenantPools<DB>,
+) -> Result<(), TenancyError> {
+    let Some(pg) = (pools as &dyn std::any::Any).downcast_ref::<TenantPools<sqlx::Postgres>>()
+    else {
+        return Ok(());
+    };
+    match registry_shadow(pg.registry()).await? {
+        None => Ok(()),
+        Some((schema, table)) => Err(TenancyError::Validation(format!(
+            "schema `{schema}` is named after the database role and holds `{table}`, so \
+             search_path reads it instead of the copy later in the path; rename or drop one \
+             of them, or set search_path on the registry URL"
+        ))),
+    }
+}
+
 impl<DB: Database> TenantPools<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,

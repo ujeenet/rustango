@@ -679,6 +679,8 @@ impl<DB: Database> Builder<DB> {
         F: FnOnce(Arc<TenantPools<DB>>, sqlx::Pool<DB>, String) -> Fut,
         Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         hook(
             self.pools.clone(),
             self.registry.clone(),
@@ -725,6 +727,8 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let root = project_root.as_ref();
         std::fs::create_dir_all(root)?;
 
@@ -779,6 +783,8 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let resolver_for_admin = self.resolver();
         // Picks the prefixed admin routes for a path under its tenant's prefix.
         let dispatch_resolver = Arc::new(self.resolver());

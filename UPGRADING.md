@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- On Postgres, the server (`migrate`, `seed_with`, `serve`) and every tenancy CLI verb refuse to run when a schema named after the database role holds a registry table that also exists later in `search_path`. Drop or rename one copy, or pin `search_path` on the registry URL.
 - `testkit::create_tables` also creates the auto-created M2M junctions between the models it is given; a test that built them by hand afterwards can drop that step (`create_junctions` stays and is idempotent).
 - Tenant JWTs must carry the org id (`org_id`) as well as the slug: tokens minted before this release are refused, so users sign in again. `TenantSlug` is now `TenantSlug::new(org_id, slug)`, `JwtBackend::issue_for_tenant*` and `UserTokenScope::Tenant` take a `&TenantSlug`, `PageKey::tenant` takes the org id, and an `OrgResolver` must return orgs with an id for `require_auth` and the JWT routes.
 - `[security] hsts_max_age_secs` keeps the preset's directives: on `relaxed` it no longer adds `includeSubDomains; preload`, and on `dev` it sends a bare `max-age`. Sites that relied on the added `preload` should use `strict` or set the header.

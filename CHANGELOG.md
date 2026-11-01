@@ -29,6 +29,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- The server and the tenancy CLI refuse to start on Postgres when a schema named after the database role holds a registry table: `search_path` reads it first, so the real registry was silently hidden.
 - Tenancy: a tenant that reuses a purged tenant's slug no longer accepts its JWTs or serves its cached pages and idempotent replays; tokens carry an `org_id` claim and those keys hold the org id.
 - `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
 - Admin detail, edit, update and delete answer 404, not 403, for a row the `view` hook hides.

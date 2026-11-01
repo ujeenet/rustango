@@ -264,6 +264,8 @@ async fn dispatch_with<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    #[cfg(feature = "postgres")]
+    crate::tenancy::refuse_registry_shadow(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
