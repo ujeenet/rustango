@@ -1239,9 +1239,9 @@ async fn migrate_storage_checks_the_target_url(pool: &Pool) {
 }
 
 /// The registry under another host name passes the endpoint check; the
-/// connection check names it (a warning for now). SQLite: a hard link to
-/// the open registry does not even connect.
-async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
+/// connection check refuses it, at create and at edit. SQLite: a hard
+/// link to the open registry does not even connect.
+async fn the_registry_under_an_alias_is_refused(pool: &Pool) {
     let env = Env::new(pool).await;
     let alias = match env.backend() {
         BackendKind::Sqlite => return,
@@ -1257,24 +1257,13 @@ async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
         ..env.db_request("alias", &alias)
     };
     let dir = env.dir("migrations");
-    let (run, _) =
-        typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
+    let err = typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
         &p, &env.url, &dir, &request, None, None, None,
     )
     .await)
-        .expect("only warned in this release");
-    let events =
-        rustango::tenancy::provision_store::events_since(&env.registry, *run.id.get().unwrap(), 0)
-            .await
-            .unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|e| e.message.contains("registry's own database")),
-        "{:?}",
-        events.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
-    // An edit to the alias is saved and says so.
+    .expect_err("the registry under an alias is refused");
+    assert!(err.to_string().contains("registry's own database"), "{err}");
+    // An edit to the alias is refused too.
     let mut other = Org {
         slug: "aliased".into(),
         display_name: "aliased".into(),
@@ -1283,11 +1272,11 @@ async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
         ..rustango::testkit::org()
     };
     other.save_pool(&env.registry).await.expect("insert org");
-    let out = env
+    let err = env
         .run_out(&dir, &["edit-tenant", "aliased", "--database-url", &alias])
         .await
-        .expect("only warned in this release");
-    assert!(out.contains("registry's own database"), "{out}");
+        .expect_err("refused");
+    assert!(err.to_string().contains("registry's own database"), "{err}");
 }
 
 /// `reseal-tenant-secrets` lists, then seals, a plain password URL.
@@ -2259,7 +2248,7 @@ tri_dialect_test! {
         provision_releases_its_schema_on_a_failed_insert,
         concurrent_creates_never_share_a_schema,
         a_duplicate_slug_leaves_no_run,
-        the_registry_under_an_alias_is_flagged,
+        the_registry_under_an_alias_is_refused,
         check_deploy_names_a_role_named_schema,
         check_names_tenants_behind_on_tenant_migrations,
         check_bounds_an_unreachable_tenant,

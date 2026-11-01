@@ -2202,7 +2202,7 @@ async fn org_edit_submit(
     }
     emit_op_audit(&state.registry, &slug, operator_id, "edit", detail).await;
 
-    let mut notice = if database_url_changed {
+    let notice = if database_url_changed {
         format!(
             "updated `{slug}` (this server switched now; others within {} s)",
             crate::tenancy::resolver::CACHE_TTL.as_secs()
@@ -2210,10 +2210,6 @@ async fn org_edit_submit(
     } else {
         format!("updated `{slug}`")
     };
-    if let Some(warning) = applied.warning {
-        notice.push_str(" — ");
-        notice.push_str(warning);
-    }
     flash::redirect(
         &format!("/orgs/{}/edit", urlencoding_lite(&slug)),
         flash::Flash::Notice(&notice),

@@ -148,7 +148,6 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::rate_limit` | Limitación de tasa |
 | `rustango::request_timeout` | Timeout por petición |
 | `rustango::scheduler` | Cron / tareas programadas |
-| `rustango::security_headers` | Ajustes de las cabeceras de seguridad (HSTS) |
 | `rustango::server` | Arranque y apagado del servidor |
 | `rustango::shutdown` | Manejo de señales y hooks de apagado |
 | `rustango::sql` | Ejecución de consultas |

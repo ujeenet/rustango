@@ -171,12 +171,9 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
     // The database rustango made for the tenant stays behind; its record
     // goes with the move, so purge and rotate never act on it again.
     let made = TenantDatabase::of_org(&pools.registry_pool(), &org).await?;
-    let alias = match parsed.target {
-        StorageMode::Database if parsed.database_url.is_some() => {
-            crate::tenancy::provision::registry_alias(&target_url, &pools.registry_pool()).await
-        }
-        _ => None,
-    };
+    if matches!(parsed.target, StorageMode::Database) && parsed.database_url.is_some() {
+        crate::tenancy::provision::registry_alias(&target_url, &pools.registry_pool()).await?;
+    }
 
     writeln!(
         writer,
@@ -192,9 +189,6 @@ pub(super) async fn migrate_tenant_storage_cmd<W: Write + Send>(
         writeln!(writer, "  target: {} (schema `{s}`)", shown(&target_ref))?;
     } else {
         writeln!(writer, "  target: {}", shown(&target_ref))?;
-    }
-    if let Some(w) = alias {
-        writeln!(writer, "  {w}")?;
     }
 
     if parsed.dry_run {
