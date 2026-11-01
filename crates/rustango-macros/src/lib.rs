@@ -337,12 +337,9 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // runtime ourselves keeps the dep transitive through the
     // `runtime` feature on rustango.
     //
-    // Parse optional `flavor = "current_thread"` / `flavor =
-    // "multi_thread"` from the attribute args. Unknown args still
-    // compile, with a warning that they are ignored.
+    // `flavor` and `logging`; anything else is a compile error.
     let root = rustango_root();
-    let arg_warnings = main_arg_warnings(&args);
-    let flavor = parse_flavor(&args);
+    let MainArgs { flavor, logging } = parse_main_args(&args)?;
     let builder_call = match flavor {
         Flavor::CurrentThread => quote! {
             #root::__private_runtime::tokio::runtime::Builder::new_current_thread()
@@ -360,7 +357,7 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // `logging = false` drops the block entirely, so a later
     // `Cli::with_logging()` is the first installer and its
     // `[logging]` settings actually take effect (#1465).
-    let logging_prologue = if parse_logging(&args) {
+    let logging_prologue = if logging {
         quote! {
             // `Setup`'s defaults, not a copy of them: filter, format and
             // the `Color::Auto` rule live in one place (#1493).
@@ -376,7 +373,6 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     };
 
     input.block = syn::parse2(quote! {{
-        #arg_warnings
         { #logging_prologue }
         let __rt = #builder_call
             .enable_all()
@@ -395,86 +391,53 @@ enum Flavor {
     CurrentThread,
 }
 
-/// `#[tokio::main]` argument names, accepted without a warning.
-const TOKIO_MAIN_ARGS: &[&str] = &[
-    "flavor",
-    "worker_threads",
-    "start_paused",
-    "crate",
-    "unhandled_panic",
-];
+/// What `#[rustango::main]` was asked for.
+struct MainArgs {
+    flavor: Flavor,
+    logging: bool,
+}
 
-/// A warning per `#[rustango::main]` argument the parsers below ignore.
-fn main_arg_warnings(args: &TokenStream2) -> TokenStream2 {
+const MAIN_ARGS_HELP: &str =
+    "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`";
+
+/// Parse `#[rustango::main(...)]`; an unknown or misspelt argument is an error.
+fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
     use syn::parse::Parser as _;
-    let parsed = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
-        .parse2(args.clone());
-    let metas = match parsed {
-        Ok(m) => m,
-        Err(e) => {
-            return deprecation_warning(
+    let metas = syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated
+        .parse2(args.clone())
+        .map_err(|e| {
+            syn::Error::new(
                 e.span(),
-                &format!("#[rustango::main]: cannot parse the arguments ({e}); they are ignored"),
+                format!("#[rustango::main]: {e}; {MAIN_ARGS_HELP}"),
             )
-        }
+        })?;
+    let mut out = MainArgs {
+        flavor: Flavor::MultiThread,
+        logging: true,
     };
-    let lit_bool = |m: &syn::MetaNameValue| match &m.value {
-        syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Bool(_),
-            ..
-        }) => true,
-        _ => false,
-    };
-    metas
-        .iter()
-        .filter_map(|meta| {
-            // `#[tokio::main]`'s own names stay silent: a `deny(warnings)`
-            // crate passing one must keep compiling in a patch release.
-            let tokio_arg = TOKIO_MAIN_ARGS.iter().any(|n| meta.path().is_ident(n));
-            let ok = match meta {
-                syn::Meta::NameValue(m) if m.path.is_ident("logging") => lit_bool(m),
-                _ => tokio_arg,
-            };
-            (!ok).then(|| {
-                deprecation_warning(
-                    meta.span(),
-                    "#[rustango::main]: unknown argument, ignored (supported: \
-                     `flavor = \"current_thread\" | \"multi_thread\"`, `logging = false`)",
-                )
-            })
-        })
-        .collect()
-}
-
-/// A compile warning at `span`: a proc macro's only stable way to warn
-/// is a `#[deprecated]` item that its own output then uses.
-fn deprecation_warning(span: proc_macro2::Span, note: &str) -> TokenStream2 {
-    quote::quote_spanned! {span=>
-        const _: () = {
-            #[deprecated(note = #note)]
-            const RUSTANGO_WARNING: () = ();
-            RUSTANGO_WARNING
+    for meta in &metas {
+        let lit = match &meta.value {
+            syn::Expr::Lit(l) => Some(&l.lit),
+            _ => None,
         };
+        let name = meta.path.get_ident().map(ToString::to_string);
+        match (name.as_deref(), lit) {
+            (Some("flavor"), Some(syn::Lit::Str(s))) if s.value() == "current_thread" => {
+                out.flavor = Flavor::CurrentThread;
+            }
+            (Some("flavor"), Some(syn::Lit::Str(s))) if s.value() == "multi_thread" => {
+                out.flavor = Flavor::MultiThread;
+            }
+            (Some("logging"), Some(syn::Lit::Bool(b))) => out.logging = b.value,
+            _ => {
+                return Err(syn::Error::new(
+                    meta.span(),
+                    format!("#[rustango::main]: unsupported argument; {MAIN_ARGS_HELP}"),
+                ))
+            }
+        }
     }
-}
-
-fn parse_flavor(args: &TokenStream2) -> Flavor {
-    // Cheap parser: look for the literal token sequence
-    // `flavor = "current_thread"`. Everything else (including
-    // bare `multi_thread` or no args) defaults to multi-thread.
-    let s = args.to_string();
-    if s.contains("current_thread") {
-        Flavor::CurrentThread
-    } else {
-        Flavor::MultiThread
-    }
-}
-
-/// `false` when the attribute carries `logging = false` — the caller
-/// installs their own subscriber, usually via `Cli::with_logging`
-/// (#1465). Same cheap token match as `parse_flavor`.
-fn parse_logging(args: &TokenStream2) -> bool {
-    !args.to_string().replace(' ', "").contains("logging=false")
+    Ok(out)
 }
 
 /// Parse form for `Q!()` — `<TypePath>.<Ident> = <Expr>`.
@@ -930,8 +893,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
-    let column_warnings =
-        unknown_column_warnings(&container.indexes, &container.get_latest_by, &collected);
+    check_known_columns(&container.indexes, &container.get_latest_by, &collected)?;
 
     // Build the audit_track list for ModelSchema: None when no audit attr,
     // Some(empty) when audit present without track, Some(names) when explicit.
@@ -1099,7 +1061,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     );
 
     Ok(quote! {
-        #column_warnings
         #model_impl
         #inherent_impl
         #from_row_impl
@@ -1133,13 +1094,13 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-/// A deprecation-style warning per index or `get_latest_by` name that is
-/// no column of the model: an error would break code that compiles today.
-fn unknown_column_warnings(
+/// An index or `get_latest_by` name that is no column of the model is a
+/// compile error; an expression index such as `lower(email)` is not checked.
+fn check_known_columns(
     indexes: &[IndexAttr],
     get_latest_by: &Option<(String, bool, proc_macro2::Span)>,
     collected: &CollectedFields,
-) -> TokenStream2 {
+) -> syn::Result<()> {
     let is_column = |c: &str| collected.column_entries.iter().any(|e| e.column == c);
     // Only plain names: an expression index such as `lower(email)` is legal.
     let plain = |c: &str| c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
@@ -1160,10 +1121,14 @@ fn unknown_column_warnings(
             ));
         }
     }
-    found
+    let mut errors = found
         .into_iter()
-        .map(|(span, note)| deprecation_warning(span, &note))
-        .collect()
+        .map(|(span, note)| syn::Error::new(span, note));
+    let Some(mut first) = errors.next() else {
+        return Ok(());
+    };
+    first.extend(errors);
+    Err(first)
 }
 
 /// Guard before decoding a `select_related` target (#2293): a NULL nullable
@@ -14661,7 +14626,7 @@ mod main_attr_tests {
             .to_string()
     }
 
-    /// Asserts on the expansion rather than on `parse_logging`,
+    /// Asserts on the expansion rather than on `parse_main_args`,
     /// because the defect was a subscriber reaching the output, not
     /// an argument being misread (#1465).
     #[test]
@@ -14704,45 +14669,52 @@ mod main_attr_tests {
 
     #[test]
     fn logging_true_is_the_default_shape() {
-        // `logging = true` is accepted and means the default, so the
-        // match must not fire on the substring `logging`.
-        assert!(parse_logging(&"logging = true".parse().unwrap()));
-        assert!(!parse_logging(&"logging=false".parse().unwrap()));
+        assert!(
+            parse_main_args(&"logging = true".parse().unwrap())
+                .unwrap()
+                .logging
+        );
+        assert!(
+            !parse_main_args(&"logging=false".parse().unwrap())
+                .unwrap()
+                .logging
+        );
     }
 }
 
 #[cfg(test)]
-mod main_arg_warning_tests {
+mod main_arg_tests {
     use super::*;
 
-    fn expand(args: &str) -> String {
+    fn expand(args: &str) -> syn::Result<TokenStream2> {
         let body = quote! { async fn main() { run().await } };
         expand_main(args.parse().unwrap(), body)
-            .expect("expansion failed")
-            .to_string()
     }
 
-    /// A typo or unknown key used to be dropped without a word.
+    /// A typo or unknown key is a compile error, not silently ignored.
     #[test]
-    fn unknown_or_misspelt_args_warn() {
-        for args in ["logging = flase", "multi_thread", "workers = 4"] {
-            let out = expand(args);
-            assert!(out.contains("unknown argument"), "{args}:\n{out}");
+    fn unknown_or_misspelt_args_are_errors() {
+        for args in [
+            "logging = flase",
+            "multi_thread",
+            "workers = 4",
+            r#"flavor = "curent_thread""#,
+            "worker_threads = 4",
+        ] {
+            let err = expand(args).expect_err(args).to_string();
+            assert!(err.contains("#[rustango::main]"), "{args}: {err}");
         }
     }
 
     #[test]
-    fn supported_args_do_not_warn() {
+    fn supported_args_expand() {
         for args in [
             "",
             r#"flavor = "current_thread""#,
             r#"flavor = "multi_thread", logging = false"#,
             "logging = true",
-            "worker_threads = 4, start_paused = true",
-            r#"crate = "tokio", unhandled_panic = "shutdown_runtime""#,
-            r#"flavor = "curent_thread""#,
         ] {
-            assert!(!expand(args).contains("RUSTANGO_WARNING"), "{args}");
+            assert!(expand(args).is_ok(), "{args}");
         }
     }
 }
@@ -14857,9 +14829,10 @@ mod field_attr_tests {
         assert!(expand(&input).is_ok());
     }
 
-    /// An index or `get_latest_by` naming no column warns; it does not fail.
+    /// An index or `get_latest_by` naming no column is a compile error,
+    /// one per name.
     #[test]
-    fn unknown_index_columns_warn() {
+    fn unknown_index_columns_are_errors() {
         let input: DeriveInput = syn::parse_quote! {
             #[rustango(
                 table = "w",
@@ -14870,16 +14843,20 @@ mod field_attr_tests {
             )]
             struct W { #[rustango(primary_key)] id: i64, a: i64, b: i64 }
         };
-        let out = expand(&input).expect("still compiles").to_string();
+        let err = expand(&input).expect_err("must not compile");
+        let all: Vec<String> = err.into_iter().map(|e| e.to_string()).collect();
         for name in ["nope", "b_typo", "missing", "when_typo"] {
-            assert!(out.contains(&format!("`{name}`")), "{name}:\n{out}");
+            assert!(
+                all.iter().any(|m| m.contains(&format!("`{name}`"))),
+                "{name}: {all:?}"
+            );
         }
     }
 
     /// Real columns, field names for `get_latest_by` and expression
-    /// indexes emit nothing new.
+    /// indexes compile.
     #[test]
-    fn known_index_columns_do_not_warn() {
+    fn known_index_columns_compile() {
         let input: DeriveInput = syn::parse_quote! {
             #[rustango(
                 table = "w",
@@ -14893,8 +14870,7 @@ mod field_attr_tests {
                 #[rustango(column = "b_col")] b: i64,
             }
         };
-        let out = expand(&input).expect("compiles").to_string();
-        assert!(!out.contains("RUSTANGO_WARNING"), "{out}");
+        expand(&input).expect("compiles");
     }
 
     /// Two FKs to one parent would emit the same reverse accessor twice.

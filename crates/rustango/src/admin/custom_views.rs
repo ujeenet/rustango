@@ -135,8 +135,8 @@ const BUILT_IN_SUFFIXES: &[&str] = &[
 pub(crate) enum Clash {
     /// The exact path of a built-in route: the Builder skips the view.
     Reserved,
-    /// Its params also match this built-in route, and axum routes the
-    /// view's static table segment first, so the view wins it.
+    /// Its params also match this built-in route; axum would route the
+    /// view first, so the Builder skips it too.
     Shadows(&'static str),
 }
 

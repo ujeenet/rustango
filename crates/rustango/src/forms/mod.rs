@@ -1344,19 +1344,18 @@ impl DynamicForm {
                             );
                         }
                     }
-                    if field.field_type == DynamicFieldType::Email && !raw_str.is_empty() {
-                        if !raw_str.contains('@') {
-                            errors.add(&field.name, "Enter a valid email address.");
-                        } else if !is_strict_email(raw_str) {
-                            warn_lenient(&field.name, "an email address SmtpMailer would refuse");
-                        }
+                    if field.field_type == DynamicFieldType::Email
+                        && !raw_str.is_empty()
+                        && !is_strict_email(raw_str)
+                    {
+                        errors.add(&field.name, "Enter a valid email address.");
                     }
-                    if field.field_type == DynamicFieldType::Url && !raw_str.is_empty() {
-                        if is_script_url(raw_str) {
-                            errors.add(&field.name, "Enter a valid URL.");
-                        } else if crate::validators::validate_url(raw_str).is_err() {
-                            warn_lenient(&field.name, "not an http(s) URL");
-                        }
+                    // `validate_url` takes http(s) only, so script schemes fail too.
+                    if field.field_type == DynamicFieldType::Url
+                        && !raw_str.is_empty()
+                        && crate::validators::validate_url(raw_str).is_err()
+                    {
+                        errors.add(&field.name, "Enter a valid URL.");
                     }
                 }
                 DynamicFieldType::Select => {
@@ -1492,22 +1491,6 @@ pub fn checkbox(raw: &str) -> Option<bool> {
     }
 }
 
-/// A URL a browser would run rather than follow: `javascript:`,
-/// `vbscript:` or `data:`, spelled as the browser reads it.
-fn is_script_url(raw: &str) -> bool {
-    // Browsers drop tab/LF/CR anywhere and leading controls and spaces.
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
-    let s = cleaned.trim_start_matches(|c: char| c <= ' ');
-    s.split_once(':').is_some_and(|(scheme, _)| {
-        ["javascript", "vbscript", "data"]
-            .iter()
-            .any(|bad| scheme.eq_ignore_ascii_case(bad))
-    })
-}
-
 /// The framework's email check, plus `SmtpMailer`'s parser with `email`.
 fn is_strict_email(s: &str) -> bool {
     #[cfg(feature = "email")]
@@ -1515,15 +1498,6 @@ fn is_strict_email(s: &str) -> bool {
     #[cfg(not(feature = "email"))]
     let parses = true;
     parses && crate::validators::validate_email(s).is_ok()
-}
-
-/// Accepted for compatibility; a later minor release refuses it.
-fn warn_lenient(field: &str, what: &str) {
-    tracing::warn!(
-        target: "rustango::forms",
-        field,
-        "DynamicForm accepted {what}; a later minor release will refuse it"
-    );
 }
 
 #[cfg(test)]
@@ -1607,17 +1581,14 @@ mod dynamic_form_tests {
             "\u{1}java\nscript:x",
             "data:text/html,<script>x</script>",
             "vbscript:x",
+            // Not http(s): refused too.
+            "example.com",
+            "mailto:a@b.co",
         ] {
             f.bind(HashMap::from([("u".into(), bad.into())]));
             assert!(!f.is_valid(), "{bad:?} accepted");
         }
-        // Accepted; the non-http(s) ones only log a warning for now.
-        for ok in [
-            "https://example.com/a?b#c",
-            "http://x:8080",
-            "example.com",
-            "mailto:a@b.co",
-        ] {
+        for ok in ["https://example.com/a?b#c", "http://x:8080"] {
             f.bind(HashMap::from([("u".into(), ok.into())]));
             assert!(f.is_valid(), "{ok:?}: {:?}", f.errors());
         }
@@ -1635,9 +1606,9 @@ mod dynamic_form_tests {
         let mut f = form(serde_json::json!([{"name": "e", "field_type": "email"}]));
         f.bind(HashMap::from([("e".into(), "nope".into())]));
         assert!(!f.is_valid());
-        // Loose but with an `@`: still accepted, with a warning.
+        // Loose but with an `@`: refused.
         f.bind(HashMap::from([("e".into(), "a@localhost".into())]));
-        assert!(f.is_valid(), "{:?}", f.errors());
+        assert!(!f.is_valid());
     }
 
     #[test]

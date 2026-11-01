@@ -1,5 +1,5 @@
 //! `ViewSet` `filter_fields` query params on every backend, and the
-//! nullable-cursor handling.
+//! nullable-cursor refusal.
 
 #![cfg(all(
     any(feature = "postgres", feature = "mysql", feature = "sqlite"),
@@ -75,15 +75,6 @@ fn app(pool: &Pool) -> axum::Router {
         .filter_fields(&["price"])
         .filter_backend(price_min)
         .router_pool("/priced", pool.clone()),
-    )
-    .merge(
-        ViewSet::for_model(
-            Item::SCHEMA,
-            &["id", "name", "category_id", "created_at", "price"],
-        )
-        .filter_fields(&["category_id"])
-        .cursor_pagination("category_id")
-        .router_pool("/by_cat", pool.clone()),
     )
 }
 
@@ -178,35 +169,6 @@ async fn a_like_lookup_on_a_number_is_400(pool: &Pool) {
     }
 }
 
-/// A nullable cursor still pages; only a NULL at the page end fails.
-async fn a_nullable_cursor_fails_only_on_a_null_row(pool: &Pool) {
-    let (status, names, body) = get(pool, "/by_cat?category_id__isnull=false&page_size=1").await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(names, ["alpha"], "{body}");
-    assert!(body.contains(r#""next":""#), "{body}");
-
-    seed(pool, "delta", None, "2024-03-01T00:00:00Z", 40).await;
-    #[cfg(feature = "runtime")]
-    let (buf, _guard) = {
-        let buf = rustango::testkit::CaptureWriter::default();
-        let writer = buf.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        (buf, tracing::subscriber::set_default(subscriber))
-    };
-    let (status, _, body) = get(pool, "/by_cat?category_id__isnull=true&page_size=1").await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
-    // The cause is logged, not sent.
-    #[cfg(feature = "runtime")]
-    assert!(
-        buf.contents().contains("is NULL in this row"),
-        "{}",
-        buf.contents()
-    );
-}
-
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -215,31 +177,16 @@ tri_dialect_test! {
         orm_lookups_filter,
         a_backend_owns_unknown_lookups,
         a_like_lookup_on_a_number_is_400,
-        a_nullable_cursor_fails_only_on_a_null_row,
     ],
 }
 
-/// Warned at build, not refused, until 0.62.0.
-#[cfg(feature = "runtime")]
+/// A nullable cursor column is refused when the ViewSet is built.
 #[test]
-fn a_nullable_cursor_column_is_logged_at_build_time() {
-    let buf = rustango::testkit::CaptureWriter::default();
-    let writer = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || writer.clone())
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    tracing::subscriber::with_default(subscriber, || {
-        let _ = rustango::viewset::ViewSet::for_model(
-            Item::SCHEMA,
-            &["id", "name", "category_id", "created_at", "price"],
-        )
-        .cursor_pagination("category_id");
-    });
-    let logs = buf.contents();
-    assert!(
-        logs.contains("WARN") && logs.contains("is nullable"),
-        "{logs}"
-    );
+#[should_panic(expected = "is nullable")]
+fn a_nullable_cursor_column_is_refused_at_build_time() {
+    let _ = rustango::viewset::ViewSet::for_model(
+        Item::SCHEMA,
+        &["id", "name", "category_id", "created_at", "price"],
+    )
+    .cursor_pagination("category_id");
 }

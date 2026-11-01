@@ -56,7 +56,7 @@
 //! | GET    | `/media/{id}`                     | Single Media row + URL + presigned link. |
 //! | DELETE | `/media/{id}`                     | Soft-delete the Media row (storage preserved). |
 //! | POST   | `/media/{id}/move`                | Move Media to another collection: body `{collection_id?: i64}`. Authorized as `Change(MediaMove { id, collection_id })`. |
-//! | POST   | `/media/{id}/tags`                | Replace tag set: body `{slugs: ["a","b"]}`. |
+//! | POST   | `/media/{id}/tags`                | Replace tag set: body `{slugs: ["a","b"]}`. A new slug also needs `Add(NewTag)`. |
 //! | DELETE | `/media/{id}/tags/{slug}`         | Remove a single tag. |
 //! | POST   | `/collections`                    | Create: body `{name, slug, parent_id?, description?}`. Authorized as `Add(NewCollection)`. |
 //! | GET    | `/collections`                    | Non-deleted collections, paged. `?limit=N&offset=N` (default and max 1000). |
@@ -739,6 +739,16 @@ const MAX_GATE_COLLECTION_BODY_BYTES: usize = 2 * 1024 * 1024;
 /// /collections` carry a disk, destination or parent the policy needs.
 /// Its own function because the middleware must decide whether to
 /// buffer *before* it can call [`classify`].
+/// Whether the gate let this request create tags (`Add(NewTag)`).
+#[derive(Clone, Copy)]
+struct TagCreatePermit(bool);
+
+/// `POST /media/{id}/tags`.
+fn is_set_tags(method: &axum::http::Method, path: &str) -> bool {
+    let seg: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    method == axum::http::Method::POST && matches!(seg.as_slice(), ["media", _, "tags"])
+}
+
 fn gate_body_limit(method: &axum::http::Method, path: &str) -> Option<usize> {
     if method != axum::http::Method::POST {
         return None;
@@ -906,7 +916,7 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
             move |req: axum::extract::Request, next: axum::middleware::Next| {
                 let auth = Arc::clone(&auth);
                 async move {
-                    let (parts, body) = req.into_parts();
+                    let (mut parts, body) = req.into_parts();
                     // Three routes need their body to be classified.
                     // Buffered under a cap and handed straight back, so
                     // nothing downstream notices — except that the policy
@@ -972,6 +982,13 @@ pub fn media_router_with<A: MediaAuthorizer>(manager: MediaManager, authorizer: 
                             _ => ApiError::forbidden("not authorized for this media operation"),
                         }
                         .into_response();
+                    }
+                    // Replacing tags may create new ones: say whether the
+                    // caller may, for the handler to check new slugs.
+                    if is_set_tags(&parts.method, parts.uri.path()) {
+                        let add = MediaAction::Add(MediaTarget::NewTag {});
+                        let allowed = auth.authorize(&parts, add).await == MediaDecision::Allow;
+                        parts.extensions.insert(TagCreatePermit(allowed));
                     }
                     next.run(axum::extract::Request::from_parts(parts, body))
                         .await
@@ -1416,10 +1433,24 @@ async fn move_media_handler(
 async fn set_tags_handler(
     State(manager): State<Arc<MediaManager>>,
     Path(id): Path<i64>,
+    permit: Option<axum::Extension<TagCreatePermit>>,
     Json(body): Json<SetTagsBody>,
-) -> Result<StatusCode, MediaError> {
+) -> Result<StatusCode, Response> {
     let slugs: Vec<&str> = body.slugs.iter().map(String::as_str).collect();
-    manager.set_tags(id, &slugs).await?;
+    // A new slug creates a tag, which needs `Add(NewTag)` as well.
+    let may_create = permit.is_none_or(|axum::Extension(p)| p.0);
+    if !may_create
+        && manager
+            .names_new_tag(&slugs)
+            .await
+            .map_err(IntoResponse::into_response)?
+    {
+        return Err(ApiError::forbidden("not authorized to create tags").into_response());
+    }
+    manager
+        .set_tags(id, &slugs)
+        .await
+        .map_err(IntoResponse::into_response)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
