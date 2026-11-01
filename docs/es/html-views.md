@@ -305,7 +305,7 @@ ellas:
 | `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (la fila) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **sin `object`** |
-| `UpdateView` | `form` (`.fields`, `.errors`), `object` (la fila), `pk`, `is_create` (false), `is_update` (true) |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (los campos listados, la clave primaria y los `.context_fields()`), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (la fila a confirmar) |
 
 Las filas se exponen como mapas planos indexados por nombre de columna (`{{ post.title }}`), con

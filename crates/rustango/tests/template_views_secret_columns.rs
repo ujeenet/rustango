@@ -1,5 +1,6 @@
 //! Template views keep credential columns out of the Tera context unless
-//! a view lists them; other columns stay for 0.61 templates.
+//! a view lists them; UpdateView and the bulk-delete confirm page carry
+//! only their field lists plus the primary key.
 
 #![cfg(all(feature = "sqlite", feature = "template_views"))]
 
@@ -33,9 +34,9 @@ const CSRF: &str = "tvsecret-csrf-token-tvsecret-csrf-token-xxxx";
 fn app(pool: &Pool) -> axum::Router {
     let mut t = Tera::default();
     t.add_raw_templates(vec![
-        ("one.html", "{{ object | json_encode() }}"),
+        ("one.html", "{{ object | json_encode() | safe }}"),
         ("list.html", "list"),
-        ("bulk.html", "{{ objects | json_encode() }}"),
+        ("bulk.html", "{{ objects | json_encode() | safe }}"),
     ])
     .unwrap();
     let t = Arc::new(t);
@@ -46,6 +47,12 @@ fn app(pool: &Pool) -> axum::Router {
             UpdateView::for_model(Account::SCHEMA, &["name", "password_hash"])
                 .template("one.html")
                 .router("/listed", t.clone(), pool.clone()),
+        )
+        .merge(
+            UpdateView::for_model(Account::SCHEMA, &["name"])
+                .context_fields(&["note"])
+                .template("one.html")
+                .router("/ctx", t.clone(), pool.clone()),
         )
         .merge(
             DetailView::for_model(Account::SCHEMA)
@@ -93,27 +100,42 @@ async fn credential_columns_stay_out_of_the_context() {
         id: Auto::default(),
         name: "ada".into(),
         password_hash: "argon2-SECRET".into(),
-        note: "kept".into(),
+        note: "UNLISTED".into(),
     };
     row.insert_pool(&pool).await.expect("seed");
     let pk = *row.id.get().unwrap();
 
-    for (method, uri, body) in [
-        (Method::GET, format!("/acc/{pk}/edit"), String::new()),
-        (Method::GET, format!("/acc/{pk}"), String::new()),
-        (
-            Method::POST,
-            "/acc".to_owned(),
-            format!("action=delete_selected&_selected_action={pk}"),
-        ),
-    ] {
-        let out = send(&pool, method, &uri, &body).await;
+    let edit = send(&pool, Method::GET, &format!("/acc/{pk}/edit"), "").await;
+    let confirm = send(
+        &pool,
+        Method::POST,
+        "/acc",
+        &format!("action=delete_selected&_selected_action={pk}"),
+    )
+    .await;
+    let detail = send(&pool, Method::GET, &format!("/acc/{pk}"), "").await;
+    for (uri, out) in [("edit", &edit), ("confirm", &confirm), ("detail", &detail)] {
         assert!(!out.contains("SECRET"), "{uri} leaks the hash: {out}");
         assert!(out.contains("ada"), "{uri}: {out}");
-        // Unlisted, non-secret columns stay until 0.62.0.
-        assert!(out.contains("kept"), "{uri}: {out}");
+        assert!(
+            out.contains(&format!("\"id\":{pk}")),
+            "{uri} lacks the pk: {out}"
+        );
     }
+    // UpdateView and the confirm page carry only their field lists and the pk.
+    for (uri, out) in [("edit", &edit), ("confirm", &confirm)] {
+        assert!(
+            !out.contains("UNLISTED"),
+            "{uri} leaks an unlisted column: {out}"
+        );
+        assert!(!out.contains("\"note\""), "{uri}: {out}");
+    }
+    // DetailView without `.fields()` still shows every non-secret column.
+    assert!(detail.contains("UNLISTED"), "{detail}");
     // A view that lists the column on purpose still gets it.
     let out = send(&pool, Method::GET, &format!("/listed/{pk}/edit"), "").await;
     assert!(out.contains("SECRET"), "{out}");
+    // `.context_fields()` opts a read-only column in.
+    let out = send(&pool, Method::GET, &format!("/ctx/{pk}/edit"), "").await;
+    assert!(out.contains("UNLISTED") && !out.contains("SECRET"), "{out}");
 }

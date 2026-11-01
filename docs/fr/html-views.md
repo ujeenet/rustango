@@ -302,7 +302,7 @@ l'autre :
 | `ListView` | `object_list` (les lignes de la page), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (la ligne) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **pas d'`object`** |
-| `UpdateView` | `form` (`.fields`, `.errors`), `object` (la ligne), `pk`, `is_create` (false), `is_update` (true) |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (les champs listés, la clé primaire et les `.context_fields()`), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (la ligne à confirmer) |
 
 Les lignes sont exposées sous forme de simples maps indexées par nom de colonne (`{{ post.title }}`),

@@ -555,8 +555,8 @@ impl ListView {
     ///
     /// - `action`: `"delete_selected"`
     /// - `pks`: list of selected primary keys (string-coerced)
-    /// - `objects`: full row data for each selected PK so the
-    ///   template can show *what* will be deleted, not just the id
+    /// - `objects`: each selected row (its `.fields()` plus the PK) so
+    ///   the template can show *what* will be deleted, not just the id
     /// - `csrf_token`: re-stamped from cookies/headers so the
     ///   second POST reuses the same CSRF token chain
     ///
@@ -664,7 +664,6 @@ impl ListView {
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
         let bulk = self.bulk_actions_enabled;
-        self.warn_wide_confirm();
         let state = Arc::new(ListViewState {
             vs: self,
             tera,
@@ -688,7 +687,6 @@ impl ListView {
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
         let bulk = self.bulk_actions_enabled;
-        self.warn_wide_confirm();
         let state = Arc::new(TenantListViewState { vs: self, tera });
         let route = if bulk {
             get(handle_list_tenant).post(handle_list_action_tenant)
@@ -696,16 +694,6 @@ impl ListView {
             get(handle_list_tenant)
         };
         csrf_protected(Router::new().route(prefix, route).with_state(state))
-    }
-
-    fn warn_wide_confirm(&self) {
-        if let (true, true, Some(listed)) = (
-            self.bulk_actions_enabled,
-            self.confirm_delete,
-            self.fields.as_deref(),
-        ) {
-            warn_wide_context("ListView bulk-delete confirm", self.schema, listed);
-        }
     }
 }
 
@@ -933,7 +921,7 @@ async fn handle_list_action(
             pk_field,
             &state.pool,
             &pks,
-            state.vs.fields.as_deref().unwrap_or_default(),
+            state.vs.fields.as_deref(),
         )
         .await
         {
@@ -1446,6 +1434,7 @@ impl CreateView {
             template: self.template.clone(),
             success_url: self.success_url.clone(),
             fields: self.fields.clone(),
+            context_fields: Vec::new(),
             tera,
             pool,
             validator: self.validator.clone(),
@@ -1470,6 +1459,7 @@ impl CreateView {
             template: self.template,
             success_url: self.success_url,
             fields: self.fields,
+            context_fields: Vec::new(),
             tera,
             validator: self.validator,
         });
@@ -1503,12 +1493,14 @@ pub struct UpdateView {
     success_url: String,
     /// The write allow-list, as on [`CreateView`].
     fields: Vec<String>,
+    /// Read-only columns `object` carries beyond `fields` and the pk.
+    context_fields: Vec<String>,
     validator: Option<Validator>,
 }
 
 impl UpdateView {
     /// Start an `UpdateView` that renders and writes only `fields`; see
-    /// [`CreateView::for_model`].
+    /// [`CreateView::for_model`]. `object` holds `fields` and the primary key.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
         Self {
@@ -1516,12 +1508,20 @@ impl UpdateView {
             template: format!("{}_form.html", schema.table),
             success_url: "/".to_owned(),
             fields: fields.iter().map(|s| (*s).to_owned()).collect(),
+            context_fields: Vec::new(),
             validator: None,
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, success_url);
+
+    /// Extra columns `object` carries for the template to show; never written.
+    #[must_use]
+    pub fn context_fields(mut self, names: &[&str]) -> Self {
+        self.context_fields = names.iter().map(|s| (*s).to_owned()).collect();
+        self
+    }
 
     /// Install a closure-based validator. Same shape and semantics
     /// as [`CreateView::validator`].
@@ -1547,12 +1547,12 @@ impl UpdateView {
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
-        warn_wide_context("UpdateView", self.schema, &self.fields);
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
             success_url: self.success_url.clone(),
             fields: self.fields.clone(),
+            context_fields: self.context_fields.clone(),
             tera,
             pool,
             validator: self.validator.clone(),
@@ -1572,12 +1572,12 @@ impl UpdateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
-        warn_wide_context("UpdateView", self.schema, &self.fields);
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
             success_url: self.success_url,
             fields: self.fields,
+            context_fields: self.context_fields,
             tera,
             validator: self.validator,
         });
@@ -1611,6 +1611,8 @@ struct FormViewState {
     template: String,
     success_url: String,
     fields: Vec<String>,
+    /// [`UpdateView::context_fields`]; empty on a CreateView.
+    context_fields: Vec<String>,
     tera: Arc<Tera>,
     pool: Pool,
     /// Optional user-supplied validator (`#[derive(Form)]`-derived
@@ -1625,6 +1627,7 @@ impl FormViewState {
         FormPage {
             schema: self.schema,
             fields: &self.fields,
+            context_fields: &self.context_fields,
             tera: &self.tera,
             template: &self.template,
         }
@@ -2339,6 +2342,7 @@ enum FormMode<'a> {
 struct FormPage<'a> {
     schema: &'static ModelSchema,
     fields: &'a [String],
+    context_fields: &'a [String],
     tera: &'a Tera,
     template: &'a str,
 }
@@ -2358,7 +2362,7 @@ impl FormPage<'_> {
             Err(e) => return Err(template_error(&format!("read key: {e}"))),
         };
         let select_q = SelectQuery::by_pk(self.schema, pk_field.column, key).visible();
-        let scalars = context_scalars(self.schema, self.fields);
+        let scalars = listed_scalars(self.schema, &[self.fields, self.context_fields]);
         match select_one_row_as_json(pool, &select_q, &scalars).await {
             Ok(Some(r)) => Ok(r),
             Ok(None) => Err((StatusCode::NOT_FOUND, "not found").into_response()),
@@ -3138,7 +3142,7 @@ fn confirm_delete_template_name(vs: &ListView) -> String {
 
 /// Render the confirmation page. Stamps in the action name, the
 /// raw PK list (so the second submit echoes the same selection),
-/// the full row objects (for showing *what* will be deleted), plus
+/// the row objects (for showing *what* will be deleted), plus
 /// the CSRF token re-stamped from the request headers.
 fn render_bulk_delete_confirm(
     tera: &Tera,
@@ -3159,20 +3163,23 @@ fn render_bulk_delete_confirm(
 }
 
 /// Fetch the rows for the selected PKs so the confirmation
-/// template can render them. Selects every scalar field but an unlisted
-/// credential (see [`context_scalars`]). Errors here surface as
-/// 500 rather than 400 because they indicate a backend problem,
+/// template can render them: the ListView's `.fields()` plus the primary
+/// key, or every non-credential scalar without a list. Errors here surface
+/// as 500 rather than 400 because they indicate a backend problem,
 /// not a bad request.
 async fn fetch_pks_as_objects_pool(
     schema: &'static ModelSchema,
     pk_field: &'static crate::core::FieldSchema,
     pool: &Pool,
     pks: &[SqlValue],
-    listed: &[String],
+    listed: Option<&[String]>,
 ) -> Result<Vec<Value>, String> {
     // #810 — IN-list lookup via the `by_pk_in` constructor.
     let q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec()).visible();
-    let fields = context_scalars(schema, listed);
+    let fields = match listed {
+        Some(names) => listed_scalars(schema, &[names]),
+        None => resolved_fields(schema, None),
+    };
     let rows = select_rows_as_json(pool, &q, &fields)
         .await
         .map_err(|e| e.to_string())?;
@@ -3245,65 +3252,26 @@ fn resolved_fields(
             .scalar_fields()
             .filter(|f| is_listed(names, f))
             .collect(),
-        None => context_scalars(schema, &[]),
+        None => schema
+            .scalar_fields()
+            .filter(|f| {
+                !(crate::core::is_credential_column(f.name)
+                    || crate::core::is_credential_column(f.column))
+            })
+            .collect(),
     }
 }
 
-/// Every scalar field for the Tera context; a credential column only when `listed`.
-fn context_scalars(
+/// The primary key plus the scalar fields named in any of `lists` — a row a
+/// view hands its template, with nothing outside the view's field lists.
+fn listed_scalars(
     schema: &'static ModelSchema,
-    listed: &[String],
+    lists: &[&[String]],
 ) -> Vec<&'static crate::core::FieldSchema> {
     schema
         .scalar_fields()
-        .filter(|f| {
-            !(crate::core::is_credential_column(f.name)
-                || crate::core::is_credential_column(f.column))
-                || is_listed(listed, f)
-        })
+        .filter(|f| f.primary_key || lists.iter().any(|l| is_listed(l, f)))
         .collect()
-}
-
-/// Mounted views whose context carries columns beyond their list, as `"<view> on <table>"`.
-static WIDE_VIEWS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-static WIDE_VIEWS_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-/// Record a view whose context carries columns outside `listed`; logged by [`log_wide_views_once`].
-fn warn_wide_context(view: &str, schema: &'static ModelSchema, listed: &[String]) {
-    let wide = context_scalars(schema, listed)
-        .into_iter()
-        .any(|f| !f.primary_key && !is_listed(listed, f));
-    if wide {
-        let mut views = WIDE_VIEWS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        views.push(format!("{view} on {}", schema.table));
-    }
-}
-
-/// One warning per process, at the first render, when every view is mounted.
-fn log_wide_views_once() {
-    use std::sync::atomic::Ordering;
-    if WIDE_VIEWS_LOGGED.load(Ordering::Relaxed) {
-        return;
-    }
-    let views = WIDE_VIEWS
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if views.is_empty() || WIDE_VIEWS_LOGGED.swap(true, Ordering::Relaxed) {
-        return;
-    }
-    const SHOWN: usize = 5;
-    let more = views.len().saturating_sub(SHOWN);
-    let listed = views[..views.len().min(SHOWN)].join(", ");
-    let tail = if more > 0 {
-        format!(" and {more} more")
-    } else {
-        String::new()
-    };
-    tracing::warn!(
-        "{listed}{tail} put columns outside their field list into the template context; a later release drops them"
-    );
 }
 
 /// Render a Tera template, returning a 200 + HTML body on success
@@ -3315,7 +3283,6 @@ fn log_wide_views_once() {
 /// Every view renders here, so `ExtraContext` and the registered
 /// context processors are merged in one place; view keys win.
 fn render(tera: &Tera, name: &str, mut ctx: Context, parts: &Parts) -> Response {
-    log_wide_views_once();
     ExtraContext::merge_into(parts.extensions.get::<ExtraContext>(), &mut ctx);
     crate::template_context_processors::apply_to_context(&mut ctx, parts);
     match tera.render(name, &ctx) {
@@ -3855,7 +3822,7 @@ mod tenant {
                 pk_field,
                 &pool,
                 &pks,
-                state.vs.fields.as_deref().unwrap_or_default(),
+                state.vs.fields.as_deref(),
             )
             .await
             {
@@ -4058,6 +4025,7 @@ mod tenant {
         pub(super) template: String,
         pub(super) success_url: String,
         pub(super) fields: Vec<String>,
+        pub(super) context_fields: Vec<String>,
         pub(super) tera: Arc<Tera>,
         /// Optional `#[derive(Form)]` validator (#80 v0.30.2 parity
         /// with the static `FormViewState` path).
@@ -4069,6 +4037,7 @@ mod tenant {
             super::FormPage {
                 schema: self.schema,
                 fields: &self.fields,
+                context_fields: &self.context_fields,
                 tera: &self.tera,
                 template: &self.template,
             }

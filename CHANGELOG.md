@@ -18,6 +18,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `M2mChangedContext` is `#[non_exhaustive]` and carries `content_type_id` for generic M2M plus the `added` / `removed` keys of a change (both empty when `set` cannot read the old keys).
 - `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
 - An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
+- UpdateView `object` and the bulk-delete confirm `objects` carry only the view's field list and the primary key; `UpdateView::context_fields` opts read-only columns in. The mount-time warning is gone.
 
 ### Fixed
 
