@@ -104,14 +104,14 @@ async fn polymorphic_m2m_round_trips_and_isolates_by_content_type_on_pg() {
     post.tags_m2m().set(&[10, 12], &pool).await.unwrap();
     video.tags_m2m().set(&[20], &pool).await.unwrap();
 
-    let mut post_tags = post.tags_m2m().all(&pool).await.unwrap();
+    let mut post_tags = post.tags_m2m().all::<i64>(&pool).await.unwrap();
     post_tags.sort_unstable();
     assert_eq!(post_tags, vec![10, 12]);
-    assert_eq!(video.tags_m2m().all(&pool).await.unwrap(), vec![20]);
+    assert_eq!(video.tags_m2m().all::<i64>(&pool).await.unwrap(), vec![20]);
     assert!(!post.tags_m2m().contains(20, &pool).await.unwrap());
 
     post.tags_m2m().clear(&pool).await.unwrap();
-    assert!(post.tags_m2m().all(&pool).await.unwrap().is_empty());
+    assert!(post.tags_m2m().all::<i64>(&pool).await.unwrap().is_empty());
     // Video untouched by Post's clear (CT-scoped).
-    assert_eq!(video.tags_m2m().all(&pool).await.unwrap(), vec![20]);
+    assert_eq!(video.tags_m2m().all::<i64>(&pool).await.unwrap(), vec![20]);
 }

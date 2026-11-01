@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed
+
+- `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
+- An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
+
 ### Fixed
 
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.

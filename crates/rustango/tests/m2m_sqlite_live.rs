@@ -49,7 +49,7 @@ async fn m2m_full_lifecycle_on_sqlite() {
     let m = mgr(1);
 
     // Empty to start.
-    let initial: Vec<i64> = m.all(&pool).await.expect("all");
+    let initial: Vec<i64> = m.all::<i64>(&pool).await.expect("all");
     assert!(initial.is_empty());
     assert!(!m.contains(42, &pool).await.expect("contains"));
 
@@ -62,7 +62,7 @@ async fn m2m_full_lifecycle_on_sqlite() {
     // `INSERT … ON CONFLICT DO NOTHING` on sqlite.
     m.add(20, &pool).await.expect("add 20 again");
 
-    let mut got = m.all(&pool).await.expect("all after add");
+    let mut got = m.all::<i64>(&pool).await.expect("all after add");
     got.sort_unstable();
     assert_eq!(got, vec![10, 20, 30]);
 
@@ -72,7 +72,7 @@ async fn m2m_full_lifecycle_on_sqlite() {
 
     // Remove one.
     m.remove(20, &pool).await.expect("remove 20");
-    let mut got = m.all(&pool).await.expect("all after remove");
+    let mut got = m.all::<i64>(&pool).await.expect("all after remove");
     got.sort_unstable();
     assert_eq!(got, vec![10, 30]);
     assert!(!m
@@ -82,19 +82,19 @@ async fn m2m_full_lifecycle_on_sqlite() {
 
     // Replace via set — atomic DELETE + multi-row INSERT.
     m.set(&[100, 200, 300], &pool).await.expect("set");
-    let mut got = m.all(&pool).await.expect("all after set");
+    let mut got = m.all::<i64>(&pool).await.expect("all after set");
     got.sort_unstable();
     assert_eq!(got, vec![100, 200, 300]);
 
     // Empty set wipes.
     m.set::<i64>(&[], &pool).await.expect("set empty");
-    let got = m.all(&pool).await.expect("all after empty set");
+    let got = m.all::<i64>(&pool).await.expect("all after empty set");
     assert!(got.is_empty());
 
     // Clear is also a wipe (idempotent).
     m.add(7, &pool).await.expect("add 7");
     m.clear(&pool).await.expect("clear");
-    let got = m.all(&pool).await.expect("all after clear");
+    let got = m.all::<i64>(&pool).await.expect("all after clear");
     assert!(got.is_empty());
     m.clear(&pool).await.expect("clear idempotent");
 }
@@ -109,15 +109,19 @@ async fn m2m_isolates_by_source_pk_on_sqlite() {
     m1.add(20, &pool).await.expect("m1 add 20");
     m2.add(99, &pool).await.expect("m2 add 99");
 
-    let mut got1 = m1.all(&pool).await.expect("m1 all");
+    let mut got1 = m1.all::<i64>(&pool).await.expect("m1 all");
     got1.sort_unstable();
     assert_eq!(got1, vec![10, 20]);
 
-    let got2 = m2.all(&pool).await.expect("m2 all");
+    let got2 = m2.all::<i64>(&pool).await.expect("m2 all");
     assert_eq!(got2, vec![99]);
 
     // Clearing m1 must not touch m2.
     m1.clear(&pool).await.expect("m1 clear");
-    assert!(m1.all(&pool).await.expect("m1 all after clear").is_empty());
-    assert_eq!(m2.all(&pool).await.expect("m2 all"), vec![99]);
+    assert!(m1
+        .all::<i64>(&pool)
+        .await
+        .expect("m1 all after clear")
+        .is_empty());
+    assert_eq!(m2.all::<i64>(&pool).await.expect("m2 all"), vec![99]);
 }

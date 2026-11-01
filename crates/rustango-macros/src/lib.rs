@@ -803,6 +803,27 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let model_name = struct_name.to_string();
 
     let collected = collect_fields(named, &table)?;
+    // An explicit `self_pk_column` must name a column of this model.
+    let explicit_pks = container
+        .reverse_has_relations
+        .iter()
+        .map(|r| (&r.self_pk_column, r.self_pk_span))
+        .chain(
+            container
+                .generic_has_relations
+                .iter()
+                .map(|r| (&r.self_pk_column, r.self_pk_span)),
+        );
+    for (column, span) in explicit_pks {
+        if let (Some(column), Some(span)) = (column, span) {
+            if !collected.column_entries.iter().any(|c| &c.column == column) {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`self_pk_column = \"{column}\"` names no column of `{model_name}`"),
+                ));
+            }
+        }
+    }
     // `reverse_has` / `generic_has` join on the PK column unless they name another.
     if let Some((_, pk_column)) = &collected.primary_key {
         for rel in &mut container.reverse_has_relations {
@@ -8837,6 +8858,8 @@ struct ReverseHasAttr {
     /// Column on **this** model's table the child FK references — the
     /// `OuterRef` target. Defaults to the PK column (`"id"` without one).
     self_pk_column: Option<String>,
+    /// Where an explicit `self_pk_column` was written, for its error.
+    self_pk_span: Option<proc_macro2::Span>,
 }
 
 impl ReverseHasAttr {
@@ -8865,6 +8888,8 @@ struct GenericHasAttr {
     /// SQL primary-key column on **this** (parent) model's table.
     /// Defaults to the PK column (`"id"` without one).
     self_pk_column: Option<String>,
+    /// Where an explicit `self_pk_column` was written, for its error.
+    self_pk_span: Option<proc_macro2::Span>,
 }
 
 impl GenericHasAttr {
@@ -9618,6 +9643,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut child_ident: Option<syn::Ident> = None;
                 let mut child_fk_column: Option<String> = None;
                 let mut self_pk_column: Option<String> = None;
+                let mut self_pk_span: Option<proc_macro2::Span> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9668,6 +9694,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             ));
                         }
                         self_pk_column = Some(trimmed.to_owned());
+                        self_pk_span = Some(s.span());
                         return Ok(());
                     }
                     Err(inner.error(
@@ -9708,6 +9735,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     child,
                     child_fk_column,
                     self_pk_column,
+                    self_pk_span,
                 });
                 return Ok(());
             }
@@ -9723,6 +9751,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut ct_column: Option<String> = None;
                 let mut pk_column: Option<String> = None;
                 let mut self_pk_column: Option<String> = None;
+                let mut self_pk_span: Option<proc_macro2::Span> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9782,6 +9811,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             ));
                         }
                         self_pk_column = Some(trimmed);
+                        self_pk_span = Some(s.span());
                         return Ok(());
                     }
                     Err(inner.error(
@@ -9819,6 +9849,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ct_column,
                     pk_column,
                     self_pk_column,
+                    self_pk_span,
                 });
                 return Ok(());
             }

@@ -1378,7 +1378,7 @@ async fn m2m_set_ignores_repeated_ids(pool: &Pool) {
         .set(&[3_i64, 3, 4], pool)
         .await
         .expect("a repeated id is linked once");
-    let mut tags = post.tags_m2m().all(pool).await.unwrap();
+    let mut tags = post.tags_m2m().all::<i64>(pool).await.unwrap();
     tags.sort_unstable();
     assert_eq!(tags, vec![3, 4]);
 }
@@ -1393,7 +1393,7 @@ async fn generic_m2m_set_ignores_repeated_ids(pool: &Pool) {
         .set(&[3_i64, 3, 4], pool)
         .await
         .expect("a repeated id is linked once");
-    let mut tags = post.tags_m2m().all(pool).await.unwrap();
+    let mut tags = post.tags_m2m().all::<i64>(pool).await.unwrap();
     tags.sort_unstable();
     assert_eq!(tags, vec![3, 4]);
 }
@@ -1482,10 +1482,10 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
         .expect("audited delete_where");
 
     for id in 1..=deleted {
-        let links = Gpost { id }.tags_m2m().all(pool).await.unwrap();
+        let links = Gpost { id }.tags_m2m().all::<i64>(pool).await.unwrap();
         assert!(links.is_empty(), "post {id}'s links outlive it: {links:?}");
     }
-    let mut kept = Gpost { id: 8 }.tags_m2m().all(pool).await.unwrap();
+    let mut kept = Gpost { id: 8 }.tags_m2m().all::<i64>(pool).await.unwrap();
     kept.sort_unstable();
     assert_eq!(kept, vec![8, 10], "a live post lost its links");
     for id in 1..=2 {
@@ -1493,13 +1493,13 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
             id,
             label: "a".into(),
         };
-        let links = a.tags_m2m().all(pool).await.unwrap();
+        let links = a.tags_m2m().all::<i64>(pool).await.unwrap();
         assert!(
             links.is_empty(),
             "audited {id}'s links outlive it: {links:?}"
         );
     }
-    assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
+    assert_eq!(video.tags_m2m().all::<i64>(pool).await.unwrap(), vec![1]);
     let rows =
         rustango::sql::count_rows_pool(pool, &CountQuery::from_select(SelectQuery::new(TAGGABLES)))
             .await
@@ -1542,19 +1542,19 @@ async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
     // Reuse id 1, as a restarted identity or a reused rowid would.
     let post = Gpost { id: 1 };
     post.insert_pool(pool).await.expect("post again");
-    let links = post.tags_m2m().all(pool).await.unwrap();
+    let links = post.tags_m2m().all::<i64>(pool).await.unwrap();
     assert!(links.is_empty(), "a new post inherits old links: {links:?}");
     let mut a = Gaudited {
         id: 1,
         label: "a".into(),
     };
     a.insert_pool(pool).await.expect("audited again");
-    let links = a.tags_m2m().all(pool).await.unwrap();
+    let links = a.tags_m2m().all::<i64>(pool).await.unwrap();
     assert!(
         links.is_empty(),
         "a new audited row inherits old links: {links:?}"
     );
-    assert_eq!(video.tags_m2m().all(pool).await.unwrap(), vec![1]);
+    assert_eq!(video.tags_m2m().all::<i64>(pool).await.unwrap(), vec![1]);
 }
 
 async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {

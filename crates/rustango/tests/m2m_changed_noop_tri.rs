@@ -202,7 +202,7 @@ async fn add_twice_on_a_keyless_through_model(pool: &Pool) {
     p.add(5_i64, pool).await.expect("add");
     p.add(5_i64, pool).await.expect("duplicate add");
     assert_eq!(actions(&fired), [M2mAction::Add]);
-    assert_eq!(p.all_as::<i32>(pool).await.expect("all"), [5]);
+    assert_eq!(p.all::<i32>(pool).await.expect("all"), [5]);
 }
 
 /// A unique key the link check does not cover skips the insert: no `Add`.
@@ -219,7 +219,7 @@ async fn add_skipped_by_another_unique_key(pool: &Pool) {
         .await
         .expect("add the unique post_id skips");
     assert_eq!(actions(&fired), [M2mAction::Add]);
-    assert_eq!(p.all_as::<i64>(pool).await.expect("all"), [5]);
+    assert_eq!(p.all::<i64>(pool).await.expect("all"), [5]);
 }
 
 /// `add` on a keyed junction is one statement and takes no source lock, so
@@ -274,7 +274,7 @@ async fn add_inside_atomic_that_updated_the_source(pool: &Pool) {
     })
     .await
     .expect("atomic");
-    assert_eq!(tags().all(pool).await.expect("all"), vec![7, 8]);
+    assert_eq!(tags().all::<i64>(pool).await.expect("all"), vec![7, 8]);
 }
 
 async fn generic_noop_set_and_clear_fire_nothing(pool: &Pool) {
@@ -294,7 +294,7 @@ async fn generic_set_with_string_keys(pool: &Pool) {
     t.set(&["b", "a"], pool).await.expect("same set");
     t.set(&["b"], pool).await.expect("smaller set");
     assert_eq!(actions(&fired), [M2mAction::Set, M2mAction::Set]);
-    assert_eq!(t.all_as::<String>(pool).await.expect("all"), ["b"]);
+    assert_eq!(t.all::<String>(pool).await.expect("all"), ["b"]);
 }
 
 /// The guessed `i64` read fails on PG's `INT`; `set` still applies.
@@ -304,7 +304,7 @@ async fn generic_set_on_an_int_column(pool: &Pool) {
     let t = tags(GENERIC_I32);
     t.set(&[5_i64, 6], pool).await.expect("set");
     t.set(&[6_i64], pool).await.expect("smaller set");
-    assert_eq!(t.all_as::<i32>(pool).await.expect("all"), [6]);
+    assert_eq!(t.all::<i32>(pool).await.expect("all"), [6]);
 }
 
 async fn generic_set_with_uuid_keys(pool: &Pool) {
@@ -315,7 +315,7 @@ async fn generic_set_with_uuid_keys(pool: &Pool) {
     t.set(&[b, a], pool).await.expect("same set");
     t.set(&[b], pool).await.expect("smaller set");
     assert_eq!(actions(&fired), [M2mAction::Set, M2mAction::Set]);
-    assert_eq!(t.all_as::<uuid::Uuid>(pool).await.expect("all"), [b]);
+    assert_eq!(t.all::<uuid::Uuid>(pool).await.expect("all"), [b]);
 }
 
 fn post(id: i64) -> M2MManager {
@@ -369,7 +369,7 @@ async fn noop_changes_fire_nothing(pool: &Pool) {
             (M2mAction::Remove, vec![SqlValue::I64(5)]),
         ]
     );
-    assert_eq!(p.all(pool).await.expect("all"), vec![6]);
+    assert_eq!(p.all::<i64>(pool).await.expect("all"), vec![6]);
 }
 
 async fn noop_set_and_clear_fire_nothing(pool: &Pool) {

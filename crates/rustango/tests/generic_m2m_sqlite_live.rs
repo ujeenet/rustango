@@ -107,14 +107,14 @@ async fn add_all_contains_remove() {
     // idempotent
     post.tags_m2m().add(10, &pool).await.unwrap();
 
-    let mut tags = post.tags_m2m().all(&pool).await.unwrap();
+    let mut tags = post.tags_m2m().all::<i64>(&pool).await.unwrap();
     tags.sort_unstable();
     assert_eq!(tags, vec![10, 20]);
     assert!(post.tags_m2m().contains(10, &pool).await.unwrap());
     assert!(!post.tags_m2m().contains(99, &pool).await.unwrap());
 
     post.tags_m2m().remove(10, &pool).await.unwrap();
-    assert_eq!(post.tags_m2m().all(&pool).await.unwrap(), vec![20]);
+    assert_eq!(post.tags_m2m().all::<i64>(&pool).await.unwrap(), vec![20]);
 }
 
 #[tokio::test]
@@ -129,12 +129,12 @@ async fn set_then_clear() {
     };
     post.tags_m2m().add(1, &pool).await.unwrap();
     post.tags_m2m().set(&[2, 3, 4], &pool).await.unwrap();
-    let mut tags = post.tags_m2m().all(&pool).await.unwrap();
+    let mut tags = post.tags_m2m().all::<i64>(&pool).await.unwrap();
     tags.sort_unstable();
     assert_eq!(tags, vec![2, 3, 4]);
 
     post.tags_m2m().clear(&pool).await.unwrap();
-    assert!(post.tags_m2m().all(&pool).await.unwrap().is_empty());
+    assert!(post.tags_m2m().all::<i64>(&pool).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -157,9 +157,9 @@ async fn two_unrelated_models_share_pivot_isolated_by_content_type() {
     post.tags_m2m().set(&[10, 11], &pool).await.unwrap();
     video.tags_m2m().set(&[20, 21], &pool).await.unwrap();
 
-    let mut post_tags = post.tags_m2m().all(&pool).await.unwrap();
+    let mut post_tags = post.tags_m2m().all::<i64>(&pool).await.unwrap();
     post_tags.sort_unstable();
-    let mut video_tags = video.tags_m2m().all(&pool).await.unwrap();
+    let mut video_tags = video.tags_m2m().all::<i64>(&pool).await.unwrap();
     video_tags.sort_unstable();
 
     assert_eq!(post_tags, vec![10, 11], "post tags leaked video's");
