@@ -163,7 +163,7 @@ impl Config {
         let secret = match &self.session_secret {
             Some(explicit) => explicit.clone(),
             None => {
-                let raw = std::env::var("RUSTANGO_SESSION_SECRET").unwrap_or_default();
+                let raw = std::env::var(crate::session::SESSION_SECRET_ENV).unwrap_or_default();
                 crate::session::SessionSecret::from_b64(&raw)
                     .map(|s| s.key().to_vec())
                     .unwrap_or_default()

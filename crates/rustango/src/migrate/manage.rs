@@ -577,6 +577,32 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A flag this command does not know.
+fn unknown_flag(flag: &str) -> MigrateError {
+    MigrateError::Validation(format!("unknown flag: {flag}"))
+}
+
+/// A positional argument this command does not take.
+fn unexpected_positional(arg: &str) -> MigrateError {
+    MigrateError::Validation(format!("unexpected positional argument: {arg}"))
+}
+
+/// A flag given as the last argument, without its value.
+fn missing_value(flag: &str) -> MigrateError {
+    MigrateError::Validation(format!("{flag} requires a value"))
+}
+
+/// Scaffolders never overwrite a file the user may have edited.
+fn refuse_overwrite(path: &Path) -> Result<(), MigrateError> {
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut merge = false;
@@ -628,13 +654,11 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if name.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 name = Some(other.to_owned());
             }
@@ -837,13 +861,11 @@ async fn migrate<W: Write>(
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if positional.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 positional = Some(other);
             }
@@ -1496,13 +1518,11 @@ fn sqlmigrate_cmd<W: Write>(
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if positional.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 positional = Some(other);
             }
@@ -1965,21 +1985,21 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
                 };
             }
             "--sql" => {
-                sql =
-                    Some(iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--sql requires a value".into())
-                    })?);
+                sql = Some(iter.next().cloned().ok_or_else(|| missing_value("--sql"))?);
             }
             "--reverse-sql" => {
-                reverse_sql = Some(iter.next().cloned().ok_or_else(|| {
-                    MigrateError::Validation("--reverse-sql requires a value".into())
-                })?);
+                reverse_sql = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| missing_value("--reverse-sql"))?,
+                );
             }
             "--name" => {
-                name =
-                    Some(iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--name requires a value".into())
-                    })?);
+                name = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| missing_value("--name"))?,
+                );
             }
             "--to" => {
                 to = Some(iter.next().cloned().ok_or_else(|| {
@@ -1994,7 +2014,7 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 return Err(MigrateError::Validation(format!(
@@ -2737,16 +2757,17 @@ fn parse_name_and_model_as(
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--model" => {
-                model =
-                    Some(iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--model requires a value".into())
-                    })?);
+                model = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| missing_value("--model"))?,
+                );
             }
             "--crate" => {
                 let v = iter
                     .next()
                     .cloned()
-                    .ok_or_else(|| MigrateError::Validation("--crate requires a value".into()))?;
+                    .ok_or_else(|| missing_value("--crate"))?;
                 let trimmed = v.trim();
                 if trimmed.is_empty() {
                     return Err(MigrateError::Validation(
@@ -2905,12 +2926,7 @@ fn write_generated<W: Write>(
     contents: String,
 ) -> Result<(), MigrateError> {
     let path = std::path::PathBuf::from("src").join(file_name);
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3368,7 +3384,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
             let v = iter
                 .next()
                 .cloned()
-                .ok_or_else(|| MigrateError::Validation("--crate requires a value".into()))?;
+                .ok_or_else(|| missing_value("--crate"))?;
             let trimmed = v.trim();
             if trimmed.is_empty() {
                 return Err(MigrateError::Validation(
@@ -3432,12 +3448,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     }
 
     let path = app_dir.join("api_routes.rs");
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
 
     let body = if tenant_aware {
         api_routes_template_tenant(app)
@@ -3811,12 +3822,7 @@ fn write_generated_bin<W: Write>(
     let path = std::path::PathBuf::from("src")
         .join("bin")
         .join(format!("{bin_name}.rs"));
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3931,12 +3937,7 @@ async fn {snake}() {{
     );
     // Tests live in tests/ not src/
     let path = std::path::PathBuf::from("tests").join(format!("{snake}.rs"));
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3976,7 +3977,7 @@ fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
             "--schema-only" => schema_only = true,
             "--no-owner" => no_owner = true,
             other => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
         }
     }
@@ -4060,7 +4061,7 @@ fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError>
             "--clean" => clean = true,
             "--yes" => yes = true,
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if file.is_some() {
@@ -4319,32 +4320,24 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
                 return Ok(out);
             }
             "--model" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--model"))?;
                 out.model_filters.push(v.clone());
             }
             "--exclude" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--exclude expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--exclude"))?;
                 out.excludes.push(v.clone());
             }
             "--indent" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--indent expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--indent"))?;
                 out.indent = v.parse().map_err(|e| {
                     MigrateError::Validation(format!("--indent: not an integer ({e})"))
                 })?;
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -4870,13 +4863,11 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
             }
             "--fail-fast" => fail_fast = true,
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if file.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 file = Some(other.to_owned());
             }
@@ -5696,9 +5687,7 @@ fn showurls_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError
                 return Ok(());
             }
             "--format" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--format expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--format"))?;
                 match v.as_str() {
                     "plain" | "json" => {
                         format = match v.as_str() {
@@ -5715,12 +5704,10 @@ fn showurls_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError
                 }
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -5791,9 +5778,7 @@ fn showmodels_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 return Ok(());
             }
             "--format" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--format expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--format"))?;
                 match v.as_str() {
                     "plain" => format = "plain",
                     "json" => format = "json",
@@ -5805,18 +5790,14 @@ fn showmodels_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 }
             }
             "--app" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--app expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--app"))?;
                 app_filter = Some(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -5916,24 +5897,18 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
             }
             "--yes" => out.yes = true,
             "--app" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--app expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--app"))?;
                 out.apps.push(v.clone());
             }
             "--model" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--model"))?;
                 out.models.push(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -6305,30 +6280,22 @@ fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, Migrat
         match a.as_str() {
             "--help" | "-h" => out.help = true,
             "--to" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--to requires a value".to_owned()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--to"))?;
                 out.to = Some(v.clone());
             }
             "--from" => {
-                let v = iter.next().ok_or_else(|| {
-                    MigrateError::Validation("--from requires a value".to_owned())
-                })?;
+                let v = iter.next().ok_or_else(|| missing_value("--from"))?;
                 out.from = Some(v.clone());
             }
             "--subject" => {
-                let v = iter.next().ok_or_else(|| {
-                    MigrateError::Validation("--subject requires a value".to_owned())
-                })?;
+                let v = iter.next().ok_or_else(|| missing_value("--subject"))?;
                 out.subject = Some(v.clone());
             }
             other if other.starts_with("--") => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -6361,24 +6328,18 @@ fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
             }
             "--pretend" | "--dry-run" => out.pretend = true,
             "--model" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--model"))?;
                 out.only.push(v.clone());
             }
             "--except" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--except expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--except"))?;
                 out.except.push(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -6396,7 +6357,7 @@ async fn audit_cleanup_cmd<W: Write>(
     let (mut days, mut keep_last, mut yes) = (None, None, false);
     let mut iter = args.iter();
     let number = |flag: &str, v: Option<&String>| -> Result<i64, MigrateError> {
-        let raw = v.ok_or_else(|| MigrateError::Validation(format!("{flag} requires a value")))?;
+        let raw = v.ok_or_else(|| missing_value(flag))?;
         raw.parse::<i64>().map_err(|_| {
             MigrateError::Validation(format!("{flag} expects an integer, got `{raw}`"))
         })
@@ -6529,18 +6490,14 @@ fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateErro
                 return Ok(out);
             }
             "--table" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--table expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--table"))?;
                 out.table = Some(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }

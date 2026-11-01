@@ -57,6 +57,9 @@ impl core::fmt::Display for SessionSecretError {
 
 impl std::error::Error for SessionSecretError {}
 
+/// The env var that holds the base64 session signing key.
+pub(crate) const SESSION_SECRET_ENV: &str = "RUSTANGO_SESSION_SECRET";
+
 /// The dev key file for tenant sessions; API keys are MACed with it too,
 /// so the CLI that mints one and the server that checks it agree.
 #[cfg(feature = "tenancy")]
@@ -81,7 +84,7 @@ impl SessionSecret {
     /// mistyped secret is visible at boot and not only in the logs.
     #[must_use]
     pub fn from_env_or_random() -> Self {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
+        if let Ok(raw) = std::env::var(SESSION_SECRET_ENV) {
             // One definition of "valid secret", shared with build_jwt
             // and `check --deploy`.
             match Self::from_b64(&raw) {
@@ -95,14 +98,9 @@ impl SessionSecret {
                 }
             }
         } else {
-            tracing::warn!(
-                "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
-                 will not survive server restarts; set the env var for production)",
-            );
+            warn_secret_unset();
         }
-        let mut buf = vec![0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        Self(buf)
+        Self::random()
     }
 
     /// Like [`Self::from_env_or_random`], but saves a generated key to
@@ -118,10 +116,7 @@ impl SessionSecret {
     /// comes from the environment or a secret manager, not a file.
     #[must_use]
     pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
-        Self::from_raw_or_disk(
-            std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
-            disk_path,
-        )
+        Self::from_raw_or_disk(std::env::var(SESSION_SECRET_ENV).ok().as_deref(), disk_path)
     }
 
     /// [`Self::from_env_or_disk`] with the env value passed in, so a test
@@ -135,7 +130,7 @@ impl SessionSecret {
                 Err(e) => warn_unusable_secret(&e.to_string()),
             }
         }
-        match load_or_create_key_file(disk_path, "session secret", "RUSTANGO_SESSION_SECRET") {
+        match load_or_create_key_file(disk_path, "session secret", SESSION_SECRET_ENV) {
             Ok(bytes) => Self(bytes),
             Err(e) => {
                 tracing::warn!(
@@ -143,9 +138,7 @@ impl SessionSecret {
                     error = %e,
                     "could not persist session secret to disk — using ephemeral random key",
                 );
-                let mut buf = vec![0u8; 32];
-                OsRng.fill_bytes(&mut buf);
-                Self(buf)
+                Self::random()
             }
         }
     }
@@ -161,16 +154,18 @@ impl SessionSecret {
     /// `SessionSecretError::TooShort` when the decoded bytes are
     /// fewer than 32.
     pub fn try_from_env() -> Result<Self, SessionSecretError> {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
+        if let Ok(raw) = std::env::var(SESSION_SECRET_ENV) {
             return Self::from_b64(&raw);
         }
-        tracing::warn!(
-            "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
-             will not survive server restarts; set the env var for production)",
-        );
+        warn_secret_unset();
+        Ok(Self::random())
+    }
+
+    /// A fresh 32-byte key that lives only in this process.
+    fn random() -> Self {
         let mut buf = vec![0u8; 32];
         OsRng.fill_bytes(&mut buf);
-        Ok(Self(buf))
+        Self(buf)
     }
 
     /// Strict variant for production boot. `RUSTANGO_SESSION_SECRET`
@@ -184,7 +179,7 @@ impl SessionSecret {
     /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
     /// `TooShort` per [`Self::try_from_env`].
     pub fn require_from_env() -> Result<Self, SessionSecretError> {
-        match std::env::var("RUSTANGO_SESSION_SECRET") {
+        match std::env::var(SESSION_SECRET_ENV) {
             Ok(raw) => Self::from_b64(&raw),
             Err(_) => Err(SessionSecretError::Missing),
         }
@@ -317,6 +312,14 @@ fn resolve_secure_cookies(override_flag: Option<bool>, tier: &str) -> bool {
 #[must_use]
 pub fn secure_cookies() -> bool {
     resolve_secure_cookies(SECURE_COOKIES_OVERRIDE.get().copied(), &tier_from_env())
+}
+
+/// The secret is unset, so sessions end on every restart.
+fn warn_secret_unset() {
+    tracing::warn!(
+        "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
+         will not survive server restarts; set the env var for production)",
+    );
 }
 
 /// Report that `RUSTANGO_SESSION_SECRET` was set but unusable.

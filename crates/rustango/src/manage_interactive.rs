@@ -234,6 +234,16 @@ impl PasswordConsole for Terminal {
     }
 }
 
+/// Print a secret the CLI shows once, such as a generated password.
+pub(crate) fn print_secret_once(
+    w: &mut impl io::Write,
+    label: &str,
+    value: &str,
+) -> io::Result<()> {
+    writeln!(w, "  {label}: {value}")?;
+    writeln!(w, "  store this safely — it won't be shown again")
+}
+
 /// Read a new password for a `manage` verb and run the form validators
 /// on it, like `createsuperuser`. A terminal user may bypass a failed
 /// check; scripts pass `skip_validation`.
