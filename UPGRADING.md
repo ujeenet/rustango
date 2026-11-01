@@ -188,6 +188,9 @@ untouched.
 - A ViewSet create or update whose row would leave a `register_queryset_scope!` scope is a 403; `ViewSet::for_model` also panics on the tables the admin never serves (TOTP secrets, passkeys, database servers).
 
 - A tenant needs a host, a path prefix or a port: `create-tenant`, the console and the webhook refuse one with none (a configured apex domain still gives the `<slug>.<apex>` default), and `edit-tenant` refuses clearing the last. `FirstAdminHandover::hand_over` returns `Result`.
+- `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
+- A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
+- `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
 ---
 
 ## 0.61.16

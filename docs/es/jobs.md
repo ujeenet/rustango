@@ -269,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Despliégalo como su propio contenedor/servicio y escálalo a **N réplicas** —
 todas extraen de la tabla compartida de forma segura. El proceso web entonces
-solo necesita `dispatch` (no tiene que `start()` los workers). Empareja el worker
+solo necesita `dispatch`, pero debe `register` cada tipo de job que despacha (sin `start()`), o construir su cola con `.allow_unregistered_dispatch()`; un dispatch no registrado se rechaza. Empareja el worker
 con un barrido periódico
 [`reclaim_stuck_jobs_pool`](#la-cola-persistente-producción) para recuperar
 trabajos de un worker que se ha caído.

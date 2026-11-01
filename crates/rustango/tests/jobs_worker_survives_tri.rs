@@ -756,7 +756,12 @@ async fn a_lost_lease_does_not_finish_the_new_holders_row(pool: &Pool) {
 
 async fn a_job_without_a_handler_spends_no_attempts(pool: &Pool) {
     let q = queue(pool, 1, Duration::from_secs(60)).await;
-    q.dispatch(&Orphan).await.unwrap();
+    // Enqueued by a producer whose worker runs elsewhere.
+    PgJobQueue::with_workers_pool(pool.clone(), 0)
+        .allow_unregistered_dispatch()
+        .dispatch(&Orphan)
+        .await
+        .unwrap();
     q.start().await;
     for _ in 0..2 {
         wait_locked(pool).await;
@@ -767,6 +772,24 @@ async fn a_job_without_a_handler_spends_no_attempts(pool: &Pool) {
             .expect("reclaim");
     }
     q.shutdown().await;
+}
+
+/// A queue refuses a job type it has no handler for, unless it is a
+/// producer that opted out; the refused one leaves no row.
+async fn an_unregistered_dispatch_is_refused_unless_allowed(pool: &Pool) {
+    let q = PgJobQueue::with_workers_pool(pool.clone(), 0);
+    let err = q.dispatch(&Orphan).await.unwrap_err();
+    assert!(
+        matches!(&err, JobError::Queue(m) if m.contains(Orphan::NAME)),
+        "{err:?}"
+    );
+    assert_eq!(job_rows(pool).await, 0, "a refused dispatch wrote a row");
+    PgJobQueue::with_workers_pool(pool.clone(), 0)
+        .allow_unregistered_dispatch()
+        .dispatch(&Orphan)
+        .await
+        .expect("a producer may enqueue for another process");
+    assert_eq!(job_rows(pool).await, 1);
 }
 
 async fn a_lost_lease_fires_no_dead_letter(pool: &Pool) {
@@ -1282,6 +1305,7 @@ tri_dialect_test! {
         a_reclaim_beside_heartbeats_does_not_fail,
         a_lost_lease_does_not_finish_the_new_holders_row,
         a_job_without_a_handler_spends_no_attempts,
+        an_unregistered_dispatch_is_refused_unless_allowed,
         a_lost_lease_fires_no_dead_letter,
         shutdown_releases_an_aborted_job,
         start_after_shutdown_runs_jobs,

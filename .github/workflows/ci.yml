@@ -1776,6 +1776,7 @@ jobs:
           binary(=uuid_v7_pk_writes_tri) |
           binary(=orm_tx_helpers_tri) |
           binary(=fk_on_delete_tri) |
+          binary(=apply_all_index_tri) |
           binary(=manage_data_verbs_tri) |
           binary(=boot_races_tri) |
           binary(=test_db_tri) |

@@ -395,6 +395,16 @@ impl HandlerRegistry {
     fn lookup(&self, name: &str) -> Option<Registered> {
         self.handlers.get(name).cloned()
     }
+
+    /// Refuse a dispatch nothing on this queue would run.
+    fn require(&self, name: &str) -> Result<(), JobError> {
+        if self.handlers.contains_key(name) {
+            return Ok(());
+        }
+        Err(JobError::Queue(format!(
+            "job `{name}` has no handler on this queue; register it before dispatching"
+        )))
+    }
 }
 
 // ------------------------------------------------------------------ DeadLetter
@@ -565,6 +575,8 @@ impl JobQueue for InMemoryJobQueue {
     }
 
     async fn dispatch<T: Job>(&self, payload: &T) -> Result<(), JobError> {
+        // Memory is the job's only copy, and only this process's workers read it.
+        self.registry.lock().await.require(T::NAME)?;
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let envelope = JobEnvelope {
             name: T::NAME,
@@ -1296,10 +1308,9 @@ mod tests {
         q.shutdown().await;
     }
 
+    /// Nothing would run a job type with no handler, so dispatch refuses it.
     #[tokio::test]
-    async fn unknown_job_is_logged_not_panic() {
-        // Dispatch a job whose NAME isn't registered — the worker should
-        // skip it without crashing.
+    async fn an_unregistered_job_is_refused_at_dispatch() {
         #[derive(Serialize, Deserialize)]
         struct UnregisteredJob;
 
@@ -1312,20 +1323,15 @@ mod tests {
         }
 
         let q = InMemoryJobQueue::with_workers(1);
-        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let s = seen.clone();
-        q.on_dead_letter(move |dl| {
-            s.lock().unwrap().push((dl.name, dl.attempts));
-            async {}
-        })
-        .await;
-        // Deliberately don't register
         q.start().await;
-        q.dispatch(&UnregisteredJob).await.unwrap();
-        wait_until("the dead letter", || !seen.lock().unwrap().is_empty()).await;
-        // Dropped from memory, so the callback is its only record.
-        assert_eq!(*seen.lock().unwrap(), [("test:unregistered", 0)]);
+        let err = q.dispatch(&UnregisteredJob).await.unwrap_err();
+        assert!(
+            matches!(&err, JobError::Queue(m) if m.contains("test:unregistered")),
+            "{err:?}"
+        );
         assert_eq!(q.pending_count().await, 0);
+        q.register::<UnregisteredJob>().await;
+        q.dispatch(&UnregisteredJob).await.expect("registered now");
         q.shutdown().await;
     }
 
