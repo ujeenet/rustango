@@ -2558,6 +2558,20 @@ async fn org_impersonate(
     payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let token = handoff::mint(&tenant_secret, &payload);
 
+    // Build the redirect: tenant host, the handoff path, and the token.
+    // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
+    // every character is already URL-safe, so no escaping needed.
+    let handoff = match crate::tenancy::server::tenant_link(
+        &org,
+        &state.tenant_handoff_url,
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        &apex.map(|Extension(a)| a).unwrap_or_default(),
+    ) {
+        Ok(link) => link,
+        Err(e) => {
+            return redirect_with_error(&slug, &e.user_facing().unwrap_or_default());
+        }
+    };
     // Audit row on the operator side. The tenant admin writes its own
     // when an impersonated session first makes a change.
     let mut detail = serde_json::Map::new();
@@ -2567,15 +2581,6 @@ async fn org_impersonate(
     );
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
-    // Build the redirect: tenant host, the handoff path, and the token.
-    // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
-    // every character is already URL-safe, so no escaping needed.
-    let handoff = crate::tenancy::server::tenant_link(
-        &org,
-        &state.tenant_handoff_url,
-        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
-        &apex.map(|Extension(a)| a).unwrap_or_default(),
-    );
     let redirect_to = format!("{handoff}?token={token}");
 
     let mut resp = Redirect::to(&redirect_to).into_response();

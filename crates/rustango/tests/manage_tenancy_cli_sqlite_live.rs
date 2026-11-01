@@ -73,7 +73,7 @@ impl Booted {
             &self.pools,
             &self.url,
             self.migrations.path(),
-            args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            rustango::testkit::routed_args(args),
             &mut buf,
         )
         .await

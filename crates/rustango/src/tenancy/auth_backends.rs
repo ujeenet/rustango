@@ -392,7 +392,11 @@ redacted_debug!(ApiKey { id, user_id, key_prefix, label, expires_at, created_at;
 // A key is minted by `create-api-key`, which shows the secret once; an admin
 // form could only store a row nobody can use (#1763).
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_api_keys", "add", |_, _| false);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_api_keys",
+    "add",
+    |_, _| false
+);
 // The owner decides who the credential signs in as (#2520).
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Add, [user_id]);

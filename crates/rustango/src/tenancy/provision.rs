@@ -1305,7 +1305,28 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
         default_host_pattern(request, crate::tenancy::server::configured_apex_domain())
     });
     out.host_pattern = pattern.as_deref().map(validate_host_pattern).transpose()?;
+    if !is_routable(
+        out.host_pattern.as_deref(),
+        out.path_prefix.as_deref(),
+        out.port,
+    ) {
+        return Err(unroutable(&out.slug));
+    }
     Ok(out)
+}
+
+/// Whether a resolver can reach a tenant with these routing keys.
+pub(crate) fn is_routable(host: Option<&str>, prefix: Option<&str>, port: Option<i32>) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+    set(host) || set(prefix) || port.is_some()
+}
+
+/// Why a tenant with no host, path prefix or port is refused.
+pub(crate) fn unroutable(slug: &str) -> String {
+    format!(
+        "tenant `{slug}` needs a host, a path prefix or a port: no resolver routes \
+         `<slug>.<apex>`, so nothing would reach it"
+    )
 }
 
 /// The host a tenant created without one answers to: `<slug>.<apex>`.
@@ -3224,6 +3245,25 @@ mod validation_tests {
         assert!(err.contains("hostname"), "should say why: {err}");
     }
 
+    /// A request that leaves the tenant with no host, path prefix or port
+    /// is refused: nothing would route to it.
+    #[test]
+    fn an_unroutable_request_is_refused() {
+        let mut r = ProvisionRequest::database("acme", "postgres://u:p@h/acme");
+        r.host_pattern = None;
+        r.path_prefix = None;
+        r.port = None;
+        let routable = |r: &ProvisionRequest| {
+            is_routable(r.host_pattern.as_deref(), r.path_prefix.as_deref(), r.port)
+        };
+        assert!(!routable(&r));
+        assert!(unroutable("acme").contains("acme"));
+        r.path_prefix = Some("acme".into());
+        assert!(routable(&r));
+        r.path_prefix = Some("  ".into());
+        assert!(!routable(&r), "a blank prefix routes nothing");
+    }
+
     #[test]
     fn a_slug_is_restricted_to_what_is_legal_in_all_three_uses() {
         for bad in [
@@ -3390,7 +3430,8 @@ mod validation_tests {
     fn validate_fields_checks_the_slug_derived_schema_name_too() {
         // A slug legal as a hostname label is legal as a schema name,
         // so the default never trips its own rule.
-        let mut req = ProvisionRequest::new("acme-2", TenantStorage::Schema(None));
+        let mut req =
+            crate::testkit::routed(ProvisionRequest::new("acme-2", TenantStorage::Schema(None)));
         assert!(validate_fields(&req).is_ok());
 
         // An explicit one is checked by the same rule.

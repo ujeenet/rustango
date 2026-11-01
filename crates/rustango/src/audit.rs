@@ -2067,6 +2067,68 @@ impl TxUpdate {
     }
 }
 
+/// Delete, or soft delete by `stamp`, the row `row` selects in the caller's
+/// `tx`, opened on `pool`, audited as [`delete`] and [`update_as`] audit it.
+/// `by_pk` re-reads the row after a soft delete, which leaves its scope.
+///
+/// # Errors
+/// As the write and the emit; an audited model with no in-transaction
+/// reader is [`crate::sql::ExecError::AuditUnsupported`].
+#[cfg(feature = "admin")]
+pub(crate) async fn remove_one_tx(
+    pool: &crate::sql::Pool,
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    (row, by_pk): (crate::core::WhereExpr, crate::core::WhereExpr),
+    stamp: Option<&crate::core::UpdateQuery>,
+) -> Result<u64, crate::sql::ExecError> {
+    let entry = crate::core::ModelEntry::for_schema(model);
+    let audited =
+        entry.is_some_and(|e| e.audited_delete().is_some() || e.audited_update().is_some());
+    let reader = match entry.and_then(|e| e.audited_cascade()) {
+        Some(r) => Some(r).filter(|_| audited),
+        None if audited => {
+            return Err(crate::sql::ExecError::AuditUnsupported {
+                table: model.table,
+                reason: "an audited delete in a transaction needs the derived reader",
+            })
+        }
+        None => None,
+    };
+    let (n, entries) = match stamp {
+        None => {
+            let entries = match reader {
+                Some(read) => read(tx, row.clone()).await?,
+                None => Vec::new(),
+            };
+            let q = crate::core::DeleteQuery {
+                model,
+                where_clause: row,
+            };
+            (
+                writing_via(pool, crate::sql::delete_tx(tx, &q)).await?,
+                entries,
+            )
+        }
+        Some(stamp) => {
+            let n = writing_via(pool, crate::sql::update_tx(tx, stamp)).await?;
+            let mut entries = match reader {
+                Some(read) if n > 0 => read(tx, by_pk).await?,
+                _ => Vec::new(),
+            };
+            for (_, e) in &mut entries {
+                e.operation = AuditOp::SoftDelete;
+            }
+            (n, entries)
+        }
+    };
+    if n > 0 && !entries.is_empty() {
+        let entries: Vec<PendingEntry> = entries.into_iter().map(|(_, e)| e).collect();
+        emit_many_tx(tx, Via::Pool(pool), &entries).await?;
+    }
+    Ok(n)
+}
+
 /// Emit a `Create` entry for the row with primary key `pk`, read in `tx`.
 ///
 /// # Errors

@@ -241,13 +241,17 @@ impl FirstAdminHandover {
 
     /// Issue `admin`'s link and mail it, or hand it back. `request_host`
     /// is the caller's `Host`, the last fallback for the tenant's port.
+    ///
+    /// # Errors
+    /// [`TenancyError::Validation`] when no resolver routes `org` (no
+    /// host, path prefix or port), so the link would be dead.
     pub async fn hand_over(
         &self,
         org: &Org,
         admin: &CreatedAdmin,
         request_host: Option<&str>,
-    ) -> Handover {
-        let link = self.link(org, admin.user_id, request_host);
+    ) -> Result<Handover, TenancyError> {
+        let link = self.link(org, admin.user_id, request_host)?;
         #[cfg(feature = "email")]
         if let Some(mail) = &self.mail {
             return match mail
@@ -255,9 +259,9 @@ impl FirstAdminHandover {
                 .send(&self.email(org, admin, &mail.from, &link))
                 .await
             {
-                Ok(()) => Handover::Mailed {
+                Ok(()) => Ok(Handover::Mailed {
                     to: admin.email.clone(),
-                },
+                }),
                 Err(e) => {
                     tracing::warn!(
                         target: "rustango::tenancy::first_admin",
@@ -265,11 +269,11 @@ impl FirstAdminHandover {
                         error = %e,
                         "could not mail the first admin's set-password link"
                     );
-                    Handover::MailFailed(link)
+                    Ok(Handover::MailFailed(link))
                 }
             };
         }
-        Handover::Link(link)
+        Ok(Handover::Link(link))
     }
 
     /// Fill in `outcome`'s first admin handover, if it has one.
@@ -289,11 +293,16 @@ impl FirstAdminHandover {
             .into_iter()
             .next()
             .ok_or_else(|| TenancyError::Validation(format!("no tenant `{}`", outcome.slug)))?;
-        admin.handover = Some(self.hand_over(&org, admin, request_host).await);
+        admin.handover = Some(self.hand_over(&org, admin, request_host).await?);
         Ok(())
     }
 
-    fn link(&self, org: &Org, user_id: i64, request_host: Option<&str>) -> SetPasswordLink {
+    fn link(
+        &self,
+        org: &Org,
+        user_id: i64,
+        request_host: Option<&str>,
+    ) -> Result<SetPasswordLink, TenancyError> {
         let signed = crate::auth_flows::PasswordReset::issue(
             &crate::auth_flows::LinkScope::from(org),
             LINK_BASE,
@@ -303,8 +312,8 @@ impl FirstAdminHandover {
         );
         let query = signed.split_once('?').map_or("", |(_, q)| q);
         let page =
-            super::server::tenant_link(org, &self.set_password_path, request_host, &self.apex);
-        SetPasswordLink(format!("{page}?{query}"))
+            super::server::tenant_link(org, &self.set_password_path, request_host, &self.apex)?;
+        Ok(SetPasswordLink(format!("{page}?{query}")))
     }
 
     #[cfg(feature = "email")]
@@ -506,9 +515,9 @@ where
     };
     if admin.email.is_empty() && handover.mails() {
         // Nowhere to mail it: hand it back.
-        return Ok(Handover::Link(handover.link(org, admin.user_id, None)));
+        return Ok(Handover::Link(handover.link(org, admin.user_id, None)?));
     }
-    Ok(handover.hand_over(org, &admin, None).await)
+    handover.hand_over(org, &admin, None).await
 }
 
 #[cfg(test)]
@@ -523,6 +532,7 @@ mod tests {
         Org {
             id: crate::sql::Auto::from(id),
             slug: "acme".into(),
+            host_pattern: Some("acme.localhost".into()),
             ..crate::testkit::org()
         }
     }
@@ -564,7 +574,12 @@ mod tests {
             handover: None,
         };
         let h = FirstAdminHandover::new(&secret());
-        let mail = h.email(&tenant, &admin, "ops@acme.test", &h.link(&tenant, 1, None));
+        let mail = h.email(
+            &tenant,
+            &admin,
+            "ops@acme.test",
+            &h.link(&tenant, 1, None).unwrap(),
+        );
         assert!(!mail.subject.contains(['\r', '\n']), "{:?}", mail.subject);
     }
 
@@ -573,7 +588,7 @@ mod tests {
     fn a_link_verifies_for_its_tenant_and_no_other() {
         let tenant = org(7);
         let h = FirstAdminHandover::new(&secret());
-        let link = h.link(&tenant, 42, None);
+        let link = h.link(&tenant, 42, None).unwrap();
         let query = link.expose().split_once('?').unwrap().1;
         assert!(
             link.expose().contains("/change-password?"),

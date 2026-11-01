@@ -255,6 +255,51 @@ pub async fn add_missing_columns<M: crate::core::Model>(pool: &Pool) -> Result<(
 
 // ======================================================= factories
 
+/// `request` with host `<slug>.localhost` when it has no host, path prefix
+/// or port: provisioning refuses a tenant no resolver routes.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn routed(
+    mut request: crate::tenancy::provision::ProvisionRequest,
+) -> crate::tenancy::provision::ProvisionRequest {
+    if request.host_pattern.is_none() && request.path_prefix.is_none() && request.port.is_none() {
+        request.host_pattern = Some(format!("{}.localhost", request.slug));
+    }
+    request
+}
+
+/// `opts` for `api::create_tenant` with `<slug>.localhost`, as [`routed`].
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn routed_opts(
+    slug: &str,
+    mut opts: crate::tenancy::manage::api::CreateTenantOpts,
+) -> crate::tenancy::manage::api::CreateTenantOpts {
+    if opts.host_pattern.is_none() && opts.path_prefix.is_none() && opts.port.is_none() {
+        opts.host_pattern = Some(format!("{slug}.localhost"));
+    }
+    opts
+}
+
+/// Tenancy verb argv; a `create-tenant <slug>` with no routing flag gains
+/// `--host-pattern <slug>.localhost`, as [`routed`] does for a request.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn routed_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().map(|a| a.as_ref().to_owned()).collect();
+    let routing = ["--host-pattern", "--path-prefix", "--port"];
+    if let [verb, slug, rest @ ..] = out.as_slice() {
+        if verb == "create-tenant"
+            && !slug.starts_with('-')
+            && !rest.iter().any(|a| routing.contains(&a.as_str()))
+        {
+            let host = format!("{slug}.localhost");
+            out.extend(["--host-pattern".to_owned(), host]);
+        }
+    }
+    out
+}
+
 /// A fully-populated [`Org`](crate::tenancy::Org) with valid defaults,
 /// for struct-update construction: `Org { slug: "x".into(), ..testkit::org() }`.
 ///

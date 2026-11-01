@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `[cache] redis_connect_timeout_ms` and `redis_command_timeout_ms` bound the Redis cache built by `cache::from_settings_async` (defaults 5000 and 2000).
 - `[server] trusted_proxies` (and `RUSTANGO__SERVER__TRUSTED_PROXIES`) installs the real-IP layer for `Cli` apps; `Cli::with_trusted_proxies` in code wins and an invalid entry stops `run`.
+- `object_permissions::Actor` tells a hook who is asking (admin session, user token, agent, nobody), bound to the routed tenant; `ViewSet::skip_object_permissions` and `view_hook_scan_cap`.
 
 ### Changed
 
@@ -20,10 +21,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
 - An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
 - UpdateView `object` and the bulk-delete confirm `objects` carry only the view's field list and the primary key; `UpdateView::context_fields` opts read-only columns in. The mount-time warning is gone.
+- ViewSets run the object-permission hooks and queryset scopes the admin runs: `add` on create, `view` (404) then `change` / `delete` (403) on item routes, `view` on lists and FK targets. `admin_add_hooks()` is gone.
+- The hook and scope macros are `register_object_permission!` and `register_queryset_scope!` under `rustango::object_permissions`; the `register_admin_*` names are deprecated.
+- `ViewSet::for_model` refuses `rustango_api_keys`, `rustango_agents` and the tables the admin never serves.
+- ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
 
 ### Fixed
 
 - `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
+- Admin detail, edit, update and delete answer 404, not 403, for a row the `view` hook hides.
 - Tenancy: a tenant URL that reaches the registry's database under another name, a resume onto the registry, and migrating into a schema another app owns are refused instead of warned.
 - A Postgres `Tenant` no longer holds a pool connection for the whole request: it takes one on the first `conn()`, so handlers that only use `t.pool()` cannot exhaust the held pool.
 - Media: replacing a row's tags could create new tag rows with only the media `change` permission; a new slug now also needs `Add(NewTag)`.
@@ -34,6 +40,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
 - File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
+- A tenant with no host, path prefix or port is refused at provisioning and edit, and gets no link, instead of being created unreachable with a warning.
 - Jobs: dispatching a type with no registered handler is refused instead of dead-lettered or left locked; `PgJobQueue::allow_unregistered_dispatch` opts a producer out.
 - MCP agent tokens no longer sign with a passphrase `RUSTANGO_SESSION_SECRET`'s raw text.
 - `apply_all` fails on an index it cannot create instead of skipping it.

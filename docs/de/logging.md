@@ -139,6 +139,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::media::auth` | Ablehnungen der Media-Router-Autorisierung |
 | `rustango::messages` | Flash-Messages |
 | `rustango::migrate` | Migrations-Runner |
+| `rustango::object_permissions` | Scan-Grenze des `"view"`-Hooks in einer Liste erreicht |
 | `rustango::outbound` | Geprüfte ausgehende Aufrufe (SSO, Slack, Webhooks) |
 | `rustango::passkey` | Vom Cache abgewiesene Passkey-Challenges |
 | `rustango::passwords` | Passwort-Hash-Upgrades beim Login |

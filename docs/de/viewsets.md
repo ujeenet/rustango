@@ -595,7 +595,8 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `pagination(PaginationStyle::…)` | Den Stil explizit setzen. |
 | `filter_backend(closure)` | Eigene `WHERE`-Prädikate über `filter_fields` hinaus hinzufügen. |
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster; `QUERY` verbraucht das Budget der Liste. |
-| `admin_add_hooks()` | Führt beim Create die `"add"`-Objekt-Berechtigungs-Hooks des Admins aus, auf dem Request und auf jeder geschriebenen Zeile; eine Ablehnung ist ein `403`. Standardmäßig aus. |
+| `skip_object_permissions()` | Überspringt die Objekt-Berechtigungs-Hooks und Queryset-Scopes der App, für eine API, die ihre Zeilen selbst schützt. Die Hooks des Frameworks laufen weiter. |
+| `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 10 000); darüber sind `count` und `last_page` `null`. |
 | `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
 | `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |
@@ -745,9 +746,17 @@ wird abgelehnt. `.permissions_for_model::<Post>()` füllt automatisch die Standa
 Codenamen `<table>.view` / `.add` / `.change` / `.delete` (`posts.view`, … für die
 Tabelle `posts`).
 
-Ein ViewSet führt die Objekt-Berechtigungs-Hooks `change`, `delete` und `view`
-des Admins noch nicht aus. Hat sein Modell welche, loggt das Einhängen eine
-Warnung; 0.62.0 wird sie bei Update, Delete und Read ausführen.
+**Objekt-Berechtigungen.** Ein ViewSet führt dieselben Hooks wie der Admin aus
+(`register_object_permission!`, `register_queryset_scope!`): `add` beim Create
+(ein Bulk-Create ganz oder gar nicht, `403` mit `{"details": {"index": i}}`);
+`view` bei Retrieve, Update und Delete (verborgen ist `404`), dann `change` bzw.
+`delete` (`403`, auch beim Soft Delete); `view` in Listen (verborgene Zeilen
+fehlen in Seite und `count`, ab `view_hook_scan_cap` sind `count` und
+`last_page` `null`). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
+`change` prüft nur die gespeicherte Zeile. `object_permissions::Actor::of(&parts)`
+sagt einem Hook, wer fragt; ein Agent-Token ist nie Superuser.
+`rustango_api_keys`, `rustango_agents` und die SSO-Tabellen lehnt
+`ViewSet::for_model` ab.
 
 **Drosselung** wendet Limits pro Client mit festem Zeitfenster an, pro Aktion:
 

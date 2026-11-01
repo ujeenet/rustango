@@ -8,6 +8,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use rustango::admin::AdminSession;
+use rustango::object_permissions::Actor;
 use rustango::sql::{sqlx, Auto, FetcherPool as _};
 use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
@@ -24,17 +25,20 @@ static UNIQ: AtomicU64 = AtomicU64::new(0);
 /// thread can hide the handoff line from the capture test's scoped subscriber.
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// What a user detail page saw: the audit source token and the admin session.
-static SEEN: std::sync::Mutex<Vec<(String, Option<AdminSession>)>> =
-    std::sync::Mutex::new(Vec::new());
+/// What a user detail page saw: the audit source token, the admin session
+/// and the hooks' actor.
+type Seen = (String, Option<AdminSession>, Actor);
+static SEEN: std::sync::Mutex<Vec<Seen>> = std::sync::Mutex::new(Vec::new());
 
 fn record_actor(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
     let source = rustango::audit::current_source().as_token();
     let session = parts.extensions.get::<AdminSession>().cloned();
-    SEEN.lock().unwrap().push((source, session));
+    SEEN.lock()
+        .unwrap()
+        .push((source, session, Actor::of(parts)));
     true
 }
-rustango::register_admin_object_permission!("rustango_users", "view", record_actor);
+rustango::register_object_permission!("rustango_users", "view", record_actor);
 
 fn unique(prefix: &str) -> String {
     format!(
@@ -406,6 +410,23 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
     );
     let page = env.get("/acme/__admin/", &cookie).await;
     assert_eq!(page.status(), StatusCode::OK);
+    // On the apex path prefix too, the hooks see the impersonated tenant.
+    let mut seen_user = User {
+        username: "prefix-seen".into(),
+        ..rustango::testkit::user()
+    };
+    seen_user.insert_pool(&env.tenant).await.expect("seed user");
+    let uid = seen_user.id.get().copied().unwrap();
+    SEEN.lock().unwrap().clear();
+    let detail = env
+        .get(&format!("/acme/__admin/rustango_users/{uid}"), &cookie)
+        .await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let (_, _, actor) = SEEN.lock().unwrap().pop().expect("the hook ran");
+    assert!(
+        matches!(&actor, Actor::Operator { impersonating: Some(t), .. } if *t == env.slug),
+        "{actor:?}"
+    );
     let html = axum::body::to_bytes(page.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -700,14 +721,15 @@ async fn a_console_route_wins_over_a_tenant_prefix() {
             "not the console's tenant list"
         );
     }
+    // The shadow check logs from a spawned task: wait for it, then make
+    // sure it warned once, not once per request.
+    let warned = |s: &str| s.matches("shadowed by an operator console route").count();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while warned(&out.contents()) == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let logged = out.contents();
-    assert_eq!(
-        logged
-            .matches("shadowed by an operator console route")
-            .count(),
-        1,
-        "{logged}"
-    );
+    assert_eq!(warned(&logged), 1, "{logged}");
     let anon = apex_request(&app, "GET", "/orgs/__admin/", "", String::new()).await;
     let to = anon.headers()["location"].to_str().unwrap();
     assert!(to.starts_with("/orgs/__login"), "got {to}");
@@ -1141,7 +1163,16 @@ async fn an_impersonation_is_attributed_to_the_operator_id() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let (source, session) = SEEN.lock().unwrap().pop().expect("the action ran");
+    let (source, session, actor) = SEEN.lock().unwrap().pop().expect("the action ran");
+    // Superuser in the impersonated tenant, the one the host routed to.
+    let impersonating = Some(env.slug.clone());
+    assert_eq!(
+        actor,
+        Actor::Operator {
+            id: op_id,
+            impersonating
+        }
+    );
     let token = format!("operator:{op_id}:impersonating");
     assert_eq!(source, token, "audited writes");
     let session = session.expect("an admin session");

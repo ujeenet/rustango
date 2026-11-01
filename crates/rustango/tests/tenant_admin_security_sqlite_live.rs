@@ -36,7 +36,7 @@ pub struct SecNote {
     pub owner_id: i64,
 }
 
-/// A table scoped by `register_admin_queryset!` to the signed-in user's rows.
+/// A table scoped by `register_queryset_scope!` to the signed-in user's rows.
 #[derive(Model, Debug, Clone)]
 #[rustango(
     table = "sec_owned",
@@ -64,7 +64,7 @@ fn own_rows(parts: &axum::http::request::Parts) -> Vec<Filter> {
         .map_or(-1, |s| s.user_id);
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(uid))]
 }
-rustango::register_admin_queryset!("sec_owned", own_rows);
+rustango::register_queryset_scope!("sec_owned", own_rows);
 
 /// Two hidden fields (`editable = false`) and one left out of `fieldsets`.
 #[derive(Model, Debug, Clone)]
@@ -111,7 +111,7 @@ pub struct SecKid {
     pub owner_id: i64,
 }
 
-rustango::register_admin_queryset!("sec_kid", own_rows);
+rustango::register_queryset_scope!("sec_kid", own_rows);
 rustango::register_admin_inline!(
     parent = "sec_parent",
     child = "sec_kid",

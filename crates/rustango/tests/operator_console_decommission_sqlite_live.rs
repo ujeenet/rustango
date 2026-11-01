@@ -180,7 +180,7 @@ impl Booted {
         let slug = unique("doomed");
         let db = self._tmp.path().join(format!("{slug}.db"));
         let form = format!(
-            "slug={slug}&storage_mode=database&backend_kind=sqlite&database_url=sqlite%3A%2F%2F{}%3Fmode%3Drwc",
+            "slug={slug}&host_pattern={slug}.localhost&storage_mode=database&backend_kind=sqlite&database_url=sqlite%3A%2F%2F{}%3Fmode%3Drwc",
             db.display().to_string().replace('/', "%2F")
         );
         let resp = self

@@ -1149,20 +1149,10 @@ async fn compute_facets(
     Ok(out)
 }
 
-/// The rows a "view" hook admits, as a filter SQL can apply.
-enum ViewHookRows {
-    /// No hook, or it denies nothing.
-    All,
-    /// The admitted rows, by PK.
-    Only(Filter),
-    /// Too many rows to scan: counts, facets and dates are withheld.
-    TooMany,
-}
+use crate::object_permissions::ViewHookRows;
 
-/// Run the table's "view" hook over every row matching `filters` and
-/// `search`, and fold the answer into one PK filter: the shorter of `IN`
-/// admitted or `NOT IN` denied. The hook takes the whole row, so all
-/// scalar columns are read.
+/// The table's "view" hook over every row matching `filters` and `search`,
+/// as one PK filter; see [`crate::object_permissions::view_hook_rows`].
 async fn view_hook_rows(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -1170,75 +1160,19 @@ async fn view_hook_rows(
     filters: &[Filter],
     search: Option<&SearchClause>,
 ) -> Result<ViewHookRows, AdminError> {
-    if !crate::admin::object_permissions::has_hook(model.table, "view") {
-        return Ok(ViewHookRows::All);
-    }
-    let Some(pk_field) = model.primary_key() else {
-        return Ok(ViewHookRows::TooMany);
-    };
-    let cap = state.view_hook_scan_cap();
-    let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        &SelectQuery {
-            where_clause: WhereExpr::and_predicates(filters.to_vec()),
-            search: search.cloned(),
-            limit: Some(i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1)),
-            ..SelectQuery::new(model)
-        },
-        &fields,
-    )
-    .await?;
-    if rows.len() > cap {
-        warn_scan_cap(model.table, cap);
-        return Ok(ViewHookRows::TooMany);
-    }
-    let (mut admitted, mut denied) = (Vec::new(), Vec::new());
-    for row in &rows {
-        let pk = render::read_value_as_string_json(row, pk_field)
-            .and_then(|raw| forms::parse_pk_string(pk_field, &raw).ok());
-        let Some(pk) = pk else {
-            return Ok(ViewHookRows::TooMany);
-        };
-        if crate::admin::object_permissions::is_allowed(model.table, "view", parts, Some(row)) {
-            admitted.push(pk);
-        } else {
-            denied.push(pk);
-        }
-    }
-    let filter = |op, value| Filter {
-        column: pk_field.column,
-        op,
-        value,
-    };
-    Ok(if denied.is_empty() {
-        ViewHookRows::All
-    } else if admitted.is_empty() {
-        // A PK is never NULL: no row.
-        ViewHookRows::Only(filter(Op::IsNull, SqlValue::Bool(true)))
-    } else if denied.len() <= admitted.len() {
-        ViewHookRows::Only(filter(Op::NotIn, SqlValue::List(denied)))
-    } else {
-        ViewHookRows::Only(filter(Op::In, SqlValue::List(admitted)))
-    })
-}
-
-/// Log once per table that the scan cap hid its counts.
-fn warn_scan_cap(table: &'static str, cap: usize) {
-    static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let mut warned = WARNED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !warned.contains(&table) {
-        warned.push(table);
-        tracing::warn!(
-            target: "rustango::admin",
-            table,
-            cap,
-            "the \"view\" hook matches more rows than the scan cap: total, facets and \
-             dates are hidden. Use register_admin_queryset! or raise view_hook_scan_cap"
-        );
-    }
+    let hooks = (parts, crate::object_permissions::Hooks::All);
+    let query = (WhereExpr::and_predicates(filters.to_vec()), search.cloned());
+    // The PK list shares the bind budget with the filters' own lists.
+    let budget = crate::list_params::in_values_budget(state.pool.dialect().max_bind_params());
+    let used: usize = filters
+        .iter()
+        .map(|f| match &f.value {
+            SqlValue::List(items) => items.len(),
+            _ => 1,
+        })
+        .sum();
+    let limits = (state.view_hook_scan_cap(), budget.saturating_sub(used));
+    Ok(crate::object_permissions::view_hook_rows(&state.pool, hooks, model, query, limits).await?)
 }
 
 /// One facet value: the stored key, its URL form, the FK display name and the count.
@@ -1891,14 +1825,9 @@ pub(crate) async fn detail_view(
         pk: pk_raw.clone(),
     })?;
 
-    // Object-level `has_view_permission(request, obj)`. If any
-    // registered `view` hook returns false, answer 403 before the
-    // detail HTML is rendered.
+    // A row the `view` hook hides reads as absent: a 403 would confirm it exists.
     if !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(&row)) {
-        return Err(AdminError::Forbidden {
-            table: model.table.to_owned(),
-            action: "view",
-        });
+        return Err(AdminError::RowNotFound { table, pk: pk_raw });
     }
 
     let fk_map = fk_map_for_rows(&state, &parts, model, std::slice::from_ref(&row)).await?;
@@ -2535,8 +2464,10 @@ pub(crate) async fn edit_form(
         pk: pk_raw.clone(),
     })?;
 
-    // `has_change_permission(request, obj)` hook. Block the edit
-    // form before any inline panel loads.
+    // Hidden is a 404, then the `change` hook a 403, before any inline panel loads.
+    if !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(&row)) {
+        return Err(AdminError::RowNotFound { table, pk: pk_raw });
+    }
     if !crate::admin::object_permissions::is_allowed(model.table, "change", &parts, Some(&row)) {
         return Err(AdminError::Forbidden {
             table: model.table.to_owned(),
@@ -2674,8 +2605,11 @@ pub(crate) async fn update_submit(
         &pre_update_fields,
     )
     .await?;
-    // Missing, or outside the queryset hooks' scope.
-    if pre_update_row.is_none() {
+    // Missing, outside the queryset hooks' scope, or hidden by the `view` hook.
+    let hidden = |row: &serde_json::Value| {
+        !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    };
+    if pre_update_row.as_ref().is_none_or(hidden) {
         return Err(AdminError::RowNotFound { table, pk: pk_raw });
     }
     if !crate::admin::object_permissions::is_allowed(
@@ -3043,7 +2977,9 @@ pub(crate) async fn delete_submit(
         &delete_fields,
     )
     .await?;
-    let Some(before_row) = before_row else {
+    let Some(before_row) = before_row.filter(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    }) else {
         return Err(AdminError::RowNotFound { table, pk: pk_raw });
     };
 

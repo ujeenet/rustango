@@ -38,12 +38,12 @@ fn hide_all_rows(_: &axum::http::request::Parts) -> Vec<rustango::core::Filter> 
         rustango::core::SqlValue::I64(-1),
     )]
 }
-rustango::register_admin_queryset!(QS_HOOKED, hide_all_rows);
+rustango::register_queryset_scope!(QS_HOOKED, hide_all_rows);
 
 fn deny_view(_: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
     false
 }
-rustango::register_admin_object_permission!(VIEW_HOOKED, "view", deny_view);
+rustango::register_object_permission!(VIEW_HOOKED, "view", deny_view);
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Audit>(pool).await;

@@ -271,6 +271,8 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
     let slug = unique("acme");
     let original_url = "env:DATABASE_URL_ACME";
     seed_org(&pool, &slug, StorageMode::Database, Some(original_url)).await;
+    // The edit keeps a routing key; slugs here carry `_`, which no host label may.
+    let host = format!("{}.localhost", slug.replace('_', "-"));
 
     let resp = app
         .clone()
@@ -282,9 +284,9 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "display_name=Updated&host_pattern=&active=on&database_url=",
-                ))
+                .body(Body::from(format!(
+                    "display_name=Updated&host_pattern={host}&active=on&database_url="
+                )))
                 .unwrap(),
         )
         .await
@@ -315,6 +317,7 @@ async fn post_edit_active_toggle_off() {
     };
     let slug = unique("acme");
     seed_org(&pool, &slug, StorageMode::Schema, None).await;
+    let host = format!("{}.localhost", slug.replace('_', "-"));
 
     // Submit without `active` field → unchecked → false.
     let resp = app
@@ -327,7 +330,9 @@ async fn post_edit_active_toggle_off() {
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("display_name=Soft+disabled&host_pattern="))
+                .body(Body::from(format!(
+                    "display_name=Soft+disabled&host_pattern={host}"
+                )))
                 .unwrap(),
         )
         .await

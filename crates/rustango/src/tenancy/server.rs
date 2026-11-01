@@ -175,27 +175,30 @@ pub(crate) fn tenant_origin(host: &str, port_suffix: &str) -> String {
 
 /// A link to `path` on `org`'s tenant host. `request_host` is the
 /// caller's own `Host`, whose port is the last fallback.
+///
+/// # Errors
+/// [`super::TenancyError::Validation`] for an org with no host, path
+/// prefix or port: no resolver would route the link.
 pub(crate) fn tenant_link(
     org: &super::Org,
     path: &str,
     request_host: Option<&str>,
     apex: &LinkApex,
-) -> String {
+) -> Result<String, super::TenancyError> {
+    if !super::provision::is_routable(
+        org.host_pattern.as_deref(),
+        org.path_prefix.as_deref(),
+        org.port,
+    ) {
+        return Err(super::TenancyError::Validation(
+            super::provision::unroutable(&org.slug),
+        ));
+    }
     let prefix = tenant_path_prefix(org.path_prefix.as_deref());
     let host = match org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         Some(pattern) => pattern.to_owned(),
-        // A path-prefix tenant lives on the apex, any other on `<slug>.<apex>`.
-        None if prefix.is_empty() => {
-            if org.port.is_none() {
-                tracing::warn!(
-                    target: "rustango::tenancy",
-                    tenant = %org.slug,
-                    "tenant has no host, path prefix or port: the standard resolvers \
-                     do not route its `<slug>.<apex>` link"
-                );
-            }
-            format!("{}.{}", org.slug, apex.get())
-        }
+        // A path-prefix tenant lives on the apex, a port-only one on `<slug>.<apex>`.
+        None if prefix.is_empty() => format!("{}.{}", org.slug, apex.get()),
         None => apex.get(),
     };
     let port = tenant_port_suffix(
@@ -203,11 +206,11 @@ pub(crate) fn tenant_link(
         std::env::var("RUSTANGO_TENANT_PORT").ok(),
         request_host,
     );
-    format!(
+    Ok(format!(
         "{}{prefix}{}",
         tenant_origin(&host, &port),
         path.trim_end_matches('/')
-    )
+    ))
 }
 
 /// The org's path prefix for a tenant link, or `""` when the stored
@@ -607,6 +610,35 @@ mod apex_tests {
             Some("env.test")
         );
         assert_eq!(pick_apex(None, s()).as_deref(), Some("toml.test"));
+    }
+
+    /// An org with no host, path prefix or port gets no link: no resolver
+    /// would route it. Any one of the three is enough.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn an_unroutable_org_gets_no_link() {
+        let apex = LinkApex::default();
+        let bare = crate::tenancy::Org {
+            slug: "acme".into(),
+            host_pattern: None,
+            path_prefix: None,
+            port: None,
+            ..crate::testkit::org()
+        };
+        assert!(matches!(
+            tenant_link(&bare, "/x", None, &apex),
+            Err(crate::tenancy::TenancyError::Validation(_))
+        ));
+        let prefixed = crate::tenancy::Org {
+            path_prefix: Some("acme".into()),
+            ..bare.clone()
+        };
+        assert!(tenant_link(&prefixed, "/x", None, &apex).is_ok());
+        let ported = crate::tenancy::Org {
+            port: Some(8081),
+            ..bare
+        };
+        assert!(tenant_link(&ported, "/x", None, &apex).is_ok());
     }
 
     /// #2425 — a handoff link defaults to https where cookies are Secure.

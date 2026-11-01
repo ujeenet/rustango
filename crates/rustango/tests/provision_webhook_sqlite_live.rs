@@ -92,6 +92,7 @@ fn body_for(slug: &str, event_id: &str, ts: i64) -> String {
         "event_id": event_id,
         "timestamp": ts,
         "slug": slug,
+        "host_pattern": format!("{slug}.localhost"),
     })
     .to_string()
 }
@@ -710,6 +711,7 @@ async fn half_made_at(b: &Booted, url: &str, slug: &str, key: &str, own: bool) -
         backend_kind: "sqlite".into(),
         database_url: Some(url.to_owned()),
         active: false,
+        host_pattern: Some(format!("{slug}.localhost")),
         ..rustango::testkit::org()
     };
     org.save_pool(&registry).await.unwrap();

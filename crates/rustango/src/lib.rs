@@ -437,6 +437,10 @@ pub mod soft_delete;
 #[cfg(feature = "admin")]
 pub mod admin;
 
+/// Per-row permission hooks and queryset scopes, run by the admin and ViewSets.
+#[cfg(feature = "admin")]
+pub mod object_permissions;
+
 #[cfg(feature = "config")]
 pub mod config;
 

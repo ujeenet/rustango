@@ -1,4 +1,4 @@
-//! `register_admin_queryset!` scopes by-pk reads, facet counts and FK
+//! `register_queryset_scope!` scopes by-pk reads, facet counts and FK
 //! facet labels and FK cells on every backend (#1859, #2029, #2080); inlines hide secrets and
 //! rows the view hook refuses, cap rows and insert natural PKs (#1861, #1717).
 
@@ -33,13 +33,13 @@ pub struct Item {
 fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(1))]
 }
-rustango::register_admin_queryset!("rowscope_item", owner_one);
+rustango::register_queryset_scope!("rowscope_item", owner_one);
 
 fn not_locked_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
     row.and_then(|r| r.get("title")) != Some(&serde_json::json!("locked"))
 }
-rustango::register_admin_object_permission!("rowscope_item", "add", not_locked_title);
-rustango::register_admin_object_permission!("rowscope_item", "change", not_locked_title);
+rustango::register_object_permission!("rowscope_item", "add", not_locked_title);
+rustango::register_object_permission!("rowscope_item", "change", not_locked_title);
 
 /// An FK facet onto `rowscope_item`, whose hook hides owner 77.
 #[derive(Model, Debug, Clone)]
@@ -99,17 +99,17 @@ fn not_hidden(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -
     row.and_then(|r| r.get("hidden"))
         .is_none_or(|v| !(v == &serde_json::json!(true) || v == &serde_json::json!(1)))
 }
-rustango::register_admin_object_permission!("rowscope_child", "view", not_hidden);
+rustango::register_object_permission!("rowscope_child", "view", not_hidden);
 
 fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("label", Op::Ne, SqlValue::String("out".into()))]
 }
-rustango::register_admin_queryset!("rowscope_child", not_out);
+rustango::register_queryset_scope!("rowscope_child", not_out);
 
 fn not_noadd(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
     row.and_then(|r| r.get("label")) != Some(&serde_json::json!("noadd"))
 }
-rustango::register_admin_object_permission!("rowscope_child", "add", not_noadd);
+rustango::register_object_permission!("rowscope_child", "add", not_noadd);
 
 /// An audited child under the same scope and `add` hook, so the audited
 /// write arms run the after-write check too.
@@ -132,8 +132,8 @@ rustango::register_admin_inline!(
     extra = 1,
     max_num = Some(2),
 );
-rustango::register_admin_queryset!("rowscope_achild", not_out);
-rustango::register_admin_object_permission!("rowscope_achild", "add", not_noadd);
+rustango::register_queryset_scope!("rowscope_achild", not_out);
+rustango::register_object_permission!("rowscope_achild", "add", not_noadd);
 
 /// An auto-PK child with a secret, capped at one row per parent.
 #[derive(Model, Debug, Clone)]
@@ -219,7 +219,7 @@ fn not_hide_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value
     row.and_then(|r| r["title"].as_str())
         .is_none_or(|t| !t.starts_with("hide"))
 }
-rustango::register_admin_object_permission!("rowscope_doc", "view", not_hide_title);
+rustango::register_object_permission!("rowscope_doc", "view", not_hide_title);
 
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};

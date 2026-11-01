@@ -177,7 +177,16 @@ untouched.
 - `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
+- ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.63.0. `ObjectPermission` gains `origin`: build it with the macro.
+- A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
+- `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
+- A ViewSet list under a `view` hook returns `count: null` and `last_page: null` past `view_hook_scan_cap` rows; add a queryset scope for big tables.
+- The admin answers 404 instead of 403 on the item pages of a row its `view` hook hides.
+- A tenant ViewSet refuses (403) a principal bound to another tenant, and its hooks see a principal with no tenant as anonymous: set `TenantSlug` next to your own `AuthenticatedUser` / `Principal`, or use `require_auth`.
+- A ViewSet create or update whose row would leave a `register_queryset_scope!` scope is a 403; `ViewSet::for_model` also panics on the tables the admin never serves (TOTP secrets, passkeys, database servers).
 
+- A tenant needs a host, a path prefix or a port: `create-tenant`, the console and the webhook refuse one with none (a configured apex domain still gives the `<slug>.<apex>` default), and `edit-tenant` refuses clearing the last. `FirstAdminHandover::hand_over` returns `Result`.
 - `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
 - A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
 - `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
