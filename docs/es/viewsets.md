@@ -606,7 +606,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `filter_backend(closure)` | Añade predicados `WHERE` personalizados más allá de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
 | `skip_object_permissions()` | Omite los hooks de permiso por objeto y los scopes de queryset de la app, para una API que protege sus filas por su cuenta. Los hooks del framework siguen ejecutándose. |
-| `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (10 000 por defecto); por encima, una lista por página u offset es un `400` (el modo cursor sigue funcionando). |
+| `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (2 000 por defecto, 10 000 en el admin; como mucho 100 000); por encima, una lista por página u offset es un `400` (el modo cursor sigue funcionando). Un campo de serializer `nested` / `many` / `slug` hacia una tabla con hook `view` o scope de queryset hace fallar el montaje, salvo con `skip_object_permissions()`. |
 | `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
 | `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |

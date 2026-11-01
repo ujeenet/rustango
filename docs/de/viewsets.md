@@ -596,7 +596,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `filter_backend(closure)` | Eigene `WHERE`-Prädikate über `filter_fields` hinaus hinzufügen. |
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster; `QUERY` verbraucht das Budget der Liste. |
 | `skip_object_permissions()` | Überspringt die Objekt-Berechtigungs-Hooks und Queryset-Scopes der App, für eine API, die ihre Zeilen selbst schützt. Die Hooks des Frameworks laufen weiter. |
-| `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 10 000); darüber ist eine Seiten- oder Offset-Liste ein `400` (Cursor-Listen funktionieren weiter). |
+| `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 2 000, im Admin 10 000; höchstens 100 000); darüber ist eine Seiten- oder Offset-Liste ein `400` (Cursor-Listen funktionieren weiter). Ein Serializer-Feld `nested` / `many` / `slug` auf eine Tabelle mit `view`-Hook oder Queryset-Scope lässt das Einhängen paniken, außer mit `skip_object_permissions()`. |
 | `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
 | `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |

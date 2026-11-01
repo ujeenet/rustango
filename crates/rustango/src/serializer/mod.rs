@@ -172,6 +172,17 @@ impl<R: LoadedRelation> LoadedRelation for Option<R> {
     }
 }
 
+/// The table of the rows a relation field reads, for
+/// [`ModelSerializer::related_tables`].
+#[doc(hidden)]
+pub fn relation_table<M, R>(_field: impl Fn(&M) -> &R) -> &'static str
+where
+    R: LoadedRelation,
+    R::Target: crate::core::Model,
+{
+    <R::Target as crate::core::Model>::SCHEMA.table
+}
+
 /// The serializer trait. `#[derive(Serializer)]` implements it.
 ///
 /// The macro writes `from_model` and `writable_fields` for you. The
@@ -238,6 +249,13 @@ pub trait ModelSerializer: serde::Serialize + Sized {
     /// order; they differ where `source` or a serde rename applies.
     fn readable_fields() -> &'static [&'static str] {
         Self::readable_source_fields()
+    }
+
+    /// `(field, table)` for each `nested`, `many` and `slug` field: the
+    /// other table whose rows it renders. A ViewSet refuses one whose
+    /// table has a "view" hook or queryset scope. The macro writes this.
+    fn related_tables() -> Vec<(&'static str, &'static str)> {
+        Vec::new()
     }
 
     /// Parse a JSON request body for validation. Writable fields are

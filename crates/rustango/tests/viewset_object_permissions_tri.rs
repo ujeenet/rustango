@@ -707,6 +707,64 @@ async fn a_pending_body_holds_no_lock(pool: &Pool) {
     assert_eq!(call.await.unwrap().unwrap().status(), StatusCode::OK);
 }
 
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "vop_post")]
+#[allow(dead_code)]
+pub struct Post {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub label: rustango::sql::ForeignKey<Label>,
+}
+
+#[cfg(feature = "serializer")]
+#[derive(rustango::Serializer, serde::Deserialize, Default, Debug)]
+#[serializer(model = Label)]
+struct LabelBrief {
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
+    pub name: String,
+}
+
+#[cfg(feature = "serializer")]
+#[derive(rustango::Serializer, serde::Deserialize, Default, Debug)]
+#[serializer(model = Post)]
+struct PostWithLabel {
+    #[serializer(read_only)]
+    pub id: Auto<i64>,
+    #[serializer(nested)]
+    pub label: LabelBrief,
+    #[serializer(slug = "name", source = "label")]
+    pub label_name: String,
+}
+
+/// A nested field onto a table with a "view" hook is refused at mount,
+/// unless the app skips the hooks; its related rows would skip them.
+#[cfg(all(feature = "serializer", feature = "sqlite"))]
+#[tokio::test]
+async fn a_nested_field_onto_a_hooked_table_is_refused() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("pool");
+    let vs = || {
+        ViewSet::for_model(Post::SCHEMA, &["id", "label"])
+            .allow_anonymous()
+            .serializer::<PostWithLabel>()
+    };
+    let mount = {
+        let pool = pool.clone();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            vs().router_pool("/posts", pool)
+        }))
+    };
+    let msg = match mount {
+        Ok(_) => panic!("a nested field onto a hooked table mounted"),
+        Err(e) => e.downcast_ref::<String>().cloned().unwrap_or_default(),
+    };
+    assert!(
+        msg.contains("`label`") && msg.contains("`vop_label`"),
+        "{msg}"
+    );
+    let _ = vs().skip_object_permissions().router_pool("/posts", pool);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [

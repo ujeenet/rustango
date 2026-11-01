@@ -14517,9 +14517,37 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    // The other tables a `nested`, `many` or `slug` field renders rows of.
+    let related_tables = fields_info.iter().filter_map(|fi| {
+        let name = &fi.ser_name;
+        if let Some(inner) = &fi.attrs.many {
+            return Some(quote! {
+                (#name, <<#inner as #root::serializer::ModelSerializer>::Model
+                    as #root::core::Model>::SCHEMA.table)
+            });
+        }
+        if !(fi.attrs.nested || fi.attrs.slug.is_some()) {
+            return None;
+        }
+        let src_name = fi
+            .attrs
+            .source
+            .as_deref()
+            .unwrap_or(&ident_name(&fi.ident))
+            .to_owned();
+        let src_ident = ident_from_name(&src_name, fi.ident.span());
+        Some(quote! {
+            (#name, #root::serializer::relation_table(|__m: &#model_path| &__m.#src_ident))
+        })
+    });
+
     Ok(quote! {
         impl #root::serializer::ModelSerializer for #struct_name {
             type Model = #model_path;
+
+            fn related_tables() -> ::std::vec::Vec<(&'static str, &'static str)> {
+                ::std::vec![ #( #related_tables ),* ]
+            }
 
             fn from_model(model: &Self::Model) -> Self {
                 Self {

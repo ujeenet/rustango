@@ -600,7 +600,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `filter_backend(closure)` | Ajouter des prédicats `WHERE` personnalisés au-delà de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
 | `skip_object_permissions()` | Ignore les hooks de permission objet et les scopes de queryset de l'application, pour une API qui protège ses lignes elle-même. Les hooks du framework s'exécutent toujours. |
-| `view_hook_scan_cap(n)` | Nombre maximal de lignes qu'une liste lit pour le hook `"view"` (10 000 par défaut) ; au-delà, une liste paginée ou à offset donne un `400` (le mode curseur fonctionne toujours). |
+| `view_hook_scan_cap(n)` | Nombre maximal de lignes qu'une liste lit pour le hook `"view"` (2 000 par défaut, 10 000 dans l'admin ; au plus 100 000) ; au-delà, une liste paginée ou à offset donne un `400` (le mode curseur fonctionne toujours). Un champ de serializer `nested` / `many` / `slug` vers une table avec un hook `view` ou un scope de queryset fait paniquer le montage, sauf avec `skip_object_permissions()`. |
 | `router(prefix, pgpool)` | Monter (Postgres uniquement, `PgPool` statique ; feature `postgres`). |
 | `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(multi-location)* monter avec résolution du locataire par requête. |
