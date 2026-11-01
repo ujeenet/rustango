@@ -328,7 +328,7 @@ seguro por defecto:
 
 Para descartar una página tras una escritura, llama a
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sobre un clon de la capa
-(añade `.tenant(slug)` a la clave con tenancy). Purga todas las variantes cacheadas
+(añade `.tenant(org_id)` a la clave con tenancy). Purga todas las variantes cacheadas
 de esa ruta: cualquier query string, cualquier valor de `vary_on`, GET y `QUERY` por
 igual. Funciona con un contador de generación por ruta, así que cada GET cacheado lee
 una clave de caché pequeña más.

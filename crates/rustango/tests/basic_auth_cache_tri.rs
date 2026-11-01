@@ -47,7 +47,7 @@ fn parts_at(user: &str, pass: &str, addr: std::net::SocketAddr) -> Parts {
     let creds = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     Request::builder()
         .header(header::AUTHORIZATION, format!("Basic {creds}"))
-        .extension(TenantSlug("basic-cache".into()))
+        .extension(TenantSlug::new(1, "basic-cache"))
         .extension(axum::extract::ConnectInfo(addr))
         .body(())
         .unwrap()

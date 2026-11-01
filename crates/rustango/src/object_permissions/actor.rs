@@ -263,7 +263,7 @@ mod tests {
                     username: "ada".into(),
                     is_superuser: true,
                 });
-                e.insert(TenantSlug(slug.to_owned()));
+                e.insert(TenantSlug::new(1, slug));
                 e.insert(RequestTenant(routed.to_owned()));
             })
         };
@@ -291,7 +291,7 @@ mod tests {
                 username: "ada".into(),
                 is_superuser: true,
             });
-            e.insert(TenantSlug("acme".into()));
+            e.insert(TenantSlug::new(1, "acme"));
         });
         assert_eq!(Actor::of(&p), Actor::Anonymous);
         assert!(!is_superuser(&p));

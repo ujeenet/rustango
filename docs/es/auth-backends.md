@@ -85,7 +85,7 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
-En una ruta de tenant, el claim `tenant` del token debe coincidir con el tenant resuelto, y
+En una ruta de tenant, los claims `tenant` y `org_id` del token deben coincidir con el tenant resuelto, y
 los tokens de agente MCP (claim `kind`) se rechazan. Emite con el login de `JwtAuth` o
 `JwtBackend::issue_for_tenant`; los tokens de `issue` solo valen sin tenant resuelto.
 Justo después de un logout-all, emite con `issue_for_user` / `issue_for_tenant_user`:

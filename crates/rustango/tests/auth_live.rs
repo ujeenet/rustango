@@ -74,7 +74,7 @@ async fn run(
         pools,
         url,
         &dir,
-        parts.iter().map(|s| (*s).to_string()),
+        rustango::testkit::routed_args(parts),
         &mut buf,
     )
     .await

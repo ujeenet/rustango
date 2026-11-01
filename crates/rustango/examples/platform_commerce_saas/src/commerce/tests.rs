@@ -206,7 +206,7 @@ async fn api_app(url: &str, backend: &str) -> axum::Router {
     use rustango::tenancy::{ChainResolver, DefaultTenantDb, Org, TenantPools};
 
     let org = Org {
-        id: rustango::sql::Auto::Unset,
+        id: rustango::sql::Auto::Set(1),
         slug: "acme".into(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),

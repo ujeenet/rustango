@@ -332,7 +332,7 @@ in einem beliebigen `BoxedCache`; `.timeout(dur)` legt fest, wie lange (Standard
 
 Um eine Seite nach einem Schreibvorgang zu verwerfen, rufe
 `layer.invalidate(&[PageKey::new(path, host)]).await?` auf einem Klon des Layers
-auf (unter Tenancy hänge `.tenant(slug)` an den Key). Das löscht jede gecachte
+auf (unter Tenancy hänge `.tenant(org_id)` an den Key). Das löscht jede gecachte
 Variante dieses Pfads: jeden Query-String, jeden `vary_on`-Wert, GET und `QUERY`
 gleichermaßen. Es arbeitet mit einem Generationszähler pro Pfad, daher liest
 jeder gecachte GET einen weiteren kleinen Cache-Key.

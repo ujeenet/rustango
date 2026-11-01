@@ -47,7 +47,7 @@ impl OrgResolver for HostResolver {
             return Ok(None);
         }
         Ok(Some(Org {
-            id: rustango::sql::Auto::default(),
+            id: rustango::sql::Auto::Set(1),
             slug: slug.to_owned(),
             display_name: slug.to_owned(),
             storage_mode: "database".into(),
@@ -238,7 +238,7 @@ impl OrgResolver for PortSlugResolver {
             return Ok(None);
         };
         Ok(Some(Org {
-            id: rustango::sql::Auto::default(),
+            id: rustango::sql::Auto::Set(1),
             slug: "alpha".to_owned(),
             display_name: "alpha".to_owned(),
             storage_mode: "database".into(),
@@ -291,8 +291,8 @@ async fn a_port_resolved_tenant_authenticates() {
 #[tokio::test]
 async fn another_bound_tenant_is_refused() {
     let (app, template) = build_app("bound");
-    let app = app.layer(axum::Extension(rustango::tenancy::TenantSlug(
-        "beta".into(),
+    let app = app.layer(axum::Extension(rustango::tenancy::TenantSlug::new(
+        1, "beta",
     )));
     let _alpha = tenant_db(
         &template.replace("{slug}", "alpha"),
@@ -377,8 +377,8 @@ async fn auth_layer_refusals_are_json() {
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"], "unauthorized");
 
-    let bound = app.layer(axum::Extension(rustango::tenancy::TenantSlug(
-        "beta".into(),
+    let bound = app.layer(axum::Extension(rustango::tenancy::TenantSlug::new(
+        1, "beta",
     )));
     let (status, body) = call_full(&bound, "alpha.localhost", Some("ann:s3cret")).await;
     assert_eq!(status, StatusCode::FORBIDDEN);

@@ -39,9 +39,18 @@ fn superuser_view(parts: &axum::http::request::Parts, _: Option<&serde_json::Val
 }
 rustango::register_object_permission!("vopt_note", "view", superuser_view);
 
+/// A registry id per slug, as stored orgs have.
+fn org_id(slug: &str) -> i64 {
+    match slug {
+        "alpha" => 1,
+        "beta" => 2,
+        _ => 3,
+    }
+}
+
 fn org(slug: &str) -> Org {
     Org {
-        id: Auto::default(),
+        id: Auto::Set(org_id(slug)),
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
         storage_mode: "database".into(),
@@ -102,7 +111,7 @@ fn app(ns: &str, outer: Option<(AuthenticatedUser, &str)>) -> (Router, String) {
         // An app layer that already decided who the caller is, for one tenant.
         Some((user, slug)) => router
             .layer(axum::Extension(user))
-            .layer(axum::Extension(TenantSlug(slug.to_owned()))),
+            .layer(axum::Extension(TenantSlug::new(org_id(slug), slug))),
         None => {
             let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
             router.require_auth(backends)

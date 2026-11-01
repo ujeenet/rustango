@@ -48,7 +48,7 @@ fn parts(token: &str) -> Parts {
 fn parts_at(token: &str, addr: std::net::SocketAddr) -> Parts {
     Request::builder()
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .extension(TenantSlug("api-key-hmac".into()))
+        .extension(TenantSlug::new(1, "api-key-hmac"))
         .extension(axum::extract::ConnectInfo(addr))
         .body(())
         .unwrap()

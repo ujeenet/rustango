@@ -101,10 +101,7 @@ impl Principal {
             return Some(Self {
                 user_id: u.id,
                 is_superuser: u.is_superuser,
-                tenant: parts
-                    .extensions
-                    .get::<TenantSlug>()
-                    .map(|TenantSlug(s)| s.clone()),
+                tenant: parts.extensions.get::<TenantSlug>().map(|t| t.slug.clone()),
                 kind: PrincipalKind::User,
                 agent_id: None,
             });
@@ -134,10 +131,31 @@ impl Principal {
     }
 }
 
-/// The resolved tenant's slug, for middleware that wants [`Principal::tenant`]
-/// populated from a cookie session (which carries no slug of its own).
-#[derive(Clone, Debug)]
-pub struct TenantSlug(pub String);
+/// The resolved tenant: its slug and registry id. The id tells a purged
+/// tenant from a new one that reuses its slug, so tokens and keys bind to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct TenantSlug {
+    pub slug: String,
+    /// `rustango_orgs.id`.
+    pub org_id: i64,
+}
+
+impl TenantSlug {
+    #[must_use]
+    pub fn new(org_id: i64, slug: impl Into<String>) -> Self {
+        Self {
+            slug: slug.into(),
+            org_id,
+        }
+    }
+
+    /// `None` for an org with no id (not read from the registry): it cannot be bound.
+    #[must_use]
+    pub fn of(org: &super::Org) -> Option<Self> {
+        org.id.get().map(|&id| Self::new(id, org.slug.clone()))
+    }
+}
 
 /// Rejection for the [`Principal`] extractor: 401, never 403 — the request did
 /// not say who it is, which is a different failure from saying so and being
@@ -206,7 +224,7 @@ mod tests {
             username: "ada".into(),
             is_superuser: true,
         });
-        p.extensions.insert(TenantSlug("acme".into()));
+        p.extensions.insert(TenantSlug::new(1, "acme"));
         let principal = Principal::from_parts(&p).expect("principal");
         assert_eq!(principal.user_id, 7);
         assert!(principal.is_superuser);
