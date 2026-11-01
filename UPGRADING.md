@@ -184,6 +184,7 @@ untouched.
 - A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
 - `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
 - A ViewSet page or offset list under a `view` hook is a 400 past `view_hook_scan_cap` rows; add a queryset scope or use cursor pagination for big tables.
+- `ViewSet::view_hook_scan_cap` defaults to 2 000 (was 10 000): set it back for bigger hooked lists. A serializer `nested`/`many`/`slug` field onto a table with a `view` hook or queryset scope now panics at mount; drop the field or call `skip_object_permissions()`.
 - Admin bulk actions skip selected rows the `view` hook hides, as they skip rows outside the queryset scopes.
 - The admin answers 404 instead of 403 on the item pages of a row its `view` hook hides.
 - A tenant ViewSet refuses (403) a principal bound to another tenant, and its hooks see a principal with no tenant as anonymous: set `TenantSlug` next to your own `AuthenticatedUser` / `Principal`, or use `require_auth`.

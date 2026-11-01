@@ -593,7 +593,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
 | `skip_object_permissions()` | Skip the app's object-permission hooks and queryset scopes, for an API that guards its rows itself. The framework's own hooks still run. |
-| `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 10 000); past it a page or offset list is a `400` (cursor lists keep working). |
+| `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 2 000, the admin's is 10 000; at most 100 000); past it a page or offset list is a `400` (cursor lists keep working). A serializer `nested` / `many` / `slug` field onto a table with a `view` hook or queryset scope panics at mount, unless `skip_object_permissions()`. |
 | `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
 | `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |

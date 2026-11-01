@@ -343,6 +343,9 @@ trait SerializerBridge: Send + Sync {
 
     /// The JSON keys of [`Self::readable_model_fields`], in order.
     fn readable_field_names(&self) -> &'static [&'static str];
+
+    /// `(field, table)` of each field that renders another table's rows.
+    fn related_tables(&self) -> Vec<(&'static str, &'static str)>;
 }
 
 /// Zero-sized carrier that pins a concrete serializer type `S`, so
@@ -422,6 +425,10 @@ where
 
     fn readable_field_names(&self) -> &'static [&'static str] {
         S::readable_fields()
+    }
+
+    fn related_tables(&self) -> Vec<(&'static str, &'static str)> {
+        S::related_tables()
     }
 }
 
@@ -699,6 +706,10 @@ where
     }
 }
 
+/// The default `view_hook_scan_cap`: an API list reads at most this many
+/// rows per request, a fifth of the admin's default.
+const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
+
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
@@ -815,7 +826,7 @@ impl ViewSet {
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
             hooks: crate::object_permissions::Hooks::All,
-            view_hook_scan_cap: 10_000,
+            view_hook_scan_cap: DEFAULT_VIEW_HOOK_SCAN_CAP,
             related_filters: Vec::new(),
         };
         vs.assert_known_names("fields", fields.iter().copied(), false);
@@ -1086,9 +1097,9 @@ impl ViewSet {
         self
     }
 
-    /// Most rows a list reads to run the "view" hook (default 10 000, at
-    /// most 100 000). Past it a page or offset list is a `400`; a queryset
-    /// scope or cursor pagination scales.
+    /// Most rows a list reads to run the "view" hook (default 2 000, at
+    /// most 100 000): each list request reads that many rows. Past it a page
+    /// or offset list is a `400`; a queryset scope or cursor pagination scales.
     #[must_use]
     pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
         self.view_hook_scan_cap = rows.clamp(1, MAX_VIEW_HOOK_SCAN_CAP);
@@ -1283,6 +1294,7 @@ impl ViewSet {
 
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
         self.assert_cursor_is_rendered();
+        self.assert_related_rows_are_unhooked();
         let open = self.open_write_actions();
         if !open.is_empty() {
             tracing::warn!(
@@ -1596,6 +1608,24 @@ impl ViewSet {
             .zip(bridge.readable_field_names())
             .find(|(m, _)| **m == model_field)
             .map(|(_, key)| *key)
+    }
+
+    /// A serializer field may not render another table's rows when that
+    /// table hides rows: the related rows would skip its hooks and scopes.
+    fn assert_related_rows_are_unhooked(&self) {
+        let Some(bridge) = &self.serializer else {
+            return;
+        };
+        for (field, table) in bridge.related_tables() {
+            let hidden = self.hooks.any(table, "view") || !self.hooks.scope_filters_empty(table);
+            assert!(
+                !hidden,
+                "ViewSet `{}`: serializer field `{field}` renders rows of `{table}`, which has \
+                 a \"view\" hook or queryset scope those rows would skip. Drop the field or \
+                 call .skip_object_permissions()",
+                self.schema.table
+            );
+        }
     }
 
     /// A serializer must render the cursor column and the primary key.
@@ -5569,6 +5599,24 @@ mod cursor_tests {
         ] {
             assert!(!cursor_field_supported(bad), "{bad:?} must not be usable");
         }
+    }
+}
+
+#[cfg(test)]
+mod scan_cap_tests {
+    use super::ViewSet;
+    use crate::core::Model as _;
+
+    /// An API list scans fewer rows than the admin by default; the clamp holds.
+    #[test]
+    fn the_default_scan_cap_suits_api_traffic() {
+        let vs = || ViewSet::for_model(crate::contenttypes::ContentType::SCHEMA, &["id"]);
+        assert_eq!(vs().view_hook_scan_cap, 2_000);
+        assert_eq!(vs().view_hook_scan_cap(0).view_hook_scan_cap, 1);
+        assert_eq!(
+            vs().view_hook_scan_cap(usize::MAX).view_hook_scan_cap,
+            100_000
+        );
     }
 }
 

@@ -126,6 +126,11 @@ impl Hooks {
             .any(|e| e.table == table && e.action == action && self.runs(e))
     }
 
+    /// Whether this set holds no queryset scope for `table`.
+    pub(crate) fn scope_filters_empty(self, table: &str) -> bool {
+        self == Self::FrameworkOnly || scope::for_table(table).is_empty()
+    }
+
     /// The queryset scopes' filters for `table`, ANDed by the caller.
     pub(crate) fn scope_filters(self, table: &str, parts: &Parts) -> Vec<crate::core::Filter> {
         match self {
