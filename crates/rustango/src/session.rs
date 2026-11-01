@@ -496,6 +496,13 @@ pub fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
     out
 }
 
+/// [`sign`] over `tag.msg`. Each token kind has its own tag, so a token
+/// signed for one purpose never verifies as another under the same key.
+#[must_use]
+pub fn sign_tagged(secret: &SessionSecret, tag: &[u8], msg: &[u8]) -> [u8; 32] {
+    sign(secret, &[tag, b".", msg].concat())
+}
+
 /// HMAC of a user's `password_hash`, carried in a session cookie. Every
 /// password write makes a new salted hash, so the old sessions stop matching.
 ///

@@ -598,6 +598,7 @@ pub struct DiskSettings {
 /// migrating to check the new path picks the same value.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct ServerSettings {
     /// Listener address. `"127.0.0.1:8080"` in dev and
     /// `"0.0.0.0:8080"` in prod. The prod value is reachable from
@@ -621,6 +622,10 @@ pub struct ServerSettings {
     /// Seconds a booting server waits for another run's migrate lock
     /// before it exits. `None` means 300.
     pub migrate_lock_timeout_secs: Option<u64>,
+    /// Reverse proxies (IPs or CIDRs) whose `X-Forwarded-For` is
+    /// believed, so logs and per-IP limits see the real client. Empty
+    /// trusts none. `Cli::with_trusted_proxies` in code wins.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl ServerSettings {

@@ -710,6 +710,23 @@ pub struct ModelForm {
     locked: Vec<&'static str>,
 }
 
+/// The superuser-only fields a form locks until `acting_superuser(true)`.
+#[cfg(feature = "admin")]
+fn default_locks(schema: &'static ModelSchema, update: bool) -> Vec<&'static str> {
+    use crate::admin::object_permissions::{superuser_fields, AdminWrite};
+    let action = if update {
+        AdminWrite::Change
+    } else {
+        AdminWrite::Add
+    };
+    superuser_fields(schema.table, action)
+}
+
+#[cfg(not(feature = "admin"))]
+fn default_locks(_schema: &'static ModelSchema, _update: bool) -> Vec<&'static str> {
+    Vec::new()
+}
+
 impl ModelForm {
     /// Create a form for **inserting** a new row.
     pub fn new(schema: &'static ModelSchema, data: HashMap<String, String>) -> Self {
@@ -719,7 +736,7 @@ impl ModelForm {
             pk_value: None,
             include_fields: None,
             exclude_fields: Vec::new(),
-            locked: Vec::new(),
+            locked: default_locks(schema, false),
         }
     }
 
@@ -735,7 +752,7 @@ impl ModelForm {
             pk_value: Some(pk),
             include_fields: None,
             exclude_fields: Vec::new(),
-            locked: Vec::new(),
+            locked: default_locks(schema, true),
         }
     }
 
@@ -759,23 +776,16 @@ impl ModelForm {
         self
     }
 
-    /// Apply the admin's superuser-only field locks
-    /// (`register_admin_superuser_fields!`): unless `is_superuser`, the
-    /// form leaves them out and a locked NOT NULL flag stores `false`.
-    /// Without this call no field is locked.
+    /// The admin's superuser-only fields (`register_admin_superuser_fields!`)
+    /// are locked by default: the form leaves them out and a locked NOT NULL
+    /// flag stores `false`. `acting_superuser(true)` unlocks them.
     #[cfg(feature = "admin")]
     #[must_use]
     pub fn acting_superuser(mut self, is_superuser: bool) -> Self {
-        use crate::admin::object_permissions::{superuser_fields, AdminWrite};
-        let action = if self.pk_value.is_some() {
-            AdminWrite::Change
-        } else {
-            AdminWrite::Add
-        };
         self.locked = if is_superuser {
             Vec::new()
         } else {
-            superuser_fields(self.schema.table, action)
+            default_locks(self.schema, self.pk_value.is_some())
         };
         self
     }
@@ -2477,6 +2487,9 @@ mod model_form_tests {
         assert_eq!(at.map(|i| &prep.values[i]), Some(&SqlValue::Bool(false)));
         let su = ModelForm::new(schema, data.clone()).acting_superuser(true);
         assert_eq!(su.included_field_names(), vec!["name", "is_staff", "owner"]);
+        // With no acting user stated, the lock still applies.
+        let unstated = ModelForm::new(schema, data.clone());
+        assert_eq!(unstated.included_field_names(), vec!["name", "owner"]);
         let change = ModelForm::for_update(schema, data, SqlValue::I64(1)).acting_superuser(false);
         assert_eq!(change.included_field_names(), vec!["name", "is_staff"]);
     }

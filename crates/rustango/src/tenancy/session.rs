@@ -31,10 +31,10 @@ use subtle::ConstantTimeEq;
 // The re-exports below keep every pre-existing `crate::tenancy::session::SessionSecret`
 // caller working.
 pub use crate::session::{PasswordFingerprint, SessionSecret, SessionSecretError};
-// `sign` re-exported at crate-internal visibility so existing
-// callers (`tenant_console`, `impersonation_handoff`) keep working
-// after the v0.45 move to `crate::session`.
-pub(crate) use crate::session::{session_survives, sign};
+
+/// Signature domain of this token kind: it never verifies as another kind.
+const OPERATOR_DOMAIN_TAG: &[u8] = b"rustango-operator-session-v1";
+pub(crate) use crate::session::session_survives;
 
 /// Default cookie name. Visible in browser devtools — namespaced so
 /// it doesn't collide with tenant cookies.
@@ -263,7 +263,7 @@ impl SessionPayload {
 pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
     let json = serde_json::to_vec(payload).expect("payload serializes");
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = sign(secret, payload_b64.as_bytes());
+    let sig = crate::session::sign_tagged(secret, OPERATOR_DOMAIN_TAG, payload_b64.as_bytes());
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
     format!("{payload_b64}.{sig_b64}")
 }
@@ -277,7 +277,7 @@ pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
 /// payload's `exp` is in the past.
 pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, SessionError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(SessionError::Malformed)?;
-    let expected = sign(secret, payload_b64.as_bytes());
+    let expected = crate::session::sign_tagged(secret, OPERATOR_DOMAIN_TAG, payload_b64.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(sig_b64)
         .map_err(|_| SessionError::Malformed)?;
@@ -303,6 +303,33 @@ mod tests {
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::default()
+    }
+
+    /// A token signed under the same key for another purpose, or with no
+    /// purpose tag, is refused.
+    #[test]
+    fn a_token_of_another_kind_is_refused() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let payload = SessionPayload::new(7, 3600, fp());
+        assert!(decode(&secret, &encode(&secret, &payload)).is_ok());
+        let b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let tags: [&[u8]; 3] = [
+            b"rustango-tenant-session-v1",
+            b"rustango-impersonation-handoff-v1",
+            b"rustango-member-session-v1",
+        ];
+        let sigs = tags
+            .iter()
+            .map(|t| crate::session::sign_tagged(&secret, t, b64.as_bytes()))
+            .chain([crate::session::sign(&secret, b64.as_bytes())]);
+        for sig in sigs {
+            let cookie = format!("{b64}.{}", URL_SAFE_NO_PAD.encode(sig));
+            assert!(matches!(
+                decode(&secret, &cookie),
+                Err(SessionError::BadSignature)
+            ));
+        }
     }
 
     /// Staging without a usable env key warns; dev, prod and a set key do not.

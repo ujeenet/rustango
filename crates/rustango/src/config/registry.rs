@@ -157,6 +157,7 @@ pub(crate) const KEYS: &[Key] = &[
     key("server.shutdown_timeout_secs", F),
     key("server.migrate_on_boot", F),
     key("server.migrate_lock_timeout_secs", F),
+    key("server.trusted_proxies", F),
     key("auth.jwt.access_ttl_secs", JWT),
     key("auth.jwt.refresh_ttl_secs", JWT),
     key(

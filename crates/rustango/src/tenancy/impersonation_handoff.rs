@@ -43,8 +43,11 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use super::session::{sign, SessionError};
+use super::session::SessionError;
 pub use super::session::{PasswordFingerprint, SessionSecret};
+
+/// Signature domain of this token kind: it never verifies as another kind.
+const HANDOFF_DOMAIN_TAG: &[u8] = b"rustango-impersonation-handoff-v1";
 
 /// Token lifetime, 60 seconds. Click, redirect, redeem: nothing real
 /// takes longer, and a wider window only helps an attacker.
@@ -140,13 +143,13 @@ impl HandoffPayload {
     }
 }
 
-/// Sign and encode a payload as `<b64(json)>.<b64(hmac)>`, the same
-/// wire format as the tenant session cookie, so both share one key.
+/// Sign and encode a payload as `<b64(json)>.<b64(hmac)>`. It shares the
+/// tenant session key but not its tag, so neither verifies as the other.
 #[must_use]
 pub fn mint(secret: &SessionSecret, payload: &HandoffPayload) -> String {
     let json = serde_json::to_vec(payload).expect("payload serializes");
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = sign(secret, payload_b64.as_bytes());
+    let sig = crate::session::sign_tagged(secret, HANDOFF_DOMAIN_TAG, payload_b64.as_bytes());
     let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
     format!("{payload_b64}.{sig_b64}")
 }
@@ -165,7 +168,7 @@ pub fn decode(
     value: &str,
 ) -> Result<HandoffPayload, HandoffError> {
     let (payload_b64, sig_b64) = value.split_once('.').ok_or(HandoffError::Malformed)?;
-    let expected = sign(secret, payload_b64.as_bytes());
+    let expected = crate::session::sign_tagged(secret, HANDOFF_DOMAIN_TAG, payload_b64.as_bytes());
     let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(sig_b64)
         .map_err(|_| HandoffError::Malformed)?;
