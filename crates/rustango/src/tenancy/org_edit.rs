@@ -105,9 +105,6 @@ pub struct Applied {
     pub touched: Vec<&'static str>,
     /// True only when the URL is genuinely different from the stored one.
     pub database_url_rotated: bool,
-    /// Saved, but worth telling the operator: the new URL reaches the
-    /// registry's own database under another name.
-    pub warning: Option<&'static str>,
 }
 
 /// Validate, write, and drop the cached `Org` — in that order.
@@ -222,7 +219,6 @@ pub(crate) async fn apply_values_if(
     let mut set: Vec<crate::core::Assignment> = Vec::new();
     let mut touched: Vec<&'static str> = Vec::new();
     let mut database_url_rotated = false;
-    let mut warning = None;
     // Claimed in the UPDATE's transaction below.
     let mut claims: Vec<ClaimKey> = Vec::new();
     // An operator activated it, so no provisioning retry may resume it (#2292).
@@ -262,7 +258,7 @@ pub(crate) async fn apply_values_if(
                 let url =
                     crate::tenancy::provision::vet_database_url(&new, secrets, registry, None)
                         .await?;
-                warning = crate::tenancy::provision::registry_alias(&url.resolved, registry).await;
+                crate::tenancy::provision::registry_alias(&url.resolved, registry).await?;
                 // Compared resolved: re-sealing the same URL is not a rotation.
                 let old = match existing.database_url.as_deref() {
                     Some(old) => secrets.resolve(old).await.ok(),
@@ -345,7 +341,6 @@ pub(crate) async fn apply_values_if(
     Ok(Some(Applied {
         touched,
         database_url_rotated,
-        warning,
     }))
 }
 

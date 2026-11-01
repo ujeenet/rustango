@@ -758,10 +758,11 @@ async fn a_retry_resumes_the_tenant_a_failed_run_left_behind() {
     assert!(orgs[0].active, "the resumed tenant was not activated");
 }
 
-/// A resumed tenant whose URL reaches the registry skips the create-time
-/// check, so the run log must say so.
+/// A resumed tenant whose URL now reaches the registry skips the
+/// create-time check, so the resume refuses it: the run fails, naming
+/// why, and the tenant stays inactive.
 #[tokio::test]
-async fn a_resume_onto_the_registry_database_is_flagged() {
+async fn a_resume_onto_the_registry_database_is_refused() {
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
     let slug = unique("onreg");
@@ -776,7 +777,8 @@ async fn a_resume_onto_the_registry_database_is_flagged() {
     let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
-    let _ = await_run(&b, run_id).await;
+    let run = await_run(&b, run_id).await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
     let events = store::events_since(&b.pools.registry_pool(), run_id, 0)
         .await
         .unwrap();
@@ -784,12 +786,17 @@ async fn a_resume_onto_the_registry_database_is_flagged() {
         events
             .iter()
             .any(|e| e.step == "validate" && e.message.contains("registry's own database")),
-        "no registry warning in {:?}",
+        "no registry refusal in {:?}",
         events
             .iter()
             .map(|e| (&e.step, &e.message))
             .collect::<Vec<_>>()
     );
+    let orgs: Vec<Org> = Org::objects()
+        .fetch(&b.pools.registry_pool())
+        .await
+        .unwrap();
+    assert!(orgs.iter().all(|o| o.slug != slug || !o.active));
 }
 
 /// An inactive Org no failed run made is not taken over.

@@ -146,7 +146,6 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::rate_limit` | Rate-Limiting |
 | `rustango::request_timeout` | Request-Timeout |
 | `rustango::scheduler` | Cron / geplante Tasks |
-| `rustango::security_headers` | Einstellungen der Sicherheits-Header (HSTS) |
 | `rustango::server` | Serverstart und -shutdown |
 | `rustango::shutdown` | Signalbehandlung und Shutdown-Hooks |
 | `rustango::sql` | Query-Ausführung |

@@ -19,6 +19,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
+- Tenancy: a tenant URL that reaches the registry's database under another name, a resume onto the registry, and migrating into a schema another app owns are refused instead of warned.
 - A Postgres `Tenant` no longer holds a pool connection for the whole request: it takes one on the first `conn()`, so handlers that only use `t.pool()` cannot exhaust the held pool.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
 

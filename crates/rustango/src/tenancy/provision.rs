@@ -864,9 +864,10 @@ where
                 )
                 .await;
         }
-        let warned = resumed_on_registry(pools, registry_url, &org).await;
-        let validated = warned.map_or(Progress::Ok, |w| Progress::Done(RunText::fixed(w)));
-        rep.step(ProvisionStep::Validate, validated).await;
+        if let Err(e) = resumed_on_registry(pools, registry_url, &org).await {
+            return rep.fail(ProvisionStep::Validate, e).await;
+        }
+        rep.step(ProvisionStep::Validate, Progress::Ok).await;
         rep.step(
             ProvisionStep::RegisterOrg,
             Progress::Skipped("resuming the tenant an earlier run left inactive"),
@@ -1133,37 +1134,35 @@ async fn check_connection(
     match checked.preflight().await {
         Ok(()) => {
             let url = checked.probe_target().unwrap_or_default();
-            let done = registry_alias(url, registry)
-                .await
-                .map_or(Progress::Ok, |w| Progress::Done(RunText::fixed(w)));
-            rep.step(ProvisionStep::CheckConnection, done).await;
+            if let Err(e) = registry_alias(url, registry).await {
+                return rep.fail(ProvisionStep::CheckConnection, e).await;
+            }
+            rep.step(ProvisionStep::CheckConnection, Progress::Ok).await;
             Ok(())
         }
         Err(e) => rep.fail(ProvisionStep::CheckConnection, e).await,
     }
 }
 
-/// What [`registry_alias`] reports.
-pub(crate) const REGISTRY_ALIAS: &str = "warning: this URL reaches the registry's own database \
-     under another name; give the tenant a database of its own (a later release refuses it)";
-
-/// The registry's own database under another host name, link or mount,
-/// which the endpoint check cannot see: compared by server identity. Only
-/// warned in this release; `None` when it differs or cannot be read.
-pub(crate) async fn registry_alias(url: &str, registry: &crate::sql::Pool) -> Option<&'static str> {
+/// Refuse the registry's own database under another host name, link or
+/// mount, which the endpoint check cannot see: compared by server
+/// identity. Passes when it differs or cannot be read.
+pub(crate) async fn registry_alias(
+    url: &str,
+    registry: &crate::sql::Pool,
+) -> Result<(), TenancyError> {
     use super::db_identity::DbIdentity;
-    let theirs = DbIdentity::of_pool(registry).await.ok()??;
-    let ours = DbIdentity::of_url(url).await.ok()??;
-    if ours != theirs {
-        return None;
+    let theirs = DbIdentity::of_pool(registry).await.ok().flatten();
+    let ours = DbIdentity::of_url(url).await.ok().flatten();
+    match (theirs, ours) {
+        (Some(theirs), Some(ours)) if theirs == ours => Err(TenancyError::Validation(
+            "this URL reaches the registry's own database under another name; give the \
+             tenant a database of its own"
+                .into(),
+        )),
+        _ => Ok(()),
     }
-    tracing::warn!(target: "rustango::tenancy::provision", "{REGISTRY_ALIAS}");
-    Some(REGISTRY_ALIAS)
 }
-
-/// What [`resumed_on_registry`] reports.
-const RESUMED_ON_REGISTRY: &str = "warning: this tenant's database URL now reaches \
-     the registry's own database; its migrations run there (a later release refuses it)";
 
 /// A resumed tenant skips [`checked_request`], and its secret may resolve
 /// elsewhere since: the same registry checks, on the URL as it resolves now.
@@ -1171,13 +1170,17 @@ async fn resumed_on_registry<DB: Database>(
     pools: &TenantPools<DB>,
     registry_url: &str,
     org: &Org,
-) -> Option<&'static str>
+) -> Result<(), TenancyError>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let reference = org.database_url.as_deref()?;
+    let Some(reference) = org.database_url.as_deref() else {
+        return Ok(());
+    };
     // An unresolvable URL fails at migrate, with its own error.
-    let url = pools.resolve_secret(reference).await.ok()?;
+    let Ok(url) = pools.resolve_secret(reference).await else {
+        return Ok(());
+    };
     let registry = pools.registry_pool();
     let (kind, pooled) = Endpoint::of_pool(&registry);
     let named = Endpoint::scheme_kind(registry_url)
@@ -1186,8 +1189,11 @@ where
         Endpoint::of_url(&url, kind).ok().flatten().as_ref() == Some(registry)
     };
     if reaches(kind, &pooled) || named.is_some_and(|(k, e)| reaches(k, &e)) {
-        tracing::warn!(target: "rustango::tenancy::provision", org = %org.slug, "{RESUMED_ON_REGISTRY}");
-        return Some(RESUMED_ON_REGISTRY);
+        return Err(TenancyError::Validation(format!(
+            "tenant `{}`'s database URL now reaches the registry's own database; \
+             give it a database of its own before resuming",
+            org.slug
+        )));
     }
     registry_alias(&url, &registry).await
 }
@@ -4032,5 +4038,31 @@ mod apex_tests {
                 None
             ]
         );
+    }
+}
+
+#[cfg(all(test, feature = "sqlite", unix))]
+mod registry_alias_tests {
+    /// The registry's file reached through a symlink is refused; a
+    /// database of its own is not.
+    #[tokio::test]
+    async fn a_url_onto_the_registry_by_another_name_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg_path = dir.path().join("reg.db");
+        let registry =
+            crate::sql::Pool::connect(&format!("sqlite://{}?mode=rwc", reg_path.display()))
+                .await
+                .unwrap();
+        let link = dir.path().join("alias.db");
+        std::os::unix::fs::symlink(&reg_path, &link).unwrap();
+        let alias = format!("sqlite://{}", link.display());
+        assert!(matches!(
+            super::registry_alias(&alias, &registry).await,
+            Err(crate::tenancy::TenancyError::Validation(_))
+        ));
+        let own = dir.path().join("own.db");
+        let own_url = format!("sqlite://{}?mode=rwc", own.display());
+        let _ = crate::sql::Pool::connect(&own_url).await.unwrap();
+        assert!(super::registry_alias(&own_url, &registry).await.is_ok());
     }
 }

@@ -1108,13 +1108,10 @@ async fn build_schema_scoped_pool(
     let origin = ensure_schema(&bootstrap, schema).await;
     bootstrap.close().await;
     if origin? == SchemaOrigin::Foreign {
-        warn!(
-            target: "rustango::tenancy",
-            schema,
-            "the tenant's schema already holds tables but no rustango ledger, so another app \
-             may own it; migrating adopts it. Move the tenant to a schema of its own: a later \
-             release refuses this"
-        );
+        return Err(TenancyError::Validation(format!(
+            "schema `{schema}` already holds tables but no rustango ledger, so another app \
+             may own it; move the tenant to a schema of its own"
+        )));
     }
 
     super::pools::connect_schema_scoped(registry_url, schema, 2).await
@@ -1286,6 +1283,12 @@ mod schema_pool_tests {
             .await
             .unwrap();
         assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Foreign);
+        // Migrating into it is refused, not adopted.
+        let refused = super::build_schema_scoped_pool(&url, &s).await;
+        assert!(
+            matches!(refused, Err(crate::tenancy::TenancyError::Validation(_))),
+            "{refused:?}"
+        );
         let ledger = crate::migrate::LEDGER_TABLE;
         sqlx::query(&format!("CREATE TABLE {q}.\"{ledger}\" (name TEXT)"))
             .execute(&pg)

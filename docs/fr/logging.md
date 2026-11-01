@@ -151,7 +151,6 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::rate_limit` | Limitation de débit |
 | `rustango::request_timeout` | Délai par requête |
 | `rustango::scheduler` | Cron / tâches planifiées |
-| `rustango::security_headers` | Réglages des en-têtes de sécurité (HSTS) |
 | `rustango::server` | Démarrage et arrêt du serveur |
 | `rustango::shutdown` | Gestion des signaux et hooks d'arrêt |
 | `rustango::sql` | Exécution des requêtes |
