@@ -1532,8 +1532,12 @@ impl TenantPools<sqlx::Postgres> {
         let span = tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
         async {
             let connect_start = std::time::Instant::now();
-            refuse_role_schema(&registry, &schema).await?;
             let scoped = self.build_scoped_pool(&schema, &registry).await?;
+            // On the new pool: it carries the tenant's connect timeout.
+            if let Err(e) = refuse_role_schema(&scoped, &schema).await {
+                scoped.close().await;
+                return Err(e);
+            }
             // Uncached, this runs per call: skip it rather than warn per request.
             if of == PoolUse::Queries && self.config.max_cached_scoped_pools > 0 {
                 warn_on_public_fallthrough(&registry, &org.slug, &schema).await;

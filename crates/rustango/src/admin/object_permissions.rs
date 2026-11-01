@@ -129,7 +129,7 @@ macro_rules! lock_user_credentials {
 }
 pub(crate) use lock_user_credentials;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tenancy", any(feature = "mcp", feature = "admin-sso")))]
 mod tests {
     use super::*;
 
