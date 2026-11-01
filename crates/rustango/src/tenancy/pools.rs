@@ -775,8 +775,8 @@ pub(crate) async fn refuse_registry_shadow<DB: Database>(
         None => Ok(()),
         Some((schema, table)) => Err(TenancyError::Validation(format!(
             "schema `{schema}` is named after the database role and holds `{table}`, so \
-             search_path reads it instead of the registry's; rename or drop that schema, or \
-             set search_path on the registry URL"
+             search_path reads it instead of the copy later in the path; rename or drop one \
+             of them, or set search_path on the registry URL"
         ))),
     }
 }

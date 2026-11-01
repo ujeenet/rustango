@@ -180,8 +180,6 @@ pub async fn run_with_writer_and_init<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    #[cfg(feature = "postgres")]
-    crate::tenancy::refuse_registry_shadow(pools).await?;
     // Boxed: inline, dispatch's state overflows a 2 MiB test thread in debug builds.
     Box::pin(dispatch(
         pools,
@@ -266,6 +264,8 @@ async fn dispatch_with<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    #[cfg(feature = "postgres")]
+    crate::tenancy::refuse_registry_shadow(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {

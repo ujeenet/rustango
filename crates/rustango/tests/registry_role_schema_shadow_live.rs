@@ -1,7 +1,7 @@
 #![cfg(all(feature = "postgres", feature = "tenancy"))]
 //! A schema named after the database role comes first in the default
 //! `search_path`, so a registry table inside it hides the real one. The
-//! CLI refuses to run against such a registry.
+//! CLI and the server refuse to run against such a registry.
 //!
 //! Skipped silently when `DATABASE_URL` is unset.
 
@@ -51,7 +51,18 @@ async fn cli_refuses_a_registry_shadowed_by_a_role_schema() {
         .await
         .unwrap();
     let err = run(&["list-tenants"]).await.expect_err("shadowed registry");
-    assert!(err.contains(&role) && err.contains("rustango_orgs"), "{err}");
+    assert!(
+        err.contains(&role) && err.contains("rustango_orgs"),
+        "{err}"
+    );
+    // The server refuses before it migrates through the shadowing schema.
+    let err = rustango::server::Builder::from_pool(raw.clone(), db.url(), "localhost")
+        .migrate(migrations.path())
+        .await
+        .err()
+        .expect("shadowed registry")
+        .to_string();
+    assert!(err.contains("named after the database role"), "{err}");
     drop(pools);
     raw.close().await;
 }
