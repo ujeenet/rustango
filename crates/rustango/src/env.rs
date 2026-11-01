@@ -583,7 +583,7 @@ pub(crate) fn set_settings_database_url(url: &str) {
 ///   `DB_PASSWORD_FILE` can't be read or is set with `DB_PASSWORD`.
 pub fn database_url_from_env() -> Result<String, EnvError> {
     let (url, source) = database_url_with_source()?;
-    note_database_url_source(&source);
+    note_database_url_source(&DATABASE_URL_NOTED, &source);
     if let Some(msg) = database_style_conflict_with(&lookup) {
         warn_style_conflict_once(&msg);
     }
@@ -626,11 +626,13 @@ fn database_style_conflict_with(get: &dyn Fn(&str) -> Option<String>) -> Option<
     ))
 }
 
-/// Log once where the database URL came from, never the URL itself.
-/// `true` when this call logged.
-fn note_database_url_source(source: &SettingSource) -> bool {
-    static NOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if NOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+static DATABASE_URL_NOTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Log once per `noted` flag where the database URL came from, never the
+/// URL itself. `true` when this call logged; tests pass their own flag.
+fn note_database_url_source(noted: &std::sync::atomic::AtomicBool, source: &SettingSource) -> bool {
+    if noted.swap(true, std::sync::atomic::Ordering::Relaxed) {
         return false;
     }
     tracing::info!(target: "rustango::server", "database URL from {source}");
@@ -1381,15 +1383,18 @@ mod tests {
         assert!(resolve_database_url_from(&staging, file).is_ok());
     }
 
-    /// The source is logged once per process, and the line has no URL.
+    /// The source is logged once per flag, and the line has no URL. A
+    /// fresh flag, so tests resolving the URL first can't burn it.
     #[test]
     fn the_database_url_source_is_noted_once() {
+        let noted = std::sync::atomic::AtomicBool::new(false);
         let src = SettingSource::File("settings file [database] url".into());
         assert_eq!(src.to_string(), "settings file [database] url");
-        assert!(note_database_url_source(&src));
-        assert!(!note_database_url_source(&SettingSource::Env(
-            "DATABASE_URL"
-        )));
+        assert!(note_database_url_source(&noted, &src));
+        assert!(!note_database_url_source(
+            &noted,
+            &SettingSource::Env("DATABASE_URL")
+        ));
     }
 
     #[test]
