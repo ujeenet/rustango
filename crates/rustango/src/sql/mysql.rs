@@ -669,7 +669,8 @@ impl Dialect for MySql {
 
     fn foreign_key_columns_sql(&self) -> Option<&'static str> {
         Some(
-            "SELECT CAST(CONSTRAINT_NAME AS CHAR), CAST(COLUMN_NAME AS CHAR) \
+            "SELECT CAST(CONSTRAINT_NAME AS CHAR), CAST(COLUMN_NAME AS CHAR), \
+             CAST(REFERENCED_TABLE_NAME AS CHAR) \
              FROM information_schema.KEY_COLUMN_USAGE \
              WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
              AND REFERENCED_TABLE_NAME IS NOT NULL \

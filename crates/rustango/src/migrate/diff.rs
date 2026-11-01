@@ -2198,18 +2198,18 @@ fn constraints_sql_from_snapshot(
     Ok(out)
 }
 
-/// Each composite FK of `t` by its columns, with its `ADD CONSTRAINT … FOREIGN KEY`.
-pub(crate) fn composite_fks(
-    t: &TableSnapshot,
+/// Each composite FK of `t`, with its `ADD CONSTRAINT … FOREIGN KEY`.
+pub(crate) fn composite_fks<'t>(
+    t: &'t TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
-) -> Vec<(Vec<String>, String)> {
+) -> Vec<(&'t super::snapshot::CompositeFkSnapshot, String)> {
     t.composite_fks
         .iter()
         .map(|cf| {
             let sql =
                 composite_fk_sql(&t.name, &cf.name, &cf.to, &cf.from, &cf.on, dialect, schema);
-            (cf.from.clone(), sql)
+            (cf, sql)
         })
         .collect()
 }

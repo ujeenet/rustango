@@ -614,6 +614,49 @@ async fn composite_fk_drop_finds_the_live_name(pool: &Pool) {
     }
 }
 
+/// Unapplying an AddCompositeFk whose table a later op renamed: the FK took
+/// the end name, so the drop finds it by the columns the migration left.
+async fn composite_fk_unapply_after_a_rename(pool: &Pool) {
+    let (p, item, product) = ("mr_cu_parent", "mr_cu_item", "mr_cu_product");
+    let ledger = "mr_cu_ledger";
+    let dir = fresh(pool, &[product, item, p], ledger).await;
+    let initial = make_migrations_from(dir.path(), &composite_snap(p, &[(item, false)]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let mig = Migration {
+        name: "0002_add_and_rename".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: composite_snap(p, &[(product, true)]),
+        forward: vec![
+            Operation::Schema(SchemaChange::AddCompositeFk {
+                table: item.into(),
+                name: "parent".into(),
+                to: p.into(),
+                from: vec!["a".into(), "b".into()],
+                on: vec!["a".into(), "b".into()],
+            }),
+            Operation::Schema(SchemaChange::RenameTable {
+                old_name: item.into(),
+                new_name: product.into(),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    let d = pool.dialect();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("migrate on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, product).await, 1, "added on {}", d.name());
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("unapply on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, item).await, 0, "dropped on {}", d.name());
+    for t in [product, item, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
@@ -1480,6 +1523,7 @@ tri_dialect_test!(
         composite_referenced_key_widens,
         composite_fk_name_on_two_tables,
         composite_fk_drop_finds_the_live_name,
+        composite_fk_unapply_after_a_rename,
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
         retyped_fk_waits_for_its_key_before_a_rename,

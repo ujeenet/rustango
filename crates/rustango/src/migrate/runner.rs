@@ -703,13 +703,13 @@ async fn reconcile_and_apply_pg(
         }
         // Unreachable with `fake_initial` off; a plain run for totality.
         ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-            let before = snapshot_before(all, mig).unwrap_or_default();
+            let before = snapshot_before(all, mig)?;
             apply_one(pool, &on_live_branches(all, done, mig), &before, ledger).await?;
             Outcome::Ran
         }
         ReconcileAction::RunOutside(existing) => {
             let run = outside_tables(mig, &existing);
-            let before = snapshot_before(all, mig).unwrap_or_default();
+            let before = snapshot_before(all, mig)?;
             apply_one(pool, &on_live_branches(all, done, &run), &before, ledger).await?;
             Outcome::RanPartial { skipped: existing }
         }
@@ -947,28 +947,35 @@ fn prev_snapshot(
     mig: &Migration,
     dir: &Path,
 ) -> Result<SchemaSnapshot, MigrateError> {
-    let Some(prev_name) = &mig.prev else {
-        return Ok(SchemaSnapshot::default());
-    };
-    snapshot_before(all, mig).ok_or_else(|| {
+    snapshot_before(all, mig).map_err(|_| {
         MigrateError::Validation(format!(
-            "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
+            "migration `{}` declares prev=`{}` but that file is missing in {}",
             mig.name,
+            mig.prev.as_deref().unwrap_or_default(),
             dir.display()
         ))
     })
 }
 
 /// The schema before `mig`, with its parent's hand-written renames as
-/// makemigrations reads it; `None` if its `prev` is missing from `all`.
-fn snapshot_before(all: &[Migration], mig: &Migration) -> Option<SchemaSnapshot> {
+/// makemigrations reads it.
+///
+/// # Errors
+/// Its `prev` is missing from `all`.
+fn snapshot_before(all: &[Migration], mig: &Migration) -> Result<SchemaSnapshot, MigrateError> {
     let Some(prev_name) = &mig.prev else {
-        return Some(SchemaSnapshot::default());
+        return Ok(SchemaSnapshot::default());
     };
     let chain: Vec<&Migration> = all.iter().collect();
     all.iter()
         .find(|m| &m.name == prev_name)
         .map(|m| super::make::effective_snapshot(&chain, m))
+        .ok_or_else(|| {
+            MigrateError::Validation(format!(
+                "migration `{}` declares prev=`{prev_name}` but that migration is missing",
+                mig.name
+            ))
+        })
 }
 
 /// Build a [`MigrationPreview`] for a single migration. Pure — no DB
@@ -1464,7 +1471,7 @@ async fn migrate_embedded_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            let before = snapshot_before(&all, &mig).unwrap_or_default();
+            let before = snapshot_before(&all, &mig)?;
             apply_one(pool, &mig, &before, ledger).await?;
             newly.push(mig);
         }
@@ -2248,7 +2255,7 @@ async fn reconcile_and_apply(
                 ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
-            let before = snapshot_before(all, mig).unwrap_or_default();
+            let before = snapshot_before(all, mig)?;
             apply_one_pool(
                 pool,
                 &on_live_branches(all, done, &effective),
@@ -3390,9 +3397,9 @@ struct IndexFks {
     /// missing here goes away later, or an earlier op already defers its
     /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
-    /// The table's composite FKs at the op by columns, with their re-add;
+    /// The table's composite FKs at the op as `(name, columns, re-add)`;
     /// one missing here just drops; `None` if the whole table goes (#2326).
-    composites: Option<Vec<(Vec<String>, String)>>,
+    composites: Option<Vec<(String, Vec<String>, String)>>,
 }
 
 /// The indexes on `table` that start with `column` once `earlier` ran on
@@ -3515,7 +3522,12 @@ impl IndexFks {
             if let Some(cs) = &mut columns {
                 cs.retain(|(c, fk)| fk.is_none() || !fk_deferred_earlier(table, c, earlier));
             }
-            let composites = at.map(|t| super::diff::composite_fks(t, dialect, schema));
+            let composites = at.map(|t| {
+                super::diff::composite_fks(t, dialect, schema)
+                    .into_iter()
+                    .map(|(cf, sql)| (cf.name.clone(), cf.from.clone(), sql))
+                    .collect()
+            });
             (columns, composites)
         };
         Ok(Self {
@@ -3526,9 +3538,9 @@ impl IndexFks {
         })
     }
 
-    /// The drops of the live composite FKs `live` only the index serves, by
-    /// name and columns, then the re-adds of those still declared; an
-    /// undeclared one stays.
+    /// The drops of the live composite FKs `live` only the index serves, then
+    /// the re-adds of those still declared, found by name, else by columns in
+    /// order; an undeclared one stays.
     fn plan_composites(
         &self,
         live: &[(String, Vec<String>)],
@@ -3538,10 +3550,18 @@ impl IndexFks {
         for (name, columns) in live {
             let readd = match &self.composites {
                 None => None,
-                Some(cs) => match cs.iter().find(|(c, _)| same_columns(c, columns)) {
-                    Some((_, sql)) => Some(sql.clone()),
-                    None => continue,
-                },
+                Some(cs) => {
+                    let named =
+                        |n: &str| *name == n || *name == ddl::fk_constraint_name(&self.table, n);
+                    let found = cs
+                        .iter()
+                        .find(|(n, _, _)| named(n))
+                        .or_else(|| cs.iter().find(|(_, c, _)| c == columns));
+                    match found {
+                        Some((_, _, sql)) => Some(sql.clone()),
+                        None => continue,
+                    }
+                }
             };
             drops.extend(dialect.drop_foreign_key_sql(&self.table, name));
             readds.extend(readd);
@@ -3618,14 +3638,52 @@ struct ColumnRef {
     keep: Vec<String>,
 }
 
-/// A composite FK a step drops. Apply finds it in the catalog by its columns:
-/// an older migration named it bare, and a table rename keeps its name.
+/// A composite FK a step drops. Apply finds it in the catalog by its columns
+/// and target: an older migration named it bare, and a table rename keeps
+/// its name.
 #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
 struct CompositeFkRef {
     table: String,
     name: String,
-    /// Its columns at the op; `None` if no snapshot or earlier op has it.
-    columns: Option<Vec<String>>,
+    /// Its columns and target at the op; `None` if no snapshot or earlier op has it.
+    declared: Option<DeclaredFk>,
+}
+
+/// A composite FK's columns, in key order, and the table it references.
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+struct DeclaredFk {
+    columns: Vec<String>,
+    to: String,
+}
+
+/// One live FK, as the catalog describes it.
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+struct CatalogFk {
+    name: String,
+    fk: DeclaredFk,
+}
+
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+impl CatalogFk {
+    /// Group the catalog's `(name, column, referenced table)` rows, in key order.
+    fn from_rows(rows: Vec<(String, String, String)>) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for (name, column, to) in rows {
+            match out.last_mut() {
+                Some(f) if f.name == name => f.fk.columns.push(column),
+                _ => out.push(Self {
+                    name,
+                    fk: DeclaredFk {
+                        columns: vec![column],
+                        to,
+                    },
+                }),
+            }
+        }
+        out
+    }
 }
 
 #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
@@ -3641,10 +3699,15 @@ impl CompositeFkRef {
                 Operation::Schema(SC::AddCompositeFk {
                     table: t,
                     name: n,
+                    to,
                     from,
                     ..
                 }) if n == name && super::rebuild::name_at_end(t, &earlier[j + 1..]) == table => {
-                    Some(super::rebuild::columns_at_end(t, from, &earlier[j + 1..]))
+                    let rest = &earlier[j + 1..];
+                    Some(DeclaredFk {
+                        columns: super::rebuild::columns_at_end(t, from, rest),
+                        to: super::rebuild::name_at_end(to, rest),
+                    })
                 }
                 _ => None,
             });
@@ -3657,66 +3720,55 @@ impl CompositeFkRef {
                 }
                 _ => t,
             });
-        let columns = added.or_else(|| {
+        let declared = added.or_else(|| {
             let cf = before.table(&start)?.composite_fk(name)?;
-            Some(super::rebuild::columns_at_end(&start, &cf.from, earlier))
+            Some(DeclaredFk {
+                columns: super::rebuild::columns_at_end(&start, &cf.from, earlier),
+                to: super::rebuild::name_at_end(&cf.to, earlier),
+            })
         });
         Self {
             table: table.to_owned(),
             name: name.to_owned(),
-            columns,
+            declared,
         }
     }
 
-    /// The live FKs it is, from the catalog's FKs on its table.
-    fn live_names(&self, live: Vec<(String, Vec<String>)>) -> Vec<String> {
-        let named =
-            |n: &str| n == self.name || n == ddl::fk_constraint_name(&self.table, &self.name);
-        let Some(columns) = &self.columns else {
-            return live
-                .into_iter()
-                .map(|(n, _)| n)
-                .filter(|n| named(n))
-                .collect();
+    /// The live FKs it is, of those on its table: the ones on its columns and
+    /// target, the one its name gives first.
+    ///
+    /// # Errors
+    /// Several such FKs, none under its name: dropping all could take a declared one.
+    fn live_names(&self, live: Vec<CatalogFk>) -> Result<Vec<String>, String> {
+        let usual = self.usual_name();
+        let named = |f: &CatalogFk| f.name == self.name || f.name == usual;
+        let found: Vec<CatalogFk> = match &self.declared {
+            Some(d) => live.into_iter().filter(|f| f.fk == *d).collect(),
+            None => live.into_iter().filter(|f| named(f)).collect(),
         };
-        let found: Vec<String> = live
-            .into_iter()
-            .filter(|(_, cs)| same_columns(cs, columns))
-            .map(|(n, _)| n)
-            .collect();
-        // Several on its columns: the one its name gives, if any.
-        if found.iter().any(|n| named(n)) {
-            found.into_iter().filter(|n| named(n)).collect()
-        } else {
-            found
+        if found.len() > 1 && !found.iter().any(named) {
+            let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+            return Err(format!(
+                "cannot drop composite FK `{}.{}`: the live FKs {} all match it and none is \
+                 named `{}` or `{usual}`; drop the right one by hand",
+                self.table,
+                self.name,
+                names.join(", "),
+                self.name,
+            ));
         }
+        let any_named = found.iter().any(named);
+        Ok(found
+            .into_iter()
+            .filter(|f| !any_named || named(f))
+            .map(|f| f.name)
+            .collect())
     }
 
     /// The name apply usually finds, for a preview.
     fn usual_name(&self) -> String {
         ddl::fk_constraint_name(&self.table, &self.name)
     }
-}
-
-/// Whether two FK column lists hold the same columns.
-fn same_columns(a: &[String], b: &[String]) -> bool {
-    let (mut a, mut b) = (a.to_vec(), b.to_vec());
-    a.sort_unstable();
-    b.sort_unstable();
-    a == b
-}
-
-/// The catalog's `(name, column)` FK rows, in key order, by constraint.
-#[cfg(any(feature = "mysql", feature = "postgres"))]
-fn group_fk_columns(rows: Vec<(String, String)>) -> Vec<(String, Vec<String>)> {
-    let mut out: Vec<(String, Vec<String>)> = Vec::new();
-    for (name, column) in rows {
-        match out.last_mut() {
-            Some((n, cs)) if *n == name => cs.push(column),
-            _ => out.push((name, vec![column])),
-        }
-    }
-    out
 }
 
 /// Render `change`, one of `ops`, which together move the schema from
@@ -4519,12 +4571,23 @@ macro_rules! step_statements {
         }
         if let Some(sql) = dialect.foreign_key_columns_sql() {
             for fk in &step.drop_composite_fks {
-                let rows: Vec<(String, String)> = sqlx::query_as(sql)
+                let rows: Vec<(String, String, String)> = sqlx::query_as(sql)
                     .bind(&fk.table)
                     .fetch_all(&mut *$conn)
                     .await?;
+                let names = fk
+                    .live_names(CatalogFk::from_rows(rows))
+                    .map_err(MigrateError::Validation)?;
+                // MySQL would record the drop as applied with the FK still there.
+                if names.is_empty() {
+                    let missing = format!("composite FK `{}.{}` is not in the catalog", fk.table, fk.name);
+                    if !dialect.drops_missing_foreign_key() {
+                        return Err(MigrateError::Validation(missing));
+                    }
+                    tracing::warn!(target: "rustango::migrate", "{missing}; nothing to drop");
+                }
                 out.extend(
-                    fk.live_names(group_fk_columns(rows))
+                    names
                         .iter()
                         .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
                 );
@@ -4542,7 +4605,7 @@ async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
     step: &Step,
     dropped: &mut DroppedFks,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<String>, MigrateError> {
     let (mut out, readd) = match &step.index_fks {
         Some(ix) => Box::pin(mysql_index_fks(conn, ix)).await?,
         None => (Vec::new(), Vec::new()),
@@ -4550,7 +4613,7 @@ async fn mysql_statements(
     if let Some(cd) = &step.drop_composites {
         out.extend(Box::pin(mysql_composite_drops(conn, cd, dropped)).await?);
     }
-    let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, step, crate::sql::MySql);
+    let rest: Result<Vec<String>, MigrateError> = step_statements!(conn, step, crate::sql::MySql);
     out.extend(rest?);
     out.extend(readd);
     Ok(out)
@@ -4646,9 +4709,10 @@ async fn mysql_index_fks(
             .bind(&ix.table)
             .fetch_all(&mut *conn)
             .await?;
-        group_fk_columns(rows)
+        CatalogFk::from_rows(rows)
             .into_iter()
-            .filter(|(n, _)| names.contains(n))
+            .filter(|f| names.contains(&f.name))
+            .map(|f| (f.name, f.fk.columns))
             .collect()
     };
     let (d, r) = ix.plan_composites(&live, &dialect);
@@ -4661,7 +4725,7 @@ async fn mysql_index_fks(
 async fn pg_statements(
     conn: &mut sqlx::PgConnection,
     step: &Step,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<String>, MigrateError> {
     step_statements!(conn, step, crate::sql::Postgres)
 }
 
@@ -4725,9 +4789,16 @@ async fn atomic_mysql(
         match op {
             Operation::Schema(_) => {
                 let step = steps.next_step();
+                // A refusal after DDL committed still says what survived it.
                 let stmts = mysql_statements(&mut tx, &step, &mut dropped)
                     .await
-                    .map_err(|e| stuck!(e))?;
+                    .map_err(|e| match e {
+                        MigrateError::Driver(e) => stuck!(e),
+                        other => match stuck!(sqlx::Error::Protocol(other.to_string())) {
+                            MigrateError::Driver(_) => other,
+                            partial => partial,
+                        },
+                    })?;
                 // Counted per *statement*, not per operation:
                 // one operation can render several, and each
                 // auto-commits on its own, so an operation
@@ -5836,7 +5907,7 @@ async fn migrate_embedded_pool_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            let before = snapshot_before(&all, &mig).unwrap_or_default();
+            let before = snapshot_before(&all, &mig)?;
             apply_one_pool(pool, &mig, &before, ledger).await?;
             newly.push(mig);
         }
@@ -6028,6 +6099,68 @@ mod tests {
         assert!(out[2].starts_with("DROP INDEX `idx_b`"), "{out:?}");
         assert!(out[3].contains("ADD CONSTRAINT"), "{out:?}");
         assert_eq!(out.len(), 4, "{out:?}");
+    }
+
+    /// `product.p1` on `(a, b)` to `parent`, as a migration drops it.
+    fn p1_drop() -> super::CompositeFkRef {
+        super::CompositeFkRef {
+            table: "product".into(),
+            name: "p1".into(),
+            declared: Some(super::DeclaredFk {
+                columns: vec!["a".into(), "b".into()],
+                to: "parent".into(),
+            }),
+        }
+    }
+
+    fn live(name: &str, columns: &[&str], to: &str) -> super::CatalogFk {
+        super::CatalogFk {
+            name: name.into(),
+            fk: super::DeclaredFk {
+                columns: columns.iter().map(|c| (*c).to_owned()).collect(),
+                to: to.into(),
+            },
+        }
+    }
+
+    /// Two FKs on its columns and target: only the one its name gives drops.
+    #[test]
+    fn composite_drop_prefers_its_name() {
+        let found = p1_drop()
+            .live_names(vec![
+                live("product_p1_fkey", &["a", "b"], "parent"),
+                live("p2_by_hand", &["a", "b"], "parent"),
+            ])
+            .unwrap();
+        assert_eq!(found, ["product_p1_fkey"]);
+    }
+
+    /// Several unnamed candidates (a renamed table) are refused, not all dropped.
+    #[test]
+    fn composite_drop_refuses_several_unnamed() {
+        let err = p1_drop()
+            .live_names(vec![
+                live("item_p1_fkey", &["a", "b"], "parent"),
+                live("item_p2_fkey", &["a", "b"], "parent"),
+            ])
+            .unwrap_err();
+        assert!(
+            err.contains("item_p1_fkey") && err.contains("item_p2_fkey"),
+            "{err}"
+        );
+    }
+
+    /// Another target, or the columns in another order, is another FK.
+    #[test]
+    fn composite_drop_matches_target_and_column_order() {
+        let found = p1_drop()
+            .live_names(vec![
+                live("item_p1_fkey", &["a", "b"], "parent"),
+                live("item_p2_fkey", &["a", "b"], "other"),
+                live("item_p3_fkey", &["b", "a"], "parent"),
+            ])
+            .unwrap();
+        assert_eq!(found, ["item_p1_fkey"]);
     }
 
     /// #2326 — a composite FK only the dropped index serves comes off around it,
