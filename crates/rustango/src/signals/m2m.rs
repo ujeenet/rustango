@@ -97,6 +97,7 @@ pub struct M2mChangedContext {
     /// The owner's content type id for a generic M2M; `None` otherwise.
     pub content_type_id: Option<i64>,
     /// Keys newly linked: the id for `Add`, the new ones for `Set`.
+    /// Empty for a `Set` whose old keys could not be read.
     pub added: Vec<crate::core::SqlValue>,
     /// Keys unlinked: the id for `Remove`, the dropped ones for `Set`.
     /// Empty for `Clear`, and for a `Set` whose old keys could not be read.

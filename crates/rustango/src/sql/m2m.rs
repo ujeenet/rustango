@@ -502,24 +502,26 @@ async fn replace(
     let deleted = super::executor::delete_tx(&mut tx, &del).await?;
     super::executor::bulk_insert_tx(&mut tx, &ins).await?;
     tx.commit().await.map_err(ExecError::Driver)?;
-    // Old keys unreadable: the change is unknown, so report every new key.
+    // Old keys unreadable: the change is unknown, so report no diff.
     let Some(old) = old else {
         let changed = !dsts.is_empty() || deleted > 0;
-        return Ok(changed.then(|| SetDiff {
-            added: dsts.to_vec(),
-            removed: Vec::new(),
-        }));
+        return Ok(changed.then(SetDiff::default));
     };
     let key = SqlValue::to_display_string;
     let new: std::collections::HashSet<String> = dsts.iter().map(key).collect();
     let was: std::collections::HashSet<String> = old.iter().map(key).collect();
+    // A keyless junction can hold one link twice: report it once.
+    let mut seen = std::collections::HashSet::new();
     let diff = SetDiff {
         added: dsts
             .iter()
             .filter(|d| !was.contains(&key(d)))
             .cloned()
             .collect(),
-        removed: old.into_iter().filter(|o| !new.contains(&key(o))).collect(),
+        removed: old
+            .into_iter()
+            .filter(|o| !new.contains(&key(o)) && seen.insert(key(o)))
+            .collect(),
     };
     Ok((!diff.added.is_empty() || !diff.removed.is_empty()).then_some(diff))
 }

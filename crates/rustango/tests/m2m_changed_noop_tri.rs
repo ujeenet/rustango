@@ -179,7 +179,7 @@ fn actions(fired: &Fired) -> Vec<M2mAction> {
 }
 
 async fn set_on_an_i32_through_model(pool: &Pool) {
-    let (_signals, fired) = record().await;
+    let (_signals, fired) = record_contexts().await;
     let p = M2MManager {
         src_pk: SqlValue::I64(1),
         through: PostTagI32::SCHEMA.table,
@@ -188,7 +188,23 @@ async fn set_on_an_i32_through_model(pool: &Pool) {
     };
     p.set(&[5_i64, 6], pool).await.expect("set");
     p.set(&[6_i64, 5], pool).await.expect("same set");
-    assert_eq!(actions(&fired), [M2mAction::Set]);
+    // The keyless through model can hold one link twice: `removed` lists it once.
+    for _ in 0..2 {
+        PostTagI32 {
+            id: Auto::default(),
+            post_id: 1,
+            tag_id: 7,
+        }
+        .insert_pool(pool)
+        .await
+        .expect("duplicate link");
+    }
+    p.set(&[5_i64, 6], pool).await.expect("drop the duplicate");
+    let i = SqlValue::I64;
+    assert_eq!(
+        diffs(&fired),
+        vec![(None, vec![i(5), i(6)], vec![]), (None, vec![], vec![i(7)])]
+    );
 }
 
 /// `add` skips a present link even when the through model has no unique key.
@@ -300,23 +316,32 @@ async fn generic_set_with_string_keys(pool: &Pool) {
 
 /// The guessed `i64` read fails on PG's `INT`; `set` still applies.
 async fn generic_set_on_an_int_column(pool: &Pool) {
-    // Its signals would land in another scenario's recorder.
-    let _signals = signals_lock().await;
+    let (_signals, fired) = record_contexts().await;
     let t = tags(GENERIC_I32);
     t.set(&[5_i64, 6], pool).await.expect("set");
     t.set(&[6_i64], pool).await.expect("smaller set");
     assert_eq!(t.all::<i32>(pool).await.expect("all"), [6]);
+    // Where the old keys are unreadable (PG) the diff is empty, never a re-added key.
+    let got = diffs(&fired);
+    assert_eq!(got.len(), 2);
+    assert!(got[1].1.is_empty(), "nothing was added: {got:?}");
+    assert!(
+        got[1].2.is_empty() || got[1].2 == [SqlValue::I64(5)],
+        "{got:?}"
+    );
 }
 
 async fn generic_set_with_uuid_keys(pool: &Pool) {
-    let (_signals, fired) = record().await;
+    let (_signals, fired) = record_contexts().await;
     let t = tags(GENERIC_UUID);
     let (a, b) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
     t.set(&[a, b], pool).await.expect("set");
     t.set(&[b, a], pool).await.expect("same set");
     t.set(&[b], pool).await.expect("smaller set");
-    assert_eq!(actions(&fired), [M2mAction::Set, M2mAction::Set]);
     assert_eq!(t.all::<uuid::Uuid>(pool).await.expect("all"), [b]);
+    let got: Vec<_> = diffs(&fired).into_iter().map(|(_, a, r)| (a, r)).collect();
+    let u = SqlValue::Uuid;
+    assert_eq!(got, vec![(vec![u(a), u(b)], vec![]), (vec![], vec![u(a)])]);
 }
 
 fn post(id: i64) -> M2MManager {

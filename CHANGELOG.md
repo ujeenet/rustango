@@ -14,7 +14,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Removed: `Tenant::for_test`, `contenttypes::render_generic_fk_link`, `admin::InlineApplyOutcome`, and the racy `Cache::touch` default.
 - `ModelForm` locks superuser-only fields unless `acting_superuser(true)` is called; before, a form that never stated the acting user locked nothing.
 - Operator, tenant and impersonation-handoff tokens sign under their own tag (`session::sign_tagged`), so one kind can never verify as another under the shared `RUSTANGO_SESSION_SECRET`. Existing sessions end once.
-- `M2mChangedContext` is `#[non_exhaustive]` and carries `content_type_id` for generic M2M plus the `added` / `removed` keys of a change.
+- `M2mChangedContext` is `#[non_exhaustive]` and carries `content_type_id` for generic M2M plus the `added` / `removed` keys of a change (both empty when `set` cannot read the old keys).
 - `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
 - An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
 
