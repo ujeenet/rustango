@@ -18,7 +18,6 @@
 //! building a `lettre::transport::smtp::client::Tls` manually and
 //! passing through [`SmtpMailer::with_transport`].
 
-
 use async_trait::async_trait;
 use lettre::message::{
     header::{ContentType, HeaderName, HeaderValue},

@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- A schema-mode tenant whose schema has a database role's name is refused when its pool opens (requests and `migrate-tenants`); `check --deploy` lists it as an error. Rename the role or move the tenant to another schema before upgrading.
 - On Postgres, the server (`migrate`, `seed_with`, `serve`) and every tenancy CLI verb refuse to run when a schema named after the database role holds a registry table that also exists later in `search_path`. Drop or rename one copy, or pin `search_path` on the registry URL.
 - `testkit::create_tables` also creates the auto-created M2M junctions between the models it is given; a test that built them by hand afterwards can drop that step (`create_junctions` stays and is idempotent).
 - Tenant JWTs must carry the org id (`org_id`) as well as the slug: tokens minted before this release are refused, so users sign in again. `TenantSlug` is now `TenantSlug::new(org_id, slug)`, `JwtBackend::issue_for_tenant*` and `UserTokenScope::Tenant` take a `&TenantSlug`, `PageKey::tenant` takes a `&TenantSlug`, and an `OrgResolver` must return orgs with an id for `require_auth` and the JWT routes.

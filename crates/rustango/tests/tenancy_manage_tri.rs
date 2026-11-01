@@ -704,7 +704,8 @@ async fn a_schema_named_after_a_role_is_refused(pool: &Pool) {
     }
 }
 
-/// A tenant that already lives in a role-named schema is named by `check --deploy`.
+/// A tenant that already lives in a role-named schema is named by `check --deploy`
+/// and its pools refuse to open.
 async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
     let env = Env::new(pool).await;
     if env.backend() != BackendKind::Postgres {
@@ -734,6 +735,12 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
         out.contains("`rolehome`") && out.contains("database role"),
         "{out}"
     );
+    // Its pools refuse to open, so migrating it fails.
+    let mut out = Vec::new();
+    let args = vec!["migrate-tenants".to_owned()];
+    let res = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await);
+    let all = format!("{res:?} {}", String::from_utf8_lossy(&out));
+    assert!(all.contains("is the name of a database role"), "{all}");
 }
 
 /// Run `create` while an uncommitted extra-host row holds `host`; commit it

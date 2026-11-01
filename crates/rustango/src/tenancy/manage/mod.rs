@@ -1104,7 +1104,7 @@ where
 }
 
 /// A tenant schema named like a role leads that role's default
-/// `search_path`; new ones are refused, existing ones are only named.
+/// `search_path`; the tenant's pools refuse to open, so name it here too.
 async fn role_schema_audit(
     registry: &crate::sql::Pool,
     out: &mut rustango::migrate::manage::DeployAuditFindings,
@@ -1135,10 +1135,10 @@ async fn role_schema_audit(
                 .await
                 .unwrap_or(false)
             {
-                out.warnings.push(format!(
-                    "tenant `{}` lives in schema `{schema}`, the name of a database role: that \
-                     role's sessions see this tenant's tables before `public`; move it to another \
-                     schema (a database move and back) or rename the role",
+                out.errors.push(format!(
+                    "tenant `{}` lives in schema `{schema}`, the name of a database role, so its \
+                     pools refuse to open; rename the role or move the tenant to another schema \
+                     (a database move and back)",
                     org.slug
                 ));
             }
