@@ -628,46 +628,6 @@ impl NearCapLatch {
     }
 }
 
-/// The registry's `search_path` when its URL sets none: with the role's
-/// `"$user", public`, a schema named like the role shadows registry tables.
-#[cfg(feature = "postgres")]
-const REGISTRY_SEARCH_PATH: &str = "public";
-
-/// Pin a Postgres registry's `search_path` as a startup option, so `RESET`
-/// returns to it. A URL that sets `search_path` itself is kept.
-fn pin_registry_search_path<DB: Database>(registry: &sqlx::Pool<DB>) {
-    #[cfg(feature = "postgres")]
-    if let Some(pg) = (registry as &dyn std::any::Any).downcast_ref::<PgPool>() {
-        let opts = pg.connect_options();
-        if sets_search_path(opts.get_options()) {
-            return;
-        }
-        pg.set_connect_options(
-            (*opts)
-                .clone()
-                .options([("search_path", REGISTRY_SEARCH_PATH)]),
-        );
-        // Idle connections were opened with the role's default: close them.
-        while let Some(mut conn) = pg.try_acquire() {
-            conn.close_on_drop();
-        }
-    }
-    #[cfg(not(feature = "postgres"))]
-    let _ = registry;
-}
-
-/// Whether startup `options` (`-c k=v`, `--k=v`) set `search_path`.
-#[cfg(feature = "postgres")]
-fn sets_search_path(options: Option<&str>) -> bool {
-    options.is_some_and(|o| {
-        o.split_ascii_whitespace().any(|w| {
-            w.trim_start_matches('-')
-                .trim_start_matches('c')
-                .starts_with("search_path=")
-        })
-    })
-}
-
 /// Which of a tenant's two pools. Two, so a request holding a
 /// connection can still query through `t.pool()` at its max size.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -692,12 +652,8 @@ impl<DB: Database> TenantPools<DB> {
     /// [`super::EnvSecretsResolver`] / [`super::ChainSecretsResolver`]
     /// for env-var lookup, or implement the trait yourself for vault
     /// integration.
-    ///
-    /// A Postgres registry gets `search_path=public` unless its URL sets
-    /// one (`?options=-c%20search_path%3D...`); its idle connections close.
     #[must_use]
     pub fn with_secrets<R: SecretsResolver>(registry: sqlx::Pool<DB>, secrets: R) -> Self {
-        pin_registry_search_path(&registry);
         Self {
             registry,
             config: TenantPoolsConfig::default(),
@@ -2545,20 +2501,6 @@ mod tests {
             .find(|l| l.contains("other-task-event"))
             .expect("logged");
         assert!(!line.contains("tenant_pool_init"), "span leaked: {line}");
-    }
-
-    /// A registry URL that names its own `search_path` keeps it.
-    #[cfg(feature = "postgres")]
-    #[test]
-    fn a_url_search_path_is_detected() {
-        use std::str::FromStr as _;
-        let opts = |url| sqlx::postgres::PgConnectOptions::from_str(url).unwrap();
-        let set = |url| sets_search_path(opts(url).get_options());
-        assert!(set("postgres://u@h/d?options=-c%20search_path%3Dreg"));
-        assert!(set("postgres://u@h/d?options=-csearch_path%3Dreg"));
-        assert!(set("postgres://u@h/d?options=--search_path%3Dreg"));
-        assert!(!set("postgres://u@h/d?options=-c%20statement_timeout%3D5s"));
-        assert!(!sets_search_path(None));
     }
 
     #[cfg(feature = "postgres")]
