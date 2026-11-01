@@ -475,10 +475,193 @@ async fn keys_over_the_mysql_byte_cap_are_refused_up_front(pool: &Pool) {
     }
 }
 
+/// A parent keyed on `(a, b)` and `children`, each with the composite FK
+/// `parent` on `(a, b)` when `with_fk` holds.
+fn composite_snap(p: &str, children: &[(&str, bool)]) -> rustango::migrate::SchemaSnapshot {
+    let mut tables = vec![table(p, vec![id(), col("a", false), col("b", false)])];
+    for (c, with_fk) in children {
+        let mut t = table(c, vec![id(), col("a", false), col("b", false)]);
+        if *with_fk {
+            t["composite_fks"] = json!([{"name": "parent", "to": p,
+                "from": ["a", "b"], "on": ["a", "b"]}]);
+        }
+        tables.push(t);
+    }
+    serde_json::from_value(
+        json!({"tables": tables, "indexes": [{"name": format!("{p}_ab"),
+        "table": p, "columns": ["a", "b"], "unique": true}]}),
+    )
+    .expect("snapshot")
+}
+
+/// Two tables with a composite FK of the same name: MySQL names FKs per
+/// database, so each needs its own (1826).
+async fn composite_fk_name_on_two_tables(pool: &Pool) {
+    let (p, c1, c2) = ("mr_cn_parent", "mr_cn_one", "mr_cn_two");
+    let ledger = "mr_cn_ledger";
+    let dir = fresh(pool, &[c2, c1, p], ledger).await;
+    let step = |one: bool| {
+        make_migrations_from(
+            dir.path(),
+            &composite_snap(p, &[(c1, one), (c2, true)]),
+            None,
+        )
+        .expect("makemigrations")
+        .expect("a migration")
+    };
+    step(true);
+    let d = pool.dialect();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("initial on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, c1).await, 1, "{}", d.name());
+    assert_eq!(fk_count(pool, c2).await, 1, "{}", d.name());
+    let drop = step(false);
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("drop on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, c1).await, 0, "dropped on {}", d.name());
+    assert_eq!(
+        fk_count(pool, c2).await,
+        1,
+        "the other kept on {}",
+        d.name()
+    );
+    unapply_pool_with_ledger(pool, dir.path(), &drop.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("unapply on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, c1).await, 1, "back on {}", d.name());
+    for t in [c2, c1, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// A composite FK drop finds the constraint by its columns: one an older
+/// migration named `parent`, and one whose table was renamed since.
+async fn composite_fk_drop_finds_the_live_name(pool: &Pool) {
+    let (p, old, ren, ren2) = ("mr_cl_parent", "mr_cl_old", "mr_cl_ren", "mr_cl_ren2");
+    let ledger = "mr_cl_ledger";
+    let dir = fresh(pool, &[ren2, ren, old, p], ledger).await;
+    let initial = make_migrations_from(
+        dir.path(),
+        &composite_snap(p, &[(old, true), (ren, true)]),
+        None,
+    )
+    .expect("makemigrations")
+    .expect("a migration");
+    let d = pool.dialect();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("initial on {}: {e}", d.name()));
+    // What an older migration left: the FK under the bare relation name.
+    if d.name() != "sqlite" {
+        let (name, schema) = if d.name() == "mysql" {
+            ("CAST(constraint_name AS CHAR)", "DATABASE()")
+        } else {
+            ("constraint_name::text", "current_schema()")
+        };
+        let sql = format!(
+            "SELECT {name} FROM information_schema.table_constraints WHERE table_schema = \
+             {schema} AND table_name = '{old}' AND constraint_type = 'FOREIGN KEY'"
+        );
+        let names: Vec<(String,)> = rustango::sql::raw_query_pool(&sql, Vec::new(), pool)
+            .await
+            .expect("FK names");
+        for (n,) in names {
+            exec(pool, &d.drop_foreign_key_sql(old, &n).expect("drop"))
+                .await
+                .expect("drop the FK");
+        }
+        exec(
+            pool,
+            &format!(
+                "ALTER TABLE {} ADD CONSTRAINT parent FOREIGN KEY (a, b) REFERENCES {} (a, b)",
+                d.quote_ident(old),
+                d.quote_ident(p)
+            ),
+        )
+        .await
+        .expect("the FK under its old name");
+    }
+    let drop = |table: &str| {
+        Operation::Schema(SchemaChange::DropCompositeFk {
+            table: table.into(),
+            name: "parent".into(),
+        })
+    };
+    let mig = Migration {
+        name: "0002_drop_composites".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: composite_snap(p, &[(old, false), (ren2, false)]),
+        forward: vec![
+            Operation::Schema(SchemaChange::RenameTable {
+                old_name: ren.into(),
+                new_name: ren2.into(),
+            }),
+            drop(old),
+            drop(ren2),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("drop on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, old).await, 0, "old name on {}", d.name());
+    assert_eq!(fk_count(pool, ren2).await, 0, "renamed on {}", d.name());
+    for t in [ren2, ren, old, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// Unapplying an AddCompositeFk whose table a later op renamed: the FK took
+/// the end name, so the drop finds it by the columns the migration left.
+async fn composite_fk_unapply_after_a_rename(pool: &Pool) {
+    let (p, item, product) = ("mr_cu_parent", "mr_cu_item", "mr_cu_product");
+    let ledger = "mr_cu_ledger";
+    let dir = fresh(pool, &[product, item, p], ledger).await;
+    let initial = make_migrations_from(dir.path(), &composite_snap(p, &[(item, false)]), None)
+        .expect("makemigrations")
+        .expect("a migration");
+    let mig = Migration {
+        name: "0002_add_and_rename".into(),
+        prev: Some(initial.name.clone()),
+        snapshot: composite_snap(p, &[(product, true)]),
+        forward: vec![
+            Operation::Schema(SchemaChange::AddCompositeFk {
+                table: item.into(),
+                name: "parent".into(),
+                to: p.into(),
+                from: vec!["a".into(), "b".into()],
+                on: vec!["a".into(), "b".into()],
+            }),
+            Operation::Schema(SchemaChange::RenameTable {
+                old_name: item.into(),
+                new_name: product.into(),
+            }),
+        ],
+        ..initial
+    };
+    write(dir.path(), &mig);
+    let d = pool.dialect();
+    migrate_pool_with_ledger(pool, dir.path(), ledger)
+        .await
+        .unwrap_or_else(|e| panic!("migrate on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, product).await, 1, "added on {}", d.name());
+    unapply_pool_with_ledger(pool, dir.path(), &mig.name, ledger)
+        .await
+        .unwrap_or_else(|e| panic!("unapply on {}: {e}", d.name()));
+    assert_eq!(fk_count(pool, item).await, 0, "dropped on {}", d.name());
+    for t in [product, item, p, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// FKs on `t`, from the catalog.
 async fn fk_count(pool: &Pool, t: &str) -> i64 {
     let sql = match pool.dialect().name() {
-        "sqlite" => format!("SELECT COUNT(*) FROM pragma_foreign_key_list('{t}')"),
+        // One row per key column; `id` is the FK.
+        "sqlite" => format!("SELECT COUNT(DISTINCT id) FROM pragma_foreign_key_list('{t}')"),
         name => format!(
             "SELECT COUNT(*) FROM information_schema.table_constraints \
              WHERE table_schema = {} AND table_name = '{t}' \
@@ -1338,6 +1521,9 @@ tri_dialect_test!(
         long_index_names_apply,
         referenced_key_widens,
         composite_referenced_key_widens,
+        composite_fk_name_on_two_tables,
+        composite_fk_drop_finds_the_live_name,
+        composite_fk_unapply_after_a_rename,
         referenced_key_widens_beside_new_fks,
         referenced_key_widens_its_junction,
         retyped_fk_waits_for_its_key_before_a_rename,
