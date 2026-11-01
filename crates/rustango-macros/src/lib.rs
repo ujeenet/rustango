@@ -11050,6 +11050,8 @@ struct FieldAttrs {
     /// Empty by default; fires on every typed INSERT/UPDATE. Each is
     /// spanned on the attribute string, so an unknown name errors there.
     validators: Vec<syn::Ident>,
+    /// `#[rustango(secret)]` / `secret = false`; `None` defers to the name rules.
+    secret: Option<bool>,
 }
 
 /// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
@@ -11073,6 +11075,7 @@ const FIELD_ATTR_KEYS: &[&str] = &[
     "db_comment",
     "verbose_name",
     "editable",
+    "secret",
     "blank",
     "citext",
     "validators",
@@ -11216,6 +11219,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         blank: false,
         case_insensitive: false,
         validators: Vec::new(),
+        secret: None,
     };
     for attr in model_attrs(&field.attrs)? {
         attr.parse_nested_meta(|meta| {
@@ -11387,6 +11391,15 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("verbose_name") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.verbose_name = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("secret") {
+                // `#[rustango(secret)]` or `#[rustango(secret = false)]`.
+                out.secret = Some(if let Ok(v) = meta.value() {
+                    v.parse::<syn::LitBool>()?.value
+                } else {
+                    true
+                });
                 return Ok(());
             }
             if meta.path.is_ident("editable") {
@@ -11891,6 +11904,10 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let db_comment = optional_str(attrs.db_comment.as_deref());
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
+    let secret = match attrs.secret {
+        Some(v) => quote!(::core::option::Option::Some(#v)),
+        None => quote!(::core::option::Option::None),
+    };
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     // A path per name: one the runtime does not know fails to resolve.
@@ -11934,7 +11951,18 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         Some(ty) => quote!(::core::option::Option::Some(<#ty>::FIELD_CAST)),
         None => quote!(::core::option::Option::None),
     };
+    // A sealed cast is always a credential: `secret = false` cannot opt it out.
+    let sealed_guard = match (attrs.secret, cast_type(&field.ty)) {
+        (Some(false), Some(ty)) => quote! {
+            const _: () = ::core::assert!(
+                !::core::matches!(<#ty>::FIELD_CAST, #root::core::FieldCast::Sealed),
+                "`#[rustango(secret = false)]` on a sealed cast: it is always a credential",
+            );
+        },
+        _ => quote!(),
+    };
     let schema = quote! {{
+        #sealed_guard
         #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
             name: #name,
             column: #column_lit,
@@ -11960,6 +11988,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             fk_on_delete: #fk_on_delete,
             validators: &[ #( #root::core::__validator_names::#validators ),* ],
             cast: #cast,
+            secret: #secret,
         })
     }};
 

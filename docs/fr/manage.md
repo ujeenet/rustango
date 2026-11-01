@@ -1433,8 +1433,11 @@ cargo run -- create-api-key acme alice --label "ci-bot"
 Élague les anciennes entrées du journal d'audit (`rustango_audit_log`)
 pour l'empêcher de grossir indéfiniment. Réduisez par âge (`--days`) ou
 par nombre (`--keep-last`), et limitez éventuellement à un seul tenant.
+Sans aucun des deux drapeaux, il supprime les entrées plus anciennes que
+`[audit] retention_days`, et échoue si ce réglage est absent.
 
 ```bash
+cargo run -- audit-cleanup                                 # plus anciennes que [audit] retention_days
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped

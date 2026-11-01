@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- Admin bulk actions run only in the admin's transaction, their audit rows with them: the `&Pool` `register_action*` path is removed (`register_tx_action*` stays), and the SSO unlink and relink actions write in that transaction.
 - `testkit::create_tables` creates the M2M junctions whose two ends it is given, so test setups match a migrated schema.
 - `toml` 1.1 replaces 0.8, so apps on `toml` 1.x no longer build two copies (and the old `toml_edit` / `toml_datetime` duplicates are gone).
 - Public `*Error` enums are `#[non_exhaustive]`; `AdminError::BadRequest` and `AdminError::Conflict` replace a faked form error and an `Ok` 409.
@@ -29,6 +30,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- A schema-mode tenant whose schema has a database role's name no longer opens: its pools and `migrate-tenants` refuse it, and `check --deploy` reports it as an error.
 - The server and the tenancy CLI refuse to start on Postgres when a schema named after the database role holds a registry table: `search_path` reads it first, so the real registry was silently hidden.
 - Tenancy: a tenant that reuses a purged tenant's slug no longer accepts its JWTs or serves its cached pages and idempotent replays; tokens carry an `org_id` claim and those keys hold the org id.
 - Tenancy: tenant session and impersonation cookies, handoff tokens, MCP agent tokens and bound HMAC keys also check the org id, and cache keys hold `#org:<id>:<slug>`.
@@ -47,11 +49,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
 - File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
+- `#[rustango(secret)]` marks a credential column, as do sealed casts and names like `token`, `api_key`, `*_secret`, `*_token`: template views show it only when listed, the admin always masks it, and `secret = false` opts a name out.
 - A tenant with no host, path prefix or port is refused at provisioning and edit, and gets no link, instead of being created unreachable with a warning.
 - Jobs: dispatching a type with no registered handler is refused instead of dead-lettered or left locked; `PgJobQueue::allow_unregistered_dispatch` opts a producer out.
 - MCP agent tokens no longer sign with a passphrase `RUSTANGO_SESSION_SECRET`'s raw text.
 - `apply_all` fails on an index it cannot create instead of skipping it.
 - `TestClient` panics on a response body that fails or passes 16 MiB, instead of returning it empty.
+- Settings that reached nothing are removed and refused at load instead of warned about; `audit-cleanup` reads `[audit] retention_days` when given no flag.
 
 ## [0.61.16] — 2026-10-31
 

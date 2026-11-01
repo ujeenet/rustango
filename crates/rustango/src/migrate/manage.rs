@@ -372,7 +372,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
             "      Remove an admin user's two-factor device (lost phone).\n"
         )?;
     }
-    writeln!(w, "  audit-cleanup --days <N> | --keep-last <N> [--yes]")?;
+    writeln!(w, "  audit-cleanup [--days <N> | --keep-last <N>] [--yes]")?;
     writeln!(
         w,
         "      Trim the audit log: entries older than N days, or all but the"
@@ -6346,14 +6346,15 @@ fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
     Ok(out)
 }
 
-/// `manage audit-cleanup --days <N> | --keep-last <N> [--yes]`: audit-log
-/// retention on the one database, the rule the tenancy verb uses.
+/// `manage audit-cleanup [--days <N> | --keep-last <N>] [--yes]`: audit-log
+/// retention on the one database, the rule the tenancy verb uses. With
+/// neither flag it deletes entries older than `[audit] retention_days`.
 async fn audit_cleanup_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    const USAGE: &str = "audit-cleanup --days <N> | --keep-last <N> [--yes]";
+    const USAGE: &str = "audit-cleanup [--days <N> | --keep-last <N>] [--yes]";
     let (mut days, mut keep_last, mut yes) = (None, None, false);
     let mut iter = args.iter();
     let number = |flag: &str, v: Option<&String>| -> Result<i64, MigrateError> {
@@ -6378,7 +6379,12 @@ async fn audit_cleanup_cmd<W: Write>(
             }
         }
     }
-    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+    let configured = if days.is_none() && keep_last.is_none() {
+        crate::audit::Retention::configured_days().map_err(MigrateError::Validation)?
+    } else {
+        None
+    };
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes, configured)
         .map_err(MigrateError::Validation)?;
     let deleted = rule.prune(pool).await?;
     writeln!(w, "audit-cleanup done: deleted={deleted}")?;
@@ -7053,7 +7059,6 @@ fn write_settings_report<W: Write>(
         };
         let note = match (key.reader, set) {
             (_, false) if missing.is_some() => format!("  {}", missing.unwrap_or_default()),
-            (Reader::Unread { instead, .. }, true) => format!("  (nothing reads it; {instead})"),
             (Reader::App(by), true) => format!("  (read only by {by})"),
             _ => String::new(),
         };
@@ -7281,8 +7286,8 @@ pub fn settings_audit_check(
     // info-flagging so the operator decides intentionally.
     if settings.audit.retention_days.is_none() {
         out.info.push(
-            "[audit] retention_days unset — log grows forever; consider setting + scheduling \
-             `manage audit-cleanup --days <N>`"
+            "[audit] retention_days unset — log grows forever; set it and schedule \
+             `manage audit-cleanup`, which prunes to it"
                 .into(),
         );
     }
@@ -7341,29 +7346,6 @@ pub fn settings_audit_check(
     // `admin::Builder::from_settings`; flag dev-defaults left in prod.
     let admin = &settings.admin;
 
-    // These three [admin] keys have no reader yet (#1379); say so.
-    if matches!(admin.csrf_cookie_secure, Some(false)) {
-        out.warnings.push(
-            "[admin] csrf_cookie_secure = false in prod tier — this key has no effect yet \
-             (#1379): the CSRF cookie follows `[security] secure_cookies`. Remove it."
-                .into(),
-        );
-    }
-
-    // Hex color sanity — common typo is missing `#` or RGB shorthand.
-    if let Some(hex) = admin.primary_color.as_deref() {
-        let stripped = hex.trim_start_matches('#');
-        let valid_len = matches!(stripped.len(), 3 | 6 | 8);
-        let all_hex = stripped.chars().all(|c| c.is_ascii_hexdigit());
-        if !hex.starts_with('#') || !valid_len || !all_hex {
-            out.warnings.push(format!(
-                "[admin] primary_color = `{hex}` does not parse as a hex color (expected \
-                 `#RRGGBB`, `#RGB`, or `#RRGGBBAA`). The key has no effect yet (#1379), so \
-                 the admin accent is unchanged either way."
-            ));
-        }
-    }
-
     // theme_mode allowlist — typo-detection.
     if let Some(mode) = admin.theme_mode.as_deref() {
         if !matches!(mode, "auto" | "light" | "dark") {
@@ -7372,15 +7354,6 @@ pub fn settings_audit_check(
                  the chrome will ignore it and fall back to `auto`."
             ));
         }
-    }
-
-    // Info-level: the key does nothing yet (#1379).
-    if matches!(admin.session_timeout_minutes, Some(0)) {
-        out.info.push(
-            "[admin] session_timeout_minutes = 0 in prod tier — this key has no effect yet \
-             (#1379): the admin has no idle timeout whatever it says."
-                .into(),
-        );
     }
 
     // url_prefix smell tests — trailing slash trips up some
@@ -8080,6 +8053,7 @@ mod gen_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }
     }
 
@@ -9876,8 +9850,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         std::fs::write(
             dir.path().join("default.toml"),
             "[database]\nurl = \"postgres://app:DBSECRET@db/app\"\npool_max_size = 7\n\
-             [server]\nbind = \"127.0.0.1:9\"\n[sso]\nclient_id = \"abc\"\n\
-             client_secret = \"SSOSECRET\"\n[mail]\nsmtp_host = \"smtp.x\"\n",
+             [server]\nbind = \"127.0.0.1:9\"\n[mail]\nsmtp_host = \"smtp.x\"\n",
         )
         .unwrap();
         let env = vec![(
@@ -9907,7 +9880,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .map(|(_, v)| (*v).to_owned())
         };
         let text = report(&vars);
-        for secret in ["DBSECRET", "SSOSECRET", "MAILSECRET"] {
+        for secret in ["DBSECRET", "MAILSECRET"] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
         let db = line(&text, "database.url");
@@ -9919,7 +9892,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(line(&text, "server.bind").contains("env RUSTANGO_BIND = 0.0.0.0:1"));
         assert!(line(&text, "mail.smtp_password")
             .contains("env RUSTANGO__MAIL__SMTP_PASSWORD = <hidden>"));
-        assert!(line(&text, "sso.client_id").contains("nothing reads it"));
         assert!(line(&text, "database.backend").contains("default"));
 
         // A bare DATABASE_URL beats the file.
@@ -10197,57 +10169,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
 
     // -------- v0.36 slice 7+10 — [admin] section audit --------
 
-    /// `csrf_cookie_secure = false` in prod is a footgun — admin
-    /// CSRF cookie sent over plain HTTP loses tamper resistance.
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_csrf_insecure_warns_in_prod() {
-        let mut s = crate::config::Settings::default();
-        s.admin.csrf_cookie_secure = Some(false);
-        let r = settings_run("prod", &s);
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("[admin]") && w.contains("csrf_cookie_secure")),
-            "expected CSRF secure warning, got: {:?}",
-            r.warnings
-        );
-    }
-
-    /// Malformed hex color trips the format check.
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_bad_primary_color_warns() {
-        let mut s = crate::config::Settings::default();
-        s.admin.primary_color = Some("not-a-color".into());
-        let r = settings_run("prod", &s);
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("[admin]") && w.contains("primary_color")),
-            "expected primary_color warning, got: {:?}",
-            r.warnings
-        );
-    }
-
-    /// Valid hex colors (3 / 6 / 8 hex digits, leading #) stay quiet.
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_valid_hex_color_is_quiet() {
-        for hex in ["#abc", "#2c6fb0", "#2c6fb0ff"] {
-            let mut s = crate::config::Settings::default();
-            s.admin.primary_color = Some(hex.into());
-            let r = settings_run("prod", &s);
-            assert!(
-                !r.warnings
-                    .iter()
-                    .any(|w| w.contains("[admin]") && w.contains("primary_color")),
-                "expected `{hex}` to be quiet, got: {:?}",
-                r.warnings
-            );
-        }
-    }
-
     /// Bogus theme_mode trips the allowlist.
     #[cfg(feature = "config")]
     #[test]
@@ -10261,23 +10182,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 .any(|w| w.contains("[admin]") && w.contains("theme_mode")),
             "expected theme_mode warning, got: {:?}",
             r.warnings
-        );
-    }
-
-    /// `session_timeout_minutes = 0` is info-level (some deploys
-    /// want never-expire kiosk sessions deliberately).
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_zero_session_timeout_is_info() {
-        let mut s = crate::config::Settings::default();
-        s.admin.session_timeout_minutes = Some(0);
-        let r = settings_run("prod", &s);
-        assert!(
-            r.info
-                .iter()
-                .any(|i| i.contains("[admin]") && i.contains("session_timeout_minutes")),
-            "expected session_timeout_minutes info, got: {:?}",
-            r.info
         );
     }
 

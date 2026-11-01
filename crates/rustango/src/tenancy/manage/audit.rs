@@ -78,7 +78,12 @@ where
         }
     }
 
-    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+    let configured = if days.is_none() && keep_last.is_none() {
+        crate::audit::Retention::configured_days().map_err(TenancyError::Validation)?
+    } else {
+        None
+    };
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes, configured)
         .map_err(TenancyError::Validation)?;
 
     if registry_only && tenant_slug.is_some() {
@@ -165,6 +170,10 @@ fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(
         w,
         "  audit-cleanup --keep-last <N>      keep N most recent entries per row"
+    )?;
+    writeln!(
+        w,
+        "  audit-cleanup                      neither flag: delete older than [audit] retention_days"
     )?;
     writeln!(w)?;
     writeln!(w, "OPTIONS:")?;

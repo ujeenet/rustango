@@ -13,6 +13,32 @@ use super::{CastError, CastValue};
 /// Marker type for the encrypted-string cast — use as
 /// [`Cast<EncryptedString>`](super::Cast). The logical value is a
 /// `String`; the column stores AEAD ciphertext.
+///
+/// Always a credential: `#[rustango(secret = false)]` on it does not compile.
+/// ```
+/// # use rustango::casts::{Cast, EncryptedString};
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_sealed")]
+/// pub struct Doc {
+///     #[rustango(primary_key)]
+///     pub id: i64,
+///     #[rustango(secret, max_length = 255)]
+///     pub key: Cast<EncryptedString>,
+/// }
+/// # fn main() {}
+/// ```
+/// ```compile_fail
+/// # use rustango::casts::{Cast, EncryptedString};
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_sealed")]
+/// pub struct Doc {
+///     #[rustango(primary_key)]
+///     pub id: i64,
+///     #[rustango(secret = false, max_length = 255)]
+///     pub key: Cast<EncryptedString>,
+/// }
+/// # fn main() {}
+/// ```
 pub enum EncryptedString {}
 
 impl CastValue for EncryptedString {

@@ -268,28 +268,27 @@ ct = "content_type_id", pk = "object_pk", …)` — same options otherwise.
 ## Bulk actions
 
 Name the actions in `admin(actions = "...")`, then register a handler per action
-on the `Builder`. The handler receives the pool and the selected rows' primary
-keys:
+on the `Builder`. The handler receives the admin's write transaction and the
+selected rows' primary keys:
 
 ```rust
+use rustango::admin::AdminError;
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_action("posts", "publish", |pool, pks| {
+    .register_tx_action("posts", "publish", |tx, pks| {
         Box::pin(async move {
-            let ids: Vec<String> = pks.iter().filter_map(|v| match v {
-                SqlValue::I64(n) => Some(n.to_string()),
-                SqlValue::I32(n) => Some(n.to_string()),
-                _ => None,
-            }).collect();
-            if !ids.is_empty() {
-                let sql = format!("UPDATE posts SET status='published' WHERE id IN ({})", ids.join(","));
-                rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
-            }
+            let query = Post::objects()
+                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .update()
+                .set("status", "published")
+                .compile()
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            rustango::sql::update_tx(tx, &query).await?;
             Ok(())
         })
     })
-    .register_action("posts", "archive", /* … */)
+    .register_tx_action("posts", "archive", /* … */)
     .build();
 ```
 
@@ -300,15 +299,12 @@ registered handler simply won't appear.
 
 A custom action is checked like an edit: `{table}.change` plus an object hook
 named after the action. An action that deletes should say so with
-`register_action_with_perm(table, name, ActionPerm::Delete, handler)`, so it
+`register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)`, so it
 needs `{table}.delete` and runs the `delete` hook instead. It still needs
 `{table}.change`, and it is audited and signalled as an edit.
 
-A `register_action` handler writes on its own connection, so the audit rows
-for an audited model are written after it, best effort.
-`register_tx_action(table, name, handler)` (and `register_tx_action_with_perm`)
-hands the handler `&mut PoolTx` instead, so its writes and their audit rows
-commit or roll back together. Write only through that transaction: a second
+The handler writes through that `&mut PoolTx`, so its writes and their audit
+rows commit or roll back together. Write only through that transaction: a second
 connection can deadlock a single-connection SQLite pool.
 
 ---
@@ -510,9 +506,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Prefix of every admin link. Nest the router at the same path: `Builder::settings_prefix(&settings)` returns it, and the scaffold falls back to `/admin` |
 | `allowed_tables` | `[]`, every model | | Same as `show_only` |
 | `read_only_tables` | `[]` | | Same as `read_only` |
-| `primary_color` | | | No effect yet; only `manage check --deploy` reads it |
-| `csrf_cookie_secure` | | | No effect yet; the CSRF cookie follows `[security] secure_cookies` |
-| `session_timeout_minutes` | | | No effect yet; the admin has no idle timeout |
 
 `[brand]` also styles the built-in error pages, which `[errors]` turns on; see [Error pages](html-views.md#error-pages).
 
@@ -567,9 +560,8 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `skip_count_for([tables])` | Skip `COUNT(*)` on huge tables (pager shows "Page N"). |
 | `view_hook_scan_cap(rows)` | How many rows the list scans through `view` hooks before it withholds the rest. Default 10 000. |
 | `with_user_perms([codenames])` | Gate tables on `{table}.view/add/change/delete`. |
-| `register_action(table, name, handler)` | Register a bulk-action handler. |
-| `register_action_with_perm(table, name, perm, handler)` | Same, checked against `ActionPerm::Delete` instead of `change`. |
-| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Same, but the handler gets the write transaction, so audit rows commit with it. |
+| `register_tx_action(table, name, handler)` | Register a bulk-action handler; it gets the write transaction, so audit rows commit with it. |
+| `register_tx_action_with_perm(table, name, perm, handler)` | Same, checked against `ActionPerm::Delete` instead of `change`. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
 | `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
 | `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |

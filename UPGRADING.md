@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- A schema-mode tenant whose schema has a database role's name is refused when its pool opens (requests and `migrate-tenants`); `check --deploy` lists it as an error. Rename the role or move the tenant to another schema before upgrading.
 - On Postgres, the server (`migrate`, `seed_with`, `serve`) and every tenancy CLI verb refuse to run when a schema named after the database role holds a registry table that also exists later in `search_path`. Drop or rename one copy, or pin `search_path` on the registry URL.
 - `testkit::create_tables` also creates the auto-created M2M junctions between the models it is given; a test that built them by hand afterwards can drop that step (`create_junctions` stays and is idempotent).
 - Tenant JWTs must carry the org id (`org_id`) as well as the slug: tokens minted before this release are refused, so users sign in again. `TenantSlug` is now `TenantSlug::new(org_id, slug)`, `JwtBackend::issue_for_tenant*` and `UserTokenScope::Tenant` take a `&TenantSlug`, `PageKey::tenant` takes a `&TenantSlug`, and an `OrgResolver` must return orgs with an id for `require_auth` and the JWT routes.
@@ -198,6 +199,28 @@ untouched.
 - `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
 - A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
 - `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
+- Template views without `.fields()` now hide `#[rustango(secret)]` fields, sealed casts and columns named `secret`, `token`, `api_key`, `private_key` or ending in `_password`, `_secret`, `_token`, `_api_key`, `_private_key`, and the admin always masks them. List a field in the view to show it there; `#[rustango(secret = false)]` opts a non-sealed name out everywhere.
+- `FieldSchema` and the derive's `FieldSchemaParts` gain `secret: Option<bool>`; neither has `Default`. Build a `FieldSchema` with `FieldSchema::new` (it is `#[non_exhaustive]`), and set `secret: None` in a hand-written `FieldSchemaParts`.
+- Settings keys that did nothing are removed, and a file or `RUSTANGO__*` var that still sets one fails to load with what to use instead: `[sso]` (add a provider in the admin), `[admin] primary_color` (`[brand] primary_color`), `[admin] csrf_cookie_secure` (`[security] secure_cookies`), `[admin] session_timeout_minutes`, `[auth.jwt] issuer` / `audience`. `config::SsoSettings` is gone. `manage audit-cleanup` with neither `--days` nor `--keep-last` now prunes to `[audit] retention_days`.
+- Admin bulk actions run only in the admin's transaction: `register_action`, `register_action_with_perm`, `AdminActionFn` and their `TenantAdminBuilder` / `server::Builder::admin_register_action*` twins are removed. Use `register_tx_action*` (`admin_register_tx_action*` on `server::Builder`) and write through the transaction:
+
+  ```rust
+  // before
+  .register_action("posts", "publish", |pool, pks| Box::pin(async move {
+      Post::objects().filter("id__in", SqlValue::List(pks.to_vec()))
+          .update().set("status", "published").execute_pool(pool).await?;
+      Ok(())
+  }))
+  // after
+  .register_tx_action("posts", "publish", |tx, pks| Box::pin(async move {
+      let q = Post::objects().filter("id__in", SqlValue::List(pks.to_vec()))
+          .update().set("status", "published").compile()
+          .map_err(|e| AdminError::Internal(e.to_string()))?;
+      rustango::sql::update_tx(tx, &q).await?;
+      Ok(())
+  }))
+  ```
+
 ---
 
 ## 0.61.16

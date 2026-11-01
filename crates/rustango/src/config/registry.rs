@@ -1,25 +1,16 @@
 //! Every settings key, who reads it, and which env vars win over it.
 //!
-//! A test walks the [`Settings`] type and fails when a field has no row
+//! A test walks the [`Settings`](super::Settings) type and fails when a field has no row
 //! here, so a new key needs a row. The reader a row names is not verified.
 
-use super::sections::Settings;
-
-/// Who reads a key.
+/// Who reads a key. There is no "nothing": such a key is removed and
+/// listed in [`REMOVED`], which the loader refuses.
 #[derive(Clone, Copy)]
 pub(crate) enum Reader {
     /// The framework applies it.
     Framework,
     /// Only the named constructor reads it, and the app calls that.
     App(&'static str),
-    /// Nothing reads it. `instead` is where to configure it; `set` says
-    /// whether a loaded [`Settings`] has it.
-    Unread {
-        instead: &'static str,
-        // Read by the boot warning, which needs `manage`.
-        #[cfg_attr(not(any(test, feature = "manage")), allow(dead_code))]
-        set: fn(&Settings) -> bool,
-    },
 }
 
 /// One settings key.
@@ -61,14 +52,34 @@ const I18N: Reader = Reader::App("i18n::Translator::from_settings");
 const MCP: Reader = Reader::App("mcp::secure_tenant_router_from_settings");
 const STORAGE: Reader = Reader::App("storage::StorageRegistry::from_settings");
 
-/// SSO providers live in the database, per tenant.
-const SSO: &str = "add an SSO provider in the admin (per tenant in a tenancy app)";
+/// Keys that did nothing and were removed in 0.62.0, with what to use
+/// instead. A settings file or `RUSTANGO__*` var that sets one fails to load.
+pub(crate) const REMOVED: &[(&str, &str)] = &[
+    (
+        "sso",
+        "add an SSO provider in the admin (per tenant in a tenancy app)",
+    ),
+    ("admin.primary_color", "use [brand] primary_color"),
+    ("admin.csrf_cookie_secure", "use [security] secure_cookies"),
+    (
+        "admin.session_timeout_minutes",
+        "the admin has no idle timeout; remove it",
+    ),
+    ("auth.jwt.issuer", "tokens carry no `iss`; remove it"),
+    ("auth.jwt.audience", "tokens carry no `aud`; remove it"),
+];
 
-const fn sso(path: &'static str, set: fn(&Settings) -> bool) -> Key {
-    key(path, Reader::Unread { instead: SSO, set })
+/// The [`REMOVED`] entry an ignored key path falls under.
+pub(crate) fn removed(path: &str) -> Option<(&'static str, &'static str)> {
+    REMOVED.iter().copied().find(|(k, _)| {
+        path == *k
+            || path
+                .strip_prefix(k)
+                .is_some_and(|rest| rest.starts_with('.'))
+    })
 }
 
-/// Every key of [`Settings`], in section order.
+/// Every key of [`Settings`](super::Settings), in section order.
 pub(crate) const KEYS: &[Key] = &[
     Key {
         path: "database.url",
@@ -99,29 +110,8 @@ pub(crate) const KEYS: &[Key] = &[
     key("admin.title", ADMIN),
     key("admin.subtitle", ADMIN),
     key("admin.logo_url", ADMIN),
-    key(
-        "admin.primary_color",
-        Reader::Unread {
-            instead: "[brand] primary_color (operator console)",
-            set: |s| s.admin.primary_color.is_some(),
-        },
-    ),
     key("admin.theme_mode", ADMIN),
     key("admin.url_prefix", ADMIN),
-    key(
-        "admin.csrf_cookie_secure",
-        Reader::Unread {
-            instead: "[security] secure_cookies",
-            set: |s| s.admin.csrf_cookie_secure.is_some(),
-        },
-    ),
-    key(
-        "admin.session_timeout_minutes",
-        Reader::Unread {
-            instead: "nothing yet: the admin has no idle timeout",
-            set: |s| s.admin.session_timeout_minutes.is_some(),
-        },
-    ),
     Key {
         path: "tenancy.apex_domain",
         reader: F,
@@ -162,20 +152,6 @@ pub(crate) const KEYS: &[Key] = &[
     key("server.trusted_proxies", F),
     key("auth.jwt.access_ttl_secs", JWT),
     key("auth.jwt.refresh_ttl_secs", JWT),
-    key(
-        "auth.jwt.issuer",
-        Reader::Unread {
-            instead: "nothing yet: tokens carry no `iss`",
-            set: |s| s.auth.jwt.issuer.is_some(),
-        },
-    ),
-    key(
-        "auth.jwt.audience",
-        Reader::Unread {
-            instead: "nothing yet: tokens carry no `aud`",
-            set: |s| s.auth.jwt.audience.is_some(),
-        },
-    ),
     key("auth.argon2_memory_kib", F),
     key("auth.argon2_iterations", F),
     key("auth.argon2_parallelism", F),
@@ -245,44 +221,7 @@ pub(crate) const KEYS: &[Key] = &[
     key("errors.enabled", F),
     key("errors.templates", F),
     key("errors.htmx_target", F),
-    sso("sso.enabled", |s| s.sso.enabled.is_some()),
-    sso("sso.provider", |s| s.sso.provider.is_some()),
-    sso("sso.issuer_url", |s| s.sso.issuer_url.is_some()),
-    sso("sso.client_id", |s| s.sso.client_id.is_some()),
-    Key {
-        path: "sso.client_secret",
-        reader: Reader::Unread {
-            instead: SSO,
-            set: |s| s.sso.client_secret.is_some(),
-        },
-        secret: true,
-        env: &[],
-    },
-    sso("sso.redirect_uri", |s| s.sso.redirect_uri.is_some()),
 ];
-
-#[cfg(feature = "manage")]
-impl Key {
-    /// `[section] key`, as written in the settings file.
-    pub(crate) fn toml_name(&self) -> String {
-        match self.path.rsplit_once('.') {
-            Some((section, key)) => format!("[{section}] {key}"),
-            None => self.path.to_owned(),
-        }
-    }
-
-    /// The boot warning for a set key nothing reads.
-    pub(crate) fn unread_message(&self) -> String {
-        let instead = match self.reader {
-            Reader::Unread { instead, .. } => instead,
-            _ => "",
-        };
-        format!(
-            "`{}` is set but nothing reads it; {instead}",
-            self.toml_name()
-        )
-    }
-}
 
 /// The row for `path`, or for the map it sits in (`storage.disks.x.y`).
 pub(crate) fn find(path: &str) -> Option<&'static Key> {
@@ -294,19 +233,10 @@ pub(crate) fn find(path: &str) -> Option<&'static Key> {
     })
 }
 
-impl Settings {
-    /// Keys that are set but that nothing reads, so boot can say so.
-    #[cfg(any(test, feature = "manage"))]
-    pub(crate) fn inert_keys(&self) -> Vec<&'static Key> {
-        KEYS.iter()
-            .filter(|k| matches!(k.reader, Reader::Unread { set, .. } if set(self)))
-            .collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Settings;
     use serde::de::{self, Deserialize, IntoDeserializer, Visitor};
     use std::cell::RefCell;
 
@@ -487,22 +417,6 @@ mod tests {
         );
         assert!(stale.is_empty(), "registry rows with no field: {stale:?}");
         assert_eq!(rows.len(), fields.len(), "duplicate registry rows");
-    }
-
-    /// Each unread key's `set` reads its own field, and only that one.
-    #[test]
-    fn unread_keys_check_their_own_field() {
-        let unread: Vec<&Key> = KEYS
-            .iter()
-            .filter(|k| matches!(k.reader, Reader::Unread { .. }))
-            .collect();
-        assert!(unread.len() >= 11, "{}", unread.len());
-        for k in unread {
-            let (s, _) = probe(Some(k.path));
-            let inert: Vec<&str> = s.inert_keys().iter().map(|k| k.path).collect();
-            assert_eq!(inert, [k.path], "{}", k.path);
-        }
-        assert!(Settings::default().inert_keys().is_empty());
     }
 
     #[test]

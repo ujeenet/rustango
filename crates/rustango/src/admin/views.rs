@@ -25,7 +25,7 @@ use super::object_permissions::AdminWrite;
 use super::queryset_hooks::{LinkedWrite, RowScope};
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::{ActionHandler, ActionPerm, AppState, CREATE_SEGMENT};
+use super::urls::{ActionPerm, AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -739,7 +739,7 @@ pub(crate) async fn table_view(
                 .enumerate()
                 .map(|(idx, item)| {
                     let inner = match item {
-                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f.name) => {
+                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f) => {
                             render_secret_cell(row, f)
                         }
                         DisplayItem::Field(f) => {
@@ -987,7 +987,7 @@ async fn compute_facets(
         // A secret's facet would list its values.
         let Some(field) = model
             .field(filter_name)
-            .filter(|f| !is_secret_field(admin_cfg, f.name))
+            .filter(|f| !is_secret_field(admin_cfg, f))
         else {
             continue;
         };
@@ -1836,7 +1836,7 @@ pub(crate) async fn detail_view(
     let mut cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
         .map(|f| {
-            let value = if is_secret_field(&detail_cfg, f.name) {
+            let value = if is_secret_field(&detail_cfg, f) {
                 render_secret_cell(&row, f)
             } else {
                 render_cell_json(&row, f, &fk_map, &state.config.admin_prefix)
@@ -2637,7 +2637,7 @@ pub(crate) async fn update_submit(
     skip.extend(
         model
             .scalar_fields()
-            .filter(|f| is_secret_field(&admin_cfg, f.name))
+            .filter(|f| is_secret_field(&admin_cfg, f))
             .filter(|f| form.get(f.name).is_none_or(String::is_empty))
             .map(|f| f.name),
     );
@@ -3340,30 +3340,23 @@ pub(crate) async fn action_submit(
     let builtin = match &write {
         BulkWrite::Custom(a) => {
             let entries = entries_for(&before_rows, &row_pks);
-            match &a.handler {
-                // A pool handler writes on its own connection, so its audit follows it.
-                ActionHandler::Pool(handler) => {
-                    handler(&state.pool, &pk_values).await?;
-                    super::audit::emit_many_best_effort(&state, &entries, &action).await;
+            // The handler writes in the action's transaction; an audited
+            // model's entries commit with it.
+            let emit = crate::audit::DiffEmit::for_model(model);
+            let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+            if let Err(e) = (a.handler)(&mut tx, &pk_values).await {
+                rollback_quietly(tx, model.table).await;
+                return Err(e);
+            }
+            if emit == crate::audit::DiffEmit::InTx {
+                if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
+                    rollback_quietly(tx, model.table).await;
+                    return Err(e.into());
                 }
-                ActionHandler::Tx(handler) => {
-                    let emit = crate::audit::DiffEmit::for_model(model);
-                    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
-                    if let Err(e) = handler(&mut tx, &pk_values).await {
-                        rollback_quietly(tx, model.table).await;
-                        return Err(e);
-                    }
-                    if emit == crate::audit::DiffEmit::InTx {
-                        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
-                            rollback_quietly(tx, model.table).await;
-                            return Err(e.into());
-                        }
-                    }
-                    tx.commit().await.map_err(crate::sql::ExecError::from)?;
-                    if emit == crate::audit::DiffEmit::Deferred {
-                        super::audit::emit_many_best_effort(&state, &entries, &action).await;
-                    }
-                }
+            }
+            tx.commit().await.map_err(crate::sql::ExecError::from)?;
+            if emit == crate::audit::DiffEmit::Deferred {
+                super::audit::emit_many_best_effort(&state, &entries, &action).await;
             }
             send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
             return back();
@@ -3483,7 +3476,7 @@ impl BulkWrite {
                 None => Err(AdminError::Internal(format!(
                     "action `{action}` is in `admin.actions` but no handler is registered \
                      on the admin builder; register it via \
-                     `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
+                     `admin::Builder::register_tx_action(\"{}\", \"{action}\", ...)` (built-ins: \
                      delete_selected, restore_selected)",
                     model.table
                 ))),

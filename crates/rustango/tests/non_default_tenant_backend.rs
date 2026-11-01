@@ -67,7 +67,7 @@ async fn boot() -> Env {
     )
     .await
     .expect("migrate-registry");
-    let org = Org {
+    let mut org = Org {
         slug: "acme".into(),
         storage_mode: "database".into(),
         backend_kind: "sqlite".into(),
@@ -75,8 +75,8 @@ async fn boot() -> Env {
         host_pattern: Some("acme.app.test".into()),
         ..rustango::testkit::org()
     };
-    org.clone()
-        .insert_pool(&pools.registry_pool())
+    // Inserted in place: the resolved org must carry its id.
+    org.insert_pool(&pools.registry_pool())
         .await
         .expect("seed org");
     let tenant = Pool::connect(&tenant_url).await.expect("tenant");

@@ -1366,29 +1366,57 @@ pub(crate) enum Retention {
 }
 
 impl Retention {
-    /// Exactly one of `--days` / `--keep-last`; 0 or less deletes everything, so needs `yes`.
+    /// At most one of `--days` / `--keep-last`; with neither, `configured`
+    /// (`[audit] retention_days`) as `--days`. 0 or less deletes everything, so needs `yes`.
     pub(crate) fn from_flags(
         days: Option<i64>,
         keep_last: Option<i64>,
         yes: bool,
+        configured: Option<i64>,
     ) -> Result<Self, String> {
+        let from_settings = days.is_none() && keep_last.is_none();
         let rule = match (days, keep_last) {
             (Some(n), None) => Self::OlderThanDays(n),
             (None, Some(n)) => Self::KeepLast(n),
-            (None, None) => {
-                return Err("audit-cleanup requires --days <N> or --keep-last <N>".into())
-            }
+            (None, None) => match configured {
+                Some(n) => Self::OlderThanDays(n),
+                None => {
+                    return Err("audit-cleanup requires --days <N> or --keep-last <N>, \
+                         or [audit] retention_days in the settings"
+                        .into())
+                }
+            },
             (Some(_), Some(_)) => {
                 return Err("--days and --keep-last are mutually exclusive".into())
             }
         };
         let (Self::OlderThanDays(n) | Self::KeepLast(n)) = rule;
         if n <= 0 && !yes {
-            return Err(
-                "a retention of 0 or less deletes every audit entry; pass --yes to confirm".into(),
-            );
+            let source = if from_settings {
+                "[audit] retention_days"
+            } else {
+                "a retention"
+            };
+            return Err(format!(
+                "{source} of 0 or less deletes every audit entry; pass --yes to confirm"
+            ));
         }
         Ok(rule)
+    }
+
+    /// `[audit] retention_days` from the settings, for an `audit-cleanup`
+    /// given neither flag. No config files means none.
+    pub(crate) fn configured_days() -> Result<Option<i64>, String> {
+        #[cfg(feature = "config")]
+        {
+            match crate::config::Settings::load_from_env() {
+                Ok(s) => Ok(s.audit.retention_days.map(i64::from)),
+                Err(e) if e.is_missing_config() => Ok(None),
+                Err(e) => Err(format!("audit-cleanup: {e}")),
+            }
+        }
+        #[cfg(not(feature = "config"))]
+        Ok(None)
     }
 
     /// Apply the rule to the audit log `pool` points at.
@@ -2792,5 +2820,34 @@ mod pool_bound_tx_tests {
         .await;
         assert_eq!(source_of(&a).await, "user:7");
         assert_eq!(source_of(&b).await, "system");
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::Retention;
+
+    /// With neither flag, `[audit] retention_days` is the `--days`; a flag wins.
+    #[test]
+    fn audit_cleanup_falls_back_to_the_configured_retention() {
+        assert_eq!(
+            Retention::from_flags(None, None, false, Some(90)),
+            Ok(Retention::OlderThanDays(90))
+        );
+        assert_eq!(
+            Retention::from_flags(Some(7), None, false, Some(90)),
+            Ok(Retention::OlderThanDays(7))
+        );
+        assert_eq!(
+            Retention::from_flags(None, Some(5), false, Some(90)),
+            Ok(Retention::KeepLast(5))
+        );
+        let err = Retention::from_flags(None, None, false, None).unwrap_err();
+        assert!(err.contains("retention_days"), "{err}");
+        // A configured 0 deletes everything too, so it still needs --yes, and says where the 0 came from.
+        let err = Retention::from_flags(None, None, false, Some(0)).unwrap_err();
+        assert!(err.contains("[audit] retention_days"), "{err}");
+        let err = Retention::from_flags(Some(0), None, false, Some(90)).unwrap_err();
+        assert!(!err.contains("retention_days"), "{err}");
     }
 }

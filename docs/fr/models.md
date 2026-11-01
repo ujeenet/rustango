@@ -448,6 +448,7 @@ ci-dessus ; voici la liste complète, y compris les avancées/spécifiques à Po
 | `min` / `max` | nombre | validation de plage |
 | `blank` | indicateur | autorise le vide dans les formulaires/admin |
 | `editable` | `true`/`false` | éditabilité formulaire/admin |
+| `secret` | flag ou `= false` | identifiant secret : les vues de template ne l'affichent que si une vue le liste, l'admin le masque toujours ; `secret = false` exclut un nom |
 | `verbose_name` | `"Label"` | libellé lisible du champ dans les formulaires/admin |
 | `help_text` | `"…"` | texte d'aide rendu sous le widget de formulaire/admin |
 | `validators` | `"name, name"` | validateurs nommés à exécuter sur ce champ |

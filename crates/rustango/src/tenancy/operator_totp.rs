@@ -20,7 +20,7 @@ pub struct OperatorTotp {
     #[rustango(primary_key)]
     pub operator_id: i64,
     /// Sealed (`enc:v1:`); private so nothing stores it plain.
-    #[rustango(max_length = 255)]
+    #[rustango(secret, max_length = 255)]
     secret: String,
     #[rustango(default = "false")]
     pub confirmed: bool,
@@ -29,7 +29,7 @@ pub struct OperatorTotp {
     /// Time step of the last accepted code; each code works once.
     pub last_used_step: Option<i64>,
     /// A re-enrollment's sealed new secret.
-    #[rustango(max_length = 255)]
+    #[rustango(secret, max_length = 255)]
     pending_secret: Option<String>,
 }
 

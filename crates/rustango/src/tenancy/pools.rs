@@ -1532,6 +1532,7 @@ impl TenantPools<sqlx::Postgres> {
         let span = tracing::info_span!("tenant_pool_init", slug = %org.slug, mode = "schema");
         async {
             let connect_start = std::time::Instant::now();
+            refuse_role_schema(&registry, &schema).await?;
             let scoped = self.build_scoped_pool(&schema, &registry).await?;
             // Uncached, this runs per call: skip it rather than warn per request.
             if of == PoolUse::Queries && self.config.max_cached_scoped_pools > 0 {
@@ -1684,8 +1685,25 @@ pub(crate) async fn connect_schema_scoped(
         })
         .connect(registry_url)
         .await?;
+    if let Err(e) = refuse_role_schema(&pool, schema).await {
+        pool.close().await;
+        return Err(e);
+    }
     crate::sql::tag_schema_scope(&pool, schema);
     Ok(pool)
+}
+
+/// The default `search_path` starts with `"$user"`, so a tenant schema named
+/// after a role leads that role's sessions: refuse to open it.
+#[cfg(feature = "postgres")]
+async fn refuse_role_schema(pg: &PgPool, schema: &str) -> Result<(), TenancyError> {
+    if crate::tenancy::provision::is_role_name(pg, schema).await? {
+        return Err(TenancyError::Validation(format!(
+            "tenant schema `{schema}` is the name of a database role, whose sessions would see \
+             its tables first; rename the role, or move the tenant to another schema"
+        )));
+    }
+    Ok(())
 }
 
 /// `SET search_path TO "<schema>", public`, the schema quoted.

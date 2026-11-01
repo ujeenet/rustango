@@ -276,28 +276,27 @@ object-pk) en lugar de una única columna FK, usa
 ## Acciones masivas
 
 Nombra las acciones en `admin(actions = "...")`, luego registra un manejador por acción
-en el `Builder`. El manejador recibe el pool y las claves primarias de las filas
-seleccionadas:
+en el `Builder`. El manejador recibe la transacción de escritura del admin y las claves
+primarias de las filas seleccionadas:
 
 ```rust
+use rustango::admin::AdminError;
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_action("posts", "publish", |pool, pks| {
+    .register_tx_action("posts", "publish", |tx, pks| {
         Box::pin(async move {
-            let ids: Vec<String> = pks.iter().filter_map(|v| match v {
-                SqlValue::I64(n) => Some(n.to_string()),
-                SqlValue::I32(n) => Some(n.to_string()),
-                _ => None,
-            }).collect();
-            if !ids.is_empty() {
-                let sql = format!("UPDATE posts SET status='published' WHERE id IN ({})", ids.join(","));
-                rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
-            }
+            let query = Post::objects()
+                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .update()
+                .set("status", "published")
+                .compile()
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            rustango::sql::update_tx(tx, &query).await?;
             Ok(())
         })
     })
-    .register_action("posts", "archive", /* … */)
+    .register_tx_action("posts", "archive", /* … */)
     .build();
 ```
 
@@ -308,15 +307,12 @@ registrado simplemente no aparecerá.
 
 Una acción personalizada se comprueba como una edición: `{table}.change` más un hook de
 objeto con el nombre de la acción. Una acción que borra debe decirlo con
-`register_action_with_perm(table, name, ActionPerm::Delete, handler)`, para que necesite
+`register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)`, para que necesite
 `{table}.delete` y ejecute en su lugar el hook `delete`. Sigue necesitando
 `{table}.change`, y se audita y se señala como una edición.
 
-Un manejador de `register_action` escribe en su propia conexión, así que las filas de
-auditoría de un modelo auditado se escriben después, en la medida de lo posible.
-`register_tx_action(table, name, handler)` (y `register_tx_action_with_perm`) le pasa
-al manejador `&mut PoolTx`, de modo que sus escrituras y sus filas de auditoría se
-confirman o se revierten juntas. Escribe solo a través de esa transacción: una segunda
+El manejador escribe a través de ese `&mut PoolTx`, de modo que sus escrituras y sus
+filas de auditoría se confirman o se revierten juntas. Escribe solo a través de esa transacción: una segunda
 conexión puede bloquear un pool SQLite de una sola conexión.
 
 ---
@@ -522,9 +518,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Prefijo de cada enlace del admin. Anida el router en la misma ruta: `Builder::settings_prefix(&settings)` la devuelve, y el scaffold recurre a `/admin` |
 | `allowed_tables` | `[]`, todos los modelos | | Igual que `show_only` |
 | `read_only_tables` | `[]` | | Igual que `read_only` |
-| `primary_color` | | | Aún sin efecto; solo lo lee `manage check --deploy` |
-| `csrf_cookie_secure` | | | Aún sin efecto; la cookie CSRF sigue a `[security] secure_cookies` |
-| `session_timeout_minutes` | | | Aún sin efecto; el admin no tiene timeout por inactividad |
 
 `[brand]` también da estilo a las páginas de error incorporadas, que activa `[errors]`; ver [Páginas de error](html-views.md#páginas-de-error).
 
@@ -581,9 +574,8 @@ indique lo contrario):
 | `skip_count_for([tables])` | Omite `COUNT(*)` en tablas enormes (el paginador muestra "Page N"). |
 | `view_hook_scan_cap(rows)` | Cuántas filas recorre la lista con los hooks `view` antes de retener el resto. Por defecto 10 000. |
 | `with_user_perms([codenames])` | Condiciona tablas a `{table}.view/add/change/delete`. |
-| `register_action(table, name, handler)` | Registra un manejador de acción masiva. |
-| `register_action_with_perm(table, name, perm, handler)` | Igual, comprobado contra `ActionPerm::Delete` en lugar de `change`. |
-| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Igual, pero el manejador recibe la transacción de escritura, así que las filas de auditoría se confirman con ella. |
+| `register_tx_action(table, name, handler)` | Registra un manejador de acción masiva; recibe la transacción de escritura, así que las filas de auditoría se confirman con ella. |
+| `register_tx_action_with_perm(table, name, perm, handler)` | Igual, comprobado contra `ActionPerm::Delete` en lugar de `change`. |
 | `with_session_auth(secret)` | Requiere inicio de sesión por cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Destino POST del botón Logout de la barra lateral. Por defecto `{admin_prefix}/logout`; los admins de inquilino lo ajustan a su ruta de logout de tenancy. |
 | `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. `new` sigue a `[security].secure_cookies`, o si no es segura en el nivel prod. |

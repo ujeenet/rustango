@@ -270,25 +270,27 @@ crate::object_permissions::register_framework_object_permission!(
 /// The `SsoLink` admin actions: unlink, and re-link on the next sign-in.
 pub(crate) fn register_link_actions(b: crate::admin::Builder) -> crate::admin::Builder {
     use crate::admin::ActionPerm;
-    b.register_action_with_perm(
+    let pool = b.pool().clone();
+    b.register_tx_action_with_perm(
         "rustango_sso_links",
         "unlink",
         ActionPerm::Delete,
-        |pool, pks| {
+        |tx, pks| {
             Box::pin(async move {
-                unlink(pool, pks)
+                unlink(tx, pks)
                     .await
                     .map_err(crate::admin::AdminError::Internal)
             })
         },
     )
-    .register_action_with_perm(
+    .register_tx_action_with_perm(
         "rustango_sso_links",
         "relink",
         ActionPerm::Delete,
-        |pool, pks| {
+        move |tx, pks| {
+            let pool = pool.clone();
             Box::pin(async move {
-                relink(pool, pks)
+                relink(&pool, tx, pks)
                     .await
                     .map_err(crate::admin::AdminError::Internal)
             })
@@ -296,13 +298,17 @@ pub(crate) fn register_link_actions(b: crate::admin::Builder) -> crate::admin::B
     )
 }
 
-async fn unlink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
+/// Delete each link in the admin action's `tx`.
+///
+/// # Errors
+/// The failed delete; the caller rolls `tx` back.
+pub async fn unlink(tx: &mut crate::sql::PoolTx<'_>, pks: &[SqlValue]) -> Result<(), String> {
     for pk in pks {
         let query = crate::sso::SsoLink::objects()
             .filter("id", pk.clone())
             .compile_delete()
             .map_err(|e| e.to_string())?;
-        crate::sql::delete_pool(pool, &query)
+        crate::sql::delete_tx(tx, &query)
             .await
             .map_err(|e| format!("unlink: {e}"))?;
     }
@@ -312,17 +318,23 @@ async fn unlink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
 /// Delete each link and leave a one-use invite that links its user again on
 /// the next sign-in by the user's verified email. Every link is checked
 /// first, as the sign-in will (never a superuser; a role holder only when
-/// the provider links staff), and then all are re-linked in one
-/// transaction, or none.
+/// the provider links staff), on `pool`; then all are re-linked in the
+/// admin action's `tx`, which commits them with its audit rows, or none.
 ///
 /// # Errors
-/// The first link that cannot be re-linked, naming why; nothing changed.
-pub async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
+/// The first link that cannot be re-linked, naming why; nothing written.
+pub async fn relink(
+    pool: &Pool,
+    tx: &mut crate::sql::PoolTx<'_>,
+    pks: &[SqlValue],
+) -> Result<(), String> {
     #[cfg(feature = "tenancy")]
     {
         use crate::sql::FetcherPool as _;
         use crate::sso::link::AccountLookup as _;
         let invited_by = current_user_id();
+        // The checks read committed rows on `pool` before `tx` writes; the
+        // account and provider readers have no transaction form.
         let mut planned = Vec::new();
         for pk in pks {
             let Some(link) = crate::sso::SsoLink::objects()
@@ -386,27 +398,24 @@ pub async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
             };
             planned.push((pk.clone(), invite));
         }
-        let mut tx = crate::sql::transaction_pool(pool)
-            .await
-            .map_err(|e| e.to_string())?;
         for (pk, mut invite) in planned {
             let query = crate::sso::SsoLink::objects()
                 .filter("id", pk)
                 .compile_delete()
                 .map_err(|e| e.to_string())?;
-            crate::sql::delete_tx(&mut tx, &query)
+            crate::sql::delete_tx(tx, &query)
                 .await
                 .map_err(|e| format!("unlink: {e}"))?;
             invite
-                .insert_tx(&mut tx)
+                .insert_tx(tx)
                 .await
                 .map_err(|e| format!("invite: {e}"))?;
         }
-        tx.commit().await.map_err(|e| e.to_string())
+        Ok(())
     }
     #[cfg(not(feature = "tenancy"))]
     {
-        let _ = (pool, pks);
+        let _ = (pool, tx, pks);
         Err("re-link needs tenant users".into())
     }
 }

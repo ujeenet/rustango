@@ -290,28 +290,27 @@ type-de-contenu + pk-d'objet) plutôt que par une seule colonne FK, utilisez
 ## Actions groupées
 
 Nommez les actions dans `admin(actions = "...")`, puis enregistrez un
-gestionnaire par action sur le `Builder`. Le gestionnaire reçoit le pool et
-les clés primaires des lignes sélectionnées :
+gestionnaire par action sur le `Builder`. Le gestionnaire reçoit la transaction
+d'écriture de l'admin et les clés primaires des lignes sélectionnées :
 
 ```rust
+use rustango::admin::AdminError;
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_action("posts", "publish", |pool, pks| {
+    .register_tx_action("posts", "publish", |tx, pks| {
         Box::pin(async move {
-            let ids: Vec<String> = pks.iter().filter_map(|v| match v {
-                SqlValue::I64(n) => Some(n.to_string()),
-                SqlValue::I32(n) => Some(n.to_string()),
-                _ => None,
-            }).collect();
-            if !ids.is_empty() {
-                let sql = format!("UPDATE posts SET status='published' WHERE id IN ({})", ids.join(","));
-                rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
-            }
+            let query = Post::objects()
+                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .update()
+                .set("status", "published")
+                .compile()
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            rustango::sql::update_tx(tx, &query).await?;
             Ok(())
         })
     })
-    .register_action("posts", "archive", /* … */)
+    .register_tx_action("posts", "archive", /* … */)
     .build();
 ```
 
@@ -323,15 +322,12 @@ simplement pas.
 
 Une action personnalisée est vérifiée comme une modification : `{table}.change`
 plus un hook d'objet nommé d'après l'action. Une action qui supprime doit le
-dire avec `register_action_with_perm(table, name, ActionPerm::Delete, handler)`,
+dire avec `register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)`,
 pour qu'elle exige `{table}.delete` et exécute le hook `delete` à la place. Elle
 exige toujours `{table}.change`, et elle est auditée et signalée comme une
 modification.
 
-Un gestionnaire `register_action` écrit sur sa propre connexion, donc les
-lignes d'audit d'un modèle audité sont écrites après lui, au mieux.
-`register_tx_action(table, name, handler)` (et `register_tx_action_with_perm`)
-passe plutôt `&mut PoolTx` au gestionnaire, donc ses écritures et leurs lignes
+Le gestionnaire écrit via ce `&mut PoolTx`, donc ses écritures et leurs lignes
 d'audit sont validées ou annulées ensemble. N'écrivez que via cette
 transaction : une seconde connexion peut bloquer un pool SQLite à une seule
 connexion.
@@ -554,9 +550,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Préfixe de chaque lien de l'admin. Montez le routeur au même chemin : `Builder::settings_prefix(&settings)` le renvoie, et le projet généré se replie sur `/admin` |
 | `allowed_tables` | `[]`, chaque modèle | | Comme `show_only` |
 | `read_only_tables` | `[]` | | Comme `read_only` |
-| `primary_color` | | | Sans effet pour l'instant ; seul `manage check --deploy` le lit |
-| `csrf_cookie_secure` | | | Sans effet pour l'instant ; le cookie CSRF suit `[security] secure_cookies` |
-| `session_timeout_minutes` | | | Sans effet pour l'instant ; l'admin n'a pas de délai d'inactivité |
 
 `[brand]` habille aussi les pages d'erreur intégrées, qu'active `[errors]` ; voir [Pages d'erreur](html-views.md#pages-derreur).
 
@@ -613,9 +606,8 @@ sauf indication contraire) :
 | `skip_count_for([tables])` | Évite `COUNT(*)` sur les tables volumineuses (le pagineur affiche « Page N »). |
 | `view_hook_scan_cap(rows)` | Nombre de lignes que la liste parcourt via les hooks `view` avant de retenir le reste. Par défaut 10 000. |
 | `with_user_perms([codenames])` | Conditionne les tables sur `{table}.view/add/change/delete`. |
-| `register_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée. |
-| `register_action_with_perm(table, name, perm, handler)` | Idem, vérifié contre `ActionPerm::Delete` au lieu de `change`. |
-| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Pareil, mais le gestionnaire reçoit la transaction d'écriture, donc les lignes d'audit sont validées avec elle. |
+| `register_tx_action(table, name, handler)` | Enregistre un gestionnaire d'action groupée ; il reçoit la transaction d'écriture, donc les lignes d'audit sont validées avec elle. |
+| `register_tx_action_with_perm(table, name, perm, handler)` | Idem, vérifié contre `ActionPerm::Delete` au lieu de `change`. |
 | `with_session_auth(secret)` | Exige une connexion par cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Cible POST du bouton Déconnexion de la barre latérale. Par défaut `{admin_prefix}/logout` ; les admins de tenant la pointent vers leur route de déconnexion tenancy. |
 | `secure_cookies(bool)` | Définit le drapeau `Secure` (HTTPS uniquement) sur le cookie de session. `new` suit `[security].secure_cookies`, sinon sécurisé au niveau prod. |

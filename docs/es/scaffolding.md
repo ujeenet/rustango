@@ -247,14 +247,11 @@ Los archivos de dev y staging definen un `[brand] tagline` de `dev` y `staging`.
 
 ### Ajustes que no surten efecto por sí solos
 
-No todas las claves las lee el framework. `Cli::with_settings` avisa al arrancar, una vez por clave, cuando se define una del primer grupo.
+No todas las claves las lee el framework. Las claves sin efecto se eliminaron en 0.62.0 (`[sso]`, `[auth.jwt] issuer` / `audience`, `[admin] primary_color` / `csrf_cookie_secure` / `session_timeout_minutes`); un archivo o variable `RUSTANGO__*` que aún defina una no carga y nombra qué usar en su lugar.
 
 | Clave | Estado |
 |---|---|
-| `[sso]` (todas las claves) | Aún sin efecto. Configura el SSO del admin en la UI del admin. |
-| `[auth.jwt] issuer`, `audience` | Aún sin efecto. |
-| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | Aún sin efecto; solo las lee `check --deploy`. |
-| `[audit] retention_days` | Nada poda en base a ella; programa `audit-cleanup --days <N>`. |
+| `[audit] retention_days` | La lee `audit-cleanup` sin `--days` ni `--keep-last`; programa ese comando. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, TTLs de `[auth.jwt]`, `[admin]` | Cableadas por el usuario: solo las lee el constructor al que llamas (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
 ### Primera ejecución

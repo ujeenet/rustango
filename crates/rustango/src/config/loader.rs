@@ -167,6 +167,19 @@ where
     let Loaded {
         settings, ignored, ..
     } = load_report(root, env, env_vars)?;
+    // A removed key did nothing for releases; refuse it, strict or not.
+    let removed: Vec<String> = ignored
+        .iter()
+        .filter_map(|k| super::registry::removed(k))
+        .map(|(key, instead)| format!("`{key}` was removed: {instead}"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !removed.is_empty() {
+        return Err(ConfigError::Shape(
+            <toml::de::Error as serde::de::Error>::custom(removed.join("; ")),
+        ));
+    }
     if !ignored.is_empty() {
         if strict {
             return Err(ConfigError::Shape(
@@ -839,7 +852,6 @@ login_field = "username"
 [auth.jwt]
 access_ttl_secs = 900
 refresh_ttl_secs = 604800
-issuer = "myapp"
 
 [brand]
 name = "Acme Operator"
@@ -872,7 +884,6 @@ retention_days = 90
             Some(crate::login_field::LoginField::Username)
         );
         assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
-        assert_eq!(cfg.auth.jwt.issuer.as_deref(), Some("myapp"));
         assert_eq!(cfg.brand.name.as_deref(), Some("Acme Operator"));
         assert_eq!(cfg.brand.primary_color.as_deref(), Some("#2c6fb0"));
         assert_eq!(cfg.security.headers_preset.as_deref(), Some("strict"));
@@ -1032,6 +1043,35 @@ retention_days = 90
         assert!(err.to_string().contains("security.allowed_host"), "{err}");
         // Without strict mode the same file loads.
         assert!(load_with_root_and_env(&root, "any", Vec::new()).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A removed key fails the load without strict mode, from a file or an
+    /// env override, and names what to use instead.
+    #[test]
+    fn a_removed_key_is_refused() {
+        let root = fresh_root("removed_keys");
+        write(
+            &root,
+            "default.toml",
+            "[sso]\nclient_secret = \"x\"\n\n[admin]\nprimary_color = \"#000000\"\n",
+        );
+        let err = load_with_root_and_env(&root, "any", Vec::new()).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ConfigError::Shape(_)), "{err:?}");
+        assert!(
+            msg.contains("`sso` was removed") && msg.contains("SSO provider"),
+            "{msg}"
+        );
+        assert!(msg.contains("`admin.primary_color` was removed"), "{msg}");
+        assert!(!msg.contains("#000000"), "a value leaked: {msg}");
+        write(&root, "default.toml", "");
+        let env = vec![("RUSTANGO__AUTH__JWT__ISSUER".to_owned(), "myapp".to_owned())];
+        let err = load_with_root_and_env(&root, "any", env).unwrap_err();
+        assert!(
+            err.to_string().contains("`auth.jwt.issuer` was removed"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

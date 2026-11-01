@@ -251,7 +251,7 @@ async fn restore_selected_refuses_when_a_row_hook_denies() {
 static TOUCHED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
 
 fn record<'a>(
-    _: &'a Pool,
+    _: &'a mut rustango::sql::PoolTx<'static>,
     pks: &'a [rustango::core::SqlValue],
 ) -> rustango::admin::AdminActionFuture<'a> {
     TOUCHED.lock().unwrap().extend_from_slice(pks);
@@ -261,8 +261,8 @@ fn record<'a>(
 async fn run_custom(pool: &Pool, form: &'static str) -> StatusCode {
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
-        .register_action("op_bulk", "touch_selected", record)
-        .register_action("op_bulk", "stamp_selected", record)
+        .register_tx_action("op_bulk", "touch_selected", record)
+        .register_tx_action("op_bulk", "stamp_selected", record)
         .build();
     let req = Request::builder()
         .method(Method::POST)
@@ -380,7 +380,7 @@ rustango::register_object_permission!("op_purge", "delete", deny);
 static PURGED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
 
 fn purge<'a>(
-    _: &'a Pool,
+    _: &'a mut rustango::sql::PoolTx<'static>,
     pks: &'a [rustango::core::SqlValue],
 ) -> rustango::admin::AdminActionFuture<'a> {
     PURGED.lock().unwrap().extend_from_slice(pks);
@@ -405,8 +405,8 @@ async fn run_purge(perms: Option<&[&str]>, form: &'static str) -> StatusCode {
         .expect("audit table");
     let mut b = rustango::admin::Builder::new(pool)
         .admin_prefix("")
-        .register_action_with_perm("op_purge", "purge_selected", ActionPerm::Delete, purge)
-        .register_action("op_purge", "tidy_selected", purge);
+        .register_tx_action_with_perm("op_purge", "purge_selected", ActionPerm::Delete, purge)
+        .register_tx_action("op_purge", "tidy_selected", purge);
     if let Some(p) = perms {
         b = b.with_user_perms(p.iter().map(|s| (*s).to_owned()));
     }
