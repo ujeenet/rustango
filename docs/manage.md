@@ -1359,9 +1359,11 @@ cargo run -- create-api-key acme alice --label "ci-bot"
 
 Prunes old entries from the audit log (`rustango_audit_log`) to keep it
 from growing forever. Trim by age (`--days`) or by count (`--keep-last`),
-and optionally limit it to one tenant.
+and optionally limit it to one tenant. With neither flag it deletes entries
+older than `[audit] retention_days`, and fails if that is unset.
 
 ```bash
+cargo run -- audit-cleanup                                 # older than [audit] retention_days
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped

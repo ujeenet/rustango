@@ -1374,6 +1374,7 @@ impl Retention {
         yes: bool,
         configured: Option<i64>,
     ) -> Result<Self, String> {
+        let from_settings = days.is_none() && keep_last.is_none();
         let rule = match (days, keep_last) {
             (Some(n), None) => Self::OlderThanDays(n),
             (None, Some(n)) => Self::KeepLast(n),
@@ -1391,9 +1392,14 @@ impl Retention {
         };
         let (Self::OlderThanDays(n) | Self::KeepLast(n)) = rule;
         if n <= 0 && !yes {
-            return Err(
-                "a retention of 0 or less deletes every audit entry; pass --yes to confirm".into(),
-            );
+            let source = if from_settings {
+                "[audit] retention_days"
+            } else {
+                "a retention"
+            };
+            return Err(format!(
+                "{source} of 0 or less deletes every audit entry; pass --yes to confirm"
+            ));
         }
         Ok(rule)
     }
@@ -2838,7 +2844,10 @@ mod retention_tests {
         );
         let err = Retention::from_flags(None, None, false, None).unwrap_err();
         assert!(err.contains("retention_days"), "{err}");
-        // A configured 0 deletes everything too, so it still needs --yes.
-        assert!(Retention::from_flags(None, None, false, Some(0)).is_err());
+        // A configured 0 deletes everything too, so it still needs --yes, and says where the 0 came from.
+        let err = Retention::from_flags(None, None, false, Some(0)).unwrap_err();
+        assert!(err.contains("[audit] retention_days"), "{err}");
+        let err = Retention::from_flags(Some(0), None, false, Some(90)).unwrap_err();
+        assert!(!err.contains("retention_days"), "{err}");
     }
 }

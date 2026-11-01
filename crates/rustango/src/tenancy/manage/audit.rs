@@ -171,6 +171,10 @@ fn write_verb_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
         w,
         "  audit-cleanup --keep-last <N>      keep N most recent entries per row"
     )?;
+    writeln!(
+        w,
+        "  audit-cleanup                      neither flag: delete older than [audit] retention_days"
+    )?;
     writeln!(w)?;
     writeln!(w, "OPTIONS:")?;
     writeln!(

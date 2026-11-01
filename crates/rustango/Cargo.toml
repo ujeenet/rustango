@@ -432,7 +432,7 @@ admin = [
 # (the OIDC/OAuth2 handshake) with `admin` (the session + user model).
 # Access is *link-to-existing* — the verified IdP email must match an
 # admin user; SSO never auto-provisions. Works for the bare admin
-# (global `[sso]` config) and, with `tenancy`, per-Org.
+# (providers added in the admin) and, with `tenancy`, per-Org.
 #
 # Composes the admin-independent `sso` core (below) with `admin` (the
 # session + user model). `admin-sso` = `admin` + `sso`; `sso` transitively

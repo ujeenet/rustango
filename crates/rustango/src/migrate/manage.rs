@@ -6346,8 +6346,9 @@ fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
     Ok(out)
 }
 
-/// `manage audit-cleanup --days <N> | --keep-last <N> [--yes]`: audit-log
-/// retention on the one database, the rule the tenancy verb uses.
+/// `manage audit-cleanup [--days <N> | --keep-last <N>] [--yes]`: audit-log
+/// retention on the one database, the rule the tenancy verb uses. With
+/// neither flag it deletes entries older than `[audit] retention_days`.
 async fn audit_cleanup_cmd<W: Write>(
     pool: &Pool,
     args: &[String],

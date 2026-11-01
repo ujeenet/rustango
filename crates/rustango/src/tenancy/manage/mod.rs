@@ -1015,6 +1015,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "  audit-cleanup                Neither flag: delete older than [audit] retention_days."
+    )?;
+    writeln!(
+        w,
         "                [--tenant <s>]  Scope to one tenant instead of all."
     )?;
     #[cfg(feature = "sso")]
