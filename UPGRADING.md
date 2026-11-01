@@ -193,6 +193,7 @@ untouched.
 - `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
 - A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
 - `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
+- Settings keys that did nothing are removed, and a file or `RUSTANGO__*` var that still sets one fails to load with what to use instead: `[sso]` (add a provider in the admin), `[admin] primary_color` (`[brand] primary_color`), `[admin] csrf_cookie_secure` (`[security] secure_cookies`), `[admin] session_timeout_minutes`, `[auth.jwt] issuer` / `audience`. `config::SsoSettings` is gone. `manage audit-cleanup` with neither `--days` nor `--keep-last` now prunes to `[audit] retention_days`.
 ---
 
 ## 0.61.16

@@ -247,14 +247,11 @@ The dev and staging files set a `[brand] tagline` of `dev` and `staging`. To cha
 
 ### Settings that do not take effect on their own
 
-Not every key is read by the framework. `Cli::with_settings` warns at boot, once per key, when one of the first group is set.
+Not every key is read by the framework. Keys that did nothing were removed in 0.62.0 (`[sso]`, `[auth.jwt] issuer` / `audience`, `[admin] primary_color` / `csrf_cookie_secure` / `session_timeout_minutes`); a file or `RUSTANGO__*` var that still sets one fails to load and names what to use instead.
 
 | Key | Status |
 |---|---|
-| `[sso]` (every key) | No effect yet. Set up admin SSO in the admin UI. |
-| `[auth.jwt] issuer`, `audience` | No effect yet. |
-| `[admin] primary_color`, `csrf_cookie_secure`, `session_timeout_minutes` | No effect yet; only `check --deploy` reads them. |
-| `[audit] retention_days` | Nothing prunes on it; schedule `audit-cleanup --days <N>`. |
+| `[audit] retention_days` | Read by `audit-cleanup` when given neither `--days` nor `--keep-last`; schedule that verb. |
 | `[jobs]`, `[i18n]`, `[cache]`, `[mail]`, `[mcp]`, `[auth.jwt]` TTLs, `[admin]` | User-wired: read only by the constructor you call (`jobs::inmemory_from_settings`, `Translator::from_settings`, `cache::from_settings_async`, `email::from_settings`, `mcp::secure_tenant_router_from_settings`, `auth_routes::Config::with_jwt_settings`, `admin::Builder::from_settings`). |
 
 ### First run

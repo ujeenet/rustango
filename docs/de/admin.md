@@ -520,9 +520,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Präfix jedes Admin-Links. Hänge den Router unter demselben Pfad ein: `Builder::settings_prefix(&settings)` liefert ihn, und das Scaffold fällt auf `/admin` zurück |
 | `allowed_tables` | `[]`, jedes Modell | | Wie `show_only` |
 | `read_only_tables` | `[]` | | Wie `read_only` |
-| `primary_color` | | | Noch ohne Wirkung; nur `manage check --deploy` liest es |
-| `csrf_cookie_secure` | | | Noch ohne Wirkung; das CSRF-Cookie folgt `[security] secure_cookies` |
-| `session_timeout_minutes` | | | Noch ohne Wirkung; der Admin hat kein Idle-Timeout |
 
 Auch `[brand] primary_color` färbt diesen Admin nicht; es ist für die
 [Operator-Konsole](operator-console.md#branding). Das Session-Cookie ist

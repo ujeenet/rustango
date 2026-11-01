@@ -1041,11 +1041,6 @@ impl Cli {
         } else {
             None
         };
-        // After logging is installed, so the warning is not lost (#2225).
-        #[cfg(feature = "config")]
-        if let Some(s) = self.settings_for_layers.as_ref() {
-            warn_unread_settings(&s.inert_keys());
-        }
         match verb {
             // v0.31.1 (#1): the hyphenated `run-server` form is what
             // `--help` has advertised since the start, but only the
@@ -2054,20 +2049,6 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
         inert.push("security.csrf_trusted_origins");
     }
     inert
-}
-
-/// One warning per set key that nothing reads, naming what to use
-/// instead. Stderr when no subscriber is installed, so it is never lost.
-#[cfg(feature = "config")]
-fn warn_unread_settings(keys: &[&crate::config::registry::Key]) {
-    for k in keys {
-        let msg = k.unread_message();
-        if tracing::dispatcher::has_been_set() {
-            tracing::warn!(target: "rustango::manage", key = k.path, "{msg}");
-        } else {
-            eprintln!("warning: {msg}");
-        }
-    }
 }
 
 /// Emit a `WARN` naming every layer-driving setting that is configured in the

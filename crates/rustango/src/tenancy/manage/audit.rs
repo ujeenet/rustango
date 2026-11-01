@@ -78,7 +78,12 @@ where
         }
     }
 
-    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+    let configured = if days.is_none() && keep_last.is_none() {
+        crate::audit::Retention::configured_days().map_err(TenancyError::Validation)?
+    } else {
+        None
+    };
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes, configured)
         .map_err(TenancyError::Validation)?;
 
     if registry_only && tenant_slug.is_some() {
