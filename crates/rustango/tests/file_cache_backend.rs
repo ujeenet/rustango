@@ -100,11 +100,9 @@ async fn long_or_funny_keys_dont_break_filenames() {
 #[tokio::test]
 async fn from_settings_file_backend_round_trips() {
     let dir = unique_tmp_dir("settings");
-    let s = CacheSettings {
-        backend: Some("file".into()),
-        file_cache_dir: Some(dir.clone()),
-        ..Default::default()
-    };
+    let mut s = CacheSettings::default();
+    s.backend = Some("file".into());
+    s.file_cache_dir = Some(dir.clone());
     let cache = from_settings(&s);
     cache.set("k", "v", None).await.unwrap();
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
@@ -123,11 +121,9 @@ async fn from_settings_file_backend_round_trips() {
 #[test]
 #[should_panic(expected = "file_cache_dir is unset")]
 fn from_settings_file_backend_without_dir_is_refused() {
-    let s = CacheSettings {
-        backend: Some("file".into()),
-        file_cache_dir: None,
-        ..Default::default()
-    };
+    let mut s = CacheSettings::default();
+    s.backend = Some("file".into());
+    s.file_cache_dir = None;
     let _ = from_settings(&s);
 }
 

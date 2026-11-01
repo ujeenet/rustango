@@ -6,6 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
+- `[cache] redis_connect_timeout_ms` and `redis_command_timeout_ms` bound the Redis cache built by `cache::from_settings_async` (defaults 5000 and 2000).
 - `[server] trusted_proxies` (and `RUSTANGO__SERVER__TRUSTED_PROXIES`) installs the real-IP layer for `Cli` apps; `Cli::with_trusted_proxies` in code wins and an invalid entry stops `run`.
 
 ### Changed

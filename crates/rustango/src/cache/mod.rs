@@ -460,7 +460,15 @@ pub async fn from_settings_async(
                             "cache.backend = \"redis\" but [cache].redis_url is unset".into(),
                         )
                     })?;
-                Ok(Arc::new(redis_backend::RedisCache::new(url).await?))
+                let defaults = redis_backend::RedisTimeouts::default();
+                let ms = |v: Option<u64>, d| v.map_or(d, Duration::from_millis);
+                let timeouts = redis_backend::RedisTimeouts::new(
+                    ms(s.redis_connect_timeout_ms, defaults.connect),
+                    ms(s.redis_command_timeout_ms, defaults.response),
+                );
+                Ok(Arc::new(
+                    redis_backend::RedisCache::with_timeouts(url, None, timeouts).await?,
+                ))
             }
             #[cfg(not(feature = "cache-redis"))]
             {
@@ -1770,11 +1778,9 @@ mod settings_tests {
             ("typo", "unknown cache.backend `typo`"),
             ("file", "file_cache_dir is unset"),
         ] {
-            let s = crate::config::CacheSettings {
-                backend: Some(backend.into()),
-                redis_url: Some("redis://user:hunter2@cache.test".into()),
-                file_cache_dir: None,
-            };
+            let mut s = crate::config::CacheSettings::default();
+            s.backend = Some(backend.into());
+            s.redis_url = Some("redis://user:hunter2@cache.test".into());
             let Err(e) = from_settings_async(&s).await else {
                 panic!("`{backend}` must be refused");
             };
@@ -1782,6 +1788,25 @@ mod settings_tests {
             assert!(msg.contains(want), "{msg}");
             assert!(!msg.contains("hunter2"), "{msg}");
         }
+    }
+
+    /// `[cache] redis_connect_timeout_ms` bounds the connect: an
+    /// unroutable host fails within its attempts, not after TCP retries.
+    #[cfg(feature = "cache-redis")]
+    #[tokio::test]
+    async fn the_redis_connect_timeout_setting_is_used() {
+        let mut s = crate::config::CacheSettings::default();
+        s.backend = Some("redis".into());
+        s.redis_url = Some("redis://10.255.255.1:6379".into());
+        s.redis_connect_timeout_ms = Some(200);
+        let started = std::time::Instant::now();
+        assert!(from_settings_async(&s).await.is_err());
+        // Three 200 ms attempts plus capped backoff; the 5 s default takes 15 s or more.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     /// The sync resolver must refuse `redis`, not hand back an

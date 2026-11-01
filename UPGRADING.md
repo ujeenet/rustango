@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- `config::CacheSettings` is `#[non_exhaustive]`: build it from `Default` and set fields.
 - `Tenant<Postgres>::conn()` is async and takes the connection on first use: write `t.conn().await?` (it returns `Result<&mut PgConnection, TenancyError>`). `Tenant::for_test_pools` takes `&Arc<TenantPools>`.
 - `Tenant::for_test` and `contenttypes::render_generic_fk_link` are removed; use `Tenant::for_test_pools` / `for_test_sqlite` / `for_test_mysql`, and build links from `ContentType::by_id`.
 - `Cache::touch` has no default: a custom backend implements it without a `get` then `set`.
