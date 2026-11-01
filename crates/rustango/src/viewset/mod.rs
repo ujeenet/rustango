@@ -39,6 +39,9 @@
 //! The [`object_permissions`](crate::object_permissions) hooks and queryset
 //! scopes run as in the admin: a row `view` hides is a `404`, a refused
 //! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`].
+//! Update and delete judge the row locked in their transaction. One limit: a
+//! model whose hand-written `ModelEntry` audits updates only on a pool is
+//! updated there, unlocked and without the queryset-scope re-check.
 //!
 //! ## Query parameters (list endpoint)
 //!
@@ -4561,10 +4564,14 @@ async fn update_inner(
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    // The row, read before the body: hidden is a 404 before any field or FK
-    // check can answer. Locked in the UPDATE's transaction, so the hooks
-    // judge the row the write changes (#2010). A model audited only on a
-    // pool is read and updated unlocked, rather than lose its audit entry.
+    // The body is in memory before the transaction opens: a slow upload
+    // must not hold the write lock. Its errors still answer after the gate.
+    let buffered = read_capped(&parts, body).await;
+    // The row, read before the body is parsed: hidden is a 404 before any
+    // field or FK check can answer. Locked in the UPDATE's transaction, so
+    // the hooks judge the row the write changes (#2010). A model audited
+    // only on a pool is read and updated unlocked, rather than lose its
+    // audit entry.
     let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
         Some(u) => match crate::sql::write_transaction(&acq.pool).await {
             Ok(tx) => Some((u, tx)),
@@ -4581,6 +4588,10 @@ async fn update_inner(
         return resp;
     }
     let qs_scope = queryset_scope(&state, &parts);
+    let body = match buffered {
+        Ok(bytes) => Body::from(bytes),
+        Err(e) => return e.into_response(),
+    };
 
     let (form, json) = match extract_form_body(parts, body, Some(body_types(&state))).await {
         Ok(b) => b,
@@ -5010,25 +5021,20 @@ pub(crate) enum CreateBody {
 /// Create/update body cap when no `BodyLimitLayer` sets one.
 const DEFAULT_BODY_CAP: usize = 4 * 1024 * 1024;
 
-pub(crate) async fn extract_create_body(
-    parts: axum::http::request::Parts,
+/// The whole body, up to the `BodyLimitLayer` cap or [`DEFAULT_BODY_CAP`].
+async fn read_capped(
+    parts: &axum::http::request::Parts,
     body: Body,
-    typed: Option<BodyTypes>,
-) -> Result<CreateBody, BodyError> {
-    use axum::body::to_bytes;
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
+) -> Result<axum::body::Bytes, BodyError> {
     // A `BodyLimitLayer`'s cap, raised or lowered, replaces the default.
     #[cfg(feature = "_http_layers")]
     let cap = crate::body_limit::stream_cap(&parts.extensions);
     #[cfg(not(feature = "_http_layers"))]
-    let cap = None;
-    let bytes = to_bytes(body, cap.unwrap_or(DEFAULT_BODY_CAP))
+    let cap = {
+        let _ = parts;
+        None
+    };
+    axum::body::to_bytes(body, cap.unwrap_or(DEFAULT_BODY_CAP))
         .await
         .map_err(|e| {
             // Our own cap or an outer `BodyLimitLayer` stream cap.
@@ -5037,7 +5043,21 @@ pub(crate) async fn extract_create_body(
                 return BodyError::TooLarge;
             }
             BodyError::Bad(e.to_string())
-        })?;
+        })
+}
+
+pub(crate) async fn extract_create_body(
+    parts: axum::http::request::Parts,
+    body: Body,
+    typed: Option<BodyTypes>,
+) -> Result<CreateBody, BodyError> {
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let bytes = read_capped(&parts, body).await?;
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;

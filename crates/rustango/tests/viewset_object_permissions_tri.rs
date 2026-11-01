@@ -668,9 +668,43 @@ async fn a_concurrent_edit_is_judged_after_it_lands(pool: &Pool) {
     }
 }
 
+/// A PATCH whose body is still uploading holds no lock: another writer
+/// changes the same row meanwhile.
+async fn a_pending_body_holds_no_lock(pool: &Pool) {
+    let id = docs(pool, &["open-slow"]).await[0];
+    let (send_body, body_ready) = tokio::sync::oneshot::channel::<()>();
+    let body = Body::from_stream(futures_util::stream::once(async move {
+        let _ = body_ready.await;
+        Ok::<_, std::io::Error>(axum::body::Bytes::from_static(br#"{"title":"open-late"}"#))
+    }));
+    let req = Request::builder()
+        .method("PATCH")
+        .uri(format!("/docs/{id}"))
+        .header("content-type", "application/json")
+        .body(body)
+        .unwrap();
+    let call = tokio::spawn(doc_app(pool, |v| v).oneshot(req));
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let mut doc = Doc::objects()
+        .filter("id", id)
+        .fetch(pool)
+        .await
+        .unwrap()
+        .remove(0);
+    doc.title = "open-other".into();
+    let saved = tokio::time::timeout(std::time::Duration::from_secs(3), doc.save_pool(pool)).await;
+    assert!(
+        matches!(saved, Ok(Ok(_))),
+        "a pending body held the write lock: {saved:?}"
+    );
+    send_body.send(()).unwrap();
+    assert_eq!(call.await.unwrap().unwrap().status(), StatusCode::OK);
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_pending_body_holds_no_lock,
         a_page_filters_by_admitted_or_by_nothing,
         a_row_hidden_after_the_scan_is_not_rendered,
         the_old_macro_names_still_apply,
