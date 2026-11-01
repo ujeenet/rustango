@@ -55,7 +55,7 @@ impl OrgResolver for FixedResolver {
 
 fn fake_sqlite_org() -> Org {
     Org {
-        id: rustango::sql::Auto::default(),
+        id: rustango::sql::Auto::Set(1),
         slug: "acme".into(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),
@@ -190,7 +190,7 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
 
     let login = TenantSessionPayload::new(
         uid,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );
@@ -210,7 +210,7 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
 
     let relogin = TenantSessionPayload::new(
         uid,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );
@@ -427,7 +427,7 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
     );
     let tenant_session = TenantSessionPayload::new(
         uid,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );

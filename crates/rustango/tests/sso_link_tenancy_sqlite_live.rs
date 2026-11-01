@@ -151,7 +151,8 @@ impl Idp {
 }
 
 struct Tenant {
-    slug: String,
+    /// Slug and org id, as session cookies bind them.
+    bound: rustango::tenancy::TenantSlug,
     host: String,
     pool: Pool,
 }
@@ -226,7 +227,7 @@ async fn boot_with(permissions: bool) -> Env {
                 .unwrap();
         }
         tenants.push(Tenant {
-            slug: slug.into(),
+            bound: rustango::tenancy::TenantSlug::of(&org).expect("org id"),
             host,
             pool,
         });
@@ -622,7 +623,7 @@ impl Env {
                     .map(str::to_owned)
             })
             .unwrap_or_else(|| panic!("no session cookie; location {to:?}"));
-        Ok(decode(&self.secret, &tenant.slug, &session).unwrap().uid)
+        Ok(decode(&self.secret, &tenant.bound, &session).unwrap().uid)
     }
 
     async fn sso(&self, slug: &str, sub: &str, email: &str) -> Result<i64, String> {
@@ -651,7 +652,7 @@ impl Env {
     async fn admin_post(&self, uid: i64, path: &str, form: &str) -> StatusCode {
         let payload = TenantSessionPayload::new(
             uid,
-            &self.tenants[0].slug,
+            &self.tenants[0].bound,
             3600,
             PasswordFingerprint::of(&self.secret, "x"),
         );
@@ -787,7 +788,7 @@ async fn a_tenant_sso_login_lands_after_the_logout_cutoff() {
         })
         .unwrap_or_else(|| panic!("no session cookie; location {:?}", location(&resp)));
     assert_eq!(
-        decode(&env.secret, &env.tenants[0].slug, &session)
+        decode(&env.secret, &env.tenants[0].bound, &session)
             .unwrap()
             .iat,
         cut.timestamp() + 1
@@ -2872,7 +2873,7 @@ async fn the_tenant_session_ttl_is_the_shortest() {
         .next()
         .unwrap()
         .trim_start_matches(&format!("{COOKIE_NAME}="));
-    let p = decode(&env.secret, &env.tenants[0].slug, value).unwrap();
+    let p = decode(&env.secret, &env.tenants[0].bound, value).unwrap();
     assert_eq!(p.uid, ann);
     let left = p.exp - chrono::Utc::now().timestamp();
     assert!((590..=600).contains(&left), "{left}");
@@ -3017,7 +3018,7 @@ async fn a_password_change_keeps_the_session_expiry() {
         .password_hash;
     let payload = TenantSessionPayload::new(
         uid,
-        &env.tenants[0].slug,
+        &env.tenants[0].bound,
         600,
         PasswordFingerprint::of(&env.secret, &hash),
     );
@@ -3046,7 +3047,7 @@ async fn a_password_change_keeps_the_session_expiry() {
                 .map(str::to_owned)
         })
         .unwrap_or_else(|| panic!("no new session: {}", location(&resp)));
-    let p = decode(&env.secret, &env.tenants[0].slug, &value).unwrap();
+    let p = decode(&env.secret, &env.tenants[0].bound, &value).unwrap();
     let left = p.exp - chrono::Utc::now().timestamp();
     assert!((1..=600).contains(&left), "{left}");
 }
@@ -3213,7 +3214,9 @@ async fn tenant_console_sso_works_on_its_host_and_under_its_prefix() {
             .1
             .to_owned();
         assert_eq!(
-            decode(&env.secret, "acme", &value).unwrap().uid,
+            decode(&env.secret, &env.tenants[0].bound, &value)
+                .unwrap()
+                .uid,
             ann,
             "{host}"
         );
@@ -3573,7 +3576,9 @@ async fn secure_flow_cookies_take_the_host_prefix_only_on_the_own_host() {
             .1
             .to_owned();
         assert_eq!(
-            decode(&env.secret, "acme", &value).unwrap().uid,
+            decode(&env.secret, &env.tenants[0].bound, &value)
+                .unwrap()
+                .uid,
             ann,
             "{host}"
         );

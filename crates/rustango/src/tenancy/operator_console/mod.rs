@@ -2549,9 +2549,12 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
+    let Some(tenant) = crate::tenancy::TenantSlug::of(&org) else {
+        return redirect_with_error(&slug, "the tenant row has no id");
+    };
     let mut payload = handoff::HandoffPayload::new(
         operator_id,
-        slug.clone(),
+        &tenant,
         handoff::HANDOFF_TTL_SECS,
         handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
     );

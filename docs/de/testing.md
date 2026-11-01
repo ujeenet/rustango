@@ -123,7 +123,7 @@ Browser und gibt die letzte Antwort mit der `(status, location)`-Kette zurück.
   und sendet dann die Felder. Das Session-Cookie bleibt im Jar.
 - `client.logout(Some(path))` postet an die Logout-Route; `logout(None)` leert
   nur den Jar.
-- Mit `tenancy` legen `force_login_tenant_user(&secret, slug, &user, ttl_secs)`
+- Mit `tenancy` legen `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)`
   und `force_login_operator(&secret, &operator, ttl_secs)` ein Session-Cookie
   ohne Formular in den Jar. Die Zeile muss gespeichert sein.
 

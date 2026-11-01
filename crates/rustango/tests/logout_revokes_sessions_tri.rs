@@ -392,6 +392,8 @@ struct Tenancy {
     secret: SessionSecret,
     op_secret: SessionSecret,
     slug: String,
+    /// Slug and org id, as tenant cookies bind them.
+    bound: rustango::tenancy::TenantSlug,
     host: String,
     _dir: tempfile::TempDir,
 }
@@ -448,6 +450,7 @@ async fn tenancy(pool: &Pool) -> Tenancy {
         ..rustango::testkit::org()
     };
     org.insert_pool(&db).await.expect("seed org");
+    let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
     let secret = SessionSecret::from_bytes(b"tenant-admin-session-secret-32b!".to_vec());
     let op_secret = SessionSecret::from_bytes(b"operator-console-secret-32bytes!".to_vec());
@@ -505,6 +508,7 @@ async fn tenancy(pool: &Pool) -> Tenancy {
         secret,
         op_secret,
         slug,
+        bound,
         host,
         _dir: dir,
     }
@@ -579,7 +583,7 @@ impl Tenancy {
     }
 
     fn tenant_iat(&self, cookie: &str) -> i64 {
-        tenant_console::decode(&self.secret, &self.slug, value(cookie))
+        tenant_console::decode(&self.secret, &self.bound, value(cookie))
             .unwrap()
             .iat
     }

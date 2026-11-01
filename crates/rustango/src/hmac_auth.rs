@@ -88,9 +88,9 @@ const DEFAULT_BODY_LIMIT: usize = 10 * 1024 * 1024;
 /// Return `None` to reject the request with 401.
 pub type KeyResolver = Arc<dyn Fn(&str) -> Option<Vec<u8>> + Send + Sync>;
 
-/// Maps a `key_id` to the tenant slug it is bound to; `None` = any tenant.
+/// Maps a `key_id` to the tenant (slug and org id) it is bound to; `None` = any tenant.
 #[cfg(feature = "tenancy")]
-pub type KeyTenantResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+pub type KeyTenantResolver = Arc<dyn Fn(&str) -> Option<crate::tenancy::TenantSlug> + Send + Sync>;
 
 /// Pseudo-header name of the signed port; no real header can take it.
 const PORT_LINE: &str = ":port";
@@ -217,8 +217,8 @@ impl HmacAuthLayer {
         self
     }
 
-    /// Bind keys to tenants (#2492): a key `tenant_of` maps to a slug is
-    /// refused (403) unless the request resolves to that tenant, through the
+    /// Bind keys to tenants (#2492): a key `tenant_of` maps to a tenant is
+    /// refused (403) unless the request resolves to that slug and org id, through the
     /// mounted tenant context's resolver chain. No context or no tenant
     /// refuses too. Keys it maps to `None` act for any tenant.
     #[cfg(feature = "tenancy")]
@@ -355,8 +355,8 @@ async fn verify_request(
         return Err(deny("signature mismatch"));
     }
     #[cfg(feature = "tenancy")]
-    if let Some(slug) = cfg.tenant_of.as_ref().and_then(|f| f(&parsed.key_id)) {
-        bound_tenant_matches(&parts, &slug).await?;
+    if let Some(bound) = cfg.tenant_of.as_ref().and_then(|f| f(&parsed.key_id)) {
+        bound_tenant_matches(&parts, &bound).await?;
     }
 
     // Replay defence. It runs only after the signature checks out, so
@@ -479,18 +479,24 @@ fn request_host(req: &Request<Body>) -> Result<SignedHost, &'static str> {
     }
 }
 
-/// The tenant this request resolves to must be `slug`; fails closed.
+/// The tenant this request resolves to must be `bound`, org id included, so a
+/// tenant that reuses a purged slug refuses its keys; fails closed.
 #[cfg(feature = "tenancy")]
 async fn bound_tenant_matches(
     parts: &axum::http::request::Parts,
-    slug: &str,
+    bound: &crate::tenancy::TenantSlug,
 ) -> Result<(), Response<Body>> {
     let refuse = || ApiError::forbidden("key is bound to another tenant").into_response();
     let Some(mounted) = crate::extractors::MountedTenantContext::of(&parts.extensions) else {
         return Err(refuse());
     };
     match mounted.resolve(parts).await {
-        Ok(Some(org)) if org.slug == slug => Ok(()),
+        Ok(Some(org))
+            if crate::tenancy::TenantSlug::of(&org)
+                .is_some_and(|t| bound.binds(&t.slug, t.org_id)) =>
+        {
+            Ok(())
+        }
         Ok(_) => Err(refuse()),
         Err(e) => {
             tracing::warn!(target: "rustango::hmac_auth", error = %e, "tenant lookup failed");
@@ -1000,12 +1006,19 @@ mod tests {
             _: &crate::sql::Pool,
         ) -> Result<Option<crate::tenancy::Org>, crate::tenancy::TenancyError> {
             let host = parts.headers.get("host").and_then(|h| h.to_str().ok());
-            Ok(host
-                .and_then(|h| h.split_once('.'))
-                .map(|(slug, _)| crate::tenancy::Org {
+            Ok(host.and_then(|h| h.split_once('.')).map(|(label, _)| {
+                // `acme2.` is the tenant that reused acme's slug after a purge.
+                let (slug, id) = match label {
+                    "acme2" => ("acme", 2),
+                    "acme" => ("acme", 1),
+                    other => (other, 3),
+                };
+                crate::tenancy::Org {
+                    id: crate::sql::Auto::Set(id),
                     slug: slug.to_owned(),
                     ..crate::testkit::org()
-                }))
+                }
+            }))
         }
     }
 
@@ -1028,7 +1041,8 @@ mod tests {
             ),
         });
         let keys: KeyResolver = Arc::new(|k| matches!(k, "k1" | "k2").then(|| b"secret".to_vec()));
-        let tenant_of: KeyTenantResolver = Arc::new(|k| (k == "k1").then(|| "acme".to_owned()));
+        let tenant_of: KeyTenantResolver =
+            Arc::new(|k| (k == "k1").then(|| crate::tenancy::TenantSlug::new(1, "acme")));
         let date = now();
         let send = |key: &'static str, host: &'static str, mounted: bool| {
             let (ctx, keys, tenant_of, date) =
@@ -1059,6 +1073,8 @@ mod tests {
         assert_eq!(send("k1", "acme.app.test", true).await, 200);
         // `X-Org: acme` is signed, but the subdomain resolves globex.
         assert_eq!(send("k1", "globex.app.test", true).await, 403);
+        // Same slug, new org id: the purged tenant's key is refused.
+        assert_eq!(send("k1", "acme2.app.test", true).await, 403);
         // No tenant context or no tenant: refused.
         assert_eq!(send("k1", "acme.app.test", false).await, 403);
         assert_eq!(send("k1", "localhost", true).await, 403);
