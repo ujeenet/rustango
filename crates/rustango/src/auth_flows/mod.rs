@@ -101,7 +101,7 @@ pub enum AuthFlowError {
 /// A multi-tenant app takes it from the request's tenant
 /// (`LinkScope::from(&tenant)`, a `Tenant` or `TenantScope`) and confirms
 /// with [`LinkTarget::from`] the same `&tenant`. [`Self::audience`] is for
-/// single-database apps only, confirmed through a `SingleDb`.
+/// single-database apps only and needs a [`SingleDb`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkScope(Option<String>);
 
@@ -111,8 +111,27 @@ impl LinkScope {
 
     /// Scope a link to an opaque audience, e.g. `"app"`, in an app with one
     /// user database. Never equal to a tenant scope.
+    ///
+    /// ```no_run
+    /// # fn f(pool: &rustango::sql::Pool) {
+    /// use rustango::auth_flows::{LinkScope, SingleDb};
+    /// let scope = LinkScope::audience(SingleDb::new(pool), "app");
+    /// # }
+    /// ```
+    ///
+    /// Without the marker it does not compile, so a tenant handler cannot
+    /// verify an unbound link:
+    ///
+    /// ```compile_fail,E0061
+    /// let scope = rustango::auth_flows::LinkScope::audience("app");
+    /// ```
     #[must_use]
-    pub fn audience(audience: &str) -> Self {
+    pub fn audience(_db: SingleDb<'_>, audience: &str) -> Self {
+        Self::unbound(audience)
+    }
+
+    /// The audience scope itself; public callers reach it through a `SingleDb`.
+    fn unbound(audience: &str) -> Self {
         Self(Some(format!("aud:{audience}")))
     }
 
@@ -172,14 +191,15 @@ pub struct LinkTarget<'a> {
 
 /// The user pool of an app with one user database. Only [`Self::new`] makes
 /// one, so a tenant pool never becomes an audience target by accident.
-#[cfg(feature = "passwords")]
 #[derive(Debug, Clone, Copy)]
-pub struct SingleDb<'a>(&'a crate::sql::Pool);
+pub struct SingleDb<'a>(
+    // Read only by `LinkTarget`, which needs `passwords`.
+    #[cfg_attr(not(feature = "passwords"), allow(dead_code))] &'a crate::sql::Pool,
+);
 
-#[cfg(feature = "passwords")]
 impl<'a> SingleDb<'a> {
     /// Mark `pool` as the app's only user database. Never call it with a
-    /// tenant pool: use `LinkTarget::from(&tenant)` there.
+    /// tenant pool: use `LinkScope::from(&tenant)` and `LinkTarget::from(&tenant)` there.
     #[must_use]
     pub fn new(pool: &'a crate::sql::Pool) -> Self {
         Self(pool)
@@ -199,7 +219,7 @@ impl<'a> LinkTarget<'a> {
     ///
     /// A bare pool is refused, so a tenant pool cannot slip in:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0308
     /// # fn f(pool: &rustango::sql::Pool) {
     /// let target = rustango::auth_flows::LinkTarget::audience(pool, "app");
     /// # }
@@ -208,7 +228,7 @@ impl<'a> LinkTarget<'a> {
     pub fn audience(db: SingleDb<'a>, audience: &str) -> Self {
         Self {
             pool: db.0,
-            scope: LinkScope::audience(audience),
+            scope: LinkScope::audience(db, audience),
             registry: None,
         }
     }
@@ -950,7 +970,7 @@ mod tests {
     const SECRET: &[u8] = b"my-test-secret";
 
     fn scope() -> LinkScope {
-        LinkScope::audience("acme")
+        LinkScope::unbound("acme")
     }
 
     /// The hand-built schema must match the `User` model it stands in for.
@@ -1030,7 +1050,7 @@ mod tests {
     /// #2472 — every link kind is refused outside the scope it was issued for.
     #[test]
     fn links_are_refused_in_another_scope() {
-        let other = LinkScope::audience("globex");
+        let other = LinkScope::unbound("globex");
         let ttl = Duration::from_secs(600);
         let reset = PasswordReset::issue(&scope(), "https://x/r", 1, SECRET, ttl);
         let verify = EmailVerification::issue(&scope(), "https://x/v", 1, "a@x.com", SECRET, ttl);
@@ -1056,7 +1076,7 @@ mod tests {
             PasswordReset::issue(&scope(), "https://x/r", 1, SECRET, Duration::from_secs(600));
         let forged = url.replace("aud%3Aacme", "aud%3Aglobex");
         assert_ne!(forged, url);
-        let r = PasswordReset::verify(&LinkScope::audience("globex"), &forged, SECRET);
+        let r = PasswordReset::verify(&LinkScope::unbound("globex"), &forged, SECRET);
         assert_eq!(r, Err(AuthFlowError::InvalidSignature));
     }
 
@@ -1076,16 +1096,45 @@ mod tests {
     fn a_tenant_scope_is_its_org_not_its_slug() {
         let old = LinkScope::from(&org("acme", 1));
         let url = PasswordReset::issue(&old, "https://x/r", 1, SECRET, Duration::from_secs(600));
-        for other in [
-            LinkScope::from(&org("acme", 2)),
-            LinkScope::audience("acme"),
-        ] {
+        for other in [LinkScope::from(&org("acme", 2)), LinkScope::unbound("acme")] {
             assert_eq!(
                 PasswordReset::verify(&other, &url, SECRET),
                 Err(AuthFlowError::WrongScope)
             );
         }
         assert_eq!(PasswordReset::verify(&old, &url, SECRET), Ok(1));
+    }
+
+    /// Every verify scoped to tenant A refuses tenant B's link for the same
+    /// user id or email.
+    #[cfg(all(feature = "tenancy", feature = "testkit"))]
+    #[tokio::test]
+    async fn every_verify_refuses_another_tenants_link() {
+        let (a, b) = (LinkScope::from(&org("a", 1)), LinkScope::from(&org("b", 2)));
+        let ttl = Duration::from_secs(600);
+        let reset = PasswordReset::issue(&b, "https://b/r", 1, SECRET, ttl);
+        let email = EmailVerification::issue(&b, "https://b/v", 1, "x@y.z", SECRET, ttl);
+        let magic = MagicLink::issue(&b, "https://b/m", "x@y.z", SECRET, ttl);
+        let wrong = Err(AuthFlowError::WrongScope);
+        assert_eq!(PasswordReset::verify(&a, &reset, SECRET), wrong);
+        assert_eq!(
+            EmailVerification::verify(&a, &email, SECRET).map(|_| 0),
+            wrong
+        );
+        assert_eq!(MagicLink::verify(&a, &magic, SECRET).map(|_| 0), wrong);
+        #[cfg(feature = "cache")]
+        {
+            let cache: std::sync::Arc<dyn crate::cache::Cache> =
+                std::sync::Arc::new(crate::cache::InMemoryCache::new());
+            let r = PasswordReset::verify_single_use(&a, &reset, SECRET, &cache).await;
+            assert_eq!(r, wrong);
+            let r = EmailVerification::verify_single_use(&a, &email, SECRET, &cache).await;
+            assert_eq!(r.map(|_| 0), wrong);
+            let r = MagicLink::verify_single_use(&a, &magic, SECRET, &cache).await;
+            assert_eq!(r.map(|_| 0), wrong);
+        }
+        assert_eq!(PasswordReset::verify(&b, &reset, SECRET), Ok(1));
+        assert!(MagicLink::verify(&b, &magic, SECRET).is_ok());
     }
 
     /// An org with no id verifies no link, not even one minted for it.
@@ -1163,7 +1212,7 @@ mod tests {
         let strong = "brand-new-strong-password-7!";
 
         let audience =
-            PasswordReset::issue(&LinkScope::audience("app"), "https://b/r", id, SECRET, ttl);
+            PasswordReset::issue(&LinkScope::unbound("app"), "https://b/r", id, SECRET, ttl);
         let r = confirm_password_reset_pool(&scope, &audience, strong, SECRET).await;
         assert_eq!(r, Err(AuthFlowError::WrongScope));
 

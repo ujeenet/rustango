@@ -76,6 +76,22 @@ impl OrgResolver for FixedResolver {
     }
 }
 
+/// The env's tenant as the `Tenant` extractor builds it.
+#[cfg(feature = "sso")]
+fn tenant_of(env: &Env) -> rustango::extractors::Tenant<sqlx::Sqlite> {
+    let sq = match &env.tenant {
+        Pool::Sqlite(sq) => sq.clone(),
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("sqlite tenant"),
+    };
+    let org = rustango::tenancy::Org {
+        id: Auto::Set(env.org_id),
+        slug: env.slug.clone(),
+        ..rustango::testkit::org()
+    };
+    rustango::extractors::Tenant::for_test_sqlite(org, sq)
+}
+
 struct Env {
     /// Operator console.
     console: Router,
@@ -1414,17 +1430,18 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
     {
         through.push("authenticate_user_pool");
     }
-    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb};
+    use rustango::auth_flows::{AuthFlowError, LinkScope, PasswordReset};
+    let tenant = tenant_of(&env);
     let secret = b"reset-secret-reset-secret-32byte";
     let url = PasswordReset::issue(
-        &LinkScope::audience("t"),
+        &LinkScope::from(&tenant),
         "https://x/reset",
         ann_id,
         secret,
         Duration::from_secs(600),
     );
     if rustango::auth_flows::confirm_password_reset_pool(
-        LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
+        &tenant,
         &url,
         "Another-strong-pass-9!",
         secret,
@@ -1439,14 +1456,14 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
         let cache: Arc<dyn rustango::cache::Cache> =
             Arc::new(rustango::cache::InMemoryCache::new());
         let url = PasswordReset::issue(
-            &LinkScope::audience("t"),
+            &LinkScope::from(&tenant),
             "https://x/reset-once",
             ann_id,
             secret,
             Duration::from_secs(600),
         );
         if rustango::auth_flows::confirm_password_reset_single_use(
-            LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
+            &tenant,
             &url,
             "Another-strong-pass-9!",
             secret,
@@ -1482,10 +1499,11 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
 #[cfg(all(feature = "sso", feature = "cache"))]
 #[tokio::test]
 async fn sso_only_refuses_the_reset_into_variants() {
-    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset, SingleDb};
+    use rustango::auth_flows::{AuthFlowError, LinkScope, PasswordReset};
     use rustango::sso::policy::SsoTenantPolicy;
     let _g = SUITE.lock().await;
     let env = boot().await;
+    let tenant = tenant_of(&env);
     let ann = unique("ann-into");
     let mut u = User {
         username: ann.clone(),
@@ -1514,7 +1532,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     policy.insert_pool(&env.tenant).await.unwrap();
     let secret = b"reset-secret-reset-secret-32byte";
     let url = PasswordReset::issue(
-        &LinkScope::audience("t"),
+        &LinkScope::from(&tenant),
         "https://x/reset",
         ann_id,
         secret,
@@ -1525,7 +1543,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     let pass = "Another-strong-pass-9!";
     assert_eq!(
         rustango::auth_flows::confirm_password_reset_pool_into(
-            LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
+            &tenant,
             &url,
             pass,
             secret,
@@ -1538,7 +1556,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     );
     let once = || {
         rustango::auth_flows::confirm_password_reset_single_use_into(
-            LinkTarget::audience(SingleDb::new(&env.tenant), "t"),
+            &tenant,
             &url,
             pass,
             secret,

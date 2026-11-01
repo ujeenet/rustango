@@ -99,7 +99,7 @@ let user_id = confirm_password_reset_pool(
 > **Las apps multi-tenant deben pasar `&t`** (el `Tenant`, o un `TenantScope`) a la
 > confirmación, para que el pool y el ámbito salgan del mismo valor. Un enlace emitido
 > para otro ámbito falla con `Err(WrongScope)`. `LinkTarget::audience(SingleDb::new(&pool), "app")` y
-> `LinkScope::audience("app")` son para apps con una sola base de datos de usuarios.
+> `LinkScope::audience(SingleDb::new(&pool), "app")` son para apps con una sola base de datos de usuarios.
 
 > **Usa esta forma para `rustango_users`.** Las sesiones del framework llevan una
 > huella del hash de la contraseña, así que el nuevo hash

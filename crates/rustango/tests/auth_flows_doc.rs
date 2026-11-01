@@ -102,7 +102,7 @@ async fn password_reset_confirm_rotates_the_hash() {
 
     // 1. Issue a reset link (you'd email this). Token encodes user_id + purpose.
     let url = PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(&pool), "app"),
         "https://app.example.com/auth/reset",
         1,
         SECRET,
@@ -134,7 +134,7 @@ async fn password_reset_rejects_weak_and_tampered() {
     // Weak password → rejected, nothing written.
     let pool = pool_with_user("KEEP-ME").await;
     let url = PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(&pool), "app"),
         "https://app.example.com/auth/reset",
         1,
         SECRET,

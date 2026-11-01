@@ -99,7 +99,7 @@ let user_id = confirm_password_reset_pool(
 > **Les applications multi-tenant doivent passer `&t`** (le `Tenant`, ou un
 > `TenantScope`) à la confirmation, pour que le pool et la portée viennent d'une
 > seule valeur. Un lien émis pour une autre portée échoue avec `Err(WrongScope)`.
-> `LinkTarget::audience(SingleDb::new(&pool), "app")` et `LinkScope::audience("app")` sont
+> `LinkTarget::audience(SingleDb::new(&pool), "app")` et `LinkScope::audience(SingleDb::new(&pool), "app")` sont
 > pour les applications à base d'utilisateurs unique.
 
 > **Utilisez cette forme pour `rustango_users`.** Les sessions du framework portent

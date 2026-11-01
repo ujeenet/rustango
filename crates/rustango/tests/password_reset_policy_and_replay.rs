@@ -81,9 +81,9 @@ async fn current_hash(pool: &Pool) -> String {
         .unwrap()
 }
 
-fn link() -> String {
+fn link(pool: &Pool) -> String {
     PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -137,7 +137,7 @@ async fn confirm_once(
 async fn passwords_the_documented_policy_rejects_are_rejected_here() {
     for weak in ["12345678", "password1", "abcdefghijkl"] {
         let pool = pool_with_user().await;
-        let err = confirm(&pool, &link(), weak).await.unwrap_err();
+        let err = confirm(&pool, &link(&pool), weak).await.unwrap_err();
         assert!(
             matches!(err, AuthFlowError::WeakPassword(_)),
             "{weak:?} must be refused by the documented policy, got {err:?}"
@@ -154,7 +154,7 @@ async fn passwords_the_documented_policy_rejects_are_rejected_here() {
 #[tokio::test]
 async fn a_strong_password_is_still_accepted() {
     let pool = pool_with_user().await;
-    assert_eq!(confirm(&pool, &link(), STRONG).await.unwrap(), 1);
+    assert_eq!(confirm(&pool, &link(&pool), STRONG).await.unwrap(), 1);
 
     let stored = current_hash(&pool).await;
     assert_ne!(stored, "OLD-HASH", "the hash must have rotated");
@@ -167,7 +167,7 @@ async fn a_strong_password_is_still_accepted() {
 #[tokio::test]
 async fn a_reset_link_cannot_be_used_twice() {
     let pool = pool_with_user().await;
-    let (url, c) = (link(), cache());
+    let (url, c) = (link(&pool), cache());
 
     assert_eq!(confirm_once(&pool, &url, STRONG, &c).await.unwrap(), 1);
     let after_first = current_hash(&pool).await;
@@ -195,7 +195,7 @@ async fn a_reset_link_cannot_be_used_twice() {
 #[tokio::test]
 async fn a_weak_password_does_not_consume_the_link() {
     let pool = pool_with_user().await;
-    let (url, c) = (link(), cache());
+    let (url, c) = (link(&pool), cache());
 
     let err = confirm_once(&pool, &url, "short", &c).await.unwrap_err();
     assert!(matches!(err, AuthFlowError::WeakPassword(_)));
@@ -212,7 +212,7 @@ async fn a_weak_password_does_not_consume_the_link() {
 #[tokio::test]
 async fn single_use_does_not_cross_cache_instances() {
     let pool = pool_with_user().await;
-    let url = link();
+    let url = link(&pool);
 
     assert_eq!(
         confirm_once(&pool, &url, STRONG, &cache()).await.unwrap(),
@@ -233,7 +233,7 @@ async fn single_use_does_not_cross_cache_instances() {
 #[tokio::test]
 async fn the_plain_helper_is_still_replayable() {
     let pool = pool_with_user().await;
-    let url = link();
+    let url = link(&pool);
 
     assert_eq!(confirm(&pool, &url, STRONG).await.unwrap(), 1);
     assert_eq!(

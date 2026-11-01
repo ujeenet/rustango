@@ -63,7 +63,7 @@ async fn current_hash(pool: &Pool, user_id: i64) -> String {
 async fn confirm_updates_password_on_valid_token() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(&pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -95,7 +95,7 @@ async fn confirm_updates_password_on_valid_token() {
 async fn weak_password_rejected_without_writing() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(&pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -121,7 +121,7 @@ async fn weak_password_rejected_without_writing() {
 async fn tampered_signature_rejected() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(&pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -149,7 +149,7 @@ async fn tampered_signature_rejected() {
 async fn wrong_secret_rejected() {
     let pool = build_pool_with_user("OLD-HASH").await;
     let url = PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(&pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,

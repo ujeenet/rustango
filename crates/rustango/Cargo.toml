@@ -653,7 +653,8 @@ libc = { workspace = true, optional = true }
 # every selective-feature test build failed on a missing module.
 # `default-features = false` matters: without it this would quietly
 # re-enable postgres and make `--no-default-features` meaningless.
-rustango       = { path = ".", default-features = false, features = ["testkit"] }
+# `test_utils` lets tests build a `Tenant` without a server.
+rustango       = { path = ".", default-features = false, features = ["testkit", "test_utils"] }
 # `test-util` pauses the clock for timeout tests.
 tokio          = { workspace = true, features = ["test-util"] }
 chrono         = { workspace = true }

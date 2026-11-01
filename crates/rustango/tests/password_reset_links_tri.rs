@@ -42,9 +42,9 @@ async fn user(pool: &Pool, changed: Option<chrono::DateTime<chrono::Utc>>) -> i6
     *u.id.get().unwrap()
 }
 
-fn link(id: i64) -> String {
+fn link(pool: &Pool, id: i64) -> String {
     PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(pool), "app"),
         "https://x/reset",
         id,
         SECRET,
@@ -64,7 +64,7 @@ async fn hash(pool: &Pool, id: i64) -> String {
 
 async fn using_a_newer_link_ends_an_older_one(pool: &Pool) {
     let id = user(pool, None).await;
-    let (older, newer) = (link(id), link(id));
+    let (older, newer) = (link(pool, id), link(pool, id));
 
     confirm_password_reset_pool(
         LinkTarget::audience(SingleDb::new(pool), "app"),
@@ -89,7 +89,7 @@ async fn using_a_newer_link_ends_an_older_one(pool: &Pool) {
 
 async fn a_used_link_cannot_be_replayed(pool: &Pool) {
     let id = user(pool, None).await;
-    let url = link(id);
+    let url = link(pool, id);
     confirm_password_reset_pool(
         LinkTarget::audience(SingleDb::new(pool), "app"),
         &url,
@@ -113,7 +113,7 @@ async fn a_link_issued_after_the_last_change_works(pool: &Pool) {
     let id = user(pool, Some(earlier)).await;
     confirm_password_reset_pool(
         LinkTarget::audience(SingleDb::new(pool), "app"),
-        &link(id),
+        &link(pool, id),
         STRONG,
         SECRET,
     )
@@ -126,7 +126,7 @@ async fn a_link_asked_for_just_after_a_change_works(pool: &Pool) {
     let id = user(pool, Some(chrono::Utc::now())).await;
     confirm_password_reset_pool(
         LinkTarget::audience(SingleDb::new(pool), "app"),
-        &link(id),
+        &link(pool, id),
         STRONG,
         SECRET,
     )

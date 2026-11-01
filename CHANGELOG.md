@@ -12,7 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
-- Auth links: `LinkTarget::audience` takes a `SingleDb` marker, not a bare pool, so a tenant pool cannot confirm an audience link that another tenant could also redeem.
+- Auth links: `LinkTarget::audience` and `LinkScope::audience` take a `SingleDb` marker, so a tenant handler cannot confirm or verify an audience link that another tenant could also redeem.
 - `Model::truncate` is a `DELETE` on every backend, so a `RESTRICT` row refuses it with `ExecError::TruncateReferenced`; `Model::truncate_cascade` empties every referencing table on all three.
 - Admin bulk actions run only in the admin's transaction, their audit rows with them: the `&Pool` `register_action*` path is removed (`register_tx_action*` stays), and the SSO unlink and relink actions write in that transaction.
 - `testkit::create_tables` creates the M2M junctions whose two ends it is given, so test setups match a migrated schema.

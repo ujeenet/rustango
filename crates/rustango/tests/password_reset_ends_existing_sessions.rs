@@ -61,9 +61,9 @@ async fn password_changed_at(pool: &Pool) -> Option<String> {
         .expect("column")
 }
 
-fn link() -> String {
+fn link(pool: &Pool) -> String {
     PasswordReset::issue(
-        &LinkScope::audience("app"),
+        &LinkScope::audience(SingleDb::new(pool), "app"),
         "https://example.com/auth/reset",
         1,
         SECRET,
@@ -79,7 +79,7 @@ async fn a_reset_stamps_password_changed_at() {
 
     confirm_password_reset_pool(
         LinkTarget::audience(SingleDb::new(&pool), "app"),
-        &link(),
+        &link(&pool),
         STRONG,
         SECRET,
     )
@@ -104,7 +104,7 @@ async fn the_caller_named_form_does_not_stamp() {
 
     confirm_password_reset_pool_into(
         LinkTarget::audience(SingleDb::new(&pool), "app"),
-        &link(),
+        &link(&pool),
         STRONG,
         SECRET,
         "rustango_users",
@@ -131,7 +131,7 @@ async fn the_hash_still_rotates_alongside_the_stamp() {
 
     confirm_password_reset_pool(
         LinkTarget::audience(SingleDb::new(&pool), "app"),
-        &link(),
+        &link(&pool),
         STRONG,
         SECRET,
     )
