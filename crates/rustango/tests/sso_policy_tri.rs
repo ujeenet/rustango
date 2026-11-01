@@ -1148,9 +1148,10 @@ async fn a_relink_invite_links_its_user_once(pool: &Pool) {
 }
 
 /// The admin re-link action applies the sign-in's staff rule to every
-/// link before it changes any, and then re-links them all.
+/// link before it changes any, and then re-links them all in the admin's
+/// transaction: rolled back, nothing changed.
 async fn the_relink_action_checks_every_link_first(pool: &Pool) {
-    use rustango::testkit::sso_admin::relink;
+    use rustango::testkit::sso_admin::{relink as relink_in, unlink};
     let t = tok();
     provider(pool, "ra", false).await;
     let key = resolve_by_slug(pool, "ra", String::new())
@@ -1196,6 +1197,28 @@ async fn the_relink_action_checks_every_link_first(pool: &Pool) {
     };
     let pk = |l: &SsoLink| SqlValue::I64(*l.id.get().unwrap());
     let (a, b) = (pk(&link_of(ann).await[0]), pk(&link_of(bob).await[0]));
+    // A rolled-back admin transaction undoes the re-link and the unlink.
+    let mut tx = rustango::sql::write_transaction(pool).await.unwrap();
+    relink_in(pool, &mut tx, std::slice::from_ref(&a))
+        .await
+        .unwrap();
+    unlink(&mut tx, std::slice::from_ref(&b)).await.unwrap();
+    tx.rollback().await.unwrap();
+    assert_eq!(
+        link_of(ann).await.len(),
+        1,
+        "a rolled-back re-link deleted the link"
+    );
+    assert_eq!(
+        invites_for(ann).await,
+        0,
+        "a rolled-back re-link left an invite"
+    );
+    assert_eq!(
+        link_of(bob).await.len(),
+        1,
+        "a rolled-back unlink deleted the link"
+    );
     // Bob holds a role and the provider does not link staff: nothing changes.
     let err = relink(pool, &[a.clone(), b.clone()]).await.unwrap_err();
     assert!(err.contains("role"), "{err}");
@@ -1208,6 +1231,16 @@ async fn the_relink_action_checks_every_link_first(pool: &Pool) {
     relink(pool, &[b]).await.unwrap();
     assert!(link_of(bob).await.is_empty());
     assert_eq!(invites_for(bob).await, 1);
+}
+
+/// [`relink`] in the admin action's transaction, committed when it succeeds.
+async fn relink(pool: &Pool, pks: &[SqlValue]) -> Result<(), String> {
+    let mut tx = rustango::sql::write_transaction(pool).await.unwrap();
+    let done = rustango::testkit::sso_admin::relink(pool, &mut tx, pks).await;
+    if done.is_ok() {
+        tx.commit().await.unwrap();
+    }
+    done
 }
 
 /// The role map grants on sign-up and, with sync on, adds and removes only

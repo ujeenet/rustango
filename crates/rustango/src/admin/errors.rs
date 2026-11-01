@@ -14,7 +14,7 @@ use crate::api_errors::ApiError;
 use super::forms::FormError;
 
 /// Error returned by admin handlers, including bulk actions registered
-/// with [`super::Builder::register_action`]. Custom actions should
+/// with [`super::Builder::register_tx_action`]. Custom actions should
 /// almost always return [`AdminError::Internal`].
 #[derive(Debug)]
 #[non_exhaustive]

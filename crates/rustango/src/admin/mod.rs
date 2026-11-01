@@ -108,5 +108,5 @@ pub(crate) use urls::AdminDatabase;
 pub(crate) use urls::{per_request_router, RequestState};
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use urls::{reset_ungated_admin_built, ungated_flag_lock};
-pub use urls::{router, ActionPerm, AdminActionFn, AdminActionFuture, AdminTxActionFn, Builder};
+pub use urls::{router, ActionPerm, AdminActionFuture, AdminTxActionFn, Builder};
 pub use user::AdminUser;

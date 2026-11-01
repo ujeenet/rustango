@@ -271,28 +271,27 @@ Objekt-PK) statt über eine einzelne FK-Spalte angehängt sind, verwende
 ## Massenaktionen
 
 Benenne die Aktionen in `admin(actions = "...")` und registriere dann einen Handler pro
-Aktion am `Builder`. Der Handler erhält den Pool und die Primärschlüssel der
-ausgewählten Zeilen:
+Aktion am `Builder`. Der Handler erhält die Schreibtransaktion des Admins und die
+Primärschlüssel der ausgewählten Zeilen:
 
 ```rust
+use rustango::admin::AdminError;
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_action("posts", "publish", |pool, pks| {
+    .register_tx_action("posts", "publish", |tx, pks| {
         Box::pin(async move {
-            let ids: Vec<String> = pks.iter().filter_map(|v| match v {
-                SqlValue::I64(n) => Some(n.to_string()),
-                SqlValue::I32(n) => Some(n.to_string()),
-                _ => None,
-            }).collect();
-            if !ids.is_empty() {
-                let sql = format!("UPDATE posts SET status='published' WHERE id IN ({})", ids.join(","));
-                rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
-            }
+            let query = Post::objects()
+                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .update()
+                .set("status", "published")
+                .compile()
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            rustango::sql::update_tx(tx, &query).await?;
             Ok(())
         })
     })
-    .register_action("posts", "archive", /* … */)
+    .register_tx_action("posts", "archive", /* … */)
     .build();
 ```
 
@@ -303,14 +302,11 @@ erscheint schlicht nicht.
 
 Eine eigene Aktion wird wie eine Bearbeitung geprüft: `{table}.change` plus ein
 Objekt-Hook, der nach der Aktion benannt ist. Eine Aktion, die löscht, sollte das mit
-`register_action_with_perm(table, name, ActionPerm::Delete, handler)` sagen, dann
+`register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)` sagen, dann
 braucht sie `{table}.delete` und führt stattdessen den `delete`-Hook aus. Sie braucht
 weiterhin `{table}.change` und wird als Bearbeitung auditiert und signalisiert.
 
-Ein `register_action`-Handler schreibt über seine eigene Verbindung, daher werden
-die Prüfpfad-Zeilen eines geprüften Modells danach geschrieben, nach bestem Bemühen.
-`register_tx_action(table, name, handler)` (und `register_tx_action_with_perm`)
-übergibt dem Handler stattdessen `&mut PoolTx`, sodass seine Schreibvorgänge und
+Der Handler schreibt über dieses `&mut PoolTx`, sodass seine Schreibvorgänge und
 ihre Prüfpfad-Zeilen gemeinsam committen oder zurückrollen. Schreibe nur über
 diese Transaktion: Eine zweite Verbindung kann einen SQLite-Pool mit nur einer
 Verbindung blockieren.
@@ -577,9 +573,8 @@ anders angegeben):
 | `skip_count_for([tables])` | Überspringt `COUNT(*)` auf riesigen Tabellen (Pager zeigt "Page N"). |
 | `view_hook_scan_cap(rows)` | Wie viele Zeilen die Liste durch `view`-Hooks prüft, bevor sie den Rest zurückhält. Standard 10 000. |
 | `with_user_perms([codenames])` | Sperrt Tabellen auf `{table}.view/add/change/delete`. |
-| `register_action(table, name, handler)` | Registriert einen Massenaktions-Handler. |
-| `register_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
-| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Dasselbe, aber der Handler erhält die Schreibtransaktion, sodass Prüfpfad-Zeilen mit ihr committen. |
+| `register_tx_action(table, name, handler)` | Registriert einen Massenaktions-Handler; er erhält die Schreibtransaktion, sodass Prüfpfad-Zeilen mit ihr committen. |
+| `register_tx_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
 | `with_session_auth(secret)` | Erfordert Cookie-Login (`/login` + `/logout`). |
 | `logout_url(u)` | POST-Ziel für die Logout-Schaltfläche der Seitenleiste. Standard `{admin_prefix}/logout`; Mandanten-Admins setzen es auf ihre Mandanten-Logout-Route. |
 | `secure_cookies(bool)` | Setzt das `Secure`-Flag (HTTPS-only) auf dem Session-Cookie. |

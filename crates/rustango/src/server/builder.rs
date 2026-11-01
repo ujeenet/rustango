@@ -130,7 +130,7 @@ struct PendingAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminActionFn,
+    handler: crate::admin::AdminTxActionFn,
 }
 
 #[cfg(feature = "postgres")]
@@ -606,10 +606,10 @@ impl<DB: Database> Builder<DB> {
     /// action name must also appear in the model's
     /// `#[rustango(admin(actions = "..."))]` allowlist.
     ///
-    /// Mirrors [`crate::admin::Builder::register_action`]; the only
-    /// difference is the handler receives the tenant-scoped pool.
+    /// Mirrors [`crate::admin::Builder::register_tx_action`]; the
+    /// transaction is on the tenant-scoped pool.
     #[must_use]
-    pub fn admin_register_action<F>(
+    pub fn admin_register_tx_action<F>(
         self,
         model_table: &'static str,
         action_name: &'static str,
@@ -617,14 +617,14 @@ impl<DB: Database> Builder<DB> {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::Pool,
+                &'a mut crate::sql::PoolTx<'static>,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send
             + Sync
             + 'static,
     {
-        self.admin_register_action_with_perm(
+        self.admin_register_tx_action_with_perm(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
@@ -632,10 +632,10 @@ impl<DB: Database> Builder<DB> {
         )
     }
 
-    /// [`Self::admin_register_action`] checked against `perm` (#1818).
-    /// See [`crate::admin::Builder::register_action_with_perm`].
+    /// [`Self::admin_register_tx_action`] checked against `perm` (#1818).
+    /// See [`crate::admin::Builder::register_tx_action_with_perm`].
     #[must_use]
-    pub fn admin_register_action_with_perm<F>(
+    pub fn admin_register_tx_action_with_perm<F>(
         mut self,
         model_table: &'static str,
         action_name: &'static str,
@@ -644,7 +644,7 @@ impl<DB: Database> Builder<DB> {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::Pool,
+                &'a mut crate::sql::PoolTx<'static>,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send
@@ -848,11 +848,11 @@ impl<DB: Database> Builder<DB> {
         }
         for action in self.admin_actions {
             let handler = action.handler;
-            tenant_admin_builder = tenant_admin_builder.register_action_with_perm(
+            tenant_admin_builder = tenant_admin_builder.register_tx_action_with_perm(
                 action.table,
                 action.name,
                 action.perm,
-                move |pool, pks| handler(pool, pks),
+                move |tx, pks| handler(tx, pks),
             );
         }
         let tenant_admin = tenant_admin_builder

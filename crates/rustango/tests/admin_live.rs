@@ -2382,7 +2382,7 @@ pub struct UaPost {
 }
 
 #[tokio::test]
-async fn user_defined_action_runs_via_register_action() {
+async fn user_defined_action_runs_via_register_tx_action() {
     // v0.11.0: register a custom handler on `Builder`. POSTing
     // `action=publish_selected` flips the targeted rows'
     // `is_published` flag via the user-supplied closure.
@@ -2404,29 +2404,16 @@ async fn user_defined_action_runs_via_register_action() {
     }
 
     let app = rustango::admin::Builder::new(pool.clone())
-        .register_action("ua_post", "publish_selected", |pool, pks| {
-            let pool = pool.clone();
+        .register_tx_action("ua_post", "publish_selected", |tx, pks| {
             let pks = pks.to_vec();
             Box::pin(async move {
-                let ids: Vec<i64> = pks
-                    .iter()
-                    .filter_map(|v| match v {
-                        rustango::core::SqlValue::I64(n) => Some(*n),
-                        _ => None,
-                    })
-                    .collect();
-                // v0.36 — action handler receives `&Pool`; extract the
-                // underlying PgPool to run the legacy `UPDATE ... = ANY($1)`
-                // helper. New code should pattern-match on `Pool::Postgres`
-                // and dispatch per backend.
-                let pg = pool.as_postgres().expect("test uses Postgres backend");
-                rustango::sql::sqlx::query(
-                    r#"UPDATE "ua_post" SET "is_published" = true WHERE "id" = ANY($1)"#,
-                )
-                .bind(&ids)
-                .execute(pg)
-                .await
-                .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
+                let query = UaPost::objects()
+                    .filter("id__in", rustango::core::SqlValue::List(pks))
+                    .update()
+                    .set("is_published", true)
+                    .compile()
+                    .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
+                rustango::sql::update_tx(tx, &query).await?;
                 Ok(())
             })
         })
@@ -2458,7 +2445,7 @@ async fn user_defined_action_runs_via_register_action() {
 #[tokio::test]
 async fn allowlisted_action_without_handler_returns_500() {
     // Allowlisted in `admin(actions = "...")` but not registered on
-    // the Builder → 500 with a hint pointing at register_action.
+    // the Builder → 500 with a hint pointing at register_tx_action.
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -2489,7 +2476,7 @@ async fn allowlisted_action_without_handler_returns_500() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = body_string(resp).await;
-    // The generic `ApiError` envelope; the `register_action` hint is
+    // The generic `ApiError` envelope; the `register_tx_action` hint is
     // logged server-side, not sent (#1193).
     assert!(
         body.contains(r#""error":"internal_error""#) && body.contains("correlation_id"),

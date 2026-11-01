@@ -194,6 +194,25 @@ untouched.
 - `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
 - A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
 - `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
+- Admin bulk actions run only in the admin's transaction: `register_action`, `register_action_with_perm`, `AdminActionFn` and their `TenantAdminBuilder` / `server::Builder::admin_register_action*` twins are removed. Use `register_tx_action*` (`admin_register_tx_action*` on `server::Builder`) and write through the transaction:
+
+  ```rust
+  // before
+  .register_action("posts", "publish", |pool, pks| Box::pin(async move {
+      Post::objects().filter("id__in", SqlValue::List(pks.to_vec()))
+          .update().set("status", "published").execute_pool(pool).await?;
+      Ok(())
+  }))
+  // after
+  .register_tx_action("posts", "publish", |tx, pks| Box::pin(async move {
+      let q = Post::objects().filter("id__in", SqlValue::List(pks.to_vec()))
+          .update().set("status", "published").compile()
+          .map_err(|e| AdminError::Internal(e.to_string()))?;
+      rustango::sql::update_tx(tx, &q).await?;
+      Ok(())
+  }))
+  ```
+
 ---
 
 ## 0.61.16
