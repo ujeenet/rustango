@@ -32,6 +32,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `AccessLogLayer` is `#[non_exhaustive]` and gains `skip_paths`, which keeps health and readiness probes out of the log by whole path segment.
 - Queued email attachments are written as base64 text instead of an integer array; both forms still read.
 - `PreMigrateContext` and `PostMigrateContext` carry the run's `pool` and `tenant` and are `#[non_exhaustive]`; the `connect_*_migrate_with_target` receivers and `MigrateTarget` are removed.
+- A schema-mode tenant's `search_path` is its schema plus `public` and other extension-only schemas that hold an extension; `public` leaves it when no extension lives there, and a tenant missing tables those schemas have is refused instead of reading the shared copies.
 
 ### Fixed
 

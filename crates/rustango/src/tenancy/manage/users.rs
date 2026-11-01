@@ -700,6 +700,7 @@ where
                     registry_url,
                     org.effective_schema(),
                     1,
+                    crate::tenancy::pools::FallThrough::Refuse,
                 )
                 .await?;
                 Ok(rustango::sql::Pool::Postgres(pg))
