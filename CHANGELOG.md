@@ -11,6 +11,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- `toml` 1.1 replaces 0.8, so apps on `toml` 1.x no longer build two copies (and the old `toml_edit` / `toml_datetime` duplicates are gone).
 - Public `*Error` enums are `#[non_exhaustive]`; `AdminError::BadRequest` and `AdminError::Conflict` replace a faked form error and an `Ok` 409.
 - Removed: `Tenant::for_test`, `contenttypes::render_generic_fk_link`, `admin::InlineApplyOutcome`, and the racy `Cache::touch` default.
 - `ModelForm` locks superuser-only fields unless `acting_superuser(true)` is called; before, a form that never stated the acting user locked nothing.
