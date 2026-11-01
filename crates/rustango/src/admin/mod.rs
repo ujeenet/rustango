@@ -76,7 +76,7 @@ pub mod user;
 // signatures stay internal to the crate.
 pub(crate) mod render;
 mod templates;
-mod urls;
+pub(crate) mod urls;
 mod views;
 
 pub use auth::{protect_with_basic_auth, protect_with_csrf};

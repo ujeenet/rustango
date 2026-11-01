@@ -22,7 +22,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
 - ViewSets run the object-permission hooks and queryset scopes the admin runs: `add` on create, `view` (404) then `change` / `delete` (403) on item routes, `view` on lists and FK targets. `admin_add_hooks()` is gone.
 - The hook and scope macros are `register_object_permission!` and `register_queryset_scope!` under `rustango::object_permissions`; the `register_admin_*` names are deprecated.
-- `ViewSet::for_model` refuses `rustango_api_keys` and `rustango_agents`.
+- `ViewSet::for_model` refuses `rustango_api_keys`, `rustango_agents` and the tables the admin never serves.
+- ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
 
 ### Fixed
 

@@ -1162,8 +1162,17 @@ async fn view_hook_rows(
 ) -> Result<ViewHookRows, AdminError> {
     let hooks = (parts, crate::object_permissions::Hooks::All);
     let query = (WhereExpr::and_predicates(filters.to_vec()), search.cloned());
-    let cap = state.view_hook_scan_cap();
-    Ok(crate::object_permissions::view_hook_rows(&state.pool, hooks, model, query, cap).await?)
+    // The PK list shares the bind budget with the filters' own lists.
+    let budget = crate::list_params::in_values_budget(state.pool.dialect().max_bind_params());
+    let used: usize = filters
+        .iter()
+        .map(|f| match &f.value {
+            SqlValue::List(items) => items.len(),
+            _ => 1,
+        })
+        .sum();
+    let limits = (state.view_hook_scan_cap(), budget.saturating_sub(used));
+    Ok(crate::object_permissions::view_hook_rows(&state.pool, hooks, model, query, limits).await?)
 }
 
 /// One facet value: the stored key, its URL form, the FK display name and the count.

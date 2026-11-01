@@ -46,12 +46,13 @@ pub(crate) enum ViewHookRows {
 /// Run `hooks`' "view" hook over every row of `model` matching `where_clause`
 /// and `search`, folded into one PK filter: the shorter of `IN` admitted or
 /// `NOT IN` denied. The hook takes the whole row, so all scalar columns are read.
+/// Past `cap` rows, or a list longer than `binds`, totals are withheld.
 pub(crate) async fn view_hook_rows(
     pool: &crate::sql::Pool,
     (parts, hooks): (&Parts, super::Hooks),
     model: &'static ModelSchema,
     (where_clause, search): (WhereExpr, Option<SearchClause>),
-    cap: usize,
+    (cap, binds): (usize, usize),
 ) -> Result<ViewHookRows, crate::sql::ExecError> {
     if !hooks.any(model.table, "view") {
         return Ok(ViewHookRows::All);
@@ -86,12 +87,27 @@ pub(crate) async fn view_hook_rows(
             denied.push(pk);
         }
     }
+    Ok(fold(model.table, pk_field, (admitted, denied), binds))
+}
+
+/// The admitted and denied PKs as one filter: the shorter list, or
+/// [`ViewHookRows::TooMany`] when it would not fit `binds`.
+fn fold(
+    table: &'static str,
+    pk_field: &'static crate::core::FieldSchema,
+    (admitted, denied): (Vec<SqlValue>, Vec<SqlValue>),
+    binds: usize,
+) -> ViewHookRows {
+    if denied.len().min(admitted.len()) > binds {
+        warn_scan_cap(table, binds);
+        return ViewHookRows::TooMany;
+    }
     let filter = |op, value| Filter {
         column: pk_field.column,
         op,
         value,
     };
-    Ok(if denied.is_empty() {
+    if denied.is_empty() {
         ViewHookRows::All
     } else if admitted.is_empty() {
         // A PK is never NULL: no row.
@@ -100,7 +116,7 @@ pub(crate) async fn view_hook_rows(
         ViewHookRows::Only(filter(Op::NotIn, SqlValue::List(denied)))
     } else {
         ViewHookRows::Only(filter(Op::In, SqlValue::List(admitted)))
-    })
+    }
 }
 
 /// A JSON row's primary key as a bind value.
@@ -165,4 +181,45 @@ macro_rules! register_admin_queryset {
     ($table:expr, $hook:expr $(,)?) => {
         $crate::register_queryset_scope!($table, $hook);
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::Model as _;
+
+    fn ids(r: std::ops::Range<i64>) -> Vec<SqlValue> {
+        r.map(SqlValue::I64).collect()
+    }
+
+    /// A PK list longer than the bind budget withholds totals, never a 500.
+    #[test]
+    fn a_list_past_the_bind_budget_withholds_totals() {
+        let pk = crate::contenttypes::ContentType::SCHEMA
+            .primary_key()
+            .unwrap();
+        let t = "op_unit_fold";
+        assert!(matches!(
+            fold(t, pk, (ids(0..5), ids(5..8)), 2),
+            ViewHookRows::TooMany
+        ));
+        let fits = fold(t, pk, (ids(0..5), ids(5..8)), 3);
+        assert!(matches!(
+            fits,
+            ViewHookRows::Only(Filter { op: Op::NotIn, .. })
+        ));
+        let shorter = fold(t, pk, (ids(0..2), ids(2..8)), 3);
+        assert!(matches!(
+            shorter,
+            ViewHookRows::Only(Filter { op: Op::In, .. })
+        ));
+        assert!(matches!(
+            fold(t, pk, (vec![], ids(0..8)), 0),
+            ViewHookRows::Only(Filter { op: Op::IsNull, .. })
+        ));
+        assert!(matches!(
+            fold(t, pk, (ids(0..8), vec![]), 0),
+            ViewHookRows::All
+        ));
+    }
 }

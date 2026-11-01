@@ -763,15 +763,19 @@ the `posts` table).
   or nothing, and a refusal is a `403` with `{"details": {"index": i}}`;
 - `view` on retrieve, update and delete: a hidden row is a `404`, so its id
   is not confirmed; then `change` on update and `delete` on delete (soft
-  delete too), a `403`. Hooks see every scalar field of the stored row;
+  delete too), a `403`. Hooks see every scalar field of the stored row,
+  read locked in the write's transaction, so a concurrent edit cannot slip
+  between the check and the write;
 - `view` on lists: hidden rows are left out of the page and the count. Past
   `view_hook_scan_cap` rows, `count` and `last_page` are `null`; a queryset
   scope does the same in SQL and scales;
-- queryset scopes narrow every read and write; an FK may not name a target
-  row its scopes or `view` hook hide (`422`).
+- queryset scopes narrow every read and write, and a create or update whose
+  row would land outside them is a `403` that writes nothing; an FK may not
+  name a target row its scopes or `view` hook hide (`422`).
 
-`change` checks the stored row only: to stop a row being moved to another
-owner, pin the column (`OwnedBy`, `WritePin`) or scope it.
+`change` checks the stored row only: a queryset scope, or a pinned column
+(`OwnedBy`, `WritePin`), is what stops a row moving to another owner. A
+credential bound to another tenant than the routed one is a `403`.
 `object_permissions::Actor::of(&parts)` tells a hook who is asking (an admin
 session, a user token, an agent, nobody); `object_permissions::is_superuser`
 is the superuser rule, and an agent token is never a superuser.

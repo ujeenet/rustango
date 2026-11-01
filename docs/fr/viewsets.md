@@ -773,7 +773,9 @@ création (un bulk create est tout ou rien, `403` avec `{"details": {"index": i}
 `change` ou `delete` (`403`, soft delete compris) ; `view` sur les listes (les
 lignes masquées sortent de la page et du `count` ; au-delà de
 `view_hook_scan_cap`, `count` et `last_page` valent `null`). Les scopes de
-queryset restreignent chaque lecture et écriture. `change` ne vérifie que la
+queryset restreignent chaque lecture et écriture ; une écriture dont la ligne en
+sortirait donne un `403`. Les hooks lisent la ligne verrouillée dans la
+transaction d'écriture ; un identifiant d'un autre tenant donne un `403`. `change` ne vérifie que la
 ligne stockée. `object_permissions::Actor::of(&parts)` indique à un hook qui
 demande ; un jeton d'agent n'est jamais superuser. `ViewSet::for_model` refuse
 `rustango_api_keys`, `rustango_agents` et les tables SSO.

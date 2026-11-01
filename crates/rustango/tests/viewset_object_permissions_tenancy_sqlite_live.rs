@@ -11,9 +11,11 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use rustango::core::Model as _;
 use rustango::extractors::DatabaseTenantContext;
+use rustango::sql::FetcherPool as _;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::auth_backends::{AuthBackend, ModelBackend};
 use rustango::tenancy::middleware::AuthenticatedUser;
+use rustango::tenancy::User;
 use rustango::tenancy::{
     session::SessionSecret, BackendKind, ChainResolver, DatabasePools, Org, OrgResolver,
     RouterAuthExt, TenancyError, TenantSlug,
@@ -88,10 +90,14 @@ fn app(ns: &str, outer: Option<(AuthenticatedUser, &str)>) -> (Router, String) {
         ),
     });
     let vs = || ViewSet::for_model(Note::SCHEMA, &["id", "title"]).allow_anonymous();
+    let users =
+        || ViewSet::for_model(User::SCHEMA, &["id", "username", "is_superuser"]).allow_anonymous();
     let mut router = Router::new()
         .merge(vs().tenant_router("/api/notes"))
         .merge(vs().tenant_router("/alpha/api/notes"))
-        .merge(vs().tenant_router("/beta/api/notes"));
+        .merge(vs().tenant_router("/beta/api/notes"))
+        .merge(users().tenant_router("/api/users"))
+        .merge(users().tenant_router("/beta/api/users"));
     router = match outer {
         // An app layer that already decided who the caller is, for one tenant.
         Some((user, slug)) => router
@@ -121,6 +127,11 @@ async fn tenant(url: &str) -> rustango::sql::Pool {
         ..rustango::testkit::user()
     };
     ann.insert_pool(&pool).await.expect("ann");
+    let mut bob = rustango::tenancy::User {
+        username: "bob".into(),
+        ..rustango::testkit::user()
+    };
+    bob.insert_pool(&pool).await.expect("bob");
     let mut note = Note {
         id: Auto::default(),
         title: "n".into(),
@@ -157,7 +168,7 @@ async fn count(
     Ok(body["count"].as_i64().expect("count"))
 }
 
-/// A superuser of `alpha` is one there, by host or by prefix, and nobody on `beta`.
+/// A superuser of `alpha` is one there, by host or by prefix, and refused on `beta`.
 #[tokio::test]
 async fn a_credential_counts_only_on_its_own_tenant() {
     let su = AuthenticatedUser {
@@ -179,12 +190,54 @@ async fn a_credential_counts_only_on_its_own_tenant() {
     );
     assert_eq!(
         count(&app, "beta.localhost", "/api/notes", None).await,
-        Ok(0)
+        Err(StatusCode::FORBIDDEN)
     );
     assert_eq!(
         count(&app, "apex.test", "/beta/api/notes", None).await,
-        Ok(0)
+        Err(StatusCode::FORBIDDEN)
     );
+}
+
+/// A credential bound to `alpha` is refused on `beta`, by host or prefix:
+/// it cannot grant superuser there through the field rules.
+#[tokio::test]
+async fn a_credential_for_another_tenant_cannot_write() {
+    let su = AuthenticatedUser {
+        id: 1,
+        username: "ann".into(),
+        is_superuser: true,
+    };
+    let (app, template) = app("write", Some((su, "alpha")));
+    let _alpha = tenant(&template.replace("{slug}", "alpha")).await;
+    let beta = tenant(&template.replace("{slug}", "beta")).await;
+    let bob = User::objects()
+        .filter("username", "bob")
+        .fetch(&beta)
+        .await
+        .expect("bob")
+        .remove(0);
+    let id = *bob.id.get().expect("pk");
+    for (host, path) in [
+        ("beta.localhost", format!("/api/users/{id}")),
+        ("apex.test", format!("/beta/api/users/{id}")),
+    ] {
+        let req = Request::builder()
+            .method("PATCH")
+            .uri(&path)
+            .header(HOST, host)
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"is_superuser": true}"#))
+            .unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN, "{host}{path}");
+    }
+    let bob = User::objects()
+        .filter("username", "bob")
+        .fetch(&beta)
+        .await
+        .expect("bob")
+        .remove(0);
+    assert!(!bob.is_superuser, "alpha's superuser promoted a beta user");
 }
 
 /// The control through `require_auth`: the tenant's own superuser sees its note.

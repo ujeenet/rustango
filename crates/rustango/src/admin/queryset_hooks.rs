@@ -144,7 +144,12 @@ pub(crate) async fn hidden_fk_target(
         .collect();
     let admits =
         |t: &FkTarget, row: &serde_json::Value| is_allowed(t.model.table, "view", parts, Some(row));
-    first_hidden_in(pool, None, owner, &targets, &checks, admits).await
+    let owner_scope: Vec<WhereExpr> = RowScope::of(owner, parts)
+        .0
+        .into_iter()
+        .map(WhereExpr::Predicate)
+        .collect();
+    first_hidden_in(pool, None, (owner, &owner_scope), &targets, &checks, admits).await
 }
 
 /// `row` stores `value` in `column`, read the way the edit form shows it.

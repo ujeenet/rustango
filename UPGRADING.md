@@ -181,6 +181,8 @@ untouched.
 - `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
 - A ViewSet list under a `view` hook returns `count: null` and `last_page: null` past `view_hook_scan_cap` rows; add a queryset scope for big tables.
 - The admin answers 404 instead of 403 on the item pages of a row its `view` hook hides.
+- A tenant ViewSet refuses (403) a principal bound to another tenant, and its hooks see a principal with no tenant as anonymous: set `TenantSlug` next to your own `AuthenticatedUser` / `Principal`, or use `require_auth`.
+- A ViewSet create or update whose row would leave a `register_queryset_scope!` scope is a 403; `ViewSet::for_model` also panics on the tables the admin never serves (TOTP secrets, passkeys, database servers).
 
 ---
 

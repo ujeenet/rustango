@@ -50,8 +50,10 @@ pub enum Actor {
 }
 
 impl Actor {
-    /// Resolve the request's actor. A credential bound to a tenant other
-    /// than the one the request was routed to resolves to `Anonymous`.
+    /// Resolve the actor of an admin or ViewSet request, the two that mark
+    /// the routed tenant. A credential bound to another tenant, a credential
+    /// with no tenant on a tenant route, or a tenant credential on an
+    /// untenanted route resolves to `Anonymous`.
     #[must_use]
     pub fn of(parts: &Parts) -> Self {
         let routed = parts
@@ -63,9 +65,10 @@ impl Actor {
             return Self::admin(parts, scoped.0, routed);
         }
         let actor = Self::api(parts);
-        match routed {
-            Some(t) if actor.tenant() != Some(t) => Self::Anonymous,
-            _ => actor,
+        if actor.tenant() == routed {
+            actor
+        } else {
+            Self::Anonymous
         }
     }
 
@@ -275,6 +278,23 @@ mod tests {
         // A credential for one tenant on the other's route is nobody.
         assert_eq!(Actor::of(&user("acme", "beta")), Actor::Anonymous);
         assert!(!is_superuser(&user("acme", "beta")));
+    }
+
+    /// A tenant credential on a route with no tenant counts for nothing.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn a_tenant_credential_off_a_tenant_route_is_anonymous() {
+        use crate::tenancy::{middleware::AuthenticatedUser, TenantSlug};
+        let p = with(|e| {
+            e.insert(AuthenticatedUser {
+                id: 7,
+                username: "ada".into(),
+                is_superuser: true,
+            });
+            e.insert(TenantSlug("acme".into()));
+        });
+        assert_eq!(Actor::of(&p), Actor::Anonymous);
+        assert!(!is_superuser(&p));
     }
 
     #[cfg(feature = "mcp")]

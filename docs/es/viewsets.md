@@ -781,7 +781,7 @@ bulk create es todo o nada, `403` con `{"details": {"index": i}}`); `view` al
 leer, actualizar y eliminar (oculto es `404`), luego `change` o `delete` (`403`,
 también con soft delete); `view` en listas (las filas ocultas salen de la página
 y del `count`; por encima de `view_hook_scan_cap`, `count` y `last_page` son
-`null`). Los scopes de queryset acotan cada lectura y escritura. `change` solo
+`null`). Los scopes de queryset acotan cada lectura y escritura; una escritura cuya fila saldría de ellos es un `403`. Los hooks leen la fila bloqueada en la transacción de escritura; una credencial de otro tenant es un `403`. `change` solo
 comprueba la fila guardada. `object_permissions::Actor::of(&parts)` le dice a un
 hook quién pregunta; un token de agente nunca es superuser. `ViewSet::for_model`
 rechaza `rustango_api_keys`, `rustango_agents` y las tablas SSO.

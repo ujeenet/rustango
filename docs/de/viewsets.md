@@ -752,7 +752,7 @@ Tabelle `posts`).
 `view` bei Retrieve, Update und Delete (verborgen ist `404`), dann `change` bzw.
 `delete` (`403`, auch beim Soft Delete); `view` in Listen (verborgene Zeilen
 fehlen in Seite und `count`, ab `view_hook_scan_cap` sind `count` und
-`last_page` `null`). Queryset-Scopes schränken jedes Lesen und Schreiben ein.
+`last_page` `null`). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
 `change` prüft nur die gespeicherte Zeile. `object_permissions::Actor::of(&parts)`
 sagt einem Hook, wer fragt; ein Agent-Token ist nie Superuser.
 `rustango_api_keys`, `rustango_agents` und die SSO-Tabellen lehnt

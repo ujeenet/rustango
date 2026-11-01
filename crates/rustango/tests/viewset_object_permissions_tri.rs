@@ -43,6 +43,30 @@ pub struct Scoped {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     pub owner_id: i64,
+    #[rustango(fk = "vop_label", on = "id")]
+    pub label_id: Option<i64>,
+}
+
+/// A row the "view" hook admits once, then hides: a change between a
+/// list's scan and its render.
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "vop_flip")]
+#[allow(dead_code)]
+pub struct Flip {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "vop_legacy")]
+#[allow(dead_code)]
+pub struct Legacy {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
 }
 
 #[derive(rustango::Model, Debug, Clone)]
@@ -87,6 +111,27 @@ fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
 }
 rustango::register_queryset_scope!("vop_scoped", owner_one);
 
+static FLIPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn flip(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
+    use std::sync::atomic::Ordering;
+    title(row) != "flip" || !FLIPPED.swap(true, Ordering::SeqCst)
+}
+rustango::register_object_permission!("vop_flip", "view", flip);
+
+/// The old macro names still register, with a deprecation warning.
+mod legacy {
+    #![allow(deprecated)]
+    use super::*;
+    fn not_hidden(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
+        !title(row).starts_with("hidden")
+    }
+    fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
+        vec![Filter::new("title", Op::Ne, SqlValue::from("out"))]
+    }
+    rustango::register_admin_object_permission!("vop_legacy", "view", not_hidden);
+    rustango::register_admin_queryset!("vop_legacy", not_out);
+}
+
 fn not_secret(_: &axum::http::request::Parts, row: Option<&Value>) -> bool {
     row.is_none_or(|r| r["name"] != "secret")
 }
@@ -99,11 +144,14 @@ async fn setup(pool: &Pool) {
         .expect("framework tables");
     rustango::testkit::matrix::fresh_table::<Doc>(pool).await;
     rustango::testkit::matrix::fresh_table::<Soft>(pool).await;
-    rustango::testkit::matrix::fresh_table::<Scoped>(pool).await;
-    // The FK owner goes first so its target can be dropped.
+    rustango::testkit::matrix::fresh_table::<Flip>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Legacy>(pool).await;
+    // The FK owners go first so their target can be dropped.
     rustango::testkit::matrix::drop_table(pool, "vop_card").await;
+    rustango::testkit::matrix::drop_table(pool, "vop_scoped").await;
     rustango::testkit::matrix::fresh_table::<Label>(pool).await;
     rustango::testkit::matrix::fresh_table::<Card>(pool).await;
+    rustango::testkit::matrix::fresh_table::<Scoped>(pool).await;
 }
 
 async fn send(
@@ -322,7 +370,17 @@ async fn a_cursor_page_skips_hidden_rows(pool: &Pool) {
             assert_eq!(status, StatusCode::OK, "{body}");
             seen.extend(titles_of(&body));
             match body["next"].as_str() {
-                Some(next) => uri = format!("/docs?cursor={next}"),
+                Some(next) => {
+                    // The token names the last row shown, never a hidden one.
+                    use base64::Engine as _;
+                    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .decode(next)
+                        .expect("token");
+                    let id: i64 = String::from_utf8(raw).unwrap().parse().expect("id");
+                    let shown = Doc::objects().filter("id", id).fetch(pool).await.unwrap();
+                    assert!(!shown[0].title.starts_with("hidden"), "cap {cap}: {id}");
+                    uri = format!("/docs?cursor={next}");
+                }
                 None => break,
             }
         }
@@ -351,6 +409,7 @@ async fn a_queryset_scope_narrows_every_action(pool: &Pool) {
         let mut s = Scoped {
             id: Auto::default(),
             owner_id: owner,
+            label_id: None,
         };
         s.insert_pool(pool).await.expect("seed");
         ids.push(*s.id.get().expect("pk"));
@@ -478,9 +537,146 @@ async fn a_superuser_row_needs_an_api_superuser(pool: &Pool) {
     assert_eq!(status, StatusCode::OK, "{body}");
 }
 
+/// A page with more hidden than visible rows (`IN`), or only hidden rows.
+async fn a_page_filters_by_admitted_or_by_nothing(pool: &Pool) {
+    docs(pool, &["a-1", "hidden-2", "hidden-3", "hidden-4"]).await;
+    let app = doc_app(pool, |v| v.ordering(&[("id", false)]));
+    let (_, body) = send(&app, "GET", "/docs", None).await;
+    assert_eq!(body["count"], 1, "{body}");
+    assert_eq!(titles_of(&body), ["a-1"]);
+    for mut d in Doc::objects().fetch(pool).await.expect("fetch") {
+        d.title = format!("hidden-{}", d.id.get().unwrap());
+        d.save_pool(pool).await.expect("hide");
+    }
+    let (_, body) = send(&app, "GET", "/docs", None).await;
+    assert_eq!(body["count"], 0, "{body}");
+    assert!(titles_of(&body).is_empty(), "{body}");
+}
+
+/// A row the hook hides after the list's scan is still left out of the page.
+async fn a_row_hidden_after_the_scan_is_not_rendered(pool: &Pool) {
+    FLIPPED.store(false, std::sync::atomic::Ordering::SeqCst);
+    let mut f = Flip {
+        id: Auto::default(),
+        title: "flip".into(),
+    };
+    f.insert_pool(pool).await.expect("seed");
+    let app = ViewSet::for_model(Flip::SCHEMA, &["id", "title"])
+        .allow_anonymous()
+        .router_pool("/flip", pool.clone());
+    let (status, body) = send(&app, "GET", "/flip", None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(titles_of(&body).is_empty(), "{body}");
+}
+
+/// The deprecated macro names still register their hook and scope.
+async fn the_old_macro_names_still_apply(pool: &Pool) {
+    for t in ["a", "hidden-b", "out"] {
+        let mut l = Legacy {
+            id: Auto::default(),
+            title: t.into(),
+        };
+        l.insert_pool(pool).await.expect("seed");
+    }
+    let app = ViewSet::for_model(Legacy::SCHEMA, &["id", "title"])
+        .allow_anonymous()
+        .router_pool("/legacy", pool.clone());
+    let (_, body) = send(&app, "GET", "/legacy", None).await;
+    assert_eq!(titles_of(&body), ["a"], "{body}");
+}
+
+/// A write may not move a row out of, or create one outside, the queryset scopes.
+async fn a_write_cannot_leave_the_queryset_scope(pool: &Pool) {
+    let mut own = Scoped {
+        id: Auto::default(),
+        owner_id: 1,
+        label_id: None,
+    };
+    own.insert_pool(pool).await.expect("seed");
+    let id = *own.id.get().expect("pk");
+    let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id"])
+        .allow_anonymous()
+        .router_pool("/scoped", pool.clone());
+    let moved = Some(json!({ "owner_id": 2 }));
+    assert_eq!(
+        send(&app, "PATCH", &format!("/scoped/{id}"), moved.clone())
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        send(&app, "POST", "/scoped", moved).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let rows = Scoped::objects().fetch(pool).await.expect("fetch");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].owner_id, 1, "a refused update wrote");
+}
+
+/// A hidden row is a 404 before its body's FK is checked: a 422 would confirm it.
+async fn a_hidden_row_is_404_before_its_fk_check(pool: &Pool) {
+    let mut secret = Label {
+        id: Auto::default(),
+        name: "secret".into(),
+    };
+    secret.insert_pool(pool).await.expect("seed");
+    let mut other = Scoped {
+        id: Auto::default(),
+        owner_id: 2,
+        label_id: None,
+    };
+    other.insert_pool(pool).await.expect("seed");
+    let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id", "label_id"])
+        .allow_anonymous()
+        .router_pool("/scoped", pool.clone());
+    let uri = format!("/scoped/{}", other.id.get().unwrap());
+    let body = Some(json!({ "label_id": secret.id.get().unwrap() }));
+    assert_eq!(
+        send(&app, "PATCH", &uri, body).await.0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// A concurrent edit is judged after it lands: the hooks read the row
+/// locked in the write's transaction. SQLite already serializes writers.
+async fn a_concurrent_edit_is_judged_after_it_lands(pool: &Pool) {
+    use rustango::core::{Assignment, UpdateQuery, WhereExpr};
+    if pool.dialect().name() == "sqlite" {
+        return;
+    }
+    let ids = docs(pool, &["open-1", "open-2"]).await;
+    let app = doc_app(pool, |v| v);
+    for (id, title, method) in [(ids[0], "locked-1", "PATCH"), (ids[1], "keep-2", "DELETE")] {
+        let mut tx = rustango::sql::write_transaction(pool).await.expect("tx");
+        let edit = UpdateQuery::new(
+            Doc::SCHEMA,
+            vec![Assignment::new("title", SqlValue::from(title))],
+            WhereExpr::Predicate(Filter::new("id", Op::Eq, SqlValue::I64(id))),
+        );
+        rustango::sql::update_tx(&mut tx, &edit)
+            .await
+            .expect("edit");
+        let app = app.clone();
+        let uri = format!("/docs/{id}");
+        let call = tokio::spawn(async move {
+            let body = (method == "PATCH").then(|| json!({ "title": "x" }));
+            send(&app, method, &uri, body).await.0
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tx.commit().await.expect("commit");
+        assert_eq!(call.await.unwrap(), StatusCode::FORBIDDEN, "{method}");
+    }
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
+        a_page_filters_by_admitted_or_by_nothing,
+        a_row_hidden_after_the_scan_is_not_rendered,
+        the_old_macro_names_still_apply,
+        a_write_cannot_leave_the_queryset_scope,
+        a_hidden_row_is_404_before_its_fk_check,
+        a_concurrent_edit_is_judged_after_it_lands,
         item_routes_hide_with_404_and_refuse_with_403,
         a_soft_delete_runs_the_delete_hook,
         a_page_counts_only_visible_rows,
