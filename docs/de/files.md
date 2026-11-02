@@ -338,7 +338,7 @@ unterstützt zwei Upload-Abläufe:
 ```rust
 use rustango::media::{Media, MediaManager};
 
-let manager = MediaManager::new_pool(pool.clone(), registry);
+let manager = MediaManager::new(pool.clone(), registry);
 // Hand the browser a short-lived download link:
 // Liefert Option<String> — None bei Backends, die nicht signieren können (z. B. lokale Platte).
 let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {

@@ -52,7 +52,7 @@ async fn seed(pool: &Pool) {
             status: status.map(str::to_string),
             views,
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

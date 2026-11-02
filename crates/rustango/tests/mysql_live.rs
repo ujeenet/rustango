@@ -121,7 +121,7 @@ async fn auto_pk_insert_pool_round_trips() {
         name: "alice".into(),
         is_active: true,
     };
-    u.insert_pool(&pool).await.expect("insert_pool");
+    u.insert(&pool).await.expect("insert_pool");
     // After insert, Auto<i64> PK should be populated from
     // LAST_INSERT_ID() — first row → 1.
     assert_eq!(u.id.get().copied(), Some(1));
@@ -144,7 +144,7 @@ async fn fetch_round_trips_decoded_row() {
         name: "bob".into(),
         is_active: false,
     };
-    u.insert_pool(&pool).await.expect("insert_pool");
+    u.insert(&pool).await.expect("insert_pool");
 
     let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users.len(), 1);
@@ -167,9 +167,9 @@ async fn save_pool_updates_existing_row() {
         name: "carol".into(),
         is_active: true,
     };
-    u.insert_pool(&pool).await.expect("insert");
+    u.insert(&pool).await.expect("insert");
     u.name = "Carol".into();
-    u.save_pool(&pool).await.expect("save_pool");
+    u.save(&pool).await.expect("save_pool");
 
     let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users[0].name, "Carol");
@@ -189,8 +189,8 @@ async fn delete_pool_removes_row() {
         name: "doomed".into(),
         is_active: true,
     };
-    u.insert_pool(&pool).await.expect("insert");
-    let affected = u.delete_pool(&pool).await.expect("delete_pool");
+    u.insert(&pool).await.expect("insert");
+    let affected = u.delete(&pool).await.expect("delete_pool");
     assert_eq!(affected, 1);
     let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 0);
@@ -211,13 +211,13 @@ async fn audited_save_pool_emits_diff_audit_row() {
         id: 100,
         name: "before".into(),
     };
-    a.insert_pool(&pool).await.expect("insert audited");
+    a.insert(&pool).await.expect("insert audited");
 
     // UPDATE the tracked column. Diff audit row should land in
     // rustango_audit_log with operation='update' and changes
     // containing { "name": { "before": "before", "after": "after" } }.
     a.name = "after".into();
-    a.save_pool(&pool).await.expect("save_pool audited");
+    a.save(&pool).await.expect("save_pool audited");
 
     // Read the audit table directly — confirm exactly one
     // Update entry whose JSON changes captures the field delta.
@@ -351,9 +351,9 @@ async fn apply_all_pool_creates_unique_together() {
         a: 1,
         b: 2,
     };
-    pair().insert_pool(&pool).await.expect("first row");
+    pair().insert(&pool).await.expect("first row");
     assert!(
-        pair().insert_pool(&pool).await.is_err(),
+        pair().insert(&pool).await.is_err(),
         "apply_all_pool left `unique_together` out"
     );
 }

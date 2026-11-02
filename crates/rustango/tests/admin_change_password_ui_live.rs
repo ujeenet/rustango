@@ -59,8 +59,8 @@ async fn change_password_anonymous_redirects_to_login() {
     };
     let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Provision a tenant in database mode pointing at the registry DB
     // (degenerate but sufficient for routing — same trick the existing
@@ -80,7 +80,7 @@ async fn change_password_anonymous_redirects_to_login() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
@@ -110,7 +110,7 @@ async fn change_password_anonymous_redirects_to_login() {
         "expected redirect to /__login, got `{loc}`"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -120,8 +120,8 @@ async fn change_password_authenticated_get_renders_form() {
     };
     let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("chpw_auth");
     let host_pattern = format!("{slug}.app.test");
@@ -138,7 +138,7 @@ async fn change_password_authenticated_get_renders_form() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     // Seed a user so validate_session can look it up.
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
     let user_id: i64 = sqlx::query_scalar(
@@ -198,7 +198,7 @@ async fn change_password_authenticated_get_renders_form() {
         assert!(tag.contains(&min_length_attr()), "{tag}");
     }
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -208,8 +208,8 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
     };
     let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("chpw_post");
     let host_pattern = format!("{slug}.app.test");
@@ -226,7 +226,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
@@ -289,7 +289,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
     assert!(rustango::tenancy::password::verify("new-pw-secret", &stored).unwrap());
     assert!(!rustango::tenancy::password::verify("old-pw-secret", &stored).unwrap());
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -299,8 +299,8 @@ async fn change_password_post_rejects_wrong_current() {
     };
     let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("chpw_rej");
     let host_pattern = format!("{slug}.app.test");
@@ -317,7 +317,7 @@ async fn change_password_post_rejects_wrong_current() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("real-current").unwrap();
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
@@ -385,7 +385,7 @@ async fn change_password_post_rejects_wrong_current() {
             .unwrap();
     assert!(rustango::tenancy::password::verify("real-current", &stored).unwrap());
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// v0.28.4 (#77 follow-up) — sessions issued before the latest
@@ -402,8 +402,8 @@ async fn session_minted_before_password_rotation_is_rejected() {
     };
     let _g = live_lock().lock().await;
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("chpw_pwd_at");
     let host_pattern = format!("{slug}.app.test");
@@ -420,7 +420,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("starting-pw").unwrap();
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
@@ -507,7 +507,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
         "expected redirect to login, got: {loc}",
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Every `<input>` tag in `html` that takes a new password.

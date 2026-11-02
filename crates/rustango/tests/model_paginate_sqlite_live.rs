@@ -37,7 +37,7 @@ async fn seed(pool: &Pool, n: i32) {
             id: Auto::default(),
             title: format!("post-{i}"),
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

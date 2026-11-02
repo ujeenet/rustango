@@ -425,12 +425,12 @@ async fn fk_display_binds_the_target_pk_type(pool: &Pool) {
         code: UUID_A.into(),
         name: "Rust".into(),
     };
-    tag.insert_pool(pool).await.expect("tag");
+    tag.insert(pool).await.expect("tag");
     let mut pin = Pin {
         id: Auto::Unset,
         tag: ForeignKey::unloaded(UUID_A.to_owned()),
     };
-    pin.insert_pool(pool).await.expect("pin");
+    pin.insert(pool).await.expect("pin");
     let (status, body) = send(pool, Method::GET, "/pins", "").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body, "Rust;");
@@ -588,7 +588,7 @@ async fn update_view_restamps_auto_now(pool: &Pool) {
         created_at: Auto::Unset,
         updated_at: Auto::Unset,
     };
-    memo.insert_pool(pool).await.expect("seed");
+    memo.insert(pool).await.expect("seed");
     let id = *memo.id.get().expect("pk");
     let old = chrono::DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
         .unwrap()
@@ -876,7 +876,7 @@ async fn sqlite_bulk_action_skips_a_hidden_row_sharing_the_uuid() {
             name: "blob".into(),
             mine: text_is_hidden,
         };
-        blob.insert_pool(&pool).await.expect("blob row");
+        blob.insert(&pool).await.expect("blob row");
         SharedKey::objects()
             .without_global_scopes()
             .filter("name", "text")
@@ -910,7 +910,7 @@ async fn seed_story(pool: &Pool) -> i64 {
         featured: true,
         owner_id: Some(5),
     };
-    s.insert_pool(pool).await.expect("seed story");
+    s.insert(pool).await.expect("seed story");
     *s.id.get().expect("pk")
 }
 

@@ -91,7 +91,7 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         title: "root".into(),
         parent_id: None,
     };
-    root.save(&pool).await?;
+    root.save(&pool.clone().into()).await?;
     let root_id = match root.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("root id unset"),
@@ -102,13 +102,13 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         title: "child_a".into(),
         parent_id: Some(root_id),
     };
-    child_a.save(&pool).await?;
+    child_a.save(&pool.clone().into()).await?;
     let mut child_b = Page {
         id: Auto::Unset,
         title: "child_b".into(),
         parent_id: Some(root_id),
     };
-    child_b.save(&pool).await?;
+    child_b.save(&pool.clone().into()).await?;
     let child_b_id = match child_b.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("child_b id unset"),
@@ -119,7 +119,7 @@ async fn live_self_fk_round_trip() -> Result<(), Box<dyn std::error::Error>> {
         title: "grand".into(),
         parent_id: Some(child_b_id),
     };
-    grand.save(&pool).await?;
+    grand.save(&pool.clone().into()).await?;
 
     let mut root_children: Vec<Page> = Page::objects()
         .filter_op("parent_id", Op::Eq, root_id)

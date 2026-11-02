@@ -2321,7 +2321,10 @@ async fn legacy_pg_runner_body(pool: &Pool, pg: &rustango::sql::sqlx::PgPool, wh
             .unwrap();
         mig.atomic = atomic;
         chain.write(&mig);
-        runner.migrate(pg, chain.dir.path()).await.expect(why);
+        runner
+            .migrate(&pg.clone().into(), chain.dir.path())
+            .await
+            .expect(why);
     }
     exec(pool, "INSERT INTO {} ({}) VALUES (1)", &[a, "id"])
         .await
@@ -2335,7 +2338,7 @@ async fn legacy_pg_runner_body(pool: &Pool, pg: &rustango::sql::sqlx::PgPool, wh
     .unwrap();
     exec(pool, "DELETE FROM {}", &[a]).await.expect("CASCADE");
     runner
-        .unapply(pg, chain.dir.path(), &chain.head().name)
+        .unapply(&pg.clone().into(), chain.dir.path(), &chain.head().name)
         .await
         .expect("legacy unapply");
     exec(pool, "INSERT INTO {} ({}) VALUES (2)", &[a, "id"])

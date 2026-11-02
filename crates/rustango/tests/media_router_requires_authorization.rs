@@ -69,7 +69,7 @@ async fn manager() -> MediaManager {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    MediaManager::new_pool(pool_enum, registry)
+    MediaManager::new(pool_enum, registry)
 }
 
 /// Put one row in so a successful read would have something to return.

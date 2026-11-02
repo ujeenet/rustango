@@ -3199,134 +3199,6 @@ fn inherent_impl_tokens(
     manager_fns: &[syn::Ident],
 ) -> TokenStream2 {
     let root = rustango_root();
-    // Audit-emit fragments threaded into write paths. Non-empty only
-    // when the model carries `#[rustango(audit(...))]`. They reborrow
-    // `_executor` (a `&mut PgConnection` for audited models — the
-    // macro switches the signature below) so the data write and the
-    // audit INSERT both run on the same caller-supplied connection.
-    let executor_passes_to_data_write = if audited_fields.is_some() {
-        quote!(&mut *_executor)
-    } else {
-        quote!(_executor)
-    };
-    let executor_param = if audited_fields.is_some() {
-        quote!(_executor: &mut #root::sql::sqlx::PgConnection)
-    } else {
-        quote!(_executor: _E)
-    };
-    let executor_generics = if audited_fields.is_some() {
-        quote!()
-    } else {
-        quote!(<'_c, _E>)
-    };
-    let executor_where = if audited_fields.is_some() {
-        quote!()
-    } else {
-        quote! {
-            where
-                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
-        }
-    };
-    // Audited `_on` methods take `&mut PgConnection`; `&PgPool` is an Executor for the rest.
-    // One transaction: the before-image's FOR UPDATE must hold through
-    // the UPDATE and its audit row.
-    let pool_to_save_on = if audited_fields.is_some() {
-        // Any failure, COMMIT included, rolls the INSERT back: put the pk and
-        // stamps back too, or a retry takes the UPDATE path and writes nothing.
-        let restored: Vec<&syn::Ident> = primary_key
-            .map(|(pk, _)| pk)
-            .into_iter()
-            .chain(&fields.auto_now_idents)
-            .collect();
-        let prev: Vec<syn::Ident> = (0..restored.len())
-            .map(|i| quote::format_ident!("__rustango_save_prev_{}", i))
-            .collect();
-        quote! {
-            #( let #prev = ::core::clone::Clone::clone(&self.#restored); )*
-            let _saved: ::core::result::Result<u64, #root::sql::ExecError> = async {
-                let mut _tx = pool.begin().await?;
-                let _affected = self.save_on(&mut *_tx).await?;
-                _tx.commit().await?;
-                ::core::result::Result::Ok(_affected)
-            }
-            .await;
-            if _saved.is_err() {
-                #( self.#restored = #prev; )*
-            }
-            _saved
-        }
-    } else {
-        quote!(self.save_on(pool).await)
-    };
-    // One transaction so the write and its audit row commit together.
-    let pool_to_insert_on = if audited_fields.is_some() {
-        // A failed COMMIT leaves the RETURNING values on `self`; put them back.
-        let assigned: Vec<syn::Ident> = fields
-            .auto_field_idents
-            .iter()
-            .map(|(ident, _, _)| ident.clone())
-            .collect();
-        restore_auto_now_unless(
-            &assigned,
-            &quote!(::core::result::Result<(), #root::sql::ExecError>),
-            &quote!(_saved.is_ok()),
-            &quote! {
-                let mut _tx = pool.begin().await?;
-                self.insert_on(&mut *_tx).await?;
-                _tx.commit().await?;
-                ::core::result::Result::Ok(())
-            },
-        )
-    } else {
-        quote!(self.insert_on(pool).await)
-    };
-    let pool_to_delete_on = if audited_fields.is_some() {
-        quote! {
-            let mut _tx = pool.begin().await?;
-            let _affected = self.delete_on(&mut *_tx).await?;
-            _tx.commit().await?;
-            ::core::result::Result::Ok(_affected)
-        }
-    } else {
-        quote!(self.delete_on(pool).await)
-    };
-    // `bulk_insert_on` chunks past the bind cap itself; audited models
-    // still need a connection for the audit rows.
-    let pool_to_bulk_insert_on = if audited_fields.is_some() {
-        quote! {
-            let mut _tx = pool.begin().await?;
-            Self::bulk_insert_on(rows, &mut *_tx).await?;
-            _tx.commit().await?;
-            ::core::result::Result::Ok(())
-        }
-    } else {
-        quote!(Self::bulk_insert_on(rows, pool).await)
-    };
-    // `bulk_insert_on` takes anything it can acquire a connection from.
-    let bulk_executor_where = if audited_fields.is_some() {
-        quote!()
-    } else {
-        quote! {
-            where
-                _E: #root::sql::sqlx::Acquire<'_c, Database = #root::sql::sqlx::Postgres>,
-        }
-    };
-    // Pre-existing bug surfaced by batch 22's first audited Auto<T>
-    // PK test model: `upsert(&PgPool)` body called `self.upsert_on(pool)`
-    // directly, but `upsert_on` for audited models takes
-    // `&mut PgConnection` (the audit emit needs a real connection).
-    // Add the missing acquire shim to keep audited Auto-PK upsert
-    // compiling.
-    let pool_to_upsert_on = if audited_fields.is_some() {
-        quote! {
-            let mut _tx = pool.begin().await?;
-            self.upsert_on(&mut *_tx).await?;
-            _tx.commit().await?;
-            ::core::result::Result::Ok(())
-        }
-    } else {
-        quote!(self.upsert_on(pool).await)
-    };
 
     // `insert_pool(&Pool)` — v0.23.0-batch9. Non-audited models only
     // (audit-on-connection over &Pool needs a bi-dialect transaction
@@ -3361,7 +3233,6 @@ fn inherent_impl_tokens(
         quote!()
     } else if fields.has_auto {
         let pushes = &fields.insert_pushes;
-        let returning_cols = &fields.returning_cols;
         // A row not inserted was never saved, so a Rust-filled value must not stay (#1937).
         let filled = &fields.rust_filled_idents;
         let was_unset: Vec<syn::Ident> = filled
@@ -3394,29 +3265,7 @@ fn inherent_impl_tokens(
         // LAST_INSERT_ID round-trip.
         if fields.returning_cols.is_empty() {
             quote! {
-                /// Insert this row against either backend. Every
-                /// `Auto<T>` PK on this model is filled Rust-side
-                /// (e.g. `default_uuid_v7`) before binding, so no
-                /// RETURNING round-trip is needed.
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    );
-                    #root::sql::insert_pool(pool, &_query).await
-                }
+
 
                 /// Eloquent `Model::insertOrIgnore()` — same shape
                 /// as the auto-PK branch above. Returns `Ok(true)`
@@ -3434,31 +3283,7 @@ fn inherent_impl_tokens(
             }
         } else {
             quote! {
-                /// Insert this row against either backend, populating any
-                /// `Auto<T>` PK from the auto-assigned value.
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    )
-                    .returning(::std::vec![ #( #returning_cols ),* ]);
-                    let _result = #root::sql::insert_returning_pool(
-                        pool, &_query,
-                    ).await?;
-                    #root::sql::apply_auto_pk(_result, self)
-                }
+
 
                 /// Eloquent `Model::insertOrIgnore()` — INSERT this
                 /// row or silently skip on unique-constraint
@@ -3488,23 +3313,7 @@ fn inherent_impl_tokens(
         let insert_columns = &fields.insert_columns;
         let insert_values = &fields.insert_values;
         quote! {
-            /// Insert this row into its table against either backend.
-            /// Equivalent to [`Self::insert`] but takes
-            /// [`#root::sql::Pool`].
-            ///
-            /// # Errors
-            /// As [`Self::insert`].
-            pub async fn insert_pool(
-                &self,
-                pool: &#root::sql::Pool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #insert_columns ),* ],
-                    ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::insert_pool(pool, &_query).await
-            }
+
 
             /// Eloquent `Model::insertOrIgnore()` — INSERT this row
             /// or silently skip on unique-constraint violation. Maps
@@ -3754,35 +3563,6 @@ fn inherent_impl_tokens(
     let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
         .unwrap_or(#root::__serde_json::Value::Null));
     let restored_json = quote!(#root::__serde_json::Value::Null);
-    // `_on` emit; `affected` paths skip the row when nothing changed.
-    let make_op_emit =
-        |op_path: TokenStream2, written: Option<TokenStream2>, affected: bool| -> TokenStream2 {
-            if audited_fields.is_none() {
-                return quote!();
-            }
-            let entry = make_entry(op_path, written);
-            let emit = quote! {
-                #entry
-                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-            };
-            if affected {
-                quote!(if _affected > 0 { #emit })
-            } else {
-                emit
-            }
-        };
-    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create), None, false);
-    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete), None, true);
-    let audit_softdelete_emit = make_op_emit(
-        quote!(#root::audit::AuditOp::SoftDelete),
-        Some(soft_deleted_json.clone()),
-        true,
-    );
-    let audit_restore_emit = make_op_emit(
-        quote!(#root::audit::AuditOp::Restore),
-        Some(restored_json.clone()),
-        true,
-    );
     // `&Pool` update runner for soft_delete / restore: one tx with the
     // audit row when audited, a plain UPDATE otherwise.
     let make_pool_update = |op_path: TokenStream2, written: TokenStream2| -> TokenStream2 {
@@ -3952,7 +3732,6 @@ fn inherent_impl_tokens(
     };
     let pool_save_method = if let Some((pk_ident, pk_col)) = primary_key {
         let pk_column_lit = pk_col.as_str();
-        let assignments = &fields.update_assignments;
         if audited_fields.is_some() {
             quote!()
         } else {
@@ -3961,35 +3740,6 @@ fn inherent_impl_tokens(
                 pk_column_lit,
                 quote!(#root::sql::update_pool(pool, &_query).await),
             );
-            let dispatch_unset = if fields.pk_is_auto {
-                quote! {
-                    if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await.map(|()| 1u64);
-                    }
-                }
-            } else {
-                quote!()
-            };
-            let write = restore_auto_now_unless(
-                &fields.auto_now_idents,
-                &save_ret,
-                &save_keep,
-                &quote! {
-                    let _query = #root::core::UpdateQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        ::std::vec![ #( #assignments ),* ],
-                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                            #pk_column_lit,
-                            #root::core::Op::Eq,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        )),
-                    );
-                    let _affected = #root::sql::update_pool(pool, &_query).await?;
-                    ::core::result::Result::Ok(_affected)
-                },
-            );
             quote! {
                 /// Save this row to its table against either backend.
                 /// `INSERT` when the `Auto<T>` PK is `Unset`, else
@@ -3997,12 +3747,11 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::save`].
-                pub async fn save_pool(
+                pub async fn save(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    #dispatch_unset
-                    #write
+                    self.__rustango_save_exec(pool).await
                 }
 
                 #partial
@@ -4020,25 +3769,6 @@ fn inherent_impl_tokens(
     // PendingEntry's `changes` carries post-write field values).
     let pool_insert_method = if audited_fields.is_some() {
         if let Some(_) = primary_key {
-            let pushes = if fields.has_auto {
-                fields.insert_pushes.clone()
-            } else {
-                // For non-Auto-PK models, the macro normally builds
-                // {columns, values} from fields.insert_columns +
-                // fields.insert_values rather than insert_pushes.
-                // Map those into the pushes shape.
-                fields
-                    .insert_columns
-                    .iter()
-                    .zip(&fields.insert_values)
-                    .map(|(col, val)| {
-                        quote! {
-                            _columns.push(#col);
-                            _values.push(#val);
-                        }
-                    })
-                    .collect()
-            };
             // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
             let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
             {
@@ -4066,23 +3796,17 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::insert`].
-                pub async fn insert_pool(
+                pub async fn insert(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    )
-                    .returning(::std::vec![ #( #returning_cols ),* ]);
-                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
-                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
+                    let mut _query = self.__rustango_insert_query();
+                    // The audit row needs the PK even when Rust filled it.
+                    if _query.returning.is_empty() {
+                        _query.returning = ::std::vec![ #( #returning_cols ),* ];
+                    }
+                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self, _op| {
+                        _m.__rustango_audit_entry(_op)
                     })
                     .await
                 }
@@ -4178,7 +3902,7 @@ fn inherent_impl_tokens(
             let unset_dispatch = if fields.has_auto {
                 quote! {
                     if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await.map(|()| 1u64);
+                        return self.insert(pool).await.map(|()| 1u64);
                     }
                 }
             } else {
@@ -4219,7 +3943,7 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::save`].
-                pub async fn save_pool(
+                pub async fn save(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
@@ -4288,7 +4012,7 @@ fn inherent_impl_tokens(
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
-                    pub async fn delete_pool(
+                    pub async fn delete(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
@@ -4315,18 +4039,11 @@ fn inherent_impl_tokens(
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
-                    pub async fn delete_pool(
+                    pub async fn delete(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::DeleteQuery::by_pk(
-                            <Self as #root::core::Model>::SCHEMA,
-                            #pk_column_lit,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        );
-                        #root::sql::delete_pool(pool, &_query).await
+                        self.__rustango_delete_exec(pool).await
                     }
                 }
             }
@@ -6625,7 +6342,7 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok((_row, true));
                 }
                 let mut _new = fallback();
-                _new.save_pool(pool).await?;
+                _new.save(pool).await?;
                 ::core::result::Result::Ok((_new, false))
             }
 
@@ -6689,69 +6406,126 @@ fn inherent_impl_tokens(
         quote!()
     };
 
-    // `_tx` family — `insert_tx`, `save_tx`, `delete_tx`. These mirror
-    // the non-audited `_pool` methods but execute against an open
-    // `PoolTx` so the writes participate in the caller's transaction.
-    // Auditing inside TX is deferred; these always use the plain
-    // executor primitives regardless of whether the model is audited.
-    let tx_insert_method = if fields.has_auto {
-        let pushes = &fields.insert_pushes;
-        let returning_cols = &fields.returning_cols;
-        quote! {
-            /// Insert this row inside an open transaction, populating
-            /// any `Auto<T>` PK from the auto-assigned value. Works
-            /// against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::insert_pool`].
-            pub async fn insert_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #( #pushes )*
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
+    // `_tx` family: the shared `__rustango_*_exec` bodies on an open
+    // `PoolTx`; an audited model writes its snapshot entry in the same tx.
+    let tx_emit = |op: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() && primary_key.is_some() {
+            quote! {
+                #root::audit::__emit_many_tx(
+                    tx,
+                    &[self.__rustango_audit_entry(#root::audit::AuditOp::#op)],
                 )
-                .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
-                #root::sql::apply_auto_pk(_result, self)
+                .await?;
             }
+        } else {
+            quote!()
         }
-    } else {
-        let insert_columns = &fields.insert_columns;
-        let insert_values = &fields.insert_values;
+    };
+    let tx_insert_method = {
+        let self_ref = if fields.has_auto {
+            quote!(&mut self)
+        } else {
+            quote!(&self)
+        };
+        let emit = tx_emit(quote!(Create));
+        let refuse_pkless = if audited_fields.is_some() && primary_key.is_none() {
+            quote! {
+                return ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                });
+            }
+        } else {
+            quote!()
+        };
         quote! {
-            /// Insert this row inside an open transaction.
+            /// Insert this row inside an open transaction; an audited model
+            /// writes its audit row there too.
             ///
             /// # Errors
-            /// As [`Self::insert_pool`].
+            /// As [`Self::insert`].
+            #[allow(unreachable_code)]
             pub async fn insert_tx(
-                &self,
+                #self_ref,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #insert_columns ),* ],
-                    ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::insert_tx(tx, &_query).await
+                #refuse_pkless
+                self.__rustango_insert_exec(&mut *tx).await?;
+                #emit
+                ::core::result::Result::Ok(())
             }
         }
     };
+    let tx_save_method = if let Some((pk_ident, _)) = primary_key {
+        let emit_create = tx_emit(quote!(Create));
+        let emit_update = tx_emit(quote!(Update));
+        let was_unset = if fields.pk_is_auto {
+            quote!(matches!(self.#pk_ident, #root::sql::Auto::Unset))
+        } else {
+            quote!(false)
+        };
+        quote! {
+            /// Save this row inside an open transaction; an audited model
+            /// writes its audit row there too.
+            ///
+            /// # Errors
+            /// As [`Self::save`].
+            pub async fn save_tx(
+                &mut self,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _was_unset = #was_unset;
+                let _n = self.__rustango_save_exec(&mut *tx).await?;
+                if _n > 0 {
+                    if _was_unset {
+                        #emit_create
+                    } else {
+                        #emit_update
+                    }
+                }
+                ::core::result::Result::Ok(_n)
+            }
+        }
+    } else {
+        quote!()
+    };
+    let tx_delete_method = if primary_key.is_some() {
+        let emit = tx_emit(quote!(Delete));
+        quote! {
+            /// Delete this row inside an open transaction; an audited model
+            /// writes its audit row there too.
+            ///
+            /// # Errors
+            /// As [`Self::delete`].
+            pub async fn delete_tx(
+                &self,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _n = self.__rustango_delete_exec(&mut *tx).await?;
+                if _n > 0 {
+                    #emit
+                }
+                ::core::result::Result::Ok(_n)
+            }
+        }
+    } else {
+        quote!()
+    };
 
-    let tx_save_method = if let Some((pk_ident, pk_col)) = primary_key {
-        let pk_column_lit = pk_col.as_str();
+    // The one statement-level write path: `_on` (refusing audited models)
+    // and `_tx` share these `__rustango_*_exec` bodies; non-audited `&Pool`
+    // methods forward to them too.
+    let refuse = |method: &str| -> TokenStream2 {
+        let reason = format!("`{method}` cannot audit; use the `&Pool` method");
+        quote!(#root::sql::__macro_internals::refuse_audited::<Self>(#reason)?;)
+    };
+    let refuse_save = refuse("save_on");
+    let save_method = if let Some((pk_ident, pk_column)) = primary_key {
+        let pk_column_lit = pk_column.as_str();
         let assignments = &fields.update_assignments;
         let dispatch_unset = if fields.pk_is_auto {
             quote! {
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                    return self.insert_tx(tx).await.map(|()| 1u64);
+                    return self.__rustango_insert_exec(_executor).await.map(|()| 1u64);
                 }
             }
         } else {
@@ -6773,380 +6547,165 @@ fn inherent_impl_tokens(
                         ),
                     )),
                 );
-                let _affected = #root::sql::update_tx(tx, &_query).await?;
-                ::core::result::Result::Ok(_affected)
+                #root::sql::__macro_internals::update_on(_executor, &_query).await
             },
         );
-        quote! {
-            /// Save this row inside an open transaction. `INSERT` when
-            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
-            /// PK. Works against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::save_pool`].
-            pub async fn save_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #dispatch_unset
-                #write
-            }
-        }
-    } else {
-        quote!()
-    };
-
-    let tx_delete_method = {
-        let pk_column_lit = primary_key.map(|(_, col)| col.as_str()).unwrap_or("id");
-        let pk_ident_for_tx = primary_key.map(|(ident, _)| ident);
-        if let Some(pk_ident) = pk_ident_for_tx {
+        let upsert = if fields.pk_is_auto {
+            let upsert_cols = &fields.upsert_update_columns;
+            let upsert_pushes = &fields.insert_pushes;
+            let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
+                fields.uuid_v7_fields.iter().cloned().unzip();
+            let upsert_returning = &fields.returning_cols;
+            let auto_now_idents = &fields.auto_now_idents;
+            // Prefer the first `unique_together`: a server-assigned PK never
+            // collides, so a PK-only target would always insert.
+            let upsert_target_columns: Vec<String> =
+                upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
+            let upsert_target_lits = upsert_target_columns
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let conflict_clause = if fields.upsert_update_columns.is_empty() {
+                quote!(#root::core::ConflictClause::DoNothing)
+            } else {
+                quote!(#root::core::ConflictClause::DoUpdate {
+                    target: ::std::vec![ #( #upsert_target_lits ),* ],
+                    update_columns: ::std::vec![ #( #upsert_cols ),* ],
+                })
+            };
+            let unit_ret = quote!(::core::result::Result<(), #root::sql::ExecError>);
+            let unit_keep = quote!(_saved.is_ok());
+            let exec_body = restore_auto_now_unless(
+                auto_now_idents,
+                &unit_ret,
+                &unit_keep,
+                &quote! {
+                    let _query = self.__rustango_upsert_query();
+                    let _row = #root::sql::__macro_internals::insert_returning_on(
+                        _executor, &_query,
+                    )
+                    .await?;
+                    #root::sql::apply_auto_pk(_row, self)
+                },
+            );
+            let pool_body = if audited_fields.is_some() {
+                restore_auto_now_unless(
+                    auto_now_idents,
+                    &unit_ret,
+                    &unit_keep,
+                    &quote! {
+                        let _query = self.__rustango_upsert_query();
+                        #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self, _op| {
+                            _m.__rustango_audit_entry(_op)
+                        })
+                        .await
+                    },
+                )
+            } else {
+                quote!(self.__rustango_upsert_exec(pool).await)
+            };
+            let refuse_upsert = refuse("upsert_on");
             quote! {
-                /// Delete the row identified by this instance's PK
-                /// inside an open transaction. Works against any backend
-                /// that `tx` wraps.
+                /// Insert this row, or update the row it conflicts with: one
+                /// `INSERT … ON CONFLICT` (MySQL: `ON DUPLICATE KEY UPDATE`).
+                /// The target is the first `unique_together`, else the PK.
+                /// Fills the `Auto<T>` fields from the written row.
                 ///
                 /// # Errors
-                /// As [`Self::delete_pool`].
-                pub async fn delete_tx(
-                    &self,
-                    tx: &mut #root::sql::PoolTx<'_>,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::DeleteQuery::by_pk(
+                /// As [`Self::insert`].
+                pub async fn upsert(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #pool_body
+                }
+
+                /// [`Self::upsert`] on any [`#root::sql::SqlExecutor`]. An
+                /// audited model refuses it: use [`Self::upsert`].
+                ///
+                /// # Errors
+                /// As [`Self::upsert`].
+                pub async fn upsert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                    &mut self,
+                    _executor: _E,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #refuse_upsert
+                    self.__rustango_upsert_exec(_executor).await
+                }
+
+                #[doc(hidden)]
+                pub async fn __rustango_upsert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                    &mut self,
+                    _executor: _E,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #exec_body
+                }
+
+                /// The upsert statement; stamps `auto_now` like `save`.
+                #[doc(hidden)]
+                pub fn __rustango_upsert_query(&mut self) -> #root::core::InsertQuery {
+                    let mut _columns: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #[allow(unused_mut)]
+                    let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                    #(
+                        if matches!(&self.#gen_idents, #root::sql::Auto::Unset) {
+                            _generated.push(#gen_cols);
+                        }
+                    )*
+                    #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
+                    #( #upsert_pushes )*
+                    #root::core::InsertQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
-                        #pk_column_lit,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    );
-                    #root::sql::delete_tx(tx, &_query).await
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #upsert_returning ),* ])
+                    .on_conflict(#conflict_clause)
+                    .generated(_generated)
                 }
             }
         } else {
             quote!()
-        }
-    };
-
-    // Update emission captures both BEFORE and AFTER state — runs an
-    // extra SELECT against `_executor` BEFORE the UPDATE, captures
-    // each tracked field's prior value, then after the UPDATE diffs
-    // against the in-memory `&self`. `diff_changes` drops unchanged
-    // columns so the JSON only contains the actual delta.
-    //
-    // Two-fragment shape: `audit_update_pre` runs before the UPDATE
-    // and binds `_audit_before_pairs`; `audit_update_post` runs
-    // after the UPDATE and emits the PendingEntry.
-    let (audit_update_pre, audit_update_post): (TokenStream2, TokenStream2) = if let Some(tracked) =
-        audited_fields
-    {
-        if tracked.is_empty() {
-            (quote!(), quote!())
-        } else {
-            let tracked_cols: Vec<&str> = tracked.iter().map(|c| c.column.as_str()).collect();
-            let pk_column_lit_for_select =
-                primary_key.map(|(_, col)| col.clone()).unwrap_or_default();
-            let pk_value_for_bind = if let Some((pk_ident, _)) = primary_key {
-                if fields.pk_is_auto {
-                    quote!(self.#pk_ident.get().copied().unwrap_or_default())
-                } else {
-                    quote!(::core::clone::Clone::clone(&self.#pk_ident))
-                }
-            } else {
-                quote!(0_i64)
-            };
-            let before_pairs = tracked.iter().map(|c| {
-                let column_lit = c.column.as_str();
-                let value_ty = &c.value_ty;
-                quote! {
-                    (
-                        #column_lit,
-                        match #root::sql::sqlx::Row::try_get::<#value_ty, _>(
-                            &_audit_before_row, #column_lit,
-                        ) {
-                            ::core::result::Result::Ok(v) => #root::core::__json_value(&v),
-                            ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
-                        },
-                    )
-                }
-            });
-            let pre = quote! {
-                let _audit_before_query = #root::audit::before_image_query(
-                    <Self as #root::core::Model>::SCHEMA,
-                    #pk_column_lit_for_select,
-                    ::core::convert::Into::<#root::core::SqlValue>::into(#pk_value_for_bind),
-                    &[ #( #tracked_cols ),* ],
-                );
-                // A failed pre-read must not let the UPDATE run unaudited (#1907).
-                let _audit_before_pairs:
-                    ::std::option::Option<::std::vec::Vec<(&'static str, #root::__serde_json::Value)>> =
-                    #root::sql::select_rows_on(&mut *_executor, &_audit_before_query)
-                        .await?
-                        .into_iter()
-                        .next()
-                        .map(|_audit_before_row| ::std::vec![ #( #before_pairs ),* ]);
-            };
-            let post = quote! {
-                if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
-                    let _audit_after = self.__rustango_audit_pairs();
-                    if let ::core::option::Option::Some(_audit_entry) =
-                        #root::audit::PendingEntry::update_diff(
-                            <Self as #root::core::Model>::SCHEMA.table,
-                            self.__rustango_audit_pk(),
-                            &_audit_before,
-                            &_audit_after,
-                        )
-                    {
-                        #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-                    }
-                }
-            };
-            (pre, post)
-        }
-    } else {
-        (quote!(), quote!())
-    };
-
-    // Bulk-insert audit: one `Create` entry per row once RETURNING has
-    // set its PK, written in one batched INSERT.
-    let audit_bulk_insert_emit: TokenStream2 = if audited_fields.is_some() {
-        quote! {
-            let _audit_entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
-                .iter()
-                .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
-                .collect();
-            #root::audit::emit_many(&mut *_executor, &_audit_entries).await?;
-        }
-    } else {
-        quote!()
-    };
-
-    let save_method = if fields.pk_is_auto {
-        let (pk_ident, pk_column) = primary_key.expect("pk_is_auto implies primary_key is Some");
-        let pk_column_lit = pk_column.as_str();
-        let assignments = &fields.update_assignments;
-        let upsert_cols = &fields.upsert_update_columns;
-        let upsert_pushes = &fields.insert_pushes;
-        // Read before the pushes, which fill each unset id.
-        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
-            fields.uuid_v7_fields.iter().cloned().unzip();
-        let upsert_returning = &fields.returning_cols;
-        let upsert_auto_assigns = &fields.auto_assigns;
-        let auto_now_idents = &fields.auto_now_idents;
-        // Conflict target: prefer the first declared `unique_together`
-        // when it exists. Plain `Auto<T>` PKs are server-assigned via
-        // `BIGSERIAL` and never collide on insert, so a PK-only target
-        // would silently turn `upsert()` into "always-insert" for
-        // surrogate-PK models with composite UNIQUE constraints — see
-        // `RolePermission` / `UserRole` / `UserPermission` in the
-        // tenancy permission engine. When no `unique_together` is
-        // declared we keep the PK target (the original behaviour).
-        let upsert_target_columns: Vec<String> =
-            upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
-        let upsert_target_lits = upsert_target_columns
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let conflict_clause = if fields.upsert_update_columns.is_empty() {
-            quote!(#root::core::ConflictClause::DoNothing)
-        } else {
-            quote!(#root::core::ConflictClause::DoUpdate {
-                target: ::std::vec![ #( #upsert_target_lits ),* ],
-                update_columns: ::std::vec![ #( #upsert_cols ),* ],
-            })
         };
-        // Audited: the upsert reports whether it inserted or updated (#1795).
-        let (upsert_run, audit_upsert_emit) = if audited_fields.is_some() {
-            (
-                quote! {
-                    let (_returning_row_v, _audit_op) =
-                        #root::audit::upsert_returning_on(&mut *_executor, &query).await?;
-                },
-                quote! {
-                    let _audit_entry = self.__rustango_audit_entry(_audit_op);
-                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-                },
-            )
-        } else {
-            (
-                quote! {
-                    let _returning_row_v =
-                        #root::sql::__macro_internals::insert_returning_on(_executor, &query)
-                            .await?;
-                },
-                quote!(),
-            )
-        };
-        let save_on_write = restore_auto_now_unless(
-            auto_now_idents,
-            &save_ret,
-            &save_keep,
-            &quote! {
-                #audit_update_pre
-                let _query = #root::core::UpdateQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #assignments ),* ],
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        #pk_column_lit,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    )),
-                );
-                let _affected = #root::sql::__macro_internals::update_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #audit_update_post
-                ::core::result::Result::Ok(_affected)
-            },
-        );
-        let upsert_write = restore_auto_now_unless(
-            auto_now_idents,
-            &quote!(::core::result::Result<(), #root::sql::ExecError>),
-            &quote!(_saved.is_ok()),
-            &quote! {
-                // The UPDATE branch writes `auto_now` too, so stamp it like `save`.
-                #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
-                #( #upsert_pushes )*
-                let query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
-                )
-                .returning(::std::vec![ #( #upsert_returning ),* ])
-                .on_conflict(#conflict_clause)
-                .generated(_generated);
-                #upsert_run
-                let _returning_row = &_returning_row_v;
-                #( #upsert_auto_assigns )*
-                #audit_upsert_emit
-                ::core::result::Result::Ok(())
-            },
-        );
         Some(quote! {
-            /// Insert this row if its `Auto<T>` primary key is
-            /// `Unset`, otherwise update the existing row matching the
-            /// PK. The caller doesn't need to pick `insert` vs the
-            /// bulk-update path manually.
-            ///
-            /// On the insert branch, populates the PK from `RETURNING`
-            /// (same behavior as `insert`). On the update branch,
-            /// writes every non-PK column back; if no row matches the
-            /// PK, returns `Ok(())` silently.
-            ///
-            /// Only generated when the primary key is declared as
-            /// `Auto<T>`. Models with a manually-managed PK must use
-            /// `insert` or the QuerySet update builder.
-            ///
-            /// **Postgres only — prefer [`Self::save_pool`].** This takes a
-            /// driver-specific `PgPool`, so it does not exist at all on a
-            /// build without the `postgres` feature: selecting `sqlite`
-            /// makes the method vanish rather than fail with anything that
-            /// names the cause.
-            ///
-            /// [`Self::save_pool`] takes `rustango::sql::Pool` and works on
-            /// all three backends. The naming is inverted — the short name
-            /// is the narrow one — and that is tracked in #1293.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing
-            /// or driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn save(
-                &mut self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #pool_to_save_on
-            }
-
-            /// Like [`Self::save`] but accepts any sqlx executor —
-            /// `&PgPool`, `&mut PgConnection`, or a transaction. The
-            /// escape hatch for tenant-scoped writes: schema-mode
-            /// tenants share the registry pool but rely on a per-
-            /// checkout `SET search_path`, so passing `&PgPool` would
-            /// silently hit the wrong schema. Acquire a connection
-            /// via `TenantPools::acquire(&org)` and pass `&mut *conn`.
+            /// [`Self::save`] on any [`#root::sql::SqlExecutor`]: a held
+            /// `PoolConn`, a `PoolTx`, a tenant connection or a Postgres sqlx
+            /// executor. An audited model refuses it: use [`Self::save`].
             ///
             /// # Errors
             /// As [`Self::save`].
-            #[cfg(feature = "postgres")]
-            pub async fn save_on #executor_generics (
+            pub async fn save_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &mut self,
-                #executor_param,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                // #1029 — INSERT writes exactly one row → 1; UPDATE returns
-                // the rows-affected count (0 when the PK no longer exists).
-                if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                    return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
-                }
-                #save_on_write
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #refuse_save
+                self.__rustango_save_exec(_executor).await
             }
 
-            /// Per-call override for the audit source. Runs
-            /// [`Self::save_on`] inside an [`#root::audit::with_source`]
-            /// scope so the resulting audit entry records `source`
-            /// instead of the task-local default. Useful for seed
-            /// scripts and one-off CLI tools that don't sit inside an
-            /// admin handler. The override applies only to this call;
-            /// no global state changes.
-            ///
-            /// # Errors
-            /// As [`Self::save_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn save_on_with #executor_generics (
+            #[doc(hidden)]
+            pub async fn __rustango_save_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &mut self,
-                #executor_param,
-                source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                #root::audit::with_source(source, self.save_on(_executor)).await
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #dispatch_unset
+                #write
             }
 
-            /// Insert this row or update it in-place if the primary key already
-            /// exists — single round-trip via `INSERT … ON CONFLICT (pk) DO UPDATE`.
-            ///
-            /// With `Auto::Unset` PK the server assigns a new key and no conflict
-            /// can occur (equivalent to `insert`). With `Auto::Set` PK the row is
-            /// inserted if absent or all non-PK columns are overwritten if present.
+            /// Old name of [`Self::save`].
             ///
             /// # Errors
-            /// As [`Self::insert_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn upsert(
+            /// As [`Self::save`].
+            #[deprecated(since = "0.62.0", note = "use `save`")]
+            pub async fn save_pool(
                 &mut self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_upsert_on
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                self.save(pool).await
             }
 
-            /// Like [`Self::upsert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
-            ///
-            /// # Errors
-            /// As [`Self::upsert`].
-            #[cfg(feature = "postgres")]
-            pub async fn upsert_on #executor_generics (
-                &mut self,
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #[allow(unused_mut)]
-                let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
-                #(
-                    if matches!(&self.#gen_idents, #root::sql::Auto::Unset) {
-                        _generated.push(#gen_cols);
-                    }
-                )*
-                #upsert_write
-            }
+            #upsert
         })
     } else {
         None
@@ -7154,6 +6713,7 @@ fn inherent_impl_tokens(
 
     let pk_methods = primary_key.map(|(pk_ident, pk_column)| {
         let pk_column_lit = pk_column.as_str();
+        let refuse_delete = refuse("delete_on");
         // Optional `soft_delete_on` / `restore_on` companions when the
         // model has a `#[rustango(soft_delete)]` column. They land
         // alongside the regular `delete_on` so callers have both
@@ -7166,23 +6726,20 @@ fn inherent_impl_tokens(
                 .soft_delete_field_ident
                 .clone()
                 .expect("soft_delete_column without ident");
+            let refuse_soft_delete = refuse("soft_delete_on");
+            let refuse_restore = refuse("restore_on");
             quote! {
-                /// Soft-delete this row by setting its
-                /// `#[rustango(soft_delete)]` column to `NOW()`.
-                /// The row stays in the table; query helpers can
-                /// filter it out by checking the column for `IS NOT
-                /// NULL`.
+                /// Soft-delete this row on any [`#root::sql::SqlExecutor`]: set
+                /// its `#[rustango(soft_delete)]` column to now. An audited
+                /// model refuses it: use [`Self::soft_delete`].
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
-                #[cfg(feature = "postgres")]
-                pub async fn soft_delete_on #executor_generics (
+                pub async fn soft_delete_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
-                    #executor_param,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError>
-                #executor_where
-                {
-                    let _now = #root::__chrono::Utc::now();
+                    _executor: _E,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    #refuse_soft_delete
                     let _query = #root::soft_delete::__mark_query(
                         <Self as #root::core::Model>::SCHEMA,
                         #col_lit,
@@ -7190,29 +6747,21 @@ fn inherent_impl_tokens(
                         ::core::convert::Into::<#root::core::SqlValue>::into(
                             ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                        ::core::option::Option::Some(_now),
+                        ::core::option::Option::Some(#root::__chrono::Utc::now()),
                     );
-                    let _affected = #root::sql::__macro_internals::update_on(
-                        #executor_passes_to_data_write,
-                        &_query,
-                    ).await?;
-                    #audit_softdelete_emit
-                    ::core::result::Result::Ok(_affected)
+                    #root::sql::__macro_internals::update_on(_executor, &_query).await
                 }
 
-                /// Inverse of [`Self::soft_delete_on`] — clears the
-                /// soft-delete column back to NULL so the row is
-                /// considered live again.
+                /// Inverse of [`Self::soft_delete_on`]: clear the soft-delete
+                /// column. An audited model refuses it: use [`Self::restore`].
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
-                #[cfg(feature = "postgres")]
-                pub async fn restore_on #executor_generics (
+                pub async fn restore_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
-                    #executor_param,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError>
-                #executor_where
-                {
+                    _executor: _E,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    #refuse_restore
                     let _query = #root::soft_delete::__mark_query(
                         <Self as #root::core::Model>::SCHEMA,
                         #col_lit,
@@ -7222,12 +6771,7 @@ fn inherent_impl_tokens(
                         ),
                         ::core::option::Option::None,
                     );
-                    let _affected = #root::sql::__macro_internals::update_on(
-                        #executor_passes_to_data_write,
-                        &_query,
-                    ).await?;
-                    #audit_restore_emit
-                    ::core::result::Result::Ok(_affected)
+                    #root::sql::__macro_internals::update_on(_executor, &_query).await
                 }
 
                 /// Tri-dialect counterpart of [`Self::soft_delete_on`]
@@ -7303,7 +6847,7 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    Self::delete_pool(self, pool).await
+                    Self::delete(self, pool).await
                 }
 
                 /// Returns `true` when this row is soft-deleted (its
@@ -7400,70 +6944,49 @@ fn inherent_impl_tokens(
             quote!()
         };
         quote! {
-            /// Delete the row identified by this instance's primary key.
-            ///
-            /// Returns the number of rows affected (0 or 1).
-            ///
-            /// **Postgres only — prefer [`Self::delete_pool`].** This takes
-            /// a driver-specific `PgPool`, so it does not exist on a build
-            /// without the `postgres` feature. [`Self::delete_pool`] takes
-            /// `rustango::sql::Pool` and works on all three. The naming is
-            /// inverted; tracked in #1293.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing or
-            /// driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn delete(
-                &self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #pool_to_delete_on
-            }
 
-            /// Like [`Self::delete`] but accepts any sqlx executor —
-            /// for tenant-scoped deletes against an explicitly-acquired
-            /// connection. See [`Self::save_on`] for the rationale.
+
+            /// [`Self::delete`] on any [`#root::sql::SqlExecutor`]. An audited
+            /// model refuses it: use [`Self::delete`].
             ///
             /// # Errors
             /// As [`Self::delete`].
-            #[cfg(feature = "postgres")]
-            pub async fn delete_on #executor_generics (
+            pub async fn delete_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &self,
-                #executor_param,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                let query = #root::core::DeleteQuery::by_pk(
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #refuse_delete
+                self.__rustango_delete_exec(_executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_delete_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                &self,
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _query = #root::core::DeleteQuery::by_pk(
                     <Self as #root::core::Model>::SCHEMA,
                     #pk_column_lit,
                     ::core::convert::Into::<#root::core::SqlValue>::into(
                         ::core::clone::Clone::clone(&self.#pk_ident)
                     ),
                 );
-                let _affected = #root::sql::__macro_internals::delete_on(
-                    #executor_passes_to_data_write,
-                    &query,
-                ).await?;
-                #audit_delete_emit
-                ::core::result::Result::Ok(_affected)
+                #root::sql::__macro_internals::delete_on(_executor, &_query).await
             }
 
-            /// Per-call audit-source override for [`Self::delete_on`].
-            /// See [`Self::save_on_with`] for shape rationale.
+            /// Old name of [`Self::delete`].
             ///
             /// # Errors
-            /// As [`Self::delete_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn delete_on_with #executor_generics (
+            /// As [`Self::delete`].
+            #[deprecated(since = "0.62.0", note = "use `delete`")]
+            pub async fn delete_pool(
                 &self,
-                #executor_param,
-                source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                #root::audit::with_source(source, self.delete_on(_executor)).await
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                self.delete(pool).await
             }
+
+
             #pool_delete_method
             #pool_insert_method
             #audit_entry_method
@@ -7507,151 +7030,203 @@ fn inherent_impl_tokens(
         }
     });
 
+    let refuse_insert = refuse("insert_on");
+    // The audited `insert` is built with the PK methods; an audited model
+    // without a PK has no row to name, so its insert refuses.
+    let audited_insert = audited_fields.is_some() && primary_key.is_some();
+    let insert_pool_body = if audited_fields.is_some() {
+        quote! {
+            ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                table: <Self as #root::core::Model>::SCHEMA.table,
+            })
+        }
+    } else {
+        quote!(self.__rustango_insert_exec(pool).await)
+    };
+    let plain_insert_auto = if audited_insert {
+        quote!()
+    } else {
+        quote! {
+            /// Insert this row on any backend, reading each `Auto` field
+            /// back from the written row.
+            ///
+            /// # Errors
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or driver failures.
+            pub async fn insert(
+                &mut self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #insert_pool_body
+            }
+        }
+    };
+    let plain_insert_plain = if audited_insert {
+        quote!()
+    } else {
+        quote! {
+            /// Insert this row on any backend.
+            ///
+            /// # Errors
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or driver failures.
+            pub async fn insert(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #insert_pool_body
+            }
+        }
+    };
     let insert_method = if fields.has_auto {
         let pushes = &fields.insert_pushes;
         let returning_cols = &fields.returning_cols;
-        let auto_assigns = &fields.auto_assigns;
         quote! {
-            /// Insert this row into its table. Skips columns whose
-            /// `Auto<T>` value is `Unset` so Postgres' SERIAL/BIGSERIAL
-            /// sequence fills them in, then reads each `Auto` column
-            /// back via `RETURNING` and stores it on `self`.
-            ///
-            /// **Postgres only — prefer [`Self::insert_pool`].** This takes
-            /// a driver-specific `PgPool`, so it does not exist on a build
-            /// without the `postgres` feature. [`Self::insert_pool`] takes
-            /// `rustango::sql::Pool` and works on all three. The naming is
-            /// inverted; tracked in #1293.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing or
-            /// driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn insert(
-                &mut self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_insert_on
-            }
-
-            /// Like [`Self::insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            #plain_insert_auto
+            /// [`Self::insert`] on any [`#root::sql::SqlExecutor`]. An audited
+            /// model refuses it: use [`Self::insert`].
             ///
             /// # Errors
             /// As [`Self::insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn insert_on #executor_generics (
+            pub async fn insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &mut self,
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_insert
+                self.__rustango_insert_exec(_executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                &mut self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                let _query = self.__rustango_insert_query();
+                // Every `Auto` filled Rust-side: nothing to read back.
+                if _query.returning.is_empty() {
+                    return #root::sql::__macro_internals::insert_on(_executor, &_query).await;
+                }
+                let _row = #root::sql::__macro_internals::insert_returning_on(
+                    _executor, &_query,
+                )
+                .await?;
+                #root::sql::apply_auto_pk(_row, self)
+            }
+
+            /// The INSERT for this row; fills Rust-side `Auto` values first.
+            #[doc(hidden)]
+            pub fn __rustango_insert_query(&mut self) -> #root::core::InsertQuery {
+                let mut _columns: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                let mut _values: ::std::vec::Vec<#root::core::SqlValue> = ::std::vec::Vec::new();
                 #( #pushes )*
-                let query = #root::core::InsertQuery::new(
+                #root::core::InsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
                     _values,
                 )
-                .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
-                    #executor_passes_to_data_write,
-                    &query,
-                ).await?;
-                let _returning_row = &_returning_row_v;
-                #( #auto_assigns )*
-                #audit_insert_emit
-                ::core::result::Result::Ok(())
+                .returning(::std::vec![ #( #returning_cols ),* ])
             }
 
-            /// Per-call audit-source override for [`Self::insert_on`].
-            /// See [`Self::save_on_with`] for shape rationale.
+            /// Old name of [`Self::insert`].
             ///
             /// # Errors
-            /// As [`Self::insert_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn insert_on_with #executor_generics (
+            /// As [`Self::insert`].
+            #[deprecated(since = "0.62.0", note = "use `insert`")]
+            pub async fn insert_pool(
                 &mut self,
-                #executor_param,
-                source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
-                #root::audit::with_source(source, self.insert_on(_executor)).await
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                self.insert(pool).await
             }
         }
     } else {
         let insert_columns = &fields.insert_columns;
         let insert_values = &fields.insert_values;
+        // The audited `insert` takes `&mut self` for its audit helper.
+        let pool_self = if audited_fields.is_some() {
+            quote!(&mut self)
+        } else {
+            quote!(&self)
+        };
         quote! {
-            /// Insert this row into its table.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing or
-            /// driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn insert(
-                &self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                self.insert_on(pool).await
-            }
-
-            /// Like [`Self::insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            #plain_insert_plain
+            /// [`Self::insert`] on any [`#root::sql::SqlExecutor`]. An audited
+            /// model refuses it: use [`Self::insert`].
             ///
             /// # Errors
             /// As [`Self::insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn insert_on<'_c, _E>(
+            pub async fn insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &self,
                 _executor: _E,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            where
-                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
-            {
-                let query = #root::core::InsertQuery::new(
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_insert
+                self.__rustango_insert_exec(_executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                &self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #root::sql::__macro_internals::insert_on(_executor, &self.__rustango_insert_query())
+                    .await
+            }
+
+            /// The INSERT for this row.
+            #[doc(hidden)]
+            pub fn __rustango_insert_query(&self) -> #root::core::InsertQuery {
+                #root::core::InsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #insert_columns ),* ],
                     ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::__macro_internals::insert_on(_executor, &query).await
+                )
+            }
+
+            /// Old name of [`Self::insert`].
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            #[deprecated(since = "0.62.0", note = "use `insert`")]
+            pub async fn insert_pool(
+                #pool_self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                self.insert(pool).await
             }
         }
     };
 
+    // `bulk_insert(&Pool)`: audited models write their rows and one
+    // `Create` entry each in one transaction.
+    let bulk_pool_body = if audited_fields.is_some() {
+        quote! {
+            let mut _tx = #root::sql::write_transaction(pool).await?;
+            Self::__rustango_bulk_insert_exec(rows, &mut _tx).await?;
+            // MySQL has no RETURNING: a database-filled PK stays unset.
+            if rows.iter().any(|_row| _row.__rustango_audit_pk().is_empty()) {
+                return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                    reason: "MySQL has no RETURNING to read the written rows",
+                });
+            }
+            let _entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
+                .iter()
+                .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
+                .collect();
+            #root::audit::__emit_many_tx(&mut _tx, &_entries).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
+        }
+    } else {
+        quote!(Self::__rustango_bulk_insert_exec(rows, pool).await)
+    };
+    let refuse_bulk = refuse("bulk_insert_on");
     let bulk_insert_method = if fields.has_auto {
         let cols_no_auto = &fields.bulk_columns_no_auto;
         let cols_all = &fields.bulk_columns_all;
         let pushes_no_auto = &fields.bulk_pushes_no_auto;
         let pushes_all = &fields.bulk_pushes_all;
         let returning_cols = &fields.returning_cols;
-        let auto_assigns_for_row = bulk_auto_assigns_for_row(fields);
         let uniformity = &fields.bulk_auto_uniformity;
         let fill_in_place = &fields.bulk_fill_in_place;
-        // Nothing to read back when every Auto field is filled Rust-side (#1934).
-        let read_back = if fields.returning_cols.is_empty() {
-            quote!()
-        } else {
-            quote! {
-                if _returned.len() != rows.len() {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Sql(
-                            #root::sql::SqlError::BulkInsertReturningMismatch {
-                                expected: rows.len(),
-                                actual: _returned.len(),
-                            }
-                        )
-                    );
-                }
-                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
-                    #auto_assigns_for_row
-                }
-            }
-        };
         // The DB-filled `Auto` picks the path; Rust-filled ones fill per row (#1950).
         let first_auto_ident = fields
             .first_db_auto
@@ -7660,40 +7235,40 @@ fn inherent_impl_tokens(
             .or(fields.first_auto_ident.as_ref())
             .expect("has_auto implies first_auto_ident is Some");
         quote! {
-            /// Bulk-insert `rows`: one statement, or one per chunk in a
-            /// transaction past the bind cap. Every row's
-            /// `Auto<T>` PK fields must uniformly be `Auto::Unset`
-            /// (sequence fills them in) or uniformly `Auto::Set(_)`
-            /// (caller-supplied values). Mixed Set/Unset is rejected
-            /// — call `insert` per row for that case.
-            ///
-            /// Empty slice is a no-op. Each row's `Auto` fields are
-            /// populated from the `RETURNING` clause in input order
-            /// before this returns.
+            /// Bulk-insert `rows`: one statement, or one per chunk in one
+            /// transaction past the bind cap. Every row's `Auto<T>` PK must
+            /// be `Auto::Unset` (the database fills it) or every one `Set`.
+            /// Each row's `Auto` fields are read back from `RETURNING`; MySQL
+            /// has none, so it leaves them unset. An empty slice is a no-op.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, mixed-Auto rejection, or driver failures.
-            #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &mut [Self],
-                pool: &#root::sql::sqlx::PgPool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_on
+                #bulk_pool_body
             }
 
-            /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            /// [`Self::bulk_insert`] on any [`#root::sql::SqlExecutor`]. An
+            /// audited model refuses it: use [`Self::bulk_insert`].
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn bulk_insert_on #executor_generics (
+            pub async fn bulk_insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 rows: &mut [Self],
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #bulk_executor_where
-            {
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_bulk
+                Self::__rustango_bulk_insert_exec(rows, _executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_bulk_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                rows: &mut [Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7705,7 +7280,6 @@ fn inherent_impl_tokens(
                 for _row in rows.iter_mut() {
                     #( #fill_in_place )*
                 }
-
                 let mut _all_rows: ::std::vec::Vec<
                     ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
@@ -7726,19 +7300,28 @@ fn inherent_impl_tokens(
                     }
                     ::std::vec![ #( #cols_all ),* ]
                 };
-
                 let _query = #root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
                     _all_rows,
                 )
                 .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _returned = #root::sql::__macro_internals::bulk_insert_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #read_back
-                #audit_bulk_insert_emit
+                let _returned =
+                    #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                if _returned.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                if _returned.len() != rows.len() {
+                    return ::core::result::Result::Err(#root::sql::ExecError::Sql(
+                        #root::sql::SqlError::BulkInsertReturningMismatch {
+                            expected: rows.len(),
+                            actual: _returned.len(),
+                        },
+                    ));
+                }
+                for (_row, _row_mut) in _returned.into_iter().zip(rows.iter_mut()) {
+                    #root::sql::apply_auto_pk(_row, _row_mut)?;
+                }
                 ::core::result::Result::Ok(())
             }
         }
@@ -7746,36 +7329,37 @@ fn inherent_impl_tokens(
         let cols_all = &fields.bulk_columns_all;
         let pushes_all = &fields.bulk_pushes_all;
         quote! {
-            /// Bulk-insert `rows`: one statement, or one per chunk in a
-            /// transaction past the bind cap. Every row's
-            /// fields are written verbatim — there are no `Auto<T>`
-            /// fields on this model.
-            ///
-            /// Empty slice is a no-op.
+            /// Bulk-insert `rows`: one statement, or one per chunk in one
+            /// transaction past the bind cap. An empty slice is a no-op.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, or driver failures.
-            #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &[Self],
-                pool: &#root::sql::sqlx::PgPool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_on
+                #bulk_pool_body
             }
 
-            /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            /// [`Self::bulk_insert`] on any [`#root::sql::SqlExecutor`]. An
+            /// audited model refuses it: use [`Self::bulk_insert`].
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn bulk_insert_on #executor_generics (
+            pub async fn bulk_insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 rows: &[Self],
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #bulk_executor_where
-            {
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_bulk
+                Self::__rustango_bulk_insert_exec(rows, _executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_bulk_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                rows: &[Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7793,12 +7377,9 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_all ),* ],
                     _all_rows,
                 );
-                let _ = #root::sql::__macro_internals::bulk_insert_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #audit_bulk_insert_emit
-                ::core::result::Result::Ok(())
+                #root::sql::__macro_internals::bulk_insert_on(_executor, &_query)
+                    .await
+                    .map(drop)
             }
         }
     };
@@ -8376,23 +7957,6 @@ fn inherent_impl_tokens(
 
         #assign_auto_pk_pool_impl
     }
-}
-
-/// Per-row Auto-field assigns for `bulk_insert` — equivalent to
-/// `auto_assigns` but reading from `_returning_row` and writing to
-/// `_row_mut` instead of `self`.
-fn bulk_auto_assigns_for_row(fields: &CollectedFields) -> TokenStream2 {
-    let root = rustango_root();
-    let lines = fields.auto_field_idents.iter().map(|(ident, column, _)| {
-        let col_lit = column.as_str();
-        quote! {
-            _row_mut.#ident = #root::sql::sqlx::Row::try_get(
-                _returning_row,
-                #col_lit,
-            )?;
-        }
-    });
-    quote! { #( #lines )* }
 }
 
 /// Emit `pub const id: …Id = …Id;` per field, inside the inherent impl.
@@ -13467,7 +13031,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #read_only_call
                     #allow_anonymous_call
                     #serializer_call
-                    .router_pool(prefix, pool.into())
+                    .router(prefix, pool.into())
             }
         }
     })

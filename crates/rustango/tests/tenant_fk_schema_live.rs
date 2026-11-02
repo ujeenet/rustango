@@ -230,7 +230,7 @@ async fn migrate_logs_with_public_passkeys_opts(
         label: String::new(),
         created_at: chrono::Utc::now(),
     };
-    cred.insert_pool(&reg).await.unwrap();
+    cred.insert(&reg).await.unwrap();
     let pools = TenantPools::new(registry.clone());
     run(
         &pools,

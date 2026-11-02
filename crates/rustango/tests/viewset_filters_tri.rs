@@ -37,7 +37,7 @@ async fn seed(pool: &Pool, name: &str, category_id: Option<i64>, at: &str, price
         created_at: at.parse().expect("instant"),
         price,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
 }
@@ -66,7 +66,7 @@ fn app(pool: &Pool) -> axum::Router {
         &["id", "name", "category_id", "created_at", "price"],
     )
     .filter_fields(&["category_id", "name", "created_at"])
-    .router_pool("/items", pool.clone())
+    .router("/items", pool.clone())
     .merge(
         ViewSet::for_model(
             Item::SCHEMA,
@@ -74,7 +74,7 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .filter_fields(&["price"])
         .filter_backend(price_min)
-        .router_pool("/priced", pool.clone()),
+        .router("/priced", pool.clone()),
     )
 }
 

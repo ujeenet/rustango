@@ -72,7 +72,7 @@ async fn drop_table(pool: &PgPool, table: &str) {
 }
 
 async fn delete_ledger_entry(pool: &PgPool, name: &str) {
-    runner().ensure_ledger(pool).await.unwrap();
+    runner().ensure_ledger(&pool.clone().into()).await.unwrap();
     sqlx::query("DELETE FROM mr_legacy_ledger WHERE name = $1")
         .bind(name)
         .execute(pool)
@@ -114,7 +114,7 @@ async fn migrate_creates_ledger_table_idempotently() {
 
     // First call ensures table exists.
     let dir = fresh_dir("ledger_bootstrap");
-    let _ = runner().migrate(&pool, &dir).await.unwrap();
+    let _ = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     // Schema query: ledger exists.
     let exists: bool = sqlx::query(
@@ -129,7 +129,7 @@ async fn migrate_creates_ledger_table_idempotently() {
     assert!(exists, "ledger table should exist after migrate");
 
     // Second call is fine (idempotent CREATE IF NOT EXISTS).
-    let _ = runner().migrate(&pool, &dir).await.unwrap();
+    let _ = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -142,7 +142,7 @@ async fn migrate_with_empty_dir_returns_empty_list() {
         return;
     };
     let dir = fresh_dir("empty_dir");
-    let applied = runner().migrate(&pool, &dir).await.unwrap();
+    let applied = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     assert!(applied.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -175,7 +175,7 @@ async fn applies_one_schema_migration_and_records_in_ledger() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    let applied = runner().migrate(&pool, &dir).await.unwrap();
+    let applied = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     assert_eq!(applied.len(), 1);
     assert_eq!(applied[0].name, mig_name);
 
@@ -234,11 +234,11 @@ async fn rerun_skips_already_applied_migrations() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    let first = runner().migrate(&pool, &dir).await.unwrap();
+    let first = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     assert_eq!(first.len(), 1);
 
     // Second run: nothing pending.
-    let second = runner().migrate(&pool, &dir).await.unwrap();
+    let second = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     assert!(
         second.is_empty(),
         "expected no-op on re-run, got: {second:?}"
@@ -306,7 +306,7 @@ async fn atomic_failure_rolls_back_offender_keeps_priors() {
     delete_ledger_entry(&pool, &mig_a).await;
     delete_ledger_entry(&pool, &mig_b).await;
 
-    let result = runner().migrate(&pool, &dir).await;
+    let result = runner().migrate(&pool.clone().into(), &dir).await;
     assert!(result.is_err(), "B should fail");
 
     // A's table exists, A is in the ledger.
@@ -382,7 +382,7 @@ async fn mixed_schema_and_data_ops_apply_in_order() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     let id: i64 = sqlx::query(&format!(r#"SELECT id FROM "{table}""#))
         .fetch_one(&pool)
@@ -425,7 +425,7 @@ async fn non_atomic_migration_runs_outside_a_tx() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    let applied = runner().migrate(&pool, &dir).await.unwrap();
+    let applied = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     assert_eq!(applied.len(), 1);
 
     let exists: bool = sqlx::query(
@@ -475,7 +475,7 @@ async fn unapply_round_trips_a_schema_only_migration() {
     delete_ledger_entry(&pool, &mig_name).await;
 
     // Apply.
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     let exists_after_apply: bool = sqlx::query(
         "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)",
     )
@@ -488,7 +488,10 @@ async fn unapply_round_trips_a_schema_only_migration() {
     assert!(exists_after_apply);
 
     // Unapply.
-    let target = runner().unapply(&pool, &dir, &mig_name).await.unwrap();
+    let target = runner()
+        .unapply(&pool.clone().into(), &dir, &mig_name)
+        .await
+        .unwrap();
     assert_eq!(target.name, mig_name);
 
     let exists_after_unapply: bool = sqlx::query(
@@ -568,7 +571,7 @@ async fn unapply_data_op_uses_reverse_sql() {
     delete_ledger_entry(&pool, &data_name).await;
 
     // Apply both.
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     let count: i64 = sqlx::query(&format!(r#"SELECT COUNT(*) FROM "{table}""#))
         .fetch_one(&pool)
         .await
@@ -578,7 +581,10 @@ async fn unapply_data_op_uses_reverse_sql() {
     assert_eq!(count, 1, "row should be present after data migration");
 
     // Unapply only the data migration.
-    runner().unapply(&pool, &dir, &data_name).await.unwrap();
+    runner()
+        .unapply(&pool.clone().into(), &dir, &data_name)
+        .await
+        .unwrap();
 
     let count: i64 = sqlx::query(&format!(r#"SELECT COUNT(*) FROM "{table}""#))
         .fetch_one(&pool)
@@ -657,10 +663,13 @@ async fn unapply_irreversible_migration_fails_fast_no_db_writes() {
     delete_ledger_entry(&pool, &create_name).await;
     delete_ledger_entry(&pool, &bad_name).await;
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     // Try to unapply 0002 → should fail fast.
-    let err = runner().unapply(&pool, &dir, &bad_name).await.unwrap_err();
+    let err = runner()
+        .unapply(&pool.clone().into(), &dir, &bad_name)
+        .await
+        .unwrap_err();
     assert!(format!("{err}").contains("reversible"), "got: {err}");
 
     // Ledger entry for the bad migration is still present (we never deleted it).
@@ -692,7 +701,7 @@ async fn unapply_unknown_migration_returns_validation_error() {
     let _ = std::fs::create_dir_all(&dir);
 
     let err = runner()
-        .unapply(&pool, &dir, "0042_does_not_exist")
+        .unapply(&pool.clone().into(), &dir, "0042_does_not_exist")
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("0042_does_not_exist"));
@@ -727,10 +736,13 @@ async fn unapply_then_reapply_round_trip() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    runner().migrate(&pool, &dir).await.unwrap();
-    runner().unapply(&pool, &dir, &mig_name).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
+    runner()
+        .unapply(&pool.clone().into(), &dir, &mig_name)
+        .await
+        .unwrap();
     // Apply again — should be idempotent (table re-created).
-    let applied = runner().migrate(&pool, &dir).await.unwrap();
+    let applied = runner().migrate(&pool.clone().into(), &dir).await.unwrap();
     assert_eq!(
         applied.len(),
         1,
@@ -821,7 +833,7 @@ async fn migration_with_two_create_tables_one_having_fk_to_other_applies() {
     drop_table(&pool, &parent).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     // Both tables exist…
     for t in [&child, &parent] {
@@ -910,7 +922,7 @@ async fn migrate_to_unknown_target_is_validation_error() {
     let dir = fresh_dir("migrate_to_unknown");
     let _ = std::fs::create_dir_all(&dir);
     let err = runner()
-        .migrate_to(&pool, &dir, "0042_does_not_exist")
+        .migrate_to(&pool.clone().into(), &dir, "0042_does_not_exist")
         .await
         .unwrap_err();
     assert!(format!("{err}").contains("0042_does_not_exist"));
@@ -929,8 +941,11 @@ async fn migrate_to_target_already_head_is_noop() {
     // Re-write because cleanup removed the dir.
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
-    let touched = runner().migrate_to(&pool, &dir, &names[2]).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
+    let touched = runner()
+        .migrate_to(&pool.clone().into(), &dir, &names[2])
+        .await
+        .unwrap();
     assert!(touched.is_empty(), "target == head should be a no-op");
     cleanup(&pool, &names, &tables, &dir).await;
 }
@@ -946,12 +961,15 @@ async fn migrate_to_forward_applies_pending_subset() {
     let (dir, names, tables) = three_migrations();
 
     // Nothing applied yet; migrate_to(0002) should apply 0001 and 0002 only.
-    let touched = runner().migrate_to(&pool, &dir, &names[1]).await.unwrap();
+    let touched = runner()
+        .migrate_to(&pool.clone().into(), &dir, &names[1])
+        .await
+        .unwrap();
     assert_eq!(touched.len(), 2);
     assert_eq!(touched[0].name, names[0]);
     assert_eq!(touched[1].name, names[1]);
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     assert!(applied.contains(&names[0]));
     assert!(applied.contains(&names[1]));
     assert!(!applied.contains(&names[2]), "0003 should still be pending");
@@ -988,15 +1006,18 @@ async fn migrate_to_backward_unapplies_in_reverse() {
     let (dir, names, tables) = three_migrations();
 
     // Apply all three.
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     // Roll back to 0001 — should unapply 0003 then 0002.
-    let touched = runner().migrate_to(&pool, &dir, &names[0]).await.unwrap();
+    let touched = runner()
+        .migrate_to(&pool.clone().into(), &dir, &names[0])
+        .await
+        .unwrap();
     assert_eq!(touched.len(), 2);
     assert_eq!(touched[0].name, names[2], "0003 first (reverse order)");
     assert_eq!(touched[1].name, names[1], "0002 second");
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     assert!(applied.contains(&names[0]));
     assert!(!applied.contains(&names[1]));
     assert!(!applied.contains(&names[2]));
@@ -1014,15 +1035,18 @@ async fn migrate_to_zero_unapplies_everything() {
     cleanup(&pool, &names, &tables, &dir).await;
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
-    let touched = runner().migrate_to(&pool, &dir, "zero").await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
+    let touched = runner()
+        .migrate_to(&pool.clone().into(), &dir, "zero")
+        .await
+        .unwrap();
     assert_eq!(touched.len(), 3);
     // Reverse-order: C, B, A.
     assert_eq!(touched[0].name, names[2]);
     assert_eq!(touched[1].name, names[1]);
     assert_eq!(touched[2].name, names[0]);
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     for n in &names {
         assert!(!applied.contains(n), "{n} should be gone");
     }
@@ -1040,12 +1064,15 @@ async fn downgrade_one_step_unapplies_head() {
     cleanup(&pool, &names, &tables, &dir).await;
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
-    let touched = runner().downgrade(&pool, &dir, 1).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
+    let touched = runner()
+        .downgrade(&pool.clone().into(), &dir, 1)
+        .await
+        .unwrap();
     assert_eq!(touched.len(), 1);
     assert_eq!(touched[0].name, names[2]);
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     assert!(applied.contains(&names[0]));
     assert!(applied.contains(&names[1]));
     assert!(!applied.contains(&names[2]));
@@ -1063,11 +1090,14 @@ async fn downgrade_more_steps_than_applied_unapplies_all() {
     cleanup(&pool, &names, &tables, &dir).await;
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
-    let touched = runner().downgrade(&pool, &dir, 99).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
+    let touched = runner()
+        .downgrade(&pool.clone().into(), &dir, 99)
+        .await
+        .unwrap();
     assert_eq!(touched.len(), 3);
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     for n in &names {
         assert!(!applied.contains(n));
     }
@@ -1082,7 +1112,10 @@ async fn downgrade_zero_steps_is_noop() {
     };
     let dir = fresh_dir("downgrade_zero");
     let _ = std::fs::create_dir_all(&dir);
-    let touched = runner().downgrade(&pool, &dir, 0).await.unwrap();
+    let touched = runner()
+        .downgrade(&pool.clone().into(), &dir, 0)
+        .await
+        .unwrap();
     assert!(touched.is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1095,7 +1128,7 @@ async fn applied_set_returns_recorded_names() {
     let Some(pool) = pool().await else {
         return;
     };
-    runner().ensure_ledger(&pool).await.unwrap();
+    runner().ensure_ledger(&pool.clone().into()).await.unwrap();
 
     let unique = format!("rustango_test_applied_set_{}", std::process::id());
     sqlx::query("INSERT INTO mr_legacy_ledger (name) VALUES ($1) ON CONFLICT DO NOTHING")
@@ -1104,7 +1137,7 @@ async fn applied_set_returns_recorded_names() {
         .await
         .unwrap();
 
-    let set = runner().applied_set(&pool).await.unwrap();
+    let set = runner().applied_set(&pool.clone().into()).await.unwrap();
     assert!(set.contains(&unique), "applied_set should include {unique}");
 
     delete_ledger_entry(&pool, &unique).await;
@@ -1178,7 +1211,7 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
     delete_ledger_entry(&pool, &create_name).await;
     delete_ledger_entry(&pool, &alter_name).await;
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     // After apply: column type is bigint.
     let pg_type: String = sqlx::query(
@@ -1194,7 +1227,10 @@ async fn alter_column_type_applies_and_unapplies_round_trip() {
     assert_eq!(pg_type, "bigint", "column should be BIGINT after alter");
 
     // Unapply 0002 → column reverts to integer.
-    runner().unapply(&pool, &dir, &alter_name).await.unwrap();
+    runner()
+        .unapply(&pool.clone().into(), &dir, &alter_name)
+        .await
+        .unwrap();
     let pg_type: String = sqlx::query(
         "SELECT data_type FROM information_schema.columns \
          WHERE table_name = $1 AND column_name = 'age'",
@@ -1276,7 +1312,7 @@ async fn rename_column_applies_and_unapplies() {
     delete_ledger_entry(&pool, &create_name).await;
     delete_ledger_entry(&pool, &rename_name).await;
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     let exists: bool = sqlx::query(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
@@ -1290,7 +1326,10 @@ async fn rename_column_applies_and_unapplies() {
     .unwrap();
     assert!(exists, "renamed column should exist");
 
-    runner().unapply(&pool, &dir, &rename_name).await.unwrap();
+    runner()
+        .unapply(&pool.clone().into(), &dir, &rename_name)
+        .await
+        .unwrap();
     let exists: bool = sqlx::query(
         "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
          WHERE table_name = $1 AND column_name = 'name')",
@@ -1337,7 +1376,10 @@ async fn dry_run_returns_pending_sql_without_executing() {
     drop_table(&pool, &table).await;
     delete_ledger_entry(&pool, &mig_name).await;
 
-    let preview = runner().migrate_dry_run(&pool, &dir).await.unwrap();
+    let preview = runner()
+        .migrate_dry_run(&pool.clone().into(), &dir)
+        .await
+        .unwrap();
     assert_eq!(preview.len(), 1);
     let p = &preview[0];
     assert_eq!(p.name, mig_name);
@@ -1392,9 +1434,15 @@ async fn dry_run_skips_already_applied_migrations() {
     let (dir, names, tables) = three_migrations();
 
     // Apply 0001 + 0002. Dry-run should preview only 0003.
-    runner().migrate_to(&pool, &dir, &names[1]).await.unwrap();
+    runner()
+        .migrate_to(&pool.clone().into(), &dir, &names[1])
+        .await
+        .unwrap();
 
-    let preview = runner().migrate_dry_run(&pool, &dir).await.unwrap();
+    let preview = runner()
+        .migrate_dry_run(&pool.clone().into(), &dir)
+        .await
+        .unwrap();
     assert_eq!(preview.len(), 1);
     assert_eq!(preview[0].name, names[2]);
 
@@ -1411,8 +1459,11 @@ async fn dry_run_returns_empty_when_up_to_date() {
     cleanup(&pool, &names, &tables, &dir).await;
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
-    let preview = runner().migrate_dry_run(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
+    let preview = runner()
+        .migrate_dry_run(&pool.clone().into(), &dir)
+        .await
+        .unwrap();
     assert!(preview.is_empty(), "no pending migrations means empty");
 
     cleanup(&pool, &names, &tables, &dir).await;
@@ -1432,16 +1483,19 @@ async fn unapply_refuses_non_head_target() {
     cleanup(&pool, &names, &tables, &dir).await;
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
-    let err = runner().unapply(&pool, &dir, &names[0]).await.unwrap_err();
+    let err = runner()
+        .unapply(&pool.clone().into(), &dir, &names[0])
+        .await
+        .unwrap_err();
     let msg = format!("{err}");
     assert!(msg.contains("out of order"), "got: {msg}");
     assert!(msg.contains(&names[0]), "got: {msg}");
     assert!(msg.contains(&names[2]), "head should be named: {msg}");
 
     // All three are still in the ledger; nothing was rolled back.
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     for n in &names {
         assert!(applied.contains(n), "{n} must remain applied");
     }
@@ -1459,18 +1513,18 @@ async fn unapply_force_bypasses_head_check() {
     cleanup(&pool, &names, &tables, &dir).await;
     let (dir, names, tables) = three_migrations();
 
-    runner().migrate(&pool, &dir).await.unwrap();
+    runner().migrate(&pool.clone().into(), &dir).await.unwrap();
 
     // Forcefully drop the middle migration's table even though 0003
     // is still in place. (Schema state is inconsistent afterward —
     // exactly why the default refuses; we only test the bypass here.)
     let target = runner()
-        .unapply_force(&pool, &dir, &names[1])
+        .unapply_force(&pool.clone().into(), &dir, &names[1])
         .await
         .unwrap();
     assert_eq!(target.name, names[1]);
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     assert!(applied.contains(&names[0]));
     assert!(!applied.contains(&names[1]), "0002 should be unapplied");
     assert!(applied.contains(&names[2]), "0003 still in ledger");
@@ -1502,9 +1556,9 @@ async fn concurrent_migrate_calls_serialize_via_advisory_lock() {
     for _ in 0..n_tasks {
         let pool = pool.clone();
         let dir = dir.clone();
-        handles.push(tokio::spawn(
-            async move { runner().migrate(&pool, &dir).await },
-        ));
+        handles.push(tokio::spawn(async move {
+            runner().migrate(&pool.clone().into(), &dir).await
+        }));
     }
 
     let mut total_applied = 0_usize;
@@ -1519,7 +1573,7 @@ async fn concurrent_migrate_calls_serialize_via_advisory_lock() {
         "every migration must be applied exactly once across all peers"
     );
 
-    let applied = runner().applied_set(&pool).await.unwrap();
+    let applied = runner().applied_set(&pool.clone().into()).await.unwrap();
     for n in &names {
         assert!(applied.contains(n), "{n} must be in the ledger");
     }

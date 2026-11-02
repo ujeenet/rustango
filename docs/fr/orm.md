@@ -1369,7 +1369,7 @@ b.save_partial(&["status"], &pool).await?;
 
 **Les noms de champs sont les champs de struct côté Rust**, pas les colonnes SQL — `["author_id"]` (pas `["author"]` pour un champ de type FK). Les noms de champs inconnus renvoient `ExecError::Query(QueryError::UnknownField)`. Une liste vide est une opération sans effet (renvoie `Ok(0)` (lignes affectées) et journalise un `tracing::warn!`) : il n'y a tout simplement rien à écrire. Les modèles audités (`#[rustango(audit(...))]`) restreignent l'instantané du journal d'audit au même ensemble de colonnes — le journal reflète exactement ce qui a été écrit.
 
-**Note sur l'auto-PK.** `save_partial` est réservé à l'UPDATE ; l'appeler sur une PK `Auto::Unset` est une erreur de l'utilisateur (utilisez `insert_pool` / `save_pool` pour ce cas). Contrairement à `save_pool` qui répartit automatiquement `Unset → insert_pool`, cette méthode suppose que vous avez déjà inséré.
+**Note sur l'auto-PK.** `save_partial` est réservé à l'UPDATE ; l'appeler sur une PK `Auto::Unset` est une erreur de l'utilisateur (utilisez `insert` / `save` pour ce cas). Contrairement à `save` qui répartit automatiquement `Unset → insert`, cette méthode suppose que vous avez déjà inséré.
 
 ### Liste de champs vérifiée à la compilation
 
@@ -1391,19 +1391,16 @@ Se ramène en interne à `save_partial` — même restriction d'audit, même con
 
 ## Opérations en masse
 
-> **Postgres uniquement.** `bulk_insert` / `bulk_insert_on` et `upsert` /
-> `upsert_on` sont émis sous `#[cfg(feature = "postgres")]` et prennent un
-> `&PgPool` ou un executor Postgres — sur un build MySQL ou SQLite ils n'existent
-> pas. Il n'y a pas d'insertion en masse simple tri-dialecte ; les writers de lot
-> multi-backends sont `bulk_upsert_pool` et `bulk_insert_or_ignore_pool`, tous
-> deux avec `&Pool`. Cela fait partie de la même scission de
-> nommage connue.
+> `bulk_insert(rows, &pool)` et `upsert(&pool)` fonctionnent sur chaque backend ;
+> `bulk_insert_on` / `upsert_on` prennent n'importe quel `SqlExecutor`. Au-delà
+> de la limite de binds, une insertion en masse écrit par blocs dans une seule
+> transaction. MySQL n'a pas de `RETURNING` : `bulk_insert` y laisse les champs `Auto` vides.
 
 
 > **Piège — les opérations en masse sautent les hooks par ligne.** `bulk_insert`, le
 > `.update().execute_pool()` sur un queryset et les suppressions en masse (`delete_where`, `destroy`) s'exécutent comme du SQL basé sur des ensembles : ils ne
 > déclenchent **pas** de signaux, ne passent pas par la suppression logique, et n'exécutent pas
-> la validation par ligne. Utilisez-les pour la vitesse ; passez au `save_pool()` / `delete_pool()` par ligne
+> la validation par ligne. Utilisez-les pour la vitesse ; passez au `save()` / `delete()` par ligne
 > quand vous avez besoin de ces effets de bord.
 
 **Vider une table.** `Model::truncate(&pool)` exécute `DELETE FROM` sur chaque backend et renvoie le nombre de lignes supprimées. Le `on_delete` de chaque FK s'applique : tant qu'une ligne `restrict` pointe vers la table, l'appel échoue avec `ExecError::TruncateReferenced` et ne change rien. `Model::truncate_cascade(&pool)` vide aussi chaque table qui la référence, de proche en proche et quel que soit son `on_delete` : `TRUNCATE … CASCADE` sur PostgreSQL, un `DELETE` par table avec les contrôles de FK désactivés (MySQL) ou différés (SQLite). Aucun des deux ne remet les ids à zéro. Sur MySQL et SQLite, une table qui se référence elle-même en `restrict` peut refuser un truncate simple ; utilisez `truncate_cascade`. La cascade de PostgreSQL atteint aussi les tables qui la référencent dans d'autres schémas, comme des tenants en mode schéma pointant vers une table partagée ; MySQL et SQLite restent dans la base courante.
@@ -1607,7 +1604,7 @@ let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await
 
 Ces méthodes prennent le `&Pool` et tournent sur les trois backends ; `soft_delete_on` / `restore_on` sont les formes executor réservées à Postgres (pour passer une transaction). Le bouton « Delete » de l'admin supprime en douceur tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` est un marqueur qui exprime l'intention et ne change rien — il n'annule pas un `.active()` précédent. Pour les exclure par défaut, déclarez un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, où `live_only()` renvoie le filtre `deleted_at IS NULL` — et désactivez-le par requête avec `.without_global_scope("live")`.
 
-Les global scopes s'appliquent à chaque `QuerySet` et aux raccourcis de `Model` construits dessus (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). Ils ne s'appliquent pas à `Model::truncate`, qui vide toute la table, ni aux méthodes d'instance indexées par la clé primaire (`save_pool`, `save_partial`, `delete_pool`, `soft_delete`, `restore`) : celles-ci agissent sur la ligne que vous tenez déjà.
+Les global scopes s'appliquent à chaque `QuerySet` et aux raccourcis de `Model` construits dessus (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). Ils ne s'appliquent pas à `Model::truncate`, qui vide toute la table, ni aux méthodes d'instance indexées par la clé primaire (`save`, `save_partial`, `delete`, `soft_delete`, `restore`) : celles-ci agissent sur la ligne que vous tenez déjà.
 
 ---
 
@@ -1629,14 +1626,14 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_pool(&pool).await
+        post.save(&pool).await
     },
 ).await?;
 ```
 
 Le panneau d'historique par ligne de l'admin lit dans cette table ; le flux inter-modèles est à `<admin prefix>/__audit` (`Builder::audit_url` le change ; l'admin de tenant utilise `RouteConfig::audit_url`, par défaut `/audit`).
 
-Les lignes auditées qu'une FK `on_delete = "cascade"` supprime reçoivent une entrée `delete`, lue avant la suppression dans sa transaction. Les lignes modifiées par `set_null` / `set_default` reçoivent une entrée `update`, et `Model::truncate` / `truncate_cascade` écrivent une entrée groupée par table auditée qu'ils modifient. Cela s'exécute sur les chemins pool et transaction (`delete_pool`, `PoolTx`, `PoolConn`), par 500 lignes supprimées à la fois : les lignes en cascade de chaque tranche sont lues avec `FOR UPDATE` et gardées en mémoire avec leurs entrées jusqu'à la suppression de la tranche. Un exécuteur sqlx brut (`Model::delete(&PgPool)`, `delete_on`) exécute un simple DELETE et journalise à la place un avertissement unique. Une FK `DEFERRABLE INITIALLY DEFERRED` ne cascade qu'au commit, donc ses lignes ne reçoivent pas d'entrées.
+Les lignes auditées qu'une FK `on_delete = "cascade"` supprime reçoivent une entrée `delete`, lue avant la suppression dans sa transaction. Les lignes modifiées par `set_null` / `set_default` reçoivent une entrée `update`, et `Model::truncate` / `truncate_cascade` écrivent une entrée groupée par table auditée qu'ils modifient. Cela s'exécute sur les chemins pool et transaction (`delete`, `PoolTx`, `PoolConn`), par 500 lignes supprimées à la fois : les lignes en cascade de chaque tranche sont lues avec `FOR UPDATE` et gardées en mémoire avec leurs entrées jusqu'à la suppression de la tranche. Un exécuteur sqlx brut (`Model::delete(&PgPool)`, `delete_on`) exécute un simple DELETE et journalise à la place un avertissement unique. Une FK `DEFERRABLE INITIALLY DEFERRED` ne cascade qu'au commit, donc ses lignes ne reçoivent pas d'entrées.
 
 Nettoyage :
 
@@ -1649,7 +1646,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-Les utilitaires `_pool` prennent un `&Pool` et fonctionnent sur les trois backends ; les `cleanup_older_than` / `cleanup_keep_last_n` nus prennent un `&PgPool` et n'existent qu'avec `postgres`. Le verbe `audit-cleanup` nécessite la feature `tenancy`. Il élague le journal du registre et celui de chaque tenant actif ; `--tenant <slug>` ou `--registry` le restreint, et un `N` de 0 ou moins exige `--yes`.
+Les utilitaires `_pool` prennent un `&Pool` et fonctionnent sur les trois backends. Le verbe `audit-cleanup` nécessite la feature `tenancy`. Il élague le journal du registre et celui de chaque tenant actif ; `--tenant <slug>` ou `--registry` le restreint, et un `N` de 0 ou moins exige `--yes`.
 
 ---
 
@@ -1708,7 +1705,7 @@ match &post.author {
 let author = post.author.get_pool(&pool).await?;     // fetches if Unloaded
 ```
 
-`get_pool` prend le `&Pool` multi-backend. `get(&PgPool)` est la forme réservée à Postgres, et `get_on(executor)` prend une connexion ou une transaction.
+`get_pool` prend le `&Pool` multi-backend, et `get_on(executor)` prend une connexion ou une transaction.
 
 Utilisez `select_related("author")` sur le queryset pour précharger un lot.
 
@@ -1792,7 +1789,7 @@ SQLite et MySQL). Son `t.pool()` est le pool propre au tenant : toutes les méth
 écritures comprises, et aucune connexion n'est tenue avant la première requête.
 Le `t.conn()` de l'extracteur `DatabaseTenant` ne sert qu'aux lectures `_on`.
 
-Par exemple `post.insert_pool(t.pool())` et `Post::objects().count(t.pool())` ;
+Par exemple `post.insert(t.pool())` et `Post::objects().count(t.pool())` ;
 l'exemple `sqlite_tenant_demo` fait exactement cela.
 
 ## Une connexion par requête

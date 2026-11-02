@@ -70,8 +70,8 @@ async fn body_text(resp: axum::response::Response) -> String {
 /// password) so individual tests can issue authenticated requests.
 async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
     let pool = pool().await?;
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Seed an operator. Pre-hashed password = "letmein".
     let username = unique("op");
@@ -86,7 +86,7 @@ async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert(&pool).await.unwrap();
+    op.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let secret = SessionSecret::from_env_or_random();
@@ -141,7 +141,7 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]

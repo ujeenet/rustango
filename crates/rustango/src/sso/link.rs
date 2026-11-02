@@ -538,9 +538,7 @@ pub async fn create_link(
     subject: &str,
     user_id: i64,
 ) -> Result<(), ExecError> {
-    link_row(key, subject, user_id, false)
-        .insert_pool(pool)
-        .await
+    link_row(key, subject, user_id, false).insert(pool).await
 }
 
 /// [`create_link`] inside an open transaction.

@@ -135,17 +135,17 @@ async fn tenant(url: &str) -> rustango::sql::Pool {
         is_superuser: true,
         ..rustango::testkit::user()
     };
-    ann.insert_pool(&pool).await.expect("ann");
+    ann.insert(&pool).await.expect("ann");
     let mut bob = rustango::tenancy::User {
         username: "bob".into(),
         ..rustango::testkit::user()
     };
-    bob.insert_pool(&pool).await.expect("bob");
+    bob.insert(&pool).await.expect("bob");
     let mut note = Note {
         id: Auto::default(),
         title: "n".into(),
     };
-    note.insert_pool(&pool).await.expect("note");
+    note.insert(&pool).await.expect("note");
     pool
 }
 

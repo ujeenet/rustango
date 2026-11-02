@@ -82,19 +82,19 @@ async fn seed(pool: &Pool) -> (i64, i64, i64) {
         id: Auto::default(),
         title: "Has comments".into(),
     };
-    p1.save_pool(pool).await.unwrap();
+    p1.save(pool).await.unwrap();
     let p1_id = p1.id.get().copied().unwrap();
     let mut p2 = Post {
         id: Auto::default(),
         title: "Also has one".into(),
     };
-    p2.save_pool(pool).await.unwrap();
+    p2.save(pool).await.unwrap();
     let p2_id = p2.id.get().copied().unwrap();
     let mut p3 = Post {
         id: Auto::default(),
         title: "Lonely post".into(),
     };
-    p3.save_pool(pool).await.unwrap();
+    p3.save(pool).await.unwrap();
     let p3_id = p3.id.get().copied().unwrap();
 
     for (post_id, n) in [(p1_id, 3_i32), (p2_id, 1)] {
@@ -104,7 +104,7 @@ async fn seed(pool: &Pool) -> (i64, i64, i64) {
                 body: format!("comment-{i}"),
                 post_id: ForeignKey::unloaded(post_id),
             };
-            c.save_pool(pool).await.unwrap();
+            c.save(pool).await.unwrap();
         }
     }
     (p1_id, p2_id, p3_id)

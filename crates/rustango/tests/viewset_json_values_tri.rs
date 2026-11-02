@@ -41,7 +41,7 @@ async fn send(pool: &Pool, method: Method, uri: &str, body: &str) -> (StatusCode
         &["id", "nickname", "amount", "ratio", "qty", "label"],
     )
     .allow_anonymous()
-    .router_pool("/items", pool.clone());
+    .router("/items", pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
@@ -68,7 +68,7 @@ async fn rows(pool: &Pool) -> Vec<Item> {
 
 async fn clear(pool: &Pool) {
     for r in rows(pool).await {
-        r.delete_pool(pool).await.expect("clear");
+        r.delete(pool).await.expect("clear");
     }
 }
 
@@ -148,7 +148,7 @@ async fn stored_exact(pool: &Pool, text: &str) -> Option<Decimal> {
         qty: 0,
         label: String::new(),
     };
-    item.insert_pool(pool).await.expect("insert");
+    item.insert(pool).await.expect("insert");
     let id = *item.id.get().expect("pk");
     let got = rows(pool)
         .await
@@ -276,7 +276,7 @@ mod renamed {
         let app = ViewSet::for_model(Note::SCHEMA, &["id", "memo"])
             .serializer::<NoteSerializer>()
             .allow_anonymous()
-            .router_pool("/notes", pool.clone());
+            .router("/notes", pool.clone());
         let resp = app
             .oneshot(
                 Request::builder()

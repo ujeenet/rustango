@@ -151,7 +151,7 @@ pub async fn register(
         label: label.to_owned(),
         created_at: chrono::Utc::now(),
     };
-    row.insert_pool(pool).await?;
+    row.insert(pool).await?;
     Ok(())
 }
 

@@ -369,7 +369,7 @@ qui correspond à la façon dont votre application gère les connexions à la ba
   de l'extracteur [`Tenant`](https://docs.rs). Disponible avec les fonctionnalités
   `template_views` + `tenancy`. Les templates se portent inchangés de l'une à l'autre.
 
-Cela reflète la séparation des ViewSets (`router` / `router_pool` vs `tenant_router`).
+Cela reflète la séparation des ViewSets (`router` vs `tenant_router`).
 
 ---
 
@@ -385,7 +385,7 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     // HTML pages for browsers:
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));

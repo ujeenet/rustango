@@ -51,7 +51,7 @@ async fn refresh_from_db_picks_up_external_update() {
         title: "First version".into(),
         views: 10,
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let pk = post.id.get().copied().unwrap();
 
     // Another process / connection updates the row out of band.
@@ -85,7 +85,7 @@ async fn refresh_from_db_errors_when_row_was_deleted() {
         title: "Doomed".into(),
         views: 0,
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let pk = post.id.get().copied().unwrap();
 
     let raw = pool.as_sqlite().expect("sqlite pool");
@@ -111,7 +111,7 @@ async fn replicate_resets_auto_pk_and_clones_other_fields() {
         title: "Original".into(),
         views: 7,
     };
-    original.save_pool(&pool).await.unwrap();
+    original.save(&pool).await.unwrap();
     let original_pk = original.id.get().copied().unwrap();
 
     // Clone-as-insertable: PK reset, fields preserved.
@@ -124,7 +124,7 @@ async fn replicate_resets_auto_pk_and_clones_other_fields() {
     assert_eq!(copy.views, 7);
 
     // Saving the copy allocates a fresh PK.
-    copy.save_pool(&pool).await.unwrap();
+    copy.save(&pool).await.unwrap();
     let copy_pk = copy.id.get().copied().unwrap();
     assert_ne!(copy_pk, original_pk, "fresh autoincrement");
 
@@ -145,13 +145,13 @@ async fn replicate_then_modify_then_save_does_not_touch_original() {
         title: "Source".into(),
         views: 1,
     };
-    original.save_pool(&pool).await.unwrap();
+    original.save(&pool).await.unwrap();
     let original_pk = original.id.get().copied().unwrap();
 
     let mut copy = original.replicate();
     copy.title = "Spinoff".into();
     copy.views = 999;
-    copy.save_pool(&pool).await.unwrap();
+    copy.save(&pool).await.unwrap();
 
     // Re-read the original to confirm it's untouched.
     original.refresh_from_db(&pool).await.unwrap();

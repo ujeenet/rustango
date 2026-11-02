@@ -714,7 +714,7 @@ async fn half_made_at(b: &Booted, url: &str, slug: &str, key: &str, own: bool) -
         host_pattern: Some(format!("{slug}.localhost")),
         ..rustango::testkit::org()
     };
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
     if own {
         store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
             .await
@@ -854,7 +854,7 @@ async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
         active: false,
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
 
     let body = body_for(&slug, "evt-reused-2", chrono::Utc::now().timestamp());
     let sig = signed(&body);
@@ -992,7 +992,7 @@ async fn a_reaped_run_does_not_revive_a_deactivated_tenant() {
         active: true,
         ..rustango::testkit::org()
     };
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
     store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
         .await
         .unwrap();

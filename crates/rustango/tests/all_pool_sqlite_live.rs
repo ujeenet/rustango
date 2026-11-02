@@ -39,7 +39,7 @@ async fn all_pool_returns_every_row() {
             id: Auto::default(),
             title: t.into(),
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
 
     let rows = Post::all(&pool).await.unwrap();

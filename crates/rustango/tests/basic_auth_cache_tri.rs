@@ -61,7 +61,7 @@ async fn seed(pool: &Pool, name: &str) -> User {
         password_hash: rustango::tenancy::password::hash(PASS).unwrap(),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed user");
+    u.insert(pool).await.expect("seed user");
     u
 }
 
@@ -95,7 +95,7 @@ async fn a_hit_skips_argon2_until_the_password_changes(pool: &Pool) {
 
     let mut u = reload(pool, &name).await;
     u.password_hash = rustango::tenancy::password::hash("new-pass-456").unwrap();
-    u.save_pool(pool).await.unwrap();
+    u.save(pool).await.unwrap();
     assert!(
         !ok(pool, &name, PASS).await,
         "the cache masked a password change"
@@ -110,7 +110,7 @@ async fn a_deactivation_is_not_masked(pool: &Pool) {
     assert!(ok(pool, &name, PASS).await);
     let mut u = reload(pool, &name).await;
     u.active = false;
-    u.save_pool(pool).await.unwrap();
+    u.save(pool).await.unwrap();
     assert!(
         !ok(pool, &name, PASS).await,
         "the cache masked a deactivation"

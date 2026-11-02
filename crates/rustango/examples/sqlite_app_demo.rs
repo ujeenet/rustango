@@ -99,6 +99,6 @@ async fn create_user(
         id: Auto::Unset,
         name: payload.name,
     };
-    u.insert_pool(&pool).await.map_err(rustango::server_error)?;
+    u.insert(&pool).await.map_err(rustango::server_error)?;
     Ok(Json(u))
 }

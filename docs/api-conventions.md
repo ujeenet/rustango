@@ -31,14 +31,7 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — the bare name takes a `rustango::sql::Pool` and is the everyday path. It works on Postgres, MySQL and SQLite, picking the dialect internally. This is what nearly all app code wants.
 - **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `aggregate` `fetch_on` take any `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) on all three backends; the rest of the `_on` family is still Postgres-only.
-- **Writes invert this, and it is the one place the rule does not hold.** `save(&pool)`, `insert(&pool)` and `delete(&pool)` take a driver-specific `sqlx::PgPool`, so on a build without the `postgres` feature they **do not exist at all** — selecting `sqlite` makes the method vanish rather than fail with anything that names the cause. The multi-backend versions carry the `_pool` suffix: `save_pool`, `insert_pool`, `delete_pool`, each taking `rustango::sql::Pool`.
-
-  | | bare name | multi-backend version |
-  |---|---|---|
-  | **Reads** (`QuerySet`) | `fetch(&pool)` — already multi-backend | *is* the bare name |
-  | **Writes** (model) | `save(&pool)` — **Postgres only** | `save_pool(&pool)` |
-
-  So the short name is the narrow one for writes and the broad one for reads. That inversion is a wart, not a design: it will be resolved with a deprecation cycle rather than a rename. Until then, **if you are not on Postgres, write `save_pool` / `insert_pool` / `delete_pool`.**
+- **Writes follow the same rule.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` and `bulk_insert(rows, &pool)` take a `rustango::sql::Pool` on every backend; their `_on` forms take any `SqlExecutor`. An audited model refuses the `_on` forms, so use the `&pool` ones there. The old `_pool` names still compile but are deprecated.
 - **`from_X(value)`** — converts FROM another value (e.g. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — a builder method that sets one option and returns the object, so you can chain calls (e.g. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — the minimal constructor. Any arguments it takes are required dependencies (e.g. `RedisCache::new(url)` — you can't build the cache without a URL).
@@ -122,7 +115,7 @@ The rule of thumb: if a method waits on something (the database, network, or dis
 Every ORM call takes a pool or executor (the database handle) as its **last** argument. You pass the connection in every time, rather than relying on a hidden global:
 
 ```rust
-post.save_pool(&pool).await?
+post.save(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```

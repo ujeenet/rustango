@@ -39,7 +39,7 @@ async fn truncate_pool_clears_table() {
             id: Auto::default(),
             title: t.into(),
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     assert_eq!(Post::count(&pool).await.unwrap(), 3);
 

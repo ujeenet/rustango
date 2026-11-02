@@ -403,22 +403,6 @@ crate::register_admin_superuser_fields!(ApiKey, Add, [user_id]);
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Change, [user_id]);
 
-/// Create the `rustango_api_keys` table if it doesn't exist.
-///
-/// PG-typed back-compat for legacy callers; new code should use
-/// [`ensure_api_keys_table_pool`] which picks the right per-dialect
-/// DDL constant via `pool.dialect().name()`.
-///
-/// #562 — delegates to [`ensure_api_keys_table_pool`] so the
-/// statement-splitting loop lives in one place.
-///
-/// # Errors
-/// Driver failures.
-#[cfg(feature = "postgres")]
-pub async fn ensure_api_keys_table(pool: &crate::sql::sqlx::PgPool) -> Result<(), sqlx::Error> {
-    ensure_api_keys_table_pool(&crate::sql::Pool::from(pool.clone())).await
-}
-
 /// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
 /// Picks the per-dialect DDL constant based on `pool.dialect().name()`
 /// and runs each statement separately (sqlx's simple-prepare rejects
@@ -705,7 +689,7 @@ pub(crate) async fn create_api_key_signed(
         expires_at,
         created_at: Auto::default(),
     };
-    key.save_pool(pool).await?;
+    key.save(pool).await?;
 
     Ok(format!("{prefix}.{secret}"))
 }
@@ -1340,7 +1324,7 @@ mod tests {
         }
         let (pool, mut user) = jwt_user("basic_burst_gate").await;
         user.password_hash = password::hash("s3cret-basic").unwrap();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let call = |pass: String| {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -1463,7 +1447,7 @@ mod tests {
             .await
             .unwrap();
         let mut user = crate::testkit::user();
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         (pool, user)
     }
 
@@ -1544,7 +1528,7 @@ mod tests {
         for stamp in ["sessions_revoked_at", "password_changed_at"] {
             user.sessions_revoked_at = (stamp == "sessions_revoked_at").then_some(later);
             user.password_changed_at = (stamp == "password_changed_at").then_some(later);
-            user.save_pool(&pool).await.unwrap();
+            user.save(&pool).await.unwrap();
             let r = bearer(&backend, &plain, None, &pool).await;
             assert!(matches!(r, Err(AuthError::InvalidToken)), "{stamp}: {r:?}");
             let r = bearer(&backend, &bound, Some("acme"), &pool).await;
@@ -1558,7 +1542,7 @@ mod tests {
         let (pool, mut user) = jwt_user("jwt_after_logout_all").await;
         let cutoff = crate::session::logout_cutoff_at(None, chrono::Utc::now().timestamp());
         user.sessions_revoked_at = Some(cutoff);
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let backend = JwtBackend::new(vec![7u8; 32]);
         for (token, tenant) in [
             (backend.issue_for_user(&user), None),
@@ -1580,7 +1564,7 @@ mod tests {
             .unwrap()
             .is_some());
         user.password_hash = "$argon2id$v=19$m=19456,t=2,p=1$new$hash".into();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let r = bearer(&backend, &token, Some("acme"), &pool).await;
         assert!(matches!(r, Err(AuthError::InvalidToken)), "{r:?}");
     }

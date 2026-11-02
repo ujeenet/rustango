@@ -686,7 +686,7 @@ impl Console {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(&env.registry).await.expect("seed operator");
+        op.insert(&env.registry).await.expect("seed operator");
         let dir = env.dir("good");
         let app = typed!(env.registry, p => {
             let pools = std::sync::Arc::new(p);
@@ -859,7 +859,7 @@ async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
         ..rustango::testkit::org()
     };
     other
-        .insert_pool(&env.registry)
+        .insert(&env.registry)
         .await
         .expect("org with a bad URL");
 

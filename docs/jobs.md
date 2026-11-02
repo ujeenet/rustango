@@ -478,7 +478,7 @@ through another pool inside it, record `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
-    note.insert_pool(&pool).await
+    note.insert(&pool).await
 })
 .await??;
 ```

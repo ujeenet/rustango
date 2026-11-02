@@ -186,7 +186,7 @@ async fn docs(pool: &Pool, titles: &[&str]) -> Vec<i64> {
             id: Auto::default(),
             title: (*t).to_owned(),
         };
-        d.insert_pool(pool).await.expect("seed doc");
+        d.insert(pool).await.expect("seed doc");
         ids.push(*d.id.get().expect("pk"));
     }
     ids
@@ -203,7 +203,7 @@ fn titles_of(body: &Value) -> Vec<String> {
 
 fn doc_app(pool: &Pool, vs: impl FnOnce(ViewSet) -> ViewSet) -> axum::Router {
     vs(ViewSet::for_model(Doc::SCHEMA, &["id", "title"]).allow_anonymous())
-        .router_pool("/docs", pool.clone())
+        .router("/docs", pool.clone())
 }
 
 /// Hidden reads as absent on every item route; a visible row a hook refuses is a 403.
@@ -290,11 +290,11 @@ async fn a_soft_delete_runs_the_delete_hook(pool: &Pool) {
         title: "keep-soft".into(),
         deleted_at: None,
     };
-    row.insert_pool(pool).await.expect("seed");
+    row.insert(pool).await.expect("seed");
     let id = *row.id.get().expect("pk");
     let app = ViewSet::for_model(Soft::SCHEMA, &["id", "title"])
         .allow_anonymous()
-        .router_pool("/soft", pool.clone());
+        .router("/soft", pool.clone());
     assert_eq!(
         send(&app, "DELETE", &format!("/soft/{id}"), None).await.0,
         StatusCode::FORBIDDEN
@@ -417,12 +417,12 @@ async fn a_queryset_scope_narrows_every_action(pool: &Pool) {
             owner_id: owner,
             label_id: None,
         };
-        s.insert_pool(pool).await.expect("seed");
+        s.insert(pool).await.expect("seed");
         ids.push(*s.id.get().expect("pk"));
     }
     let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id"])
         .allow_anonymous()
-        .router_pool("/scoped", pool.clone());
+        .router("/scoped", pool.clone());
     let (_, body) = send(&app, "GET", "/scoped", None).await;
     assert_eq!(body["count"], 1, "{body}");
     let other = ids[1];
@@ -454,12 +454,12 @@ async fn an_fk_to_a_hidden_target_is_refused(pool: &Pool) {
             id: Auto::default(),
             name: name.into(),
         };
-        l.insert_pool(pool).await.expect("seed");
+        l.insert(pool).await.expect("seed");
         label_ids.push(*l.id.get().expect("pk"));
     }
     let app = ViewSet::for_model(Card::SCHEMA, &["id", "label_id"])
         .allow_anonymous()
-        .router_pool("/cards", pool.clone());
+        .router("/cards", pool.clone());
     let (status, body) = send(
         &app,
         "POST",
@@ -486,7 +486,7 @@ async fn a_superuser_row_needs_an_api_superuser(pool: &Pool) {
         is_superuser: true,
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed");
+    u.insert(pool).await.expect("seed");
     let id = *u.id.get().expect("pk");
     let vs = |skip: bool| {
         let vs = ViewSet::for_model(User::SCHEMA, &["id", "username", "active"]).allow_anonymous();
@@ -516,7 +516,7 @@ async fn a_superuser_row_needs_an_api_superuser(pool: &Pool) {
     let uri = format!("/users/{id}");
     for skip in [false, true] {
         let app = vs(skip)
-            .router_pool("/users", pool.clone())
+            .router("/users", pool.clone())
             .layer(axum::Extension(member.clone()));
         assert_eq!(
             send(&app, "PATCH", &uri, patch()).await.0,
@@ -530,14 +530,14 @@ async fn a_superuser_row_needs_an_api_superuser(pool: &Pool) {
         );
     }
     let app = vs(false)
-        .router_pool("/users", pool.clone())
+        .router("/users", pool.clone())
         .layer(axum::Extension(agent));
     assert_eq!(
         send(&app, "PATCH", &uri, patch()).await.0,
         StatusCode::FORBIDDEN
     );
     let app = vs(false)
-        .router_pool("/users", pool.clone())
+        .router("/users", pool.clone())
         .layer(axum::Extension(superuser));
     let (status, body) = send(&app, "PATCH", &uri, patch()).await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -552,7 +552,7 @@ async fn a_page_filters_by_admitted_or_by_nothing(pool: &Pool) {
     assert_eq!(titles_of(&body), ["a-1"]);
     for mut d in Doc::objects().fetch(pool).await.expect("fetch") {
         d.title = format!("hidden-{}", d.id.get().unwrap());
-        d.save_pool(pool).await.expect("hide");
+        d.save(pool).await.expect("hide");
     }
     let (_, body) = send(&app, "GET", "/docs", None).await;
     assert_eq!(body["count"], 0, "{body}");
@@ -566,10 +566,10 @@ async fn a_row_hidden_after_the_scan_is_not_rendered(pool: &Pool) {
         id: Auto::default(),
         title: "flip".into(),
     };
-    f.insert_pool(pool).await.expect("seed");
+    f.insert(pool).await.expect("seed");
     let app = ViewSet::for_model(Flip::SCHEMA, &["id", "title"])
         .allow_anonymous()
-        .router_pool("/flip", pool.clone());
+        .router("/flip", pool.clone());
     let (status, body) = send(&app, "GET", "/flip", None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(titles_of(&body).is_empty(), "{body}");
@@ -582,11 +582,11 @@ async fn the_old_macro_names_still_apply(pool: &Pool) {
             id: Auto::default(),
             title: t.into(),
         };
-        l.insert_pool(pool).await.expect("seed");
+        l.insert(pool).await.expect("seed");
     }
     let app = ViewSet::for_model(Legacy::SCHEMA, &["id", "title"])
         .allow_anonymous()
-        .router_pool("/legacy", pool.clone());
+        .router("/legacy", pool.clone());
     let (_, body) = send(&app, "GET", "/legacy", None).await;
     assert_eq!(titles_of(&body), ["a"], "{body}");
 }
@@ -598,11 +598,11 @@ async fn a_write_cannot_leave_the_queryset_scope(pool: &Pool) {
         owner_id: 1,
         label_id: None,
     };
-    own.insert_pool(pool).await.expect("seed");
+    own.insert(pool).await.expect("seed");
     let id = *own.id.get().expect("pk");
     let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id"])
         .allow_anonymous()
-        .router_pool("/scoped", pool.clone());
+        .router("/scoped", pool.clone());
     let moved = Some(json!({ "owner_id": 2 }));
     assert_eq!(
         send(&app, "PATCH", &format!("/scoped/{id}"), moved.clone())
@@ -625,16 +625,16 @@ async fn a_hidden_row_is_404_before_its_fk_check(pool: &Pool) {
         id: Auto::default(),
         name: "secret".into(),
     };
-    secret.insert_pool(pool).await.expect("seed");
+    secret.insert(pool).await.expect("seed");
     let mut other = Scoped {
         id: Auto::default(),
         owner_id: 2,
         label_id: None,
     };
-    other.insert_pool(pool).await.expect("seed");
+    other.insert(pool).await.expect("seed");
     let app = ViewSet::for_model(Scoped::SCHEMA, &["id", "owner_id", "label_id"])
         .allow_anonymous()
-        .router_pool("/scoped", pool.clone());
+        .router("/scoped", pool.clone());
     let uri = format!("/scoped/{}", other.id.get().unwrap());
     let body = Some(json!({ "label_id": secret.id.get().unwrap() }));
     assert_eq!(
@@ -698,7 +698,7 @@ async fn a_pending_body_holds_no_lock(pool: &Pool) {
         .unwrap()
         .remove(0);
     doc.title = "open-other".into();
-    let saved = tokio::time::timeout(std::time::Duration::from_secs(3), doc.save_pool(pool)).await;
+    let saved = tokio::time::timeout(std::time::Duration::from_secs(3), doc.save(pool)).await;
     assert!(
         matches!(saved, Ok(Ok(_))),
         "a pending body held the write lock: {saved:?}"
@@ -751,7 +751,7 @@ async fn a_nested_field_onto_a_hooked_table_is_refused() {
     let mount = {
         let pool = pool.clone();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            vs().router_pool("/posts", pool)
+            vs().router("/posts", pool)
         }))
     };
     let msg = match mount {
@@ -762,7 +762,7 @@ async fn a_nested_field_onto_a_hooked_table_is_refused() {
         msg.contains("`label`") && msg.contains("`vop_label`"),
         "{msg}"
     );
-    let _ = vs().skip_object_permissions().router_pool("/posts", pool);
+    let _ = vs().skip_object_permissions().router("/posts", pool);
 }
 
 tri_dialect_test!(

@@ -33,7 +33,7 @@ async fn setup(pool: &Pool) {
 fn app(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Acct::SCHEMA, &["id", "title"])
         .allow_anonymous()
-        .router_pool("/accts", pool.clone())
+        .router("/accts", pool.clone())
 }
 
 async fn send(pool: &Pool, method: Method, uri: &str, body: &str) -> (StatusCode, String) {

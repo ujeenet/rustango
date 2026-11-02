@@ -173,7 +173,7 @@ async fn orm_handler(t: rustango::extractors::TenantScope) -> String {
         id: rustango::sql::Auto::default(),
         title: "hello".into(),
     };
-    post.insert_pool(pool).await.expect("insert");
+    post.insert(pool).await.expect("insert");
     let n = Post::objects().count(pool).await.expect("count");
     format!("{}:{n}", t.org.slug)
 }

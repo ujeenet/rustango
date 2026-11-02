@@ -186,7 +186,7 @@ mod scenarios {
             qty: 4,
             total: 0, // placeholder — DB computes 12
         };
-        inv.save_pool(pool).await.expect("insert");
+        inv.save(pool).await.expect("insert");
         if pool.dialect().name() == "mysql" {
             // No `INSERT … RETURNING` on MySQL — the generated column
             // stays at its placeholder — the refresh is deferred.
@@ -214,7 +214,7 @@ mod scenarios {
             qty: 1,
             total: 0,
         };
-        inv.save_pool(pool).await.expect("insert");
+        inv.save(pool).await.expect("insert");
         let pk: i64 = *inv.id.get().expect("Auto PK populated after save");
         assert!(pk > 0, "64-bit auto PK assigned: {pk}");
     }

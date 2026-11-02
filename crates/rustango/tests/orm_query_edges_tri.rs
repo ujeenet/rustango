@@ -244,16 +244,13 @@ async fn setup(pool: &Pool) {
 /// `get` loads the parent by the `on` column, not by a PK equal to the key.
 async fn fk_get_follows_the_on_column(pool: &Pool) {
     for (id, num) in [(1, 100), (100, 7)] {
-        Country { id, num }
-            .insert_pool(pool)
-            .await
-            .expect("country");
+        Country { id, num }.insert(pool).await.expect("country");
     }
     City {
         id: 1,
         country: ForeignKey::unloaded(100),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("city");
     let mut city = City::objects().fetch(pool).await.expect("fetch").remove(0);
@@ -287,17 +284,14 @@ async fn ad_hoc_alias_clashing_a_relation_filter(pool: &Pool) {
 /// An ad-hoc join equal to the relation join, either side order, is reused.
 async fn ad_hoc_join_equal_to_the_relation_join(pool: &Pool) {
     for (id, num) in [(1, 100), (2, 200)] {
-        Country { id, num }
-            .insert_pool(pool)
-            .await
-            .expect("country");
+        Country { id, num }.insert(pool).await.expect("country");
     }
     for (id, num) in [(1, 100), (2, 200)] {
         City {
             id,
             country: ForeignKey::unloaded(num),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("city");
     }
@@ -330,7 +324,7 @@ async fn long_select_related_chains(pool: &Pool) {
             id,
             label: label.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("leaf");
     }
@@ -339,14 +333,14 @@ async fn long_select_related_chains(pool: &Pool) {
         second_hop_relation_one: ForeignKey::unloaded(1),
         second_hop_relation_two: ForeignKey::unloaded(2),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("mid");
     Top {
         id: 1,
         the_middle_relation_with_a_much_longer_field_name: ForeignKey::unloaded(1),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("top");
     let rows: Vec<Top> = Top::objects()
@@ -376,7 +370,7 @@ async fn long_select_related_chains(pool: &Pool) {
 /// PG binds the keys as one array.
 async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
     for id in [1, 2] {
-        Bucket { id }.insert_pool(pool).await.expect("bucket");
+        Bucket { id }.insert(pool).await.expect("bucket");
     }
     let mut conn = pool.acquire().await.expect("conn");
     let small = Bucket::objects()
@@ -400,12 +394,12 @@ async fn in_bulk_on_past_the_bind_cap(pool: &Pool) {
 
 /// `prefetch_soft` takes the FK's column, which may differ from its field.
 async fn prefetch_soft_by_a_renamed_column(pool: &Pool) {
-    Owner { id: 1 }.insert_pool(pool).await.expect("owner");
+    Owner { id: 1 }.insert(pool).await.expect("owner");
     Pet {
         id: 1,
         owner: ForeignKey::unloaded(1),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("pet");
     let grouped =
@@ -427,7 +421,7 @@ async fn in_lists_match_alike_and_share_a_statement(pool: &Pool) {
             label,
             rank: i as i32,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("token");
     }
@@ -506,7 +500,7 @@ async fn prefetch_reverse_generic_by_a_renamed_column(pool: &Pool) {
         ct_id: *ct.id.get().expect("ct id"),
         object_pk: 1,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("note");
     let grouped =
@@ -529,14 +523,14 @@ async fn generic_reads_apply_global_scopes(pool: &Pool) {
         .expect("doc ct");
     let ct_id = *ct.id.get().expect("ct id");
     for (id, shown) in [(1, true), (2, false)] {
-        Doc { id, shown }.insert_pool(pool).await.expect("doc");
+        Doc { id, shown }.insert(pool).await.expect("doc");
         Remark {
             id,
             ct_id,
             object_pk: 1,
             shown,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("remark");
     }
@@ -584,7 +578,7 @@ async fn week_is_iso(pool: &Pool) {
     ];
     for (id, d) in days {
         let at = Utc.from_utc_datetime(&d.and_hms_opt(12, 0, 0).unwrap());
-        Day { id, d, at }.insert_pool(pool).await.expect("day");
+        Day { id, d, at }.insert(pool).await.expect("day");
     }
     for (week, id) in [(52_i64, 1), (53, 2), (1, 3)] {
         for field in ["d__week", "at__week"] {
@@ -604,7 +598,7 @@ async fn week_is_iso(pool: &Pool) {
 /// An `f32` reads as its own digits in JSON rows and audit changes.
 async fn f32_json_is_not_widened(pool: &Pool) {
     Gauge { id: 1, ratio: 0.1 }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("gauge");
     let select = Gauge::objects().compile().expect("compile");
@@ -636,7 +630,7 @@ async fn items(pool: &Pool, rows: &[(i64, &str, &str, Option<&str>)]) {
             score: 1.23456,
             created_at: base + chrono::Duration::seconds(id),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("item");
     }
@@ -749,7 +743,7 @@ async fn date_buckets_skip_nulls(pool: &Pool) {
             d: None,
         },
     ] {
-        ev.insert_pool(pool).await.expect("ev");
+        ev.insert(pool).await.expect("ev");
     }
     let months = rustango::sql::fetch_dates_pool(pool, Ev::objects().dates("at", DateKind::Month))
         .await
@@ -770,13 +764,13 @@ async fn date_buckets_skip_nulls(pool: &Pool) {
 
 /// PARTITION BY / ORDER BY of a window take the base table beside a join.
 async fn window_columns_beside_a_join(pool: &Pool) {
-    Owner { id: 1 }.insert_pool(pool).await.expect("owner");
+    Owner { id: 1 }.insert(pool).await.expect("owner");
     for id in [1, 2] {
         Pet {
             id,
             owner: ForeignKey::unloaded(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("pet");
     }
@@ -959,11 +953,11 @@ async fn chunk_shortcuts_on_small_and_renamed_keys(pool: &Pool) {
     use rustango::sql::Auto;
     for n in 0..5 {
         Small { id: Auto::Unset, n }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("small");
         Renamed { id: Auto::Unset, n }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("renamed");
     }
@@ -1011,7 +1005,7 @@ async fn chunk_shortcuts_on_small_and_renamed_keys(pool: &Pool) {
 /// The key-list shortcuts split a list past the bind cap; PG binds one array.
 async fn key_list_shortcuts_past_the_bind_cap(pool: &Pool) {
     for id in [1, 2, 3] {
-        Bucket { id }.insert_pool(pool).await.expect("bucket");
+        Bucket { id }.insert(pool).await.expect("bucket");
     }
     let many = || (1..=70_000_i64).collect::<Vec<_>>();
     let ids = |rows: Vec<Bucket>| {
@@ -1044,7 +1038,7 @@ async fn key_list_shortcuts_past_the_bind_cap(pool: &Pool) {
 /// the row once: MySQL matches `ABC` to `abc`.
 async fn split_key_lists_return_each_row_once(pool: &Pool) {
     Code { code: "abc".into() }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("code");
     let keys = || {
@@ -1065,7 +1059,7 @@ async fn split_key_lists_return_each_row_once(pool: &Pool) {
 /// matches `ABC` to `abc`; PG and SQLite do not.
 async fn find_many_or_fail_follows_the_collation(pool: &Pool) {
     Code { code: "abc".into() }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("code");
     let got = Code::find_many_or_fail(["abc", "ABC"], pool).await;
@@ -1105,7 +1099,7 @@ async fn get_or_create_survives_concurrent_callers(pool: &Pool) {
                             // Widen the gap between the SELECT and the INSERT.
                             tokio::task::yield_now().await;
                             let row = Code { code: key };
-                            row.insert_pool(&pool).await?;
+                            row.insert(&pool).await?;
                             Ok(row)
                         },
                         pool,
@@ -1143,7 +1137,7 @@ async fn update_or_create_survives_concurrent_callers(pool: &Pool) {
                     |pool| async move {
                         tokio::task::yield_now().await;
                         let row = Code { code: key };
-                        row.insert_pool(&pool).await?;
+                        row.insert(&pool).await?;
                         Ok(row)
                     },
                     pool,
@@ -1167,7 +1161,7 @@ async fn get_or_create_keeps_a_violation_on_another_key(pool: &Pool) {
     Code {
         code: "taken".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     let got = Code::objects()
@@ -1177,7 +1171,7 @@ async fn get_or_create_keeps_a_violation_on_another_key(pool: &Pool) {
                 let row = Code {
                     code: "taken".into(),
                 };
-                row.insert_pool(&pool).await?;
+                row.insert(&pool).await?;
                 Ok(row)
             },
             pool,
@@ -1196,7 +1190,7 @@ async fn get_or_create_keeps_a_violation_on_another_key(pool: &Pool) {
 /// unless dropping duplicates makes it fit. PG binds one array.
 async fn where_not_in_past_the_bind_cap(pool: &Pool) {
     for id in [1, 2, 3] {
-        Bucket { id }.insert_pool(pool).await.expect("bucket");
+        Bucket { id }.insert(pool).await.expect("bucket");
     }
     let ids = |rows: Vec<Bucket>| {
         let mut v: Vec<i64> = rows.iter().map(|b| b.id).collect();
@@ -1224,13 +1218,13 @@ async fn where_not_in_past_the_bind_cap(pool: &Pool) {
 /// the rows the first batch matched.
 async fn destroy_past_the_bind_cap_is_all_or_none(pool: &Pool) {
     for id in [1, 70_000] {
-        Bucket { id }.insert_pool(pool).await.expect("bucket");
+        Bucket { id }.insert(pool).await.expect("bucket");
     }
     BucketRef {
         id: 1,
         bucket: ForeignKey::Unloaded(70_000),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("ref");
     Bucket::destroy(1..=70_000_i64, pool)

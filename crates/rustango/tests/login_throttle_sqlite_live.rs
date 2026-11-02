@@ -49,7 +49,7 @@ async fn app_with(users: &[(&str, bool)]) -> (axum::Router, Pool) {
     for (name, active) in users {
         let mut u = AdminUser::new_with_password(*name, "right-pass", false).unwrap();
         u.active = *active;
-        u.insert_pool(&pool).await.unwrap();
+        u.insert(&pool).await.unwrap();
     }
     let app = Builder::new(pool.clone())
         .admin_prefix("")
@@ -313,7 +313,7 @@ async fn a_codeless_reenroll_spends_no_limit_tokens() {
     let (app, pool) = app_with(&[]).await;
     // Only a superuser reaches the account pages.
     let mut u = AdminUser::new_with_password("thr_hank", "right-pass", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let id = *u.id.get().unwrap();
     let secret = rustango::totp::TotpSecret::generate();
     totp_store::start_enrollment(&pool, id, &secret)
@@ -348,7 +348,7 @@ async fn wrong_enrollment_codes_lock_the_account() {
     let _g = SUITE.lock().await;
     let (app, pool) = app_with(&[]).await;
     let mut u = AdminUser::new_with_password("thr_ivy", "right-pass", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let id = *u.id.get().unwrap();
     let a = login(&app, "10.71.0.1", "thr_ivy", "right-pass").await;
     let session = a.cookie.expect("session");
@@ -397,7 +397,7 @@ async fn post_totp(app: &axum::Router, session: &str, ip: &str, code: &str) -> S
 async fn enrolling(name: &str, ip: &str) -> (axum::Router, String, rustango::totp::TotpSecret) {
     let (app, pool) = app_with(&[]).await;
     let mut u = AdminUser::new_with_password(name, "right-pass", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let id = *u.id.get().unwrap();
     let session = login(&app, ip, name, "right-pass")
         .await
@@ -451,7 +451,7 @@ async fn a_code_without_a_pending_enrollment_never_locks() {
     let _g = SUITE.lock().await;
     let (app, pool) = app_with(&[]).await;
     let mut u = AdminUser::new_with_password("thr_liam", "right-pass", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let session = login(&app, "10.74.0.1", "thr_liam", "right-pass")
         .await
         .cookie

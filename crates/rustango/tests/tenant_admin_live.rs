@@ -81,8 +81,8 @@ async fn database_mode_admin_serves_tenant_data() {
 
     // Apply registry schema (Org table + Widget table since we live
     // in the same DB).
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Seed an org and a widget.
     let org_slug = unique("acme");
@@ -94,13 +94,13 @@ async fn database_mode_admin_serves_tenant_data() {
         host_pattern: Some(format!("{org_slug}.app.test")),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let mut widget = Widget {
         id: Auto::default(),
         label: "marker_widget".into(),
     };
-    widget.insert(&pool).await.unwrap();
+    widget.insert(&pool.clone().into()).await.unwrap();
 
     // Build the tenant admin — header-based resolver so the test
     // doesn't need DNS.
@@ -123,7 +123,7 @@ async fn database_mode_admin_serves_tenant_data() {
         "tenant data should render in admin: {body}"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn no_tenant_match_returns_404() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = TenantAdminBuilder::new(pools, url, HeaderResolver::default()).build();
@@ -144,7 +144,7 @@ async fn no_tenant_match_returns_404() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -154,8 +154,8 @@ async fn unknown_slug_in_header_returns_404() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = TenantAdminBuilder::new(pools, url, HeaderResolver::default()).build();
@@ -168,7 +168,7 @@ async fn unknown_slug_in_header_returns_404() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -183,8 +183,8 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     };
     let url = std::env::var("DATABASE_URL").unwrap();
 
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     // A tenant table has no business in `public`, and would block the tenants' pools.
     sqlx::query("DROP TABLE IF EXISTS public.ten_admin_widget")
         .execute(&pool)
@@ -204,7 +204,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
         schema_name: Some(acme_schema.clone()),
         ..rustango::testkit::org()
     };
-    acme_org.insert(&pool).await.unwrap();
+    acme_org.insert(&pool.clone().into()).await.unwrap();
 
     let mut globex_org = Org {
         slug: globex_slug.clone(),
@@ -213,7 +213,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
         schema_name: Some(globex_schema.clone()),
         ..rustango::testkit::org()
     };
-    globex_org.insert(&pool).await.unwrap();
+    globex_org.insert(&pool.clone().into()).await.unwrap();
     // Migrated like `migrate-tenants`: a tenant pool refuses a bare schema.
     for org in [&acme_org, &globex_org] {
         rustango::testkit::migrate_schema_tenant(&TenantPools::new(pool.clone()), org, &url)
@@ -289,7 +289,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
 
     drop_schema(&pool, &acme_schema).await;
     drop_schema(&pool, &globex_schema).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -299,8 +299,8 @@ async fn subdomain_chain_resolves_via_host_header() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("subdomain_acme");
     let host = format!("{slug}.app.test");
@@ -312,7 +312,7 @@ async fn subdomain_chain_resolves_via_host_header() {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new()
@@ -334,5 +334,5 @@ async fn subdomain_chain_resolves_via_host_header() {
         "subdomain resolver should land on the tenant"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }

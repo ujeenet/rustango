@@ -75,14 +75,14 @@ async fn setup(pool: &Pool) {
 fn plain(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Span::SCHEMA, &["id", "owner_id", "lo", "hi", "note"])
         .serializer::<SpanSerializer>()
-        .router_pool("/spans", pool.clone())
+        .router("/spans", pool.clone())
 }
 
 fn owned(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Span::SCHEMA, &["id", "owner_id", "lo", "hi", "note"])
         .serializer::<SpanSerializer>()
         .filter_backend(OwnedBy::column("owner_id"))
-        .router_pool("/spans", pool.clone())
+        .router("/spans", pool.clone())
 }
 
 async fn send(
@@ -132,7 +132,7 @@ async fn patch_checks_the_stored_value_of_an_unwritten_field(pool: &Pool) {
     let id = seed(pool, 1, 1, 10).await;
     let app = ViewSet::for_model(Span::SCHEMA, &["id", "hi"])
         .serializer::<SpanSerializer>()
-        .router_pool("/spans", pool.clone());
+        .router("/spans", pool.clone());
     let uri = format!("/spans/{id}");
 
     // Stored lo 1 > written hi 0: refused, though the sent lo 0 would pass.

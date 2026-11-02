@@ -47,7 +47,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
             amount,
             visible,
         };
-        row.insert_pool(pool).await.expect("seed row");
+        row.insert(pool).await.expect("seed row");
         if !visible {
             hidden.push(*row.id.get().expect("pk"));
         }

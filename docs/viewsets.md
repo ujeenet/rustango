@@ -491,7 +491,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Reach for the builder when you need SQLite/MySQL, multi-tenancy, a runtime-built
@@ -594,8 +594,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
 | `skip_object_permissions()` | Skip the app's object-permission hooks and queryset scopes, for an API that guards its rows itself. The framework's own hooks still run. |
 | `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 2 000, the admin's is 10 000; at most 100 000); past it a page or offset list is a `400` (cursor lists keep working). A serializer `nested` / `many` / `slug` field onto a table with a `view` hook or queryset scope panics at mount, unless `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
-| `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
 
 ---
@@ -747,7 +746,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 An empty action list = no check. Enforcement reads an authenticated user from
@@ -788,7 +787,7 @@ is the superuser rule, and an agent token is never a superuser.
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Over-limit → `429 Too Many Requests` + `Retry-After`. Counters are per-process;
@@ -806,7 +805,7 @@ CRUD routes. For extra endpoints, mount your own handlers alongside it:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -961,7 +960,7 @@ Compose the ViewSet's router into your app. Single-tenant, static pool:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-tenant (no pool captured — each request resolves its tenant connection):
@@ -980,7 +979,7 @@ let api = urls::api()
 
 ## Backend support
 
-- **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — PostgreSQL,
+- **Builder + `router` / `tenant_router`** is **tri-dialect** — PostgreSQL,
   SQLite and MySQL — and is the recommended path.
 - **The derive macro's `router(prefix, pool)`** takes `impl Into<rustango::sql::Pool>` — a `PgPool`, `MySqlPool`, `SqlitePool` or the `Pool` enum. It is not Postgres-only.
 - **Serializer input + output** now works on **all three backends** (the

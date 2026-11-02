@@ -175,7 +175,7 @@ async fn edit_form_renders_picker_with_current_ct_preselected() {
         id: Auto::Unset,
         title: "Hello".into(),
     };
-    post.save_pool(&p).await.unwrap();
+    post.save(&p).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     let mut attach = Attachment {
@@ -185,7 +185,7 @@ async fn edit_form_renders_picker_with_current_ct_preselected() {
         file_path: "/files/x.pdf".into(),
     };
     attach.set_owner_for::<Post>(&p, post_pk).await.unwrap();
-    attach.save_pool(&p).await.unwrap();
+    attach.save(&p).await.unwrap();
     let attach_pk = *attach.id.get().unwrap();
 
     // The Post's CT id — what the picker should mark as selected.

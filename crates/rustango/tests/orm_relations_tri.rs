@@ -393,7 +393,7 @@ async fn seed_articles(pool: &Pool) {
         id: 1,
         code: "US".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("country");
     for (id, name) in [(1, "Acme"), (2, "Beta")] {
@@ -401,7 +401,7 @@ async fn seed_articles(pool: &Pool) {
             id,
             name: name.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("agency");
     }
@@ -412,7 +412,7 @@ async fn seed_articles(pool: &Pool) {
         country: Some(ForeignKey::unloaded(1)),
         agency: Some(ForeignKey::unloaded(2)),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("profile");
     Editor {
@@ -421,7 +421,7 @@ async fn seed_articles(pool: &Pool) {
         profile: ForeignKey::unloaded(1),
         agency: Some(ForeignKey::unloaded(1)),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("editor");
     for (id, editor) in [(1, None), (2, Some(ForeignKey::unloaded(1)))] {
@@ -430,7 +430,7 @@ async fn seed_articles(pool: &Pool) {
             title: format!("a{id}"),
             editor,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("article");
     }
@@ -576,7 +576,7 @@ async fn null_fk_on_a_deeper_hop(pool: &Pool) {
         country: None,
         agency: None,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("bare profile");
     Editor {
@@ -585,7 +585,7 @@ async fn null_fk_on_a_deeper_hop(pool: &Pool) {
         profile: ForeignKey::unloaded(2),
         agency: None,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("editor 2");
     Article {
@@ -593,7 +593,7 @@ async fn null_fk_on_a_deeper_hop(pool: &Pool) {
         title: "a3".into(),
         editor: Some(ForeignKey::unloaded(2)),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("article 3");
     let rows: Vec<Article> = Article::objects()
@@ -643,7 +643,7 @@ async fn bare_columns_qualified_under_joins(pool: &Pool) {
         id: 1,
         at: at("2025-01-01T00:00:00Z"),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("crew");
     for (id, when) in [(1, "2024-05-01T00:00:00Z"), (2, "2025-05-01T00:00:00Z")] {
@@ -652,7 +652,7 @@ async fn bare_columns_qualified_under_joins(pool: &Pool) {
             at: at(when),
             crew: Some(ForeignKey::unloaded(1)),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("shift");
     }
@@ -676,7 +676,7 @@ async fn filter_joins_project_nothing(pool: &Pool) {
         profile: ForeignKey::unloaded(1),
         agency: None,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("editor 2");
     for id in [3, 4] {
@@ -685,7 +685,7 @@ async fn filter_joins_project_nothing(pool: &Pool) {
             title: "dup".into(),
             editor: Some(ForeignKey::unloaded(id - 2)),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("article");
     }
@@ -1022,7 +1022,7 @@ async fn ordered_union_of_select_related(pool: &Pool) {
             id,
             row: ForeignKey::unloaded(row),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("child");
     }
@@ -1048,7 +1048,7 @@ async fn prefetch_past_the_bind_cap(pool: &Pool) {
             id,
             row: ForeignKey::unloaded(row),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("child");
     }
@@ -1091,7 +1091,7 @@ async fn prefetch_fills_every_copy_of_a_parent(pool: &Pool) {
             id,
             row: ForeignKey::unloaded(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("child");
     }
@@ -1134,7 +1134,7 @@ async fn reverse_has_helpers_follow_self_pk_column(pool: &Pool) {
             id,
             code: code.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("shop");
     }
@@ -1143,7 +1143,7 @@ async fn reverse_has_helpers_follow_self_pk_column(pool: &Pool) {
             id,
             shop: ForeignKey::unloaded(code.to_owned()),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("item");
     }
@@ -1177,7 +1177,7 @@ async fn prefetch_matches_an_fk_on_a_unique_column(pool: &Pool) {
             id,
             code: code.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("shop");
     }
@@ -1186,7 +1186,7 @@ async fn prefetch_matches_an_fk_on_a_unique_column(pool: &Pool) {
             id,
             shop: ForeignKey::unloaded(code.to_owned()),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("item");
     }
@@ -1223,7 +1223,7 @@ async fn prefetch_soft_past_the_bind_cap(pool: &Pool) {
             id,
             row: ForeignKey::unloaded(row),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("child");
     }
@@ -1273,7 +1273,7 @@ async fn self_relation_correlates_to_the_outer_row(pool: &Pool) {
             parent_id,
             weight: id * 10,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed cat");
     }
@@ -1283,7 +1283,7 @@ async fn self_relation_correlates_to_the_outer_row(pool: &Pool) {
             from_id,
             to_id,
         };
-        l.insert_pool(pool).await.expect("seed link");
+        l.insert(pool).await.expect("seed link");
     }
     let ids = |rows: Vec<Cat>| {
         let mut v: Vec<i64> = rows.into_iter().map(|c| c.id).collect();
@@ -1332,13 +1332,10 @@ async fn self_relation_correlates_to_the_outer_row(pool: &Pool) {
 /// M2M target aggregates join on the target's real PK column.
 async fn m2m_aggregate_on_a_renamed_target_pk(pool: &Pool) {
     for (number, carat) in [(10, 3), (11, 7), (12, 5)] {
-        Gem { number, carat }
-            .insert_pool(pool)
-            .await
-            .expect("seed gem");
+        Gem { number, carat }.insert(pool).await.expect("seed gem");
     }
     for id in [1, 2] {
-        Vault { id }.insert_pool(pool).await.expect("seed vault");
+        Vault { id }.insert(pool).await.expect("seed vault");
     }
     for (vault_id, gem_no) in [(1, 10), (1, 11)] {
         let mut l = VaultGem {
@@ -1346,7 +1343,7 @@ async fn m2m_aggregate_on_a_renamed_target_pk(pool: &Pool) {
             vault_id,
             gem_no,
         };
-        l.insert_pool(pool).await.expect("seed link");
+        l.insert(pool).await.expect("seed link");
     }
     let rows = Vault::objects()
         .annotate_max("gems", "carat")
@@ -1407,7 +1404,7 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
     rustango::contenttypes::clear_cache();
     // Posts 1-7 are deleted below; post 8 stays.
     for id in 1..=8 {
-        Gpost { id }.insert_pool(pool).await.expect("post");
+        Gpost { id }.insert(pool).await.expect("post");
         Gpost { id }
             .tags_m2m()
             .set(&[id, 10], pool)
@@ -1415,7 +1412,7 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
             .expect("tag post");
     }
     let video = Gvideo { id: 1 };
-    video.insert_pool(pool).await.expect("video");
+    video.insert(pool).await.expect("video");
     video
         .tags_m2m()
         .set(&[1_i64], pool)
@@ -1426,14 +1423,11 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
             id,
             label: "a".into(),
         };
-        a.insert_pool(pool).await.expect("audited");
+        a.insert(pool).await.expect("audited");
         a.tags_m2m().set(&[id], pool).await.expect("tag audited");
     }
 
-    Gpost { id: 1 }
-        .delete_pool(pool)
-        .await
-        .expect("delete_pool");
+    Gpost { id: 1 }.delete(pool).await.expect("delete_pool");
     Gpost::delete_where("id", 2_i64, pool)
         .await
         .expect("delete_where");
@@ -1463,7 +1457,10 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
     #[cfg(feature = "postgres")]
     #[allow(irrefutable_let_patterns)]
     let deleted = if let Pool::Postgres(pg) = pool {
-        Gpost { id: 7 }.delete(pg).await.expect("pg delete");
+        Gpost { id: 7 }
+            .delete(&pg.clone().into())
+            .await
+            .expect("pg delete");
         7
     } else {
         6
@@ -1474,7 +1471,7 @@ async fn generic_m2m_rows_go_with_their_owner(pool: &Pool) {
         id: 1,
         label: "a".into(),
     }
-    .delete_pool(pool)
+    .delete(pool)
     .await
     .expect("audited delete_pool");
     Gaudited::delete_where("id", 2_i64, pool)
@@ -1515,14 +1512,14 @@ async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
         .expect("seed content types");
     rustango::contenttypes::clear_cache();
     let video = Gvideo { id: 1 };
-    video.insert_pool(pool).await.expect("video");
+    video.insert(pool).await.expect("video");
     video
         .tags_m2m()
         .set(&[1_i64], pool)
         .await
         .expect("tag video");
     for id in 1..=2 {
-        Gpost { id }.insert_pool(pool).await.expect("post");
+        Gpost { id }.insert(pool).await.expect("post");
         Gpost { id }
             .tags_m2m()
             .set(&[id, 10], pool)
@@ -1532,7 +1529,7 @@ async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
             id,
             label: "a".into(),
         };
-        a.insert_pool(pool).await.expect("audited");
+        a.insert(pool).await.expect("audited");
         a.tags_m2m().set(&[id], pool).await.expect("tag audited");
     }
 
@@ -1541,14 +1538,14 @@ async fn generic_m2m_rows_go_with_truncate(pool: &Pool) {
 
     // Reuse id 1, as a restarted identity or a reused rowid would.
     let post = Gpost { id: 1 };
-    post.insert_pool(pool).await.expect("post again");
+    post.insert(pool).await.expect("post again");
     let links = post.tags_m2m().all::<i64>(pool).await.unwrap();
     assert!(links.is_empty(), "a new post inherits old links: {links:?}");
     let mut a = Gaudited {
         id: 1,
         label: "a".into(),
     };
-    a.insert_pool(pool).await.expect("audited again");
+    a.insert(pool).await.expect("audited again");
     let links = a.tags_m2m().all::<i64>(pool).await.unwrap();
     assert!(
         links.is_empty(),
@@ -1566,7 +1563,7 @@ async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
         id: Auto::default(),
         label: "gold".into(),
     };
-    badge.insert_pool(pool).await.expect("badge");
+    badge.insert(pool).await.expect("badge");
     let pk = i64::from(*badge.id.get().expect("pk"));
     let ct = ContentType::for_model::<Badge>(pool)
         .await
@@ -1578,7 +1575,7 @@ async fn prefetch_generic_keeps_i32_pks(pool: &Pool) {
         id: Auto::from(200_000),
         label: "last".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("last badge");
     // 70k pairs: past every backend's bind cap.
@@ -1609,7 +1606,7 @@ async fn prefetch_generic_on_a_renamed_pk_column(pool: &Pool) {
         number: 7,
         label: "seven".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("ledger");
     let ct = ContentType::for_model::<Ledger>(pool)
@@ -1649,7 +1646,7 @@ async fn prefetch_reverse_generic_past_the_bind_cap(pool: &Pool) {
             ct_id,
             object_pk,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
     }

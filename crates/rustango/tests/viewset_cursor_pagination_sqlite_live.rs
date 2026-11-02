@@ -45,7 +45,7 @@ async fn make_router_and_pool(page_size: usize) -> (axum::Router, Pool) {
     let router = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .page_size(page_size)
         .cursor_pagination("id")
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
     (router, pool)
 }
 
@@ -159,7 +159,7 @@ async fn cursor_pagination_descending_walks_back_from_highest_id() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .page_size(3)
         .cursor_pagination_desc("id")
-        .router_pool("/posts", pool);
+        .router("/posts", pool);
 
     seed(&app, 7).await;
 
@@ -216,7 +216,7 @@ async fn cursor_pagination_follows_a_renamed_cursor_field() {
         .page_size(5)
         .cursor_pagination("id")
         .serializer::<KeyedPost>()
-        .router_pool("/posts", pool);
+        .router("/posts", pool);
     let resp = app.clone().oneshot(get("/posts")).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let page = body_json(resp).await;
@@ -251,5 +251,5 @@ async fn a_serializer_without_the_cursor_field_panics_at_mount() {
     let _ = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .cursor_pagination("id")
         .serializer::<TitleOnly>()
-        .router_pool("/posts", pool);
+        .router("/posts", pool);
 }

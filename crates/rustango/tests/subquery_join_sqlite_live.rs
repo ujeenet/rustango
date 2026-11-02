@@ -52,7 +52,7 @@ async fn add_customer(pool: &Pool, name: &str) -> i64 {
         id: Auto::default(),
         name: name.into(),
     };
-    c.save_pool(pool).await.unwrap();
+    c.save(pool).await.unwrap();
     *c.id.get().unwrap()
 }
 
@@ -62,7 +62,7 @@ async fn add_order(pool: &Pool, customer_id: i64, total: i64) {
         customer_id: ForeignKey::from(customer_id),
         total,
     };
-    o.save_pool(pool).await.unwrap();
+    o.save(pool).await.unwrap();
 }
 
 #[tokio::test]

@@ -5,9 +5,9 @@
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
 use rustango::core::{
-    joins::aliased, BulkInsertQuery, Join, JoinKind, Model as _, Op, Relation, SqlValue, WhereExpr,
+    joins::aliased, Join, JoinKind, Model as _, Op, Relation, SqlValue, WhereExpr,
 };
-use rustango::sql::{bulk_insert_pool, Auto, FetcherPool as _, ForeignKey, Pool};
+use rustango::sql::{Auto, FetcherPool as _, ForeignKey, Pool};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone)]
@@ -188,14 +188,14 @@ async fn fk_targets_a_renamed_pk_column(pool: &Pool) {
         id: 7,
         name: "seven".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("acct");
     Txn {
         id: 1,
         acct: ForeignKey::unloaded(7),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("txn");
     let rows: Vec<Txn> = Txn::objects()
@@ -208,14 +208,14 @@ async fn fk_targets_a_renamed_pk_column(pool: &Pool) {
 
 async fn seed_city(pool: &Pool) {
     Country { id: 1, num: 100 }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("country");
     City {
         id: 1,
         country: ForeignKey::unloaded(100),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("city");
 }
@@ -272,14 +272,14 @@ async fn seed_long(pool: &Pool) {
         id: 1,
         an_extremely_long_column_name_for_labels: "deep".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("parent");
     LongChild {
         id: 1,
         a_rather_long_foreign_key_field_name_here: ForeignKey::unloaded(1),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("child");
 }
@@ -335,47 +335,16 @@ async fn long_join_labels_keep_their_key(pool: &Pool) {
     );
 }
 
-/// The PG-typed prefetch batches its `IN` list like the pool one.
-async fn pg_prefetch_past_the_bind_cap(pool: &Pool) {
-    #[cfg(feature = "postgres")]
-    #[allow(irrefutable_let_patterns)]
-    if let Pool::Postgres(pg) = pool {
-        const N: i64 = 70_000;
-        let rows: Vec<Vec<SqlValue>> = (0..N).map(|i| vec![i.into()]).collect();
-        bulk_insert_pool(
-            pool,
-            &BulkInsertQuery::new(Bucket::SCHEMA, vec!["id"], rows),
-        )
-        .await
-        .expect("buckets");
-        Drip {
-            id: 1,
-            bucket: ForeignKey::unloaded(N - 1),
-        }
-        .insert_pool(pool)
-        .await
-        .expect("drip");
-        let groups =
-            rustango::sql::fetch_with_prefetch::<Bucket, Drip>(Bucket::objects(), "bucket", pg)
-                .await
-                .expect("prefetch past the bind cap");
-        assert_eq!(groups.len(), usize::try_from(N).unwrap());
-        let last = groups.iter().find(|(b, _)| b.id == N - 1).expect("last");
-        assert_eq!(last.1.len(), 1);
-    }
-    let _ = (pool, bulk_insert_pool, BulkInsertQuery::new);
-}
-
 /// Two `set`s racing on one source: the result is one of them, never both.
 async fn concurrent_m2m_sets_keep_one(pool: &Pool) {
-    Album { id: 1 }.insert_pool(pool).await.expect("album");
+    Album { id: 1 }.insert(pool).await.expect("album");
     race_sets(pool, || Album { id: 1 }.tags_m2m()).await;
 }
 
 /// Two sources sharing a junction end: each one's sets still serialize.
 async fn concurrent_sets_on_a_shared_junction(pool: &Pool) {
-    ShareA { id: 1 }.insert_pool(pool).await.expect("a");
-    ShareB { id: 2 }.insert_pool(pool).await.expect("b");
+    ShareA { id: 1 }.insert(pool).await.expect("a");
+    ShareB { id: 2 }.insert(pool).await.expect("b");
     race_sets(pool, || ShareA { id: 1 }.tags_m2m()).await;
     race_sets(pool, || ShareB { id: 2 }.tags_m2m()).await;
 }
@@ -409,7 +378,6 @@ tri_dialect_test! {
         ad_hoc_join_named_like_an_fk,
         long_join_labels_decode,
         long_join_labels_keep_their_key,
-        pg_prefetch_past_the_bind_cap,
         concurrent_m2m_sets_keep_one,
         concurrent_sets_on_a_shared_junction,
     ],

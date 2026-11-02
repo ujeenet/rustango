@@ -159,7 +159,7 @@ async fn record_event(
     // `save_pool`, not `save`: the bare name is Postgres-typed, and this
     // app runs on all three dialects.
     event
-        .save_pool(pool)
+        .save(pool)
         .await
         .map_err(|e| JobError::Retryable(e.to_string()))?;
     Ok(())

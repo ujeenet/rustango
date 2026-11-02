@@ -67,7 +67,7 @@ async fn boot(edit: bool) -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     // Two database-mode tenants with reachable files — pre-warm only
     // walks database-mode, and these are what it should open.
@@ -94,7 +94,7 @@ async fn boot(edit: bool) -> Booted {
             primary_color: None,
             theme_mode: None,
         };
-        org.insert_pool(&registry).await.expect("seed org");
+        org.insert(&registry).await.expect("seed org");
     }
 
     let app = if edit {

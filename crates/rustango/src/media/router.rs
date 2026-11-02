@@ -82,7 +82,7 @@
 //!
 //! // `new_pool` works on all three backends; `MediaManager::new` is
 //! // Postgres-only and takes a `PgPool`.
-//! let manager = MediaManager::new_pool(pool.clone(), registry);
+//! let manager = MediaManager::new(pool.clone(), registry);
 //! let app = axum::Router::new()
 //!     .nest("/media", media_router_with(manager, MyAuthorizer));
 //! ```

@@ -57,7 +57,7 @@ fn app(pool: Pool) -> axum::Router {
         .page_size(50)
         .filter_fields(&["status", "rating"])
         .ordering_fields(&["rating", "title"])
-        .router_pool("/posts", pool)
+        .router("/posts", pool)
 }
 
 async fn body_json(resp: axum::response::Response) -> Value {

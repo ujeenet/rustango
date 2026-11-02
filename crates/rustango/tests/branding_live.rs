@@ -102,7 +102,7 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert(pool).await.unwrap();
+    op.insert(&pool.clone().into()).await.unwrap();
 
     let slug = format!(
         "brand_acme_{}",
@@ -121,7 +121,7 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let secret = SessionSecret::from_env_or_random();
@@ -217,8 +217,12 @@ async fn failed_branding_upload_keeps_the_served_logo() {
     };
     let tmp = tempfile::tempdir().expect("tempdir");
     std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path());
-    rustango::migrate::drop_all(&pool).await.unwrap();
-    rustango::migrate::apply_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
     let (app, cookie, slug, _) = seed_and_login(&pool).await;
 
     let ok = multipart("b", &[("logo", "image/png", b"png")]);
@@ -269,8 +273,12 @@ async fn upload_then_serve_round_trip() {
     // via `tempfile::TempDir`).
     let tmp = tempfile::tempdir().expect("tempdir");
     std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path());
-    rustango::migrate::drop_all(&pool).await.unwrap();
-    rustango::migrate::apply_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 
     let (app, cookie, slug, username) = seed_and_login(&pool).await;
 
@@ -372,8 +380,12 @@ async fn tenant_admin_renders_brand_overrides() {
     let tmp = tempfile::tempdir().expect("tempdir");
     std::env::set_var(branding::BRAND_STORAGE_ROOT_ENV, tmp.path());
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
-    rustango::migrate::apply_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 
     // Seed an org with all brand fields populated.
     let slug = format!(
@@ -393,7 +405,7 @@ async fn tenant_admin_renders_brand_overrides() {
         theme_mode: Some("dark".into()),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = HeaderResolver::default();

@@ -15,7 +15,7 @@
 //! [`AuditSource`] travels in a tokio task-local, so handlers, seed
 //! scripts and jobs can say who made a write without passing a context
 //! object through every ORM call. The default is [`AuditSource::System`].
-//! Override one call with `Model::save_on_with(conn, source)`.
+//! Override one call with `with_source(source, model.save(&pool))`.
 //!
 //! ## What gets logged
 //!
@@ -36,7 +36,7 @@ use crate::sql::sqlx;
 // MySQL go through the `*_pool` helpers further down, which dispatch per
 // backend.
 #[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, PgPool, Row};
+use crate::sql::sqlx::{postgres::PgRow, Row};
 
 /// Source of the change recorded in the audit log.
 ///
@@ -95,19 +95,12 @@ struct WriteScope {
 /// How an emitter reached the database, for [`source_token`].
 #[derive(Clone, Copy)]
 enum Via<'a> {
-    /// A caller's executor: its pool is unknown.
+    /// A caller's raw executor: its pool is unknown.
     Unknown,
     /// This pool.
     Pool(&'a crate::sql::Pool),
     /// A transaction opened on this pool.
     Tx(&'a crate::sql::PoolId),
-}
-
-impl<'a> Via<'a> {
-    /// The pool `tx` was opened on, if it knows.
-    fn of_tx(tx: &'a crate::sql::PoolTx<'_>) -> Self {
-        tx.pool_id().map_or(Via::Unknown, Via::Tx)
-    }
 }
 
 /// Read the active audit source. Returns [`AuditSource::System`] when no
@@ -587,28 +580,6 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
     )
 }
 
-/// Read every audit entry for one `(entity_table, entity_pk)` pair,
-/// newest first. Used by the admin's per-row audit trail panel.
-///
-/// Postgres-typed, kept for older call sites; it delegates to
-/// [`fetch_for_entity_pool`], which is the one to use on any backend.
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn fetch_for_entity(
-    pool: &PgPool,
-    entity_table: &str,
-    entity_pk: &str,
-) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    fetch_for_entity_pool(
-        &crate::sql::Pool::from(pool.clone()),
-        entity_table,
-        entity_pk,
-    )
-    .await
-}
-
 /// Schema-registration model for `rustango_audit_log`, so
 /// `makemigrations` owns the audit-log schema. Reads go through
 /// [`AuditEntry`], which has the per-dialect `changes`-column decoders.
@@ -716,85 +687,6 @@ fn cutoff_before(days: i64) -> chrono::DateTime<chrono::Utc> {
     chrono::Duration::try_days(days.max(0))
         .and_then(|d| chrono::Utc::now().checked_sub_signed(d))
         .map_or(floor, |t| t.max(floor))
-}
-
-/// Delete audit entries older than `cutoff_days` from `pool`'s audit
-/// table. Returns the number of rows removed.
-///
-/// Nothing schedules this for you — wire it into a cron job or a
-/// maintenance task. Each tenant's audit table is its own retention
-/// boundary, so this only touches the tenant `pool` points at.
-///
-/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0;
-/// one reaching before 1970 deletes nothing.
-///
-/// Postgres-typed; [`cleanup_older_than_pool`] works on any backend.
-///
-/// The cutoff comes from Rust, not `NOW()`. Since [`emit_one`] binds
-/// `occurred_at`, a database-side `NOW()` would compare two clocks: if
-/// the app host runs ahead, its rows sit in the database's future and a
-/// zero-day sweep deletes none of them.
-///
-/// # Errors
-/// Driver / SQL failures from the DELETE.
-#[cfg(feature = "postgres")]
-pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
-    let cutoff_ts = cutoff_before(cutoff_days);
-    let result = sqlx::query(r#"DELETE FROM "rustango_audit_log" WHERE "occurred_at" < $1"#)
-        .bind(cutoff_ts)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
-}
-
-/// Per-row retention: keep the `keep` newest audit entries for each
-/// `(entity_table, entity_pk)` pair and delete the rest. Use it when you
-/// must keep the edit chain of every row but cap how far the table grows.
-///
-/// One window-function DELETE does the work: each entry gets a
-/// `ROW_NUMBER()` ordered by `occurred_at DESC, id DESC`, and rows ranked
-/// above `keep` are dropped. One round-trip, however many pairs the table
-/// holds.
-///
-/// `keep = 0` clears the whole table; negative values clamp to 0. Returns
-/// the number of rows removed.
-///
-/// Postgres-typed; [`cleanup_keep_last_n_pool`] works on any backend.
-///
-/// # Errors
-/// Driver / SQL failures from the DELETE.
-#[cfg(feature = "postgres")]
-pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::Error> {
-    let keep = keep.max(0);
-    let result = sqlx::query(
-        r#"DELETE FROM "rustango_audit_log" WHERE "id" IN (
-              SELECT "id" FROM (
-                SELECT "id",
-                       ROW_NUMBER() OVER (
-                           PARTITION BY "entity_table", "entity_pk"
-                           ORDER BY "occurred_at" DESC, "id" DESC
-                       ) AS _rn
-                FROM "rustango_audit_log"
-              ) ranked
-              WHERE _rn > $1
-           )"#,
-    )
-    .bind(keep)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
-}
-
-/// Make sure the table exists in `pool`'s database or schema. Does nothing
-/// when it is already there. Handy in tests and ad-hoc setup.
-///
-/// Postgres-typed; [`ensure_table_pool`] works on any backend.
-///
-/// # Errors
-/// Driver / SQL failures from the emitted DDL.
-#[cfg(feature = "postgres")]
-pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-    ensure_table_pool(&crate::sql::Pool::Postgres(pool.clone())).await
 }
 
 // ============================================================ all-backend audit
@@ -1452,8 +1344,8 @@ async fn emit_one_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     entry: &PendingEntry,
 ) -> Result<(), sqlx::Error> {
-    let pool = tx.pool_id().cloned();
-    let via = pool.as_ref().map_or(Via::Unknown, Via::Tx);
+    let pool = tx.pool_id().clone();
+    let via = Via::Tx(&pool);
     match &mut tx.conn {
         #[cfg(feature = "postgres")]
         crate::sql::TxConn::Postgres(t) => emit_one_pg(&mut **t, entry, via).await,
@@ -1607,18 +1499,60 @@ pub async fn insert_one_with_audit<M>(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
     model: &mut M,
-    entry: impl FnOnce(&M) -> PendingEntry,
+    entry: impl FnOnce(&M, AuditOp) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
     M: crate::sql::AssignAutoPkPool,
 {
-    // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
+    let (returning, op) = insert_or_upsert_tx(&mut tx, query).await?;
     crate::sql::apply_auto_pk(returning, model)?;
-    emit_one_tx(&mut tx, &entry(model)).await?;
+    emit_one_tx(&mut tx, &entry(model, op)).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Run `query` in `tx`, with whether it inserted (`Create`) or updated
+/// (`Update`): a `DoUpdate` upsert runs a `DoNothing` pass first and
+/// upserts only when that skipped (#1795).
+async fn insert_or_upsert_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+) -> Result<(crate::sql::InsertReturningPool, AuditOp), crate::sql::ExecError> {
+    if !matches!(
+        query.on_conflict,
+        Some(crate::core::ConflictClause::DoUpdate { .. })
+    ) {
+        return Ok((
+            crate::sql::insert_returning_tx(tx, query).await?,
+            AuditOp::Create,
+        ));
+    }
+    if !tx.dialect().supports_returning() {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "without RETURNING an audited upsert cannot tell an insert from an update",
+        });
+    }
+    let mut probe = query.clone();
+    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
+    match crate::sql::insert_returning_tx(tx, &probe).await {
+        Ok(row) => Ok((row, AuditOp::Create)),
+        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
+            crate::sql::insert_returning_tx(tx, query).await?,
+            AuditOp::Update,
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write `entries` in the caller's `tx`, for the derive's audited bulk insert.
+#[doc(hidden)]
+pub async fn __emit_many_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    entries: &[PendingEntry],
+) -> Result<(), crate::sql::ExecError> {
+    emit_many_tx(tx, entries).await
 }
 
 /// Emit a batch of entries inside an open `PoolTx`, in bind-limit-sized
@@ -1627,7 +1561,7 @@ async fn emit_many_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    let via = Via::of_tx(tx);
+    let via = Via::Tx(tx.pool_id());
     let stmts = entries
         .chunks(audit_rows_per_insert(tx.dialect()))
         .map(|chunk| audit_insert_stmt(tx.dialect(), chunk, via))
@@ -2451,40 +2385,6 @@ where
     }
     tx.commit().await?;
     Ok(())
-}
-
-/// A single-row `INSERT … ON CONFLICT` on PG, with whether it inserted
-/// (`Create`) or updated (`Update`) the row: a `DoUpdate` runs a
-/// `DoNothing` pass first and upserts only when that skipped (#1795).
-/// A row another transaction deletes between the passes is recorded as `Update`.
-///
-/// # Errors
-/// As [`crate::sql::insert_returning_pool`].
-#[cfg(feature = "postgres")]
-pub async fn upsert_returning_on(
-    conn: &mut sqlx::PgConnection,
-    query: &crate::core::InsertQuery,
-) -> Result<(sqlx::postgres::PgRow, AuditOp), crate::sql::ExecError> {
-    use crate::sql::insert_returning_on;
-    if !matches!(
-        query.on_conflict,
-        Some(crate::core::ConflictClause::DoUpdate { .. })
-    ) {
-        return Ok((
-            insert_returning_on(&mut *conn, query).await?,
-            AuditOp::Create,
-        ));
-    }
-    let mut probe = query.clone();
-    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
-    match insert_returning_on(&mut *conn, &probe).await {
-        Ok(row) => Ok((row, AuditOp::Create)),
-        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
-            insert_returning_on(&mut *conn, query).await?,
-            AuditOp::Update,
-        )),
-        Err(e) => Err(e),
-    }
 }
 
 /// Truncate an audited model's table (`Model::truncate` /

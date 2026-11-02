@@ -42,7 +42,7 @@ async fn fresh_pool_returns_fresh_instance_without_mutating_self() {
         title: "stale".into(),
         views: 1,
     };
-    p1.save_pool(&pool).await.unwrap();
+    p1.save(&pool).await.unwrap();
     let pk = p1.id.get().copied().unwrap();
 
     // External update.
@@ -72,7 +72,7 @@ async fn fresh_pool_returns_none_when_row_deleted() {
         title: "doomed".into(),
         views: 0,
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let pk = p.id.get().copied().unwrap();
 
     // Delete the row out from under us.

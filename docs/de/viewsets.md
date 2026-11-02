@@ -494,7 +494,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Greife zum Builder, wenn du SQLite/MySQL, Mandantenfähigkeit, eine zur Laufzeit erstellte
@@ -597,8 +597,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster; `QUERY` verbraucht das Budget der Liste. |
 | `skip_object_permissions()` | Überspringt die Objekt-Berechtigungs-Hooks und Queryset-Scopes der App, für eine API, die ihre Zeilen selbst schützt. Die Hooks des Frameworks laufen weiter. |
 | `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 2 000, im Admin 10 000; höchstens 100 000); darüber ist eine Seiten- oder Offset-Liste ein `400` (Cursor-Listen funktionieren weiter). Ein Serializer-Feld `nested` / `many` / `slug` auf eine Tabelle mit `view`-Hook oder Queryset-Scope lässt das Einhängen paniken, außer mit `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
-| `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |
 
 ---
@@ -737,7 +736,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Eine leere Aktionsliste = keine Prüfung. Die Durchsetzung liest einen authentifizierten Benutzer aus
@@ -763,7 +762,7 @@ sagt einem Hook, wer fragt; ein Agent-Token ist nie Superuser.
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Über dem Limit → `429 Too Many Requests` + `Retry-After`. Die Zähler sind pro Prozess;
@@ -780,7 +779,7 @@ Routen beschränkt. Für zusätzliche Endpunkte binde deine eigenen Handler nebe
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -937,7 +936,7 @@ Setze den Router des ViewSets in deine App ein. Single-Tenant, statischer Pool:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-Tenant (kein Pool erfasst — jede Anfrage löst ihre Mandantenverbindung auf):
@@ -956,7 +955,7 @@ let api = urls::api()
 
 ## Backend-Unterstützung
 
-- **Builder + `router_pool` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
+- **Builder + `router` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
   SQLite und MySQL — und ist der empfohlene Weg.
 - **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only.
 - **Serializer-Eingabe + -Ausgabe** funktioniert jetzt auf **allen drei Backends** (das

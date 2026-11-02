@@ -39,7 +39,7 @@ async fn seed(pool: &Pool) -> (Vec<i64>, Vec<i64>) {
             id: Auto::default(),
             published,
         };
-        row.save_pool(pool).await.unwrap();
+        row.save(pool).await.unwrap();
         let pk = *row.id.get().unwrap();
         if published {
             pubs.push(pk);

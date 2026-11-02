@@ -45,7 +45,7 @@ async fn add_org(pool: &Pool, slug: &str) -> String {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(pool).await.expect("insert org");
+    org.insert(pool).await.expect("insert org");
     host
 }
 
@@ -172,7 +172,7 @@ async fn header_and_port_lookups_are_cached(pool: &Pool) {
         port: Some(port),
         ..rustango::testkit::org()
     };
-    org.insert_pool(pool).await.expect("insert org");
+    org.insert(pool).await.expect("insert org");
     assert_eq!(
         answers(pool, &slug, port).await,
         [None, None, None, None],
@@ -188,7 +188,7 @@ async fn header_and_port_lookups_are_cached(pool: &Pool) {
 
     // Suspended: hits are served until the invalidation, then nothing resolves.
     org.active = false;
-    org.save_pool(pool).await.expect("suspend");
+    org.save(pool).await.expect("suspend");
     assert_eq!(
         answers(pool, &slug, port).await,
         [all.clone(), all.clone(), all.clone(), all]

@@ -56,7 +56,7 @@ async fn seed(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    picker.insert_pool(pool).await.expect("insert picker");
+    picker.insert(pool).await.expect("insert picker");
     let picker_pk = picker.id.get().copied().expect("picker pk");
 
     let mut empty = Order {
@@ -68,7 +68,7 @@ async fn seed(pool: &Pool) {
         weight: None,
         due: None,
     };
-    empty.insert_pool(pool).await.expect("insert empty order");
+    empty.insert(pool).await.expect("insert empty order");
     let mut full = Order {
         id: Auto::default(),
         assigned_picker_id: Some(ForeignKey::unloaded(picker_pk)),
@@ -78,7 +78,7 @@ async fn seed(pool: &Pool) {
         weight: Some(1.5),
         due: chrono::NaiveDate::from_ymd_opt(2026, 9, 28),
     };
-    full.insert_pool(pool).await.expect("insert full order");
+    full.insert(pool).await.expect("insert full order");
 }
 
 async fn json_rows(pool: &Pool) -> Vec<Value> {

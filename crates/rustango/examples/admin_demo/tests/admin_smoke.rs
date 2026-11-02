@@ -34,7 +34,7 @@ async fn admin_renders_list_filters_and_inline() {
             .as_nanos()
     );
     let mut user = AdminUser::new_with_password(&name, "smoke-pass-123", true).unwrap();
-    user.insert_pool(&pool).await.expect("admin user");
+    user.insert(&pool).await.expect("admin user");
     let login = client
         .login(
             "/admin/login",

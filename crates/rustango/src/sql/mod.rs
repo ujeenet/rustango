@@ -72,8 +72,6 @@ pub use vector::Vector;
 pub(crate) use executor::in_any_block;
 #[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::in_block;
-#[cfg(feature = "postgres")]
-pub(crate) use executor::insert_returning_on;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
 pub use executor::row_to_json_my;
@@ -98,7 +96,8 @@ pub use executor::{
     CounterPool, ExistsPool, ExplainFormat, ExplainOptions, FetcherPool, FetcherTx, FkPkAccess,
     FlatScalar, HasPkValue, InsertReturningPool, LoadRelated, MaybeMyFromRow, MaybeMyLoadRelated,
     MaybeMyScalar, MaybePgFromRow, MaybePgScalar, MaybeSqliteFromRow, MaybeSqliteLoadRelated,
-    MaybeSqliteScalar, Page, PoolConn, PoolTx, SqlExecutor, TxConn, TxGuard, UpdaterPool,
+    MaybeSqliteScalar, Page, PoolConn, PoolTx, PooledConn, SqlExecutor, TxConn, TxGuard,
+    UpdaterPool,
 };
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
@@ -135,16 +134,12 @@ pub use executor::row_to_json;
 ///
 /// The macro never emits `annotate_count_children`. Audited `save_on`
 /// calls `select_rows_on` for its BEFORE read.
-///
-/// These are **PostgreSQL only**, typed `E: sqlx::Executor<Database =
-/// Postgres>`.
 #[cfg(feature = "postgres")]
-pub use executor::{
-    annotate_count_children, bulk_insert_on, fetch_with_prefetch, insert_on, select_rows_on,
-    update_on,
-};
+pub use executor::select_rows_on;
 /// Take any [`SqlExecutor`].
 pub use executor::{annotate_count_children_on, fetch_aggregate_on};
+/// Writes on any [`SqlExecutor`].
+pub use executor::{bulk_insert_on, insert_on, update_on};
 
 /// Hidden path for the `#[derive(Model)]` macro's generic-executor
 /// emissions. The functions inside are PG-typed (`E: sqlx::Executor<
@@ -164,11 +159,11 @@ pub use executor::{annotate_count_children_on, fetch_aggregate_on};
 /// against a scoped connection, say so on #1431 rather than importing
 /// this module: the point of the issue was that reaching in here is
 /// what a missing public API looks like.
-#[cfg(feature = "postgres")]
 #[doc(hidden)]
 pub mod __macro_internals {
+    pub use super::executor::refuse_audited;
     pub use super::executor::{
-        bulk_insert_on, delete_on, fetch_with_prefetch, insert_on, insert_returning_on, update_on,
+        bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on,
     };
 }
 

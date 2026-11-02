@@ -94,14 +94,14 @@ async fn select_related_loads_fk_target_in_one_query() {
         name: "Ada".into(),
         bio: "Pioneer".into(),
     };
-    ada.save(&pool).await.unwrap();
+    ada.save(&pool.clone().into()).await.unwrap();
     let ada_pk = ada.id.get().copied().unwrap();
     let mut grace = Author {
         id: Auto::default(),
         name: "Grace".into(),
         bio: "Compiler inventor".into(),
     };
-    grace.save(&pool).await.unwrap();
+    grace.save(&pool.clone().into()).await.unwrap();
     let grace_pk = grace.id.get().copied().unwrap();
 
     for (title, author_pk) in [
@@ -114,7 +114,7 @@ async fn select_related_loads_fk_target_in_one_query() {
             title: title.into(),
             author: ForeignKey::unloaded(author_pk),
         };
-        p.save(&pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
 
     // Fetch with select_related: every post's `author` FK is Loaded
@@ -170,7 +170,7 @@ async fn fetch_on_without_select_related_keeps_fast_path() {
         name: "Solo".into(),
         bio: "Just here".into(),
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let posts: Vec<Post> = Post::objects()
         .where_(Post::title.eq("missing".to_owned()))
         .fetch_on(&pool)

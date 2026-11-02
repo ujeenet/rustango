@@ -177,7 +177,7 @@ async fn project(pool: &Pool, name: &str, owner_id: i64, deleted: bool) -> i64 {
         owner_id,
         deleted_at: deleted.then(chrono::Utc::now),
     };
-    p.insert_pool(pool).await.expect("insert project");
+    p.insert(pool).await.expect("insert project");
     *p.id.get().expect("pk")
 }
 
@@ -186,7 +186,7 @@ async fn label(pool: &Pool, name: &str) -> i64 {
         id: Auto::default(),
         name: name.into(),
     };
-    l.insert_pool(pool).await.expect("insert label");
+    l.insert(pool).await.expect("insert label");
     *l.id.get().expect("pk")
 }
 
@@ -195,7 +195,7 @@ async fn sprint(pool: &Pool, name: &str) -> i64 {
         id: Auto::default(),
         name: name.into(),
     };
-    s.insert_pool(pool).await.expect("insert sprint");
+    s.insert(pool).await.expect("insert sprint");
     *s.id.get().expect("pk")
 }
 
@@ -207,7 +207,7 @@ async fn task(pool: &Pool, sprint_id: i64, project_id: i64, title: &str) -> i64 
         label_id: None,
         title: title.into(),
     };
-    t.insert_pool(pool).await.expect("insert task");
+    t.insert(pool).await.expect("insert task");
     *t.id.get().expect("pk")
 }
 
@@ -348,7 +348,7 @@ async fn autocomplete_reads_renamed_columns(pool: &Pool) {
         id: Auto::default(),
         name: "alpha".into(),
     };
-    tag.insert_pool(pool).await.expect("insert tag");
+    tag.insert(pool).await.expect("insert tag");
     let id = *tag.id.get().expect("pk");
     let r = send(
         pool,
@@ -381,7 +381,7 @@ async fn audit_files_the_canonical_key(pool: &Pool) {
         id: Auto::default(),
         title: "n".into(),
     };
-    n.insert_pool(pool).await.expect("insert note");
+    n.insert(pool).await.expect("insert note");
     let id = *n.id.get().expect("pk");
     let r = post(pool, &format!("/wt_note/00{id}"), "title=zeroed").await;
     assert!(r.status.is_redirection(), "{}: {}", r.status, r.body);

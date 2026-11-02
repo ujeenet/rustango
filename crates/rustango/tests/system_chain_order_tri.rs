@@ -1505,7 +1505,7 @@ async fn tenant_project_table_converges(backend: Backend) {
         database_url: Some(tenant_url.clone()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
 
     let (table, column) = ("rustango_users", "password_changed_at");
     let dir = tmp.path().join("app/migrations");
@@ -1565,7 +1565,7 @@ async fn schema_mode_tenant_converges() {
         database_url: None,
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
     let (table, column) = ("rustango_users", "password_changed_at");
     let dir = tmp.path().join("app/migrations");
     project_initial(&dir, current_table(table, Some(column)));
@@ -1618,7 +1618,7 @@ async fn schema_mode_fk_stays_in_the_tenant_schema() {
         database_url: None,
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
     let pg = registry.as_postgres().expect("a Postgres pool");
     rustango::sql::sqlx::query("CREATE TABLE fkq_parent (id BIGINT PRIMARY KEY)")
         .execute(pg)
@@ -1712,7 +1712,7 @@ async fn post_migrate_receiver_can_migrate() {
         database_url: None,
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
     let dir = tmp.path().join("app/migrations");
     std::fs::create_dir_all(&dir).unwrap();
     let seen: Arc<Mutex<Option<Result<(), String>>>> = Arc::default();

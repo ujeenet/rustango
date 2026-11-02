@@ -473,7 +473,7 @@ mod app_tests {
             primary_color: None,
             theme_mode: None,
         };
-        org.insert_pool(&pools.registry_pool()).await.unwrap();
+        org.insert(&pools.registry_pool()).await.unwrap();
         let secret = crate::session::SessionSecret::from_bytes(vec![9; 32]);
         let keys = crate::tenancy::session::ServerKeys {
             tenant: secret.clone(),

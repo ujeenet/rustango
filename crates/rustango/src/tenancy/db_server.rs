@@ -747,7 +747,7 @@ pub async fn add(
     {
         return Err(DbServerError::Taken(spec.name));
     }
-    row.insert_pool(registry).await.map_err(|e| {
+    row.insert(registry).await.map_err(|e| {
         if e.is_unique_violation() {
             DbServerError::Taken(spec.name.clone())
         } else {
@@ -895,7 +895,7 @@ pub async fn remove(
             tenants,
         });
     }
-    row.delete_pool(registry).await?;
+    row.delete(registry).await?;
     Ok(())
 }
 
@@ -1147,7 +1147,7 @@ mod tests {
         crate::testkit::migrate_framework(&pool).await.unwrap();
         let mut row = pg("db.internal");
         row.admin_password = Some(sealed(&LoginPassword::new("first-pass").unwrap()).unwrap());
-        row.insert_pool(&pool).await.unwrap();
+        row.insert(&pool).await.unwrap();
         let stale = row.clone();
         let id = row.id.get().copied().unwrap();
         let newer = sealed(&LoginPassword::new("second-pass").unwrap()).unwrap();

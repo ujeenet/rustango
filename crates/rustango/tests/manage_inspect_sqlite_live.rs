@@ -92,7 +92,7 @@ impl Booted {
             changes: serde_json::json!({}),
             occurred_at: chrono::Utc::now(),
         };
-        row.insert_pool(&self.registry).await.expect("seed audit");
+        row.insert(&self.registry).await.expect("seed audit");
     }
 }
 

@@ -503,7 +503,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Recurre al builder cuando necesites SQLite/MySQL, multi-tenencia, una
@@ -607,8 +607,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
 | `skip_object_permissions()` | Omite los hooks de permiso por objeto y los scopes de queryset de la app, para una API que protege sus filas por su cuenta. Los hooks del framework siguen ejecutándose. |
 | `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (2 000 por defecto, 10 000 en el admin; como mucho 100 000); por encima, una lista por página u offset es un `400` (el modo cursor sigue funcionando). Un campo de serializer `nested` / `many` / `slug` hacia una tabla con hook `view` o scope de queryset hace fallar el montaje, salvo con `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
-| `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
 
 ---
@@ -766,7 +765,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
@@ -791,7 +790,7 @@ y las cinco vistas de plantilla rechazan `rustango_api_keys`, `rustango_agents` 
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Sobre el límite → `429 Too Many Requests` + `Retry-After`. Los contadores son por
@@ -810,7 +809,7 @@ CRUD. Para endpoints adicionales, monta tus propios handlers junto al ViewSet:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -972,7 +971,7 @@ Compón el router del ViewSet en tu app. Un solo inquilino, pool estático:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-inquilino (sin pool capturado — cada petición resuelve su conexión de
@@ -992,7 +991,7 @@ let api = urls::api()
 
 ## Soporte de backends
 
-- **El builder + `router_pool` / `tenant_router`** es **tri-dialecto** —
+- **El builder + `router` / `tenant_router`** es **tri-dialecto** —
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
 - **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
   — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de

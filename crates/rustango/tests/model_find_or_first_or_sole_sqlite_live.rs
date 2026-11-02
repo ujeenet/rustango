@@ -50,7 +50,7 @@ async fn find_or_pool_returns_row_when_found() {
         title: "real".into(),
         status: "live".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let r = Post::find_or(1_i64, &pool, anon).await.unwrap();
     assert_eq!(r.title, "real");
 }
@@ -71,7 +71,7 @@ async fn first_or_pool_returns_first_when_present() {
         title: "first".into(),
         status: "live".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let r = Post::first_or(&pool, anon).await.unwrap();
     assert_eq!(r.title, "first");
 }
@@ -92,7 +92,7 @@ async fn sole_pool_returns_row_on_unique_match() {
             title: t.into(),
             status: s.into(),
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     let r = Post::sole("status", "published", &pool).await.unwrap();
     assert_eq!(r.title, "b");
@@ -114,7 +114,7 @@ async fn sole_pool_errors_on_multi_match() {
             title: t.into(),
             status: "draft".into(),
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     let err = Post::sole("status", "draft", &pool).await.unwrap_err();
     match err {

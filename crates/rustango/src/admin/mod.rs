@@ -10,7 +10,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let pool = PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
-//!     migrate::apply_all(&pool).await?;
+//!     migrate::apply_all_pool(&pool).await?;
 //!
 //!     let app = admin::router(pool);
 //!     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;

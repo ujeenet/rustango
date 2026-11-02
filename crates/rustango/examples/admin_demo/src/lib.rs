@@ -104,13 +104,13 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
             name: name.into(),
             email: format!("{}@example.com", name.split(' ').next().unwrap().to_lowercase()),
         };
-        a.save_pool(pool).await?;
+        a.save(pool).await?;
         author_ids.push(a.id.get().copied().unwrap());
     }
 
     for t in ["rust", "web", "orm", "admin", "async"] {
         let mut tag = Tag { id: Auto::default(), name: t.into(), slug: t.into() };
-        tag.save_pool(pool).await?;
+        tag.save(pool).await?;
     }
 
     let statuses = ["draft", "published", "archived"];
@@ -127,7 +127,7 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
             view_count: (i * 37) % 500,
             published_at: Utc.with_ymd_and_hms(2025, month, day, 12, 0, 0).unwrap(),
         };
-        p.save_pool(pool).await?;
+        p.save(pool).await?;
         let pid = p.id.get().copied().unwrap();
 
         for c in 1..=3u32 {
@@ -138,7 +138,7 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
                 body: format!("Comment {c} on post {i}."),
                 created_at: Utc.with_ymd_and_hms(2025, month, day, 13, c, 0).unwrap(),
             };
-            cm.save_pool(pool).await?;
+            cm.save(pool).await?;
         }
     }
     Ok(())

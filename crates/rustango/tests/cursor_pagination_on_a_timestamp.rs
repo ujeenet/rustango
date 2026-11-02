@@ -78,7 +78,7 @@ async fn get(pool: &Pool, uri: &str) -> (StatusCode, serde_json::Value) {
     let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
         .cursor_pagination("occurred_at")
         .page_size(3)
-        .router_pool("/events", pool.clone());
+        .router("/events", pool.clone());
     let res = app
         .oneshot(
             Request::builder()
@@ -186,7 +186,7 @@ async fn a_projection_containing_the_cursor_and_pk_still_serves() {
     let app = ViewSet::for_model(Event::SCHEMA, &["id", "label", "occurred_at"])
         .cursor_pagination("occurred_at")
         .page_size(3)
-        .router_pool("/events", pool.clone());
+        .router("/events", pool.clone());
 
     let res = app
         .oneshot(
@@ -294,7 +294,7 @@ async fn paging_through_tied_timestamps_visits_every_row() {
             let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
                 .cursor_pagination("occurred_at")
                 .page_size(2)
-                .router_pool("/events", pool);
+                .router("/events", pool);
             let res = app
                 .oneshot(
                     Request::builder()
@@ -362,7 +362,7 @@ async fn paging_descending_through_ties_visits_every_row() {
         let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
             .cursor_pagination_desc("occurred_at")
             .page_size(2)
-            .router_pool("/events", pool.clone());
+            .router("/events", pool.clone());
         let res = app
             .oneshot(
                 Request::builder()
@@ -470,7 +470,7 @@ async fn walk_all_labels(pool: &Pool) -> Vec<String> {
         let app = ViewSet::for_model(Event::SCHEMA, FIELDS)
             .cursor_pagination("occurred_at")
             .page_size(2)
-            .router_pool("/events", pool.clone());
+            .router("/events", pool.clone());
         let res = app
             .oneshot(
                 Request::builder()

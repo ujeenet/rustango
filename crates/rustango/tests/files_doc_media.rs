@@ -57,7 +57,7 @@ async fn manager_with_cdn() -> MediaManager {
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default")
         .cdn("default", "https://cdn.example.com/media");
-    MediaManager::new_pool(pool, registry)
+    MediaManager::new(pool, registry)
 }
 
 async fn save_one(mgr: &MediaManager) -> i64 {
@@ -145,7 +145,7 @@ async fn public_url_is_none_for_a_missing_row_and_for_a_disk_with_no_base() {
     rustango::testkit::migrate_framework(&pool)
         .await
         .expect("migrate");
-    let bare = MediaManager::new_pool(
+    let bare = MediaManager::new(
         pool,
         StorageRegistry::new()
             .set("default", Arc::new(InMemoryStorage::new()))

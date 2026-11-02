@@ -109,7 +109,7 @@ fn manager(pool: &Pool, storage: GatedStorage) -> MediaManager {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(storage))
         .with_default("default");
-    MediaManager::new_pool(pool.clone(), registry)
+    MediaManager::new(pool.clone(), registry)
 }
 
 /// A `pending` upload old enough for any sweep.
@@ -231,7 +231,7 @@ async fn storage_error_keeps_the_row_for_the_next_sweep(pool: &Pool) {
     let registry = StorageRegistry::new()
         .set("default", storage.clone())
         .with_default("default");
-    let mgr = MediaManager::new_pool(pool.clone(), registry);
+    let mgr = MediaManager::new(pool.clone(), registry);
     let id = seed_pending(&mgr, pool).await;
 
     assert!(mgr.purge_pending(Duration::ZERO).await.is_err());

@@ -302,7 +302,7 @@ async fn seed(pool: &Pool, title: &str, owner_id: i64) -> i64 {
         title: title.into(),
         owner_id,
     };
-    item.insert_pool(pool).await.expect("insert");
+    item.insert(pool).await.expect("insert");
     *item.id.get().expect("pk")
 }
 
@@ -442,7 +442,7 @@ async fn audited_inline_child_outside_scope_is_refused(pool: &Pool) {
         parent_id: p,
         label: "one".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("insert child");
     let label = |code: &'static str| async move {
@@ -513,7 +513,7 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
             kind: kind.into(),
             filed_on: day(y),
         };
-        d.insert_pool(pool).await.expect("insert doc");
+        d.insert(pool).await.expect("insert doc");
     }
     let (status, body) = get(pool, "/rowscope_doc").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -554,7 +554,7 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
         kind: "a".into(),
         filed_on: day(2024),
     };
-    d.insert_pool(pool).await.expect("insert doc");
+    d.insert(pool).await.expect("insert doc");
     let next = "next &rarr;</a>";
     let (_, body) = get_as(pool, "/rowscope_doc?page=2", |b| b.view_hook_scan_cap(2)).await;
     assert!(body.contains(next), "an admitted next row: {body}");
@@ -572,7 +572,7 @@ async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
         body: "n".into(),
         item_id: theirs,
     };
-    note.insert_pool(pool).await.expect("insert note");
+    note.insert(pool).await.expect("insert note");
     let (status, body) = get(pool, "/rowscope_note").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains(&format!("item_id={theirs}")), "facet: {body}");
@@ -592,7 +592,7 @@ async fn fk_cell_shows_a_visible_targets_name(pool: &Pool) {
         body: "n".into(),
         item_id: mine,
     };
-    note.insert_pool(pool).await.expect("insert note");
+    note.insert(pool).await.expect("insert note");
     let (status, body) = get(pool, &format!("/rowscope_note/{}", note.id.get().unwrap())).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("shown-title"), "detail: {body}");
@@ -621,7 +621,7 @@ async fn seed_child(pool: &Pool, code: &str, parent_id: i64, label: &str, hidden
         secret: format!("pw-{code}"),
         hidden: Some(hidden),
     };
-    c.insert_pool(pool).await.expect("insert child");
+    c.insert(pool).await.expect("insert child");
 }
 
 async fn seed_parent(pool: &Pool) -> i64 {
@@ -629,7 +629,7 @@ async fn seed_parent(pool: &Pool) -> i64 {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("insert parent");
+    p.insert(pool).await.expect("insert parent");
     *p.id.get().expect("pk")
 }
 
@@ -774,7 +774,7 @@ async fn seed_auto_child(pool: &Pool, parent_id: i64, note: &str) -> i64 {
         note: note.into(),
         token: "tok".into(),
     };
-    c.insert_pool(pool).await.expect("insert auto child");
+    c.insert(pool).await.expect("insert auto child");
     *c.id.get().expect("pk")
 }
 
@@ -892,7 +892,7 @@ async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("insert parent");
+    p.insert(pool).await.expect("insert parent");
     let p = *p.id.get().expect("pk");
     let form = "name=p&rowscope_flag-TOTAL_FORMS=3&rowscope_flag-INITIAL_FORMS=0\
         &rowscope_flag-0-active=true&rowscope_flag-0-maybe=\
@@ -914,7 +914,7 @@ async fn bulk_actions_skip_hidden_rows(pool: &Pool) {
             id: Auto::default(),
             title: title.into(),
         };
-        b.insert_pool(pool).await.expect("insert");
+        b.insert(pool).await.expect("insert");
         ids.push(*b.id.get().expect("pk"));
     }
     let form = format!(

@@ -43,19 +43,19 @@ async fn seed(pool: &Pool) -> (i64, i64, i64) {
         title: "alpha".into(),
         deleted_at: None,
     };
-    a.save_pool(pool).await.unwrap();
+    a.save(pool).await.unwrap();
     let mut b = Post {
         id: Auto::default(),
         title: "beta".into(),
         deleted_at: None,
     };
-    b.save_pool(pool).await.unwrap();
+    b.save(pool).await.unwrap();
     let mut c = Post {
         id: Auto::default(),
         title: "gamma".into(),
         deleted_at: None,
     };
-    c.save_pool(pool).await.unwrap();
+    c.save(pool).await.unwrap();
     // Soft-delete beta.
     b.soft_delete(pool).await.unwrap();
     (

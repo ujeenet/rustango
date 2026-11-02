@@ -958,9 +958,7 @@ mod tests {
             id: crate::sql::Auto::Unset,
             label: "hello".into(),
         };
-        row.save_pool(&pool)
-            .await
-            .expect("insert into emitted table");
+        row.save(&pool).await.expect("insert into emitted table");
 
         let found: Vec<Row> = Row::objects().fetch(&pool).await.expect("fetch");
         assert_eq!(found.len(), 1, "the row written should be the row read");

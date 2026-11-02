@@ -55,7 +55,7 @@ async fn cookbook_rating_round_trips_against_mysql() {
     fresh_table(&p).await;
 
     let mut r = Rating { id: Auto::Unset, score: 4 };
-    r.save_pool(&p).await.expect("save_pool against mysql");
+    r.save(&p).await.expect("save_pool against mysql");
     let id = match r.id { Auto::Set(v) => v, _ => panic!("AUTO_INCREMENT didn't fill id") };
     assert!(id > 0, "MySQL AUTO_INCREMENT must assign positive id");
 
@@ -82,7 +82,7 @@ async fn mysql_multi_auto_inserts_then_refetches_for_remaining_fields() {
         bio: Some("multi-auto on mysql".into()),
         joined_at: Auto::Unset,
     };
-    a.save_pool(&p).await.expect("multi-Auto INSERT no longer errors on MySQL");
+    a.save(&p).await.expect("multi-Auto INSERT no longer errors on MySQL");
     let id = match a.id { Auto::Set(v) => v, _ => panic!("PK Auto must be set") };
     assert!(id > 0);
 
@@ -129,7 +129,7 @@ async fn mysql_decodes_multi_row_select() {
 
     for s in 1..=5 {
         let mut r = Rating { id: Auto::Unset, score: s };
-        r.save_pool(&p).await.unwrap();
+        r.save(&p).await.unwrap();
     }
     let rows: Vec<Rating> = Rating::objects()
         .fetch(&p).await.expect("fetch against mysql");

@@ -20,7 +20,7 @@ async fn operator(pool: &Pool, username: String) -> Operator {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(pool).await.expect("insert operator");
+    op.insert(pool).await.expect("insert operator");
     op
 }
 

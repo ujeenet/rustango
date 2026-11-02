@@ -41,7 +41,7 @@ async fn encrypted_cast_round_trips_and_stores_ciphertext() {
         name: "Ada".into(),
         ssn: Cast::new(plaintext.to_owned()),
     };
-    patient.save_pool(&pool).await.unwrap();
+    patient.save(&pool).await.unwrap();
     let id = *patient.id.get().unwrap();
 
     // SELECT through the model → decrypts transparently.

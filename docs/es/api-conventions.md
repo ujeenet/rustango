@@ -31,14 +31,7 @@ El nombre de un método te dice lo que hace. Una vez que aprendes estos sufijos,
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — el nombre escueto recibe un `rustango::sql::Pool` y es el camino habitual. Funciona en Postgres, MySQL y SQLite, eligiendo el dialecto internamente. Es lo que quiere casi todo el código de aplicación.
 - **`fetch_on(executor)`, `count_on(executor)`** — el sufijo `_on` significa «ejecuta esto contra el *executor* que te entrego» — una conexión o una transacción abierta en lugar del pool. Úsalo cuando necesites varias sentencias dentro de una misma transacción. `fetch_on` / `first_on` / `count_on` / `exists_on` y el `fetch_on` de `values` / `aggregate` aceptan cualquier `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) en los tres backends; el resto de la familia `_on` sigue siendo solo para Postgres.
-- **Las escrituras invierten esto, y es el único lugar donde la regla no se cumple.** `save(&pool)`, `insert(&pool)` y `delete(&pool)` reciben un `sqlx::PgPool` específico del controlador, así que en un build sin la característica `postgres` **no existen en absoluto**: elegir `sqlite` hace desaparecer el método en lugar de fallar con algo que nombre la causa. Las versiones multi-backend llevan el sufijo `_pool`: `save_pool`, `insert_pool`, `delete_pool`, cada una con `rustango::sql::Pool`.
-
-  | | nombre escueto | versión multi-backend |
-  |---|---|---|
-  | **Lecturas** (`QuerySet`) | `fetch(&pool)` — ya es multi-backend | *es* el nombre escueto |
-  | **Escrituras** (modelo) | `save(&pool)` — **solo Postgres** | `save_pool(&pool)` |
-
-  Así que el nombre corto es el estrecho para escrituras y el amplio para lecturas. Esa inversión es una verruga, no un diseño: se resolverá con un ciclo de deprecación en lugar de un renombrado. Hasta entonces, **si no estás en Postgres, escribe `save_pool` / `insert_pool` / `delete_pool`.**
+- **Las escrituras siguen la misma regla.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` y `bulk_insert(rows, &pool)` reciben un `rustango::sql::Pool` en todos los backends; sus formas `_on` reciben cualquier `SqlExecutor`. Un modelo auditado rechaza las formas `_on`, así que usa ahí las variantes `&pool`. Los antiguos nombres `_pool` aún compilan, pero están obsoletos.
 - **`from_X(value)`** — convierte DESDE otro valor (p. ej. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — un método de builder que establece una opción y devuelve el objeto, de modo que puedes encadenar llamadas (p. ej. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — el constructor mínimo. Cualquier argumento que reciba es una dependencia obligatoria (p. ej. `RedisCache::new(url)` — no puedes construir la caché sin una URL).
@@ -122,7 +115,7 @@ La regla general: si un método espera algo (la base de datos, la red o el disco
 Cada llamada al ORM recibe un pool o executor (el handle de base de datos) como **último** argumento. Pasas la conexión cada vez, en lugar de depender de un estado global oculto:
 
 ```rust
-post.save_pool(&pool).await?
+post.save(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```

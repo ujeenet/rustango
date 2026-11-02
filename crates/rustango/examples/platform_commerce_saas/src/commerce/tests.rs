@@ -369,7 +369,7 @@ async fn order_writes_need_the_change_codename() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    user.insert_pool(&pool).await.expect("user");
+    user.insert(&pool).await.expect("user");
     let uid = *user.id.get().expect("user id");
 
     let app = api_app(&url, backend).await;

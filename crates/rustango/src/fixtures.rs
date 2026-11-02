@@ -13,7 +13,7 @@
 //!
 //! Fixture::new("users")
 //!     .from_file("fixtures/users.json")?
-//!     .load_into("rustango_users", &pool).await?;
+//!     .load_into_pool("rustango_users", &pool).await?;
 //! ```
 //!
 //! ## How it works
@@ -31,8 +31,6 @@ use std::path::Path;
 
 use serde_json::Value;
 
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::PgPool;
 use crate::sql::{Pool, PoolTx};
 
 #[derive(Debug, thiserror::Error)]
@@ -151,16 +149,6 @@ impl Fixture {
         }
         Ok(self.rows.len())
     }
-
-    /// PG-typed back-compat shim around [`Self::load_into_pool`].
-    ///
-    /// # Errors
-    /// As [`Self::load_into_pool`].
-    #[cfg(feature = "postgres")]
-    pub async fn load_into(&self, table: &str, pool: &PgPool) -> Result<usize, FixtureError> {
-        self.load_into_pool(table, &Pool::Postgres(pool.clone()))
-            .await
-    }
 }
 
 /// Load several fixtures in order on any supported backend, in one
@@ -182,15 +170,6 @@ pub async fn load_all_pool(
         .await
         .map_err(|e| db(crate::sql::ExecError::Driver(e)))?;
     Ok(total)
-}
-
-/// PG-typed back-compat shim around [`load_all_pool`].
-///
-/// # Errors
-/// First fixture error encountered.
-#[cfg(feature = "postgres")]
-pub async fn load_all(fixtures: &[(&str, &Fixture)], pool: &PgPool) -> Result<usize, FixtureError> {
-    load_all_pool(fixtures, &Pool::Postgres(pool.clone())).await
 }
 
 /// The registered model whose table is `table`, if any.

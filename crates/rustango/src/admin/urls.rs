@@ -704,7 +704,7 @@ impl Builder {
 
     /// Restrict visible and writable tables to the authenticated user's
     /// effective permission set. Pass the codenames returned by
-    /// `rustango::tenancy::permissions::user_permissions(uid, pool)`.
+    /// `rustango::tenancy::permissions::user_permissions_pool(uid, pool)`.
     ///
     /// * Tables where the user lacks `{table}.view` are hidden from the
     ///   index and return 404 on direct hits.

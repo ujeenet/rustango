@@ -49,10 +49,10 @@ async fn setup() -> Pool {
             created_at: Auto::default(),
             deleted_at: None,
         };
-        p.save_pool(&pool).await.expect("seed post");
+        p.save(&pool).await.expect("seed post");
     }
     let mut a = Author { id: Auto::default(), name: "Ada".into() };
-    a.save_pool(&pool).await.expect("seed author");
+    a.save(&pool).await.expect("seed author");
 
     pool
 }

@@ -154,7 +154,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
         created_at: chrono::Utc::now(),
         sessions_revoked_at: None,
     };
-    user.save_pool(pool)
+    user.save(pool)
         .await
         .map_err(|e| MigrateError::Validation(format!("insert failed: {e}")))?;
     let user_id = user.id.get().copied().unwrap_or_default();

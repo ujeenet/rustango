@@ -57,7 +57,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     let storage: rustango::storage::BoxedStorage = Arc::new(rustango::storage::LocalStorage::new(
         tmp.path().join("brand"),
@@ -270,7 +270,7 @@ async fn failed_operator_saves_withhold_the_driver_text() {
         sessions_revoked_at: None,
     };
     other
-        .insert_pool(&rustango::sql::Pool::from(b.raw.clone()))
+        .insert(&rustango::sql::Pool::from(b.raw.clone()))
         .await
         .expect("seed operator");
     let id = *other.id.get().unwrap();

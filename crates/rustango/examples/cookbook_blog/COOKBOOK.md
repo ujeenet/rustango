@@ -2771,7 +2771,7 @@ API:         [`crates/rustango/src/sql/backend.rs`](../../src/sql/backend.rs)
 Recipe:
 ```rust,ignore
 let mut alice = Author { id: Auto::Unset, name: "Alice".into(), age: 32 };
-alice.insert_pool(&pool).await?;
+alice.insert(&pool).await?;
 assert!(alice.id.is_set());  // populated from RETURNING
 ```
 Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
@@ -3426,7 +3426,7 @@ rustango = { version = "0.61", default-features = false, features = ["sqlite", "
 ```rust,ignore
 let pool = rustango::sql::Pool::connect("sqlite:./var/app.db?mode=rwc").await?;
 rustango::media::ensure_all_tables_pool(&pool).await?;
-let manager = MediaManager::new_pool(pool, registry);
+let manager = MediaManager::new(pool, registry);
 let m = manager.save_bytes(opts).await?;
 let m = manager.get(m.id.get().copied().unwrap()).await?.unwrap();
 ```

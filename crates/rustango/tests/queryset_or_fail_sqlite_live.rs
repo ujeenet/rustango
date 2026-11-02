@@ -42,14 +42,14 @@ async fn seed(pool: &Pool) -> (i64, i64) {
         title: "published".into(),
         published: true,
     };
-    pub_row.save_pool(pool).await.unwrap();
+    pub_row.save(pool).await.unwrap();
     let pub_id = *pub_row.id.get().unwrap();
     let mut draft_row = Post {
         id: Auto::default(),
         title: "draft".into(),
         published: false,
     };
-    draft_row.save_pool(pool).await.unwrap();
+    draft_row.save(pool).await.unwrap();
     let draft_id = *draft_row.id.get().unwrap();
     (pub_id, draft_id)
 }

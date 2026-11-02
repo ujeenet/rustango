@@ -370,7 +370,7 @@ matches how your app manages database connections:
   `template_views` + `tenancy` features. Templates port between the two
   unchanged.
 
-This mirrors the ViewSet split (`router` / `router_pool` vs `tenant_router`).
+This mirrors the ViewSet split (`router` vs `tenant_router`).
 
 ---
 
@@ -386,7 +386,7 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     // HTML pages for browsers:
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));

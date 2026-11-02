@@ -108,7 +108,7 @@ async fn widget(pool: &Pool) -> i64 {
         name: "w".into(),
         flag: false,
     };
-    w.insert_pool(pool).await.expect("widget");
+    w.insert(pool).await.expect("widget");
     *w.id.get().expect("pk")
 }
 
@@ -156,7 +156,7 @@ async fn order(pool: &Pool) -> i64 {
         id: Auto::default(),
         name: "o".into(),
     };
-    o.insert_pool(pool).await.expect("order");
+    o.insert(pool).await.expect("order");
     *o.id.get().expect("pk")
 }
 
@@ -192,7 +192,7 @@ async fn hidden_child_is_not_rendered_or_written(pool: &Pool) {
         qty: 4242,
         flag: false,
     };
-    l.insert_pool(pool).await.expect("line");
+    l.insert(pool).await.expect("line");
     let parent_only = || {
         admin(pool)
             .with_user_perms(perms(&["aae_order.view", "aae_order.change"]))
@@ -218,7 +218,7 @@ async fn viewset_create_with_a_locked_required_field_is_forbidden(pool: &Pool) {
         <Key as rustango::core::Model>::SCHEMA,
         &["id", "owner_id", "label"],
     )
-    .router_pool("/keys", pool.clone());
+    .router("/keys", pool.clone());
     for body in [
         r#"{"owner_id": 9, "label": "k"}"#,
         r#"[{"owner_id": 9, "label": "k"}]"#,

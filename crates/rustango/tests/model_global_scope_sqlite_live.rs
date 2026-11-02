@@ -76,7 +76,7 @@ async fn seed(pool: &Pool) {
             title: t.into(),
             is_active: active,
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

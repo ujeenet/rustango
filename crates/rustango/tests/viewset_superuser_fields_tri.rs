@@ -69,7 +69,7 @@ fn anonymous(pool: &Pool) -> axum::Router {
     ];
     ViewSet::for_model(User::SCHEMA, fields)
         .allow_anonymous()
-        .router_pool("/users", pool.clone())
+        .router("/users", pool.clone())
 }
 
 /// A full user body that asks for superuser and a new hash.
@@ -120,7 +120,7 @@ async fn seed(pool: &Pool) -> (i64, String) {
         password_hash: "old-hash".into(),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed");
+    u.insert(pool).await.expect("seed");
     (*u.id.get().expect("pk"), u.username)
 }
 
@@ -215,8 +215,8 @@ async fn create_runs_the_add_hooks(pool: &Pool) {
     let vs = || ViewSet::for_model(Hooked::SCHEMA, &["id", "label"]).allow_anonymous();
     let skipped_app = vs()
         .skip_object_permissions()
-        .router_pool("/hooked", pool.clone());
-    let app = vs().router_pool("/hooked", pool.clone());
+        .router("/hooked", pool.clone());
+    let app = vs().router("/hooked", pool.clone());
     let post_to = |app: &axum::Router, body: serde_json::Value, deny: bool| {
         let mut req = Request::builder()
             .method("POST")
@@ -287,7 +287,7 @@ async fn a_write_echoes_only_with_the_view_perm(pool: &Pool) {
                 update: cn("change"),
                 destroy: cn("delete"),
             })
-            .router_pool("/hooked", pool.clone())
+            .router("/hooked", pool.clone())
             .layer(axum::Extension(AuthenticatedUser {
                 id: uid,
                 username: "member".into(),

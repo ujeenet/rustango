@@ -177,7 +177,7 @@ async fn boot() -> Env {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.expect("seed org");
+    org.insert(&registry).await.expect("seed org");
     let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
     let tenant = rustango::sql::Pool::connect(&tenant_url)
@@ -240,7 +240,7 @@ impl Env {
             password_hash: rustango::tenancy::password::hash("pw-123456789").unwrap(),
             ..rustango::testkit::user()
         };
-        user.insert_pool(&self.tenant).await.expect("seed user");
+        user.insert(&self.tenant).await.expect("seed user");
         let uid = user.id.get().copied().unwrap();
         for p in perms {
             set_user_perm_pool(uid, p, true, &self.tenant)
@@ -266,7 +266,7 @@ impl Env {
             title: title.to_owned(),
             owner_id,
         };
-        row.insert_pool(&self.tenant).await.expect("seed sec_owned");
+        row.insert(&self.tenant).await.expect("seed sec_owned");
         row.id.get().copied().unwrap()
     }
 
@@ -546,7 +546,7 @@ async fn an_edit_writes_only_rendered_fields() {
         is_verified: true,
         note: Some("keep".into()),
     };
-    row.insert_pool(&env.tenant).await.expect("seed sec_form");
+    row.insert(&env.tenant).await.expect("seed sec_form");
     let pk = row.id.get().copied().unwrap();
     let (status, body) = env
         .post(
@@ -662,7 +662,7 @@ async fn admin_row_signals_name_the_tenant() {
         id: rustango::Auto::default(),
         title: "p".into(),
     };
-    parent.insert_pool(&env.tenant).await.expect("seed parent");
+    parent.insert(&env.tenant).await.expect("seed parent");
     let pid = parent.id.get().copied().unwrap();
     let mut kid = SecKid {
         id: rustango::Auto::default(),
@@ -670,7 +670,7 @@ async fn admin_row_signals_name_the_tenant() {
         title: "k".into(),
         owner_id: uid,
     };
-    kid.insert_pool(&env.tenant).await.expect("seed kid");
+    kid.insert(&env.tenant).await.expect("seed kid");
     let kid = kid.id.get().copied().unwrap();
     let seen = admin_signals(&env.slug, || async {
         let form = format!("action=delete_selected&_selected={owned}");
@@ -738,7 +738,7 @@ async fn the_queryset_hook_scopes_inline_children() {
         id: rustango::Auto::default(),
         title: "p".into(),
     };
-    parent.insert_pool(&env.tenant).await.expect("seed parent");
+    parent.insert(&env.tenant).await.expect("seed parent");
     let pid = parent.id.get().copied().unwrap();
     let mut theirs = 0;
     for (title, owner) in [("mine-kid", uid), ("their-kid", uid + 1000)] {
@@ -748,7 +748,7 @@ async fn the_queryset_hook_scopes_inline_children() {
             title: title.into(),
             owner_id: owner,
         };
-        kid.insert_pool(&env.tenant).await.expect("seed kid");
+        kid.insert(&env.tenant).await.expect("seed kid");
         theirs = kid.id.get().copied().unwrap();
     }
     for uri in [
@@ -785,7 +785,7 @@ async fn the_detail_audit_panel_needs_audit_view() {
         title: "n".into(),
         owner_id: 1,
     };
-    note.insert_pool(&env.tenant).await.expect("seed note");
+    note.insert(&env.tenant).await.expect("seed note");
     let pk = note.id.get().copied().unwrap();
     env.audit("sec_note", &pk.to_string()).await;
     let marker = format!("sec_note-{pk}");

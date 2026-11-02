@@ -289,7 +289,7 @@ async fn operator_cookie(console: &axum::Router, registry: &rustango::sql::Pool)
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(registry).await.expect("seed operator");
+    op.insert(registry).await.expect("seed operator");
     let login = console
         .clone()
         .oneshot(

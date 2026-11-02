@@ -41,8 +41,8 @@ async fn org_round_trip_insert_and_fetch() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut acme = Org {
         id: Auto::default(),
@@ -57,7 +57,7 @@ async fn org_round_trip_insert_and_fetch() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    acme.insert(&pool).await.unwrap();
+    acme.insert(&pool.clone().into()).await.unwrap();
     let acme_id = *acme.id.get().unwrap();
     assert!(acme_id > 0, "BIGSERIAL should assign a positive id");
 
@@ -67,7 +67,7 @@ async fn org_round_trip_insert_and_fetch() {
     assert_eq!(fetched[0].storage_mode, "schema");
     assert_eq!(fetched[0].host_pattern.as_deref(), Some("acme.app.test"));
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -77,8 +77,8 @@ async fn org_filter_by_slug_returns_single_match() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     for slug in ["acme", "globex", "initech"] {
         let mut org = Org {
@@ -94,7 +94,7 @@ async fn org_filter_by_slug_returns_single_match() {
             path_prefix: None,
             ..rustango::testkit::org()
         };
-        org.insert(&pool).await.unwrap();
+        org.insert(&pool.clone().into()).await.unwrap();
     }
 
     let matches: Vec<Org> = Org::objects()
@@ -118,7 +118,7 @@ async fn org_filter_by_slug_returns_single_match() {
         .unwrap();
     assert_eq!(actives.len(), 3);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -130,8 +130,8 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut frozen = Org {
         id: Auto::default(),
@@ -147,7 +147,7 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
         active: false,
         ..rustango::testkit::org()
     };
-    frozen.insert(&pool).await.unwrap();
+    frozen.insert(&pool.clone().into()).await.unwrap();
 
     let fetched: Vec<Org> = Org::objects()
         .where_(Org::active.eq(false))
@@ -157,7 +157,7 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
     assert_eq!(fetched.len(), 1);
     assert!(!fetched[0].active);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[test]

@@ -150,7 +150,7 @@ des déploiements PostgreSQL :
 
 Marquez un champ `#[rustango(primary_key)]`. Un modèle sans clé primaire compile
 quand même et peut être interrogé, mais le derive omet toutes les méthodes de ligne
-basées sur la PK (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
+basées sur la PK (`save`, `find`, `delete`, `refresh_from_db`, …).
 
 La PK **par défaut et la plus courante** est un entier 64 bits auto-incrémenté,
 déclaré comme `Auto<i64>` :
@@ -167,7 +167,7 @@ PostgreSQL/SQLite, `LAST_INSERT_ID()` sur MySQL) et stockée sur votre struct :
 
 ```rust
 let mut g = Gadget { id: Auto::default(), /* … */ };   // Unset
-g.save_pool(&pool).await?;                              // DB assigns the id
+g.save(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
@@ -191,7 +191,7 @@ colonne peut être la PK ; vous assignez la valeur vous-même :
 | `i64` / `i32` + `primary_key` | `BIGINT` / `INTEGER` | vous (l'application) |
 
 Une **clé de chaîne naturelle** (par ex. un code de coupon) — notez que vous fournissez la valeur et
-insérez avec [`insert_pool`](#save-vs-insert), puisqu'il n'y a pas d'`Auto::Unset` pour que
+insérez avec [`insert`](#save-vs-insert), puisqu'il n'y a pas d'`Auto::Unset` pour que
 `save` puisse le détecter :
 
 ```rust
@@ -204,7 +204,7 @@ pub struct Coupon {
 }
 
 let c = Coupon { code: "SAVE10".into(), discount: 10 };
-c.insert_pool(&pool).await?;                       // explicit INSERT
+c.insert(&pool).await?;                       // explicit INSERT
 let back = Coupon::find_or_fail("SAVE10".to_string(), &pool).await?;   // look up by the string PK
 ```
 
@@ -363,15 +363,10 @@ Déclarés sur le **modèle** :
   `.where_(Post::author_id.eq(42))` pour des filtres vérifiés à la compilation.
 - **Des chercheurs (finders)** — `find(pk, &pool)` → `Option<Self>` ; `find_or_fail(pk, &pool)` →
   `Self` (erreur si absent) ; `find_many(pks, &pool)` ; `find_or_insert(...)`.
-- **Des écrivains (writers)** — `save_pool` (INSERT ou UPDATE), `insert_pool`
-  (insertion explicite), `delete_pool`, et `save_partial(&["title"], &pool)`
-  (met à jour seulement certaines colonnes). Les `save` / `insert` / `delete`
-  nus n'en sont **pas** des alias : ils prennent un `sqlx::PgPool` spécifique au
-  pilote et sont `#[cfg(feature = "postgres")]`, donc sur un build `sqlite` ou
-  `mysql` ils n'existent tout simplement pas. La famille `_pool` prend
-  `rustango::sql::Pool` et fonctionne sur les trois — écrivez celle-là sauf si
-  vous savez être sur Postgres. Ce nommage inversé est un défaut connu ; voir
-  [api-conventions](api-conventions.md#fonctions).
+- **Des écrivains (writers)** — `save` (INSERT ou UPDATE), `insert`
+  (insertion explicite), `delete`, et `save_partial(&["title"], &pool)`
+  (met à jour seulement certaines colonnes), tous avec `rustango::sql::Pool`
+  sur chaque backend.
 - **La suppression logique** (si activée) — `soft_delete`, `restore`, `force_delete` ;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -381,13 +376,13 @@ Ceci embrouille souvent les gens, il vaut donc la peine de le dire clairement :
 
 | Méthode | Comportement |
 |---|---|
-| `save_pool(&mut self, &pool)` | **INSERT** si la PK `Auto` est `Unset`, sinon **UPDATE** |
-| `insert_pool(&self, &pool)` | toujours **INSERT** |
+| `save(&mut self, &pool)` | **INSERT** si la PK `Auto` est `Unset`, sinon **UPDATE** |
+| `insert(&self, &pool)` | toujours **INSERT** |
 
-Pour la PK `Auto<i64>` par défaut, `save_pool` fait ce qu'il faut automatiquement.
+Pour la PK `Auto<i64>` par défaut, `save` fait ce qu'il faut automatiquement.
 Pour une **PK assignée par l'application** (un `String`/`Uuid` que vous définissez vous-même), il n'y a
-pas d'état `Unset` — `save_pool` ferait donc un UPDATE sur une ligne (peut-être inexistante).
-Utilisez **`insert_pool`** pour insérer une ligne toute neuve avec une PK personnalisée (vérifié dans le
+pas d'état `Unset` — `save` ferait donc un UPDATE sur une ligne (peut-être inexistante).
+Utilisez **`insert`** pour insérer une ligne toute neuve avec une PK personnalisée (vérifié dans le
 test associé).
 
 ---

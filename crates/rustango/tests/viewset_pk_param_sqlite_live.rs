@@ -51,7 +51,7 @@ async fn renamed_capture_still_resolves_the_detail_route() {
     let pool = pool_with_row().await;
     let app = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .pk_param("id")
-        .router_pool("/notes", pool);
+        .router("/notes", pool);
 
     let res = app
         .oneshot(
@@ -74,7 +74,7 @@ async fn sibling_route_with_matching_capture_name_mounts() {
     let pool = pool_with_row().await;
     let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .pk_param("id")
-        .router_pool("/notes", pool);
+        .router("/notes", pool);
 
     // A hand-written neighbour spelling the same position `{id}`.
     let app = vs.merge(axum::Router::new().route(

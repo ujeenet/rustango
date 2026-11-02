@@ -78,8 +78,8 @@ fn delete_pool_method_emitted_for_non_audited_model() {
     // (would need a live DB); just calling the method confirms it
     // resolves with the right signature.
     fn _probe(u: &User, p: &Post, pool: &rustango::sql::Pool) {
-        let _fut = u.delete_pool(pool);
-        let _fut = p.delete_pool(pool);
+        let _fut = u.delete(pool);
+        let _fut = p.delete(pool);
     }
 }
 
@@ -115,10 +115,10 @@ fn insert_pool_and_save_pool_methods_emitted() {
     // no live DB. Each future is dropped before the next call so the
     // borrows don't overlap.
     fn _probe(u: &mut User, p: &mut Post, pool: &rustango::sql::Pool) {
-        drop(u.insert_pool(pool));
-        drop(p.insert_pool(pool));
-        drop(u.save_pool(pool));
-        drop(p.save_pool(pool));
+        drop(u.insert(pool));
+        drop(p.insert(pool));
+        drop(u.save(pool));
+        drop(p.save(pool));
     }
 }
 
@@ -254,7 +254,7 @@ fn audited_model_gets_delete_pool() {
     // a per-backend tx wrapping DELETE + audit emit. Compile-time
     // probe; live exec needs a database.
     fn _probe(rec: &AuditedRecord, pool: &rustango::sql::Pool) {
-        let _fut = rec.delete_pool(pool);
+        let _fut = rec.delete(pool);
     }
 }
 
@@ -264,7 +264,7 @@ fn audited_model_with_plain_pk_gets_save_pool() {
     // through audit::save_one_with_audit (per-backend tx wraps
     // UPDATE + audit emit atomically; snapshot-style audit).
     fn _probe(rec: &mut AuditedRecord, pool: &rustango::sql::Pool) {
-        let _fut = rec.save_pool(pool);
+        let _fut = rec.save(pool);
     }
 }
 
@@ -283,8 +283,8 @@ fn audited_auto_pk_model_gets_insert_pool() {
     // through audit::insert_one_with_audit (per-backend tx
     // wraps INSERT + auto-PK readback + audit emit).
     fn _probe(rec: &mut AuditedAutoRecord, pool: &rustango::sql::Pool) {
-        drop(rec.insert_pool(pool));
-        drop(rec.save_pool(pool));
+        drop(rec.insert(pool));
+        drop(rec.save(pool));
     }
 }
 
@@ -346,7 +346,7 @@ fn pool_tx_commit_and_rollback_signatures() {
 fn audited_plain_pk_model_gets_insert_pool() {
     // batch 22 — audited non-Auto-PK models also get insert_pool now.
     fn _probe(rec: &mut AuditedRecord, pool: &rustango::sql::Pool) {
-        let _fut = rec.insert_pool(pool);
+        let _fut = rec.insert(pool);
     }
 }
 
@@ -360,8 +360,8 @@ fn audit_insert_one_with_audit_pool_is_callable() {
             vec![SqlValue::String("seed".into())],
         )
         .returning(vec!["id"]);
-        let _fut = rustango::audit::insert_one_with_audit(pool, &q, rec, |r| {
-            r.__rustango_audit_entry(rustango::audit::AuditOp::Create)
+        let _fut = rustango::audit::insert_one_with_audit(pool, &q, rec, |r, op| {
+            r.__rustango_audit_entry(op)
         });
     }
 }

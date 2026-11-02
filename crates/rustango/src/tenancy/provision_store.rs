@@ -282,7 +282,7 @@ pub async fn open_run(
         started_at: Auto::default(),
         finished_at: None,
     };
-    run.insert_pool(registry).await?;
+    run.insert(registry).await?;
     Ok(run)
 }
 
@@ -507,7 +507,7 @@ pub async fn append_event_text(
         message: message.as_str().to_owned(),
         at: Auto::default(),
     };
-    event.insert_pool(registry).await?;
+    event.insert(registry).await?;
     Ok(())
 }
 
@@ -691,7 +691,7 @@ pub async fn open_migrate_run(
         started_at: Auto::default(),
         finished_at: None,
     };
-    run.insert_pool(registry).await?;
+    run.insert(registry).await?;
     Ok(run)
 }
 
@@ -753,7 +753,7 @@ async fn insert_operation_run(
         started_at: Auto::default(),
         finished_at: None,
     };
-    run.insert_pool(registry).await?;
+    run.insert(registry).await?;
     Ok(run)
 }
 
@@ -1014,9 +1014,9 @@ pub async fn prune_runs(
             .fetch(registry)
             .await?;
         for event in events {
-            event.delete_pool(registry).await?;
+            event.delete(registry).await?;
         }
-        run.delete_pool(registry).await?;
+        run.delete(registry).await?;
         removed += 1;
     }
     Ok(removed)

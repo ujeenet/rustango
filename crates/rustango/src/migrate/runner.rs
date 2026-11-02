@@ -99,116 +99,111 @@ impl Builder {
         self.ledger
     }
 
-    /// As [`migrate`], with this builder's ledger.
-    ///
-    /// PG-typed back-compat. For non-PG migrations, call
-    /// [`migrate_pool`] directly.
+    /// As [`migrate_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate`].
-    #[cfg(feature = "postgres")]
-    pub async fn migrate(&self, pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-        migrate_with_ledger(pool, dir, self.ledger, None).await
+    /// As [`migrate_pool`].
+    pub async fn migrate(
+        &self,
+        pool: &crate::sql::Pool,
+        dir: &Path,
+    ) -> Result<Vec<Migration>, MigrateError> {
+        migrate_pool_with_ledger(pool, dir, self.ledger).await
     }
 
-    /// As [`migrate_to`], with this builder's ledger.
+    /// As [`migrate_to_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate_to`].
-    #[cfg(feature = "postgres")]
+    /// As [`migrate_to_pool`].
     pub async fn migrate_to(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         target: &str,
     ) -> Result<Vec<Migration>, MigrateError> {
-        migrate_to_with_ledger(pool, dir, target, self.ledger).await
+        migrate_to_pool_with_ledger(pool, dir, target, self.ledger).await
     }
 
-    /// As [`migrate_embedded`], with this builder's ledger.
+    /// As [`migrate_embedded_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate_embedded`].
-    #[cfg(feature = "postgres")]
+    /// As [`migrate_embedded_pool`].
     pub async fn migrate_embedded(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         embedded: &[(&str, &str)],
     ) -> Result<Vec<Migration>, MigrateError> {
-        migrate_embedded_with_ledger(pool, embedded, self.ledger).await
+        migrate_embedded_pool_with_ledger(pool, embedded, self.ledger).await
     }
 
-    /// As [`migrate_dry_run`], with this builder's ledger.
+    /// As [`migrate_dry_run_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate_dry_run`].
-    #[cfg(feature = "postgres")]
+    /// As [`migrate_dry_run_pool`].
     pub async fn migrate_dry_run(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
     ) -> Result<Vec<MigrationPreview>, MigrateError> {
-        migrate_dry_run_with_ledger(pool, dir, self.ledger).await
+        migrate_dry_run_pool_with_ledger(pool, dir, self.ledger).await
     }
 
-    /// As [`downgrade`], with this builder's ledger.
+    /// As [`downgrade_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`downgrade`].
-    #[cfg(feature = "postgres")]
+    /// As [`downgrade_pool`].
     pub async fn downgrade(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         steps: usize,
     ) -> Result<Vec<Migration>, MigrateError> {
-        downgrade_with_ledger(pool, dir, steps, self.ledger).await
+        downgrade_pool_with_ledger(pool, dir, steps, self.ledger).await
     }
 
-    /// As [`unapply`], with this builder's ledger.
+    /// As [`unapply_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`unapply`].
-    #[cfg(feature = "postgres")]
+    /// As [`unapply_pool`].
     pub async fn unapply(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         name: &str,
     ) -> Result<Migration, MigrateError> {
-        unapply_with_ledger(pool, dir, name, self.ledger).await
+        unapply_pool_with_ledger(pool, dir, name, self.ledger).await
     }
 
-    /// As [`unapply_force`], with this builder's ledger.
+    /// As [`unapply_force_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`unapply_force`].
-    #[cfg(feature = "postgres")]
+    /// As [`unapply_force_pool`].
     pub async fn unapply_force(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         name: &str,
     ) -> Result<Migration, MigrateError> {
-        unapply_force_with_ledger(pool, dir, name, self.ledger).await
+        unapply_force_pool_with_ledger(pool, dir, name, self.ledger).await
     }
 
-    /// As [`applied_set`], with this builder's ledger.
+    /// As [`applied_set_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`applied_set`].
-    #[cfg(feature = "postgres")]
-    pub async fn applied_set(&self, pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
-        applied_set_for(pool, self.ledger).await
+    /// As [`applied_set_pool`].
+    pub async fn applied_set(
+        &self,
+        pool: &crate::sql::Pool,
+    ) -> Result<HashSet<String>, MigrateError> {
+        applied_set_pool_with_ledger(pool, self.ledger).await
     }
 
-    /// As [`ensure_ledger`], with this builder's ledger.
+    /// As [`ensure_ledger_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`ensure_ledger`].
-    #[cfg(feature = "postgres")]
-    pub async fn ensure_ledger(&self, pool: &PgPool) -> Result<(), MigrateError> {
-        ensure_ledger_for(pool, self.ledger).await
+    /// As [`ensure_ledger_pool`].
+    pub async fn ensure_ledger(&self, pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+        ensure_ledger_pool_with_ledger(pool, self.ledger).await
     }
 }
 
@@ -324,66 +319,6 @@ async fn create_bootstrap_indexes(
     Ok(())
 }
 
-/// Run `CREATE TABLE` for every registered model, then its declared
-/// indexes, then every model's FK `ALTER TABLE` constraints. FKs last so
-/// create order doesn't matter.
-/// PG-typed back-compat; for non-PG use [`apply_all_pool`].
-///
-/// # Errors
-/// Returns [`MigrateError`] for any sqlx failure (connection, syntax,
-/// constraint violation).
-#[cfg(feature = "postgres")]
-pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
-    // `signals` is optional, so the pre/post_migrate emissions are gated
-    // (#1208) — they were unconditional while the module is not.
-    #[cfg(feature = "signals")]
-    use crate::signals::migrate::{
-        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
-    };
-    #[cfg(feature = "signals")]
-    let target = crate::sql::Pool::Postgres(pool.clone());
-    #[cfg(feature = "signals")]
-    send_pre_migrate(PreMigrateContext::new("apply_all", target.clone(), None)).await;
-    let models = bootstrap_models();
-
-    for model in &models {
-        let sql = ddl::create_table_sql(model);
-        sqlx::query(&sql).execute(pool).await?;
-    }
-    create_bootstrap_indexes(&crate::sql::Pool::Postgres(pool.clone()), &models).await?;
-    for model in &models {
-        for sql in ddl::create_constraints_sql(model) {
-            sqlx::query(&sql).execute(pool).await?;
-        }
-    }
-    // #411 — post_migrate fires once after the bootstrap walk
-    // completes successfully.
-    #[cfg(feature = "signals")]
-    send_post_migrate(PostMigrateContext::new(
-        "apply_all",
-        Vec::new(),
-        target,
-        None,
-    ))
-    .await;
-    Ok(())
-}
-
-/// `DROP TABLE IF EXISTS … CASCADE` for every registered model. CASCADE
-/// makes order irrelevant — FKs go away with the parent table.
-/// PG-typed back-compat; for non-PG use [`drop_all_pool`].
-///
-/// # Errors
-/// Returns [`MigrateError`] for any sqlx failure.
-#[cfg(feature = "postgres")]
-pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
-    for model in bootstrap_models() {
-        let sql = ddl::drop_table_sql(model, /* if_exists */ true, /* cascade */ true);
-        sqlx::query(&sql).execute(pool).await?;
-    }
-    Ok(())
-}
-
 /// `apply_all` against either backend. Equivalent to [`apply_all`] but
 /// takes [`crate::sql::Pool`] and dispatches per backend — uses the
 /// dialect-aware DDL emitters from
@@ -486,68 +421,6 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
     Ok(())
-}
-
-/// Ensure the ledger table exists, then apply every pending migration
-/// in `dir` (lex-sorted by name) to `pool`. Already-applied migrations
-/// are skipped.
-///
-/// Each migration runs in its own transaction unless its `atomic`
-/// field is `false` (e.g. for `CREATE INDEX CONCURRENTLY`). On
-/// failure within an atomic migration the file's changes roll back
-/// cleanly; **prior** files stay applied (their commits already
-/// happened), so re-running `migrate` after fixing the offender will
-/// pick up where it left off.
-///
-/// Returns the migrations that were newly applied (could be empty).
-///
-/// # Errors
-/// Returns [`MigrateError::Io`]/[`MigrateError::Json`]/[`MigrateError::Validation`]
-/// for file problems, [`MigrateError::Driver`] for SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().migrate(pool, dir).await
-}
-
-/// [`migrate`], reporting each migration to `observer` as it starts and
-/// finishes.
-///
-/// The PG-typed sibling of [`migrate_pool_with_progress`]. Kept separate
-/// rather than routed through it because this path is not the same code:
-/// it fires the `pre_migrate` / `post_migrate` signals and uses the
-/// PG-typed ledger helpers.
-///
-/// **The observer is called with the migrate lock held**, so it must not
-/// block; see [the module docs](super::progress#observers-must-not-block).
-///
-/// # Errors
-/// As [`migrate`].
-#[cfg(feature = "postgres")]
-pub async fn migrate_with_progress(
-    pool: &PgPool,
-    dir: &Path,
-    observer: &dyn MigrationObserver,
-) -> Result<Vec<Migration>, MigrateError> {
-    migrate_with_ledger(pool, dir, LEDGER_TABLE, Some(observer)).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    ledger: &str,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_signals(
-        async {
-            ensure_ledger_for(pool, ledger).await?;
-            with_migrate_lock(pool, migrate_with_ledger_body(pool, dir, ledger, observer)).await
-        },
-        |newly| newly.iter().map(|m| m.name.clone()).collect(),
-        &crate::sql::Pool::Postgres(pool.clone()),
-        None,
-    )
-    .await
 }
 
 /// [`migrate_with_progress`] for a caller that holds the migrate lock. Fires
@@ -722,37 +595,11 @@ fn forward_to(all: &[Migration], applied: &HashSet<String>, target: &str) -> Vec
         .collect()
 }
 
-/// Hold the migrate advisory lock for the duration of `body`, then
-/// release it (best-effort) before returning. Peers calling any
-/// migrate-shaped operation block until the holder releases.
-///
-/// The lock is **session-scoped**, held on a connection outside the pool
-/// for the whole body and closed after.
-#[cfg(feature = "postgres")]
-async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateError>
-where
-    F: std::future::Future<Output = Result<R, MigrateError>>,
-{
-    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), Box::pin(body)).await
-}
-
 /// The creation schema of `pool`'s sessions, for FK targets (#1718).
 #[cfg(feature = "postgres")]
 async fn pg_creation_schema(pool: &PgPool) -> Result<Option<String>, MigrateError> {
     let pool = crate::sql::Pool::Postgres(pool.clone());
     Ok(super::ensure::creation_schema(&pool).await?)
-}
-
-/// Set of migration names already recorded in the default ledger
-/// table (`__rustango_migrations__`). For a custom ledger, build a
-/// [`Builder`] with `.ledger("…")` and call its `applied_set` method.
-///
-/// # Errors
-/// Returns [`MigrateError::Driver`] for any sqlx failure (including a
-/// missing ledger table — call [`ensure_ledger`] first).
-#[cfg(feature = "postgres")]
-pub async fn applied_set(pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
-    applied_set_for(pool, LEDGER_TABLE).await
 }
 
 #[cfg(feature = "postgres")]
@@ -765,49 +612,6 @@ async fn applied_set_for(pool: &PgPool, ledger: &str) -> Result<HashSet<String>,
         out.insert(row.try_get::<String, _>("name")?);
     }
     Ok(out)
-}
-
-/// Bootstrap the default ledger table (`__rustango_migrations__`)
-/// if it doesn't exist. Idempotent and safe to run from concurrent
-/// processes — Postgres' `CREATE TABLE IF NOT EXISTS` is *not*
-/// race-free against concurrent creators (they can both pass the
-/// existence check and then collide on the catalog), so the
-/// bootstrap is serialized via a transaction-scoped advisory lock.
-///
-/// For a custom ledger, build a [`Builder`] with `.ledger("…")` and
-/// call its `ensure_ledger` method.
-///
-/// # Errors
-/// Returns [`MigrateError::Driver`] for any sqlx failure.
-#[cfg(feature = "postgres")]
-pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
-    ensure_ledger_for(pool, LEDGER_TABLE).await
-}
-
-#[cfg(feature = "postgres")]
-async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
-    use crate::sql::{Dialect as _, Postgres};
-    let dialect = Postgres;
-    let key = pg_migrate_lock_key(pool).await?;
-    let mut tx = pool.begin().await?;
-    // Postgres returns `pg_advisory_xact_lock(...)`. SQLite returns
-    // `None` (its `BEGIN` already gates concurrent CREATE TABLE).
-    if let Some(xact_lock_sql) = dialect.acquire_xact_lock_sql() {
-        // The pool runners' key, so both bootstraps serialize (#1844).
-        sqlx::query(&xact_lock_sql)
-            .bind(key)
-            .execute(&mut *tx)
-            .await?;
-    }
-    let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {ledger} (\
-         name TEXT PRIMARY KEY, \
-         applied_at {})",
-        dialect.timestamp_now_column()
-    );
-    sqlx::query(&create_sql).execute(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(())
 }
 
 /// One pending migration the dry-run would apply.
@@ -828,34 +632,6 @@ pub struct MigrationPreview {
     /// `atomic` flag on the file).
     pub atomic: bool,
     pub statements: Vec<String>,
-}
-
-/// Compute the SQL `migrate(pool, dir)` would execute, without
-/// running any of it. Reads the ledger to know what's pending; never
-/// writes. Output is one [`MigrationPreview`] per pending migration,
-/// in apply order.
-///
-/// Used by `manage migrate --dry-run`.
-///
-/// # Errors
-/// As [`migrate`] minus the SQL execution — file I/O, JSON parse,
-/// chain validation, plus the `applied_set` read.
-#[cfg(feature = "postgres")]
-pub async fn migrate_dry_run(
-    pool: &PgPool,
-    dir: &Path,
-) -> Result<Vec<MigrationPreview>, MigrateError> {
-    Builder::default().migrate_dry_run(pool, dir).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_dry_run_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    ledger: &str,
-) -> Result<Vec<MigrationPreview>, MigrateError> {
-    let pool = crate::sql::Pool::Postgres(pool.clone());
-    migrate_dry_run_pool_with_ledger(&pool, dir, ledger).await
 }
 
 /// `sqlmigrate <name>` — compute the SQL the named
@@ -1328,188 +1104,6 @@ async fn apply_atomic(
     Ok(())
 }
 
-/// Move the database to a specific migration target — forward or back.
-///
-/// Compares `target` to the current head (lex-greatest applied
-/// migration name in `dir`) and walks the right direction:
-///
-/// * `target > head` → apply pending migrations whose name lies in
-///   `(head, target]`, in lex order.
-/// * `target == head` → no-op.
-/// * `target < head` → unapply migrations whose name lies in
-///   `(target, head]`, in **reverse** lex order.
-/// * `target == "zero"` → unapply every applied migration. Special-
-///   cased so users have a stable way to wipe the schema's migration
-///   state without having to think about which file is "earliest".
-///
-/// Returns the migrations that were applied or unapplied (the caller
-/// can compare against [`applied_set`] before/after to infer
-/// direction). Returns an empty `Vec` if the target was already the
-/// current head.
-///
-/// # Errors
-/// * [`MigrateError::Validation`] if `target` doesn't match any file
-///   in `dir` (and isn't `"zero"`).
-/// * Any error [`migrate`] or [`unapply`] would raise.
-#[cfg(feature = "postgres")]
-pub async fn migrate_to(
-    pool: &PgPool,
-    dir: &Path,
-    target: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().migrate_to(pool, dir, target).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_to_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    target: &str,
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        let all = file::list_dir(dir)?;
-        let applied = applied_set_for(pool, ledger).await?;
-
-        if target == "zero" {
-            return unapply_all_in_order(pool, dir, &all, &applied, ledger).await;
-        }
-
-        if !all.iter().any(|m| m.name == target) {
-            return Err(MigrateError::Validation(format!(
-                "target migration `{target}` not found in {}",
-                dir.display()
-            )));
-        }
-
-        let mut applied = applied;
-        let mut touched = Vec::new();
-        for mig in backward_from(&all, &applied, target) {
-            unapply_locked(pool, dir, &mig.name, ledger).await?;
-            applied.remove(&mig.name);
-            touched.push(mig);
-        }
-        let mut done = applied.clone();
-        for mig in forward_to(&all, &applied, target) {
-            reconcile_and_apply_pg(pool, &all, &done, &mig, &applied, ledger).await?;
-            done.insert(mig.name.clone());
-            touched.push(mig);
-        }
-        Ok(touched)
-    })
-    .await
-}
-
-/// Apply pending migrations from an in-memory `&[(name, json)]` slice.
-///
-/// Built for deployments where shipping a `migrations/` folder
-/// alongside the binary is awkward (Docker images, single-binary
-/// distribution). Pair with the [`embed_migrations!`] proc-macro from
-/// `rustango-macros` (re-exported as `rustango::embed_migrations!`),
-/// which scans a directory at compile time and emits the slice via
-/// `include_str!` per file. The macro emits content in lex-sorted
-/// order, but this function re-sorts defensively.
-///
-/// Each entry's first item must equal the migration's `name` field
-/// — a divergence would mean the slice was hand-built incorrectly.
-///
-/// [`embed_migrations!`]: https://docs.rs/rustango/0.1/rustango/macro.embed_migrations.html
-///
-/// # Errors
-/// As [`migrate`], plus [`MigrateError::Validation`] when an entry
-/// key doesn't match the migration's own name.
-#[cfg(feature = "postgres")]
-pub async fn migrate_embedded(
-    pool: &PgPool,
-    embedded: &[(&str, &str)],
-) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().migrate_embedded(pool, embedded).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_embedded_with_ledger(
-    pool: &PgPool,
-    embedded: &[(&str, &str)],
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
-        for (name, json) in embedded {
-            let mig = file::parse(json)?;
-            if mig.name != *name {
-                return Err(MigrateError::Validation(format!(
-                    "embedded entry key `{name}` doesn't match migration `name` field `{}`",
-                    mig.name,
-                )));
-            }
-            all.push(mig);
-        }
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        file::validate_chain(&all, "embedded slice")?;
-
-        let applied = applied_set_for(pool, ledger).await?;
-        let pending: Vec<Migration> = all
-            .iter()
-            .filter(|m| !applied.contains(&m.name))
-            .cloned()
-            .collect();
-
-        let mut newly = Vec::with_capacity(pending.len());
-        for mig in pending {
-            let before = snapshot_before(&all, &mig)?;
-            apply_one(pool, &mig, &before, ledger).await?;
-            newly.push(mig);
-        }
-        Ok(newly)
-    })
-    .await
-}
-
-/// Step back `steps` applied migrations (Alembic's `downgrade -N`).
-///
-/// `downgrade(pool, dir, 1)` rolls back the most recently applied
-/// migration. `downgrade(pool, dir, n)` rolls back the `n` most
-/// recent. If `n` exceeds the number of applied migrations, every
-/// applied migration is rolled back. `n == 0` is a no-op.
-///
-/// # Errors
-/// As [`unapply`] for each step.
-#[cfg(feature = "postgres")]
-pub async fn downgrade(
-    pool: &PgPool,
-    dir: &Path,
-    steps: usize,
-) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().downgrade(pool, dir, steps).await
-}
-
-#[cfg(feature = "postgres")]
-async fn downgrade_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    steps: usize,
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    if steps == 0 {
-        return Ok(Vec::new());
-    }
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        let order = ApplyOrder::read(&crate::sql::Pool::Postgres(pool.clone()), ledger).await?;
-        let plan = Rollback::Steps(steps).plan(&[dir.to_path_buf()], &order)?;
-
-        let mut touched = Vec::with_capacity(plan.unapply.len());
-        for (_, mig) in plan.unapply {
-            unapply_locked(pool, dir, &mig.name, ledger).await?;
-            touched.push(mig);
-        }
-        Ok(touched)
-    })
-    .await
-}
-
 #[cfg(feature = "postgres")]
 async fn apply_one(
     pool: &PgPool,
@@ -1523,272 +1117,6 @@ async fn apply_one(
     } else {
         apply_loose(pool, mig, before, ledger).await
     }
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_all_in_order(
-    pool: &PgPool,
-    dir: &Path,
-    all: &[Migration],
-    applied: &HashSet<String>,
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    let mut to_unapply: Vec<Migration> = all
-        .iter()
-        .filter(|m| applied.contains(&m.name))
-        .cloned()
-        .collect();
-    to_unapply.reverse();
-    let mut touched = Vec::with_capacity(to_unapply.len());
-    for mig in to_unapply {
-        // Caller already holds the migrate lock; use `unapply_locked`
-        // to avoid re-acquiring (which would deadlock on a different
-        // pooled connection / session).
-        unapply_locked(pool, dir, &mig.name, ledger).await?;
-        touched.push(mig);
-    }
-    Ok(touched)
-}
-
-/// Roll back a single applied migration.
-///
-/// Loads `dir/{name}.json`, looks up its predecessor (or empty for
-/// the first migration) for snapshot context, computes the inverse
-/// op list via [`super::invert::invert`], and executes it in a
-/// transaction (or loose if the original `atomic: false`). Removes
-/// the entry from `__rustango_migrations__` on success.
-///
-/// **Refuses to unapply a non-head migration** — leaving an applied
-/// migration newer than the rolled-back one would put the schema in
-/// an inconsistent state (the newer one still thinks its predecessor
-/// is in place). Use [`downgrade`] or [`migrate_to`] for ordered
-/// rollback, or [`unapply_force`] to bypass.
-///
-/// **What "roll back" means here:** schema reversal restores shape,
-/// not data — `DropColumn` then `unapply` does NOT bring back the
-/// column's row values. Data reversal is only as good as the
-/// `reverse_sql` you wrote in the migration file; if you wrote
-/// `reverse_sql: "DELETE FROM x"`, that's what runs.
-///
-/// **Irreversible migrations** (`reversible: false` on any data op)
-/// fail fast before any DB write, with an error that names the op.
-///
-/// # Errors
-/// * [`MigrateError::Validation`] — non-head target, irreversible
-///   op, missing migration file, missing predecessor.
-/// * [`MigrateError::Driver`] — SQL failure during rollback.
-#[cfg(feature = "postgres")]
-pub async fn unapply(pool: &PgPool, dir: &Path, name: &str) -> Result<Migration, MigrateError> {
-    Builder::default().unapply(pool, dir, name).await
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<Migration, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        check_is_head(pool, dir, name, ledger).await?;
-        unapply_locked(pool, dir, name, ledger).await
-    })
-    .await
-}
-
-/// Roll back any applied migration, even out of order.
-///
-/// Same body as [`unapply`] but skips the head check — the caller
-/// accepts responsibility for the resulting schema state. Use only
-/// when you genuinely need to drop an arbitrary applied migration
-/// (e.g. surgical correction of a bad migration mid-history); in
-/// most cases [`downgrade`] or [`migrate_to`] is what you want.
-///
-/// # Errors
-/// As [`unapply`], minus the head-mismatch check.
-#[cfg(feature = "postgres")]
-pub async fn unapply_force(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-) -> Result<Migration, MigrateError> {
-    Builder::default().unapply_force(pool, dir, name).await
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_force_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<Migration, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, unapply_locked(pool, dir, name, ledger)).await
-}
-
-/// Verify `name` is the lex-greatest currently-applied migration.
-/// Silent pass-through if the migration isn't applied at all — that
-/// case will surface as a clearer error from `unapply_locked`
-/// ("migration not found in dir" or similar).
-#[cfg(feature = "postgres")]
-async fn check_is_head(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    let applied = applied_set_for(pool, ledger).await?;
-    if !applied.contains(name) {
-        return Ok(());
-    }
-    let all = file::list_dir(dir)?;
-    let head = all
-        .iter()
-        .rev()
-        .find(|m| applied.contains(&m.name))
-        .map(|m| m.name.as_str());
-    match head {
-        Some(h) if h == name => Ok(()),
-        Some(h) => Err(MigrateError::Validation(format!(
-            "refusing to unapply `{name}` out of order: current head is `{h}`. \
-             Use `downgrade(pool, dir, n)` / `migrate_to(pool, dir, target)` for \
-             ordered rollback, or `unapply_force` to bypass.",
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// Body of [`unapply`] without acquiring the migrate lock — for
-/// reuse by `migrate_to` and `downgrade`, which already hold the
-/// lock for the whole operation. Acquiring the lock recursively on
-/// a different pooled connection would block forever (each
-/// `pool.acquire()` is a fresh session).
-#[cfg(feature = "postgres")]
-async fn unapply_locked(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<Migration, MigrateError> {
-    let all = file::list_dir(dir)?;
-    let target = all
-        .iter()
-        .find(|m| m.name == name)
-        .cloned()
-        .ok_or_else(|| {
-            MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
-        })?;
-
-    let prev_snapshot = prev_snapshot(&all, &target, dir)?;
-
-    let inverted = invert_migration(&target, &prev_snapshot)?;
-    let applied = applied_set_for(pool, ledger).await?;
-    let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
-
-    if target.atomic {
-        unapply_atomic(pool, &target, &inverted, &after, ledger).await?;
-    } else {
-        unapply_loose(pool, &target, &inverted, &after, ledger).await?;
-    }
-
-    Ok(target)
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_atomic(
-    pool: &PgPool,
-    target: &Migration,
-    inverted: &[Operation],
-    snapshot: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    tracing::info!(migration = %target.name, "unapplying (atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
-    let mut tx = pool.begin().await?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in inverted {
-        match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    inverted,
-                    &target.snapshot,
-                    snapshot,
-                    &crate::sql::Postgres,
-                    schema.as_deref(),
-                    &empty,
-                )?;
-                for stmt in pg_statements(&mut tx, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *tx).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(&mut *tx).await?;
-    }
-    sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
-        .bind(&target.name)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_loose(
-    pool: &PgPool,
-    target: &Migration,
-    inverted: &[Operation],
-    snapshot: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    let callbacks = Callbacks::resolve(inverted)?;
-    tracing::info!(migration = %target.name, "unapplying (non-atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
-    let mut steps = render_steps(
-        inverted,
-        &target.snapshot,
-        snapshot,
-        &crate::sql::Postgres,
-        schema.as_deref(),
-        &empty,
-    )?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in inverted {
-        match op {
-            Operation::Schema(_) => {
-                let step = steps.next_step();
-                let mut conn = pool.acquire().await?;
-                for stmt in pg_statements(&mut conn, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *conn).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(pool, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => {
-                callbacks.run(c, pool.clone().into()).await?;
-            }
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(pool).await?;
-    }
-    sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
-        .bind(&target.name)
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 #[cfg(feature = "postgres")]

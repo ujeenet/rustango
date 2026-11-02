@@ -76,7 +76,7 @@ async fn insert(
         seats,
         valid_on,
     };
-    e.save_pool(pool).await.unwrap();
+    e.save(pool).await.unwrap();
     *e.id.get().unwrap()
 }
 

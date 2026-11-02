@@ -1369,7 +1369,7 @@ b.save_partial(&["status"], &pool).await?;
 
 **Feldnamen sind Struct-Felder auf Rust-Seite**, keine SQL-Spalten — `["author_id"]` (nicht `["author"]` für ein FK-typisiertes Feld). Unbekannte Feldnamen geben `ExecError::Query(QueryError::UnknownField)` zurück. Eine leere Liste ist eine No-op (gibt `Ok(0)` (betroffene Zeilen) zurück und loggt ein `tracing::warn!`) — es gibt schlicht nichts zu schreiben. Auditierte Models (`#[rustango(audit(...))]`) verengen den Audit-Log-Snapshot auf dieselbe Spaltenmenge — das Log spiegelt genau das wider, was geschrieben wurde.
 
-**Auto-PK-Hinweis.** `save_partial` ist nur UPDATE; es auf einem `Auto::Unset`-PK aufzurufen ist ein Benutzerfehler (verwende dafür `insert_pool` / `save_pool`). Anders als `save_pool`, das automatisch `Unset → insert_pool` dispatcht, nimmt diese Methode an, dass du bereits eingefügt hast.
+**Auto-PK-Hinweis.** `save_partial` ist nur UPDATE; es auf einem `Auto::Unset`-PK aufzurufen ist ein Benutzerfehler (verwende dafür `insert` / `save`). Anders als `save`, das automatisch `Unset → insert` dispatcht, nimmt diese Methode an, dass du bereits eingefügt hast.
 
 ### Kompilierzeit-geprüfte Feldliste
 
@@ -1391,20 +1391,17 @@ Senkt intern zu `save_partial` ab — gleiche Audit-Verengung, gleiche `Auto::Un
 
 ## Massenoperationen
 
-> **Nur Postgres.** `bulk_insert` / `bulk_insert_on` und `upsert` / `upsert_on`
-> werden unter `#[cfg(feature = "postgres")]` erzeugt und nehmen einen `&PgPool`
-> oder einen Postgres-Executor — auf einem MySQL- oder SQLite-Build existieren
-> sie nicht. Einen tri-dialektalen einfachen Bulk-Insert gibt es nicht; die
-> Mehr-Backend-Batch-Writer sind `bulk_upsert_pool` und
-> `bulk_insert_or_ignore_pool`, beide mit `&Pool`. Das gehört zum selben
-> bekannten Namens-Split.
+> `bulk_insert(rows, &pool)` und `upsert(&pool)` laufen auf jedem Backend;
+> `bulk_insert_on` / `upsert_on` nehmen jeden `SqlExecutor`. Jenseits der
+> Bind-Grenze schreibt ein Bulk-Insert in Blöcken innerhalb einer Transaktion.
+> MySQL hat kein `RETURNING`, daher lässt `bulk_insert` die `Auto`-Felder dort leer.
 
 
 > **Fallstrick — Massenoperationen überspringen Per-Zeile-Hooks.** `bulk_insert`, Queryset
 > `.update().execute_pool()` und Mengen-Deletes (`delete_where`, `destroy`) laufen als mengenbasiertes SQL: sie feuern **keine**
 > Signale, routen nicht durch Soft-Delete und führen
-> keine Per-Zeile-Validierung aus. Verwende sie für Geschwindigkeit; wechsle zu Per-Zeile-`save_pool()` /
-> `delete_pool()`, wenn du diese Seiteneffekte brauchst.
+> keine Per-Zeile-Validierung aus. Verwende sie für Geschwindigkeit; wechsle zu Per-Zeile-`save()` /
+> `delete()`, wenn du diese Seiteneffekte brauchst.
 
 **Eine Tabelle leeren.** `Model::truncate(&pool)` führt auf jedem Backend `DELETE FROM` aus und gibt die gelöschten Zeilen zurück. Das `on_delete` jedes FK gilt: Solange eine `restrict`-Zeile auf die Tabelle zeigt, schlägt es mit `ExecError::TruncateReferenced` fehl und ändert nichts. `Model::truncate_cascade(&pool)` leert zusätzlich jede Tabelle, die auf sie verweist, transitiv und unabhängig von ihrem `on_delete`: `TRUNCATE … CASCADE` auf PostgreSQL, ein `DELETE` pro Tabelle mit abgeschalteten (MySQL) bzw. aufgeschobenen (SQLite) FK-Prüfungen. Keines von beiden setzt IDs zurück. Auf MySQL und SQLite kann eine Tabelle, die mit `restrict` auf sich selbst verweist, ein einfaches truncate ablehnen; nutze dann `truncate_cascade`. Die Kaskade von PostgreSQL erreicht auch verweisende Tabellen in anderen Schemas, etwa Schema-Mandanten, die auf eine gemeinsame Tabelle zeigen; MySQL und SQLite bleiben in der aktuellen Datenbank.
 
@@ -1627,14 +1624,14 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_pool(&pool).await
+        post.save(&pool).await
     },
 ).await?;
 ```
 
 Das Per-Zeile-Verlaufspanel des Admins liest aus dieser Tabelle; der modellübergreifende Feed ist unter `<admin prefix>/__audit` (`Builder::audit_url` ändert das; der Tenant-Admin nutzt `RouteConfig::audit_url`, Standard `/audit`).
 
-Auditierte Zeilen, die ein FK `on_delete = "cascade"` entfernt, bekommen einen `delete`-Eintrag, gelesen vor dem Löschen in dessen Transaktion. Zeilen, die `set_null` / `set_default` ändern, bekommen einen `update`-Eintrag, und `Model::truncate` / `truncate_cascade` schreiben einen Sammeleintrag pro auditierter Tabelle, die sie ändern. Das läuft auf Pool- und Transaktionspfaden (`delete_pool`, `PoolTx`, `PoolConn`), 500 gelöschte Zeilen auf einmal: Die kaskadierten Zeilen jedes Blocks werden mit `FOR UPDATE` gelesen und mit ihren Einträgen im Speicher gehalten, bis der Block gelöscht ist. Ein roher sqlx-Executor (`Model::delete(&PgPool)`, `delete_on`) führt ein schlichtes DELETE aus und loggt stattdessen einmalig eine Warnung. Ein `DEFERRABLE INITIALLY DEFERRED`-FK kaskadiert erst beim Commit, seine Zeilen bekommen also keine Einträge.
+Auditierte Zeilen, die ein FK `on_delete = "cascade"` entfernt, bekommen einen `delete`-Eintrag, gelesen vor dem Löschen in dessen Transaktion. Zeilen, die `set_null` / `set_default` ändern, bekommen einen `update`-Eintrag, und `Model::truncate` / `truncate_cascade` schreiben einen Sammeleintrag pro auditierter Tabelle, die sie ändern. Das läuft auf Pool- und Transaktionspfaden (`delete`, `PoolTx`, `PoolConn`), 500 gelöschte Zeilen auf einmal: Die kaskadierten Zeilen jedes Blocks werden mit `FOR UPDATE` gelesen und mit ihren Einträgen im Speicher gehalten, bis der Block gelöscht ist. Ein roher sqlx-Executor (`Model::delete(&PgPool)`, `delete_on`) führt ein schlichtes DELETE aus und loggt stattdessen einmalig eine Warnung. Ein `DEFERRABLE INITIALLY DEFERRED`-FK kaskadiert erst beim Commit, seine Zeilen bekommen also keine Einträge.
 
 Bereinigung:
 
@@ -1647,7 +1644,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-Die `_pool`-Helfer nehmen `&Pool` und laufen auf allen drei Backends; die bloßen `cleanup_older_than` / `cleanup_keep_last_n` nehmen einen `&PgPool` und existieren nur mit `postgres`. Das `audit-cleanup`-Verb braucht das `tenancy`-Feature. Es kürzt das Log der Registry und das jedes aktiven Tenants; `--tenant <slug>` oder `--registry` grenzt es ein, und ein `N` von 0 oder weniger braucht `--yes`.
+Die `_pool`-Helfer nehmen `&Pool` und laufen auf allen drei Backends. Das `audit-cleanup`-Verb braucht das `tenancy`-Feature. Es kürzt das Log der Registry und das jedes aktiven Tenants; `--tenant <slug>` oder `--registry` grenzt es ein, und ein `N` von 0 oder weniger braucht `--yes`.
 
 ---
 
@@ -1706,7 +1703,7 @@ match &post.author {
 let author = post.author.get_pool(&pool).await?;     // fetches if Unloaded
 ```
 
-`get_pool` nimmt den Multi-Backend-`&Pool`. `get(&PgPool)` ist die reine Postgres-Form, und `get_on(executor)` nimmt eine Verbindung oder Transaktion.
+`get_pool` nimmt den Multi-Backend-`&Pool`, und `get_on(executor)` nimmt eine Verbindung oder Transaktion.
 
 Verwende `select_related("author")` auf dem Queryset, um einen Batch vorzuladen.
 
@@ -1791,7 +1788,7 @@ Pool-Methode, auch Schreibzugriffe, und bis zur ersten Abfrage wird keine
 Verbindung gehalten. `t.conn()` des `DatabaseTenant`-Extraktors nimmt nur die
 `_on`-Lesezugriffe.
 
-Zum Beispiel `post.insert_pool(t.pool())` und `Post::objects().count(t.pool())`;
+Zum Beispiel `post.insert(t.pool())` und `Post::objects().count(t.pool())`;
 das Beispiel `sqlite_tenant_demo` macht genau das.
 
 ## Eine Verbindung pro Request

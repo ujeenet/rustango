@@ -1369,7 +1369,7 @@ b.save_partial(&["status"], &pool).await?;
 
 **Field names are Rust-side struct fields**, not SQL columns — `["author_id"]` (not `["author"]` for an FK-typed field). Unknown field names return `ExecError::Query(QueryError::UnknownField)`. An empty list is a no-op: it returns `Ok(0)` (rows affected) and logs a `tracing::warn!`. Audited models (`#[rustango(audit(...))]`) narrow the audit-log snapshot to the same column set — the log reflects exactly what was written.
 
-**Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert_pool` / `save_pool` for that case). Unlike `save_pool` which auto-dispatches `Unset → insert_pool`, this method assumes you've already inserted.
+**Auto-PK note.** `save_partial` is UPDATE-only; calling it on an `Auto::Unset` PK is a user error (use `insert` / `save` for that case). Unlike `save` which auto-dispatches `Unset → insert`, this method assumes you've already inserted.
 
 ### Compile-time-checked field list
 
@@ -1391,20 +1391,17 @@ Internally lowers to `save_partial` — same audit narrowing, same `Auto::Unset`
 
 ## Bulk operations
 
-> **Postgres only.** `bulk_insert` / `bulk_insert_on` and `upsert` / `upsert_on`
-> are emitted under `#[cfg(feature = "postgres")]` — on a MySQL or SQLite build
-> they do not exist. `bulk_insert_on` takes a `&PgPool`, `&mut PgConnection` or
-> transaction; past the bind cap it writes in chunks inside one transaction. There is no
-> tri-dialect plain bulk insert; the multi-backend batch writers are
-> `bulk_upsert_pool` and `bulk_insert_or_ignore_pool`, both taking `&Pool`.
-> This is part of the same known naming split.
+> `bulk_insert(rows, &pool)` and `upsert(&pool)` run on every backend;
+> `bulk_insert_on` / `upsert_on` take any `SqlExecutor`. Past the bind cap a
+> bulk insert writes in chunks inside one transaction. MySQL has no
+> `RETURNING`, so `bulk_insert` leaves the `Auto` fields unset there.
 
 
 > **Pitfall — bulk ops skip per-row hooks.** `bulk_insert`, queryset
 > `.update().execute_pool()`, and set deletes (`delete_where`, `destroy`) run as
 > set-based SQL: they do **not** fire signals, route through soft-delete, or run
-> per-row validation. Use them for speed; drop to per-row `save_pool()` /
-> `delete_pool()` when you need those side effects.
+> per-row validation. Use them for speed; drop to per-row `save()` /
+> `delete()` when you need those side effects.
 
 **Empty a table.** `Model::truncate(&pool)` runs `DELETE FROM` on every backend and returns the rows deleted. Each FK's `on_delete` applies, so while a `restrict` row still points at the table it fails with `ExecError::TruncateReferenced` and changes nothing. `Model::truncate_cascade(&pool)` also empties every table that references it, transitively and whatever its `on_delete`: `TRUNCATE … CASCADE` on PostgreSQL, one `DELETE` per table with FK checks off (MySQL) or deferred (SQLite). Neither restarts ids. On MySQL and SQLite a table that references itself with `restrict` can refuse a plain truncate; use `truncate_cascade`. PostgreSQL's cascade also reaches referencing tables in other schemas, such as schema-mode tenants that point at a shared table; MySQL and SQLite stay in the current database.
 
@@ -1606,7 +1603,7 @@ let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await
 
 These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the Postgres-only executor forms (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. To exclude them by default, declare a global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, where `live_only()` returns the `deleted_at IS NULL` filter — and opt out per query with `.without_global_scope("live")`.
 
-Global scopes apply to every `QuerySet` and to the `Model` shortcuts built on one (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). They do not apply to `Model::truncate`, which empties the whole table, or to the instance methods keyed by the primary key (`save_pool`, `save_partial`, `delete_pool`, `soft_delete`, `restore`): those act on the row you already hold.
+Global scopes apply to every `QuerySet` and to the `Model` shortcuts built on one (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). They do not apply to `Model::truncate`, which empties the whole table, or to the instance methods keyed by the primary key (`save`, `save_partial`, `delete`, `soft_delete`, `restore`): those act on the row you already hold.
 
 ---
 
@@ -1628,14 +1625,14 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_pool(&pool).await
+        post.save(&pool).await
     },
 ).await?;
 ```
 
 The admin's per-row history panel reads from this table; the cross-model feed is at `<admin prefix>/__audit` (`Builder::audit_url` changes it; the tenant admin uses `RouteConfig::audit_url`, default `/audit`).
 
-Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default` get an `update` entry, and `Model::truncate` / `truncate_cascade` write one bulk entry per audited table they change. It runs on pool and transaction paths (`delete_pool`, `PoolTx`, `PoolConn`), 500 deleted rows at a time: each chunk's cascaded rows are read with `FOR UPDATE` and held in memory with their entries until the chunk is deleted. A raw sqlx executor (`Model::delete(&PgPool)`, `delete_on`) runs one plain DELETE and logs a one-time warning instead. A `DEFERRABLE INITIALLY DEFERRED` FK cascades only at commit, so its rows get no entries.
+Audited rows an FK `on_delete = "cascade"` removes get a `delete` entry, read before the delete in its transaction. Rows changed by `set_null` / `set_default` get an `update` entry, and `Model::truncate` / `truncate_cascade` write one bulk entry per audited table they change. It runs on pool and transaction paths (`delete`, `PoolTx`, `PoolConn`), 500 deleted rows at a time: each chunk's cascaded rows are read with `FOR UPDATE` and held in memory with their entries until the chunk is deleted. A raw sqlx executor (`Model::delete(&PgPool)`, `delete_on`) runs one plain DELETE and logs a one-time warning instead. A `DEFERRABLE INITIALLY DEFERRED` FK cascades only at commit, so its rows get no entries.
 
 Cleanup:
 
@@ -1648,7 +1645,7 @@ manage audit-cleanup --days 90
 manage audit-cleanup --keep-last 50 --tenant acme
 ```
 
-The `_pool` helpers take `&Pool` and run on all three backends; the bare `cleanup_older_than` / `cleanup_keep_last_n` take a `&PgPool` and exist only with `postgres`. The `audit-cleanup` verb needs the `tenancy` feature. It trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` narrows it, and an `N` of 0 or less needs `--yes`.
+The `_pool` helpers take `&Pool` and run on all three backends. The `audit-cleanup` verb needs the `tenancy` feature. It trims the registry's log and every active tenant's; `--tenant <slug>` or `--registry` narrows it, and an `N` of 0 or less needs `--yes`.
 
 ---
 
@@ -1707,7 +1704,7 @@ match &post.author {
 let author = post.author.get_pool(&pool).await?;     // fetches if Unloaded
 ```
 
-`get_pool` takes the multi-backend `&Pool`. `get(&PgPool)` is the Postgres-only form, and `get_on(executor)` takes a connection or transaction.
+`get_pool` takes the multi-backend `&Pool`, and `get_on(executor)` takes a connection or transaction.
 
 Use `select_related("author")` on the queryset to pre-load a batch.
 
@@ -1790,7 +1787,7 @@ SQLite and MySQL). Its `t.pool()` is the tenant's own pool, so every pool method
 included, and no connection is held until a query runs. The `DatabaseTenant`
 extractor's `t.conn()` takes the `_on` reads only.
 
-For example `post.insert_pool(t.pool())` and `Post::objects().count(t.pool())`;
+For example `post.insert(t.pool())` and `Post::objects().count(t.pool())`;
 the `sqlite_tenant_demo` example does exactly this.
 
 ## One connection per request

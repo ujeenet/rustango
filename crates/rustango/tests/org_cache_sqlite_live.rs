@@ -65,7 +65,7 @@ async fn add_org(pool: &Pool, slug: &str, host: &str) {
         host_pattern: Some(host.into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(pool).await.expect("insert org");
+    org.insert(pool).await.expect("insert org");
 }
 
 async fn resolve(pool: &Pool, host: &str) -> Option<String> {

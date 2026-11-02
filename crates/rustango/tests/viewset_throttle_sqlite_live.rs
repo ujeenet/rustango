@@ -41,7 +41,7 @@ async fn router(throttle: ViewSetThrottle) -> axum::Router {
     .expect("create");
     ViewSet::for_model(Post::SCHEMA, &["id", "title"])
         .throttle(throttle)
-        .router_pool("/posts", Pool::Sqlite(sq))
+        .router("/posts", Pool::Sqlite(sq))
 }
 
 /// A GET from the socket address `ip`, if any.

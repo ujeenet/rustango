@@ -74,12 +74,12 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
         id: Auto::default(),
         name: "Ada".into(),
     };
-    ada.save_pool(&pool).await.unwrap();
+    ada.save(&pool).await.unwrap();
     let mut grace = User {
         id: Auto::default(),
         name: "Grace".into(),
     };
-    grace.save_pool(&pool).await.unwrap();
+    grace.save(&pool).await.unwrap();
 
     let ada_pk = ada.id.get().copied().unwrap();
     let grace_pk = grace.id.get().copied().unwrap();
@@ -96,7 +96,7 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
             author: ForeignKey::unloaded(author_pk),
             reviewer: ForeignKey::unloaded(reviewer_pk),
         };
-        c.save_pool(&pool).await.unwrap();
+        c.save(&pool).await.unwrap();
     }
 
     let ada_db = QuerySet::<User>::default()

@@ -66,7 +66,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     // `router()` deliberately — the audit page is read-only and must be
     // there even on a console that cannot change anything, which is

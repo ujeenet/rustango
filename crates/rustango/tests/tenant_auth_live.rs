@@ -75,7 +75,7 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
         host_pattern: Some(format!("{slug}.app.test")),
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     org
 }
 
@@ -130,8 +130,8 @@ async fn anon_request_redirects_to_login() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("anon");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -161,7 +161,7 @@ async fn anon_request_redirects_to_login() {
         "should preserve next, got `{location}`"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// `GET /__login` renders the form. Public surface — no cookie needed.
@@ -172,8 +172,8 @@ async fn login_form_renders_for_anon() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("loginform");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -193,7 +193,7 @@ async fn login_form_renders_for_anon() {
     assert!(body.contains("Sign in"), "login form should render: {body}");
     assert!(body.contains(&slug), "should reference tenant slug");
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// GET the login form and take both halves of the double-submit CSRF
@@ -240,8 +240,8 @@ async fn login_without_a_csrf_token_is_refused() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("logincsrf");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -342,7 +342,7 @@ async fn login_without_a_csrf_token_is_refused() {
         "a legitimate login with a matching token must still succeed"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Wrong credentials → 303 back to `/__login?error=...`.
@@ -353,8 +353,8 @@ async fn login_with_wrong_credentials_redirects_to_error() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("badcreds");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -404,7 +404,7 @@ async fn login_with_wrong_credentials_redirects_to_error() {
         );
     }
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Superuser login → 303, cookie minted, follow-up GET sees full
@@ -416,8 +416,8 @@ async fn superuser_login_grants_read_write_admin() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("super");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -429,7 +429,7 @@ async fn superuser_login_grants_read_write_admin() {
         id: Auto::default(),
         label: "rw_marker".into(),
     };
-    w.insert(&pool).await.unwrap();
+    w.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
@@ -472,7 +472,7 @@ async fn superuser_login_grants_read_write_admin() {
         "superuser should see write-link, got: {body}"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Non-superuser login → cookie minted, but the admin renders in
@@ -485,8 +485,8 @@ async fn non_superuser_session_forces_read_only_admin() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("ronly");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -504,12 +504,16 @@ async fn non_superuser_session_forces_read_only_admin() {
             .remove(0)
     };
     {
-        use rustango::tenancy::permissions::{assign_role, get_or_create_role, grant_role_perm};
-        let role = get_or_create_role("viewer", "", &pool).await.unwrap();
-        grant_role_perm(role, "tenauth_widget.view", &pool)
+        use rustango::tenancy::permissions::{
+            assign_role_pool, get_or_create_role_pool, grant_role_perm_pool,
+        };
+        let role = get_or_create_role_pool("viewer", "", &pool.clone().into())
             .await
             .unwrap();
-        assign_role(*bob.id.get().unwrap(), role, &pool)
+        grant_role_perm_pool(role, "tenauth_widget.view", &pool.clone().into())
+            .await
+            .unwrap();
+        assign_role_pool(*bob.id.get().unwrap(), role, &pool.clone().into())
             .await
             .unwrap();
     }
@@ -518,7 +522,7 @@ async fn non_superuser_session_forces_read_only_admin() {
         id: Auto::default(),
         label: "ro_marker".into(),
     };
-    w.insert(&pool).await.unwrap();
+    w.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
@@ -569,7 +573,7 @@ async fn non_superuser_session_forces_read_only_admin() {
         "non-superuser /new should 403"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Cookie minted for tenant A is rejected when sent against tenant B
@@ -581,8 +585,8 @@ async fn cookie_from_one_tenant_is_rejected_at_another() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug_a = unique("a");
     let slug_b = unique("b");
@@ -628,7 +632,7 @@ async fn cookie_from_one_tenant_is_rejected_at_another() {
         .unwrap_or("");
     assert!(location.starts_with("/__login"), "got `{location}`");
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// v0.12.1 regression: when a request is authenticated, the tenant
@@ -643,9 +647,11 @@ async fn admin_write_records_user_source_via_with_source_install() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
-    rustango::audit::ensure_table(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
+    rustango::audit::ensure_table_pool(&pool.clone().into())
+        .await
+        .unwrap();
 
     let slug = unique("aud");
     seed_db_mode_tenant(&pool, &slug, &url).await;
@@ -661,7 +667,7 @@ async fn admin_write_records_user_source_via_with_source_install() {
         id: Auto::default(),
         label: "before-edit".into(),
     };
-    w.insert(&pool).await.unwrap();
+    w.insert(&pool.clone().into()).await.unwrap();
     let widget_pk = w.id.get().copied().unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
@@ -744,10 +750,13 @@ async fn admin_write_records_user_source_via_with_source_install() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 
     // Audit entry must be attributed to alice.
-    let entries =
-        rustango::audit::fetch_for_entity(&pool, "tenauth_widget", &widget_pk.to_string())
-            .await
-            .unwrap();
+    let entries = rustango::audit::fetch_for_entity_pool(
+        &pool.clone().into(),
+        "tenauth_widget",
+        &widget_pk.to_string(),
+    )
+    .await
+    .unwrap();
     assert!(
         entries.iter().any(|e| e.operation == "update"),
         "no update entry recorded: {entries:?}",
@@ -760,7 +769,7 @@ async fn admin_write_records_user_source_via_with_source_install() {
         upd.source
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 fn extract_session_cookie(resp: &axum::http::Response<Body>) -> Option<String> {

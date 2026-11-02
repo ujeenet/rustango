@@ -383,12 +383,12 @@ async fn prefetch_soft_groups_children_by_fk_value() {
         id: Auto::Unset,
         title: "first".into(),
     };
-    p1.insert(&pool).await.expect("insert p1");
+    p1.insert(&pool.clone().into()).await.expect("insert p1");
     let mut p2 = Post {
         id: Auto::Unset,
         title: "second".into(),
     };
-    p2.insert(&pool).await.expect("insert p2");
+    p2.insert(&pool.clone().into()).await.expect("insert p2");
     let p1_id = p1.id.get().copied().unwrap();
     let p2_id = p2.id.get().copied().unwrap();
 
@@ -402,7 +402,9 @@ async fn prefetch_soft_groups_children_by_fk_value() {
             post_id,
             body: body.into(),
         };
-        c.insert(&pool).await.expect("insert comment");
+        c.insert(&pool.clone().into())
+            .await
+            .expect("insert comment");
     }
 
     let parent_pks = vec![p1_id, p2_id];
@@ -457,17 +459,17 @@ async fn prefetch_generic_hydrates_typed_targets() {
         id: Auto::Unset,
         title: "alpha".into(),
     };
-    p1.insert(&pool).await.expect("insert p1");
+    p1.insert(&pool.clone().into()).await.expect("insert p1");
     let mut p2 = Post {
         id: Auto::Unset,
         title: "beta".into(),
     };
-    p2.insert(&pool).await.expect("insert p2");
+    p2.insert(&pool.clone().into()).await.expect("insert p2");
     let mut u = User {
         id: Auto::Unset,
         username: "carol".into(),
     };
-    u.insert(&pool).await.expect("insert u");
+    u.insert(&pool.clone().into()).await.expect("insert u");
 
     let p1_pk = p1.id.get().copied().unwrap();
     let p2_pk = p2.id.get().copied().unwrap();

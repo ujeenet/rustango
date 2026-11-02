@@ -85,9 +85,7 @@ impl Booted {
             changes: serde_json::json!({}),
             occurred_at: chrono::Utc::now() - chrono::Duration::days(age_days),
         };
-        row.insert_pool(&self.registry)
-            .await
-            .expect("seed audit row");
+        row.insert(&self.registry).await.expect("seed audit row");
     }
 
     async fn registry_entries(&self) -> Vec<String> {

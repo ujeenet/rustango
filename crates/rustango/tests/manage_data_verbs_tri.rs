@@ -340,7 +340,7 @@ async fn fail_fast_still_resets_sequences(pool: &Pool) {
         id: Auto::default(),
         name: "next".into(),
     };
-    next.insert_pool(pool)
+    next.insert(pool)
         .await
         .expect("an insert after a --fail-fast load reused a loaded id");
 }
@@ -351,12 +351,12 @@ async fn self_fk_child_before_parent_loads(pool: &Pool) {
         id: Auto::default(),
         parent_id: None,
     };
-    root.insert_pool(pool).await.expect("root");
+    root.insert(pool).await.expect("root");
     let mut leaf = Node {
         id: Auto::default(),
         parent_id: Some(root.id.get().copied().expect("pk")),
     };
-    leaf.insert_pool(pool).await.expect("leaf");
+    leaf.insert(pool).await.expect("leaf");
 
     let dumped = manage(
         pool,
@@ -401,7 +401,7 @@ async fn insert(pool: &Pool, name: &str) {
         id: Auto::default(),
         name: name.into(),
     };
-    r.insert_pool(pool).await.expect("insert");
+    r.insert(pool).await.expect("insert");
 }
 
 /// `flush --yes` clears the table; it once sent `DELETE FROM "t"` to MySQL.
@@ -432,12 +432,12 @@ async fn flush_skips_unmanaged_tables_and_views(pool: &Pool) {
             id: Auto::default(),
             name: name.into(),
         };
-        o.insert_pool(pool).await.expect("owned");
+        o.insert(pool).await.expect("owned");
         let mut l = Legacy {
             id: Auto::default(),
             name: name.into(),
         };
-        l.insert_pool(pool).await.expect("legacy");
+        l.insert(pool).await.expect("legacy");
     }
 
     let out = manage(pool, &["flush", "--yes", "--app", "cli2285"]).await;
@@ -465,18 +465,18 @@ async fn flush_refuses_when_an_unmanaged_table_references_a_target(pool: &Pool) 
         id: Auto::default(),
         name: "t".into(),
     };
-    t.insert_pool(pool).await.expect("target");
+    t.insert(pool).await.expect("target");
     let mut r = TargetRef {
         id: Auto::default(),
         target: ForeignKey::unloaded(t.id.get().copied().expect("pk")),
     };
-    r.insert_pool(pool).await.expect("ref");
+    r.insert(pool).await.expect("ref");
     rustango::testkit::matrix::fresh_table::<Bystander>(pool).await;
     let mut b = Bystander {
         id: Auto::default(),
         n: 1,
     };
-    b.insert_pool(pool).await.expect("bystander");
+    b.insert(pool).await.expect("bystander");
 
     let out = manage(pool, &["flush", "--yes", "--app", "cli2315"]).await;
     let refs: Vec<TargetRef> = TargetRef::objects().fetch(pool).await.expect("refs");
@@ -514,22 +514,22 @@ async fn flush_clears_children_before_parents(pool: &Pool) {
         id: Auto::default(),
         n: 1,
     };
-    pa.insert_pool(pool).await.expect("parent a");
+    pa.insert(pool).await.expect("parent a");
     let mut pb = ParentB {
         id: Auto::default(),
         n: 1,
     };
-    pb.insert_pool(pool).await.expect("parent b");
+    pb.insert(pool).await.expect("parent b");
     let mut ca = ChildA {
         id: Auto::default(),
         parent: ForeignKey::unloaded(pa.id.get().copied().expect("pk")),
     };
-    ca.insert_pool(pool).await.expect("child a");
+    ca.insert(pool).await.expect("child a");
     let mut cb = ChildB {
         id: Auto::default(),
         parent: ForeignKey::unloaded(pb.id.get().copied().expect("pk")),
     };
-    cb.insert_pool(pool).await.expect("child b");
+    cb.insert(pool).await.expect("child b");
     // root <- mid <- leaf: the DELETE meets the root first.
     let mut parent_id = None;
     for _ in 0..3 {
@@ -537,7 +537,7 @@ async fn flush_clears_children_before_parents(pool: &Pool) {
             id: Auto::default(),
             parent_id,
         };
-        n.insert_pool(pool).await.expect("tree");
+        n.insert(pool).await.expect("tree");
         parent_id = n.id.get().copied();
     }
 
@@ -560,7 +560,7 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
     if let Ok(rows) = CycA::objects().fetch(pool).await {
         for mut a in rows {
             a.b_id = None;
-            let _ = a.save_pool(pool).await;
+            let _ = a.save(pool).await;
         }
     }
     // PG and MySQL drop the pair together; SQLite takes one table at a time.
@@ -581,14 +581,14 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
         id: Auto::default(),
         b_id: None,
     };
-    a.insert_pool(pool).await.expect("a");
+    a.insert(pool).await.expect("a");
     let mut b = CycB {
         id: Auto::default(),
         a_id: a.id.get().copied(),
     };
-    b.insert_pool(pool).await.expect("b");
+    b.insert(pool).await.expect("b");
     a.b_id = b.id.get().copied();
-    a.save_pool(pool).await.expect("close the cycle");
+    a.save(pool).await.expect("close the cycle");
 
     let out = manage(pool, &["flush", "--yes", "--app", "cli2318"]).await;
     let left = [
@@ -617,7 +617,7 @@ async fn fresh_cycle(pool: &Pool) {
     if let Ok(rows) = CycOrg::objects().fetch(pool).await {
         for mut o in rows {
             o.owner_id = None;
-            let _ = o.save_pool(pool).await;
+            let _ = o.save(pool).await;
         }
     }
     fresh_pair(pool, CycOrg::SCHEMA, CycMember::SCHEMA).await;
@@ -651,15 +651,15 @@ async fn loaddata_breaks_a_nullable_cycle(pool: &Pool) {
             id: Auto::default(),
             owner_id: None,
         };
-        org.insert_pool(pool).await.expect("org");
+        org.insert(pool).await.expect("org");
         let org_id = org.id.get().copied().expect("org pk");
         let mut member = CycMember {
             id: Auto::default(),
             org: ForeignKey::Unloaded(org_id),
         };
-        member.insert_pool(pool).await.expect("member");
+        member.insert(pool).await.expect("member");
         org.owner_id = member.id.get().copied();
-        org.save_pool(pool).await.expect("close the cycle");
+        org.save(pool).await.expect("close the cycle");
         owners.push((org_id, org.owner_id));
     }
 
@@ -706,7 +706,7 @@ async fn load_pk_less_orgs(pool: &Pool, pk: Option<serde_json::Value>) {
         id: Auto::default(),
         owner_id: None,
     };
-    first.insert_pool(pool).await.expect("org already in");
+    first.insert(pool).await.expect("org already in");
     let org = |owner: i64| {
         let mut row = serde_json::json!({"model": "mdv.CycOrg", "fields": {"owner_id": owner}});
         if let Some(pk) = &pk {
@@ -801,12 +801,12 @@ async fn flush_clears_auto_m2m_junctions(pool: &Pool) {
         id: Auto::default(),
         n: 1,
     };
-    post.insert_pool(pool).await.expect("post");
+    post.insert(pool).await.expect("post");
     let mut tag = M2mTag {
         id: Auto::default(),
         n: 1,
     };
-    tag.insert_pool(pool).await.expect("tag");
+    tag.insert(pool).await.expect("tag");
     let tag_id = tag.id.get().copied().expect("pk");
     post.tags_m2m().add(tag_id, pool).await.expect("link");
 
@@ -829,14 +829,14 @@ async fn dump_and_load_keeps_m2m_links(pool: &Pool) {
         id: Auto::default(),
         n: 1,
     };
-    post.insert_pool(pool).await.expect("post");
+    post.insert(pool).await.expect("post");
     let mut want = Vec::new();
     for n in [1, 2] {
         let mut tag = M2mTag {
             id: Auto::default(),
             n,
         };
-        tag.insert_pool(pool).await.expect("tag");
+        tag.insert(pool).await.expect("tag");
         let id = tag.id.get().copied().expect("pk");
         post.tags_m2m().add(id, pool).await.expect("link");
         want.push(id);
@@ -886,7 +886,7 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
         id: Auto::default(),
         n: 1,
     };
-    tag.insert_pool(pool).await.expect("tag");
+    tag.insert(pool).await.expect("tag");
     let tag_id = tag.id.get().copied().expect("pk");
     // Scans come back out of pk order unless sorted: PG in heap (insert)
     // order, MySQL through the covering index on `n`.
@@ -903,7 +903,7 @@ async fn dumpdata_pages_rows_and_links(pool: &Pool) {
             id: Auto::from(id),
             n: 1000 - id,
         };
-        post.insert_pool(pool).await.expect("post");
+        post.insert(pool).await.expect("post");
         post.tags_m2m().add(tag_id, pool).await.expect("link");
     }
     let args = ["dumpdata", "--model", "cli2317.M2mPost", "--indent", "0"];
@@ -944,7 +944,7 @@ async fn dumpdata_keeps_rows_tied_on_a_partial_pk(pool: &Pool) {
             order_id: 7,
             line_no,
         };
-        l.insert_pool(pool).await.expect("line");
+        l.insert(pool).await.expect("line");
     }
     let out = manage(
         pool,
@@ -1037,14 +1037,14 @@ async fn dump_and_load_round_trip(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     let mut c = Child {
         id: Auto::default(),
         parent: ForeignKey::unloaded(p.id.get().copied().expect("pk")),
         at: chrono::NaiveTime::from_hms_milli_opt(12, 34, 56, 789).unwrap(),
         n: 7,
     };
-    c.insert_pool(pool).await.expect("child");
+    c.insert(pool).await.expect("child");
 
     let before = dump(pool).await;
     let mut reversed = before.as_array().expect("array").clone();
@@ -1062,7 +1062,7 @@ async fn dump_and_load_round_trip(pool: &Pool) {
         id: Auto::default(),
         name: "after".into(),
     };
-    next.insert_pool(pool)
+    next.insert(pool)
         .await
         .expect("an insert after loaddata reused a loaded id");
 }
@@ -1099,7 +1099,7 @@ async fn dump_and_load_keeps_floats_and_json_null(pool: &Pool) {
             meta,
             extra,
         };
-        m.insert_pool(pool).await.expect("measure");
+        m.insert(pool).await.expect("measure");
     }
     let before = measures(pool).await;
     assert_eq!(before[0].2, json!(null), "seed stored SQL NULL");

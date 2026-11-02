@@ -193,7 +193,7 @@ async fn set_on_an_i32_through_model(pool: &Pool) {
             post_id: 1,
             tag_id: 7,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("duplicate link");
     }
@@ -245,7 +245,7 @@ async fn add_inside_atomic_that_updated_the_source(pool: &Pool) {
         id: Auto::Set(1),
         n: 0,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("post");
     for id in [7, 8] {
@@ -253,7 +253,7 @@ async fn add_inside_atomic_that_updated_the_source(pool: &Pool) {
             id: Auto::Set(id),
             n: 0,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("tag");
     }

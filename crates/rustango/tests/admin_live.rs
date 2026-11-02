@@ -97,8 +97,8 @@ fn detail_value<'a>(body: &'a str, label: &str) -> Option<&'a str> {
 }
 
 async fn seed(pool: &sqlx::PgPool) {
-    migrate::drop_all(pool).await.unwrap();
-    migrate::apply_all(pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for user in [
         AdminUser {
             id: 1,
@@ -113,7 +113,7 @@ async fn seed(pool: &sqlx::PgPool) {
             is_active: false,
         },
     ] {
-        user.insert(pool).await.unwrap();
+        user.insert(&pool.clone().into()).await.unwrap();
     }
 }
 
@@ -142,7 +142,7 @@ async fn index_lists_registered_models() {
         "missing link to table: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -185,7 +185,7 @@ async fn table_view_renders_seeded_rows() {
     // PK marker
     assert!(body.contains("(pk)"), "missing pk marker: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -194,8 +194,8 @@ async fn table_view_empty_table_says_no_rows() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let response = app
@@ -212,7 +212,7 @@ async fn table_view_empty_table_says_no_rows() {
     let body = body_string(response).await;
     assert!(body.contains("No rows"), "missing empty marker: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -248,15 +248,15 @@ async fn html_escapes_user_provided_strings() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     AdminUser {
         id: 1,
         name: "<script>".into(),
         age: 30,
         is_active: true,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -281,7 +281,7 @@ async fn html_escapes_user_provided_strings() {
         "unescaped script element: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ============================================================ CRUD forms
@@ -335,7 +335,7 @@ async fn detail_view_renders_full_row() {
         "missing delete form: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -360,7 +360,7 @@ async fn detail_view_unknown_pk_returns_404() {
     let body = body_string(response).await;
     assert!(body.contains("row not found"), "missing 404 body: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -383,7 +383,7 @@ async fn detail_view_unparseable_pk_returns_400() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -392,8 +392,8 @@ async fn create_form_shows_one_input_per_field() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let response = app
@@ -427,7 +427,7 @@ async fn create_form_shows_one_input_per_field() {
     assert!(body.contains(r#"min="0""#), "missing min: {body}");
     assert!(body.contains(r#"max="150""#), "missing max: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -441,8 +441,8 @@ async fn create_form_for_auto_pk_omits_id_input() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let response = app
@@ -465,7 +465,7 @@ async fn create_form_for_auto_pk_omits_id_input() {
         "label input still rendered: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -480,8 +480,8 @@ async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let response = app
@@ -521,7 +521,7 @@ async fn create_submit_for_auto_pk_assigns_pk_and_redirects() {
         .unwrap();
     assert_eq!(row.try_get::<String, _>("label").unwrap(), "auto-pk-test");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -530,8 +530,8 @@ async fn create_submit_inserts_row_and_redirects() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     // v0.46+ — `_continue=1` keeps the historical "redirect to the
@@ -563,7 +563,7 @@ async fn create_submit_inserts_row_and_redirects() {
     assert_eq!(row.try_get::<i32, _>("age").unwrap(), 27);
     assert!(row.try_get::<bool, _>("is_active").unwrap());
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -572,8 +572,8 @@ async fn create_submit_unchecked_checkbox_is_false() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Browser omits unchecked checkbox keys entirely.
     let app = rustango::admin::router(pool.clone());
@@ -593,7 +593,7 @@ async fn create_submit_unchecked_checkbox_is_false() {
         .unwrap();
     assert!(!row.try_get::<bool, _>("is_active").unwrap());
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -602,8 +602,8 @@ async fn create_submit_validation_error_re_renders_form() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // age=200 violates the max=150 bound.
     let app = rustango::admin::router(pool.clone());
@@ -625,7 +625,7 @@ async fn create_submit_validation_error_re_renders_form() {
     assert!(body.contains(r#"value="oldie""#), "lost name: {body}");
     assert!(body.contains(r#"value="200""#), "lost age: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -666,7 +666,7 @@ async fn edit_form_pre_populates_with_pk_readonly() {
     // is_active was true → checkbox checked.
     assert!(body.contains("checked"), "missing checkbox check: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -702,7 +702,7 @@ async fn edit_submit_updates_row_and_redirects() {
     assert_eq!(row.try_get::<String, _>("name").unwrap(), "ALICE");
     assert_eq!(row.try_get::<i32, _>("age").unwrap(), 31);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -732,7 +732,7 @@ async fn delete_submit_removes_row_and_redirects() {
         .unwrap();
     assert_eq!(count, 1); // bob remains
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -767,14 +767,14 @@ async fn list_view_has_new_link_and_per_row_view_link() {
         "missing bob link: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ============================================================ pagination
 
 async fn seed_n(pool: &sqlx::PgPool, n: i64) {
-    migrate::drop_all(pool).await.unwrap();
-    migrate::apply_all(pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for i in 1..=n {
         AdminUser {
             id: i,
@@ -782,7 +782,7 @@ async fn seed_n(pool: &sqlx::PgPool, n: i64) {
             age: 30,
             is_active: true,
         }
-        .insert(pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -822,7 +822,7 @@ async fn list_view_pages_at_50_rows_per_page() {
         "row 51 leaked onto page 1: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -858,7 +858,7 @@ async fn list_view_page_2_shows_remaining_rows() {
         "missing prev link: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -883,7 +883,7 @@ async fn list_view_no_pager_when_under_one_page() {
     assert!(body.contains("5 rows"), "missing total: {body}");
     assert!(!body.contains("page 1 of"), "should not show pager: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ============================================================ basic auth
@@ -903,7 +903,7 @@ async fn unprotected_router_lets_requests_through() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -939,7 +939,7 @@ async fn protected_router_returns_401_without_credentials() {
         "missing realm: {www_authenticate}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -969,7 +969,7 @@ async fn protected_router_rejects_wrong_credentials() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1001,7 +1001,7 @@ async fn protected_router_accepts_correct_credentials() {
     let body = body_string(response).await;
     assert!(body.contains("Rustango Admin"), "missing title: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1057,7 +1057,7 @@ async fn show_only_filters_index_to_listed_tables() {
         "expected empty index: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1082,7 +1082,7 @@ async fn show_only_returns_404_for_filtered_table() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1109,7 +1109,7 @@ async fn show_only_admits_listed_tables() {
     let body = body_string(response).await;
     assert!(body.contains("AdminUser"), "missing model name: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1142,7 +1142,7 @@ async fn read_only_hides_new_button_in_list() {
         "missing read-only marker: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1176,7 +1176,7 @@ async fn read_only_hides_edit_and_delete_on_detail() {
     );
     assert!(body.contains("read-only"), "missing read-only note: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1205,7 +1205,7 @@ async fn read_only_blocks_create_with_403() {
         "missing read-only error: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1229,7 +1229,7 @@ async fn read_only_blocks_update_with_403() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1249,7 +1249,7 @@ async fn read_only_blocks_delete_with_403() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1274,7 +1274,7 @@ async fn read_only_blocks_new_form_with_403() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1315,21 +1315,21 @@ async fn show_only_and_read_only_compose() {
         .unwrap();
     assert_eq!(new_form.status(), StatusCode::FORBIDDEN);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ============================================================ FK display
 
 async fn seed_blog(pool: &sqlx::PgPool) {
-    migrate::drop_all(pool).await.unwrap();
-    migrate::apply_all(pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     AdminUser {
         id: 1,
         name: "alice".into(),
         age: 30,
         is_active: true,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     AdminUser {
@@ -1338,7 +1338,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         age: 45,
         is_active: false,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     AdminPost {
@@ -1346,7 +1346,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         title: "hello".into(),
         author_id: 1,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     AdminPost {
@@ -1354,7 +1354,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         title: "second".into(),
         author_id: 2,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 }
@@ -1396,7 +1396,7 @@ async fn list_renders_fk_as_link_to_display_value() {
         "raw author_id leaked: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1426,7 +1426,7 @@ async fn detail_renders_fk_as_link_to_display_value() {
         "detail should show alice link: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1463,7 +1463,7 @@ async fn fk_falls_back_to_raw_when_target_hidden() {
         "raw author_id missing: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1472,8 +1472,8 @@ async fn fk_falls_back_to_raw_when_target_row_missing() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Insert a post with no matching author. We bypass FK enforcement
     // by inserting via raw SQL after dropping the constraint.
@@ -1504,7 +1504,7 @@ async fn fk_falls_back_to_raw_when_target_row_missing() {
     );
     assert!(body.contains(">999<"), "raw 999 should render: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ============================================================ search + filters
@@ -1533,7 +1533,7 @@ async fn list_view_renders_search_box_when_searchable_field_exists() {
         "missing search box: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1564,7 +1564,7 @@ async fn search_filters_to_matching_rows() {
         "missing active filters note: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1591,7 +1591,7 @@ async fn search_is_case_insensitive() {
         "case-insensitive match failed: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1620,7 +1620,7 @@ async fn field_filter_keeps_only_matching_rows() {
         "missing filter badge: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1647,7 +1647,7 @@ async fn unknown_filter_field_is_silently_ignored() {
     assert!(body.contains("alice"), "missing alice: {body}");
     assert!(body.contains("bob"), "missing bob: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1664,7 +1664,7 @@ async fn search_and_filter_compose() {
         age: 50,
         is_active: false,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -1687,7 +1687,7 @@ async fn search_and_filter_compose() {
     );
     assert!(!body.contains("bob"), "bob should not match: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1696,8 +1696,8 @@ async fn pager_links_preserve_search_and_filters() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     // 60 active alphas + 60 inactive betas → exactly 60 active rows = 2 pages
     for i in 1..=60 {
         AdminUser {
@@ -1706,7 +1706,7 @@ async fn pager_links_preserve_search_and_filters() {
             age: 25,
             is_active: true,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -1717,7 +1717,7 @@ async fn pager_links_preserve_search_and_filters() {
             age: 25,
             is_active: false,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -1739,7 +1739,7 @@ async fn pager_links_preserve_search_and_filters() {
         "pager dropped filters: {body}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ============================================================== SLICE 10.2 + 10.3
@@ -1748,8 +1748,8 @@ async fn pager_links_preserve_search_and_filters() {
 // `search_fields`, `list_per_page`, and `ordering` on the list view.
 
 async fn seed_admin_showcase(pool: &sqlx::PgPool) {
-    migrate::drop_all(pool).await.unwrap();
-    migrate::apply_all(pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for (id, name, color, notes) in [
         (1_i64, "alpha", "red", "first row"),
         (2, "bravo", "green", "second"),
@@ -1761,7 +1761,7 @@ async fn seed_admin_showcase(pool: &sqlx::PgPool) {
             color: color.into(),
             notes: notes.into(),
         }
-        .insert(pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -1800,7 +1800,7 @@ async fn list_display_attr_renders_only_named_columns() {
         "notes should be hidden by list_display: {head}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1828,7 +1828,7 @@ async fn search_fields_attr_filters_by_named_columns() {
     assert!(!body.contains(">bravo<"), "bravo leaked: {body}");
     assert!(!body.contains(">charlie<"), "charlie leaked: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1860,7 +1860,7 @@ async fn ordering_attr_drives_sort_order() {
         "expected reverse-name order; got positions charlie={charlie} bravo={bravo} alpha={alpha}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1892,7 +1892,7 @@ async fn no_admin_attr_falls_back_to_all_scalar_fields() {
         );
     }
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1938,7 +1938,7 @@ async fn sidebar_renders_on_admin_pages() {
         "active sidebar link not highlighted: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -1974,7 +1974,7 @@ async fn list_filter_attr_renders_facet_card_with_distinct_values() {
     // Each color appears once; the count should read `(1)` next to it.
     assert!(body.contains("(1)"), "facet count `(1)` missing: {body}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2009,7 +2009,7 @@ async fn list_filter_active_value_highlights_and_filters_rows() {
         "active facet link not highlighted: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2046,7 +2046,7 @@ async fn actions_attr_renders_action_picker_and_checkboxes() {
         "row checkbox missing: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2094,7 +2094,7 @@ async fn delete_selected_action_removes_named_rows() {
         .unwrap();
     assert_eq!(last, "charlie", "unexpected survivor: {last}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2127,7 +2127,7 @@ async fn unknown_action_returns_400() {
         .unwrap();
     assert_eq!(remaining, 3, "rows must not be touched on unknown action");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Slice 10.7 fixtures: a parent with `display = "name"` and a child
@@ -2163,14 +2163,14 @@ async fn list_filter_renders_fk_target_display_name() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for (id, name) in [(1_i64, "Ada"), (2, "Linus")] {
         FkParent {
             id,
             name: name.into(),
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2180,7 +2180,7 @@ async fn list_filter_renders_fk_target_display_name() {
             label: label.into(),
             parent_id,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2209,7 +2209,7 @@ async fn list_filter_renders_fk_target_display_name() {
         "Ada should be the link text: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Slice 10.5 fixture — model with `fieldsets` + `readonly_fields`.
@@ -2237,8 +2237,8 @@ async fn fieldsets_render_legend_and_groups_fields() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let resp = app
@@ -2275,7 +2275,7 @@ async fn fieldsets_render_legend_and_groups_fields() {
         "created_by input missing: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2287,14 +2287,14 @@ async fn readonly_fields_render_input_as_readonly_on_edit() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     FsDoc {
         id: 1,
         title: "first".into(),
         created_by: "alice".into(),
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -2314,7 +2314,7 @@ async fn readonly_fields_render_input_as_readonly_on_edit() {
         "created_by input should carry `readonly` attr: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2326,14 +2326,14 @@ async fn readonly_fields_are_skipped_on_update_submit() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     FsDoc {
         id: 1,
         title: "first".into(),
         created_by: "alice".into(),
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -2366,7 +2366,7 @@ async fn readonly_fields_are_skipped_on_update_submit() {
         "created_by should NOT be overridden by readonly bypass attempt"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Slice 11.0 fixture: model with a custom bulk action allowlisted.
@@ -2390,15 +2390,15 @@ async fn user_defined_action_runs_via_register_tx_action() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for (id, title) in [(1_i64, "alpha"), (2, "bravo"), (3, "charlie")] {
         UaPost {
             id,
             title: title.into(),
             is_published: false,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2439,7 +2439,7 @@ async fn user_defined_action_runs_via_register_tx_action() {
         .unwrap();
     assert_eq!(rows, vec![(1, true), (2, false), (3, true)]);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -2450,14 +2450,14 @@ async fn allowlisted_action_without_handler_returns_500() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     UaPost {
         id: 1,
         title: "x".into(),
         is_published: false,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -2483,5 +2483,5 @@ async fn allowlisted_action_without_handler_returns_500() {
         "expected JSON error envelope: {body}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }

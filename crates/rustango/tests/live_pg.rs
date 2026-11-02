@@ -56,7 +56,7 @@ async fn fresh_pool() -> Option<sqlx::PgPool> {
     .unwrap();
 
     for user in seed() {
-        user.insert(&pool).await.unwrap();
+        user.insert(&pool.clone().into()).await.unwrap();
     }
     Some(pool)
 }
@@ -290,12 +290,12 @@ async fn instance_delete_targets_only_that_pk() {
         name: "alice".into(),
         is_active: true,
     };
-    let affected = alice.delete(&pool).await.unwrap();
+    let affected = alice.delete(&pool.clone().into()).await.unwrap();
     assert_eq!(affected, 1);
     assert_eq!(count(&pool).await, 2);
 
     // Re-deleting the same instance is idempotent (0 rows affected).
-    let affected = alice.delete(&pool).await.unwrap();
+    let affected = alice.delete(&pool.clone().into()).await.unwrap();
     assert_eq!(affected, 0);
 }
 
@@ -352,7 +352,7 @@ async fn insert_within_bounds_succeeds() {
         name: "alice".into(),
         age: 30,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -373,7 +373,7 @@ async fn insert_too_long_string_is_rejected_before_db() {
         name: "this_is_way_too_long".into(), // > 8 chars
         age: 30,
     };
-    let err = bad.insert(&pool).await.unwrap_err();
+    let err = bad.insert(&pool.clone().into()).await.unwrap_err();
     assert!(matches!(
         err,
         ExecError::Query(QueryError::MaxLengthExceeded { max: 8, .. })
@@ -394,7 +394,7 @@ async fn insert_age_below_min_is_rejected() {
         name: "ok".into(),
         age: -1,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap_err();
     assert!(matches!(
@@ -414,7 +414,7 @@ async fn insert_age_above_max_is_rejected() {
         name: "ok".into(),
         age: 9999,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap_err();
     assert!(matches!(
@@ -434,7 +434,7 @@ async fn insert_at_inclusive_bounds_is_accepted() {
         name: "12345678".into(), // exactly 8 chars
         age: 0,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     BoundedUser {
@@ -442,7 +442,7 @@ async fn insert_at_inclusive_bounds_is_accepted() {
         name: "ok".into(),
         age: 150,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -461,7 +461,7 @@ async fn update_too_long_string_is_rejected_before_db() {
         name: "ok".into(),
         age: 25,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -497,7 +497,7 @@ async fn update_out_of_range_age_is_rejected() {
         name: "ok".into(),
         age: 25,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -526,7 +526,7 @@ async fn filter_with_long_string_still_works_at_runtime() {
         name: "ok".into(),
         age: 25,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -624,7 +624,7 @@ async fn full_crud_round_trip() {
         name: "dave".into(),
         is_active: false,
     };
-    dave.insert(&pool).await.unwrap();
+    dave.insert(&pool.clone().into()).await.unwrap();
     assert_eq!(count(&pool).await, 4);
 
     // UPDATE dave to active and rename.

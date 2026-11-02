@@ -48,7 +48,7 @@ async fn seed_one(pool: &Pool) -> i64 {
         title: "subject".into(),
         deleted_at: None,
     };
-    p.save_pool(pool).await.unwrap();
+    p.save(pool).await.unwrap();
     p.id.get().copied().unwrap()
 }
 
