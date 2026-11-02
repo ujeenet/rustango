@@ -1440,7 +1440,7 @@ where
 
 /// Run `query` in `tx`, with whether it inserted (`Create`) or updated
 /// (`Update`): a `DoUpdate` upsert runs a `DoNothing` pass first and
-/// upserts only when that skipped (#1795).
+/// upserts only when that skipped.
 async fn insert_or_upsert_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::InsertQuery,

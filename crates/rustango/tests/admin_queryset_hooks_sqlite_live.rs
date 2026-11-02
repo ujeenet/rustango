@@ -1,4 +1,4 @@
-//! Issue #360 — `register_queryset_scope!` adds a
+//! `register_queryset_scope!` adds a
 //! request-aware Filter contribution to the admin's list view
 //! WHERE clause. End-to-end: register a hook that hides
 //! `archived = true` rows, seed both kinds of rows, fetch the list

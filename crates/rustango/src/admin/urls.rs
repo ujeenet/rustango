@@ -68,7 +68,7 @@ pub type AdminTxActionFn = Arc<
         + Sync,
 >;
 
-/// The permission a custom bulk action is checked against (#1818).
+/// The permission a custom bulk action is checked against.
 ///
 /// Any custom action also needs the table writable, so `Delete` needs
 /// `{table}.change` too. It audits as an update and sends edit signals.
@@ -749,7 +749,7 @@ impl Builder {
     }
 
     /// [`Self::register_tx_action`] checked against `perm` instead of
-    /// `change`, plus the object hook named after the action (#1818).
+    /// `change`, plus the object hook named after the action.
     /// A `Delete` action still needs `{table}.change`, and it audits and
     /// signals as an edit; the handler does its own deleting.
     pub fn register_tx_action_with_perm<F>(
@@ -1001,37 +1001,6 @@ async fn mark_perms_scoped(
     next.run(req).await
 }
 
-/// Tables the generic admin never serves: the TOTP store holds raw
-/// secrets, and a passkey row signs in as its `user_id` (#2364).
-/// Enrollment has its own pages.
-pub(crate) fn is_never_served(table: &str) -> bool {
-    #[cfg(not(any(feature = "totp", feature = "passkey", feature = "tenancy")))]
-    let _ = table;
-    // Written only through `db_server`, which seals the admin password.
-    #[cfg(feature = "tenancy")]
-    if table == <crate::tenancy::DbServer as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    // A purge drops what these rows name, so only provisioning writes them.
-    #[cfg(feature = "tenancy")]
-    if table == <crate::tenancy::TenantDatabase as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(feature = "totp")]
-    if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(all(feature = "tenancy", feature = "totp"))]
-    if table == <crate::tenancy::OperatorTotp as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(feature = "passkey")]
-    if table == <crate::passkey::WebauthnCredential as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    false
-}
-
 /// Per-request state: the pool plus the resolved `Config`. It is
 /// cloned on every request, which is cheap because `Config` is in
 /// an `Arc`.
@@ -1069,7 +1038,9 @@ impl AppState {
         {
             return false;
         }
-        if is_never_served(table) {
+        if crate::core::table_policy::table_access(table)
+            == crate::core::table_policy::TableAccess::Never
+        {
             return false;
         }
         // `rustango_admin_users` is the bare admin's credential

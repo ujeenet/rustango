@@ -41,7 +41,6 @@ use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 use super::session::SessionError;
 pub use super::session::{PasswordFingerprint, SessionSecret};
@@ -142,9 +141,11 @@ impl HandoffPayload {
             iat: now,
         }
     }
+}
 
-    fn is_expired(&self) -> bool {
-        chrono::Utc::now().timestamp() >= self.exp
+impl crate::session::Expiring for HandoffPayload {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
     }
 }
 
@@ -152,11 +153,7 @@ impl HandoffPayload {
 /// tenant session key but not its tag, so neither verifies as the other.
 #[must_use]
 pub fn mint(secret: &SessionSecret, payload: &HandoffPayload) -> String {
-    let json = serde_json::to_vec(payload).expect("payload serializes");
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = crate::session::sign_tagged(secret, HANDOFF_DOMAIN_TAG, payload_b64.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{payload_b64}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), HANDOFF_DOMAIN_TAG, payload)
 }
 
 /// Verify a handoff token, decode it, and check it is bound to
@@ -172,22 +169,9 @@ pub fn decode(
     tenant: &crate::tenancy::TenantSlug,
     value: &str,
 ) -> Result<HandoffPayload, HandoffError> {
-    let (payload_b64, sig_b64) = value.split_once('.').ok_or(HandoffError::Malformed)?;
-    let expected = crate::session::sign_tagged(secret, HANDOFF_DOMAIN_TAG, payload_b64.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| HandoffError::Malformed)?;
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return Err(HandoffError::BadSignature);
-    }
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| HandoffError::Malformed)?;
     let payload: HandoffPayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| HandoffError::Malformed)?;
-    if payload.is_expired() {
-        return Err(HandoffError::Expired);
-    }
+        crate::session::SealedToken::open(secret.key(), HANDOFF_DOMAIN_TAG, value)
+            .map_err(SessionError::from)?;
     if !tenant.binds(&payload.slug, payload.org) {
         return Err(HandoffError::WrongTenant);
     }

@@ -295,7 +295,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         )
     }
 
-    /// [`Self::register_tx_action`] checked against `perm` (#1818). Same
+    /// [`Self::register_tx_action`] checked against `perm`. Same
     /// semantics as [`crate::admin::Builder::register_tx_action_with_perm`].
     #[must_use]
     pub fn register_tx_action_with_perm<F>(

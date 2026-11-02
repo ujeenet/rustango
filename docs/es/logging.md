@@ -406,8 +406,8 @@ contiene una palabra secreta, comparada palabra a palabra, así que `api_key`,
 `pwd`, `token`, `jwt`, `secret`, `key`, `signature`, `auth`, `credential`,
 `cookie`, `session`, `otp`, más los nombres OAuth `code`, `state` y
 `assertion`. Amplía con `.redact_additional("ref")`, o sustituye la lista
-entera con `.redact(vec![...])`; `token`, `signature` y `code` siguen
-enmascarados en todo caso. El `url.query` del span de la petición se
+entera con `.redact(vec![...])`; las palabras de credenciales (`password`,
+`token`, `secret`, `api_key`, ...), `signature` y `code` siguen enmascaradas en todo caso. El `url.query` del span de la petición se
 enmascara igual. Esto cubre **solo las cadenas de consulta**;
 para el resto, ver
 [security.md](security.md#mantener-los-secretos-fuera-de-tus-registros).

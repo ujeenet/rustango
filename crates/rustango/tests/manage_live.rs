@@ -711,14 +711,13 @@ async fn purge_tenant_drops_a_legacy_schema_name() {
     .1
     .unwrap();
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{legacy}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
     sqlx::query("UPDATE rustango_orgs SET schema_name = $1 WHERE slug = $2")
         .bind(&legacy)
         .bind(&slug)
         .execute(&pool)
+        .await
+        .unwrap();
+    rustango::testkit::migrate_schema(&pools, &legacy, &url)
         .await
         .unwrap();
 
@@ -1691,10 +1690,6 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
 
     let slug = unique("ssoschema");
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
     let mut org = Org {
         slug: slug.clone(),
         display_name: slug.clone(),
@@ -1706,6 +1701,9 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         .await
         .unwrap();
     let pools = TenantPools::new(pool.clone());
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &url)
+        .await
+        .unwrap();
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
         .await

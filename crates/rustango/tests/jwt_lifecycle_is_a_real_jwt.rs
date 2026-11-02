@@ -104,61 +104,43 @@ async fn issued_tokens_still_verify() {
     assert_eq!(claims.typ, "access");
 }
 
-/// A token in the pre-#1397 two-segment shape still verifies, so
-/// upgrading the framework does not log out everyone holding one that
-/// has not expired.
-///
-/// Built by hand rather than by an old code path, because the old code
-/// path is gone — which is the point: this pins the compatibility
-/// window rather than the implementation that needed it.
+/// A correctly signed token in the older two-segment shape is refused,
+/// by the lifecycle and by `JwtBackend` alike: one codec, three segments.
+#[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn legacy_two_segment_tokens_still_verify() {
+async fn a_two_segment_token_is_refused() {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     let life = JwtLifecycle::new(secret());
     let exp = chrono::Utc::now().timestamp() + 600;
     let payload = serde_json::json!({
-        "sub": 42, "exp": exp, "jti": "legacy-jti", "typ": "access",
+        "sub": 42, "exp": exp, "iat": exp - 600, "jti": "legacy-jti", "typ": "access",
     });
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&payload).unwrap());
-
-    // Legacy signing input: the payload alone, no header.
     let mut mac = <Hmac<Sha256>>::new_from_slice(&secret()).unwrap();
     mac.update(payload_b64.as_bytes());
     let sig_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-
     let legacy = format!("{payload_b64}.{sig_b64}");
-    assert_eq!(legacy.split('.').count(), 2);
 
-    let claims = life
-        .verify_access(&legacy)
+    assert!(life.verify_access(&legacy).await.is_none(), "lifecycle");
+    assert!(!life.revoke(&legacy).await, "revoke reads the same codec");
+
+    let backend = rustango::tenancy::auth_backends::JwtBackend::new(secret());
+    let req = axum::http::Request::builder()
+        .header("authorization", format!("Bearer {legacy}"))
+        .body(())
+        .unwrap();
+    let (parts, ()) = req.into_parts();
+    let pool = rustango::sql::Pool::connect("sqlite::memory:")
         .await
-        .expect("a token issued before #1397 must still verify");
-    assert_eq!(claims.sub, 42);
-}
-
-/// Compatibility is not credulity: a two-segment token signed with the
-/// wrong key is still refused.
-///
-/// Without this, "accept the old shape" could have meant "accept
-/// anything shaped like the old one".
-#[tokio::test]
-async fn a_legacy_token_with_a_bad_signature_is_refused() {
-    let life = JwtLifecycle::new(secret());
-    let exp = chrono::Utc::now().timestamp() + 600;
-    let payload = serde_json::json!({
-        "sub": 42, "exp": exp, "jti": "forged", "typ": "access",
-    });
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(serde_json::to_vec(&payload).unwrap());
-    let forged = format!("{payload_b64}.{}", "A".repeat(43));
-
+        .unwrap();
+    use rustango::tenancy::auth_backends::AuthBackend as _;
     assert!(
-        life.verify_access(&forged).await.is_none(),
-        "a legacy-shaped token with a bad signature must be refused"
+        !matches!(backend.authenticate(&parts, &pool).await, Ok(Some(_))),
+        "JwtBackend"
     );
 }
 

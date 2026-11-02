@@ -319,23 +319,6 @@ pub enum FieldCast {
 #[cfg(doctest)]
 pub struct KeyedStringsNeedMaxLength;
 
-/// Clear credential names: these exact names, or ending in `_password`,
-/// `_secret`, `_token`, `_api_key` or `_private_key`. No `*_hash`: content hashes.
-fn is_credential_name(name: &str) -> bool {
-    const EXACT: [&str; 7] = [
-        "password",
-        "password_hash",
-        "database_url",
-        "secret",
-        "token",
-        "api_key",
-        "private_key",
-    ];
-    const SUFFIX: [&str; 5] = ["_password", "_secret", "_token", "_api_key", "_private_key"];
-    let name = name.to_ascii_lowercase();
-    EXACT.contains(&name.as_str()) || SUFFIX.iter().any(|s| name.ends_with(s))
-}
-
 impl FieldSchema {
     /// A plain `NOT NULL` column; every other field is off or empty,
     /// except `editable`. Set the rest by assigning fields:
@@ -393,9 +376,10 @@ impl FieldSchema {
     #[must_use]
     pub fn is_credential(&self) -> bool {
         matches!(self.cast, Some(FieldCast::Sealed))
-            || self
-                .secret
-                .unwrap_or_else(|| is_credential_name(self.name) || is_credential_name(self.column))
+            || self.secret.unwrap_or_else(|| {
+                crate::secret_keys::is_credential_column_name(self.name)
+                    || crate::secret_keys::is_credential_column_name(self.column)
+            })
     }
 
     /// `true` for a server-assigned timestamp: an

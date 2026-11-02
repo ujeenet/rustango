@@ -56,9 +56,12 @@ async fn seed_org(
     org
 }
 
+/// A migrated tenant schema: a tenant pool refuses a bare one.
 async fn create_schema(pool: &sqlx::PgPool, name: &str) {
-    let sql = format!(r#"CREATE SCHEMA IF NOT EXISTS "{name}""#);
-    sqlx::query(&sql).execute(pool).await.unwrap();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rustango::testkit::migrate_schema(&TenantPools::new(pool.clone()), name, &url)
+        .await
+        .unwrap();
 }
 
 async fn drop_schema(pool: &sqlx::PgPool, name: &str) {

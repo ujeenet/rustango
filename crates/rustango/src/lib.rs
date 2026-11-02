@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.61"                                        # Postgres (the default backend)
+//! rustango = "0.62"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.61", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.61", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.62", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.62", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -543,8 +543,13 @@ pub mod jsonapi;
     feature = "csrf",
     feature = "totp",
     feature = "tenancy",
+    feature = "passkey",
 ))]
 pub(crate) mod crypto;
+
+/// The one codec for signed, expiring cookies and tokens (`SealedToken`).
+#[cfg(any(feature = "csrf", feature = "passkey", feature = "oauth2"))]
+pub mod sealed;
 
 /// AEAD sealing shared by `EncryptedString` and sealed tenant secrets.
 #[cfg(feature = "_aead")]
@@ -560,8 +565,7 @@ pub mod casts;
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
 
-/// Word-based secret-key matcher for log and audit redaction.
-#[cfg(any(feature = "mcp", feature = "_http_layers"))]
+/// The credential word list, and its matcher for log and audit redaction.
 pub(crate) mod secret_keys;
 
 /// URL / IRI / URI helpers — `url_encode`, `uri_to_iri`, `iri_to_uri`,

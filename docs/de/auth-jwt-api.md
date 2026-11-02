@@ -343,9 +343,8 @@ Benutzerdefinierte Claims überleben `refresh` (werden auf das neue Paar
   rustango und sogar von `rustango::jwt::decode` abgelehnt. Wer dafür einen
   eigenen Verifier geschrieben hat, kann ihn wegwerfen.
 
-  Vor dem Fix ausgestellte Tokens werden beim Verifizieren weiterhin akzeptiert,
-  damit ein Upgrade niemanden ausloggt. Dieser Kompatibilitätspfad entfällt in
-  0.58, wenn jedes Token der alten Form längst abgelaufen ist.
+  Seit 0.62.0 wird ein zweiteiliges Token abgewiesen, von `JwtLifecycle` wie
+  von `JwtBackend`.
 
 
 ---

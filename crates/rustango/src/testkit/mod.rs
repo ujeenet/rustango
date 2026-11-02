@@ -238,6 +238,43 @@ pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// Migrate one schema-mode tenant, creating its schema and every framework
+/// tenant table, as `migrate-tenants` would; a tenant pool refuses a bare schema.
+///
+/// # Errors
+/// Anything [`crate::tenancy::migrate_one_tenant`] raises.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub async fn migrate_schema_tenant(
+    pools: &crate::tenancy::TenantPools,
+    org: &crate::tenancy::Org,
+    registry_url: &str,
+) -> Result<(), crate::tenancy::TenancyError> {
+    let dir = tempfile::tempdir().map_err(|e| {
+        crate::tenancy::TenancyError::Validation(format!("no temp dir for migrations: {e}"))
+    })?;
+    crate::tenancy::migrate_one_tenant(pools, org, dir.path(), registry_url, None).await?;
+    Ok(())
+}
+
+/// [`migrate_schema_tenant`] for a bare schema, through an unsaved org named after it.
+///
+/// # Errors
+/// As [`migrate_schema_tenant`].
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub async fn migrate_schema(
+    pools: &crate::tenancy::TenantPools,
+    schema: &str,
+    registry_url: &str,
+) -> Result<(), crate::tenancy::TenancyError> {
+    let org = crate::tenancy::Org {
+        slug: schema.to_owned(),
+        storage_mode: crate::tenancy::StorageMode::Schema.as_str().to_owned(),
+        schema_name: Some(schema.to_owned()),
+        ..org()
+    };
+    migrate_schema_tenant(pools, &org, registry_url).await
+}
+
 /// Add the columns `M`'s table lacks, so a table created by a build
 /// with fewer features (an optional `email`, say) fits this one.
 ///

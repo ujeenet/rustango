@@ -789,7 +789,7 @@ Prints the **Rustango** framework version.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.16
+rustango 0.62.0
 ```
 
 ### `about`
@@ -801,7 +801,7 @@ variables. Drop this into support tickets when something's wrong.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.16
+  version:        0.62.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local

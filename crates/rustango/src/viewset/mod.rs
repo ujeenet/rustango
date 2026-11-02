@@ -713,19 +713,6 @@ const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
-/// Tables only the admin or their own flows write: SSO configuration, and
-/// credentials minted once with their secret. [`ViewSet::for_model`] refuses them.
-const ADMIN_ONLY_TABLES: &[&str] = &[
-    "rustango_api_keys",
-    "rustango_agents",
-    "rustango_sso_providers",
-    "rustango_shared_sso_providers",
-    "rustango_sso_links",
-    "rustango_sso_invites",
-    "rustango_sso_shared_overrides",
-    "rustango_sso_tenant_policy",
-];
-
 /// Builder for a set of REST CRUD endpoints over a single
 /// [`Model`](crate::core::Model) table.
 ///
@@ -799,13 +786,7 @@ impl ViewSet {
     /// their own flows may write those.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
-        assert!(
-            !ADMIN_ONLY_TABLES.contains(&schema.table)
-                && !crate::admin::urls::is_never_served(schema.table),
-            "ViewSet::for_model: `{}` is admin only (or written by its own flow); \
-             a ViewSet cannot serve it",
-            schema.table
-        );
+        crate::core::table_policy::assert_generic(schema, "ViewSet::for_model");
         let vs = Self {
             schema,
             fields: fields.iter().map(|&s| s.to_owned()).collect(),
@@ -2212,7 +2193,7 @@ impl WriteSet {
     }
 
     /// `body` cut to the keys the UPDATE writes, so PATCH validation
-    /// overlays only those on the stored row (#1995).
+    /// overlays only those on the stored row.
     fn patch_body(&self, bridge: &dyn SerializerBridge, body: &Value) -> Value {
         let Some(obj) = body.as_object() else {
             return body.clone();
@@ -3443,7 +3424,7 @@ async fn handle_list_cursor(
 
 /// `col > v OR (col = v AND pk > pk_v)` (`<` when descending): strictly
 /// after a row, ties included. No tiebreak when the cursor is the PK, or
-/// the token is a pre-#1459 one that carries no pk component.
+/// the token is an older one that carries no pk component.
 fn cursor_after(
     (cursor, tiebreak, desc): (
         &'static crate::core::FieldSchema,
@@ -4578,7 +4559,7 @@ async fn update_inner(
     let buffered = read_capped(&parts, body).await;
     // The row, read before the body is parsed: hidden is a 404 before any
     // field or FK check can answer. Locked in the UPDATE's transaction, so
-    // the hooks judge the row the write changes (#2010). A model audited
+    // the hooks judge the row the write changes. A model audited
     // only on a pool is read and updated unlocked, rather than lose its
     // audit entry.
     let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
@@ -4613,7 +4594,7 @@ async fn update_inner(
     };
     let json = write_json(&state, &form, json);
 
-    // PATCH checks only the sent fields, over the stored row (#1995).
+    // PATCH checks only the sent fields, over the stored row.
     let validated = match &state.vs.serializer {
         Some(bridge) if partial => {
             let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());

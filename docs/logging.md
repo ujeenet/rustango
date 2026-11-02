@@ -395,8 +395,9 @@ written. A key is masked when it holds a secret word, matched by word, so
 `password`, `pass`, `pwd`, `token`, `jwt`, `secret`, `key`, `signature`,
 `auth`, `credential`, `cookie`, `session`, `otp`, plus the OAuth names `code`,
 `state` and `assertion`. Extend with `.redact_additional("ref")`, or replace
-the whole list with `.redact(vec![...])`; `token`, `signature` and `code` stay
-masked either way. The request span's `url.query` is masked the same way.
+the whole list with `.redact(vec![...])`; the credential words (`password`, `passwd`,
+`token`, `secret`, `api_key`, `encryption_key`, ...), `signature` and `code`
+stay masked either way. The request span's `url.query` is masked the same way.
 This covers **query strings only**; see
 [security.md](security.md#keeping-secrets-out-of-your-logs) for the rest.
 

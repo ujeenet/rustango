@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.62.0] — 2026-11-02
+
 ### Added
 
 - `[cache] redis_connect_timeout_ms` and `redis_command_timeout_ms` bound the Redis cache built by `cache::from_settings_async` (defaults 5000 and 2000).
@@ -12,6 +14,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- One codec each for HS256 JWTs (`crate::jwt`, now behind `JwtLifecycle` and `JwtBackend`) and for signed cookies (`session::SealedToken`); two-part JWTs are refused.
 - Model writes take a `rustango::sql::Pool` on every backend: `save`, `insert`, `delete`, `upsert` and `bulk_insert` replace the PgPool-only forms, their `_on` forms take any `SqlExecutor` (an audited model refuses them), and the `_pool` names are deprecated. The PgPool-typed functions that had a `Pool` twin are removed.
 - Auth links: `LinkTarget::audience` and `LinkScope::audience` take a `SingleDb` marker, so a tenant handler cannot confirm or verify an audience link that another tenant could also redeem.
 - `Model::truncate` is a `DELETE` on every backend, so a `RESTRICT` row refuses it with `ExecError::TruncateReferenced`; `Model::truncate_cascade` empties every referencing table on all three.
@@ -34,6 +37,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Queued email attachments are written as base64 text instead of an integer array; both forms still read.
 - `PreMigrateContext` and `PostMigrateContext` carry the run's `pool` and `tenant` and are `#[non_exhaustive]`; the `connect_*_migrate_with_target` receivers and `MigrateTarget` are removed.
 - A schema-mode tenant's `search_path` is its schema plus `public` and other extension-only schemas that hold an extension; `public` leaves it when no extension lives there, and a tenant missing tables those schemas have is refused instead of reading the shared copies.
+- A schema an org names, or one holding its own functions, types or sequences, never joins a tenant's `search_path`; `check --deploy` lists every tenant whose pools would refuse to open.
 
 ### Fixed
 
@@ -61,6 +65,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
 - `#[rustango(secret)]` marks a credential column, as do sealed casts and names like `token`, `api_key`, `*_secret`, `*_token`: template views show it only when listed, the admin always masks it, and `secret = false` opts a name out.
+- Template views (list, detail, create, update, delete) refuse API key, agent, SSO, TOTP, passkey and database-server tables, as `ViewSet` does; one table policy serves all three surfaces.
+- One credential word list drives the admin, template views, the access log and the MCP audit, so `passwd` or `encryption_key` is secret everywhere.
 - A tenant with no host, path prefix or port is refused at provisioning and edit, and gets no link, instead of being created unreachable with a warning.
 - Jobs: dispatching a type with no registered handler is refused instead of dead-lettered or left locked; `PgJobQueue::allow_unregistered_dispatch` opts a producer out.
 - MCP agent tokens no longer sign with a passphrase `RUSTANGO_SESSION_SECRET`'s raw text.

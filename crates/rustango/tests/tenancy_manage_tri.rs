@@ -1490,6 +1490,13 @@ async fn reseal_leaves_a_schema_mode_url_alone(pool: &Pool) {
         ..rustango::testkit::org()
     };
     org.save(&env.registry).await.expect("insert org");
+    // The tenant passes open its pool, which refuses a schema that was never migrated.
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = &env.registry {
+        rustango::testkit::migrate_schema_tenant(&TenantPools::new(pg.clone()), &org, &env.url)
+            .await
+            .expect("migrate tenant");
+    }
     let dir = env.dir("migrations");
     let (res, out) = env
         .run_both(&dir, &["reseal-tenant-secrets", "--apply"])

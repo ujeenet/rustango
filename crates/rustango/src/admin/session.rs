@@ -8,12 +8,10 @@
 //! two cookies differ in name and shape while the crypto stays in one
 //! place.
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
+use crate::session::PasswordFingerprint;
 pub use crate::session::SessionSecret as AdminSessionSecret;
-use crate::session::{sign, PasswordFingerprint};
 
 tokio::task_local! {
     /// Per-request session, set by the `require_session` middleware, so
@@ -188,11 +186,14 @@ pub(crate) struct CookieAuth {
     pub(crate) exp: i64,
 }
 
-impl CookiePayload {
-    fn is_expired(&self) -> bool {
-        chrono::Utc::now().timestamp() >= self.exp
+impl crate::session::Expiring for CookiePayload {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
     }
 }
+
+/// Seal tag of the admin session cookie, apart from every other token kind.
+const ADMIN_SESSION_TAG: &[u8] = b"rustango-admin-session-v1";
 
 /// Sign a fresh session and return the cookie value to set. Lasts 8
 /// hours. `auth_hash` is the fingerprint of the user's current
@@ -241,11 +242,7 @@ pub(crate) fn encode_for(
         auth_hash: auth_hash.clone(),
         iat: crate::session::issued_at(sessions_revoked_at),
     };
-    let json = serde_json::to_vec(&payload).expect("payload serializes");
-    let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
-    let sig = sign(secret, body.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{body}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), ADMIN_SESSION_TAG, &payload)
 }
 
 /// Verify and decode a cookie value. Returns `Some` only when the
@@ -258,23 +255,8 @@ pub(crate) fn decode_full(
     secret: &AdminSessionSecret,
     value: &str,
 ) -> Option<(AdminSession, CookieAuth)> {
-    let (body, sig_b64) = value.split_once('.')?;
-    let expected = sign(secret, body.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .ok()?;
-    // Constant-time comparison, the same primitive `tenancy::session`
-    // uses. It blocks timing probes that forge a cookie byte by byte.
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return None;
-    }
-    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(body)
-        .ok()?;
-    let payload: CookiePayload = serde_json::from_slice(&json).ok()?;
-    if payload.is_expired() {
-        return None;
-    }
+    let payload: CookiePayload =
+        crate::session::SealedToken::open(secret.key(), ADMIN_SESSION_TAG, value).ok()?;
     Some((
         AdminSession::new(payload.user_id, payload.username, payload.is_superuser),
         CookieAuth {

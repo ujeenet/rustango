@@ -326,9 +326,8 @@ Custom claims survive `refresh` (carried onto the new pair) unless you use
   but rustango, and rejected even by `rustango::jwt::decode`. If you wrote a
   custom verifier to work around that, you can drop it.
 
-  Tokens minted before the fix are still accepted on verify so an upgrade does
-  not log anyone out. That compatibility path is removed in 0.58, by which point
-  any token in the old shape has long expired.
+  Since 0.62.0 a two-segment token is refused, by `JwtLifecycle` and
+  `JwtBackend` alike.
 
 
 ---

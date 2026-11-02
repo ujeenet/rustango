@@ -875,33 +875,20 @@ impl JwtBackend {
     }
 
     fn sign_payload(&self, payload: &serde_json::Value) -> String {
-        use base64::Engine;
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(payload).unwrap_or_default());
-        let sig = hmac_sha256(&self.secret, payload_b64.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-        format!("{payload_b64}.{sig_b64}")
+        let claims = crate::jwt::Claims::from_map(payload.as_object().cloned().unwrap_or_default());
+        // The one HS256 codec; the key length is asserted in `new`.
+        crate::jwt::encode(&claims, &self.secret).expect("JwtBackend key is >= 32 bytes")
     }
 
-    /// Verify and return `(sub, jti, login session)`.
-    ///
-    /// Accepts both token shapes. Three segments is what `JwtLifecycle`
-    /// issues since #1397 and what any standard JWT looks like; two is
-    /// what `JwtBackend::issue` still emits and what `JwtLifecycle` emitted
-    /// before it. Signing input differs — `header.payload` for the former,
-    /// `payload` alone for the latter — so each is checked against its own.
-    ///
-    /// Handling both is not politeness: `docs/auth-jwt-api.md` tells you to
-    /// pair this backend with `JwtLifecycle`, and between #1397 and this
-    /// change that pairing silently stopped authenticating anyone, because
-    /// the caller below required exactly one dot.
+    /// Verify and return `(sub, jti, login session)`: a three-segment HS256
+    /// token from [`crate::jwt`], the shape `JwtLifecycle` and [`Self::issue`] mint.
     ///
     /// **Refresh tokens are refused.** They carry `typ: "refresh"` and are
     /// wire-identical to access tokens, so without this check one
     /// authenticates as a bearer credential with the refresh token's much
     /// longer life — seven days by default (#1402).
     ///
-    /// The tenant binding and `kind` go through [`UserTokenScope`] (#1848).
+    /// The tenant binding and `kind` go through [`UserTokenScope`].
     ///
     /// [`UserTokenScope`]: super::jwt_lifecycle::UserTokenScope
     fn verify_claims(
@@ -909,35 +896,8 @@ impl JwtBackend {
         token: &str,
         scope: super::jwt_lifecycle::UserTokenScope<'_>,
     ) -> Option<VerifiedClaims> {
-        use base64::Engine;
-        use subtle::ConstantTimeEq;
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-        let parts: Vec<&str> = token.split('.').collect();
-        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
-            [header, payload, sig] => {
-                // Pin the algorithm. The HMAC below catches a swapped one
-                // anyway, but refusing here makes `alg: none` fail as
-                // itself rather than as a signature mismatch.
-                let h: serde_json::Value =
-                    serde_json::from_slice(&b64.decode(header).ok()?).ok()?;
-                if h.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
-                    return None;
-                }
-                (format!("{header}.{payload}"), *payload, *sig)
-            }
-            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
-            _ => return None,
-        };
-
-        let expected = hmac_sha256(&self.secret, signing_input.as_bytes());
-        let provided = b64.decode(sig_b64).ok()?;
-        if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-            return None;
-        }
-
-        let payload: serde_json::Value =
-            serde_json::from_slice(&b64.decode(payload_b64).ok()?).ok()?;
+        let payload =
+            serde_json::Value::Object(crate::jwt::verify(token, &self.secret).ok()?.into_map());
         let exp = payload.get("exp")?.as_i64()?;
         if chrono::Utc::now().timestamp() >= exp {
             return None; // expired
@@ -974,20 +934,6 @@ struct VerifiedClaims {
     session: Option<super::auth_routes::RefreshSession>,
 }
 
-/// v0.38 — inline HMAC-SHA256(secret, msg) so JwtBackend signs
-/// without depending on the PG-gated `operator_console::session::sign`.
-/// Equivalent to the shared primitive — same `hmac` + `sha2` crates.
-fn hmac_sha256(secret: &[u8], msg: &[u8]) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
-    mac.update(msg);
-    let bytes = mac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes[..32]);
-    out
-}
-
 #[async_trait]
 impl AuthBackend for JwtBackend {
     async fn authenticate(
@@ -1003,16 +949,10 @@ impl AuthBackend for JwtBackend {
             return Ok(None);
         };
 
-        // A JWT is two dots (`header.payload.sig`) since #1397, or one for
-        // the legacy shape `JwtBackend::issue` still emits. An API key is
-        // also one dot (`prefix.secret`), distinguished by its 8-char hex
-        // prefix — a base64 JWT payload is never 8 characters.
-        //
-        // This used to require *exactly* one dot, which meant a real JWT
-        // was handed back as "not mine" before verification ran. Between
-        // #1397 and #1402 that silently stopped `JwtLifecycle` tokens
-        // authenticating through the backend chain the docs tell you to
-        // pair them with.
+        // A JWT is two dots (`header.payload.sig`). An API key is one dot
+        // (`prefix.secret`) with an 8-char hex prefix and is left to its
+        // backend; any other one-dot token, such as the old two-part JWT
+        // shape, fails verification and is refused.
         let dots = token.chars().filter(|&c| c == '.').count();
         if dots != 1 && dots != 2 {
             return Ok(None);
@@ -1022,7 +962,7 @@ impl AuthBackend for JwtBackend {
         }
 
         // All tenants share one key, so a resolved tenant must match the
-        // token's `tenant` and `org_id` claims (#1848).
+        // token's `tenant` and `org_id` claims.
         let scope = match parts.extensions.get::<super::TenantSlug>() {
             Some(t) => super::jwt_lifecycle::UserTokenScope::Tenant(t),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,

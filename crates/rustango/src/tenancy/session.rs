@@ -21,9 +21,7 @@
 //! signature = HMAC-SHA256(secret, payload_base64) [first 32 bytes]
 //! ```
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 // v0.45 (#253) — `SessionSecret` + `sign` were promoted to the
 // crate-root `crate::session` module so the bare `admin` module can
@@ -241,12 +239,6 @@ impl SessionPayload {
         }
     }
 
-    /// Past the idle deadline `exp`, or [`SESSION_TTL_SECS`] after sign-in.
-    fn is_expired(&self) -> bool {
-        let now = chrono::Utc::now().timestamp();
-        now >= self.exp || now >= self.iat.saturating_add(SESSION_TTL_SECS)
-    }
-
     /// This session with its idle deadline moved to now + [`SESSION_IDLE_SECS`],
     /// capped at the absolute lifetime. `None` while `exp` is still fresh.
     #[must_use]
@@ -261,14 +253,27 @@ impl SessionPayload {
     }
 }
 
+impl crate::session::Expiring for SessionPayload {
+    /// Past the idle deadline `exp`, or [`SESSION_TTL_SECS`] after sign-in.
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp || now >= self.iat.saturating_add(SESSION_TTL_SECS)
+    }
+}
+
+impl From<crate::session::SealError> for SessionError {
+    fn from(e: crate::session::SealError) -> Self {
+        match e {
+            crate::session::SealError::BadSignature => Self::BadSignature,
+            crate::session::SealError::Expired => Self::Expired,
+            _ => Self::Malformed,
+        }
+    }
+}
+
 /// Serialize and sign a payload into a cookie value.
 #[must_use]
 pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
-    let json = serde_json::to_vec(payload).expect("payload serializes");
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = crate::session::sign_tagged(secret, OPERATOR_DOMAIN_TAG, payload_b64.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{payload_b64}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), OPERATOR_DOMAIN_TAG, payload)
 }
 
 /// Verify and deserialize a cookie value.
@@ -279,23 +284,11 @@ pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
 /// secret rotation + tampering), [`SessionError::Expired`] when the
 /// payload's `exp` is in the past.
 pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, SessionError> {
-    let (payload_b64, sig_b64) = value.split_once('.').ok_or(SessionError::Malformed)?;
-    let expected = crate::session::sign_tagged(secret, OPERATOR_DOMAIN_TAG, payload_b64.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| SessionError::Malformed)?;
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return Err(SessionError::BadSignature);
-    }
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| SessionError::Malformed)?;
-    let payload: SessionPayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| SessionError::Malformed)?;
-    if payload.is_expired() {
-        return Err(SessionError::Expired);
-    }
-    Ok(payload)
+    Ok(crate::session::SealedToken::open(
+        secret.key(),
+        OPERATOR_DOMAIN_TAG,
+        value,
+    )?)
 }
 
 // `sign` moved to `crate::session` in v0.45 (#253) — `use` above.
@@ -303,6 +296,7 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::default()

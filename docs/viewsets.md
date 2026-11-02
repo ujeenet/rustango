@@ -780,7 +780,7 @@ credential bound to another tenant than the routed one is a `403`.
 session, a user token, an agent, nobody); `object_permissions::is_superuser`
 is the superuser rule, and an agent token is never a superuser.
 `rustango_api_keys`, `rustango_agents` and the SSO tables are refused by
-`ViewSet::for_model`.
+`ViewSet::for_model` and by the five template views.
 
 **Throttling** applies fixed-window per-client limits, per action:
 

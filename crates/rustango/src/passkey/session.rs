@@ -28,9 +28,8 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
-use subtle::ConstantTimeEq as _;
+
+use crate::sealed::{Expiring, SealedToken};
 
 /// How long a sealed challenge stays valid (#1841).
 pub const CHALLENGE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -50,10 +49,10 @@ pub enum CeremonyPurpose {
 }
 
 impl CeremonyPurpose {
-    fn tag(self) -> &'static str {
+    fn seal_tag(self) -> &'static [u8] {
         match self {
-            Self::Registration => "reg",
-            Self::Authentication => "auth",
+            Self::Registration => b"rustango-passkey-reg-v2",
+            Self::Authentication => b"rustango-passkey-auth-v2",
         }
     }
 }
@@ -85,22 +84,27 @@ fn seal_at(
     secret: &[u8],
     issued_at: i64,
 ) -> String {
-    let payload = format!(
-        "{}.{issued_at}.{}.{}",
-        purpose.tag(),
-        URL_SAFE_NO_PAD.encode(challenge),
-        URL_SAFE_NO_PAD.encode(context)
-    );
-    format!(
-        "{payload}.{}",
-        URL_SAFE_NO_PAD.encode(mac(secret, &payload))
-    )
+    let ceremony = Ceremony {
+        iat: issued_at,
+        challenge: URL_SAFE_NO_PAD.encode(challenge),
+        context: URL_SAFE_NO_PAD.encode(context),
+    };
+    SealedToken::seal(secret, purpose.seal_tag(), &ceremony)
 }
 
-fn mac(secret: &[u8], payload: &str) -> Vec<u8> {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key of any size");
-    mac.update(payload.as_bytes());
-    mac.finalize().into_bytes().to_vec()
+/// What a sealed challenge carries; the purpose is its seal tag.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Ceremony {
+    iat: i64,
+    challenge: String,
+    context: String,
+}
+
+impl Expiring for Ceremony {
+    fn is_expired_at(&self, now: i64) -> bool {
+        let ttl = i64::try_from(CHALLENGE_TTL.as_secs()).unwrap_or(i64::MAX);
+        self.iat > now + CLOCK_SKEW_SECS || now - self.iat > ttl
+    }
 }
 
 /// Check signature, purpose and age; does not consume the token.
@@ -110,25 +114,9 @@ fn verify_at(
     secret: &[u8],
     now: i64,
 ) -> Option<(Vec<u8>, Vec<u8>)> {
-    let last_dot = sealed.rfind('.')?;
-    let (payload, sig_b64) = (&sealed[..last_dot], &sealed[last_dot + 1..]);
-    let provided = URL_SAFE_NO_PAD.decode(sig_b64).ok()?;
-    if mac(secret, payload).ct_eq(&provided).unwrap_u8() == 0 {
-        return None;
-    }
-    let mut parts = payload.split('.');
-    let (tag, issued_at, challenge_b64, context_b64) =
-        (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
-    if parts.next().is_some() || tag != purpose.tag() {
-        return None;
-    }
-    let issued_at: i64 = issued_at.parse().ok()?;
-    let ttl = i64::try_from(CHALLENGE_TTL.as_secs()).ok()?;
-    if issued_at > now + CLOCK_SKEW_SECS || now - issued_at > ttl {
-        return None;
-    }
-    let challenge = URL_SAFE_NO_PAD.decode(challenge_b64).ok()?;
-    let context = URL_SAFE_NO_PAD.decode(context_b64).ok()?;
+    let c: Ceremony = SealedToken::open_at(secret, purpose.seal_tag(), sealed, now).ok()?;
+    let challenge = URL_SAFE_NO_PAD.decode(c.challenge).ok()?;
+    let context = URL_SAFE_NO_PAD.decode(c.context).ok()?;
     Some((challenge, context))
 }
 
