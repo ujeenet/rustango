@@ -553,3 +553,114 @@ async fn an_extension_in_another_tenants_schema_stays_off_the_path() {
     registry.close().await;
     drop(db);
 }
+
+/// Tenant B's `search_path` once `ext_sql` has run beside migrated tenants A and B.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+async fn b_path_after(prefix: &str, ext_sql: &[&str]) -> Option<String> {
+    let (db, registry, pools, _a) = unmigrated_schema_tenant(prefix, "tedge-a", &[]).await?;
+    let url = db.url().to_owned();
+    run(
+        &pools,
+        &url,
+        &[
+            "create-tenant",
+            "tedge-b",
+            "--mode",
+            "schema",
+            "--no-migrate",
+        ],
+    )
+    .await
+    .unwrap();
+    run(&pools, &url, &["migrate-tenants"]).await.unwrap();
+    for sql in ext_sql {
+        sqlx::query(sql).execute(&registry).await.unwrap();
+    }
+    let b = Org::objects()
+        .where_(Org::slug.eq("tedge-b".to_owned()))
+        .fetch(&rustango::sql::Pool::from(registry.clone()))
+        .await
+        .unwrap()
+        .remove(0);
+    let scoped = TenantPools::new(registry.clone())
+        .scoped_pool_dyn(&b)
+        .await
+        .unwrap();
+    let path = show_search_path(&scoped).await;
+    scoped.close().await;
+    drop(pools);
+    registry.close().await;
+    drop(db);
+    Some(path)
+}
+
+/// A schema an org names stays off other tenants' paths even while it holds
+/// nothing but an extension.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn an_org_schema_holding_only_an_extension_stays_off_the_path() {
+    let Some(path) = b_path_after(
+        "rustango_tedgeorg",
+        &[
+            "DROP SCHEMA IF EXISTS \"tedge-a\" CASCADE",
+            "CREATE SCHEMA \"tedge-a\"",
+            "CREATE EXTENSION pg_trgm SCHEMA \"tedge-a\"",
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        !path.contains("tedge-a"),
+        "an org's schema on B's path: {path}"
+    );
+}
+
+/// A schema with a function no extension owns is not extension-only.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn a_schema_with_its_own_function_stays_off_the_path() {
+    let Some(path) = b_path_after(
+        "rustango_tedgefn",
+        &[
+            "CREATE SCHEMA shared_ext",
+            "CREATE EXTENSION pg_trgm SCHEMA shared_ext",
+            "CREATE FUNCTION shared_ext.f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        !path.contains("shared_ext"),
+        "shared_ext on B's path: {path}"
+    );
+}
+
+/// The uncached `acquire` runs the same checks as a pool build: a schema
+/// named after the database role is refused.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn uncached_acquire_refuses_a_role_named_schema() {
+    let Some((db, registry, _pools, mut org)) =
+        unmigrated_schema_tenant("rustango_tuncrole", "tuncrole", &[]).await
+    else {
+        return;
+    };
+    let role: String = sqlx::query_scalar("SELECT current_user::text")
+        .fetch_one(&registry)
+        .await
+        .unwrap();
+    org.schema_name = Some(role);
+    let pools = TenantPools::new(registry.clone()).config(rustango::tenancy::TenantPoolsConfig {
+        max_cached_scoped_pools: 0,
+        ..Default::default()
+    });
+    let err = pools.acquire(&org).await.err().expect("refused");
+    assert!(err.to_string().contains("database role"), "{err}");
+    drop(pools);
+    registry.close().await;
+    drop(db);
+}

@@ -1133,18 +1133,23 @@ async fn role_schema_audit(
                 return;
             }
         };
+        // The same checks the tenant's pools run, so this lists exactly those that refuse.
         for org in orgs {
-            let schema = org.effective_schema();
-            if crate::tenancy::provision::is_role_name(pg, schema)
-                .await
-                .unwrap_or(false)
-            {
-                out.errors.push(format!(
-                    "tenant `{}` lives in schema `{schema}`, the name of a database role, so its \
-                     pools refuse to open; rename the role or move the tenant to another schema \
-                     (a database move and back)",
+            let checked = crate::tenancy::pools::TenantSearchPath::open(
+                pg,
+                org.effective_schema(),
+                crate::tenancy::pools::FallThrough::Refuse,
+            )
+            .await;
+            match checked {
+                Ok(_) => {}
+                Err(crate::tenancy::TenancyError::Validation(why)) => out.errors.push(format!(
+                    "tenant `{}`: its pools refuse to open: {why}",
                     org.slug
-                ));
+                )),
+                Err(e) => out
+                    .errors
+                    .push(format!("could not check tenant `{}`: {e}", org.slug)),
             }
         }
     }

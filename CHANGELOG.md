@@ -29,6 +29,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `ViewSet::for_model` refuses `rustango_api_keys`, `rustango_agents` and the tables the admin never serves.
 - ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
 - A schema-mode tenant's `search_path` is its schema plus `public` and other extension-only schemas that hold an extension; `public` leaves it when no extension lives there, and a tenant missing tables those schemas have is refused instead of reading the shared copies.
+- A schema an org names, or one holding its own functions, types or sequences, never joins a tenant's `search_path`; `check --deploy` lists every tenant whose pools would refuse to open.
 
 ### Fixed
 

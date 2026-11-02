@@ -15,6 +15,12 @@ async fn setup(pool: &Pool) {
         .expect("framework tables");
 }
 
+/// The registry URL the Postgres matrix pool connects to.
+#[cfg(feature = "postgres")]
+fn registry_url() -> String {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL")
+}
+
 async fn purge_on(pool: &Pool, slug: &str) -> Result<Report, TenancyError> {
     let action = Action::Purge {
         purge_database: true,
@@ -427,12 +433,10 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
 
     // The schema exists and holds the tenant's media.
     let mut org = schema_org("live");
-    let schema = org.schema_name.clone().unwrap();
-    rustango::sql::sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-        .execute(pg)
-        .await
-        .unwrap();
     org.save_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
+        .await
+        .expect("migrate tenant");
     let scoped = Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
     let keys = upload(&scoped, &storage).await;
     drop(scoped);
@@ -519,10 +523,6 @@ async fn schema_purge_evicts_the_scoped_pool() {
         unreachable!()
     };
     let slug = format!("purge-schema-{}", std::process::id());
-    rustango::sql::sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{slug}\""))
-        .execute(pg)
-        .await
-        .unwrap();
     let mut org = Org {
         slug: slug.clone(),
         display_name: slug.clone(),
@@ -532,6 +532,9 @@ async fn schema_purge_evicts_the_scoped_pool() {
     };
     org.save_pool(&pool).await.expect("insert org");
     let pools = TenantPools::new(pg.clone());
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
+        .await
+        .expect("migrate tenant");
     pools.scoped_pool(&org).await.expect("scoped pool");
     assert_eq!(pools.cached_scoped_pool_count().await, 1);
 

@@ -701,6 +701,7 @@ where
                     org.effective_schema(),
                     1,
                     crate::tenancy::pools::FallThrough::Refuse,
+                    pools.pool_config().database_pool_acquire_timeout,
                 )
                 .await?;
                 Ok(rustango::sql::Pool::Postgres(pg))

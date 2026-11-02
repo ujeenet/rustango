@@ -2199,36 +2199,15 @@ pub(crate) async fn provision_schema<DB: Database>(
                         .into(),
                 )
             })?;
-        // The default `search_path` starts with "$user": a schema named
-        // after a role would lead that role's sessions, the registry's included.
-        if is_role_name(pg_pools.registry(), schema).await? {
-            return Err(TenancyError::Validation(format!(
-                "schema name `{schema}` is the name of a database role — choose another"
-            )));
+        // Name checks and the clash test live with the other schema checks.
+        if crate::tenancy::pools::create_tenant_schema(pg_pools.registry(), schema).await? {
+            return Ok(());
         }
-        // Use the dialect's quoter, not a local copy: it doubles any
-        // embedded `"`.
-        let sql = format!("CREATE SCHEMA {}", crate::sql::Postgres.quote_ident(schema));
-        match rustango::sql::sqlx::query(&sql)
-            .execute(pg_pools.registry())
-            .await
-        {
-            Ok(_) => Ok(()),
-            // duplicate_schema; or unique_violation when a concurrent create
-            // inserted the same name first.
-            Err(sqlx::Error::Database(e))
-                if e.code().as_deref() == Some("42P06")
-                    || (e.code().as_deref() == Some("23505")
-                        && e.constraint() == Some("pg_namespace_nspname_index")) =>
-            {
-                Err(TenancyError::Validation(format!(
-                    "schema `{schema}` already exists — choose another schema name, or, if a \
-                     failed create left it empty, run `DROP SCHEMA {}`",
-                    crate::sql::Postgres.quote_ident(schema)
-                )))
-            }
-            Err(e) => Err(e.into()),
-        }
+        Err(TenancyError::Validation(format!(
+            "schema `{schema}` already exists — choose another schema name, or, if a \
+             failed create left it empty, run `DROP SCHEMA {}`",
+            crate::sql::Postgres.quote_ident(schema)
+        )))
     }
     #[cfg(not(feature = "postgres"))]
     {
@@ -2237,15 +2216,6 @@ pub(crate) async fn provision_schema<DB: Database>(
             "schema mode is not available on this server — choose the database storage mode".into(),
         ))
     }
-}
-
-/// Whether a database role is called `name`. Catalog SQL: schema mode is Postgres-only.
-#[cfg(feature = "postgres")]
-pub(crate) async fn is_role_name(pg: &sqlx::PgPool, name: &str) -> Result<bool, sqlx::Error> {
-    rustango::sql::sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)")
-        .bind(name)
-        .fetch_one(pg)
-        .await
 }
 
 /// Drop the schema [`provision_schema`] just made when its `Org` row failed,

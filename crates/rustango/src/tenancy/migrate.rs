@@ -984,7 +984,8 @@ async fn run_for_one_tenant(
     match mode {
         StorageMode::Schema => {
             let schema = org.effective_schema().to_owned();
-            let pool = build_schema_scoped_pool(registry_url, &schema).await?;
+            let timeout = pools.pool_config().database_pool_acquire_timeout;
+            let pool = build_schema_scoped_pool(registry_url, &schema, timeout).await?;
             // Framework tenant tables (rustango_users/roles/permissions/…)
             // come from the system-app migrations and MUST be applied
             // BEFORE the tenant's user migrations, which may FK into them
@@ -1030,7 +1031,8 @@ async fn run_for_one_tenant(
             }
             let applied = run?;
             // Checked after the run: a fresh tenant's tables only exist once it has migrated.
-            if let Err(e) = super::pools::refuse_public_fallthrough(&pool, &schema).await {
+            let check = super::pools::FallThrough::Refuse;
+            if let Err(e) = super::pools::probe_path(registry_url, &schema, check, timeout).await {
                 pool.close().await;
                 let e = match e {
                     TenancyError::Validation(why) => why,
@@ -1114,6 +1116,7 @@ async fn run_for_one_tenant(
 async fn build_schema_scoped_pool(
     registry_url: &str,
     schema: &str,
+    acquire_timeout: std::time::Duration,
 ) -> Result<PgPool, TenancyError> {
     // Ensure the schema exists. Use a one-shot connection so we don't
     // pollute the migration pool's connections.
@@ -1132,6 +1135,7 @@ async fn build_schema_scoped_pool(
         schema,
         2,
         super::pools::FallThrough::CheckAfterMigrate,
+        acquire_timeout,
     )
     .await
 }
@@ -1150,17 +1154,10 @@ enum SchemaOrigin {
 /// `CREATE SCHEMA`, and on a clash, whether the existing one looks like
 /// the tenant's. Catalog SQL: schema mode is Postgres-only.
 #[cfg(feature = "postgres")]
-async fn ensure_schema(pg: &PgPool, schema: &str) -> Result<SchemaOrigin, sqlx::Error> {
+async fn ensure_schema(pg: &PgPool, schema: &str) -> Result<SchemaOrigin, TenancyError> {
     use crate::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
-    let create = format!("CREATE SCHEMA {}", crate::sql::quote_with(schema, '"'));
-    match rustango::sql::sqlx::query(&create).execute(pg).await {
-        Ok(_) => return Ok(SchemaOrigin::Created),
-        // duplicate_schema, or a concurrent create's unique_violation.
-        Err(sqlx::Error::Database(e))
-            if e.code().as_deref() == Some("42P06")
-                || (e.code().as_deref() == Some("23505")
-                    && e.constraint() == Some("pg_namespace_nspname_index")) => {}
-        Err(e) => return Err(e),
+    if super::pools::create_tenant_schema(pg, schema).await? {
+        return Ok(SchemaOrigin::Created);
     }
     let (tables, ledgers): (i64, i64) = rustango::sql::sqlx::query_as(
         "SELECT count(*), count(*) FILTER (WHERE c.relname IN ($2, $3)) \
@@ -1255,8 +1252,16 @@ mod schema_pool_tests {
         let pid = std::process::id();
         let (a, b) = (format!("scope \"a\" {pid}"), format!("scope_b_{pid}"));
         let registry = crate::sql::Pool::connect(&url).await.expect("registry");
-        let pa = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &a).await.expect("a"));
-        let pb = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &b).await.expect("b"));
+        let pa = crate::sql::Pool::Postgres(
+            build_schema_scoped_pool(&url, &a, std::time::Duration::from_secs(30))
+                .await
+                .expect("a"),
+        );
+        let pb = crate::sql::Pool::Postgres(
+            build_schema_scoped_pool(&url, &b, std::time::Duration::from_secs(30))
+                .await
+                .expect("b"),
+        );
         let current: (String,) = sqlx::query_as("SELECT current_schema()::text")
             .fetch_one(pa.as_postgres().expect("pg"))
             .await
@@ -1303,7 +1308,8 @@ mod schema_pool_tests {
             .unwrap();
         assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Foreign);
         // Migrating into it is refused, not adopted.
-        let refused = super::build_schema_scoped_pool(&url, &s).await;
+        let refused =
+            super::build_schema_scoped_pool(&url, &s, std::time::Duration::from_secs(30)).await;
         assert!(
             matches!(refused, Err(crate::tenancy::TenancyError::Validation(_))),
             "{refused:?}"

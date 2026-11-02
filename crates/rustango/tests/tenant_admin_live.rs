@@ -185,19 +185,41 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
 
     rmig::drop_all(&pool).await.unwrap();
     rmig::apply_all(&pool).await.unwrap();
+    // A tenant table has no business in `public`, and would block the tenants' pools.
+    sqlx::query("DROP TABLE IF EXISTS public.ten_admin_widget")
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let acme_schema = unique("admin_acme");
     let globex_schema = unique("admin_globex");
     drop_schema(&pool, &acme_schema).await;
     drop_schema(&pool, &globex_schema).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{acme_schema}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::query(&format!(r#"CREATE SCHEMA "{globex_schema}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
+    let acme_slug = unique("acme");
+    let globex_slug = unique("globex");
+    let mut acme_org = Org {
+        slug: acme_slug.clone(),
+        display_name: "ACME".into(),
+        storage_mode: StorageMode::Schema.as_str().into(),
+        schema_name: Some(acme_schema.clone()),
+        ..rustango::testkit::org()
+    };
+    acme_org.insert(&pool).await.unwrap();
+
+    let mut globex_org = Org {
+        slug: globex_slug.clone(),
+        display_name: "Globex".into(),
+        storage_mode: StorageMode::Schema.as_str().into(),
+        schema_name: Some(globex_schema.clone()),
+        ..rustango::testkit::org()
+    };
+    globex_org.insert(&pool).await.unwrap();
+    // Migrated like `migrate-tenants`: a tenant pool refuses a bare schema.
+    for org in [&acme_org, &globex_org] {
+        rustango::testkit::migrate_schema_tenant(&TenantPools::new(pool.clone()), org, &url)
+            .await
+            .expect("migrate tenant");
+    }
 
     // Per-tenant widget tables (mirroring what `migrate_tenants`
     // would do with a real Widget migration). Widget snapshot would
@@ -223,26 +245,6 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     .execute(&pool)
     .await
     .unwrap();
-
-    let acme_slug = unique("acme");
-    let globex_slug = unique("globex");
-    let mut acme_org = Org {
-        slug: acme_slug.clone(),
-        display_name: "ACME".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        schema_name: Some(acme_schema.clone()),
-        ..rustango::testkit::org()
-    };
-    acme_org.insert(&pool).await.unwrap();
-
-    let mut globex_org = Org {
-        slug: globex_slug.clone(),
-        display_name: "Globex".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        schema_name: Some(globex_schema.clone()),
-        ..rustango::testkit::org()
-    };
-    globex_org.insert(&pool).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = TenantAdminBuilder::new(pools, url.clone(), HeaderResolver::default())
