@@ -209,7 +209,7 @@ async fn on_reads_are_counted_and_stay_flat() {
         assert_eq!(page.unwrap().total, 3);
         let q = Author::objects().compile().unwrap();
         assert_eq!(
-            rustango::sql::select_rows_on(&pool, &q)
+            rustango::sql::select_rows_pool::<Author>(&pool.clone().into(), &q)
                 .await
                 .unwrap()
                 .len(),

@@ -478,7 +478,7 @@ async fn large_audit_batch_is_chunked(pool: &Pool) {
             changes: serde_json::json!({}),
         })
         .collect();
-    audit::emit_many_pool(pool, &entries).await.expect("emit");
+    audit::emit_many(pool, &entries).await.expect("emit");
     assert_eq!(ops(pool, ITEM, "create").await, OVER_BIND_CAP as i64);
 }
 

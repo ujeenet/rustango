@@ -191,5 +191,7 @@ async fn empty_or_branch_returns_named_writer_error() {
         SelectQuery::new(Person::SCHEMA).where_clause(WhereExpr::Or(vec![WhereExpr::Predicate(
             Filter::new("id", Op::Eq, SqlValue::I64(1)),
         )]));
-    rustango::sql::select_rows_on(&pool, &q2).await.unwrap();
+    rustango::sql::select_rows_pool::<Person>(&pool.clone().into(), &q2)
+        .await
+        .unwrap();
 }

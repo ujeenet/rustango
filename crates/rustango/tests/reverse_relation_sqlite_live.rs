@@ -135,7 +135,7 @@ async fn override_emits_custom_named_accessor() {
         .unwrap();
     // `default_related_name = "articles"` → method is named
     // `articles_pool` on the parent (no `_set` suffix).
-    let articles = ada.articles_pool(&pool).await.unwrap();
+    let articles = ada.articles(&pool).await.unwrap();
     assert_eq!(articles.len(), 2);
     let titles: Vec<&str> = articles.iter().map(|a| a.title.as_str()).collect();
     assert!(titles.contains(&"Engine notes"));
@@ -148,7 +148,7 @@ async fn override_emits_custom_named_accessor() {
         .unwrap()
         .pop()
         .unwrap();
-    let articles = grace.articles_pool(&pool).await.unwrap();
+    let articles = grace.articles(&pool).await.unwrap();
     assert_eq!(articles.len(), 1);
     assert_eq!(articles[0].title, "Birth of the Bug");
 }
@@ -167,7 +167,7 @@ async fn default_name_falls_back_to_child_snake_set() {
         .unwrap();
     // Comment has no `default_related_name` override → falls back to
     // `<child_snake>_set_pool` → `comment_set_pool`.
-    let comments = ada.comment_set_pool(&pool).await.unwrap();
+    let comments = ada.comment_set(&pool).await.unwrap();
     assert_eq!(comments.len(), 2);
     let bodies: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
     assert!(bodies.contains(&"nice work"));
@@ -183,6 +183,6 @@ async fn empty_parent_returns_empty_vec() {
         name: "Newcomer".into(),
     };
     newcomer.save(&pool).await.unwrap();
-    let articles = newcomer.articles_pool(&pool).await.unwrap();
+    let articles = newcomer.articles(&pool).await.unwrap();
     assert_eq!(articles.len(), 0);
 }

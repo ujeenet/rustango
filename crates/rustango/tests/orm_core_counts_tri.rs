@@ -191,10 +191,7 @@ async fn renamed_fk_column_loads_on_every_path(pool: &Pool) {
         .fetch(pool)
         .await
         .expect("ada");
-    let books = ada[0]
-        .renamed_fk_book_set_pool(pool)
-        .await
-        .expect("reverse");
+    let books = ada[0].renamed_fk_book_set(pool).await.expect("reverse");
     assert_eq!(books.len(), 2);
 }
 
@@ -240,7 +237,7 @@ async fn raw_ident_fk_loads_on_every_path(pool: &Pool) {
         .fetch(pool)
         .await
         .expect("ada");
-    let books = ada[0].raw_fk_book_set_pool(pool).await.expect("reverse");
+    let books = ada[0].raw_fk_book_set(pool).await.expect("reverse");
     assert_eq!(books.len(), 2);
 }
 

@@ -317,7 +317,7 @@ impl Env {
     }
 
     async fn audit(&self, table: &'static str, pk: &str) {
-        rustango::audit::emit_one_pool(
+        rustango::audit::emit_one(
             &self.tenant,
             &PendingEntry {
                 entity_table: table,

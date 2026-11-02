@@ -1553,49 +1553,35 @@ fn reverse_helper_tokens(
              generated from the FK declaration on `{child_ident}::{fk_col}`. Composes with \
              further `{child_ident}::objects()` filters via direct queryset use."
         );
-        let pool_doc = format!(
-            "Tri-dialect counterpart of [`Self::{pg_suffix}`] — takes \
-             [`#root::sql::Pool`] and dispatches per backend so the \
-             reverse-FK fetch works on PG / MySQL / SQLite under one method. \
-             Use this from framework code that holds a `&Pool` (admin, \
-             tenancy resolver, viewset handlers); reach for the executor- \
-             bound variant when you already have a typed `sqlx::Executor`."
-        );
         quote! {
-            #[cfg(feature = "postgres")]
             impl #parent_ty {
                 #[doc = #doc]
+                ///
+                /// Runs on any [`#root::sql::SqlExecutor`]: a `&Pool`, a held
+                /// `PoolConn`, a `PoolTx` or a Postgres sqlx executor.
                 ///
                 /// # Errors
                 /// Returns [`#root::sql::ExecError`] for SQL-writing
                 /// or driver failures.
-                pub async fn #pg_method_ident<'_c, _E>(
+                pub async fn #pg_method_ident<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
                     _executor: _E,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<#child_ident>,
                     #root::sql::ExecError,
-                >
-                where
-                    _E: #root::sql::sqlx::Executor<
-                        '_c,
-                        Database = #root::sql::sqlx::Postgres,
-                    >,
-                {
+                > {
                     let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
                     #root::query::QuerySet::<#child_ident>::new()
                         .filter_op(#fk_col, #root::core::Op::Eq, _key)
                         .fetch_on(_executor)
                         .await
                 }
-            }
 
-            impl #parent_ty {
-                #[doc = #pool_doc]
+                /// Old name of the reverse accessor without `_pool`.
                 ///
                 /// # Errors
-                /// Returns [`#root::sql::ExecError`] for SQL-writing
-                /// or driver failures.
+                /// As the accessor.
+                #[deprecated(since = "0.62.0", note = "drop the `_pool` suffix")]
                 pub async fn #pool_method_ident(
                     &self,
                     pool: &#root::sql::Pool,
@@ -1603,12 +1589,7 @@ fn reverse_helper_tokens(
                     ::std::vec::Vec<#child_ident>,
                     #root::sql::ExecError,
                 > {
-                    use #root::sql::FetcherPool as _;
-                    let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
-                    #root::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, #root::core::Op::Eq, _key)
-                        .fetch(pool)
-                        .await
+                    self.#pg_method_ident(pool).await
                 }
             }
         }

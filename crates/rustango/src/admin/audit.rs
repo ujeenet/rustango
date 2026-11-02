@@ -413,7 +413,7 @@ pub(crate) async fn audit_cleanup_submit(
         source: crate::audit::current_source(),
         changes,
     };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
         tracing::warn!(target: "rustango::admin::audit",
             error = %e, "audit_cleanup self-audit emit failed");
     }
@@ -536,7 +536,7 @@ fn mask_secrets(
 
 /// Write `entry` after its data write committed; a failure only warns.
 pub(crate) async fn emit_best_effort(state: &AppState, entry: &crate::audit::PendingEntry) {
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, entry).await {
+    if let Err(e) = crate::audit::emit_one(&state.pool, entry).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,
@@ -556,7 +556,7 @@ pub(crate) async fn emit_many_best_effort(
     let Some(first) = entries.first() else {
         return;
     };
-    if let Err(e) = crate::audit::emit_many_pool(&state.pool, entries).await {
+    if let Err(e) = crate::audit::emit_many(&state.pool, entries).await {
         tracing::warn!(
             target: "rustango::admin::audit",
             error = %e,

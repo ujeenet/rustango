@@ -438,13 +438,11 @@ mod page;
 pub use page::Page;
 use page::{paginated_statement, total_statement};
 
-// PG-only raw-executor reads — see pg_on.rs.
+// The PG INSERT … RETURNING on a raw executor — see pg_on.rs.
 #[cfg(feature = "postgres")]
 mod pg_on;
 #[cfg(feature = "postgres")]
 pub(crate) use pg_on::pg_insert_returning;
-#[cfg(feature = "postgres")]
-pub use pg_on::select_rows_on;
 
 // Writes on any `SqlExecutor` — see write_on.rs.
 mod write_on;
@@ -875,17 +873,6 @@ pub(crate) fn bind_query(
     value: SqlValue,
 ) -> Query<'_, sqlx::Postgres, PgArguments> {
     bind_match!(q, value)
-}
-
-/// The bound query of a PG `_on` read. The one place that family is
-/// counted for `assert_num_queries` (#1561).
-#[cfg(feature = "postgres")]
-pub(super) fn pg_on_query(
-    sql: &str,
-    params: Vec<SqlValue>,
-) -> Query<'_, sqlx::Postgres, PgArguments> {
-    crate::test_assertions::query_counter::bump();
-    params.into_iter().fold(sqlx::query(sql), bind_query)
 }
 
 /// Like [`fetch_aggregate_dict`] but on any [`SqlExecutor`].
@@ -3127,7 +3114,7 @@ where
     /// delete can shift a row into the next chunk and return it
     /// twice. The chunker only takes a `&Pool`, never a transaction.
     /// On a table other writers touch, write the LIMIT/OFFSET loop
-    /// yourself against [`select_rows_on`] inside a repeatable-read
+    /// yourself with `fetch_on` on a `PoolTx` inside a repeatable-read
     /// transaction. Read-only or append-only tables are fine.
     ///
     /// **`select_for_update()` is lost.** Each chunk runs in its own
