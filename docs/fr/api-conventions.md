@@ -293,7 +293,7 @@ quiconque s'en retire à connaître toute la liste.
 Pour réduire un binaire qui n'a pas besoin de tout, désactivez les valeurs par défaut et ne listez que ce que vous utilisez :
 
 ```toml
-rustango = { version = "0.61", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.62", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

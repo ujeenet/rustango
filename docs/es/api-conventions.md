@@ -293,7 +293,7 @@ backend: `default-features = false, features = ["batteries", "sqlite"]`. La alte
 Para adelgazar un binario que no necesita todo, desactiva los valores por defecto y lista solo lo que uses:
 
 ```toml
-rustango = { version = "0.61", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.62", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

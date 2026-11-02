@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.62.0] — 2026-11-02
+
 ### Added
 
 - `[cache] redis_connect_timeout_ms` and `redis_command_timeout_ms` bound the Redis cache built by `cache::from_settings_async` (defaults 5000 and 2000).
