@@ -95,19 +95,12 @@ struct WriteScope {
 /// How an emitter reached the database, for [`source_token`].
 #[derive(Clone, Copy)]
 enum Via<'a> {
-    /// A caller's executor: its pool is unknown.
+    /// A caller's raw executor: its pool is unknown.
     Unknown,
     /// This pool.
     Pool(&'a crate::sql::Pool),
     /// A transaction opened on this pool.
     Tx(&'a crate::sql::PoolId),
-}
-
-impl<'a> Via<'a> {
-    /// The pool `tx` was opened on, if it knows.
-    fn of_tx(tx: &'a crate::sql::PoolTx<'_>) -> Self {
-        tx.pool_id().map_or(Via::Unknown, Via::Tx)
-    }
 }
 
 /// Read the active audit source. Returns [`AuditSource::System`] when no
@@ -1452,8 +1445,8 @@ async fn emit_one_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     entry: &PendingEntry,
 ) -> Result<(), sqlx::Error> {
-    let pool = tx.pool_id().cloned();
-    let via = pool.as_ref().map_or(Via::Unknown, Via::Tx);
+    let pool = tx.pool_id().clone();
+    let via = Via::Tx(&pool);
     match &mut tx.conn {
         #[cfg(feature = "postgres")]
         crate::sql::TxConn::Postgres(t) => emit_one_pg(&mut **t, entry, via).await,
@@ -1627,7 +1620,7 @@ async fn emit_many_tx(
     tx: &mut crate::sql::PoolTx<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    let via = Via::of_tx(tx);
+    let via = Via::Tx(tx.pool_id());
     let stmts = entries
         .chunks(audit_rows_per_insert(tx.dialect()))
         .map(|chunk| audit_insert_stmt(tx.dialect(), chunk, via))

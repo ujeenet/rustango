@@ -102,16 +102,14 @@ impl PoolConn {
     /// # Errors
     /// Driver errors from `BEGIN`.
     pub async fn begin(&mut self) -> Result<PoolTx<'_>, ExecError> {
-        use sqlx::Connection as _;
-        let conn = match &mut self.conn {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PooledConn::Postgres(c) => TxConn::Postgres((**c).begin().await?),
+            PooledConn::Postgres(c) => PoolTx::begin_on(&mut **c, &self.pool).await,
             #[cfg(feature = "mysql")]
-            PooledConn::Mysql(c) => TxConn::Mysql((**c).begin().await?),
+            PooledConn::Mysql(c) => PoolTx::begin_on(&mut **c, &self.pool).await,
             #[cfg(feature = "sqlite")]
-            PooledConn::Sqlite(c) => TxConn::Sqlite((**c).begin().await?),
-        };
-        Ok(PoolTx::new(conn, Some(self.pool.clone())))
+            PooledConn::Sqlite(c) => PoolTx::begin_on(&mut **c, &self.pool).await,
+        }
     }
 }
 
@@ -635,9 +633,8 @@ macro_rules! database_conn_executor {
                 'c: 'e,
             {
                 Box::pin(async move {
-                    use sqlx::Connection as _;
-                    let pool = Some(self.pool_id().clone());
-                    let mut tx = PoolTx::new(TxConn::$variant((***self).begin().await?), pool);
+                    let pool = self.pool_id().clone();
+                    let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
                     let n = super::run_delete_plan_tx(&mut tx, plan).await?;
                     tx.commit().await?;
                     Ok(n)

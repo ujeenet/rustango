@@ -29,8 +29,30 @@ use crate::sql::{Pool, PoolId};
 /// keep a tenant-bound source on that tenant's pool.
 pub struct PoolTx<'a> {
     pub(crate) conn: TxConn<'a>,
-    pool: Option<PoolId>,
+    pool: PoolId,
 }
+
+/// A driver connection a [`PoolTx`] can begin on.
+pub(crate) trait BeginTx {
+    fn begin_tx(&mut self) -> futures_util::future::BoxFuture<'_, Result<TxConn<'_>, sqlx::Error>>;
+}
+
+macro_rules! begin_tx {
+    ($feature:literal, $conn:ty, $variant:ident) => {
+        #[cfg(feature = $feature)]
+        impl BeginTx for $conn {
+            fn begin_tx(
+                &mut self,
+            ) -> futures_util::future::BoxFuture<'_, Result<TxConn<'_>, sqlx::Error>> {
+                use sqlx::Connection as _;
+                Box::pin(async move { Ok(TxConn::$variant(self.begin().await?)) })
+            }
+        }
+    };
+}
+begin_tx!("postgres", sqlx::PgConnection, Postgres);
+begin_tx!("mysql", sqlx::MySqlConnection, Mysql);
+begin_tx!("sqlite", sqlx::SqliteConnection, Sqlite);
 
 /// The driver-typed transaction inside a [`PoolTx`].
 #[non_exhaustive]
@@ -44,9 +66,17 @@ pub enum TxConn<'a> {
 }
 
 impl<'a> PoolTx<'a> {
-    /// `conn` opened on `pool`; `None` when the pool is unknown.
-    pub(crate) fn new(conn: TxConn<'a>, pool: Option<PoolId>) -> Self {
+    /// `conn` opened on `pool`.
+    pub(crate) fn new(conn: TxConn<'a>, pool: PoolId) -> Self {
         Self { conn, pool }
+    }
+
+    /// Begin on `conn`, a connection checked out of `pool`.
+    pub(crate) async fn begin_on<C: BeginTx + ?Sized>(
+        conn: &'a mut C,
+        pool: &PoolId,
+    ) -> Result<Self, ExecError> {
+        Ok(Self::new(conn.begin_tx().await?, pool.clone()))
     }
 
     /// The driver-typed transaction, to run sqlx queries on.
@@ -54,9 +84,9 @@ impl<'a> PoolTx<'a> {
         &mut self.conn
     }
 
-    /// The pool this transaction was opened on, when known.
-    pub(crate) fn pool_id(&self) -> Option<&PoolId> {
-        self.pool.as_ref()
+    /// The pool this transaction was opened on.
+    pub(crate) fn pool_id(&self) -> &PoolId {
+        &self.pool
     }
 
     /// Commit this transaction. Consumes the wrapper.
@@ -223,7 +253,7 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError>
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => TxConn::Sqlite(sq.begin().await?),
     };
-    Ok(PoolTx::new(conn, Some(PoolId::of(pool))))
+    Ok(PoolTx::new(conn, PoolId::of(pool)))
 }
 
 /// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`. Use it
@@ -240,7 +270,7 @@ pub async fn write_transaction(pool: &Pool) -> Result<PoolTx<'static>, ExecError
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => Ok(PoolTx::new(
             TxConn::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?),
-            Some(PoolId::of(pool)),
+            PoolId::of(pool),
         )),
         #[allow(unreachable_patterns)]
         _ => transaction_pool(pool).await,
