@@ -1011,9 +1011,9 @@ async fn run_for_one_tenant(
                         let observer = project_progress
                             .as_ref()
                             .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                        let pool = &pool;
+                        let pool = &dbpool;
                         each_dir(project, move |d| {
-                            crate::migrate::migrate_locked(held, pool, d, observer)
+                            crate::migrate::migrate_pool_locked(held, pool, d, observer)
                         })
                     },
                 )
@@ -1079,9 +1079,9 @@ async fn run_for_one_tenant(
                     let observer = project_progress
                         .as_ref()
                         .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                    let pool = tenant_pool.pool();
+                    let pool = &dbpool;
                     each_dir(project, move |d| {
-                        crate::migrate::migrate_locked(held, pool, d, observer)
+                        crate::migrate::migrate_pool_locked(held, pool, d, observer)
                     })
                 },
             )
