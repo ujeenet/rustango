@@ -158,6 +158,18 @@ impl Claims {
         c
     }
 
+    /// Claims from a raw JSON object, as the token payload holds them.
+    #[must_use]
+    pub(crate) fn from_map(inner: Map<String, Value>) -> Self {
+        Self { inner }
+    }
+
+    /// The raw JSON object.
+    #[must_use]
+    pub(crate) fn into_map(self) -> Map<String, Value> {
+        self.inner
+    }
+
     fn to_json(&self) -> Vec<u8> {
         serde_json::to_vec(&self.inner).unwrap_or_else(|_| b"{}".to_vec())
     }
@@ -247,6 +259,30 @@ fn decode_inner(
     now: u64,
     require_exp: bool,
 ) -> Result<Claims, JwtError> {
+    let claims = verify(token, secret)?;
+
+    // A fractional `exp` ends at its whole second, a fractional `nbf` starts at the next.
+    if let Some(exp) = numeric_date(&claims, "exp", f64::floor)? {
+        if now > exp {
+            return Err(JwtError::Expired(exp));
+        }
+    } else if require_exp {
+        // Absent `exp` used to skip the check entirely, so a token
+        // minted without `.ttl()` was valid forever.
+        return Err(JwtError::MissingExp);
+    }
+    if let Some(nbf) = numeric_date(&claims, "nbf", f64::ceil)? {
+        if now < nbf {
+            return Err(JwtError::NotYetValid(nbf));
+        }
+    }
+
+    Ok(claims)
+}
+
+/// Shape, key length, HS256 signature and header, nothing about time: the
+/// one verify step every HS256 token in the crate goes through.
+pub(crate) fn verify(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
     // A verifier with a short or empty key accepts tokens anyone can sign.
     check_key_len(secret)?;
     let mut it = token.split('.');
@@ -278,29 +314,10 @@ fn decode_inner(
         return Err(JwtError::UnsupportedAlg(alg.to_owned()));
     }
 
-    // Decode claims + check temporal validity.
     let payload_bytes = URL_SAFE_NO_PAD
         .decode(payload_b.as_bytes())
         .map_err(|e| JwtError::Decode(format!("payload b64: {e}")))?;
-    let claims = Claims::from_json(&payload_bytes)?;
-
-    // A fractional `exp` ends at its whole second, a fractional `nbf` starts at the next.
-    if let Some(exp) = numeric_date(&claims, "exp", f64::floor)? {
-        if now > exp {
-            return Err(JwtError::Expired(exp));
-        }
-    } else if require_exp {
-        // Absent `exp` used to skip the check entirely, so a token
-        // minted without `.ttl()` was valid forever.
-        return Err(JwtError::MissingExp);
-    }
-    if let Some(nbf) = numeric_date(&claims, "nbf", f64::ceil)? {
-        if now < nbf {
-            return Err(JwtError::NotYetValid(nbf));
-        }
-    }
-
-    Ok(claims)
+    Claims::from_json(&payload_bytes)
 }
 
 /// A NumericDate claim, integer or not (RFC 7519 allows a fraction);

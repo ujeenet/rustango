@@ -86,8 +86,7 @@ pub fn issue_agent_token(
     let mut custom = serde_json::Map::new();
     custom.insert(CLAIM_KIND.into(), json!(KIND_AGENT));
     custom.insert(CLAIM_KEY_PREFIX.into(), json!(secret_prefix));
-    custom.insert(CLAIM_TENANT.into(), json!(tenant.slug));
-    custom.insert(CLAIM_ORG_ID.into(), json!(tenant.org_id));
+    crate::tenancy::jwt_lifecycle::write_tenant_claims(&mut custom, tenant);
     custom.insert(CLAIM_SKILLS.into(), json!(skills));
     custom.insert(CLAIM_TOOLS.into(), json!(tools));
     if let Some(uid) = user_id {
@@ -127,12 +126,8 @@ async fn verify_agent_claims(
     if claims.get_custom::<String>(CLAIM_KIND).as_deref() != Some(KIND_AGENT) {
         return None;
     }
-    let tenant = claims.get_custom::<String>(CLAIM_TENANT)?;
-    // The org id too: a tenant that reuses a purged slug refuses its tokens.
-    let org_id = claims.get_custom::<i64>(CLAIM_ORG_ID)?;
-    if !expected_tenant.binds(&tenant, org_id) {
-        return None;
-    }
+    crate::tenancy::jwt_lifecycle::check_tenant_claims(&claims.custom, expected_tenant).ok()?;
+    let tenant = expected_tenant.slug.clone();
     // A token from before the claim existed cannot be checked for rotation.
     let secret_prefix = claims.get_custom::<String>(CLAIM_KEY_PREFIX)?;
     let agent = McpAgent {
