@@ -380,7 +380,7 @@ mod second_factor {
 
     const PENDING_COOKIE: &str = "rustango_admin_sso_totp";
     /// Domain tag: a pending cookie is never a valid MAC of a session.
-    const TAG: &[u8] = b"rustango-admin-sso-totp-v1.";
+    const TAG: &[u8] = b"rustango-admin-sso-totp-v1";
     const TTL_SECS: i64 = Pending::TTL_SECS;
 
     fn seal(secret: &session::AdminSessionSecret, p: &Pending) -> String {

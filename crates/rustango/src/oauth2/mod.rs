@@ -65,7 +65,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use hmac::{Hmac, Mac};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -599,10 +599,7 @@ impl OAuth2Provider {
         // 5-minute cookie Max-Age is client-side and outside the MAC).
         // saturating_sub tolerates a created_at slightly in the future
         // (clock skew) by treating the age as 0.
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
-        if now.saturating_sub(flow.created_at) > MAX_FLOW_AGE_SECS {
+        if flow.is_stale() {
             return Err(OAuthError::FlowExpired);
         }
 
@@ -946,51 +943,54 @@ impl<'a> FlowScope<'a> {
         }
     }
 
-    /// The MAC over the scope and the payload; length-prefixed so no two
-    /// scopes share an input.
-    fn mac(self, secret: &[u8], payload_b64: &str) -> Hmac<Sha256> {
-        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret).expect("HMAC key");
+    /// The seal tag: the scope's parts, length-prefixed so no two scopes share one.
+    fn tag(self) -> Vec<u8> {
         let org = self.org.map(|id| id.to_string()).unwrap_or_default();
+        let mut tag = b"rustango-oauth2-flow-v2".to_vec();
         for part in [self.purpose.tag(), self.tenant, &org, self.provider] {
-            mac.update(&(part.len() as u64).to_be_bytes());
-            mac.update(part.as_bytes());
+            tag.extend_from_slice(&(part.len() as u64).to_be_bytes());
+            tag.extend_from_slice(part.as_bytes());
         }
-        mac.update(payload_b64.as_bytes());
-        mac
+        tag
+    }
+}
+
+impl OAuth2Flow {
+    /// Older than [`MAX_FLOW_AGE_SECS`]; a `created_at` slightly in the future
+    /// (clock skew) counts as age 0.
+    fn is_stale(&self) -> bool {
+        crate::sealed::Expiring::is_expired(self)
+    }
+}
+
+impl crate::sealed::Expiring for OAuth2Flow {
+    fn is_expired_at(&self, now: i64) -> bool {
+        u64::try_from(now)
+            .unwrap_or(0)
+            .saturating_sub(self.created_at)
+            > MAX_FLOW_AGE_SECS
     }
 }
 
 /// Sign `flow` for `scope` with `secret`. Embed the result in a cookie or query param.
 #[must_use]
 pub fn seal_flow(flow: &OAuth2Flow, scope: FlowScope<'_>, secret: &[u8]) -> String {
-    let payload = serde_json::to_vec(flow).unwrap_or_default();
-    let payload_b64 = URL_SAFE_NO_PAD.encode(&payload);
-    let sig = URL_SAFE_NO_PAD.encode(scope.mac(secret, &payload_b64).finalize().into_bytes());
-    format!("{payload_b64}.{sig}")
+    crate::sealed::SealedToken::seal(secret, &scope.tag(), flow)
 }
 
 /// Verify and decode a flow sealed with [`seal_flow`]; a flow sealed for
-/// another `scope` is refused.
+/// another `scope`, or older than [`MAX_FLOW_AGE_SECS`], is refused.
 pub fn open_flow(
     sealed: &str,
     scope: FlowScope<'_>,
     secret: &[u8],
 ) -> Result<OAuth2Flow, OAuthError> {
-    let (payload_b64, sig_b64) = sealed
-        .split_once('.')
-        .ok_or(OAuthError::BadResponse("malformed sealed flow".into()))?;
-    let expected = scope.mac(secret, payload_b64).finalize().into_bytes();
-    let provided = URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| OAuthError::BadResponse("bad signature encoding".into()))?;
-    if expected.ct_eq(&provided).unwrap_u8() == 0 {
-        return Err(OAuthError::StateMismatch);
-    }
-    let payload = URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| OAuthError::BadResponse("bad payload encoding".into()))?;
-    serde_json::from_slice(&payload)
-        .map_err(|e| OAuthError::BadResponse(format!("decode flow: {e}")))
+    use crate::sealed::SealError;
+    crate::sealed::SealedToken::open(secret, &scope.tag(), sealed).map_err(|e| match e {
+        SealError::BadSignature => OAuthError::StateMismatch,
+        SealError::Expired => OAuthError::FlowExpired,
+        _ => OAuthError::BadResponse("malformed sealed flow".into()),
+    })
 }
 
 // --------------------------------------------------------------------- key
@@ -1741,7 +1741,7 @@ mod tests {
         let flow = OAuth2Flow {
             state: "s".into(),
             pkce_verifier: "v".into(),
-            created_at: 1234,
+            created_at: fresh(),
             nonce: None,
             next: None,
         };
@@ -1749,7 +1749,7 @@ mod tests {
         let opened = open_flow(&sealed, SCOPE, secret).unwrap();
         assert_eq!(opened.state, "s");
         assert_eq!(opened.pkce_verifier, "v");
-        assert_eq!(opened.created_at, 1234);
+        assert_eq!(opened.created_at, flow.created_at);
     }
 
     #[test]
@@ -1758,7 +1758,7 @@ mod tests {
         let flow = OAuth2Flow {
             state: "s".into(),
             pkce_verifier: "v".into(),
-            created_at: 0,
+            created_at: fresh(),
             nonce: None,
             next: None,
         };
@@ -1772,6 +1772,31 @@ mod tests {
         sealed = tampered;
         let err = open_flow(&sealed, SCOPE, secret).unwrap_err();
         assert!(matches!(err, OAuthError::StateMismatch));
+    }
+
+    /// A `created_at` inside the flow's age limit.
+    fn fresh() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    /// A sealed flow past its age limit does not open.
+    #[test]
+    fn open_flow_refuses_a_stale_flow() {
+        let flow = OAuth2Flow {
+            state: "s".into(),
+            pkce_verifier: "v".into(),
+            created_at: 1,
+            nonce: None,
+            next: None,
+        };
+        let sealed = seal_flow(&flow, SCOPE, b"k");
+        assert!(matches!(
+            open_flow(&sealed, SCOPE, b"k"),
+            Err(OAuthError::FlowExpired)
+        ));
     }
 
     const SCOPE: FlowScope<'static> = FlowScope {
@@ -1790,7 +1815,7 @@ mod tests {
         let flow = OAuth2Flow {
             state: "s".into(),
             pkce_verifier: "v".into(),
-            created_at: 0,
+            created_at: fresh(),
             nonce: None,
             next: None,
         };
@@ -1812,7 +1837,7 @@ mod tests {
         let flow = OAuth2Flow {
             state: "s".into(),
             pkce_verifier: "v".into(),
-            created_at: 0,
+            created_at: fresh(),
             nonce: None,
             next: None,
         };
@@ -1834,7 +1859,7 @@ mod tests {
         let flow = OAuth2Flow {
             state: "s".into(),
             pkce_verifier: "v".into(),
-            created_at: 0,
+            created_at: fresh(),
             nonce: None,
             next: None,
         };
@@ -1854,7 +1879,7 @@ mod tests {
         let flow = OAuth2Flow {
             state: "s".into(),
             pkce_verifier: "v".into(),
-            created_at: 0,
+            created_at: fresh(),
             nonce: None,
             next: None,
         };

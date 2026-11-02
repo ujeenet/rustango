@@ -343,9 +343,8 @@ sauf si vous utilisez `refresh_with`.
   d'autre que rustango, et rejetés jusque par `rustango::jwt::decode`. Si vous
   aviez écrit un vérificateur maison pour contourner cela, vous pouvez le jeter.
 
-  Les jetons émis avant le correctif restent acceptés à la vérification, pour
-  qu'une mise à niveau ne déconnecte personne. Ce chemin de compatibilité
-  disparaît en 0.58, quand tout jeton à l'ancienne forme aura expiré.
+  Depuis 0.62.0, un jeton en deux segments est refusé, par `JwtLifecycle`
+  comme par `JwtBackend`.
 
 
 ---

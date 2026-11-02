@@ -14,6 +14,8 @@
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+
+pub use crate::sealed::{Expiring, SealError, SealedToken};
 use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 
@@ -535,8 +537,8 @@ impl PasswordFingerprint {
     }
 }
 
-/// Who passed the first factor and still owes a TOTP code. Signed under a
-/// per-flow tag ending in `.`, so it never verifies as a session cookie.
+/// Who passed the first factor and still owes a TOTP code. Sealed under a
+/// per-flow tag, so it never verifies as a session cookie.
 #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingSecondFactor {
@@ -567,28 +569,20 @@ impl PendingSecondFactor {
         }
     }
 
-    fn mac(secret: &SessionSecret, tag: &[u8], body: &str) -> [u8; 32] {
-        sign(secret, &[tag, body.as_bytes()].concat())
-    }
-
     pub(crate) fn seal(&self, secret: &SessionSecret, tag: &[u8]) -> String {
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let body = b64.encode(serde_json::to_vec(self).unwrap_or_default());
-        let sig = b64.encode(Self::mac(secret, tag, &body));
-        format!("{body}.{sig}")
+        SealedToken::seal(secret.key(), tag, self)
     }
 
     /// The pending state behind `value`, if signed under `tag` and not expired.
     pub(crate) fn open(secret: &SessionSecret, tag: &[u8], value: &str) -> Option<Self> {
-        use subtle::ConstantTimeEq as _;
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let (body, sig) = value.split_once('.')?;
-        let sig = b64.decode(sig).ok()?;
-        if Self::mac(secret, tag, body).ct_eq(&sig[..]).unwrap_u8() == 0 {
-            return None;
-        }
-        let p: Self = serde_json::from_slice(&b64.decode(body).ok()?).ok()?;
-        (chrono::Utc::now().timestamp() < p.exp).then_some(p)
+        SealedToken::open(secret.key(), tag, value).ok()
+    }
+}
+
+#[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+impl Expiring for PendingSecondFactor {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
     }
 }
 
@@ -713,6 +707,24 @@ pub async fn deactivate<T: crate::core::Model + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pending second factor is a plain [`SealedToken`]: either side opens
+    /// what the other sealed, and another flow's tag does not.
+    #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+    #[test]
+    fn pending_second_factor_uses_the_shared_codec() {
+        let secret = SessionSecret::from_bytes(vec![4; 32]);
+        let p = PendingSecondFactor::new(&secret, 9, "$argon2id$h");
+        let sealed = p.seal(&secret, b"flow-a");
+        let opened = SealedToken::<PendingSecondFactor>::open(secret.key(), b"flow-a", &sealed);
+        assert_eq!(opened.map(|o| o.uid), Ok(9));
+        let back = SealedToken::seal(secret.key(), b"flow-a", &p);
+        assert_eq!(
+            PendingSecondFactor::open(&secret, b"flow-a", &back).map(|o| o.uid),
+            Some(9)
+        );
+        assert!(PendingSecondFactor::open(&secret, b"flow-b", &sealed).is_none());
+    }
 
     /// A key file that exists but cannot be read is an error, never replaced.
     #[cfg(unix)]

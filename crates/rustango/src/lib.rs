@@ -543,8 +543,13 @@ pub mod jsonapi;
     feature = "csrf",
     feature = "totp",
     feature = "tenancy",
+    feature = "passkey",
 ))]
 pub(crate) mod crypto;
+
+/// The one codec for signed, expiring cookies and tokens (`SealedToken`).
+#[cfg(any(feature = "csrf", feature = "passkey", feature = "oauth2"))]
+pub mod sealed;
 
 /// AEAD sealing shared by `EncryptedString` and sealed tenant secrets.
 #[cfg(feature = "_aead")]

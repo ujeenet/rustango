@@ -41,7 +41,6 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use subtle::ConstantTimeEq;
 
 use crate::jti_store::{InMemoryJtiStore, JtiStore};
 
@@ -144,20 +143,30 @@ impl UserTokenScope<'_> {
         if claims.contains_key(CLAIM_KIND) {
             return Err("token is not a user token");
         }
-        let bound = claims.get(CLAIM_TENANT);
-        match (self, bound) {
-            (Self::Tenant(t), Some(v)) if v.as_str() == Some(t.slug.as_str()) => {
-                match claims.get(CLAIM_ORG_ID).and_then(serde_json::Value::as_i64) {
-                    Some(id) if id == t.org_id => Ok(()),
-                    Some(_) => Err("token issued for a purged tenant"),
-                    None => Err("token missing org binding"),
-                }
-            }
-            (Self::Tenant(_), Some(_)) => Err("token issued for different tenant"),
-            (Self::Tenant(_), None) => Err("token missing tenant binding"),
+        match (self, claims.get(CLAIM_TENANT)) {
+            (Self::Tenant(t), _) => check_tenant_claims(claims, t),
             (Self::Unscoped, None) => Ok(()),
             (Self::Unscoped, Some(_)) => Err("tenant token presented without a tenant"),
         }
+    }
+}
+
+/// The `tenant` and `org_id` claims [`write_tenant_claims`] wrote must name
+/// `tenant`: the one tenant-binding check for user and agent tokens alike.
+pub(crate) fn check_tenant_claims(
+    claims: &serde_json::Map<String, serde_json::Value>,
+    tenant: &crate::tenancy::TenantSlug,
+) -> Result<(), &'static str> {
+    match claims.get(CLAIM_TENANT).map(serde_json::Value::as_str) {
+        Some(Some(slug)) if slug == tenant.slug => {
+            match claims.get(CLAIM_ORG_ID).and_then(serde_json::Value::as_i64) {
+                Some(id) if id == tenant.org_id => Ok(()),
+                Some(_) => Err("token issued for a purged tenant"),
+                None => Err("token missing org binding"),
+            }
+        }
+        Some(_) => Err("token issued for different tenant"),
+        None => Err("token missing tenant binding"),
     }
 }
 
@@ -465,26 +474,9 @@ impl JwtLifecycle {
         payload.insert("jti".into(), serde_json::Value::String(jti));
         payload.insert("typ".into(), serde_json::Value::String(typ.into()));
 
-        // Three segments, with the JOSE header, signed over
-        // `header.payload` — i.e. an actual JWT (#1397).
-        //
-        // This used to emit `base64(payload).base64(sig)`: two segments,
-        // no header, no `alg`, signed over the payload alone. Nothing
-        // outside rustango could read it — not jwt.io, not any language's
-        // standard library, not an API gateway asked to validate a JWT,
-        // and not `rustango::jwt::decode`, which rejected the framework's
-        // own tokens as malformed. Meanwhile every doc, the type names
-        // and the route all said JWT.
-        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-            serde_json::to_vec(&serde_json::json!({"alg": "HS256", "typ": "JWT"}))
-                .unwrap_or_default(),
-        );
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(&payload).unwrap_or_default());
-        let signing_input = format!("{header_b64}.{payload_b64}");
-        let sig = self.sign(signing_input.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-        format!("{signing_input}.{sig_b64}")
+        // The one HS256 codec; the key length is asserted at construction.
+        crate::jwt::encode(&crate::jwt::Claims::from_map(payload), self.secret.bytes())
+            .expect("JwtLifecycle signing key is >= 32 bytes")
     }
 
     async fn verify_token(&self, token: &str) -> Option<JwtClaims> {
@@ -567,49 +559,10 @@ impl JwtLifecycle {
     /// Used for `revoke` so we can blacklist even an already-expired token's
     /// JTI, and at logout to end its family (#2419).
     pub(crate) fn decode_signed(&self, token: &str) -> Option<JwtClaims> {
-        // Accepts both shapes (#1397). Three segments is what we issue
-        // now; two is the pre-#1397 format, still verified so that
-        // upgrading the framework does not log out everyone holding a
-        // token that has not expired yet.
-        //
-        // This is a compatibility path with an end date, not a permanent
-        // one — it goes in 0.62.0; old-shape tokens have long aged out. It weakens nothing in the
-        // meantime: both shapes are verified with the same HMAC key, and
-        // an attacker who cannot forge one cannot forge the other.
-        let parts: Vec<&str> = token.split('.').collect();
-        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
-            [header, payload, sig] => {
-                // Pin the algorithm from the header rather than trusting
-                // it. Belt-and-braces — we verify HS256 over the whole
-                // `header.payload` with our own key regardless, so a
-                // swapped `alg` cannot validate — but refusing it here
-                // means `alg: none` is rejected as such instead of as a
-                // signature mismatch.
-                let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                    .decode(header)
-                    .ok()?;
-                let header_json: serde_json::Value = serde_json::from_slice(&header_bytes).ok()?;
-                if header_json.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
-                    return None;
-                }
-                (format!("{header}.{payload}"), *payload, *sig)
-            }
-            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
-            _ => return None,
-        };
-
-        let expected = self.sign(signing_input.as_bytes());
-        let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(sig_b64)
-            .ok()?;
-        if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-            return None;
-        }
-        let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload_b64)
-            .ok()?;
-        let mut payload: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_slice(&payload_bytes).ok()?;
+        // Three segments only: the two-part shape issued before #1397 is gone.
+        let mut payload = crate::jwt::verify(token, self.secret.bytes())
+            .ok()?
+            .into_map();
 
         // Extract reserved claims first
         let sub = payload.get("sub")?.as_i64()?;
@@ -629,15 +582,6 @@ impl JwtLifecycle {
             typ,
             custom: payload,
         })
-    }
-
-    fn sign(&self, msg: &[u8]) -> Vec<u8> {
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let mut mac =
-            <Hmac<Sha256>>::new_from_slice(self.secret.bytes()).expect("HMAC accepts any key");
-        mac.update(msg);
-        mac.finalize().into_bytes().to_vec()
     }
 
     async fn blacklist_jti(&self, jti: &str, expires_at: i64) {

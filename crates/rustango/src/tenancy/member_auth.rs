@@ -53,9 +53,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 use crate::extractors::{Tenant, TenantScope};
 use crate::session::{secure_cookies, PasswordFingerprint, SessionSecret};
@@ -146,10 +144,6 @@ impl MemberSessionPayload {
             pwf,
         }
     }
-
-    fn is_expired(&self) -> bool {
-        chrono::Utc::now().timestamp() >= self.exp
-    }
 }
 
 /// Distinct decode failures for the member codec. Kept separate from
@@ -176,14 +170,26 @@ pub enum MemberSessionError {
     WrongAudience,
 }
 
+impl crate::session::Expiring for MemberSessionPayload {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
+    }
+}
+
+impl From<crate::session::SealError> for MemberSessionError {
+    fn from(e: crate::session::SealError) -> Self {
+        match e {
+            crate::session::SealError::BadSignature => Self::BadSignature,
+            crate::session::SealError::Expired => Self::Expired,
+            _ => Self::Malformed,
+        }
+    }
+}
+
 /// Serialize and sign a member payload over the domain-tagged message.
 #[must_use]
 pub fn encode(secret: &SessionSecret, payload: &MemberSessionPayload) -> String {
-    let json = serde_json::to_vec(payload).expect("payload serializes");
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = crate::session::sign_tagged(secret, MEMBER_DOMAIN_TAG, payload_b64.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{payload_b64}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), MEMBER_DOMAIN_TAG, payload)
 }
 
 /// Verify, deserialize, and tenant/audience-bind-check a member cookie
@@ -202,24 +208,10 @@ pub fn decode(
     tenant: &crate::tenancy::TenantSlug,
     value: &str,
 ) -> Result<MemberSessionPayload, MemberSessionError> {
-    let (payload_b64, sig_b64) = value.split_once('.').ok_or(MemberSessionError::Malformed)?;
-    let expected = crate::session::sign_tagged(secret, MEMBER_DOMAIN_TAG, payload_b64.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| MemberSessionError::Malformed)?;
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return Err(MemberSessionError::BadSignature);
-    }
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| MemberSessionError::Malformed)?;
     let payload: MemberSessionPayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| MemberSessionError::Malformed)?;
+        crate::session::SealedToken::open(secret.key(), MEMBER_DOMAIN_TAG, value)?;
     if payload.aud != "member" {
         return Err(MemberSessionError::WrongAudience);
-    }
-    if payload.is_expired() {
-        return Err(MemberSessionError::Expired);
     }
     if !tenant.binds(&payload.slug, payload.org) {
         return Err(MemberSessionError::WrongTenant);
@@ -1181,6 +1173,7 @@ mod tests {
     use super::*;
     use crate::tenancy::session::SessionError;
     use crate::tenancy::tenant_console;
+    use base64::Engine as _;
 
     fn secret() -> SessionSecret {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())

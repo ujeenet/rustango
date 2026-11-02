@@ -234,11 +234,7 @@ async fn the_backends_own_tokens_still_authenticate() {
     let backend = JwtBackend::new(secret());
     let token = backend.issue(42);
 
-    assert_eq!(
-        token.split('.').count(),
-        2,
-        "issue() emits the legacy shape"
-    );
+    assert_eq!(token.split('.').count(), 3, "issue() emits a standard JWT");
     assert_eq!(auth(&backend, &pool, &token).await, Some(42));
 }
 

@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- Two-part JWTs (pre-0.57.5 shape) are refused and `JwtBackend::issue*` mint standard three-part tokens. Admin session, TOTP-pending, passkey challenge and OAuth2 flow cookies change format, and password links get a new scope value: those in flight end once. `tenancy` now enables the `jwt` feature.
 - `PoolTx` is a struct: match `tx.conn()` (a `#[non_exhaustive]` `TxConn`) instead of the tx. Before: `match &mut tx { PoolTx::Postgres(t) => … }`. After: `match tx.conn() { TxConn::Postgres(t) => …, _ => … }`.
 - Migrate signal receivers read `ctx.pool` and `ctx.tenant`; build contexts with `PreMigrateContext::new` / `PostMigrateContext::new`. Before: `connect_post_migrate_with_target(|ctx, t| … t.pool …)`. After: `connect_post_migrate(|ctx| … ctx.pool …)`.
 - `LinkTarget::audience` and `LinkScope::audience` take a `rustango::auth_flows::SingleDb`, so a tenant pool or handler cannot use an unbound scope by mistake: `LinkTarget::audience(&pool, "app")` becomes `LinkTarget::audience(SingleDb::new(&pool), "app")`, and `LinkScope::audience("app")` becomes `LinkScope::audience(SingleDb::new(&pool), "app")`. Multi-tenant apps use `LinkScope::from(&tenant)` and `LinkTarget::from(&tenant)`.
