@@ -99,7 +99,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     // tables now migrate under a dedicated `__rustango_system_migrations__`
     // ledger (separate from the user-app `__rustango_migrations__`), so
     // both must be dropped.
-    let _ = rmig::drop_all(&pool).await;
+    let _ = rmig::drop_all_pool(&pool.clone().into()).await;
     for ledger in [rmig::LEDGER_TABLE, "__rustango_system_migrations__"] {
         let _ = sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
             .execute(&pool)
