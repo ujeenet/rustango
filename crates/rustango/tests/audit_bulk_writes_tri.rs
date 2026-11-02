@@ -96,6 +96,39 @@ async fn latest(pool: &Pool, table: &str, pk: &str) -> audit::AuditEntry {
         .unwrap_or_else(|| panic!("no audit row for {table}/{pk}"))
 }
 
+/// An audited bulk insert names each row's PK, or refuses where the
+/// database cannot report it (MySQL) and writes nothing.
+async fn audited_bulk_insert_names_every_pk(pool: &Pool) {
+    let mut rows = vec![
+        Item {
+            id: Auto::default(),
+            name: "x".into(),
+            score: 1,
+        },
+        Item {
+            id: Auto::default(),
+            name: "y".into(),
+            score: 2,
+        },
+    ];
+    let res = Item::bulk_insert(&mut rows, pool).await;
+    if pool.dialect().name() == "mysql" {
+        assert!(
+            matches!(res, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
+            "{res:?}"
+        );
+        assert_eq!(Item::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(ops(pool, ITEM, "create").await, 0);
+        return;
+    }
+    res.expect("bulk insert");
+    for row in &rows {
+        let pk = row.id.get().expect("pk read back").to_string();
+        assert_eq!(latest(pool, ITEM, &pk).await.operation, "create");
+    }
+    assert_eq!(ops(pool, ITEM, "create").await, 2);
+}
+
 /// Three items: `a` (1), `b` (2), `b` (3). Returns their PKs.
 async fn seed(pool: &Pool) -> Vec<i64> {
     let mut pks = Vec::new();
@@ -522,6 +555,7 @@ async fn large_bulk_insert_audits_on_postgres(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        audited_bulk_insert_names_every_pk,
         destroy_audits_each_deleted_row,
         delete_where_audits_each_deleted_row,
         prune_audits_each_deleted_row,

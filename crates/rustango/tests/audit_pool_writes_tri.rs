@@ -141,6 +141,28 @@ async fn audited_on_writes_are_refused(pool: &Pool) {
     assert_eq!(Note::objects().count(pool).await.expect("count"), 1);
 }
 
+/// `insert_tx` / `save_tx` / `delete_tx` write their audit rows in the tx.
+async fn tx_writes_are_audited(pool: &Pool) {
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+    let mut note = Note {
+        id: Auto::default(),
+        title: "in-tx".into(),
+        deleted_at: None,
+    };
+    note.insert_tx(&mut tx).await.expect("insert_tx");
+    note.title = "changed".into();
+    note.save_tx(&mut tx).await.expect("save_tx");
+    note.delete_tx(&mut tx).await.expect("delete_tx");
+    tx.commit().await.expect("commit");
+    let pk = note.id.get().expect("pk").to_string();
+    let ops: Vec<String> = entries(pool, &pk)
+        .await
+        .into_iter()
+        .map(|e| e.operation)
+        .collect();
+    assert_eq!(ops, ["delete", "update", "create"]);
+}
+
 async fn insert_records_the_assigned_pk(pool: &Pool) {
     let note = insert_note(pool).await;
     let pk = note.id.get().expect("pk assigned").to_string();
@@ -845,6 +867,7 @@ tri_dialect_test! {
     setup: setup,
     scenarios: [
         audited_on_writes_are_refused,
+        tx_writes_are_audited,
         insert_records_the_assigned_pk,
         soft_delete_and_restore_each_write_one_row,
         delete_writes_one_row,

@@ -6407,29 +6407,65 @@ fn inherent_impl_tokens(
     };
 
     // `_tx` family: the shared `__rustango_*_exec` bodies on an open
-    // `PoolTx`. They write no audit rows.
+    // `PoolTx`; an audited model writes its snapshot entry in the same tx.
+    let tx_emit = |op: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() && primary_key.is_some() {
+            quote! {
+                #root::audit::__emit_many_tx(
+                    tx,
+                    &[self.__rustango_audit_entry(#root::audit::AuditOp::#op)],
+                )
+                .await?;
+            }
+        } else {
+            quote!()
+        }
+    };
     let tx_insert_method = {
         let self_ref = if fields.has_auto {
             quote!(&mut self)
         } else {
             quote!(&self)
         };
+        let emit = tx_emit(quote!(Create));
+        let refuse_pkless = if audited_fields.is_some() && primary_key.is_none() {
+            quote! {
+                return ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                });
+            }
+        } else {
+            quote!()
+        };
         quote! {
-            /// Insert this row inside an open transaction.
+            /// Insert this row inside an open transaction; an audited model
+            /// writes its audit row there too.
             ///
             /// # Errors
             /// As [`Self::insert`].
+            #[allow(unreachable_code)]
             pub async fn insert_tx(
                 #self_ref,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                self.__rustango_insert_exec(&mut *tx).await
+                #refuse_pkless
+                self.__rustango_insert_exec(&mut *tx).await?;
+                #emit
+                ::core::result::Result::Ok(())
             }
         }
     };
-    let tx_save_method = if primary_key.is_some() {
+    let tx_save_method = if let Some((pk_ident, _)) = primary_key {
+        let emit_create = tx_emit(quote!(Create));
+        let emit_update = tx_emit(quote!(Update));
+        let was_unset = if fields.pk_is_auto {
+            quote!(matches!(self.#pk_ident, #root::sql::Auto::Unset))
+        } else {
+            quote!(false)
+        };
         quote! {
-            /// Save this row inside an open transaction.
+            /// Save this row inside an open transaction; an audited model
+            /// writes its audit row there too.
             ///
             /// # Errors
             /// As [`Self::save`].
@@ -6437,15 +6473,26 @@ fn inherent_impl_tokens(
                 &mut self,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                self.__rustango_save_exec(&mut *tx).await
+                let _was_unset = #was_unset;
+                let _n = self.__rustango_save_exec(&mut *tx).await?;
+                if _n > 0 {
+                    if _was_unset {
+                        #emit_create
+                    } else {
+                        #emit_update
+                    }
+                }
+                ::core::result::Result::Ok(_n)
             }
         }
     } else {
         quote!()
     };
     let tx_delete_method = if primary_key.is_some() {
+        let emit = tx_emit(quote!(Delete));
         quote! {
-            /// Delete this row inside an open transaction.
+            /// Delete this row inside an open transaction; an audited model
+            /// writes its audit row there too.
             ///
             /// # Errors
             /// As [`Self::delete`].
@@ -6453,7 +6500,11 @@ fn inherent_impl_tokens(
                 &self,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                self.__rustango_delete_exec(&mut *tx).await
+                let _n = self.__rustango_delete_exec(&mut *tx).await?;
+                if _n > 0 {
+                    #emit
+                }
+                ::core::result::Result::Ok(_n)
             }
         }
     } else {
@@ -6980,8 +7031,18 @@ fn inherent_impl_tokens(
     });
 
     let refuse_insert = refuse("insert_on");
-    // The audited `insert` is built with the PK methods.
+    // The audited `insert` is built with the PK methods; an audited model
+    // without a PK has no row to name, so its insert refuses.
     let audited_insert = audited_fields.is_some() && primary_key.is_some();
+    let insert_pool_body = if audited_fields.is_some() {
+        quote! {
+            ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                table: <Self as #root::core::Model>::SCHEMA.table,
+            })
+        }
+    } else {
+        quote!(self.__rustango_insert_exec(pool).await)
+    };
     let plain_insert_auto = if audited_insert {
         quote!()
     } else {
@@ -6995,7 +7056,7 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                self.__rustango_insert_exec(pool).await
+                #insert_pool_body
             }
         }
     };
@@ -7011,7 +7072,7 @@ fn inherent_impl_tokens(
                 &self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                self.__rustango_insert_exec(pool).await
+                #insert_pool_body
             }
         }
     };
@@ -7139,6 +7200,13 @@ fn inherent_impl_tokens(
         quote! {
             let mut _tx = #root::sql::write_transaction(pool).await?;
             Self::__rustango_bulk_insert_exec(rows, &mut _tx).await?;
+            // MySQL has no RETURNING: a database-filled PK stays unset.
+            if rows.iter().any(|_row| _row.__rustango_audit_pk().is_empty()) {
+                return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                    reason: "MySQL has no RETURNING to read the written rows",
+                });
+            }
             let _entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
                 .iter()
                 .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
