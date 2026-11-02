@@ -2291,7 +2291,7 @@ async fn emit_registry_audit(
         source: crate::audit::AuditSource::Custom(format!("operator:{operator_id}:{verb}")),
         changes: serde_json::Value::Object(changes),
     };
-    if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
+    if let Err(e) = crate::audit::emit_one(registry, &entry).await {
         // The action happened but was not recorded. Loud on purpose: a
         // trail with a silent hole in it is worse than a short one.
         tracing::error!(

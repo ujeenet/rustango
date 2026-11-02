@@ -49,8 +49,6 @@
 use crate::core::Model as _;
 use crate::core::{ConflictClause, DeleteQuery, Filter, InsertQuery, Op, SqlValue, WhereExpr};
 use crate::sql::sqlx;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::Row;
 use crate::sql::Auto;
 use crate::Model;
 
@@ -360,70 +358,6 @@ pub async fn has_perm_pool(
         return Ok(granted);
     }
     Ok(via_role)
-}
-
-/// Like [`has_perm`] but accepts any sqlx executor. The
-/// [`crate::viewset::ViewSet::tenant_router`] path uses this with the
-/// per-request `&mut PgConnection` from
-/// [`crate::extractors::Tenant::conn`] — `&PgPool` isn't usable in
-/// schema-mode tenancy because each query needs `SET search_path`
-/// against the same connection that issued it.
-///
-/// # Errors
-/// As [`has_perm`].
-#[cfg(feature = "postgres")]
-pub async fn has_perm_on<'c, E>(uid: i64, codename: &str, executor: E) -> Result<bool, sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    let row = sqlx::query(
-        r#"
-        WITH user_info AS (
-            SELECT is_superuser
-            FROM   "rustango_users"
-            WHERE  id = $1 AND active = TRUE
-        ),
-        explicit AS (
-            SELECT granted
-            FROM   "rustango_user_permissions"
-            WHERE  user_id = $1 AND codename = $2
-        ),
-        via_role AS (
-            SELECT 1
-            FROM   "rustango_user_roles" ur
-            JOIN   "rustango_role_permissions" rp
-                   ON rp.role_id = ur.role_id
-            WHERE  ur.user_id = $1 AND rp.codename = $2
-            LIMIT  1
-        )
-        SELECT
-            COALESCE((SELECT is_superuser FROM user_info), FALSE) AS is_super,
-            (SELECT granted FROM explicit)                         AS explicit_grant,
-            EXISTS(SELECT 1 FROM via_role)                         AS via_role,
-            EXISTS(SELECT 1 FROM "rustango_users"
-                   WHERE id = $1 AND active = TRUE)                AS user_active
-        "#,
-    )
-    .bind(uid)
-    .bind(codename)
-    .fetch_one(executor)
-    .await?;
-
-    let is_super: bool = row.try_get("is_super").unwrap_or(false);
-    if is_super {
-        return Ok(true);
-    }
-    // Audit P3 — a deactivated user holds no permissions even with a
-    // role / explicit grant (parity with `has_perm_pool`).
-    let user_active: bool = row.try_get("user_active").unwrap_or(true);
-    if !user_active {
-        return Ok(false);
-    }
-    let explicit: Option<bool> = row.try_get("explicit_grant").unwrap_or(None);
-    if let Some(granted) = explicit {
-        return Ok(granted);
-    }
-    Ok(row.try_get("via_role").unwrap_or(false))
 }
 
 // ------------------------------------------------------------------ Role management (ORM-backed)

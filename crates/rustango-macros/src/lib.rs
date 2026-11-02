@@ -1478,13 +1478,8 @@ const NO_REVERSE_ACCESSOR: &str = "+";
 /// Reads the column the FK points at (`on`, else the PK) and runs one
 /// `SELECT … WHERE <fk_column> = $1`: one round trip, no N+1.
 ///
-/// **PG-only emission**: the accessor is bounded on
-/// `sqlx::Executor<Database = sqlx::Postgres>` and calls `fetch_on`,
-/// both of which are gated behind the `postgres` cargo feature. The
-/// emitted code is wrapped in `#[cfg(feature = "postgres")]` so the
-/// model derive itself compiles on tri-dialect / sqlite-only
-/// downstream builds — the accessor just isn't materialised. A tri-
-/// dialect `_set_pool` variant is a separate follow-up.
+/// The accessor takes any `SqlExecutor`; `_set_pool` is its deprecated
+/// old name.
 fn reverse_helper_tokens(
     child_ident: &syn::Ident,
     fk_relations: &[FkRelation],
@@ -1553,49 +1548,35 @@ fn reverse_helper_tokens(
              generated from the FK declaration on `{child_ident}::{fk_col}`. Composes with \
              further `{child_ident}::objects()` filters via direct queryset use."
         );
-        let pool_doc = format!(
-            "Tri-dialect counterpart of [`Self::{pg_suffix}`] — takes \
-             [`#root::sql::Pool`] and dispatches per backend so the \
-             reverse-FK fetch works on PG / MySQL / SQLite under one method. \
-             Use this from framework code that holds a `&Pool` (admin, \
-             tenancy resolver, viewset handlers); reach for the executor- \
-             bound variant when you already have a typed `sqlx::Executor`."
-        );
         quote! {
-            #[cfg(feature = "postgres")]
             impl #parent_ty {
                 #[doc = #doc]
+                ///
+                /// Runs on any [`#root::sql::SqlExecutor`]: a `&Pool`, a held
+                /// `PoolConn`, a `PoolTx` or a Postgres sqlx executor.
                 ///
                 /// # Errors
                 /// Returns [`#root::sql::ExecError`] for SQL-writing
                 /// or driver failures.
-                pub async fn #pg_method_ident<'_c, _E>(
+                pub async fn #pg_method_ident<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
                     _executor: _E,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<#child_ident>,
                     #root::sql::ExecError,
-                >
-                where
-                    _E: #root::sql::sqlx::Executor<
-                        '_c,
-                        Database = #root::sql::sqlx::Postgres,
-                    >,
-                {
+                > {
                     let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
                     #root::query::QuerySet::<#child_ident>::new()
                         .filter_op(#fk_col, #root::core::Op::Eq, _key)
                         .fetch_on(_executor)
                         .await
                 }
-            }
 
-            impl #parent_ty {
-                #[doc = #pool_doc]
+                /// Old name of the reverse accessor without `_pool`.
                 ///
                 /// # Errors
-                /// Returns [`#root::sql::ExecError`] for SQL-writing
-                /// or driver failures.
+                /// As the accessor.
+                #[deprecated(since = "0.62.0", note = "drop the `_pool` suffix")]
                 pub async fn #pool_method_ident(
                     &self,
                     pool: &#root::sql::Pool,
@@ -1603,12 +1584,7 @@ fn reverse_helper_tokens(
                     ::std::vec::Vec<#child_ident>,
                     #root::sql::ExecError,
                 > {
-                    use #root::sql::FetcherPool as _;
-                    let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
-                    #root::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, #root::core::Op::Eq, _key)
-                        .fetch(pool)
-                        .await
+                    self.#pg_method_ident(pool).await
                 }
             }
         }
@@ -3653,12 +3629,12 @@ fn inherent_impl_tokens(
             /// Auto-PK models with an unset PK return
             /// [`#root::core::QueryError::UnknownField`] with
             /// field name `<pk>` — `save_partial` is an
-            /// UPDATE-only path. Call [`Self::insert_pool`]
-            /// (or [`Self::save_pool`] which dispatches based on
+            /// UPDATE-only path. Call [`Self::insert`]
+            /// (or [`Self::save`] which dispatches based on
             /// PK state) for the INSERT case.
             ///
             /// # Errors
-            /// As [`Self::save_pool`], plus `UnknownField` for
+            /// As [`Self::save`], plus `UnknownField` for
             /// unknown / empty / Auto-Unset cases.
             pub async fn save_partial(
                 &mut self,
@@ -3787,19 +3763,17 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
-            quote! {
-                /// Insert this row against either backend with audit
-                /// emission inside the same transaction. Bi-dialect
-                /// counterpart of [`Self::insert`] for audited models.
-                ///
-                /// Snapshot-style audit (post-write field values).
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+            // A failed COMMIT rolls the row back: put the read-back values back too.
+            let assigned: Vec<syn::Ident> = fields
+                .auto_field_idents
+                .iter()
+                .map(|(ident, _, _)| ident.clone())
+                .collect();
+            let body = restore_auto_now_unless(
+                &assigned,
+                &quote!(::core::result::Result<(), #root::sql::ExecError>),
+                &quote!(_saved.is_ok()),
+                &quote! {
                     let mut _query = self.__rustango_insert_query();
                     // The audit row needs the PK even when Rust filled it.
                     if _query.returning.is_empty() {
@@ -3809,6 +3783,21 @@ fn inherent_impl_tokens(
                         _m.__rustango_audit_entry(_op)
                     })
                     .await
+                },
+            );
+            quote! {
+                /// Insert this row on any backend, with its audit row in the
+                /// same transaction.
+                ///
+                /// Snapshot-style audit (post-write field values).
+                ///
+                /// # Errors
+                /// As [`Self::insert`].
+                pub async fn insert(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #body
                 }
             }
         } else {
@@ -3929,16 +3918,13 @@ fn inherent_impl_tokens(
                 },
             );
             quote! {
-                /// Save this row against either backend with audit
-                /// emission (diff-style: BEFORE+AFTER) inside the
-                /// same transaction. Auto::Unset PK routes to
-                /// insert_pool. Bi-dialect counterpart of
-                /// [`Self::save`] for audited models.
+                /// Save this row on any backend, with a diff audit row
+                /// (before and after) in the same transaction. An `Unset`
+                /// `Auto` PK inserts instead.
                 ///
                 /// The audit row's `changes` JSON contains one
                 /// `{ "field": { "before": …, "after": … } }` entry
                 /// per tracked column whose value actually changed
-                /// — same shape as the existing &PgPool save() emits.
                 /// Keyed on the PK; global scopes do not apply.
                 ///
                 /// # Errors
@@ -4005,9 +3991,8 @@ fn inherent_impl_tokens(
         if let Some(pk_ident) = pk_ident_for_pool {
             if audited_fields.is_some() {
                 quote! {
-                    /// Delete this row against either backend with audit
-                    /// emission inside the same transaction. Bi-dialect
-                    /// counterpart of [`Self::delete`] for audited models.
+                    /// Delete this row on any backend, with its audit row in
+                    /// the same transaction.
                     /// Keyed on the PK; global scopes do not apply.
                     ///
                     /// # Errors
@@ -6329,7 +6314,7 @@ fn inherent_impl_tokens(
             /// the conflict error if you need race-free semantics.
             ///
             /// # Errors
-            /// As [`Self::find`] and [`Self::save_pool`].
+            /// As [`Self::find`] and [`Self::save`].
             pub async fn find_or_insert<F>(
                 pk: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
@@ -6774,9 +6759,7 @@ fn inherent_impl_tokens(
                     #root::sql::__macro_internals::update_on(_executor, &_query).await
                 }
 
-                /// Tri-dialect counterpart of [`Self::soft_delete_on`]
-                /// — takes [`#root::sql::Pool`] and dispatches per
-                /// backend. Eloquent `Model::delete()` semantics on
+                /// Soft-delete this row on any backend. Eloquent `Model::delete()` semantics on
                 /// soft-delete-enabled models (closes #821 partial).
                 ///
                 /// Sets the `#[rustango(soft_delete)]` column to

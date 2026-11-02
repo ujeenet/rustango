@@ -934,7 +934,7 @@ async fn totp_audit_as(
         source,
         changes: serde_json::json!({ "action": action }),
     };
-    if let Err(e) = crate::audit::emit_one_pool(&state.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(&state.pool, &entry).await {
         tracing::warn!(target: "rustango::admin", error = %e, action, "totp audit entry");
     }
 }

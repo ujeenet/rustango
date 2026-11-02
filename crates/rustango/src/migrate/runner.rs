@@ -16,8 +16,6 @@ use std::path::Path;
 
 use crate::core::{inventory, ModelEntry, ModelSchema};
 use crate::sql::sqlx;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::Row;
 // PG-typed shims below import these; sqlite/mysql-only builds get
 // just the `_pool` entry points.
 #[cfg(feature = "postgres")]
@@ -423,21 +421,6 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
     Ok(())
 }
 
-/// [`migrate_with_progress`] for a caller that holds the migrate lock. Fires
-/// no signals: they would run under the lock, so [`Signals::Fire`] does.
-#[cfg(feature = "postgres")]
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
-pub(crate) async fn migrate_locked(
-    _: LockHeld,
-    pool: &PgPool,
-    dir: &Path,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Vec<Migration>, MigrateError> {
-    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-    create_ledger_locked(&enum_pool, LEDGER_TABLE).await?;
-    migrate_with_ledger_body(pool, dir, LEDGER_TABLE, observer).await
-}
-
 /// Whether a run fires `pre_migrate` / `post_migrate`. They fire outside
 /// the migrate lock, so a handler may migrate again.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -489,93 +472,6 @@ pub(crate) async fn with_migrate_signals<T>(
     Ok(out)
 }
 
-/// The legacy PG run; the caller holds the migrate lock.
-#[cfg(feature = "postgres")]
-async fn migrate_with_ledger_body(
-    pool: &PgPool,
-    dir: &Path,
-    ledger: &str,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Vec<Migration>, MigrateError> {
-    let all = file::list_dir(dir)?;
-    let applied = applied_set_for(pool, ledger).await?;
-    let pending = pending_migrations(&all, &applied);
-    let mut done = applied.clone();
-
-    let total = pending.len();
-    emit(observer, || MigrationEvent::Planned { total });
-
-    let mut newly = Vec::with_capacity(total);
-    for (i, mig) in pending.into_iter().enumerate() {
-        let index = i + 1;
-        emit(observer, || MigrationEvent::Started {
-            name: mig.name.clone(),
-            index,
-            total,
-        });
-        let began = std::time::Instant::now();
-
-        let step = reconcile_and_apply_pg(pool, &all, &done, &mig, &applied, ledger).await;
-
-        let outcome = match step {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                emit(observer, || MigrationEvent::Failed {
-                    name: mig.name.clone(),
-                    index,
-                    total,
-                    error: e.to_string(),
-                });
-                return Err(e);
-            }
-        };
-
-        emit(observer, || MigrationEvent::Finished {
-            name: mig.name.clone(),
-            index,
-            total,
-            outcome,
-            elapsed: began.elapsed(),
-        });
-        done.insert(mig.name.clone());
-        newly.push(mig);
-    }
-    Ok(newly)
-}
-
-/// [`reconcile_and_apply`] for the legacy PgPool runner, which applies
-/// through [`apply_one`]. `fake_initial` stays off: only the system chain
-/// opts into table-existence faking.
-#[cfg(feature = "postgres")]
-async fn reconcile_and_apply_pg(
-    pool: &PgPool,
-    all: &[Migration],
-    done: &HashSet<String>,
-    mig: &Migration,
-    applied: &HashSet<String>,
-    ledger: &str,
-) -> Result<Outcome, MigrateError> {
-    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-    Ok(match reconcile(&enum_pool, mig, applied, false).await? {
-        ReconcileAction::Fake => {
-            fake_apply_pool(&enum_pool, mig, ledger).await?;
-            Outcome::Faked
-        }
-        // Unreachable with `fake_initial` off; a plain run for totality.
-        ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-            let before = snapshot_before(all, mig)?;
-            apply_one(pool, &on_live_branches(all, done, mig), &before, ledger).await?;
-            Outcome::Ran
-        }
-        ReconcileAction::RunOutside(existing) => {
-            let run = outside_tables(mig, &existing);
-            let before = snapshot_before(all, mig)?;
-            apply_one(pool, &on_live_branches(all, done, &run), &before, ledger).await?;
-            Outcome::RanPartial { skipped: existing }
-        }
-    })
-}
-
 /// What `migrate <target>` unapplies first: every applied file after
 /// `target`, newest first. Read from the ledger, not from a head name.
 fn backward_from(all: &[Migration], applied: &HashSet<String>, target: &str) -> Vec<Migration> {
@@ -593,25 +489,6 @@ fn forward_to(all: &[Migration], applied: &HashSet<String>, target: &str) -> Vec
         .into_iter()
         .filter(|m| m.name.as_str() <= target)
         .collect()
-}
-
-/// The creation schema of `pool`'s sessions, for FK targets (#1718).
-#[cfg(feature = "postgres")]
-async fn pg_creation_schema(pool: &PgPool) -> Result<Option<String>, MigrateError> {
-    let pool = crate::sql::Pool::Postgres(pool.clone());
-    Ok(super::ensure::creation_schema(&pool).await?)
-}
-
-#[cfg(feature = "postgres")]
-async fn applied_set_for(pool: &PgPool, ledger: &str) -> Result<HashSet<String>, MigrateError> {
-    let rows = sqlx::query(&format!("SELECT name FROM {ledger}"))
-        .fetch_all(pool)
-        .await?;
-    let mut out = HashSet::with_capacity(rows.len());
-    for row in rows {
-        out.insert(row.try_get::<String, _>("name")?);
-    }
-    Ok(out)
 }
 
 /// One pending migration the dry-run would apply.
@@ -1055,117 +932,6 @@ pub fn render_changes_between(
     }
     statements.extend(deferred);
     Ok(statements)
-}
-
-#[cfg(feature = "postgres")]
-async fn apply_atomic(
-    pool: &PgPool,
-    mig: &Migration,
-    before: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    tracing::info!(migration = %mig.name, "applying (atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
-    let mut tx = pool.begin().await?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in &mig.forward {
-        match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    &mig.forward,
-                    before,
-                    &mig.snapshot,
-                    &crate::sql::Postgres,
-                    schema.as_deref(),
-                    &empty,
-                )?;
-                for stmt in pg_statements(&mut tx, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *tx).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(&mut *tx).await?;
-    }
-    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
-        .bind(&mig.name)
-        .bind(chrono::Utc::now())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-#[cfg(feature = "postgres")]
-async fn apply_one(
-    pool: &PgPool,
-    mig: &Migration,
-    before: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    refuse_duplicate_keys(&pool.clone().into(), mig).await?;
-    if mig.atomic {
-        apply_atomic(pool, mig, before, ledger).await
-    } else {
-        apply_loose(pool, mig, before, ledger).await
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn apply_loose(
-    pool: &PgPool,
-    mig: &Migration,
-    before: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    let callbacks = Callbacks::resolve(&mig.forward)?;
-    tracing::info!(migration = %mig.name, "applying (non-atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
-    let mut steps = render_steps(
-        &mig.forward,
-        before,
-        &mig.snapshot,
-        &crate::sql::Postgres,
-        schema.as_deref(),
-        &empty,
-    )?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in &mig.forward {
-        match op {
-            Operation::Schema(_) => {
-                let step = steps.next_step();
-                let mut conn = pool.acquire().await?;
-                for stmt in pg_statements(&mut conn, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *conn).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(pool, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => {
-                callbacks.run(c, pool.clone().into()).await?;
-            }
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(pool).await?;
-    }
-    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
-        .bind(&mig.name)
-        .bind(chrono::Utc::now())
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 // ====================================================================

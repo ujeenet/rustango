@@ -1714,7 +1714,7 @@ impl Cli {
                     dir,
                     &mut std::io::stderr(),
                     crate::migrate::Signals::Fire { tenant: None },
-                    |held| crate::migrate::migrate_locked(held, &pool, dir, None),
+                    |held| crate::migrate::migrate_pool_locked(held, &enum_pool, dir, None),
                 ))
                 .await?;
             if let Some(seed) = self.seed.take() {

@@ -107,7 +107,7 @@ async fn emit_one_persists_a_pending_entry() {
         source: AuditSource::User { id: "alice".into() },
         changes: json!({ "title": "first", "body": "hello" }),
     };
-    audit::emit_one(&pool, &entry).await.unwrap();
+    audit::emit_one(&pool.clone().into(), &entry).await.unwrap();
 
     let rows = audit::fetch_for_entity_pool(&pool.clone().into(), "post", "42")
         .await
@@ -138,7 +138,9 @@ async fn emit_many_batches_multiple_entries_in_one_statement() {
             changes: json!({ "title": format!("p{i}") }),
         })
         .collect();
-    audit::emit_many(&pool, &entries).await.unwrap();
+    audit::emit_many(&pool.clone().into(), &entries)
+        .await
+        .unwrap();
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_table" = 'post'"#,
@@ -161,7 +163,7 @@ async fn emit_many_with_empty_input_is_a_noop() {
         return;
     };
     reset(&pool).await;
-    audit::emit_many(&pool, &[]).await.unwrap();
+    audit::emit_many(&pool.clone().into(), &[]).await.unwrap();
     let total: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
         .fetch_one(&pool)
         .await
@@ -185,7 +187,7 @@ async fn fetch_for_entity_orders_newest_first() {
             source: AuditSource::System,
             changes: json!({}),
         };
-        audit::emit_one(&pool, &entry).await.unwrap();
+        audit::emit_one(&pool.clone().into(), &entry).await.unwrap();
         // Tiny gap so occurred_at advances measurably across rows.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -587,7 +589,7 @@ async fn cleanup_older_than_zero_clears_table() {
             source: AuditSource::System,
             changes: json!({}),
         };
-        audit::emit_one(&pool, &entry).await.unwrap();
+        audit::emit_one(&pool.clone().into(), &entry).await.unwrap();
     }
     let removed = audit::cleanup_older_than_pool(&pool.clone().into(), 0)
         .await
@@ -616,7 +618,7 @@ async fn cleanup_older_than_negative_treated_as_zero() {
         source: AuditSource::System,
         changes: json!({}),
     };
-    audit::emit_one(&pool, &entry).await.unwrap();
+    audit::emit_one(&pool.clone().into(), &entry).await.unwrap();
     let removed = audit::cleanup_older_than_pool(&pool.clone().into(), -42)
         .await
         .unwrap();
@@ -699,7 +701,7 @@ async fn cleanup_keep_last_n_zero_clears_table() {
             source: AuditSource::System,
             changes: json!({}),
         };
-        audit::emit_one(&pool, &entry).await.unwrap();
+        audit::emit_one(&pool.clone().into(), &entry).await.unwrap();
     }
     let removed = audit::cleanup_keep_last_n_pool(&pool.clone().into(), 0)
         .await
@@ -819,7 +821,7 @@ async fn cleanup_older_than_huge_days_keeps_rows() {
         source: AuditSource::System,
         changes: json!({}),
     };
-    audit::emit_one(&pool, &entry).await.unwrap();
+    audit::emit_one(&pool.clone().into(), &entry).await.unwrap();
     let any = rustango::sql::Pool::Postgres(pool.clone());
     for days in [1_000_000, 200_000_000, i64::MAX] {
         assert_eq!(

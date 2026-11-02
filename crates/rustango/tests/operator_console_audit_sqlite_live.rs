@@ -145,7 +145,7 @@ impl Booted {
             source: rustango::audit::AuditSource::Custom(format!("operator:1:{verb}")),
             changes: serde_json::Value::Object(changes),
         };
-        rustango::audit::emit_one_pool(&self.registry, &entry)
+        rustango::audit::emit_one(&self.registry, &entry)
             .await
             .expect("record an audit entry");
     }

@@ -109,7 +109,7 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
 
     // Field-level `related_name = "authored_comments"` →
     // `authored_comments_pool` on the parent.
-    let authored = ada_db.authored_comments_pool(&pool).await.unwrap();
+    let authored = ada_db.authored_comments(&pool).await.unwrap();
     assert_eq!(authored.len(), 2);
     let bodies: Vec<&str> = authored.iter().map(|c| c.body.as_str()).collect();
     assert!(bodies.contains(&"A1"));
@@ -117,7 +117,7 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
 
     // Field-level `related_name = "reviewed_comments"` →
     // `reviewed_comments_pool` on the parent. Ada reviewed all 3.
-    let reviewed = ada_db.reviewed_comments_pool(&pool).await.unwrap();
+    let reviewed = ada_db.reviewed_comments(&pool).await.unwrap();
     assert_eq!(reviewed.len(), 3);
 
     let grace_db = QuerySet::<User>::default()
@@ -127,10 +127,10 @@ async fn per_fk_related_name_disambiguates_two_fks_to_same_parent() {
         .unwrap()
         .pop()
         .unwrap();
-    let authored = grace_db.authored_comments_pool(&pool).await.unwrap();
+    let authored = grace_db.authored_comments(&pool).await.unwrap();
     assert_eq!(authored.len(), 1);
     assert_eq!(authored[0].body, "G1");
     // Grace reviewed zero comments.
-    let reviewed = grace_db.reviewed_comments_pool(&pool).await.unwrap();
+    let reviewed = grace_db.reviewed_comments(&pool).await.unwrap();
     assert_eq!(reviewed.len(), 0);
 }

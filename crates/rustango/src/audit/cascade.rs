@@ -465,23 +465,11 @@ async fn column_values(
         .collect())
 }
 
-/// Warn once that a delete on a single-statement executor cascaded to an
-/// audited model without audit rows.
-pub(crate) fn warn_unaudited(table: &str) {
-    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        tracing::warn!(
-            table,
-            "delete cascades to an audited model, but this executor runs one statement, \
-             so the cascaded rows get no audit rows; use `delete_pool` or a `PoolTx`"
-        );
-    }
-}
-
 #[cfg(all(test, feature = "tenancy"))]
 mod tx_source_tests {
     use crate::audit::{fetch_for_entity_pool, with_tenant_source, writing_to_tenant, AuditSource};
     use crate::core::Model as _;
+    use crate::sql::CounterPool as _;
     use crate::sql::Pool;
 
     #[derive(crate::Model, Debug, Clone)]
@@ -609,6 +597,20 @@ mod tx_source_tests {
         assert_eq!(source.as_deref(), Some("user:7"));
     }
 
+    /// A raw sqlx executor cannot audit the cascade, so the delete refuses.
+    async fn raw_executor_cascade_is_refused(pool: &Pool) {
+        #[cfg(feature = "postgres")]
+        #[allow(irrefutable_let_patterns)]
+        if let Pool::Postgres(pg) = pool {
+            let res = Shelf::objects().filter("id", 1_i64).delete_on(pg).await;
+            assert!(
+                matches!(res, Err(crate::sql::ExecError::AuditUnsupported { .. })),
+                "{res:?}"
+            );
+            assert_eq!(Book::objects().count(pool).await.unwrap(), 1);
+        }
+    }
+
     async fn delete_tx_keeps_the_tenant_source(pool: &Pool) {
         let source = cascade_source(pool, Via::DeleteTx).await;
         assert_eq!(source.as_deref(), Some("user:7"));
@@ -632,6 +634,7 @@ mod tx_source_tests {
     crate::tri_dialect_test!(
         setup: setup,
         scenarios: [
+            raw_executor_cascade_is_refused,
             delete_tx_keeps_the_tenant_source,
             delete_on_tx_keeps_the_tenant_source,
             conn_begin_keeps_the_tenant_source,

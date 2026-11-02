@@ -241,7 +241,7 @@ async fn reverse_set_reads_the_fk_target_column(pool: &Pool) {
         .await
         .expect("country")
         .remove(0);
-    let cities = country.city_set_pool(pool).await.expect("city_set");
+    let cities = country.city_set(pool).await.expect("city_set");
     assert_eq!(cities.iter().map(|c| c.id).collect::<Vec<_>>(), [1]);
 }
 

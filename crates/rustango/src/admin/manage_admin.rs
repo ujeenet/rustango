@@ -447,6 +447,6 @@ async fn audit_account(pool: &Pool, user: &AdminUser, action: &str) -> Result<()
         source: AuditSource::Custom("cli".into()),
         changes: serde_json::json!({ "action": action }),
     };
-    crate::audit::emit_one_pool(pool, &entry).await?;
+    crate::audit::emit_one(pool, &entry).await?;
     Ok(())
 }

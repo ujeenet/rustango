@@ -964,7 +964,7 @@ async fn audit_success(
         source: crate::audit::AuditSource::Custom(format!("sso:{}", req.surface.as_str())),
         changes,
     };
-    if let Err(e) = crate::audit::emit_one_pool(req.pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(req.pool, &entry).await {
         tracing::error!(target: "rustango::sso", error = %e, event, "an SSO account change was NOT written to the audit log");
     }
 }
@@ -1225,7 +1225,7 @@ pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
         }),
     };
     if recent_audit_rows(ctx.pool, entry.entity_table, &entry.entity_pk).await < MAX_REFUSAL_ROWS {
-        if let Err(e) = crate::audit::emit_one_pool(ctx.pool, &entry).await {
+        if let Err(e) = crate::audit::emit_one(ctx.pool, &entry).await {
             tracing::error!(target: "rustango::sso", error = %e, "an SSO refusal was NOT written to the audit log");
         }
     } else {

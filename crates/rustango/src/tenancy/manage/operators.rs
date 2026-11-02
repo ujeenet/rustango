@@ -161,7 +161,7 @@ where
         source: AuditSource::Custom("cli".into()),
         changes: serde_json::json!({ "action": "totp_reset" }),
     };
-    crate::audit::emit_one_pool(&registry, &entry).await?;
+    crate::audit::emit_one(&registry, &entry).await?;
     writeln!(
         w,
         "two-factor device removed for operator `{username}`; their sessions are ended"

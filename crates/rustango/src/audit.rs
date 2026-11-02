@@ -95,8 +95,6 @@ struct WriteScope {
 /// How an emitter reached the database, for [`source_token`].
 #[derive(Clone, Copy)]
 enum Via<'a> {
-    /// A caller's raw executor: its pool is unknown.
-    Unknown,
     /// This pool.
     Pool(&'a crate::sql::Pool),
     /// A transaction opened on this pool.
@@ -137,7 +135,6 @@ fn source_token(source: &AuditSource, via: Via<'_>) -> String {
             .try_with(|s| s.as_token() == token)
             .unwrap_or(false);
     let through_scope = match via {
-        Via::Unknown => false,
         Via::Pool(pool) => scope.is(pool),
         Via::Tx(pool) => pool.same(&scope),
     };
@@ -307,31 +304,6 @@ impl AuditOp {
     }
 }
 
-/// Emit a single entry against a Postgres executor. Used by per-row write
-/// paths on PG. For all backends, see [`emit_one_pool`].
-///
-/// # `occurred_at` is bound, not defaulted
-///
-/// Every emit path binds it — all three dialects, single-row and batch.
-/// The column default is only a backstop for hand-written SQL.
-///
-/// SQLite is the reason. An older database still defaults to
-/// `CURRENT_TIMESTAMP`, whose `YYYY-MM-DD HH:MM:SS` spelling sorts *below*
-/// the canonical `…T…` one, and SQLite cannot `ALTER TABLE` a default
-/// away. A defaulted write there would store a legacy-shaped value, which
-/// inverts `ORDER BY occurred_at DESC` and makes `cleanup_keep_last_n`
-/// delete the newest entries. PG and MySQL bind it too, for uniformity.
-///
-/// # Errors
-/// Driver / SQL failures from the INSERT.
-#[cfg(feature = "postgres")]
-pub async fn emit_one<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    emit_one_pg(executor, entry, Via::Unknown).await
-}
-
 #[cfg(feature = "postgres")]
 async fn emit_one_pg<'c, E>(
     executor: E,
@@ -354,47 +326,6 @@ where
     .bind(chrono::Utc::now())
     .execute(executor)
     .await?;
-    Ok(())
-}
-
-/// Emit a batch of entries on Postgres, one multi-row INSERT per
-/// bind-limit-sized chunk. Several chunks run in one transaction (a
-/// savepoint when `conn` is already inside one). For all backends, see
-/// [`emit_many_pool`].
-///
-/// # Errors
-/// As [`emit_one`].
-#[cfg(feature = "postgres")]
-pub async fn emit_many<'c, A>(conn: A, entries: &[PendingEntry]) -> Result<(), sqlx::Error>
-where
-    A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
-{
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let per_insert = audit_rows_per_insert(&crate::sql::Postgres);
-    if entries.len() <= per_insert {
-        let mut c = conn.acquire().await?;
-        return emit_chunk_pg(&mut c, entries).await;
-    }
-    let mut tx = conn.begin().await?;
-    for chunk in entries.chunks(per_insert) {
-        emit_chunk_pg(&mut tx, chunk).await?;
-    }
-    tx.commit().await
-}
-
-#[cfg(feature = "postgres")]
-async fn emit_chunk_pg(
-    conn: &mut sqlx::PgConnection,
-    entries: &[PendingEntry],
-) -> Result<(), sqlx::Error> {
-    let stmt = audit_insert_stmt(&crate::sql::Postgres, entries, Via::Unknown)?;
-    let mut q = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = crate::sql::bind_query(q, value);
-    }
-    q.execute(conn).await?;
     Ok(())
 }
 
@@ -714,19 +645,6 @@ pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA])
 }
 
-/// MySQL counterpart of [`emit_one`] — `?` placeholders and backtick
-/// quoting. Used for audited writes over a MySQL transaction.
-///
-/// # Errors
-/// Driver / SQL failures from the INSERT.
-#[cfg(feature = "mysql")]
-pub async fn emit_one_my<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::MySql>,
-{
-    emit_one_my_via(executor, entry, Via::Unknown).await
-}
-
 #[cfg(feature = "mysql")]
 async fn emit_one_my_via<'c, E>(
     executor: E,
@@ -751,19 +669,6 @@ where
     .execute(executor)
     .await?;
     Ok(())
-}
-
-/// SQLite counterpart of [`emit_one`] — double-quoted identifiers and `?`
-/// placeholders. The `changes` JSON goes into a TEXT column.
-///
-/// # Errors
-/// Driver / SQL failures from the INSERT.
-#[cfg(feature = "sqlite")]
-pub async fn emit_one_sqlite<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
-{
-    emit_one_sqlite_via(executor, entry, Via::Unknown).await
 }
 
 #[cfg(feature = "sqlite")]
@@ -802,10 +707,7 @@ where
 ///
 /// # Errors
 /// As [`emit_one`].
-pub async fn emit_one_pool(
-    pool: &crate::sql::Pool,
-    entry: &PendingEntry,
-) -> Result<(), sqlx::Error> {
+pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(), sqlx::Error> {
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => emit_one_pg(pg, entry, Via::Pool(pool)).await,
@@ -1121,7 +1023,7 @@ fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT(s) or the transaction.
-pub async fn emit_many_pool(
+pub async fn emit_many(
     pool: &crate::sql::Pool,
     entries: &[PendingEntry],
 ) -> Result<(), sqlx::Error> {
@@ -1135,6 +1037,30 @@ pub async fn emit_many_pool(
     let mut tx = crate::sql::transaction_pool(pool).await.map_err(to_sqlx)?;
     emit_many_tx(&mut tx, entries).await.map_err(to_sqlx)?;
     tx.commit().await
+}
+
+/// Old name of [`emit_one`].
+///
+/// # Errors
+/// As [`emit_one`].
+#[deprecated(since = "0.62.0", note = "use `audit::emit_one`")]
+pub async fn emit_one_pool(
+    pool: &crate::sql::Pool,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error> {
+    emit_one(pool, entry).await
+}
+
+/// Old name of [`emit_many`].
+///
+/// # Errors
+/// As [`emit_many`].
+#[deprecated(since = "0.62.0", note = "use `audit::emit_many`")]
+pub async fn emit_many_pool(
+    pool: &crate::sql::Pool,
+    entries: &[PendingEntry],
+) -> Result<(), sqlx::Error> {
+    emit_many(pool, entries).await
 }
 
 /// All-backend counterpart of [`fetch_for_entity`]. The `changes` column

@@ -234,7 +234,7 @@ fn audit_ensure_table_pool_and_emit_one_pool_are_callable() {
             changes: serde_json::json!({}),
         };
         let _fut = rustango::audit::ensure_table_pool(pool);
-        let _fut = rustango::audit::emit_one_pool(pool, &entry);
+        let _fut = rustango::audit::emit_one(pool, &entry);
     }
 }
 

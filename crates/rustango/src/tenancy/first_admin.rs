@@ -460,7 +460,7 @@ async fn audit(registry: &crate::sql::Pool, org: &Org, admin: &CreatedAdmin) {
             "is_superuser": true,
         }),
     };
-    if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
+    if let Err(e) = crate::audit::emit_one(registry, &entry).await {
         tracing::error!(
             target: "rustango::tenancy::first_admin",
             slug = %org.slug,

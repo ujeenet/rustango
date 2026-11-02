@@ -48,22 +48,31 @@ pub async fn update_on<'c, E: SqlExecutor<'c>>(
 }
 
 /// DELETE `query` on `executor`, with its junction and cascade statements.
-/// A raw sqlx executor runs only the one DELETE, so a cascade into an
-/// audited model gets no audit rows there.
 ///
 /// # Errors
-/// [`ExecError`] if the query is invalid or the driver rejects it.
+/// [`ExecError`] if the query is invalid or the driver rejects it;
+/// [`ExecError::AuditUnsupported`] when a raw sqlx executor would cascade
+/// into an audited model it cannot audit.
 pub async fn delete_on<'c, E: SqlExecutor<'c>>(
     executor: E,
     query: &DeleteQuery,
 ) -> Result<u64, ExecError> {
     let plan = crate::sql::compile_delete_plan(executor.dialect(), query)?;
-    let single = plan.links.is_empty() && !executor.runs_plans();
-    if plan.is_one_statement() || single {
-        if plan.cascade.is_some() {
-            crate::audit::cascade::warn_unaudited(query.model.table);
-        }
+    if plan.is_one_statement() {
         return write_on(executor, &plan.owner.sql, plan.owner.params).await;
+    }
+    if !executor.runs_plans() {
+        if plan.cascade.is_some() {
+            return Err(ExecError::AuditUnsupported {
+                table: query.model.table,
+                reason: "a raw sqlx executor cannot audit the rows this delete cascades to; \
+                         use a Pool, PoolConn or PoolTx",
+            });
+        }
+        // Postgres folds the junction cleanup into the one statement.
+        if plan.links.is_empty() {
+            return write_on(executor, &plan.owner.sql, plan.owner.params).await;
+        }
     }
     executor.run_delete_plan(plan).await
 }
