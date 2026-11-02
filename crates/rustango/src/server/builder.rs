@@ -632,7 +632,7 @@ impl<DB: Database> Builder<DB> {
         )
     }
 
-    /// [`Self::admin_register_tx_action`] checked against `perm` (#1818).
+    /// [`Self::admin_register_tx_action`] checked against `perm`.
     /// See [`crate::admin::Builder::register_tx_action_with_perm`].
     #[must_use]
     pub fn admin_register_tx_action_with_perm<F>(

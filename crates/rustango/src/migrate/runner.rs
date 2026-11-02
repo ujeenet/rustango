@@ -894,7 +894,7 @@ fn preview_schema_op(
             Some((drops, readd.into_iter().collect::<Vec<_>>()))
         })
         .unwrap_or_default();
-    // The composite FKs only this index serves, as apply finds them (#2326).
+    // The composite FKs only this index serves, as apply finds them.
     if let Some((ix, index)) = dropped {
         let covers = |cols: &[String], fk: &[String]| cols.starts_with(fk);
         let names: Vec<(String, Vec<String>)> = before
@@ -1027,7 +1027,7 @@ impl LiveFks {
 }
 
 /// The DDL that moves `before` to `after` by `changes` on `dialect`, as
-/// `sqlmigrate` prints it: a MySQL column drop drops its FK first (#2026).
+/// `sqlmigrate` prints it: a MySQL column drop drops its FK first.
 ///
 /// # Errors
 /// A change the dialect cannot render.
@@ -2713,7 +2713,7 @@ struct IndexFks {
     /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
     /// The table's composite FKs at the op as `(name, columns, re-add)`;
-    /// one missing here just drops; `None` if the whole table goes (#2326).
+    /// one missing here just drops; `None` if the whole table goes.
     composites: Option<Vec<(String, Vec<String>, String)>>,
 }
 

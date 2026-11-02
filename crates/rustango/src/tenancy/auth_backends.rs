@@ -888,7 +888,7 @@ impl JwtBackend {
     /// authenticates as a bearer credential with the refresh token's much
     /// longer life — seven days by default (#1402).
     ///
-    /// The tenant binding and `kind` go through [`UserTokenScope`] (#1848).
+    /// The tenant binding and `kind` go through [`UserTokenScope`].
     ///
     /// [`UserTokenScope`]: super::jwt_lifecycle::UserTokenScope
     fn verify_claims(
@@ -962,7 +962,7 @@ impl AuthBackend for JwtBackend {
         }
 
         // All tenants share one key, so a resolved tenant must match the
-        // token's `tenant` and `org_id` claims (#1848).
+        // token's `tenant` and `org_id` claims.
         let scope = match parts.extensions.get::<super::TenantSlug>() {
             Some(t) => super::jwt_lifecycle::UserTokenScope::Tenant(t),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,

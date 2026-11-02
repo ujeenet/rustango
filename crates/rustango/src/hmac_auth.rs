@@ -217,7 +217,7 @@ impl HmacAuthLayer {
         self
     }
 
-    /// Bind keys to tenants (#2492): a key `tenant_of` maps to a tenant is
+    /// Bind keys to tenants: a key `tenant_of` maps to a tenant is
     /// refused (403) unless the request resolves to that slug and org id, through the
     /// mounted tenant context's resolver chain. No context or no tenant
     /// refuses too. Keys it maps to `None` act for any tenant.

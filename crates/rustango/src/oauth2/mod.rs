@@ -904,7 +904,7 @@ impl FlowPurpose {
 }
 
 /// The one provider of one tenant, on one surface, a sealed flow is good
-/// for (#1992). Use `""` as the tenant when single-tenant; a tenancy org
+/// for. Use `""` as the tenant when single-tenant; a tenancy org
 /// uses [`Self::for_tenant`], which binds its org id too.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowScope<'a> {

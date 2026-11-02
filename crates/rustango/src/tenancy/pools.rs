@@ -1762,7 +1762,7 @@ impl TenantSearchPath {
         })
     }
 
-    /// The quoted, comma-joined schema list: unquoted, `Acme` folds into `acme` (#2325).
+    /// The quoted, comma-joined schema list: unquoted, `Acme` folds into `acme`.
     fn list(&self) -> String {
         self.schemas
             .iter()

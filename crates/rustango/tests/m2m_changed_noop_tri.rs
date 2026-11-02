@@ -1,4 +1,4 @@
-//! `m2m_changed` fires only when `add` / `remove` / `set` / `clear` changed a junction row (#2221),
+//! `m2m_changed` fires only when `add` / `remove` / `set` / `clear` changed a junction row,
 //! and carries the generic owner's content type and the `set` diff.
 
 #![cfg(all(

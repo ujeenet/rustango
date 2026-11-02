@@ -104,7 +104,7 @@ async fn issued_tokens_still_verify() {
     assert_eq!(claims.typ, "access");
 }
 
-/// A correctly signed token in the pre-#1397 two-segment shape is refused,
+/// A correctly signed token in the older two-segment shape is refused,
 /// by the lifecycle and by `JwtBackend` alike: one codec, three segments.
 #[cfg(feature = "sqlite")]
 #[tokio::test]

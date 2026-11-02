@@ -1,4 +1,4 @@
-//! Issue #361 — `register_object_permission!` adds
+//! `register_object_permission!` adds
 //! per-row enforcement to the admin's `add` / `change` / `delete`
 //! / `view` write paths. Each registered hook is consulted at
 //! request time; a `false` return yields 403, or 404 when `view` hides the row.

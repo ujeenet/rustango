@@ -2193,7 +2193,7 @@ impl WriteSet {
     }
 
     /// `body` cut to the keys the UPDATE writes, so PATCH validation
-    /// overlays only those on the stored row (#1995).
+    /// overlays only those on the stored row.
     fn patch_body(&self, bridge: &dyn SerializerBridge, body: &Value) -> Value {
         let Some(obj) = body.as_object() else {
             return body.clone();
@@ -3424,7 +3424,7 @@ async fn handle_list_cursor(
 
 /// `col > v OR (col = v AND pk > pk_v)` (`<` when descending): strictly
 /// after a row, ties included. No tiebreak when the cursor is the PK, or
-/// the token is a pre-#1459 one that carries no pk component.
+/// the token is an older one that carries no pk component.
 fn cursor_after(
     (cursor, tiebreak, desc): (
         &'static crate::core::FieldSchema,
@@ -4559,7 +4559,7 @@ async fn update_inner(
     let buffered = read_capped(&parts, body).await;
     // The row, read before the body is parsed: hidden is a 404 before any
     // field or FK check can answer. Locked in the UPDATE's transaction, so
-    // the hooks judge the row the write changes (#2010). A model audited
+    // the hooks judge the row the write changes. A model audited
     // only on a pool is read and updated unlocked, rather than lose its
     // audit entry.
     let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
@@ -4594,7 +4594,7 @@ async fn update_inner(
     };
     let json = write_json(&state, &form, json);
 
-    // PATCH checks only the sent fields, over the stored row (#1995).
+    // PATCH checks only the sent fields, over the stored row.
     let validated = match &state.vs.serializer {
         Some(bridge) if partial => {
             let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());

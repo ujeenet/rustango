@@ -559,7 +559,7 @@ impl JwtLifecycle {
     /// Used for `revoke` so we can blacklist even an already-expired token's
     /// JTI, and at logout to end its family (#2419).
     pub(crate) fn decode_signed(&self, token: &str) -> Option<JwtClaims> {
-        // Three segments only: the two-part shape issued before #1397 is gone.
+        // Three segments only: the older two-part shape is gone.
         let mut payload = crate::jwt::verify(token, self.secret.bytes())
             .ok()?
             .into_map();
