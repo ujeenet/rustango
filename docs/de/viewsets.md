@@ -754,7 +754,8 @@ fehlen in Seite und `count`, ab `view_hook_scan_cap` ist eine Seiten- oder
 Offset-Liste ein `400`: Queryset-Scope ergänzen oder Cursor-Paginierung nutzen). Queryset-Scopes schränken jedes Lesen und Schreiben ein; ein Schreiben, dessen Zeile sie verließe, ist ein `403`. Hooks lesen die Zeile gesperrt in der Schreib-Transaktion; ein Credential eines anderen Mandanten ist ein `403`.
 `change` prüft nur die gespeicherte Zeile. `object_permissions::Actor::of(&parts)`
 sagt einem Hook, wer fragt; ein Agent-Token ist nie Superuser.
-`rustango_api_keys`, `rustango_agents` und die SSO-Tabellen lehnen
+`rustango_api_keys`, `rustango_agents`, `rustango_agent_grants`, `rustango_operators`,
+`rustango_admin_users` und die SSO-Tabellen lehnen
 `ViewSet::for_model` und die fünf Template-Views ab.
 
 **Drosselung** wendet Limits pro Client mit festem Zeitfenster an, pro Aktion:

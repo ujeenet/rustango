@@ -410,7 +410,8 @@ donc. Les mots incluent `password`, `pass`, `pwd`, `token`, `jwt`, `secret`,
 noms OAuth `code`, `state` et `assertion`. Étendez avec
 `.redact_additional("ref")`, ou remplacez toute la liste avec
 `.redact(vec![...])` ; les mots d'identifiants (`password`, `token`,
-`secret`, `api_key`, ...), `signature` et `code` restent masqués dans tous les cas. Le `url.query` du span de requête est masqué de la même façon.
+`secret`, `api_key`, ...), `signature` et `code` restent masqués dans tous les cas,
+y compris dans une clé collée (`secretary` contient `secret`) ; une liste personnalisée ne l'annule pas. Le `url.query` du span de requête est masqué de la même façon.
 Cela ne couvre **que les chaînes de requête** ; pour
 le reste, voir
 [security.md](security.md#garder-les-secrets-hors-de-vos-journaux).
