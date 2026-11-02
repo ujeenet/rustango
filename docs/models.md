@@ -150,7 +150,7 @@ PostgreSQL deployments:
 
 Mark one field `#[rustango(primary_key)]`. A model with no primary key still
 compiles and can be queried, but the derive skips every PK-based row method
-(`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
+(`save`, `find`, `delete`, `refresh_from_db`, …).
 
 The **default and most common** PK is an auto-incrementing 64-bit integer,
 declared as `Auto<i64>`:
@@ -191,7 +191,7 @@ column can be the PK; you assign the value yourself:
 | `i64` / `i32` + `primary_key` | `BIGINT` / `INTEGER` | you (application) |
 
 A **natural string key** (e.g. a coupon code) — note you provide the value and
-insert with [`insert_pool`](#save-vs-insert), since there's no `Auto::Unset` for
+insert with [`insert`](#save-vs-insert), since there's no `Auto::Unset` for
 `save` to detect:
 
 ```rust
@@ -363,14 +363,9 @@ Declared on the **model**:
   `.where_(Post::author_id.eq(42))` for compile-checked filters.
 - **Finders** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (errors if absent); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Writers** — `save_pool` (insert-or-update), `insert_pool` (explicit insert),
-  `delete_pool`, and `save_partial(&["title"], &pool)` (update only some
-  columns). The bare `save` / `insert` / `delete` are **not** aliases of these:
-  they take a driver-specific `sqlx::PgPool` and are `#[cfg(feature = "postgres")]`,
-  so on a `sqlite` or `mysql` build they do not exist at all. The `_pool` family
-  takes `rustango::sql::Pool` and works on all three — write those unless you
-  know you are on Postgres. The naming is known to be inverted; see
-  [api-conventions](api-conventions.md#functions).
+- **Writers** — `save` (insert-or-update), `insert` (explicit insert),
+  `delete`, and `save_partial(&["title"], &pool)` (update only some
+  columns), all taking `rustango::sql::Pool` on every backend.
 - **Soft delete** (when enabled) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -380,13 +375,13 @@ This trips people up, so it's worth stating plainly:
 
 | Method | Behaviour |
 |---|---|
-| `save_pool(&mut self, &pool)` | **INSERT** if the `Auto` PK is `Unset`, otherwise **UPDATE** |
-| `insert_pool(&self, &pool)` | always **INSERT** |
+| `save(&mut self, &pool)` | **INSERT** if the `Auto` PK is `Unset`, otherwise **UPDATE** |
+| `insert(&self, &pool)` | always **INSERT** |
 
-For the default `Auto<i64>` PK, `save_pool` does the right thing automatically.
+For the default `Auto<i64>` PK, `save` does the right thing automatically.
 For an **application-assigned PK** (a `String`/`Uuid` you set yourself), there's
-no `Unset` state — so `save_pool` would UPDATE a (possibly non-existent) row.
-Use **`insert_pool`** to insert a brand-new row with a custom PK (verified in the
+no `Unset` state — so `save` would UPDATE a (possibly non-existent) row.
+Use **`insert`** to insert a brand-new row with a custom PK (verified in the
 backing test).
 
 ---

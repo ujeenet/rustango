@@ -13,7 +13,7 @@
 //!
 //! Fixture::new("users")
 //!     .from_file("fixtures/users.json")?
-//!     .load_into("rustango_users", &pool).await?;
+//!     .load_into_pool("rustango_users", &pool).await?;
 //! ```
 //!
 //! ## How it works

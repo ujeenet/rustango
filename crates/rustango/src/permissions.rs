@@ -8,7 +8,7 @@
 //!
 //! ```ignore
 //! // By string, still supported:
-//! rustango::tenancy::permissions::has_perm(uid, "post.change", &pool).await?;
+//! rustango::tenancy::permissions::has_perm_pool(uid, "post.change", &pool).await?;
 //!
 //! // By model type:
 //! rustango::permissions::has_perm_for_model::<Post>(uid, "change", &pool).await?;

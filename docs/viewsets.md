@@ -594,8 +594,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
 | `skip_object_permissions()` | Skip the app's object-permission hooks and queryset scopes, for an API that guards its rows itself. The framework's own hooks still run. |
 | `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 2 000, the admin's is 10 000; at most 100 000); past it a page or offset list is a `400` (cursor lists keep working). A serializer `nested` / `many` / `slug` field onto a table with a `view` hook or queryset scope panics at mount, unless `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
-| `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
 
 ---
@@ -980,7 +979,7 @@ let api = urls::api()
 
 ## Backend support
 
-- **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — PostgreSQL,
+- **Builder + `router` / `tenant_router`** is **tri-dialect** — PostgreSQL,
   SQLite and MySQL — and is the recommended path.
 - **The derive macro's `router(prefix, pool)`** takes `impl Into<rustango::sql::Pool>` — a `PgPool`, `MySqlPool`, `SqlitePool` or the `Pool` enum. It is not Postgres-only.
 - **Serializer input + output** now works on **all three backends** (the

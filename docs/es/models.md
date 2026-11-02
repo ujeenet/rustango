@@ -154,7 +154,7 @@ solo en despliegues de PostgreSQL:
 
 Marca un campo con `#[rustango(primary_key)]`. Un modelo sin clave primaria
 sigue compilando y se puede consultar, pero el derive omite todos los métodos de fila
-basados en la PK (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
+basados en la PK (`save`, `find`, `delete`, `refresh_from_db`, …).
 
 La PK **por defecto y más común** es un entero de 64 bits autoincremental, declarado como
 `Auto<i64>`:
@@ -195,7 +195,7 @@ columna puede ser la PK; tú mismo asignas el valor:
 | `i64` / `i32` + `primary_key` | `BIGINT` / `INTEGER` | tú (aplicación) |
 
 Una **clave natural de tipo string** (por ejemplo, un código de cupón) — ten en cuenta
-que proporcionas el valor e insertas con [`insert_pool`](#save-vs-insert), ya que no hay
+que proporcionas el valor e insertas con [`insert`](#save-vs-insert), ya que no hay
 un `Auto::Unset` que `save` pueda detectar:
 
 ```rust
@@ -369,15 +369,9 @@ Declarados sobre el **modelo**:
   `.where_(Post::author_id.eq(42))` para filtros verificados en compilación.
 - **Buscadores** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (error si no existe); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Escritores** — `save_pool` (INSERT o UPDATE), `insert_pool` (inserción
-  explícita), `delete_pool` y `save_partial(&["title"], &pool)` (actualiza solo
-  algunas columnas). Los `save` / `insert` / `delete` a secas **no** son alias de
-  estos: toman un `sqlx::PgPool` específico del driver y son
-  `#[cfg(feature = "postgres")]`, así que en un build `sqlite` o `mysql` no
-  existen en absoluto. La familia `_pool` toma `rustango::sql::Pool` y funciona
-  en los tres — escribe esos salvo que sepas que estás en Postgres. El nombrado
-  está invertido, y se sabe; consulta
-  [api-conventions](api-conventions.md#funciones).
+- **Escritores** — `save` (INSERT o UPDATE), `insert` (inserción
+  explícita), `delete` y `save_partial(&["title"], &pool)` (actualiza solo
+  algunas columnas), todos con `rustango::sql::Pool` en cada backend.
 - **Borrado lógico** (cuando está habilitado) — `soft_delete`, `restore`,
   `force_delete`; `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -387,13 +381,13 @@ Esto confunde a la gente, así que vale la pena decirlo con claridad:
 
 | Método | Comportamiento |
 |---|---|
-| `save_pool(&mut self, &pool)` | **INSERT** si la PK `Auto` está `Unset`, de lo contrario **UPDATE** |
-| `insert_pool(&self, &pool)` | siempre **INSERT** |
+| `save(&mut self, &pool)` | **INSERT** si la PK `Auto` está `Unset`, de lo contrario **UPDATE** |
+| `insert(&self, &pool)` | siempre **INSERT** |
 
-Para la PK `Auto<i64>` por defecto, `save_pool` hace lo correcto automáticamente. Para una
+Para la PK `Auto<i64>` por defecto, `save` hace lo correcto automáticamente. Para una
 **PK asignada por la aplicación** (un `String`/`Uuid` que estableces tú mismo), no hay un
-estado `Unset` — así que `save_pool` haría un UPDATE de una fila (posiblemente
-inexistente). Usa **`insert_pool`** para insertar una fila totalmente nueva con una PK
+estado `Unset` — así que `save` haría un UPDATE de una fila (posiblemente
+inexistente). Usa **`insert`** para insertar una fila totalmente nueva con una PK
 personalizada (verificado en el test de respaldo).
 
 ---

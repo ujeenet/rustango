@@ -597,8 +597,7 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `throttle(…)` / `throttle_all(max, secs)` | Rate-Limits pro Aktion mit festem Zeitfenster; `QUERY` verbraucht das Budget der Liste. |
 | `skip_object_permissions()` | Überspringt die Objekt-Berechtigungs-Hooks und Queryset-Scopes der App, für eine API, die ihre Zeilen selbst schützt. Die Hooks des Frameworks laufen weiter. |
 | `view_hook_scan_cap(n)` | Höchstens so viele Zeilen liest eine Liste für den `"view"`-Hook (Standard 2 000, im Admin 10 000; höchstens 100 000); darüber ist eine Seiten- oder Offset-Liste ein `400` (Cursor-Listen funktionieren weiter). Ein Serializer-Feld `nested` / `many` / `slug` auf eine Tabelle mit `view`-Hook oder Queryset-Scope lässt das Einhängen paniken, außer mit `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Einbinden (nur Postgres, statischer `PgPool`; Feature `postgres`). |
-| `router_pool(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Tri-dialektfähig einbinden (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(Mandantenfähigkeit)* mit Mandantenauflösung pro Anfrage einbinden. |
 
 ---
@@ -956,7 +955,7 @@ let api = urls::api()
 
 ## Backend-Unterstützung
 
-- **Builder + `router_pool` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
+- **Builder + `router` / `tenant_router`** ist **tri-dialektfähig** — PostgreSQL,
   SQLite und MySQL — und ist der empfohlene Weg.
 - **Das `router(prefix, pool)` des Derive-Makros** nimmt `impl Into<rustango::sql::Pool>` — einen `PgPool`, `MySqlPool`, `SqlitePool` oder das `Pool`-Enum. Es ist nicht Postgres-only.
 - **Serializer-Eingabe + -Ausgabe** funktioniert jetzt auf **allen drei Backends** (das

@@ -153,7 +153,7 @@ Verwende sie nur in PostgreSQL-Deployments:
 
 Markiere ein Feld mit `#[rustango(primary_key)]`. Ein Modell ohne Primärschlüssel
 kompiliert trotzdem und lässt sich abfragen, aber das Derive lässt jede PK-basierte
-Zeilenmethode weg (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
+Zeilenmethode weg (`save`, `find`, `delete`, `refresh_from_db`, …).
 
 Der **Standard und häufigste** PK ist eine auto-inkrementierende 64-Bit-Ganzzahl,
 deklariert als `Auto<i64>`:
@@ -195,7 +195,7 @@ abgebildet wird, kann der PK sein; du weist den Wert selbst zu:
 | `i64` / `i32` + `primary_key` | `BIGINT` / `INTEGER` | du (Anwendung) |
 
 Ein **natürlicher String-Schlüssel** (z. B. ein Gutscheincode) — beachte, dass du den
-Wert selbst bereitstellst und mit [`insert_pool`](#save-vs-insert) einfügst, da es kein
+Wert selbst bereitstellst und mit [`insert`](#save-vs-insert) einfügst, da es kein
 `Auto::Unset` gibt, das `save` erkennen könnte:
 
 ```rust
@@ -368,15 +368,9 @@ Auf dem **Modell** deklariert:
   `.where_(Post::author_id.eq(42))` für compilergeprüfte Filter.
 - **Finder** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (Fehler, wenn nicht vorhanden); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Writer** — `save_pool` (INSERT oder UPDATE), `insert_pool` (explizites
-  Einfügen), `delete_pool` und `save_partial(&["title"], &pool)` (nur einige
-  Spalten aktualisieren). Die nackten `save` / `insert` / `delete` sind **keine**
-  Aliase davon: sie nehmen einen treiberspezifischen `sqlx::PgPool` und sind
-  `#[cfg(feature = "postgres")]`, existieren also in einem `sqlite`- oder
-  `mysql`-Build überhaupt nicht. Die `_pool`-Familie nimmt `rustango::sql::Pool`
-  und funktioniert auf allen dreien — schreiben Sie diese, sofern Sie nicht
-  sicher auf Postgres sind. Die Benennung ist bekanntermaßen vertauscht; siehe
-  [api-conventions](api-conventions.md#funktionen).
+- **Writer** — `save` (INSERT oder UPDATE), `insert` (explizites
+  Einfügen), `delete` und `save_partial(&["title"], &pool)` (nur einige
+  Spalten aktualisieren), alle mit `rustango::sql::Pool` auf jedem Backend.
 - **Soft-Delete** (wenn aktiviert) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -386,13 +380,13 @@ Das bringt Leute durcheinander, daher ist es die klare Aussage wert:
 
 | Methode | Verhalten |
 |---|---|
-| `save_pool(&mut self, &pool)` | **INSERT**, wenn der `Auto`-PK `Unset` ist, andernfalls **UPDATE** |
-| `insert_pool(&self, &pool)` | immer **INSERT** |
+| `save(&mut self, &pool)` | **INSERT**, wenn der `Auto`-PK `Unset` ist, andernfalls **UPDATE** |
+| `insert(&self, &pool)` | immer **INSERT** |
 
-Für den Standard-`Auto<i64>`-PK macht `save_pool` automatisch das Richtige. Für einen
+Für den Standard-`Auto<i64>`-PK macht `save` automatisch das Richtige. Für einen
 **anwendungsseitig zugewiesenen PK** (ein `String`/`Uuid`, den du selbst setzt) gibt es
-keinen `Unset`-Zustand — daher würde `save_pool` eine (möglicherweise nicht existierende)
-Zeile UPDATEn. Verwende **`insert_pool`**, um eine brandneue Zeile mit einem
+keinen `Unset`-Zustand — daher würde `save` eine (möglicherweise nicht existierende)
+Zeile UPDATEn. Verwende **`insert`**, um eine brandneue Zeile mit einem
 benutzerdefinierten PK einzufügen (im begleitenden Test verifiziert).
 
 ---

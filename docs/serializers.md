@@ -146,7 +146,7 @@ hand after `from_model` (e.g. a list of tag ids you fetch separately).
 > **`write_only` does not transform the value.** A `write_only` field is
 > accepted on write and persisted **verbatim** — the serializer never hashes or
 > encrypts it. For a password, hash it yourself (see [Passwords](auth-passwords.md))
-> before `save_pool()`; `read_only` fields, conversely, are silently ignored on write
+> before `save()`; `read_only` fields, conversely, are silently ignored on write
 > rather than rejected.
 
 ---
@@ -464,7 +464,7 @@ let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 
 Outside a ViewSet, the serializer derives `serde::Deserialize`, so you can parse
 a request body into it, run `.validate()`, and — on success — map the data onto
-a model and `save_pool(&pool)`. `from_writable_json()` builds an instance from only
+a model and `save(&pool)`. `from_writable_json()` builds an instance from only
 the writable keys (read-only / computed fields default), and `writable_fields()`
 / `writable_source_fields()` tell you which keys are accepted — the same
 machinery the ViewSet uses internally.

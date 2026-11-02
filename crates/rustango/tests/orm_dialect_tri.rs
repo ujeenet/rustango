@@ -463,7 +463,6 @@ async fn pg_bulk_insert_on_chunks_and_stays_atomic() {
     };
     fresh_table::<Wide>(&pool).await;
     fresh_table::<WideFixed>(&pool).await;
-    let pg = pool.as_postgres().expect("pg");
     // 12 000 rows x 6 columns is past the 65 535 bind cap.
     let mut rows: Vec<Wide> = (0..12_000_i64)
         .map(|n| Wide {
@@ -476,8 +475,8 @@ async fn pg_bulk_insert_on_chunks_and_stays_atomic() {
             f: n,
         })
         .collect();
-    let mut tx = pg.begin().await.unwrap();
-    Wide::bulk_insert_on(&mut rows, &mut *tx)
+    let mut tx = rustango::sql::transaction_pool(&pool).await.unwrap();
+    Wide::bulk_insert_on(&mut rows, &mut tx)
         .await
         .expect("chunked bulk on a transaction");
     tx.commit().await.unwrap();
@@ -501,7 +500,7 @@ async fn pg_bulk_insert_on_chunks_and_stays_atomic() {
         })
         .collect();
     fixed.last_mut().unwrap().id = 0;
-    WideFixed::bulk_insert_on(&fixed, pg)
+    WideFixed::bulk_insert_on(&fixed, &pool)
         .await
         .expect_err("duplicate key in the last chunk");
     assert_eq!(

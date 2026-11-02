@@ -372,7 +372,7 @@ coincida con cómo tu app gestiona las conexiones a la base de datos:
   el extractor [`Tenant`](https://docs.rs). Disponible con las características
   `template_views` + `tenancy`. Las plantillas se portan sin cambios entre ambos.
 
-Esto refleja la división de ViewSet (`router` / `router_pool` vs `tenant_router`).
+Esto refleja la división de ViewSet (`router` vs `tenant_router`).
 
 ---
 

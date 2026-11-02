@@ -153,7 +153,7 @@ n'est pas accessible en écriture, on le renseigne donc à la main après
 > **`write_only` ne transforme pas la valeur.** Un champ `write_only` est accepté
 > en écriture et persisté **tel quel** — le serializer ne le hache ni ne le
 > chiffre jamais. Pour un mot de passe, le hacher soi-même (voir
-> [Mots de passe](auth-passwords.md)) avant `save_pool()` ; les champs `read_only`, à
+> [Mots de passe](auth-passwords.md)) avant `save()` ; les champs `read_only`, à
 > l'inverse, sont silencieusement ignorés à l'écriture plutôt que rejetés.
 
 ---
@@ -478,7 +478,7 @@ let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 
 Hors d'un ViewSet, le serializer dérive `serde::Deserialize`, on peut donc parser
 un corps de requête vers lui, exécuter `.validate()`, et — en cas de succès —
-mettre les données en correspondance avec un modèle et `save_pool(&pool)`.
+mettre les données en correspondance avec un modèle et `save(&pool)`.
 `from_writable_json()` construit une instance à partir des seules clés accessibles
 en écriture (les champs read-only / calculés prennent leur valeur par défaut), et
 `writable_fields()` / `writable_source_fields()` indiquent quelles clés sont

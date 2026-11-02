@@ -369,7 +369,7 @@ qui correspond à la façon dont votre application gère les connexions à la ba
   de l'extracteur [`Tenant`](https://docs.rs). Disponible avec les fonctionnalités
   `template_views` + `tenancy`. Les templates se portent inchangés de l'une à l'autre.
 
-Cela reflète la séparation des ViewSets (`router` / `router_pool` vs `tenant_router`).
+Cela reflète la séparation des ViewSets (`router` vs `tenant_router`).
 
 ---
 

@@ -601,8 +601,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `throttle(…)` / `throttle_all(max, secs)` | Limites de débit à fenêtre fixe par action ; `QUERY` consomme le budget de la liste. |
 | `skip_object_permissions()` | Ignore les hooks de permission objet et les scopes de queryset de l'application, pour une API qui protège ses lignes elle-même. Les hooks du framework s'exécutent toujours. |
 | `view_hook_scan_cap(n)` | Nombre maximal de lignes qu'une liste lit pour le hook `"view"` (2 000 par défaut, 10 000 dans l'admin ; au plus 100 000) ; au-delà, une liste paginée ou à offset donne un `400` (le mode curseur fonctionne toujours). Un champ de serializer `nested` / `many` / `slug` vers une table avec un hook `view` ou un scope de queryset fait paniquer le montage, sauf avec `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Monter (Postgres uniquement, `PgPool` statique ; feature `postgres`). |
-| `router_pool(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Monter en tri-dialecte (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(multi-location)* monter avec résolution du locataire par requête. |
 
 ---
@@ -979,7 +978,7 @@ lignes `.merge(...)`. Il prend le pool : montez-le depuis `main.rs` avec
 
 ## Prise en charge des backends
 
-- **Le builder + `router_pool` / `tenant_router`** est **tri-dialecte** — PostgreSQL,
+- **Le builder + `router` / `tenant_router`** est **tri-dialecte** — PostgreSQL,
   SQLite et MySQL — et c'est le chemin recommandé.
 - **Le `router(prefix, pool)` de la macro derive** prend `impl Into<rustango::sql::Pool>` — un `PgPool`, `MySqlPool`, `SqlitePool` ou l'énumération `Pool`. Il n'est pas réservé à Postgres.
 - **L'entrée + sortie du sérialiseur** fonctionne désormais sur **les trois backends** (le

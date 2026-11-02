@@ -154,7 +154,7 @@ Liste von Tag-IDs, die du separat holst).
 > **`write_only` transformiert den Wert nicht.** Ein `write_only`-Feld wird beim
 > Schreiben akzeptiert und **wortwörtlich** persistiert — der Serializer hasht
 > oder verschlüsselt es nie. Bei einem Passwort hashe es selbst (siehe
-> [Passwörter](auth-passwords.md)) vor `save_pool()`; `read_only`-Felder werden
+> [Passwörter](auth-passwords.md)) vor `save()`; `read_only`-Felder werden
 > umgekehrt beim Schreiben stillschweigend ignoriert statt abgelehnt.
 
 ---
@@ -485,7 +485,7 @@ let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 
 Außerhalb eines ViewSet leitet der Serializer `serde::Deserialize` ab, sodass du
 einen Request-Body in ihn parsen, `.validate()` ausführen und — bei Erfolg — die
-Daten auf ein Modell abbilden und `save_pool(&pool)` kannst. `from_writable_json()`
+Daten auf ein Modell abbilden und `save(&pool)` kannst. `from_writable_json()`
 baut eine Instanz nur aus den schreibbaren Schlüsseln (schreibgeschützte /
 berechnete Felder bekommen Default-Werte), und `writable_fields()` /
 `writable_source_fields()` sagen dir, welche Schlüssel akzeptiert werden — dieselbe

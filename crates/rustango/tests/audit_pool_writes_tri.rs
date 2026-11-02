@@ -114,6 +114,33 @@ async fn insert_note(pool: &Pool) -> Note {
     note
 }
 
+/// An audited model refuses every `_on` write, on every executor, and writes nothing.
+async fn audited_on_writes_are_refused(pool: &Pool) {
+    use rustango::sql::ExecError;
+    let refused = |r: Result<u64, ExecError>| {
+        assert!(
+            matches!(r, Err(ExecError::AuditUnsupported { .. })),
+            "{r:?}"
+        );
+    };
+    let mut note = insert_note(pool).await;
+    let before = audit_rows(pool).await;
+    refused(note.save_on(pool).await);
+    let mut conn = pool.acquire().await.expect("acquire");
+    refused(note.delete_on(&mut conn).await);
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+    refused(note.soft_delete_on(&mut tx).await);
+    let mut fresh = Note {
+        id: Auto::default(),
+        title: "never".into(),
+        deleted_at: None,
+    };
+    refused(fresh.insert_on(&mut tx).await.map(|()| 0));
+    tx.rollback().await.expect("rollback");
+    assert_eq!(audit_rows(pool).await, before);
+    assert_eq!(Note::objects().count(pool).await.expect("count"), 1);
+}
+
 async fn insert_records_the_assigned_pk(pool: &Pool) {
     let note = insert_note(pool).await;
     let pk = note.id.get().expect("pk assigned").to_string();
@@ -817,6 +844,7 @@ async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        audited_on_writes_are_refused,
         insert_records_the_assigned_pk,
         soft_delete_and_restore_each_write_one_row,
         delete_writes_one_row,

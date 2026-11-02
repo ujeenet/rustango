@@ -365,7 +365,7 @@ passt, wie deine App Datenbankverbindungen verwaltet:
   [`Tenant`](https://docs.rs)-Extractor auf. Verfügbar mit den Features
   `template_views` + `tenancy`. Templates portieren unverändert zwischen beiden.
 
-Das spiegelt die ViewSet-Aufteilung (`router` / `router_pool` vs `tenant_router`).
+Das spiegelt die ViewSet-Aufteilung (`router` vs `tenant_router`).
 
 ---
 

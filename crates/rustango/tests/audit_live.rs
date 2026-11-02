@@ -244,13 +244,13 @@ async fn macro_emits_audit_create_entry_on_insert_on() {
     };
     setup_post(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
+    let conn: rustango::sql::Pool = pool.clone().into();
     let mut row = AuditedPost {
         id: rustango::sql::Auto::default(),
         title: "first".into(),
         body: "hello world".into(),
     };
-    row.insert_on(&mut *conn).await.unwrap();
+    row.insert(&conn).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
     let entries =
@@ -277,15 +277,15 @@ async fn macro_emits_audit_delete_entry_on_delete_on() {
     };
     setup_post(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
+    let conn: rustango::sql::Pool = pool.clone().into();
     let mut row = AuditedPost {
         id: rustango::sql::Auto::default(),
         title: "doomed".into(),
         body: "soon gone".into(),
     };
-    row.insert_on(&mut *conn).await.unwrap();
+    row.insert(&conn).await.unwrap();
     let pk = row.id.get().copied().unwrap();
-    row.delete_on(&mut *conn).await.unwrap();
+    row.delete(&conn).await.unwrap();
 
     let entries =
         audit::fetch_for_entity_pool(&pool.clone().into(), "rustango_audit_post", &pk.to_string())
@@ -341,17 +341,17 @@ async fn macro_emits_audit_softdelete_and_restore_entries() {
     };
     setup_paper(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
+    let conn: rustango::sql::Pool = pool.clone().into();
     let mut row = AuditedPaper {
         id: rustango::sql::Auto::default(),
         title: "draft".into(),
         deleted_at: None,
     };
-    row.insert_on(&mut *conn).await.unwrap();
+    row.insert(&conn).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
-    row.soft_delete_on(&mut *conn).await.unwrap();
-    row.restore_on(&mut *conn).await.unwrap();
+    row.soft_delete(&conn).await.unwrap();
+    row.restore(&conn).await.unwrap();
 
     let entries = audit::fetch_for_entity_pool(
         &pool.clone().into(),
@@ -376,14 +376,14 @@ async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
     };
     setup_post(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
+    let conn: rustango::sql::Pool = pool.clone().into();
     audit::with_source(AuditSource::User { id: "alice".into() }, async {
         let mut row = AuditedPost {
             id: rustango::sql::Auto::default(),
             title: "scoped".into(),
             body: "x".into(),
         };
-        row.insert_on(&mut *conn).await.unwrap();
+        row.insert(&conn).await.unwrap();
         let pk = row.id.get().copied().unwrap();
         let entries = audit::fetch_for_entity_pool(
             &pool.clone().into(),
@@ -409,18 +409,18 @@ async fn macro_emits_audit_update_entry_with_before_after_diff() {
     };
     setup_post(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
+    let conn: rustango::sql::Pool = pool.clone().into();
     let mut row = AuditedPost {
         id: rustango::sql::Auto::default(),
         title: "v1".into(),
         body: "unchanged".into(),
     };
-    row.insert_on(&mut *conn).await.unwrap();
+    row.insert(&conn).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
     row.title = "v2".into();
     // body left at "unchanged" — must NOT appear in the diff.
-    row.save_on(&mut *conn).await.unwrap();
+    row.save(&conn).await.unwrap();
 
     let entries =
         audit::fetch_for_entity_pool(&pool.clone().into(), "rustango_audit_post", &pk.to_string())
@@ -479,7 +479,7 @@ async fn bulk_insert_on_emits_one_batched_audit_for_all_rows() {
     };
     setup_post(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
+    let conn: rustango::sql::Pool = pool.clone().into();
     let mut rows = vec![
         AuditedPost {
             id: rustango::sql::Auto::default(),
@@ -497,9 +497,7 @@ async fn bulk_insert_on_emits_one_batched_audit_for_all_rows() {
             body: "cx".into(),
         },
     ];
-    AuditedPost::bulk_insert_on(&mut rows, &mut *conn)
-        .await
-        .unwrap();
+    AuditedPost::bulk_insert(&mut rows, &conn).await.unwrap();
 
     let total: i64 = sqlx::query_scalar(
         r#"SELECT COUNT(*) FROM "rustango_audit_log" WHERE "entity_table" = 'rustango_audit_post'"#,

@@ -607,8 +607,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
 | `skip_object_permissions()` | Omite los hooks de permiso por objeto y los scopes de queryset de la app, para una API que protege sus filas por su cuenta. Los hooks del framework siguen ejecutándose. |
 | `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (2 000 por defecto, 10 000 en el admin; como mucho 100 000); por encima, una lista por página u offset es un `400` (el modo cursor sigue funcionando). Un campo de serializer `nested` / `many` / `slug` hacia una tabla con hook `view` o scope de queryset hace fallar el montaje, salvo con `skip_object_permissions()`. |
-| `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
-| `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
+| `router(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
 
 ---
@@ -992,7 +991,7 @@ let api = urls::api()
 
 ## Soporte de backends
 
-- **El builder + `router_pool` / `tenant_router`** es **tri-dialecto** —
+- **El builder + `router` / `tenant_router`** es **tri-dialecto** —
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
 - **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
   — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de

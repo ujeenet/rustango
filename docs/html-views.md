@@ -370,7 +370,7 @@ matches how your app manages database connections:
   `template_views` + `tenancy` features. Templates port between the two
   unchanged.
 
-This mirrors the ViewSet split (`router` / `router_pool` vs `tenant_router`).
+This mirrors the ViewSet split (`router` vs `tenant_router`).
 
 ---
 
