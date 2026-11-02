@@ -79,6 +79,20 @@ impl<DB: Database> DatabasePool<DB> {
 /// connection is reachable for query macros / ORM helpers.
 pub struct DatabaseConn<DB: Database> {
     inner: PoolConnection<DB>,
+    /// The tenant's pool, so audit rows in its transactions keep the source.
+    pool: crate::sql::PoolId,
+}
+
+impl<DB: Database> DatabaseConn<DB> {
+    /// `inner`, checked out of `pool`.
+    pub(crate) fn new(inner: PoolConnection<DB>, pool: &crate::sql::Pool) -> Self {
+        let pool = crate::sql::PoolId::of(pool);
+        Self { inner, pool }
+    }
+
+    pub(crate) fn pool_id(&self) -> &crate::sql::PoolId {
+        &self.pool
+    }
 }
 
 impl<DB: Database> std::ops::Deref for DatabaseConn<DB> {
@@ -348,10 +362,16 @@ impl<DB: Database> DatabasePools<DB> {
     /// # Errors
     /// As [`Self::pool_for_org`] plus [`TenancyError::Driver`] for
     /// the underlying connection checkout.
-    pub async fn acquire(&self, org: &Org) -> Result<DatabaseConn<DB>, TenancyError> {
+    pub async fn acquire(&self, org: &Org) -> Result<DatabaseConn<DB>, TenancyError>
+    where
+        crate::sql::Pool: From<Pool<DB>>,
+    {
         let pool = self.pool_for_org(org).await?;
         let inner = pool.pool().acquire().await?;
-        Ok(DatabaseConn { inner })
+        Ok(DatabaseConn::new(
+            inner,
+            &crate::sql::Pool::from(pool.pool().clone()),
+        ))
     }
 
     /// Drop the cached pool for `org` (if any). Used by the operator

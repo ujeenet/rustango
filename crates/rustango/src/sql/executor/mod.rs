@@ -1051,7 +1051,7 @@ pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
 // One executor for every `_on` method.
 mod on;
 use on::RowRef;
-pub use on::{PoolConn, SqlExecutor};
+pub use on::{PoolConn, PooledConn, SqlExecutor};
 
 mod atomic;
 #[cfg(feature = "jobs")]

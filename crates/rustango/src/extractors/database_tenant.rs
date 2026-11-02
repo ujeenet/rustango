@@ -139,6 +139,7 @@ impl<S, DB> FromRequestParts<S> for DatabaseTenant<DB>
 where
     S: Send + Sync,
     DB: Database + 'static,
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
     type Rejection = DatabaseTenantRejection;
 

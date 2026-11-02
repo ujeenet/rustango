@@ -45,11 +45,8 @@ pub enum TxConn<'a> {
 
 impl<'a> PoolTx<'a> {
     /// `conn` opened on `pool`; `None` when the pool is unknown.
-    pub(crate) fn new(conn: TxConn<'a>, pool: Option<&Pool>) -> Self {
-        Self {
-            conn,
-            pool: pool.map(PoolId::of),
-        }
+    pub(crate) fn new(conn: TxConn<'a>, pool: Option<PoolId>) -> Self {
+        Self { conn, pool }
     }
 
     /// The driver-typed transaction, to run sqlx queries on.
@@ -226,7 +223,7 @@ pub async fn transaction_pool(pool: &Pool) -> Result<PoolTx<'static>, ExecError>
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => TxConn::Sqlite(sq.begin().await?),
     };
-    Ok(PoolTx::new(conn, Some(pool)))
+    Ok(PoolTx::new(conn, Some(PoolId::of(pool))))
 }
 
 /// [`transaction_pool`] that takes SQLite's write lock at `BEGIN`. Use it
@@ -243,7 +240,7 @@ pub async fn write_transaction(pool: &Pool) -> Result<PoolTx<'static>, ExecError
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => Ok(PoolTx::new(
             TxConn::Sqlite(sq.begin_with("BEGIN IMMEDIATE").await?),
-            Some(pool),
+            Some(PoolId::of(pool)),
         )),
         #[allow(unreachable_patterns)]
         _ => transaction_pool(pool).await,

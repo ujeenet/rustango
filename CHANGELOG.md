@@ -36,6 +36,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- Cascade audit rows from `PoolConn::begin()`, `delete_on(&mut conn)` and `delete_on` on a MySQL / SQLite `DatabaseConn` keep a tenant-bound source on that tenant's pool instead of `system`; `PoolConn` is a struct matched through `conn.conn()` (`PooledConn`).
 - Cascade audit rows written in a caller's `PoolTx` (`delete_tx`, `delete_on(&mut tx)`) keep a tenant-bound source on that tenant's pool instead of `system`; `PoolTx` is a struct that remembers its pool, matched through `tx.conn()` (`TxConn`).
 - On SQLite, an admin, ViewSet or template-view delete that a `restrict` reference blocks answers 409 instead of 500.
 - Tenant admin: the sidebar, `<title>` and heading show one name (`Org.brand_name`, then `[admin] title`, then `[brand] name`, then the display name), links take the org's `primary_color`, and the operator console serves `/favicon.ico`.

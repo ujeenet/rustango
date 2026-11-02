@@ -6,7 +6,7 @@
 use rustango::core::AggregateExpr;
 use rustango::query::QuerySet;
 use rustango::sql::sqlx;
-use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn};
+use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn, PooledConn};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone, PartialEq)]
@@ -57,21 +57,21 @@ async fn seeded(pool: &Pool) {
 
 /// The backend's id for the session `conn` holds.
 async fn session_id(conn: &mut PoolConn) -> String {
-    match conn {
+    match conn.conn() {
         #[cfg(feature = "postgres")]
-        PoolConn::Postgres(c) => sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        PooledConn::Postgres(c) => sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
             .fetch_one(&mut **c)
             .await
             .expect("pid")
             .to_string(),
         #[cfg(feature = "mysql")]
-        PoolConn::Mysql(c) => sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
+        PooledConn::Mysql(c) => sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
             .fetch_one(&mut **c)
             .await
             .expect("connection id")
             .to_string(),
         #[cfg(feature = "sqlite")]
-        PoolConn::Sqlite(c) => {
+        PooledConn::Sqlite(c) => {
             let mut h = c.lock_handle().await.expect("handle");
             format!("{:p}", h.as_raw_handle())
         }
@@ -165,13 +165,13 @@ async fn on_conn_matches_pool(pool: &Pool) {
 async fn queries_run_on_the_held_session(pool: &Pool) {
     let mut conn = pool.acquire().await.expect("acquire");
     let ddl = "CREATE TEMPORARY TABLE pc_author (id BIGINT PRIMARY KEY, name VARCHAR(40) NOT NULL)";
-    match &mut conn {
+    match conn.conn() {
         #[cfg(feature = "postgres")]
-        PoolConn::Postgres(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
+        PooledConn::Postgres(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
         #[cfg(feature = "mysql")]
-        PoolConn::Mysql(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
+        PooledConn::Mysql(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
         #[cfg(feature = "sqlite")]
-        PoolConn::Sqlite(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
+        PooledConn::Sqlite(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
         #[allow(unreachable_patterns)]
         _ => unreachable!("no backend enabled"),
     }
@@ -456,9 +456,9 @@ async fn one_conn(pool: &Pool) -> Pool {
 
 /// Read one session setting on `conn`, after setting it when `set`.
 async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
-    match conn {
+    match conn.conn() {
         #[cfg(feature = "postgres")]
-        PoolConn::Postgres(c) => {
+        PooledConn::Postgres(c) => {
             if set {
                 sqlx::query("SET application_name = 'rustango_leak'")
                     .execute(&mut **c)
@@ -471,7 +471,7 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
                 .unwrap()
         }
         #[cfg(feature = "mysql")]
-        PoolConn::Mysql(c) => {
+        PooledConn::Mysql(c) => {
             if set {
                 sqlx::query("SET @rustango_leak = 'rustango_leak'")
                     .execute(&mut **c)
@@ -484,7 +484,7 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
                 .unwrap()
         }
         #[cfg(feature = "sqlite")]
-        PoolConn::Sqlite(c) => {
+        PooledConn::Sqlite(c) => {
             // Per connection; `cache_size` would live in the shared in-memory cache.
             if set {
                 sqlx::query("PRAGMA reverse_unordered_selects = 1")

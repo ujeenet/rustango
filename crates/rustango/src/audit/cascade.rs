@@ -525,26 +525,51 @@ mod tx_source_tests {
         book.insert_pool(pool).await.unwrap();
     }
 
-    /// Runs `delete` in a tx on `pool` as tenant `a`'s user, scoped to that pool.
-    async fn cascade_source(pool: &Pool, by_queryset: bool) -> Option<String> {
+    /// How the test deletes the shelf.
+    #[derive(Clone, Copy)]
+    enum Via {
+        DeleteTx,
+        DeleteOnTx,
+        ConnBegin,
+        DeleteOnConn,
+        DeleteOnTenantConn,
+    }
+
+    /// Deletes the shelf as tenant `a`'s user, scoped to `pool`.
+    async fn cascade_source(pool: &Pool, via: Via) -> Option<String> {
         let user = AuditSource::User { id: "7".into() };
+        let query = || {
+            Shelf::objects()
+                .filter("id", 1_i64)
+                .compile_delete()
+                .unwrap()
+        };
         with_tenant_source(user, "a".into(), async {
             writing_to_tenant("a".into(), Some(pool), async {
-                let mut tx = crate::sql::transaction_pool(pool).await.unwrap();
-                if by_queryset {
-                    Shelf::objects()
-                        .filter("id", 1_i64)
-                        .delete_on(&mut tx)
-                        .await
-                        .unwrap();
-                } else {
-                    let query = Shelf::objects()
-                        .filter("id", 1_i64)
-                        .compile_delete()
-                        .unwrap();
-                    crate::sql::delete_tx(&mut tx, &query).await.unwrap();
+                match via {
+                    Via::DeleteTx | Via::DeleteOnTx => {
+                        let mut tx = crate::sql::transaction_pool(pool).await.unwrap();
+                        if matches!(via, Via::DeleteTx) {
+                            crate::sql::delete_tx(&mut tx, &query()).await.unwrap();
+                        } else {
+                            let qs = Shelf::objects().filter("id", 1_i64);
+                            qs.delete_on(&mut tx).await.unwrap();
+                        }
+                        tx.commit().await.unwrap();
+                    }
+                    Via::ConnBegin => {
+                        let mut conn = pool.acquire().await.unwrap();
+                        let mut tx = conn.begin().await.unwrap();
+                        crate::sql::delete_tx(&mut tx, &query()).await.unwrap();
+                        tx.commit().await.unwrap();
+                    }
+                    Via::DeleteOnConn => {
+                        let mut conn = pool.acquire().await.unwrap();
+                        let qs = Shelf::objects().filter("id", 1_i64);
+                        qs.delete_on(&mut conn).await.unwrap();
+                    }
+                    Via::DeleteOnTenantConn => delete_on_tenant_conn(pool).await,
                 }
-                tx.commit().await.unwrap();
             })
             .await;
         })
@@ -555,13 +580,52 @@ mod tx_source_tests {
         rows.first().map(|e| e.source.clone())
     }
 
+    /// `delete_on` through a database-mode tenant connection out of `pool`.
+    async fn delete_on_tenant_conn(pool: &Pool) {
+        use crate::tenancy::DatabaseConn;
+        let qs = Shelf::objects().filter("id", 1_i64);
+        match pool {
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => {
+                let mut conn = DatabaseConn::new(p.acquire().await.unwrap(), pool);
+                qs.delete_on(&mut conn).await.unwrap();
+            }
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => {
+                let mut conn = DatabaseConn::new(p.acquire().await.unwrap(), pool);
+                qs.delete_on(&mut conn).await.unwrap();
+            }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+
+    async fn delete_on_tenant_conn_keeps_the_tenant_source(pool: &Pool) {
+        // Postgres tenants run `delete_on` on the raw sqlx connection.
+        if pool.dialect().name() == "postgres" {
+            return;
+        }
+        let source = cascade_source(pool, Via::DeleteOnTenantConn).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
     async fn delete_tx_keeps_the_tenant_source(pool: &Pool) {
-        let source = cascade_source(pool, false).await;
+        let source = cascade_source(pool, Via::DeleteTx).await;
         assert_eq!(source.as_deref(), Some("user:7"));
     }
 
     async fn delete_on_tx_keeps_the_tenant_source(pool: &Pool) {
-        let source = cascade_source(pool, true).await;
+        let source = cascade_source(pool, Via::DeleteOnTx).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    async fn conn_begin_keeps_the_tenant_source(pool: &Pool) {
+        let source = cascade_source(pool, Via::ConnBegin).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    async fn delete_on_conn_keeps_the_tenant_source(pool: &Pool) {
+        let source = cascade_source(pool, Via::DeleteOnConn).await;
         assert_eq!(source.as_deref(), Some("user:7"));
     }
 
@@ -570,6 +634,9 @@ mod tx_source_tests {
         scenarios: [
             delete_tx_keeps_the_tenant_source,
             delete_on_tx_keeps_the_tenant_source,
+            conn_begin_keeps_the_tenant_source,
+            delete_on_conn_keeps_the_tenant_source,
+            delete_on_tenant_conn_keeps_the_tenant_source,
         ],
     );
 }

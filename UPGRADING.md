@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- `PoolConn` is a struct: match `conn.conn()` (a `#[non_exhaustive]` `PooledConn`) instead of the connection. Before: `match &mut conn { PoolConn::Mysql(c) => … }`. After: `match conn.conn() { PooledConn::Mysql(c) => …, _ => … }`.
+- Outside code can no longer wrap its own sqlx `Transaction` in a `PoolTx` (`PoolTx::new` is crate-private). Open it with `transaction_pool`, `write_transaction` or `pool.acquire().await?.begin()`, so the transaction knows its pool.
 - `PoolTx` is a struct: match `tx.conn()` (a `#[non_exhaustive]` `TxConn`) instead of the tx. Before: `match &mut tx { PoolTx::Postgres(t) => … }`. After: `match tx.conn() { TxConn::Postgres(t) => …, _ => … }`.
 - Migrate signal receivers read `ctx.pool` and `ctx.tenant`; build contexts with `PreMigrateContext::new` / `PostMigrateContext::new`. Before: `connect_post_migrate_with_target(|ctx, t| … t.pool …)`. After: `connect_post_migrate(|ctx| … ctx.pool …)`.
 - `LinkTarget::audience` and `LinkScope::audience` take a `rustango::auth_flows::SingleDb`, so a tenant pool or handler cannot use an unbound scope by mistake: `LinkTarget::audience(&pool, "app")` becomes `LinkTarget::audience(SingleDb::new(&pool), "app")`, and `LinkScope::audience("app")` becomes `LinkScope::audience(SingleDb::new(&pool), "app")`. Multi-tenant apps use `LinkScope::from(&tenant)` and `LinkTarget::from(&tenant)`.

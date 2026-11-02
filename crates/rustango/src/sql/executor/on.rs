@@ -24,8 +24,17 @@ use crate::sql::{DeletePlan, Pool};
 ///
 /// Do not call a `&Pool` method while holding one: that takes a second
 /// connection, and `max_connections` such requests deadlock the pool.
+///
+/// Reach the driver connection through [`Self::conn`]. It remembers its
+/// pool, so audit rows in [`Self::begin`] keep a tenant-bound source.
+pub struct PoolConn {
+    conn: PooledConn,
+    pool: crate::sql::PoolId,
+}
+
+/// The driver-typed connection inside a [`PoolConn`].
 #[non_exhaustive]
-pub enum PoolConn {
+pub enum PooledConn {
     #[cfg(feature = "postgres")]
     Postgres(sqlx::pool::PoolConnection<sqlx::Postgres>),
     #[cfg(feature = "mysql")]
@@ -40,28 +49,37 @@ impl Pool {
     /// # Errors
     /// The driver's acquire error, e.g. a pool timeout.
     pub async fn acquire(&self) -> Result<PoolConn, ExecError> {
-        Ok(match self {
+        let conn = match self {
             #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => PoolConn::Postgres(p.acquire().await?),
+            Pool::Postgres(p) => PooledConn::Postgres(p.acquire().await?),
             #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => PoolConn::Mysql(p.acquire().await?),
+            Pool::Mysql(p) => PooledConn::Mysql(p.acquire().await?),
             #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => PoolConn::Sqlite(p.acquire().await?),
+            Pool::Sqlite(p) => PooledConn::Sqlite(p.acquire().await?),
+        };
+        Ok(PoolConn {
+            conn,
+            pool: crate::sql::PoolId::of(self),
         })
     }
 }
 
 impl PoolConn {
+    /// The driver-typed connection, to run sqlx queries on.
+    pub fn conn(&mut self) -> &mut PooledConn {
+        &mut self.conn
+    }
+
     /// The dialect of this connection's backend.
     #[must_use]
     pub fn dialect(&self) -> &'static dyn Dialect {
-        match self {
+        match &self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(_) => crate::sql::postgres::DIALECT,
+            PooledConn::Postgres(_) => crate::sql::postgres::DIALECT,
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(_) => crate::sql::mysql::DIALECT,
+            PooledConn::Mysql(_) => crate::sql::mysql::DIALECT,
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
+            PooledConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
         }
     }
 
@@ -69,13 +87,13 @@ impl PoolConn {
     /// session state set on it cannot reach the next borrower. sqlx never
     /// resets it, and a reset would also undo an `after_connect` setup.
     pub fn close_on_drop(&mut self) {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => c.close_on_drop(),
+            PooledConn::Postgres(c) => c.close_on_drop(),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => c.close_on_drop(),
+            PooledConn::Mysql(c) => c.close_on_drop(),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => c.close_on_drop(),
+            PooledConn::Sqlite(c) => c.close_on_drop(),
         }
     }
 
@@ -85,16 +103,15 @@ impl PoolConn {
     /// Driver errors from `BEGIN`.
     pub async fn begin(&mut self) -> Result<PoolTx<'_>, ExecError> {
         use sqlx::Connection as _;
-        let conn = match self {
+        let conn = match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => TxConn::Postgres((**c).begin().await?),
+            PooledConn::Postgres(c) => TxConn::Postgres((**c).begin().await?),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => TxConn::Mysql((**c).begin().await?),
+            PooledConn::Mysql(c) => TxConn::Mysql((**c).begin().await?),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => TxConn::Sqlite((**c).begin().await?),
+            PooledConn::Sqlite(c) => TxConn::Sqlite((**c).begin().await?),
         };
-        // A pooled connection does not know its pool.
-        Ok(PoolTx::new(conn, None))
+        Ok(PoolTx::new(conn, Some(self.pool.clone())))
     }
 }
 
@@ -428,13 +445,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => pg_rows(&mut **c, sql, params, decode),
+            PooledConn::Postgres(c) => pg_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => my_rows(&mut **c, sql, params, decode),
+            PooledConn::Mysql(c) => my_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => sq_rows(&mut **c, sql, params, decode),
+            PooledConn::Sqlite(c) => sq_rows(&mut **c, sql, params, decode),
         }
     }
 
@@ -446,13 +463,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     where
         'c: 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => pg_exec(&mut **c, sql, params),
+            PooledConn::Postgres(c) => pg_exec(&mut **c, sql, params),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => my_exec(&mut **c, sql, params),
+            PooledConn::Mysql(c) => my_exec(&mut **c, sql, params),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
+            PooledConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
         }
     }
 
@@ -609,13 +626,18 @@ macro_rules! database_conn_executor {
                 $exec(&mut ***self, sql, params)
             }
 
+            fn runs_plans(&self) -> bool {
+                true
+            }
+
             fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
             where
                 'c: 'e,
             {
                 Box::pin(async move {
                     use sqlx::Connection as _;
-                    let mut tx = PoolTx::new(TxConn::$variant((***self).begin().await?), None);
+                    let pool = Some(self.pool_id().clone());
+                    let mut tx = PoolTx::new(TxConn::$variant((***self).begin().await?), pool);
                     let n = super::run_delete_plan_tx(&mut tx, plan).await?;
                     tx.commit().await?;
                     Ok(n)
