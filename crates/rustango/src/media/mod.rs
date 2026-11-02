@@ -1485,6 +1485,7 @@ impl MediaManager {
 
     /// Whether any of `slugs` names no stored tag yet. More than
     /// [`MAX_TAGS_PER_CALL`] slugs answer `false`: tagging refuses them anyway.
+    #[cfg(feature = "admin")]
     pub(crate) async fn names_new_tag(&self, slugs: &[&str]) -> Result<bool, MediaError> {
         let mut slugs = slugs.to_vec();
         slugs.sort_unstable();

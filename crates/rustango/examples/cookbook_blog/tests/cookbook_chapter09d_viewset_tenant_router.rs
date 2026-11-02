@@ -122,10 +122,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     let opts = tenancy::manage::api::CreateTenantOpts {
         host_pattern: Some(format!("{slug}.app.test")),
         mode: tenancy::StorageMode::Schema,
-        // Skip the tenant-migration pass: the Author table is set up
-        // manually via fresh_author_table since the test only needs
-        // that one table on the tenant DB.
-        no_migrate: true,
+        // Migrate the tenant: its pool refuses a schema missing the framework tables.
         ..Default::default()
     };
     let org = tenancy::manage::api::create_tenant_if_missing(

@@ -469,6 +469,7 @@ async fn column_values(
 mod tx_source_tests {
     use crate::audit::{fetch_for_entity_pool, with_tenant_source, writing_to_tenant, AuditSource};
     use crate::core::Model as _;
+    #[cfg(feature = "postgres")]
     use crate::sql::CounterPool as _;
     use crate::sql::Pool;
 
@@ -570,7 +571,9 @@ mod tx_source_tests {
 
     /// `delete_on` through a database-mode tenant connection out of `pool`.
     async fn delete_on_tenant_conn(pool: &Pool) {
+        #[cfg(any(feature = "mysql", feature = "sqlite"))]
         use crate::tenancy::DatabaseConn;
+        #[cfg(any(feature = "mysql", feature = "sqlite"))]
         let qs = Shelf::objects().filter("id", 1_i64);
         match pool {
             #[cfg(feature = "mysql")]
@@ -599,6 +602,8 @@ mod tx_source_tests {
 
     /// A raw sqlx executor cannot audit the cascade, so the delete refuses.
     async fn raw_executor_cascade_is_refused(pool: &Pool) {
+        #[cfg(not(feature = "postgres"))]
+        let _ = pool;
         #[cfg(feature = "postgres")]
         #[allow(irrefutable_let_patterns)]
         if let Pool::Postgres(pg) = pool {

@@ -1070,7 +1070,9 @@ async fn a_move_and_a_create_racing_for_one_schema_never_share_it() {
                     ..CreateTenantOpts::default()
                 };
                 let dir = std::path::Path::new("no-migrations");
-                create_tenant(&pools, &url, dir, &format!("t1487-c{round}"), opts)
+                let slug = format!("t1487-c{round}");
+                let opts = rustango::testkit::routed_opts(&slug, opts);
+                create_tenant(&pools, &url, dir, &slug, opts)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string())

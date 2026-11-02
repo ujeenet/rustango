@@ -944,7 +944,7 @@ mod webhook {
         let org = env.org(&slug).await.expect("tenant");
         let id = org.id.get().copied().unwrap();
         assert!(
-            link.contains(&format!("scope=tenant%3A{slug}%3A{id}")),
+            link.contains(&format!("scope=tenant%3A%23org%3A{id}%3A{slug}")),
             "{link}"
         );
         assert!(env.user(&slug, "dee@acme.test").await.unwrap().is_superuser);

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 /// `cfg(feature = "postgres")` occurrences left in the macro source.
 /// Lower it when one goes; never raise it.
-const POSTGRES_ARMS_LEFT: usize = 5;
+const POSTGRES_ARMS_LEFT: usize = 3;
 
 fn macro_source() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
