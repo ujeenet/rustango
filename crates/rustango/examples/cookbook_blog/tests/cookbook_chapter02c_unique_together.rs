@@ -64,11 +64,11 @@ async fn unique_together_rejects_duplicate_pair() {
     fresh(&pool).await;
 
     let mut m1 = Membership { id: Auto::Unset, org_id: 10, user_id: 20, role: "owner".into() };
-    m1.save(&pool).await.expect("first row inserts");
+    m1.save(&pool.clone().into()).await.expect("first row inserts");
 
     // Same (10, 20) pair, different role — DB rejects.
     let mut m2 = Membership { id: Auto::Unset, org_id: 10, user_id: 20, role: "viewer".into() };
-    let err = m2.save(&pool).await.expect_err("duplicate (org, user) pair must be rejected");
+    let err = m2.save(&pool.clone().into()).await.expect_err("duplicate (org, user) pair must be rejected");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
         msg.contains("unique") || msg.contains("duplicate"),
@@ -77,7 +77,7 @@ async fn unique_together_rejects_duplicate_pair() {
 
     // Different pairs are fine.
     let mut m3 = Membership { id: Auto::Unset, org_id: 10, user_id: 99, role: "viewer".into() };
-    m3.save(&pool).await.expect("(10, 99) is a different pair, accepted");
+    m3.save(&pool.clone().into()).await.expect("(10, 99) is a different pair, accepted");
     let mut m4 = Membership { id: Auto::Unset, org_id: 99, user_id: 20, role: "owner".into() };
-    m4.save(&pool).await.expect("(99, 20) is a different pair, accepted");
+    m4.save(&pool.clone().into()).await.expect("(99, 20) is a different pair, accepted");
 }

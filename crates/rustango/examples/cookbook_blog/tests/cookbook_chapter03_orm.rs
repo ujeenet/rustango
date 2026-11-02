@@ -53,7 +53,7 @@ async fn fresh_blog(pool: &sqlx::PgPool) -> i64 {
         name: "ada".into(), email: "ada@example.com".into(),
         bio: None, joined_at: Auto::Unset,
     };
-    a.save(pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id { Auto::Set(v) => v, _ => unreachable!() };
 
     // 5 posts: 3 published, 2 draft. Mix of view counts for filtering tests.
@@ -75,7 +75,7 @@ async fn fresh_blog(pool: &sqlx::PgPool) -> i64 {
             metadata: serde_json::json!({"i": i}),
             published_at: published.then(chrono::Utc::now),
         };
-        p.save(pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
     author_id
 }
@@ -229,12 +229,12 @@ async fn save_inserts_then_updates_in_place() {
         metadata: serde_json::json!({}),
         published_at: None,
     };
-    p.save(&pool).await.unwrap();
+    p.save(&pool.clone().into()).await.unwrap();
     let id = match p.id { Auto::Set(v) => v, _ => unreachable!() };
 
     p.body = "v2".into();
     p.published = true;
-    p.save(&pool).await.unwrap();
+    p.save(&pool.clone().into()).await.unwrap();
 
     let back: Vec<Post> = Post::objects()
         .filter_op("id", Op::Eq, id).fetch_on(&pool).await.unwrap();
