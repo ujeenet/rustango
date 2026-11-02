@@ -41,8 +41,12 @@ async fn pool() -> Option<PgPool> {
 }
 
 async fn fresh(pool: &PgPool) {
-    rustango::migrate::drop_all(pool).await.unwrap();
-    rustango::migrate::apply_all(pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 fn args(values: &[&str]) -> Vec<String> {
@@ -111,7 +115,9 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         "password should be redacted in printed plan: {output}"
     );
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -162,7 +168,9 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         format!("{err}").contains("already in `schema`"),
         "expected same-mode error: {err}"
     );
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -213,7 +221,9 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         format!("{err}").contains("--database-url"),
         "expected validation error mentioning --database-url: {err}"
     );
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -251,7 +261,9 @@ async fn migrate_tenant_storage_rejects_unknown_slug() {
         format!("{err}").contains("not found"),
         "expected `not found` for unknown slug: {err}"
     );
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 /// #1864 — database → schema restores the rows into the target schema.
@@ -733,7 +745,9 @@ async fn sqlx_exec(pool: &PgPool, sql: &str) {
 async fn private_registry(prefix: &str) -> (ScratchDb, PgPool) {
     let db = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), prefix).await;
     let pool = PgPool::connect(db.url()).await.unwrap();
-    rustango::migrate::apply_all(&pool).await.unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
     (db, pool)
 }
 
@@ -893,7 +907,9 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
     let err = res.expect_err("a used schema must be refused");
     assert!(err.to_string().contains("already used"), "{err}");
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 /// The refusal `create-tenant` gives for a schema that already exists.

@@ -274,21 +274,6 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     let counts: Vec<(i64, i64)> = counts.into_iter().map(|(a, n)| (a.id, n)).collect();
     assert_eq!(counts, [(1, 2), (2, 1)]);
 
-    // The `&PgPool` wrappers count too.
-    #[cfg(feature = "postgres")]
-    #[allow(irrefutable_let_patterns)] // single-variant `Pool` in a postgres-only build
-    if let Pool::Postgres(pg) = pool {
-        let page = one(1, by_id().limit(1).fetch_paginated(pg)).await.unwrap();
-        assert_eq!((page.rows.len(), page.total), (1, 2));
-        let counts = one(
-            1,
-            rustango::sql::annotate_count_children(by_id(), "pc_book", "author", pg),
-        )
-        .await
-        .unwrap();
-        assert_eq!(counts.len(), 2);
-    }
-
     let plan = one(1, by_id().explain_on(&mut *c, ExplainOptions::default()))
         .await
         .unwrap();

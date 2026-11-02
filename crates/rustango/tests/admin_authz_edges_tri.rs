@@ -218,7 +218,7 @@ async fn viewset_create_with_a_locked_required_field_is_forbidden(pool: &Pool) {
         <Key as rustango::core::Model>::SCHEMA,
         &["id", "owner_id", "label"],
     )
-    .router_pool("/keys", pool.clone());
+    .router("/keys", pool.clone());
     for body in [
         r#"{"owner_id": 9, "label": "k"}"#,
         r#"[{"owner_id": 9, "label": "k"}]"#,

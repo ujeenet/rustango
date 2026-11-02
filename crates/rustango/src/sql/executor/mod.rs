@@ -9,7 +9,7 @@ use crate::query::{QuerySet, UpdateBuilder};
 // PG-typed helpers below import these. Sqlite/MySQL-only builds only
 // see the bi/tri-dialect `_pool` entry points from this module.
 #[cfg(feature = "postgres")]
-use sqlx::postgres::{PgArguments, PgPool, PgRow};
+use sqlx::postgres::{PgArguments, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::query::{Query, QueryAs};
 
@@ -309,31 +309,7 @@ where
 }
 
 #[cfg(feature = "postgres")]
-impl<T> QuerySet<T>
-where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    /// [`Self::fetch_paginated_on`] against a pool, for non-tenant code.
-    ///
-    /// # Errors
-    /// As [`Self::fetch_paginated_on`].
-    pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
-        let select = self.compile()?;
-        let stmt = paginated_statement(&Postgres, &select)?;
-        // Its own decode only for the looser `FromRow<PgRow>` bound.
-        let rows = run_on(pool, &stmt.sql, stmt.params, |row| match row {
-            RowRef::Postgres(r) => paged::<T, _>(r),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("a PgPool yields Postgres rows"),
-        })
-        .await?;
-        let total = match total_statement(&Postgres, &select)?.filter(|_| rows.is_empty()) {
-            Some(count) => Some(count_stmt_on(pool, count).await?),
-            None => None,
-        };
-        Ok(into_page(rows, total))
-    }
-}
+impl<T> QuerySet<T> where T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin {}
 
 /// One `fetch_paginated` row and its window total.
 fn paged<T, R>(row: &R) -> Result<(T, i64), sqlx::Error>
@@ -482,45 +458,6 @@ pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 #[cfg(feature = "admin")]
 pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
 
-/// Annotate each parent row with the COUNT of its children, from a
-/// single query, so a list page costs one round trip instead of
-/// N + 1:
-///
-/// ```text
-///   SELECT parent.<every-column>,
-///     (SELECT COUNT(*) FROM child WHERE child.<fk_column> = parent.<pk>)
-///       AS __annotated_count
-///   FROM parent [WHERE / ORDER BY / LIMIT from `parent_qs`]
-/// ```
-///
-/// Handles one Count over one reverse-FK relation. For `Sum`, `Avg`
-/// and friends use the aggregate query builder.
-///
-/// `child_table` is the child model's table; `child_fk_column` is the
-/// column on it that holds the parent's PK.
-///
-/// # Errors
-/// SQL-writing or driver failures from the single SELECT.
-#[cfg(feature = "postgres")]
-pub async fn annotate_count_children<P>(
-    parent_qs: crate::query::QuerySet<P>,
-    child_table: &'static str,
-    child_fk_column: &'static str,
-    pool: &PgPool,
-) -> Result<Vec<(P, i64)>, ExecError>
-where
-    P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    let stmt = annotate_count_statement(&Postgres, parent_qs, child_table, child_fk_column)?;
-    // Its own decode only for the looser `FromRow<PgRow>` bound.
-    run_on(pool, &stmt.sql, stmt.params, |row| match row {
-        RowRef::Postgres(r) => counted::<P, _>(r),
-        #[allow(unreachable_patterns)]
-        _ => unreachable!("a PgPool yields Postgres rows"),
-    })
-    .await
-}
-
 /// [`annotate_count_children`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
 /// whose connection holds the tenant's `search_path`.
 ///
@@ -584,58 +521,6 @@ fn annotate_count_statement<P: Model>(
     )?)
 }
 
-/// Prefetch children: fetch parents and, for each one,
-/// the children whose foreign key points at it. Two queries in total,
-/// however many parents there are:
-///
-/// ```text
-///   SELECT * FROM <parent>;
-///   SELECT * FROM <child> WHERE <fk_column> IN ($1, $2, ...);
-/// ```
-///
-/// Each parent is paired with its children; a parent with no children
-/// gets an empty `Vec`. Parents keep the queryset's order, children
-/// keep the second query's order.
-///
-/// `child_fk_column` is the column on the child table that holds the
-/// parent's PK — for `Post { author: ForeignKey<Author> }` that is
-/// `"author"`. Children are grouped by reading the same column back
-/// through [`FkPkAccess`].
-///
-/// # Errors
-/// Anything either of the underlying `fetch` calls returns.
-#[cfg(feature = "postgres")]
-pub async fn fetch_with_prefetch<P, C>(
-    parent_qs: crate::query::QuerySet<P>,
-    child_fk_column: &'static str,
-    pool: &PgPool,
-) -> Result<Vec<(P, Vec<C>)>, ExecError>
-where
-    P: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + Send
-        + Unpin
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue,
-    C: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + Send
-        + Unpin
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess,
-{
-    // The pool path batches the `IN` list past the bind cap.
-    fetch_with_prefetch_pool(parent_qs, child_fk_column, &Pool::Postgres(pool.clone())).await
-}
-
 /// Read a model's PK as a [`crate::core::SqlValue`] through
 /// [`HasPkValue`].
 pub(super) fn extract_pk_value<P: HasPkValue>(parent: &P) -> crate::core::SqlValue {
@@ -657,27 +542,7 @@ pub trait HasPkValue {
 }
 
 #[cfg(feature = "postgres")]
-impl<T: Model + Send> QuerySet<T> {
-    /// Run `EXPLAIN` on this queryset and return the plan, one line
-    /// per `Vec` entry. Runs against a pool with the default options:
-    /// plain `EXPLAIN`, no `ANALYZE`, so the query itself is not run.
-    /// Use [`Self::explain_on`] to pick the executor and options.
-    ///
-    /// ```ignore
-    /// use rustango::sql::ExplainOptions;
-    /// let plan = Post::objects()
-    ///     .where_(Post::author_id.eq(7_i64))
-    ///     .explain(&pool)
-    ///     .await?;
-    /// for line in plan { println!("{line}"); }
-    /// ```
-    ///
-    /// # Errors
-    /// SQL-writing or driver failures from the EXPLAIN.
-    pub async fn explain(self, pool: &PgPool) -> Result<Vec<String>, ExecError> {
-        self.explain_on(pool, ExplainOptions::default()).await
-    }
-}
+impl<T: Model + Send> QuerySet<T> {}
 
 impl<T: Model + Send> QuerySet<T> {
     /// [`Self::explain`] with your own [`SqlExecutor`] and [`ExplainOptions`],

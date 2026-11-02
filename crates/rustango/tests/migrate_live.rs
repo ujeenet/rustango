@@ -75,8 +75,8 @@ async fn apply_all_creates_every_registered_table() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Tables exist by virtue of insert/fetch round-tripping.
     MigUser {
@@ -106,7 +106,7 @@ async fn apply_all_creates_every_registered_table() {
     assert_eq!(posts.len(), 1);
     assert_eq!(posts[0].title, "hello");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -118,8 +118,8 @@ async fn fk_constraint_is_enforced_by_db() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let bad = MigPost {
         id: 99,
@@ -133,7 +133,7 @@ async fn fk_constraint_is_enforced_by_db() {
         "expected FK violation, got: {msg}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -146,8 +146,8 @@ async fn check_constraint_is_enforced_by_db() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let result =
         sqlx::query("INSERT INTO mig_user (id, name, age, is_active) VALUES ($1, $2, $3, $4)")
@@ -164,7 +164,7 @@ async fn check_constraint_is_enforced_by_db() {
         "expected CHECK violation, got: {msg}",
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -176,8 +176,8 @@ async fn varchar_length_is_enforced_by_db() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let result =
         sqlx::query("INSERT INTO mig_user (id, name, age, is_active) VALUES ($1, $2, $3, $4)")
@@ -192,7 +192,7 @@ async fn varchar_length_is_enforced_by_db() {
         "expected length violation, got: {result:?}"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// The bootstrap walk creates `unique_together` indexes too, so an
@@ -203,8 +203,8 @@ async fn apply_all_creates_unique_together() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     let pair = || MigPair {
         id: Auto::Unset,
         a: 1,
@@ -215,7 +215,7 @@ async fn apply_all_creates_unique_together() {
         pair().insert(&pool).await.is_err(),
         "apply_all left `unique_together` out"
     );
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -239,8 +239,8 @@ async fn auto_pk_insert_populates_id_from_sequence() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut alice = AutoUser {
         id: Auto::default(),
@@ -269,7 +269,7 @@ async fn auto_pk_insert_populates_id_from_sequence() {
     let users: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(users.len(), 2);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -282,8 +282,8 @@ async fn auto_pk_set_value_is_honored() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut explicit = AutoUser {
         id: Auto::Set(9999),
@@ -292,7 +292,7 @@ async fn auto_pk_set_value_is_honored() {
     explicit.insert(&pool).await.unwrap();
     assert_eq!(*explicit.id.get().unwrap(), 9999);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -303,8 +303,8 @@ async fn bulk_insert_non_auto_model_writes_n_rows_one_round_trip() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let rows: Vec<MigUser> = (1..=10_i64)
         .map(|i| MigUser {
@@ -320,7 +320,7 @@ async fn bulk_insert_non_auto_model_writes_n_rows_one_round_trip() {
     let fetched: Vec<MigUser> = MigUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 10, "all 10 rows should be present");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -332,8 +332,8 @@ async fn bulk_insert_auto_model_unset_path_populates_each_pk() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut rows: Vec<AutoUser> = (1..=5)
         .map(|i| AutoUser {
@@ -355,7 +355,7 @@ async fn bulk_insert_auto_model_unset_path_populates_each_pk() {
     let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 5);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -367,8 +367,8 @@ async fn bulk_insert_auto_model_all_set_path_honors_supplied_ids() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut rows: Vec<AutoUser> = (100..=102)
         .map(|i: i64| AutoUser {
@@ -383,7 +383,7 @@ async fn bulk_insert_auto_model_all_set_path_honors_supplied_ids() {
         assert_eq!(*r.id.get().unwrap(), 100 + i as i64);
     }
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -395,8 +395,8 @@ async fn bulk_insert_auto_model_mixed_set_unset_is_rejected() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut rows = vec![
         AutoUser {
@@ -420,7 +420,7 @@ async fn bulk_insert_auto_model_mixed_set_unset_is_rejected() {
     let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 0);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -430,8 +430,8 @@ async fn bulk_insert_empty_slice_is_noop() {
         return;
     };
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut empty: Vec<AutoUser> = Vec::new();
     AutoUser::bulk_insert(&mut empty, &pool).await.unwrap();
@@ -441,7 +441,7 @@ async fn bulk_insert_empty_slice_is_noop() {
     let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 0);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -452,11 +452,11 @@ async fn apply_all_is_safe_to_call_after_drop_all() {
     };
 
     // First cycle.
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     // Second cycle.
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Schema is fresh; confirm a basic insert works.
     MigUser {
@@ -476,7 +476,7 @@ async fn apply_all_is_safe_to_call_after_drop_all() {
         .len();
     assert_eq!(count, 1);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Replicas migrating a fresh DB at once: the ledger CREATE used to run
@@ -562,7 +562,7 @@ async fn legacy_bootstrap_waits_for_a_pool_migrate() {
     let started = std::time::Instant::now();
     migrate::Builder::default()
         .ledger(legacy)
-        .ensure_ledger(&pg)
+        .ensure_ledger(&pg.clone().into())
         .await
         .unwrap();
     let waited = started.elapsed();

@@ -49,10 +49,7 @@ async fn manager_with_pool() -> (MediaManager, Pool) {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    (
-        MediaManager::new_pool(pool_enum.clone(), registry),
-        pool_enum,
-    )
+    (MediaManager::new(pool_enum.clone(), registry), pool_enum)
 }
 
 async fn seed(mgr: &MediaManager, collection_id: Option<i64>) -> rustango::media::Media {
@@ -438,7 +435,7 @@ async fn flaky_manager() -> MediaManager {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(FlakyDelete(InMemoryStorage::new())))
         .with_default("default");
-    MediaManager::new_pool(pool, registry)
+    MediaManager::new(pool, registry)
 }
 
 async fn seed_under(mgr: &MediaManager, prefix: &str) -> rustango::media::Media {

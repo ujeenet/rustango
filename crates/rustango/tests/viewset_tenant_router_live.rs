@@ -117,8 +117,8 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     let url = std::env::var("DATABASE_URL").unwrap();
 
     // Registry tables (rustango_orgs etc).
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     fresh_widget_table(&pool).await;
     rustango::testkit::matrix::fresh_table::<Code>(&rustango::sql::Pool::Postgres(pool.clone()))
         .await;

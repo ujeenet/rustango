@@ -403,22 +403,6 @@ crate::register_admin_superuser_fields!(ApiKey, Add, [user_id]);
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Change, [user_id]);
 
-/// Create the `rustango_api_keys` table if it doesn't exist.
-///
-/// PG-typed back-compat for legacy callers; new code should use
-/// [`ensure_api_keys_table_pool`] which picks the right per-dialect
-/// DDL constant via `pool.dialect().name()`.
-///
-/// #562 — delegates to [`ensure_api_keys_table_pool`] so the
-/// statement-splitting loop lives in one place.
-///
-/// # Errors
-/// Driver failures.
-#[cfg(feature = "postgres")]
-pub async fn ensure_api_keys_table(pool: &crate::sql::sqlx::PgPool) -> Result<(), sqlx::Error> {
-    ensure_api_keys_table_pool(&crate::sql::Pool::from(pool.clone())).await
-}
-
 /// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
 /// Picks the per-dialect DDL constant based on `pool.dialect().name()`
 /// and runs each statement separately (sqlx's simple-prepare rejects

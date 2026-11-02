@@ -3426,7 +3426,7 @@ rustango = { version = "0.61", default-features = false, features = ["sqlite", "
 ```rust,ignore
 let pool = rustango::sql::Pool::connect("sqlite:./var/app.db?mode=rwc").await?;
 rustango::media::ensure_all_tables_pool(&pool).await?;
-let manager = MediaManager::new_pool(pool, registry);
+let manager = MediaManager::new(pool, registry);
 let m = manager.save_bytes(opts).await?;
 let m = manager.get(m.id.get().copied().unwrap()).await?.unwrap();
 ```

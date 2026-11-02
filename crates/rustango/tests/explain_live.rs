@@ -78,7 +78,7 @@ async fn explain_returns_plan_lines() {
 
     let plan = Demo::objects()
         .where_(Demo::label.eq("alpha"))
-        .explain(&pool)
+        .explain_on(&pool, rustango::sql::ExplainOptions::default())
         .await
         .unwrap();
 

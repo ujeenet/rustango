@@ -41,7 +41,7 @@ async fn send(pool: &Pool, method: Method, uri: &str, body: &str) -> (StatusCode
         &["id", "nickname", "amount", "ratio", "qty", "label"],
     )
     .allow_anonymous()
-    .router_pool("/items", pool.clone());
+    .router("/items", pool.clone());
     let resp = app
         .oneshot(
             Request::builder()
@@ -276,7 +276,7 @@ mod renamed {
         let app = ViewSet::for_model(Note::SCHEMA, &["id", "memo"])
             .serializer::<NoteSerializer>()
             .allow_anonymous()
-            .router_pool("/notes", pool.clone());
+            .router("/notes", pool.clone());
         let resp = app
             .oneshot(
                 Request::builder()

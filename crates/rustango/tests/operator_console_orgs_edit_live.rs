@@ -70,8 +70,8 @@ async fn body_text(resp: axum::response::Response) -> String {
 /// password) so individual tests can issue authenticated requests.
 async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
     let pool = pool().await?;
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Seed an operator. Pre-hashed password = "letmein".
     let username = unique("op");

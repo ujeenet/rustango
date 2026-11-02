@@ -42,7 +42,7 @@ use crate::core::{Model, Op};
 use crate::query::QuerySet;
 // For the PG-only `get`.
 #[cfg(feature = "postgres")]
-use sqlx::postgres::{PgPool, PgRow};
+use sqlx::postgres::PgRow;
 #[cfg(feature = "postgres")]
 use sqlx::FromRow;
 
@@ -363,24 +363,6 @@ where
         + crate::sql::MaybeSqliteLoadRelated,
     K: Clone + Into<SqlValue> + Send + Sync + 'static,
 {
-    /// Resolve the parent row and cache it on the field. Subsequent
-    /// calls return the cached reference without hitting the DB.
-    ///
-    /// PG-typed shim — for the tri-dialect entry point see
-    /// [`Self::get_pool`].
-    ///
-    /// # Errors
-    /// * [`ExecError::ForeignKeyTargetMissing`] — no row in the
-    ///   target table has the FK's PK. Usually means the parent was
-    ///   deleted under a non-CASCADE constraint, or the FK was hand-
-    ///   built with an out-of-band value.
-    /// * [`ExecError::MissingPrimaryKey`] — the target model has no
-    ///   `#[rustango(primary_key)]` field (programming error).
-    /// * Any [`ExecError`] produced by the underlying
-    ///   [`FetcherPool`](crate::sql::FetcherPool).
-    pub async fn get(&mut self, pool: &PgPool) -> Result<&T, ExecError> {
-        self.get_on(pool).await
-    }
 }
 
 impl<T, K> ForeignKey<T, K>

@@ -66,7 +66,7 @@ fn app(pool: &Pool) -> axum::Router {
         &["id", "name", "category_id", "created_at", "price"],
     )
     .filter_fields(&["category_id", "name", "created_at"])
-    .router_pool("/items", pool.clone())
+    .router("/items", pool.clone())
     .merge(
         ViewSet::for_model(
             Item::SCHEMA,
@@ -74,7 +74,7 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .filter_fields(&["price"])
         .filter_backend(price_min)
-        .router_pool("/priced", pool.clone()),
+        .router("/priced", pool.clone()),
     )
 }
 

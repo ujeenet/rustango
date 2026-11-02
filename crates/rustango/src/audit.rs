@@ -36,7 +36,7 @@ use crate::sql::sqlx;
 // MySQL go through the `*_pool` helpers further down, which dispatch per
 // backend.
 #[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, PgPool, Row};
+use crate::sql::sqlx::{postgres::PgRow, Row};
 
 /// Source of the change recorded in the audit log.
 ///
@@ -580,28 +580,6 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
     )
 }
 
-/// Read every audit entry for one `(entity_table, entity_pk)` pair,
-/// newest first. Used by the admin's per-row audit trail panel.
-///
-/// Postgres-typed, kept for older call sites; it delegates to
-/// [`fetch_for_entity_pool`], which is the one to use on any backend.
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn fetch_for_entity(
-    pool: &PgPool,
-    entity_table: &str,
-    entity_pk: &str,
-) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    fetch_for_entity_pool(
-        &crate::sql::Pool::from(pool.clone()),
-        entity_table,
-        entity_pk,
-    )
-    .await
-}
-
 /// Schema-registration model for `rustango_audit_log`, so
 /// `makemigrations` owns the audit-log schema. Reads go through
 /// [`AuditEntry`], which has the per-dialect `changes`-column decoders.
@@ -709,85 +687,6 @@ fn cutoff_before(days: i64) -> chrono::DateTime<chrono::Utc> {
     chrono::Duration::try_days(days.max(0))
         .and_then(|d| chrono::Utc::now().checked_sub_signed(d))
         .map_or(floor, |t| t.max(floor))
-}
-
-/// Delete audit entries older than `cutoff_days` from `pool`'s audit
-/// table. Returns the number of rows removed.
-///
-/// Nothing schedules this for you — wire it into a cron job or a
-/// maintenance task. Each tenant's audit table is its own retention
-/// boundary, so this only touches the tenant `pool` points at.
-///
-/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0;
-/// one reaching before 1970 deletes nothing.
-///
-/// Postgres-typed; [`cleanup_older_than_pool`] works on any backend.
-///
-/// The cutoff comes from Rust, not `NOW()`. Since [`emit_one`] binds
-/// `occurred_at`, a database-side `NOW()` would compare two clocks: if
-/// the app host runs ahead, its rows sit in the database's future and a
-/// zero-day sweep deletes none of them.
-///
-/// # Errors
-/// Driver / SQL failures from the DELETE.
-#[cfg(feature = "postgres")]
-pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
-    let cutoff_ts = cutoff_before(cutoff_days);
-    let result = sqlx::query(r#"DELETE FROM "rustango_audit_log" WHERE "occurred_at" < $1"#)
-        .bind(cutoff_ts)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
-}
-
-/// Per-row retention: keep the `keep` newest audit entries for each
-/// `(entity_table, entity_pk)` pair and delete the rest. Use it when you
-/// must keep the edit chain of every row but cap how far the table grows.
-///
-/// One window-function DELETE does the work: each entry gets a
-/// `ROW_NUMBER()` ordered by `occurred_at DESC, id DESC`, and rows ranked
-/// above `keep` are dropped. One round-trip, however many pairs the table
-/// holds.
-///
-/// `keep = 0` clears the whole table; negative values clamp to 0. Returns
-/// the number of rows removed.
-///
-/// Postgres-typed; [`cleanup_keep_last_n_pool`] works on any backend.
-///
-/// # Errors
-/// Driver / SQL failures from the DELETE.
-#[cfg(feature = "postgres")]
-pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::Error> {
-    let keep = keep.max(0);
-    let result = sqlx::query(
-        r#"DELETE FROM "rustango_audit_log" WHERE "id" IN (
-              SELECT "id" FROM (
-                SELECT "id",
-                       ROW_NUMBER() OVER (
-                           PARTITION BY "entity_table", "entity_pk"
-                           ORDER BY "occurred_at" DESC, "id" DESC
-                       ) AS _rn
-                FROM "rustango_audit_log"
-              ) ranked
-              WHERE _rn > $1
-           )"#,
-    )
-    .bind(keep)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
-}
-
-/// Make sure the table exists in `pool`'s database or schema. Does nothing
-/// when it is already there. Handy in tests and ad-hoc setup.
-///
-/// Postgres-typed; [`ensure_table_pool`] works on any backend.
-///
-/// # Errors
-/// Driver / SQL failures from the emitted DDL.
-#[cfg(feature = "postgres")]
-pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-    ensure_table_pool(&crate::sql::Pool::Postgres(pool.clone())).await
 }
 
 // ============================================================ all-backend audit

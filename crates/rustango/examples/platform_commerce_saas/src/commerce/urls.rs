@@ -4,7 +4,7 @@
 //! differences, and they are the whole difference between a
 //! single-tenant and a multi-tenant rustango app:
 //!
-//! 1. `.tenant_router(prefix)` replaces `.router_pool(prefix, pool)` —
+//! 1. `.tenant_router(prefix)` replaces `.router(prefix, pool)` —
 //!    the ViewSet resolves the tenant's pool per request instead of
 //!    closing over one.
 //! 2. The hand-written handlers take `Tenant<DefaultTenantDb>` and read

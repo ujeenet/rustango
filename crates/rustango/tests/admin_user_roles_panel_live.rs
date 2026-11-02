@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
 use rustango::sql::Pool;
 use rustango::tenancy::permissions::{
-    assign_role, get_or_create_role, grant_role_perm, set_user_perm,
+    assign_role_pool, get_or_create_role_pool, grant_role_perm_pool, set_user_perm_pool,
 };
 use rustango::tenancy::User;
 use tower::ServiceExt;
@@ -41,8 +41,12 @@ async fn pool() -> Option<sqlx::PgPool> {
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
-    rustango::migrate::drop_all(pool).await.unwrap();
-    rustango::migrate::apply_all(pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
     for t in [
         "rustango_user_permissions",
         "rustango_user_roles",
@@ -80,22 +84,26 @@ async fn user_detail_page_renders_roles_and_effective_perms() {
     user.insert(&pool).await.unwrap();
     let user_id = *user.id.get().expect("PK assigned");
 
-    let role_id = get_or_create_role("editor_panel", "Edits content", &pool)
+    let role_id = get_or_create_role_pool("editor_panel", "Edits content", &pool.clone().into())
         .await
         .unwrap();
 
-    grant_role_perm(role_id, "post.add", &pool).await.unwrap();
-    grant_role_perm(role_id, "post.change", &pool)
+    grant_role_perm_pool(role_id, "post.add", &pool.clone().into())
         .await
         .unwrap();
-    assign_role(user_id, role_id, &pool).await.unwrap();
+    grant_role_perm_pool(role_id, "post.change", &pool.clone().into())
+        .await
+        .unwrap();
+    assign_role_pool(user_id, role_id, &pool.clone().into())
+        .await
+        .unwrap();
 
     // Direct grant + direct denial — the panel should show the grant
     // and *not* the denied codename even though the role would grant it.
-    set_user_perm(user_id, "comment.add", true, &pool)
+    set_user_perm_pool(user_id, "comment.add", true, &pool.clone().into())
         .await
         .unwrap();
-    set_user_perm(user_id, "post.change", false, &pool)
+    set_user_perm_pool(user_id, "post.change", false, &pool.clone().into())
         .await
         .unwrap();
 

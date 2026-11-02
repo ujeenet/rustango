@@ -39,7 +39,7 @@ async fn make_router() -> axum::Router {
     let pool = Pool::Sqlite(sq);
     rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "published"])
         .page_size(50)
-        .router_pool("/posts", pool)
+        .router("/posts", pool)
 }
 
 fn get(uri: &str) -> Request<Body> {

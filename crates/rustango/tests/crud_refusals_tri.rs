@@ -68,11 +68,8 @@ fn app(pool: &Pool) -> axum::Router {
     .unwrap();
     let t = Arc::new(t);
     ViewSet::for_model(Author::SCHEMA, &["id", "name"])
-        .router_pool("/api/authors", pool.clone())
-        .merge(
-            ViewSet::for_model(Tag::SCHEMA, &["code", "name"])
-                .router_pool("/api/tags", pool.clone()),
-        )
+        .router("/api/authors", pool.clone())
+        .merge(ViewSet::for_model(Tag::SCHEMA, &["code", "name"]).router("/api/tags", pool.clone()))
         .merge(
             DeleteView::for_model(Author::SCHEMA)
                 .template("detail.html")

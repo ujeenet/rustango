@@ -7,7 +7,7 @@
 //! * The FK column DDL is emitted as `BIGINT` (same as the v0.1
 //!   `i64` + `#[rustango(fk = "…")]` form).
 //! * After fetching a `Book`, `book.author` is `ForeignKey::Unloaded(pk)`.
-//! * `book.author.get(&pool)` resolves the parent and caches it.
+//! * `book.author.get_on(&pool)` resolves the parent and caches it.
 //! * A second `.get()` is a no-op (no extra SQL needed; we just
 //!   confirm the value is the same reference).
 //! * `ForeignKey::loaded(pk, t)` constructs the `Loaded` state
@@ -124,12 +124,12 @@ async fn fetched_book_has_unloaded_fk_then_get_resolves_parent() {
     assert!(fetched_book.author.value().is_none());
 
     // Lazy-load.
-    let loaded_author = fetched_book.author.get(&pool).await.unwrap();
+    let loaded_author = fetched_book.author.get_on(&pool).await.unwrap();
     assert_eq!(loaded_author.name, "alice");
     assert!(fetched_book.author.is_loaded());
 
     // Second `.get()` is cached — must still return alice.
-    let cached = fetched_book.author.get(&pool).await.unwrap();
+    let cached = fetched_book.author.get_on(&pool).await.unwrap();
     assert_eq!(cached.name, "alice");
 }
 
@@ -156,7 +156,7 @@ async fn loaded_constructor_skips_initial_select() {
     assert_eq!(fk.pk(), bob_pk);
 
     // `.get()` returns the cached value without touching the DB.
-    let same = fk.get(&pool).await.unwrap();
+    let same = fk.get_on(&pool).await.unwrap();
     assert_eq!(same.name, "bob");
 }
 
@@ -170,7 +170,7 @@ async fn missing_fk_target_returns_named_error() {
     // PK 9999 doesn't exist — and we built the FK by hand so it
     // bypasses the FK constraint check on insert.
     let mut orphan: ForeignKey<Author> = ForeignKey::unloaded(9999);
-    let err = orphan.get(&pool).await.unwrap_err();
+    let err = orphan.get_on(&pool).await.unwrap_err();
     match err {
         ExecError::ForeignKeyTargetMissing { table, pk } => {
             assert_eq!(table, "rustango_fk_author");
@@ -269,7 +269,7 @@ async fn string_pk_fk_round_trips_with_lazy_load() {
     assert!(!fetched.author.is_loaded());
 
     // Lazy-load resolves the parent.
-    let parent = fetched.author.get(&pool).await.unwrap();
+    let parent = fetched.author.get_on(&pool).await.unwrap();
     assert_eq!(parent.name, "alice");
     assert!(fetched.author.is_loaded());
 }
@@ -282,7 +282,7 @@ async fn string_pk_fk_missing_target_renders_pk_in_error() {
     };
 
     let mut orphan: ForeignKey<StrUser, String> = ForeignKey::unloaded("does-not-exist".to_owned());
-    let err = orphan.get(&pool).await.unwrap_err();
+    let err = orphan.get_on(&pool).await.unwrap_err();
     match err {
         ExecError::ForeignKeyTargetMissing { table, pk } => {
             assert_eq!(table, "rustango_fk_str_user");
@@ -407,7 +407,7 @@ async fn nullable_fk_round_trip_with_some_and_none() {
         .author
         .as_mut()
         .unwrap()
-        .get(&pool)
+        .get_on(&pool)
         .await
         .unwrap();
     assert_eq!(parent.name, "alice");

@@ -72,7 +72,7 @@ async fn serializer_router() -> axum::Router {
     rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         .page_size(50)
         .serializer::<PostSerializer>()
-        .router_pool("/posts", sqlite_pool().await)
+        .router("/posts", sqlite_pool().await)
 }
 
 fn get(uri: &str) -> Request<Body> {
@@ -180,7 +180,7 @@ async fn without_serializer_default_projection_is_unchanged() {
     // confirming the serializer path is what reshapes the output.
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         .page_size(50)
-        .router_pool("/posts", sqlite_pool().await);
+        .router("/posts", sqlite_pool().await);
 
     let resp = app
         .clone()

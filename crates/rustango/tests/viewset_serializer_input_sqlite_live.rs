@@ -67,7 +67,7 @@ async fn router() -> axum::Router {
     .expect("create");
     rustango::viewset::ViewSet::for_model(Item::SCHEMA, &["id", "name", "slug", "internal_score"])
         .serializer::<ItemSerializer>()
-        .router_pool("/items", Pool::Sqlite(sq))
+        .router("/items", Pool::Sqlite(sq))
 }
 
 fn post(uri: &str, json: &str) -> Request<Body> {
@@ -254,7 +254,7 @@ async fn widget_router() -> axum::Router {
         &["id", "code", "note", "priority", "status"],
     )
     .serializer::<WidgetSerializer>()
-    .router_pool("/widgets", Pool::Sqlite(sq))
+    .router("/widgets", Pool::Sqlite(sq))
 }
 
 /// Helper: POST a widget body, return (status, body).
@@ -421,7 +421,7 @@ async fn doc_router() -> axum::Router {
     .expect("create");
     rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "body"])
         .serializer::<DocSerializer>()
-        .router_pool("/docs", Pool::Sqlite(sq))
+        .router("/docs", Pool::Sqlite(sq))
 }
 
 #[tokio::test]
@@ -623,7 +623,7 @@ async fn span_router() -> axum::Router {
     .expect("create");
     rustango::viewset::ViewSet::for_model(Span::SCHEMA, &["id", "lo", "hi"])
         .serializer::<SpanSerializer>()
-        .router_pool("/spans", Pool::Sqlite(sq))
+        .router("/spans", Pool::Sqlite(sq))
 }
 
 #[tokio::test]
@@ -717,7 +717,7 @@ async fn patch_skips_an_absent_write_only_field() {
     .expect("create");
     let app = rustango::viewset::ViewSet::for_model(Acct::SCHEMA, &["id", "name", "secret"])
         .serializer::<AcctSerializer>()
-        .router_pool("/accts", Pool::Sqlite(sq));
+        .router("/accts", Pool::Sqlite(sq));
     let resp = app
         .clone()
         .oneshot(post("/accts", r#"{"name":"a","secret":"longenough"}"#))

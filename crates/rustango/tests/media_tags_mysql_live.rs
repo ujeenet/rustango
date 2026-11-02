@@ -71,7 +71,7 @@ async fn manager_or_skip() -> Option<(MediaManager, Pool)> {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    Some((MediaManager::new_pool(pool.clone(), registry), pool))
+    Some((MediaManager::new(pool.clone(), registry), pool))
 }
 
 async fn seed(mgr: &MediaManager) -> i64 {

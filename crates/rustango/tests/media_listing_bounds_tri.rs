@@ -36,7 +36,7 @@ fn manager(pool: &Pool) -> MediaManager {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    MediaManager::new_pool(pool.clone(), registry)
+    MediaManager::new(pool.clone(), registry)
 }
 
 struct AllowAll;

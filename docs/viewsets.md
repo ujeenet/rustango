@@ -491,7 +491,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Reach for the builder when you need SQLite/MySQL, multi-tenancy, a runtime-built
@@ -747,7 +747,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 An empty action list = no check. Enforcement reads an authenticated user from
@@ -788,7 +788,7 @@ is the superuser rule, and an agent token is never a superuser.
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Over-limit → `429 Too Many Requests` + `Retry-After`. Counters are per-process;
@@ -806,7 +806,7 @@ CRUD routes. For extra endpoints, mount your own handlers alongside it:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -961,7 +961,7 @@ Compose the ViewSet's router into your app. Single-tenant, static pool:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-tenant (no pool captured — each request resolves its tenant connection):

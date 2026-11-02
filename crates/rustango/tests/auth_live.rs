@@ -9,7 +9,7 @@ use rustango::core::Column as _;
 use rustango::migrate as rmig;
 use rustango::sql::sqlx;
 use rustango::tenancy::{
-    authenticate_operator, authenticate_user_pool, manage, password, Org, TenantPools,
+    authenticate_operator_pool, authenticate_user_pool, manage, password, Org, TenantPools,
 };
 use tokio::sync::Mutex;
 
@@ -92,8 +92,8 @@ async fn create_operator_and_authenticate_round_trip() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let username = unique("admin");
@@ -112,25 +112,25 @@ async fn create_operator_and_authenticate_round_trip() {
     .unwrap();
 
     // Right password authenticates.
-    let op = authenticate_operator(&pool, &username, "hunter2")
+    let op = authenticate_operator_pool(&pool.clone().into(), &username, "hunter2")
         .await
         .unwrap();
     assert!(op.is_some(), "right password should authenticate");
     assert_eq!(op.unwrap().username, username);
 
     // Wrong password rejects.
-    let op = authenticate_operator(&pool, &username, "wrong")
+    let op = authenticate_operator_pool(&pool.clone().into(), &username, "wrong")
         .await
         .unwrap();
     assert!(op.is_none(), "wrong password should reject");
 
     // Unknown username rejects.
-    let op = authenticate_operator(&pool, "nobody", "hunter2")
+    let op = authenticate_operator_pool(&pool.clone().into(), "nobody", "hunter2")
         .await
         .unwrap();
     assert!(op.is_none(), "unknown user should reject");
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -140,8 +140,8 @@ async fn create_operator_rejects_duplicate_username() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let username = unique("dup");
@@ -174,7 +174,7 @@ async fn create_operator_rejects_duplicate_username() {
     .unwrap_err();
     assert!(format!("{err}").contains("already exists"));
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -184,8 +184,8 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Provision a schema-mode tenant. We need the rustango_users
     // table in that schema — create it manually since slice 6 doesn't
@@ -269,7 +269,7 @@ async fn create_user_in_schema_mode_tenant_authenticates_against_that_schema() {
     assert_eq!(u.password_changed_at, Some(at));
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -282,8 +282,8 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("acme-hw");
     drop_schema(&pool, &slug).await;
@@ -335,7 +335,7 @@ async fn hard_wall_operator_credential_does_not_authenticate_against_tenant() {
     );
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -345,8 +345,8 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("acme-hw2");
     drop_schema(&pool, &slug).await;
@@ -387,7 +387,7 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
 
     // The tenant user (even superuser) must NOT authenticate as an
     // operator — the username doesn't exist in rustango_operators.
-    let op = authenticate_operator(&pool, &user, "Top-secret-pw-1")
+    let op = authenticate_operator_pool(&pool.clone().into(), &user, "Top-secret-pw-1")
         .await
         .unwrap();
     assert!(
@@ -396,7 +396,7 @@ async fn hard_wall_tenant_user_credential_does_not_authenticate_as_operator() {
     );
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[test]

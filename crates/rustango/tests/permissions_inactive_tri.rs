@@ -62,10 +62,23 @@ async fn inactive_user_holds_no_grants(pool: &Pool) {
     // The PostgreSQL-only forms agree.
     #[cfg(feature = "postgres")]
     if let Some(pg) = pool.as_postgres() {
-        use rustango::tenancy::permissions::{has_all_perms, has_any_perm, user_permissions};
-        assert!(!has_any_perm(uid, &["pit_post.view"], pg).await.unwrap());
-        assert!(!has_all_perms(uid, &["pit_post.view"], pg).await.unwrap());
-        assert!(user_permissions(uid, pg).await.unwrap().is_empty());
+        use rustango::tenancy::permissions::{
+            has_all_perms_pool, has_any_perm_pool, user_permissions_pool,
+        };
+        assert!(
+            !has_any_perm_pool(uid, &["pit_post.view"], &pg.clone().into())
+                .await
+                .unwrap()
+        );
+        assert!(
+            !has_all_perms_pool(uid, &["pit_post.view"], &pg.clone().into())
+                .await
+                .unwrap()
+        );
+        assert!(user_permissions_pool(uid, &pg.clone().into())
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
 
@@ -86,13 +99,19 @@ async fn active_user_holds_its_grants(pool: &Pool) {
     assert_eq!(perms, ["pit_post.export", "pit_post.view"]);
     #[cfg(feature = "postgres")]
     if let Some(pg) = pool.as_postgres() {
-        use rustango::tenancy::permissions::{has_all_perms, has_any_perm};
-        assert!(has_any_perm(uid, &["pit_post.view"], pg).await.unwrap());
+        use rustango::tenancy::permissions::{has_all_perms_pool, has_any_perm_pool};
         assert!(
-            has_all_perms(uid, &["pit_post.view", "pit_post.export"], pg)
+            has_any_perm_pool(uid, &["pit_post.view"], &pg.clone().into())
                 .await
                 .unwrap()
         );
+        assert!(has_all_perms_pool(
+            uid,
+            &["pit_post.view", "pit_post.export"],
+            &pg.clone().into()
+        )
+        .await
+        .unwrap());
     }
 }
 

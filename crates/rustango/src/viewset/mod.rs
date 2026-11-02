@@ -459,7 +459,7 @@ where
 ///             ))]
 ///         })
 ///     })
-///     .router_pool("/posts", pool);
+///     .router("/posts", pool);
 /// ```
 ///
 /// Backends run on **every** action. They narrow the list query and
@@ -1237,21 +1237,19 @@ impl ViewSet {
     }
 
     /// Build an `axum::Router` mounted at `prefix`. The pool is baked
-    /// in at mount time, so every request uses the same `PgPool`. For
+    /// in at mount time, so every request uses the same pool. For
     /// tenancy projects use [`Self::tenant_router`] instead, so each
     /// request resolves its own tenant connection.
     ///
     /// A trailing `/` on the prefix makes no difference.
-    #[cfg(feature = "postgres")]
-    pub fn router(self, prefix: &str, pool: crate::sql::sqlx::PgPool) -> Router {
-        Self::router_with_source(self, prefix, PoolSource::Static(pool))
+    pub fn router(self, prefix: &str, pool: impl Into<crate::sql::Pool>) -> Router {
+        Self::router_with_source(self, prefix, PoolSource::StaticPool(pool.into()))
     }
 
-    /// [`Self::router`], but taking the backend-erasing
-    /// [`crate::sql::Pool`] enum. SQLite and MySQL projects use this;
-    /// Postgres projects may use either.
+    /// Old name of [`Self::router`].
+    #[deprecated(since = "0.62.0", note = "use `ViewSet::router`")]
     pub fn router_pool(self, prefix: &str, pool: crate::sql::Pool) -> Router {
-        Self::router_with_source(self, prefix, PoolSource::StaticPool(pool))
+        self.router(prefix, pool)
     }
 
     /// Build a router that resolves the database connection per
@@ -1352,10 +1350,7 @@ impl ViewSet {
 /// Where a [`ViewSet`] gets its database pool.
 #[derive(Clone)]
 enum PoolSource {
-    /// PG-typed static pool, from `router(prefix, pool)`.
-    #[cfg(feature = "postgres")]
-    Static(crate::sql::sqlx::PgPool),
-    /// Any-dialect static pool, from `router_pool(prefix, pool)`.
+    /// A static pool, from `router(prefix, pool)`.
     StaticPool(crate::sql::Pool),
     /// Each handler resolves a connection through the
     /// [`crate::extractors::Tenant`] extractor at request time. A
@@ -1701,8 +1696,6 @@ impl ViewSetState {
     #[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
     async fn resolve(&self, parts: &axum::http::request::Parts) -> Result<Scope, Response> {
         match &self.pool_source {
-            #[cfg(feature = "postgres")]
-            PoolSource::Static(_) => Ok(Scope::Static),
             PoolSource::StaticPool(_) => Ok(Scope::Static),
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
@@ -1726,8 +1719,6 @@ impl ViewSetState {
         parts: &axum::http::request::Parts,
     ) -> Result<AcquiredConn, Response> {
         let pool = match (&self.pool_source, &scope) {
-            #[cfg(feature = "postgres")]
-            (PoolSource::Static(pool), _) => Pool::from(pool.clone()),
             (PoolSource::StaticPool(pool), _) => pool.clone(),
             #[cfg(feature = "tenancy")]
             (PoolSource::Tenant, scope) => {
@@ -6271,7 +6262,7 @@ mod bulk_create_source_tests {
         crate::testkit::matrix::fresh_table::<Note>(&pool).await;
         audit::ensure_table_pool(&pool).await.unwrap();
         let app = super::ViewSet::for_model(<Note as crate::core::Model>::SCHEMA, &["id", "title"])
-            .router_pool("/notes", pool.clone());
+            .router("/notes", pool.clone());
         let req = Request::builder()
             .method(Method::POST)
             .uri("/notes")

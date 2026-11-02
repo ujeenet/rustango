@@ -21,9 +21,7 @@
 //!     .set("avatars", Arc::new(s3_storage))
 //!     .with_default("avatars");
 //!
-//! // `new_pool` works on all three backends. `MediaManager::new` is
-//! // Postgres-only and takes a `PgPool`.
-//! let manager = MediaManager::new_pool(pool.clone(), registry);
+//! let manager = MediaManager::new(pool.clone(), registry);
 //!
 //! // Server-side save (small files):
 //! let media = manager.save_bytes(SaveOpts {
@@ -64,15 +62,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-#[cfg(feature = "postgres")]
-use sqlx::PgPool;
-
 use crate::core::Column as _;
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub mod collection;
 pub mod tag;
@@ -347,21 +342,21 @@ pub struct MediaManager {
 }
 
 impl MediaManager {
-    /// PG back-compat constructor.
-    #[cfg(feature = "postgres")]
+    /// A manager over `pool`, on any backend.
     #[must_use]
-    pub fn new(pool: PgPool, registry: StorageRegistry) -> Self {
-        Self::new_pool(crate::sql::Pool::Postgres(pool), registry)
-    }
-
-    /// Constructor that works on all three backends.
-    #[must_use]
-    pub fn new_pool(pool: impl Into<crate::sql::Pool>, registry: StorageRegistry) -> Self {
+    pub fn new(pool: impl Into<crate::sql::Pool>, registry: StorageRegistry) -> Self {
         Self {
             pool: pool.into(),
             registry,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
+    }
+
+    /// Old name of [`Self::new`].
+    #[deprecated(since = "0.62.0", note = "use `MediaManager::new`")]
+    #[must_use]
+    pub fn new_pool(pool: impl Into<crate::sql::Pool>, registry: StorageRegistry) -> Self {
+        Self::new(pool, registry)
     }
 
     /// Refuse a [`Self::begin_upload`] that declares more than `bytes`.
@@ -2104,7 +2099,7 @@ mod tests {
     #[tokio::test]
     async fn pool_works_on_a_sqlite_manager() {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
-        let m = MediaManager::new_pool(pool, StorageRegistry::new());
+        let m = MediaManager::new(pool, StorageRegistry::new());
         assert!(m.pool().as_sqlite().is_some());
     }
 

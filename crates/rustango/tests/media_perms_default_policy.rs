@@ -49,7 +49,7 @@ async fn setup() -> (MediaManager, Pool) {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    (MediaManager::new_pool(pool.clone(), registry), pool)
+    (MediaManager::new(pool.clone(), registry), pool)
 }
 
 async fn make_user(pool: &Pool, name: &str, superuser: bool) -> i64 {
@@ -835,7 +835,7 @@ async fn ownerless_upload(superuser: bool) -> (Option<i64>, i64) {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(Presigning(InMemoryStorage::new())))
         .with_default("default");
-    let mgr = MediaManager::new_pool(pool.clone(), registry);
+    let mgr = MediaManager::new(pool.clone(), registry);
     let uid = make_user(&pool, "uploader", superuser).await;
     grant(&pool, uid, "rustango_media.add").await;
     let resp = app(mgr.clone(), pool, Some(principal(uid, superuser)))

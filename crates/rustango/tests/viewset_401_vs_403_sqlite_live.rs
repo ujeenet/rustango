@@ -46,7 +46,7 @@ fn gated(pool: Pool) -> axum::Router {
             list: vec!["vs_401_app.view_note".to_owned()],
             ..ViewSetPerms::default()
         })
-        .router_pool("/notes", pool)
+        .router("/notes", pool)
 }
 
 /// No credentials at all → 401, so a token client knows to refresh.
@@ -134,8 +134,7 @@ async fn superuser_is_allowed() {
 /// An ungated ViewSet is unaffected — no codenames means no auth check.
 #[tokio::test]
 async fn ungated_viewset_still_serves_anonymous() {
-    let app =
-        ViewSet::for_model(Note::SCHEMA, &["id", "title"]).router_pool("/notes", pool().await);
+    let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"]).router("/notes", pool().await);
 
     let res = app
         .oneshot(
@@ -188,7 +187,7 @@ async fn every_codename_is_required() {
                 ],
                 ..ViewSetPerms::default()
             })
-            .router_pool("/notes", pool)
+            .router("/notes", pool)
     };
     let list = || {
         let mut req = Request::builder()

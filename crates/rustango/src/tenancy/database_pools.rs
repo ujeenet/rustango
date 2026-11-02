@@ -80,6 +80,7 @@ impl<DB: Database> DatabasePool<DB> {
 pub struct DatabaseConn<DB: Database> {
     inner: PoolConnection<DB>,
     /// The tenant's pool, so audit rows in its transactions keep the source.
+    #[cfg_attr(not(any(feature = "mysql", feature = "sqlite")), allow(dead_code))]
     pool: crate::sql::PoolId,
 }
 
@@ -90,6 +91,7 @@ impl<DB: Database> DatabaseConn<DB> {
         Self { inner, pool }
     }
 
+    #[cfg(any(feature = "mysql", feature = "sqlite"))]
     pub(crate) fn pool_id(&self) -> &crate::sql::PoolId {
         &self.pool
     }

@@ -9,7 +9,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::fetch_with_prefetch;
+use rustango::sql::fetch_with_prefetch_pool;
 use rustango::sql::{sqlx, Auto, ForeignKey};
 use rustango::Model;
 use tokio::sync::Mutex;
@@ -120,7 +120,7 @@ async fn prefetch_groups_children_under_parents() {
     }
 
     let groups: Vec<(Author, Vec<Post>)> =
-        fetch_with_prefetch::<Author, Post>(Author::objects(), "author", &pool)
+        fetch_with_prefetch_pool::<Author, Post>(Author::objects(), "author", &pool.clone().into())
             .await
             .unwrap();
     assert_eq!(groups.len(), 3);
@@ -151,7 +151,7 @@ async fn prefetch_with_no_parents_returns_empty() {
     };
     setup(&pool).await;
     let groups: Vec<(Author, Vec<Post>)> =
-        fetch_with_prefetch::<Author, Post>(Author::objects(), "author", &pool)
+        fetch_with_prefetch_pool::<Author, Post>(Author::objects(), "author", &pool.clone().into())
             .await
             .unwrap();
     assert!(groups.is_empty());
@@ -192,9 +192,13 @@ async fn on_reads_are_counted_and_stay_flat() {
     })
     .await;
     assert_num_queries(2, async {
-        let groups = fetch_with_prefetch::<Author, Post>(Author::objects(), "author", &pool)
-            .await
-            .unwrap();
+        let groups = fetch_with_prefetch_pool::<Author, Post>(
+            Author::objects(),
+            "author",
+            &pool.clone().into(),
+        )
+        .await
+        .unwrap();
         assert_eq!(groups.len(), 3);
     })
     .await;

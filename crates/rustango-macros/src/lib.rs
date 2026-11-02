@@ -13467,7 +13467,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #read_only_call
                     #allow_anonymous_call
                     #serializer_call
-                    .router_pool(prefix, pool.into())
+                    .router(prefix, pool.into())
             }
         }
     })

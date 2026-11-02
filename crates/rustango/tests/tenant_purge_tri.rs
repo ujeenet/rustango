@@ -367,7 +367,7 @@ async fn upload(pool: &Pool, storage: &rustango::storage::StorageRegistry) -> Ve
     rustango::testkit::create_tables_for::<Media>(pool)
         .await
         .unwrap();
-    let mgr = MediaManager::new_pool(pool.clone(), storage.clone());
+    let mgr = MediaManager::new(pool.clone(), storage.clone());
     let mut keys = Vec::new();
     for file in ["a.txt", "b.txt"] {
         let m = mgr

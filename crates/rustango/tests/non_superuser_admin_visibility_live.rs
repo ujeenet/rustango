@@ -3,7 +3,7 @@
 //! admin as a non-superuser" loop that #61–#66 collectively broke.
 //!
 //! What this catches end-to-end:
-//!   - #61: `auto_create_permissions` actually runs (we invoke it
+//!   - #61: `auto_create_permissions_pool` actually runs (we invoke it
 //!     here and assert the seeded codenames exist in
 //!     `rustango_permissions`).
 //!   - #62: framework models with the default `permissions = true`
@@ -22,7 +22,8 @@ use axum::http::{Request, StatusCode};
 use rustango::sql::sqlx;
 use rustango::sql::Pool;
 use rustango::tenancy::permissions::{
-    assign_role, auto_create_permissions, get_or_create_role, grant_role_perm, user_permissions,
+    assign_role_pool, auto_create_permissions_pool, get_or_create_role_pool, grant_role_perm_pool,
+    user_permissions_pool,
 };
 use rustango::tenancy::User;
 use tower::ServiceExt;
@@ -50,8 +51,12 @@ async fn pool() -> Option<sqlx::PgPool> {
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
-    rustango::migrate::drop_all(pool).await.unwrap();
-    rustango::migrate::apply_all(pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
     for t in [
         "rustango_user_permissions",
         "rustango_user_roles",
@@ -69,7 +74,7 @@ async fn fresh(pool: &sqlx::PgPool) {
         .unwrap();
 }
 
-/// `auto_create_permissions` walks the inventory of registered models
+/// `auto_create_permissions_pool` walks the inventory of registered models
 /// and seeds the four CRUD codenames (`{table}.add/change/delete/view`)
 /// for every model with the default `permissions = true`. After
 /// running it, a known-permissions-enabled framework model
@@ -84,7 +89,9 @@ async fn auto_create_permissions_seeds_codenames_for_default_models() {
     };
     fresh(&pool).await;
 
-    auto_create_permissions(&pool).await.unwrap();
+    auto_create_permissions_pool(&pool.clone().into())
+        .await
+        .unwrap();
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM rustango_permissions WHERE codename = $1")
@@ -94,7 +101,7 @@ async fn auto_create_permissions_seeds_codenames_for_default_models() {
             .unwrap();
     assert_eq!(
         count, 1,
-        "expected `rustango_users.view` to exist after auto_create_permissions"
+        "expected `rustango_users.view` to exist after auto_create_permissions_pool"
     );
     // Sanity: all four CRUD verbs land for the same model.
     for action in ["add", "change", "delete", "view"] {
@@ -106,7 +113,7 @@ async fn auto_create_permissions_seeds_codenames_for_default_models() {
                 .unwrap();
         assert_eq!(
             n, 1,
-            "expected `rustango_users.{action}` codename after auto_create_permissions"
+            "expected `rustango_users.{action}` codename after auto_create_permissions_pool"
         );
     }
     // #2061: the reserved codenames too, as `auto_create_permissions_pool` seeds.
@@ -120,7 +127,10 @@ async fn auto_create_permissions_seeds_codenames_for_default_models() {
                 .fetch_one(&pool)
                 .await
                 .unwrap();
-        assert_eq!(n, 1, "expected `{codename}` after auto_create_permissions");
+        assert_eq!(
+            n, 1,
+            "expected `{codename}` after auto_create_permissions_pool"
+        );
     }
 }
 
@@ -143,7 +153,9 @@ async fn non_superuser_with_view_perm_sees_model_in_admin() {
     };
     fresh(&pool).await;
 
-    auto_create_permissions(&pool).await.unwrap();
+    auto_create_permissions_pool(&pool.clone().into())
+        .await
+        .unwrap();
 
     // Provision a non-superuser.
     let mut user = User {
@@ -161,15 +173,19 @@ async fn non_superuser_with_view_perm_sees_model_in_admin() {
     // Role grants `rustango_users.view` only — explicitly NOT
     // `rustango_roles.view`, so we can assert the sidebar
     // filtering really does exclude unviewable models.
-    let role_id = get_or_create_role("user_viewer", "Can read users", &pool)
+    let role_id = get_or_create_role_pool("user_viewer", "Can read users", &pool.clone().into())
         .await
         .unwrap();
-    grant_role_perm(role_id, "rustango_users.view", &pool)
+    grant_role_perm_pool(role_id, "rustango_users.view", &pool.clone().into())
         .await
         .unwrap();
-    assign_role(user_id, role_id, &pool).await.unwrap();
+    assign_role_pool(user_id, role_id, &pool.clone().into())
+        .await
+        .unwrap();
 
-    let perms = user_permissions(user_id, &pool).await.unwrap();
+    let perms = user_permissions_pool(user_id, &pool.clone().into())
+        .await
+        .unwrap();
     assert!(
         perms.iter().any(|p| p == "rustango_users.view"),
         "user should have rustango_users.view in effective set; got {perms:?}"

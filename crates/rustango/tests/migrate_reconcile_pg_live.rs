@@ -91,7 +91,9 @@ async fn squash_reconciles_on_postgres_legacy_runner() {
     let a = mig(&m1, std::slice::from_ref(&t_a), &[]);
     let b = mig(&m2, std::slice::from_ref(&t_b), &[]);
     let dir = write_dir(&[&a, &b]);
-    let first = migrate::migrate(&pool, &dir).await.unwrap();
+    let first = migrate::migrate_pool(&pool.clone().into(), &dir)
+        .await
+        .unwrap();
     assert_eq!(first.len(), 2);
     sqlx::query(&format!("INSERT INTO \"{t_a}\" (id) VALUES (9)"))
         .execute(&pool)
@@ -101,7 +103,7 @@ async fn squash_reconciles_on_postgres_legacy_runner() {
     // The squash must reconcile rather than re-CREATE (42P07).
     let squash = mig(&sq, &[t_a.clone(), t_b.clone()], &[m1.clone(), m2.clone()]);
     let dir = write_dir(&[&a, &b, &squash]);
-    let applied = migrate::migrate(&pool, &dir)
+    let applied = migrate::migrate_pool(&pool.clone().into(), &dir)
         .await
         .expect("squash must reconcile on the legacy PgPool runner, not hit 42P07");
     assert_eq!(applied.len(), 1);
@@ -129,7 +131,10 @@ async fn squash_reconciles_on_postgres_legacy_runner() {
     assert_eq!(v, 9);
 
     // Idempotent — predecessor files remain on disk but are superseded.
-    assert!(migrate::migrate(&pool, &dir).await.unwrap().is_empty());
+    assert!(migrate::migrate_pool(&pool.clone().into(), &dir)
+        .await
+        .unwrap()
+        .is_empty());
 
     // Cleanup.
     for t in [&t_a, &t_b] {
@@ -166,14 +171,14 @@ async fn migrate_to_reconciles_a_squash_on_postgres() {
     );
     let a = mig(&m1, std::slice::from_ref(&t_a), &[]);
     let b = mig(&m2, std::slice::from_ref(&t_b), &[]);
-    migrate::migrate(&pool, &write_dir(&[&a, &b]))
+    migrate::migrate_pool(&pool.clone().into(), &write_dir(&[&a, &b]))
         .await
         .unwrap();
 
     // `migrate --squash` removed the replaced files.
     let squash = mig(&sq, &[t_a.clone(), t_b.clone()], &[m1.clone(), m2.clone()]);
     let dir = write_dir(&[&squash]);
-    let touched = migrate::migrate_to(&pool, &dir, &sq)
+    let touched = migrate::migrate_to_pool(&pool.clone().into(), &dir, &sq)
         .await
         .expect("migrate_to must reconcile the squash, not hit 42P07");
     assert_eq!(touched.len(), 1);
@@ -220,13 +225,13 @@ async fn migrate_to_reconciles_a_squash_after_its_predecessors_on_postgres() {
     );
     let a = mig(&m1, std::slice::from_ref(&t_a), &[]);
     let b = mig(&m2, std::slice::from_ref(&t_b), &[]);
-    migrate::migrate(&pool, &write_dir(&[&a, &b]))
+    migrate::migrate_pool(&pool.clone().into(), &write_dir(&[&a, &b]))
         .await
         .unwrap();
 
     let squash = mig(&sq, &[t_a.clone(), t_b.clone()], &[m1.clone(), m2.clone()]);
     let dir = write_dir(&[&a, &b, &squash]);
-    let touched = migrate::migrate_to(&pool, &dir, &sq)
+    let touched = migrate::migrate_to_pool(&pool.clone().into(), &dir, &sq)
         .await
         .expect("migrate_to must reconcile the squash, not hit 42P07");
     assert_eq!(touched.len(), 1);

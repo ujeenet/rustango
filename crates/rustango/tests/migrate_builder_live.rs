@@ -141,16 +141,16 @@ async fn two_builders_keep_distinct_ledgers() {
     assert_eq!(a.ledger_name(), LEDGER_A);
     assert_eq!(b.ledger_name(), LEDGER_B);
 
-    let applied_a = a.migrate(&pool, &dir_a).await.unwrap();
-    let applied_b = b.migrate(&pool, &dir_b).await.unwrap();
+    let applied_a = a.migrate(&pool.clone().into(), &dir_a).await.unwrap();
+    let applied_b = b.migrate(&pool.clone().into(), &dir_b).await.unwrap();
     assert_eq!(applied_a.len(), 1);
     assert_eq!(applied_b.len(), 1);
     assert_eq!(applied_a[0].name, mig_a_name);
     assert_eq!(applied_b[0].name, mig_b_name);
 
     // Each ledger sees only its own entry.
-    let a_set = a.applied_set(&pool).await.unwrap();
-    let b_set = b.applied_set(&pool).await.unwrap();
+    let a_set = a.applied_set(&pool.clone().into()).await.unwrap();
+    let b_set = b.applied_set(&pool.clone().into()).await.unwrap();
     assert!(a_set.contains(&mig_a_name));
     assert!(!a_set.contains(&mig_b_name));
     assert!(b_set.contains(&mig_b_name));
@@ -173,8 +173,13 @@ async fn two_builders_keep_distinct_ledgers() {
     // Default `migrate::applied_set` (which reads
     // `__rustango_migrations__`) doesn't see entries from custom
     // ledgers.
-    Builder::default().ensure_ledger(&pool).await.unwrap();
-    let default_set = migrate::applied_set(&pool).await.unwrap();
+    Builder::default()
+        .ensure_ledger(&pool.clone().into())
+        .await
+        .unwrap();
+    let default_set = migrate::applied_set_pool(&pool.clone().into())
+        .await
+        .unwrap();
     assert!(!default_set.contains(&mig_a_name));
     assert!(!default_set.contains(&mig_b_name));
 
@@ -193,9 +198,17 @@ async fn default_builder_matches_free_function_results() {
     let Some((_db, pool)) = pool().await else {
         return;
     };
-    Builder::default().ensure_ledger(&pool).await.unwrap();
-    let from_builder = Builder::default().applied_set(&pool).await.unwrap();
-    let from_free_fn = migrate::applied_set(&pool).await.unwrap();
+    Builder::default()
+        .ensure_ledger(&pool.clone().into())
+        .await
+        .unwrap();
+    let from_builder = Builder::default()
+        .applied_set(&pool.clone().into())
+        .await
+        .unwrap();
+    let from_free_fn = migrate::applied_set_pool(&pool.clone().into())
+        .await
+        .unwrap();
     assert_eq!(from_builder, from_free_fn);
 }
 

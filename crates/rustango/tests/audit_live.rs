@@ -72,7 +72,9 @@ async fn reset(pool: &sqlx::PgPool) {
         .execute(pool)
         .await
         .unwrap();
-    audit::ensure_table(pool).await.unwrap();
+    audit::ensure_table_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -82,8 +84,12 @@ async fn ensure_table_is_idempotent() {
         return;
     };
     reset(&pool).await;
-    audit::ensure_table(&pool).await.unwrap();
-    audit::ensure_table(&pool).await.unwrap(); // second call must not error
+    audit::ensure_table_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    audit::ensure_table_pool(&pool.clone().into())
+        .await
+        .unwrap(); // second call must not error
 }
 
 #[tokio::test]
@@ -103,7 +109,9 @@ async fn emit_one_persists_a_pending_entry() {
     };
     audit::emit_one(&pool, &entry).await.unwrap();
 
-    let rows = audit::fetch_for_entity(&pool, "post", "42").await.unwrap();
+    let rows = audit::fetch_for_entity_pool(&pool.clone().into(), "post", "42")
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].operation, "create");
     assert_eq!(rows[0].source, "user:alice");
@@ -139,7 +147,9 @@ async fn emit_many_batches_multiple_entries_in_one_statement() {
     .await
     .unwrap();
     assert_eq!(total, 3);
-    let one = audit::fetch_for_entity(&pool, "post", "2").await.unwrap();
+    let one = audit::fetch_for_entity_pool(&pool.clone().into(), "post", "2")
+        .await
+        .unwrap();
     assert_eq!(one.len(), 1);
     assert_eq!(one[0].changes, json!({ "title": "p2" }));
 }
@@ -179,7 +189,9 @@ async fn fetch_for_entity_orders_newest_first() {
         // Tiny gap so occurred_at advances measurably across rows.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    let rows = audit::fetch_for_entity(&pool, "post", "9").await.unwrap();
+    let rows = audit::fetch_for_entity_pool(&pool.clone().into(), "post", "9")
+        .await
+        .unwrap();
     assert_eq!(rows.len(), 3);
     assert_eq!(rows[0].operation, "soft_delete");
     assert_eq!(rows[1].operation, "update");
@@ -241,9 +253,10 @@ async fn macro_emits_audit_create_entry_on_insert_on() {
     row.insert_on(&mut *conn).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
-    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-        .await
-        .unwrap();
+    let entries =
+        audit::fetch_for_entity_pool(&pool.clone().into(), "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
     assert_eq!(entries.len(), 1, "exactly one audit entry expected");
     assert_eq!(entries[0].operation, "create");
     assert_eq!(entries[0].source, "system");
@@ -274,9 +287,10 @@ async fn macro_emits_audit_delete_entry_on_delete_on() {
     let pk = row.id.get().copied().unwrap();
     row.delete_on(&mut *conn).await.unwrap();
 
-    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-        .await
-        .unwrap();
+    let entries =
+        audit::fetch_for_entity_pool(&pool.clone().into(), "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
     assert_eq!(entries.len(), 2, "create + delete entries expected");
     assert_eq!(entries[0].operation, "delete");
     assert_eq!(
@@ -339,9 +353,13 @@ async fn macro_emits_audit_softdelete_and_restore_entries() {
     row.soft_delete_on(&mut *conn).await.unwrap();
     row.restore_on(&mut *conn).await.unwrap();
 
-    let entries = audit::fetch_for_entity(&pool, "rustango_audit_paper", &pk.to_string())
-        .await
-        .unwrap();
+    let entries = audit::fetch_for_entity_pool(
+        &pool.clone().into(),
+        "rustango_audit_paper",
+        &pk.to_string(),
+    )
+    .await
+    .unwrap();
     assert_eq!(entries.len(), 3, "create + soft_delete + restore expected");
     let ops: Vec<&str> = entries.iter().map(|e| e.operation.as_str()).collect();
     assert_eq!(ops, vec!["restore", "soft_delete", "create"]);
@@ -367,9 +385,13 @@ async fn macro_emits_audit_with_user_source_inside_with_source_scope() {
         };
         row.insert_on(&mut *conn).await.unwrap();
         let pk = row.id.get().copied().unwrap();
-        let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-            .await
-            .unwrap();
+        let entries = audit::fetch_for_entity_pool(
+            &pool.clone().into(),
+            "rustango_audit_post",
+            &pk.to_string(),
+        )
+        .await
+        .unwrap();
         assert_eq!(entries[0].source, "user:alice");
     })
     .await;
@@ -400,9 +422,10 @@ async fn macro_emits_audit_update_entry_with_before_after_diff() {
     // body left at "unchanged" — must NOT appear in the diff.
     row.save_on(&mut *conn).await.unwrap();
 
-    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-        .await
-        .unwrap();
+    let entries =
+        audit::fetch_for_entity_pool(&pool.clone().into(), "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].operation, "update");
     assert_eq!(
@@ -436,9 +459,10 @@ async fn save_on_with_overrides_audit_source_for_one_call() {
         .unwrap();
     let pk = row.id.get().copied().unwrap();
 
-    let entries = audit::fetch_for_entity(&pool, "rustango_audit_post", &pk.to_string())
-        .await
-        .unwrap();
+    let entries =
+        audit::fetch_for_entity_pool(&pool.clone().into(), "rustango_audit_post", &pk.to_string())
+            .await
+            .unwrap();
     assert_eq!(entries[0].source, "seed-script");
 }
 
@@ -538,7 +562,9 @@ async fn cleanup_older_than_drops_rows_past_the_cutoff() {
         .unwrap();
     assert_eq!(total_before, 3);
 
-    let removed = audit::cleanup_older_than(&pool, 7).await.unwrap();
+    let removed = audit::cleanup_older_than_pool(&pool.clone().into(), 7)
+        .await
+        .unwrap();
     assert_eq!(removed, 1, "exactly one row past the 7-day cutoff");
 
     let total_after: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
@@ -565,7 +591,9 @@ async fn cleanup_older_than_zero_clears_table() {
         };
         audit::emit_one(&pool, &entry).await.unwrap();
     }
-    let removed = audit::cleanup_older_than(&pool, 0).await.unwrap();
+    let removed = audit::cleanup_older_than_pool(&pool.clone().into(), 0)
+        .await
+        .unwrap();
     assert_eq!(removed, 2);
     let total: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
         .fetch_one(&pool)
@@ -591,7 +619,9 @@ async fn cleanup_older_than_negative_treated_as_zero() {
         changes: json!({}),
     };
     audit::emit_one(&pool, &entry).await.unwrap();
-    let removed = audit::cleanup_older_than(&pool, -42).await.unwrap();
+    let removed = audit::cleanup_older_than_pool(&pool.clone().into(), -42)
+        .await
+        .unwrap();
     assert_eq!(removed, 1);
 }
 
@@ -637,7 +667,9 @@ async fn cleanup_keep_last_n_keeps_n_per_row() {
         .unwrap();
     }
 
-    let removed = audit::cleanup_keep_last_n(&pool, 2).await.unwrap();
+    let removed = audit::cleanup_keep_last_n_pool(&pool.clone().into(), 2)
+        .await
+        .unwrap();
     assert_eq!(removed, 2, "row 1 had 4 entries; should drop 2 oldest");
 
     let row1: i64 =
@@ -671,7 +703,9 @@ async fn cleanup_keep_last_n_zero_clears_table() {
         };
         audit::emit_one(&pool, &entry).await.unwrap();
     }
-    let removed = audit::cleanup_keep_last_n(&pool, 0).await.unwrap();
+    let removed = audit::cleanup_keep_last_n_pool(&pool.clone().into(), 0)
+        .await
+        .unwrap();
     assert_eq!(removed, 3);
     let total: i64 = sqlx::query_scalar(r#"SELECT COUNT(*) FROM "rustango_audit_log""#)
         .fetch_one(&pool)
@@ -791,7 +825,9 @@ async fn cleanup_older_than_huge_days_keeps_rows() {
     let any = rustango::sql::Pool::Postgres(pool.clone());
     for days in [1_000_000, 200_000_000, i64::MAX] {
         assert_eq!(
-            audit::cleanup_older_than(&pool, days).await.unwrap(),
+            audit::cleanup_older_than_pool(&pool.clone().into(), days)
+                .await
+                .unwrap(),
             0,
             "{days}"
         );
@@ -802,7 +838,7 @@ async fn cleanup_older_than_huge_days_keeps_rows() {
         );
     }
     assert_eq!(
-        audit::fetch_for_entity(&pool, "post", "1")
+        audit::fetch_for_entity_pool(&pool.clone().into(), "post", "1")
             .await
             .unwrap()
             .len(),

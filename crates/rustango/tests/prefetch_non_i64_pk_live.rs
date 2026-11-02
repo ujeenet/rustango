@@ -11,7 +11,7 @@
 
 #![cfg(feature = "tenancy")]
 
-use rustango::sql::fetch_with_prefetch;
+use rustango::sql::fetch_with_prefetch_pool;
 use rustango::sql::{sqlx, Auto, ForeignKey};
 
 #[derive(rustango::Model, Debug, Clone)]
@@ -103,9 +103,13 @@ async fn fetch_with_prefetch_groups_children_under_string_pk_parents() {
         d.insert(&pool).await.unwrap();
     }
 
-    let bundles = fetch_with_prefetch::<StrTenant, StrDoc>(StrTenant::objects(), "tenant", &pool)
-        .await
-        .unwrap();
+    let bundles = fetch_with_prefetch_pool::<StrTenant, StrDoc>(
+        StrTenant::objects(),
+        "tenant",
+        &pool.clone().into(),
+    )
+    .await
+    .unwrap();
 
     assert_eq!(bundles.len(), 2, "two parents seeded");
     let acme = bundles

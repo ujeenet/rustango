@@ -31,7 +31,7 @@ fn mount_logs(vs: ViewSet, pool: Pool) -> String {
         .with_ansi(false)
         .finish();
     tracing::subscriber::with_default(sub, || {
-        let _ = vs.router_pool("/api/notes", pool);
+        let _ = vs.router("/api/notes", pool);
     });
     out.contents()
 }

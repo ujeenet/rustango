@@ -503,7 +503,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Recurre al builder cuando necesites SQLite/MySQL, multi-tenencia, una
@@ -766,7 +766,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
@@ -791,7 +791,7 @@ rechaza `rustango_api_keys`, `rustango_agents` y las tablas SSO.
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Sobre el límite → `429 Too Many Requests` + `Retry-After`. Los contadores son por
@@ -810,7 +810,7 @@ CRUD. Para endpoints adicionales, monta tus propios handlers junto al ViewSet:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -972,7 +972,7 @@ Compón el router del ViewSet en tu app. Un solo inquilino, pool estático:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-inquilino (sin pool capturado — cada petición resuelve su conexión de

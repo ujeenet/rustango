@@ -47,8 +47,12 @@ async fn pool() -> Option<sqlx::PgPool> {
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
-    rustango::migrate::drop_all(pool).await.unwrap();
-    rustango::migrate::apply_all(pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

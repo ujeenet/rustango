@@ -81,8 +81,8 @@ async fn database_mode_admin_serves_tenant_data() {
 
     // Apply registry schema (Org table + Widget table since we live
     // in the same DB).
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Seed an org and a widget.
     let org_slug = unique("acme");
@@ -123,7 +123,7 @@ async fn database_mode_admin_serves_tenant_data() {
         "tenant data should render in admin: {body}"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -133,8 +133,8 @@ async fn no_tenant_match_returns_404() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = TenantAdminBuilder::new(pools, url, HeaderResolver::default()).build();
@@ -144,7 +144,7 @@ async fn no_tenant_match_returns_404() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -154,8 +154,8 @@ async fn unknown_slug_in_header_returns_404() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = TenantAdminBuilder::new(pools, url, HeaderResolver::default()).build();
@@ -168,7 +168,7 @@ async fn unknown_slug_in_header_returns_404() {
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -183,8 +183,8 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     };
     let url = std::env::var("DATABASE_URL").unwrap();
 
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let acme_schema = unique("admin_acme");
     let globex_schema = unique("admin_globex");
@@ -287,7 +287,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
 
     drop_schema(&pool, &acme_schema).await;
     drop_schema(&pool, &globex_schema).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -297,8 +297,8 @@ async fn subdomain_chain_resolves_via_host_header() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("subdomain_acme");
     let host = format!("{slug}.app.test");
@@ -332,5 +332,5 @@ async fn subdomain_chain_resolves_via_host_header() {
         "subdomain resolver should land on the tenant"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
 }

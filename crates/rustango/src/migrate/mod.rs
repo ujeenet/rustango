@@ -88,11 +88,4 @@ pub use runner::{
     sqlmigrate_one, unapply_force_pool, unapply_pool, with_lock_timeout, Builder, MigrationPreview,
     LEDGER_TABLE,
 };
-// PG-typed back-compat, only when the `postgres` feature is on.
-// SQLite and MySQL apps use the `_pool` variants above.
-#[cfg(feature = "postgres")]
-pub use runner::{
-    applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_dry_run,
-    migrate_embedded, migrate_to, migrate_with_progress, unapply, unapply_force,
-};
 pub use snapshot::{FieldSnapshot, IndexSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};

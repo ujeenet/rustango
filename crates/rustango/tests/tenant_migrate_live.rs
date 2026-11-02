@@ -143,7 +143,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
     // an empty system ledger (as an `apply_all` would): the system
     // migration would then try to CREATE them again and collide. Tables
     // absent + ledger absent is the one consistent starting state.
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     for ledger in ["__rustango_migrations__", "__rustango_system_migrations__"] {
         sqlx::query(&format!(
             r#"DROP TABLE IF EXISTS public."{ledger}" CASCADE"#
@@ -225,7 +225,7 @@ async fn registry_migrate_applies_only_registry_scoped() {
     drop_table_in_public(&pool, &tenant_table).await;
     delete_ledger_entry_in_public(&pool, &reg_name).await;
     delete_ledger_entry_in_public(&pool, &tenant_name).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -241,8 +241,8 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     };
     let url = std::env::var("DATABASE_URL").unwrap();
 
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let acme_schema = unique("acme_sch");
     let globex_schema = unique("globex_sch");
@@ -383,7 +383,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
 
     drop_schema(&pool, &acme_schema).await;
     drop_schema(&pool, &globex_schema).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -395,8 +395,8 @@ async fn tenant_migrate_skips_inactive_orgs() {
     };
     let url = std::env::var("DATABASE_URL").unwrap();
 
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let active_schema = unique("active_sch");
     let inactive_schema = unique("inactive_sch");
@@ -466,7 +466,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
     assert!(!table_exists_in_schema(&pool, &inactive_schema, "thing").await);
 
     drop_schema(&pool, &active_schema).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -548,7 +548,7 @@ async fn schema_mode_tenants_share_citext() {
         .unwrap();
     let fresh_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
     let pool = sqlx::PgPool::connect(&fresh_url).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let schemas = [unique("ci_a"), unique("ci_b")];
     for schema in &schemas {

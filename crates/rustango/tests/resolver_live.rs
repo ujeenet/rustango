@@ -139,8 +139,8 @@ async fn subdomain_resolver_matches_host_pattern() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = SubdomainResolver::new("app.test");
@@ -152,7 +152,7 @@ async fn subdomain_resolver_matches_host_pattern() {
     assert!(org.is_some(), "acme.app.test should resolve to acme");
     assert_eq!(org.unwrap().slug, "acme");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -161,8 +161,8 @@ async fn subdomain_resolver_apex_returns_none() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = SubdomainResolver::new("app.test");
@@ -175,7 +175,7 @@ async fn subdomain_resolver_apex_returns_none() {
         .unwrap();
     assert!(org.is_none(), "apex must NEVER resolve to a tenant");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -184,8 +184,8 @@ async fn subdomain_resolver_unknown_subdomain_returns_none() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = SubdomainResolver::new("app.test");
@@ -196,7 +196,7 @@ async fn subdomain_resolver_unknown_subdomain_returns_none() {
         .unwrap();
     assert!(org.is_none(), "unknown subdomain → no match");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -207,8 +207,8 @@ async fn subdomain_resolver_strips_port_from_host_header() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = SubdomainResolver::new("app.test");
@@ -219,7 +219,7 @@ async fn subdomain_resolver_strips_port_from_host_header() {
         .unwrap();
     assert_eq!(org.unwrap().slug, "acme");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -228,8 +228,8 @@ async fn subdomain_resolver_skips_inactive_orgs() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = SubdomainResolver::new("app.test");
@@ -241,7 +241,7 @@ async fn subdomain_resolver_skips_inactive_orgs() {
         .unwrap();
     assert!(org.is_none(), "inactive orgs must not resolve");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -250,8 +250,8 @@ async fn path_prefix_resolver_matches_first_segment() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = PathPrefixResolver;
@@ -276,7 +276,7 @@ async fn path_prefix_resolver_matches_first_segment() {
         .unwrap()
         .is_none());
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -285,8 +285,8 @@ async fn header_resolver_matches_x_org() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = HeaderResolver::default();
@@ -321,7 +321,7 @@ async fn header_resolver_matches_x_org() {
         .unwrap()
         .is_none());
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -330,8 +330,8 @@ async fn port_resolver_matches_org_port() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let r = PortResolver;
@@ -361,7 +361,7 @@ async fn port_resolver_matches_org_port() {
         .unwrap()
         .is_none());
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -370,8 +370,8 @@ async fn chain_resolver_subdomain_first_then_header() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let chain = ChainResolver::standard("app.test");
@@ -431,7 +431,7 @@ async fn chain_resolver_subdomain_first_then_header() {
         "PathPrefixResolver must NOT be in the default chain"
     );
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -440,8 +440,8 @@ async fn chain_resolver_with_explicit_path_prefix_opt_in() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let chain = ChainResolver::new()
@@ -456,7 +456,7 @@ async fn chain_resolver_with_explicit_path_prefix_opt_in() {
         .unwrap();
     assert_eq!(org.unwrap().slug, "acme");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -465,8 +465,8 @@ async fn chain_resolver_returns_none_when_no_resolver_matches() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     seed_orgs(&pool).await;
 
     let chain = ChainResolver::standard("app.test");
@@ -477,5 +477,5 @@ async fn chain_resolver_returns_none_when_no_resolver_matches() {
         .unwrap()
         .is_none());
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }

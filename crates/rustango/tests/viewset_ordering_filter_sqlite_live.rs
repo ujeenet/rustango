@@ -110,7 +110,7 @@ async fn default_ordering_applies_when_no_query_param() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .ordering(&[("rating", true)])
-        .router_pool("/posts", pool);
+        .router("/posts", pool);
 
     post_row(&app, "a", 3).await; // id 1
     post_row(&app, "b", 1).await; // id 2
@@ -129,7 +129,7 @@ async fn explicit_ordering_overrides_default_and_handles_desc_prefix() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .ordering(&[("rating", true)]) // default DESC on rating
-        .router_pool("/posts", pool);
+        .router("/posts", pool);
 
     post_row(&app, "a", 3).await; // id 1
     post_row(&app, "b", 1).await; // id 2
@@ -161,7 +161,7 @@ async fn comma_separated_multi_field_ordering() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
-        .router_pool("/posts", pool);
+        .router("/posts", pool);
 
     // Same rating, different titles
     post_row(&app, "charlie", 1).await; // id 1
@@ -187,7 +187,7 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
         .page_size(50)
         .ordering(&[("id", false)])
         .ordering_fields(&["title", "rating"]) // `secret_score` NOT whitelisted
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
 
     // secret_score ASC is [3, 2, 1]; every assertion below would see that
     // order if the off-list name were honoured.
@@ -242,7 +242,7 @@ async fn ordering_fields_whitelist_drops_off_list_names() {
 /// `secret_score` (#1845).
 async fn seed_divergent(pool: &Pool) {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
     for (title, rating, secret) in [("a", 1, "zzz"), ("b", 2, "mmm"), ("c", 3, "aaa")] {
         let payload = serde_json::json!({
             "title": title, "rating": rating, "secret_score": secret
@@ -271,7 +271,7 @@ async fn ordering_on_an_unexposed_field_is_dropped_by_default() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "rating"])
         .page_size(50)
         .ordering(&[("id", false)])
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
 
     seed_divergent(&pool).await;
 
@@ -298,7 +298,7 @@ async fn ordering_on_an_exposed_field_still_works() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "rating"])
         .page_size(50)
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
 
     seed_divergent(&pool).await;
 
@@ -318,7 +318,7 @@ async fn ordering_stays_open_when_every_field_is_listed() {
     let pool = fresh_pool().await;
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
 
     seed_divergent(&pool).await;
 
@@ -363,7 +363,7 @@ async fn ordering_is_closed_when_the_serializer_renders_no_model_field() {
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, POST_FIELDS)
         .page_size(50)
         .serializer::<HandPost>()
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
 
     seed_divergent(&pool).await;
 
@@ -385,7 +385,7 @@ async fn an_empty_ordering_fields_list_sorts_on_nothing() {
         .page_size(50)
         .ordering(&[("id", false)])
         .ordering_fields(&[])
-        .router_pool("/posts", pool.clone());
+        .router("/posts", pool.clone());
 
     seed_divergent(&pool).await;
 

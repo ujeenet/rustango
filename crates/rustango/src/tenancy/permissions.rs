@@ -50,7 +50,7 @@ use crate::core::Model as _;
 use crate::core::{ConflictClause, DeleteQuery, Filter, InsertQuery, Op, SqlValue, WhereExpr};
 use crate::sql::sqlx;
 #[cfg(feature = "postgres")]
-use crate::sql::sqlx::{PgPool, Row};
+use crate::sql::sqlx::Row;
 use crate::sql::Auto;
 use crate::Model;
 
@@ -243,24 +243,6 @@ pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Err
 
 // ------------------------------------------------------------------ has_perm (CTE query)
 
-/// Check whether user `uid` holds permission `codename` in `pool`.
-///
-/// Resolution order:
-/// 1. Superuser → always `true`.
-/// 2. Explicit per-user denial (`granted = false`) → `false`.
-/// 3. Explicit per-user grant (`granted = true`) → `true`.
-/// 4. Any role the user belongs to grants `codename` → `true`.
-/// 5. Default → `false`.
-///
-/// Single round-trip via a CTE.
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn has_perm(uid: i64, codename: &str, pool: &PgPool) -> Result<bool, sqlx::Error> {
-    has_perm_on(uid, codename, pool).await
-}
-
 /// v0.38 — tri-dialect counterpart of [`has_perm`]. **One round trip**:
 /// a single `SELECT` with four scalar subqueries (superuser, explicit
 /// denial, explicit grant, role-via grant), portable across
@@ -444,53 +426,7 @@ where
     Ok(row.try_get("via_role").unwrap_or(false))
 }
 
-/// Check whether user `uid` holds ANY of the given `codenames`, one
-/// [`has_perm_on`] per codename, so an inactive user holds none.
-#[cfg(feature = "postgres")]
-pub async fn has_any_perm(
-    uid: i64,
-    codenames: &[&str],
-    pool: &PgPool,
-) -> Result<bool, sqlx::Error> {
-    for c in codenames {
-        if has_perm_on(uid, c, pool).await? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// Check whether user `uid` holds ALL of the given `codenames`, one
-/// [`has_perm_on`] per codename, so an inactive user holds none.
-#[cfg(feature = "postgres")]
-pub async fn has_all_perms(
-    uid: i64,
-    codenames: &[&str],
-    pool: &PgPool,
-) -> Result<bool, sqlx::Error> {
-    for c in codenames {
-        if !has_perm_on(uid, c, pool).await? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
-}
-
 // ------------------------------------------------------------------ Role management (ORM-backed)
-
-/// Create a role. Errors if name already exists.
-///
-/// #562 — delegates to [`create_role_pool`] so the Insert IR
-/// builder lives in one place. The PG-typed signature stays for
-/// back-compat with existing call sites.
-#[cfg(feature = "postgres")]
-pub async fn create_role(
-    name: &str,
-    description: &str,
-    pool: &PgPool,
-) -> Result<i64, TenancyError> {
-    create_role_pool(name, description, &crate::sql::Pool::from(pool.clone())).await
-}
 
 /// v0.38 — tri-dialect counterpart of [`create_role`].
 ///
@@ -611,34 +547,6 @@ pub async fn user_roles_pool(
         .collect())
 }
 
-/// Get an existing role by name or create one. Returns the id.
-///
-/// Delegates to [`get_or_create_role_pool`].
-#[cfg(feature = "postgres")]
-pub async fn get_or_create_role(
-    name: &str,
-    description: &str,
-    pool: &PgPool,
-) -> Result<i64, TenancyError> {
-    get_or_create_role_pool(name, description, &crate::sql::Pool::from(pool.clone())).await
-}
-
-/// Grant a codename to a role. No-op if already granted.
-///
-/// Routed through the ORM's [`InsertQuery`] IR with
-/// [`ConflictClause::DoNothing`] — the writer emits `INSERT … ON
-/// CONFLICT DO NOTHING`, which matches the `(role_id, codename)`
-/// unique constraint the ensure-table DDL declares.
-/// #562 — delegates to [`grant_role_perm_pool`].
-#[cfg(feature = "postgres")]
-pub async fn grant_role_perm(
-    role_id: i64,
-    codename: &str,
-    pool: &PgPool,
-) -> Result<(), TenancyError> {
-    grant_role_perm_pool(role_id, codename, &crate::sql::Pool::from(pool.clone())).await
-}
-
 /// v0.38 — tri-dialect counterpart of [`grant_role_perm`].
 ///
 /// # Errors
@@ -658,18 +566,6 @@ pub async fn grant_role_perm_pool(
     };
     crate::sql::insert_pool(pool, &query).await?;
     Ok(())
-}
-
-/// Revoke a codename from a role.
-///
-/// #562 — delegates to [`revoke_role_perm_pool`].
-#[cfg(feature = "postgres")]
-pub async fn revoke_role_perm(
-    role_id: i64,
-    codename: &str,
-    pool: &PgPool,
-) -> Result<(), TenancyError> {
-    revoke_role_perm_pool(role_id, codename, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`revoke_role_perm`].
@@ -701,14 +597,6 @@ pub async fn revoke_role_perm_pool(
     )
     .await?;
     Ok(())
-}
-
-/// Assign a user to a role. No-op if already assigned.
-///
-/// #562 — delegates to [`assign_role_pool`].
-#[cfg(feature = "postgres")]
-pub async fn assign_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
-    assign_role_pool(user_id, role_id, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`assign_role`].
@@ -758,14 +646,6 @@ pub async fn remove_role_tx(
         .map(|_| ())
 }
 
-/// Remove a user from a role.
-///
-/// #562 — delegates to [`remove_role_pool`].
-#[cfg(feature = "postgres")]
-pub async fn remove_role(user_id: i64, role_id: i64, pool: &PgPool) -> Result<(), TenancyError> {
-    remove_role_pool(user_id, role_id, &crate::sql::Pool::from(pool.clone())).await
-}
-
 /// v0.38 — tri-dialect counterpart of [`remove_role`].
 pub async fn remove_role_pool(
     user_id: i64,
@@ -794,30 +674,6 @@ fn remove_role_query(user_id: i64, role_id: i64) -> DeleteQuery {
     }
 }
 
-/// Set a per-user permission override. Updates `granted` if a row already exists.
-///
-/// #562 — delegates to [`set_user_perm_pool`]. The
-/// `InsertQuery` IR (with `ConflictClause::DoUpdate` targeting the
-/// `(user_id, codename)` unique constraint from the ensure-table DDL) lives
-/// there; the `granted` column is the only one in `update_columns`
-/// so existing `data` JSONB (reason / granted-by / etc.) survives
-/// a re-grant.
-#[cfg(feature = "postgres")]
-pub async fn set_user_perm(
-    user_id: i64,
-    codename: &str,
-    granted: bool,
-    pool: &PgPool,
-) -> Result<(), TenancyError> {
-    set_user_perm_pool(
-        user_id,
-        codename,
-        granted,
-        &crate::sql::Pool::from(pool.clone()),
-    )
-    .await
-}
-
 /// v0.38 — tri-dialect counterpart of [`set_user_perm`].
 pub async fn set_user_perm_pool(
     user_id: i64,
@@ -843,16 +699,6 @@ pub async fn set_user_perm_pool(
     };
     crate::sql::insert_pool(pool, &query).await?;
     Ok(())
-}
-
-/// Remove a per-user override, restoring role-based resolution.
-#[cfg(feature = "postgres")]
-pub async fn clear_user_perm(
-    user_id: i64,
-    codename: &str,
-    pool: &PgPool,
-) -> Result<(), TenancyError> {
-    clear_user_perm_pool(user_id, codename, &crate::sql::Pool::from(pool.clone())).await
 }
 
 /// v0.38 — tri-dialect counterpart of [`clear_user_perm`].
@@ -1102,54 +948,6 @@ pub(crate) async fn permissions_of_active_user(
     Ok(rows.into_iter().map(|(codename,)| codename).collect())
 }
 
-/// List all roles a user belongs to.
-#[cfg(feature = "postgres")]
-pub async fn user_roles_qs(user_id: i64, pool: &PgPool) -> Result<Vec<Role>, sqlx::Error> {
-    let rows = sqlx::query(
-        r#"SELECT r.id, r.name, r.description
-           FROM   "rustango_roles" r
-           JOIN   "rustango_user_roles" ur ON ur.role_id = r.id
-           WHERE  ur.user_id = $1
-           ORDER  BY r.name"#,
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-    rows.iter()
-        .map(|row| {
-            Ok(Role {
-                id: Auto::Set(row.try_get::<i64, _>("id")?),
-                name: row.try_get("name")?,
-                description: row.try_get("description")?,
-                data: row
-                    .try_get::<serde_json::Value, _>("data")
-                    .unwrap_or_else(|_| serde_json::json!({})),
-            })
-        })
-        .collect()
-}
-
-/// List all `(role_id, name)` pairs for a user.
-#[cfg(feature = "postgres")]
-pub async fn user_roles(uid: i64, pool: &PgPool) -> Result<Vec<(i64, String)>, sqlx::Error> {
-    let roles = user_roles_qs(uid, pool).await?; // raw SQL join — stays sqlx::Error
-    Ok(roles
-        .into_iter()
-        .map(|r| (r.id.get().copied().unwrap_or(0), r.name))
-        .collect())
-}
-
-/// List all codenames a user has access to (union of role + direct grants,
-/// minus explicit denials). Superuser implicit grants are NOT included —
-/// callers that need to handle superusers should check `is_superuser` first.
-///
-/// Denial priority matches [`has_perm`]: an explicit `granted = false` row
-/// removes the codename even if a role would otherwise grant it.
-#[cfg(feature = "postgres")]
-pub async fn user_permissions(uid: i64, pool: &PgPool) -> Result<Vec<String>, TenancyError> {
-    user_permissions_pool(uid, &crate::sql::Pool::from(pool.clone())).await
-}
-
 // ------------------------------------------------------------------ Codename helpers
 
 /// Standard four codenames for a model table (`add`, `change`, `delete`, `view`).
@@ -1161,21 +959,6 @@ pub fn model_codenames(table: &str) -> [String; 4] {
         format!("{table}.delete"),
         format!("{table}.view"),
     ]
-}
-
-/// [`auto_create_permissions_pool`] on a `PgPool`: the same reserved,
-/// extra and CRUD codenames (it used to seed CRUD only).
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn auto_create_permissions(pool: &PgPool) -> Result<(), sqlx::Error> {
-    auto_create_permissions_pool(&crate::sql::Pool::from(pool.clone()))
-        .await
-        .map_err(|e| match e {
-            TenancyError::Driver(e) => e,
-            other => sqlx::Error::Protocol(other.to_string()),
-        })
 }
 
 /// v0.38 — tri-dialect counterpart of [`auto_create_permissions`].
