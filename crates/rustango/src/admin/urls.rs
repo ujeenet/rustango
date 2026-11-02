@@ -1001,37 +1001,6 @@ async fn mark_perms_scoped(
     next.run(req).await
 }
 
-/// Tables the generic admin never serves: the TOTP store holds raw
-/// secrets, and a passkey row signs in as its `user_id` (#2364).
-/// Enrollment has its own pages.
-pub(crate) fn is_never_served(table: &str) -> bool {
-    #[cfg(not(any(feature = "totp", feature = "passkey", feature = "tenancy")))]
-    let _ = table;
-    // Written only through `db_server`, which seals the admin password.
-    #[cfg(feature = "tenancy")]
-    if table == <crate::tenancy::DbServer as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    // A purge drops what these rows name, so only provisioning writes them.
-    #[cfg(feature = "tenancy")]
-    if table == <crate::tenancy::TenantDatabase as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(feature = "totp")]
-    if table == <super::totp_store::AdminTotp as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(all(feature = "tenancy", feature = "totp"))]
-    if table == <crate::tenancy::OperatorTotp as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(feature = "passkey")]
-    if table == <crate::passkey::WebauthnCredential as crate::core::Model>::SCHEMA.table {
-        return true;
-    }
-    false
-}
-
 /// Per-request state: the pool plus the resolved `Config`. It is
 /// cloned on every request, which is cheap because `Config` is in
 /// an `Arc`.
@@ -1069,7 +1038,9 @@ impl AppState {
         {
             return false;
         }
-        if is_never_served(table) {
+        if crate::core::table_policy::table_access(table)
+            == crate::core::table_policy::TableAccess::Never
+        {
             return false;
         }
         // `rustango_admin_users` is the bare admin's credential

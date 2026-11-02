@@ -778,8 +778,8 @@ queryset restreignent chaque lecture et écriture ; une écriture dont la ligne 
 sortirait donne un `403`. Les hooks lisent la ligne verrouillée dans la
 transaction d'écriture ; un identifiant d'un autre tenant donne un `403`. `change` ne vérifie que la
 ligne stockée. `object_permissions::Actor::of(&parts)` indique à un hook qui
-demande ; un jeton d'agent n'est jamais superuser. `ViewSet::for_model` refuse
-`rustango_api_keys`, `rustango_agents` et les tables SSO.
+demande ; un jeton d'agent n'est jamais superuser. `ViewSet::for_model` et les
+cinq vues de template refusent `rustango_api_keys`, `rustango_agents` et les tables SSO.
 
 **Le throttling** applique des limites à fenêtre fixe par client, par action :
 

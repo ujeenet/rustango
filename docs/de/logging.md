@@ -406,8 +406,8 @@ enthält, wortweise verglichen; also zählen `api_key`, `reset_token` und
 `secret`, `key`, `signature`, `auth`, `credential`, `cookie`, `session`,
 `otp`, dazu die OAuth-Namen `code`, `state` und `assertion`. Erweitern mit
 `.redact_additional("ref")`, oder die ganze Liste ersetzen mit
-`.redact(vec![...])`; `token`, `signature` und `code` bleiben in jedem Fall
-maskiert. Das `url.query` des Request-Spans wird genauso maskiert. Das betrifft **nur Query-Strings**; für den Rest siehe
+`.redact(vec![...])`; die Zugangsdaten-Wörter (`password`, `token`, `secret`, `api_key`, ...),
+`signature` und `code` bleiben in jedem Fall maskiert. Das `url.query` des Request-Spans wird genauso maskiert. Das betrifft **nur Query-Strings**; für den Rest siehe
 [security.md](security.md#secrets-aus-deinen-logs-heraushalten).
 
 ## Welcher Mandant war das?

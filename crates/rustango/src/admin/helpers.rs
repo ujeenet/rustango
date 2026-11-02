@@ -1059,6 +1059,8 @@ mod tests {
             "api_key",
             "reset_token",
             "client_secret",
+            "passwd",
+            "encryption_key",
         ] {
             assert!(is_secret_field(&cfg, &named(n)), "{n}");
         }
