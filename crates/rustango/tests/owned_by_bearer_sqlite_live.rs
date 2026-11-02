@@ -91,7 +91,15 @@ fn db_url(name: &str) -> String {
 }
 
 fn org(slug: &str, name: &str) -> Org {
+    // Tokens bind to the org id, so each tenant needs its own.
+    let id = slug
+        .bytes()
+        .fold(7_i64, |h, b| h.wrapping_mul(31).wrapping_add(i64::from(b)))
+        .abs()
+        % 1_000_000
+        + 1;
     Org {
+        id: rustango::sql::Auto::Set(id),
         slug: slug.to_owned(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),
