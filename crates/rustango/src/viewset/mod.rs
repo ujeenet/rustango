@@ -713,19 +713,6 @@ const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
-/// Tables only the admin or their own flows write: SSO configuration, and
-/// credentials minted once with their secret. [`ViewSet::for_model`] refuses them.
-const ADMIN_ONLY_TABLES: &[&str] = &[
-    "rustango_api_keys",
-    "rustango_agents",
-    "rustango_sso_providers",
-    "rustango_shared_sso_providers",
-    "rustango_sso_links",
-    "rustango_sso_invites",
-    "rustango_sso_shared_overrides",
-    "rustango_sso_tenant_policy",
-];
-
 /// Builder for a set of REST CRUD endpoints over a single
 /// [`Model`](crate::core::Model) table.
 ///
@@ -799,13 +786,7 @@ impl ViewSet {
     /// their own flows may write those.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
-        assert!(
-            !ADMIN_ONLY_TABLES.contains(&schema.table)
-                && !crate::admin::urls::is_never_served(schema.table),
-            "ViewSet::for_model: `{}` is admin only (or written by its own flow); \
-             a ViewSet cannot serve it",
-            schema.table
-        );
+        crate::core::table_policy::assert_generic(schema, "ViewSet::for_model");
         let vs = Self {
             schema,
             fields: fields.iter().map(|&s| s.to_owned()).collect(),

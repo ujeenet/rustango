@@ -434,23 +434,22 @@ fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
 /// Query parameters whose values are redacted by default: the shared
 /// secret words plus the OAuth / OIDC callback names they miss.
 pub(crate) fn default_redact_params() -> Vec<String> {
-    crate::secret_keys::SECRET_WORDS
-        .iter()
-        .chain(&["code", "state", "assertion"])
-        .map(|w| (*w).to_owned())
+    crate::secret_keys::secret_words()
+        .chain(["code", "state", "assertion"])
+        .map(str::to_owned)
         .collect()
 }
 
-/// Params the framework itself puts credentials in (the console's
-/// `?token=`, signed URLs, SSO callbacks), so a custom `redact` list
-/// cannot drop them (#1818).
-const ALWAYS_REDACTED: &[&str] = &["token", "signature", "code"];
+/// Params a custom `redact` list cannot drop: the credential words, plus the
+/// signed-URL and SSO callback params the framework itself sends.
+const ALWAYS_REDACTED: &[&str] = &["signature", "code"];
 
-/// The configured list plus [`ALWAYS_REDACTED`], split once per layer.
+/// The configured list plus the credential words and [`ALWAYS_REDACTED`], split once per layer.
 pub(crate) fn query_names(redact_keys: &[String]) -> crate::secret_keys::SecretNames {
     crate::secret_keys::SecretNames::new(
-        ALWAYS_REDACTED
+        crate::secret_keys::CREDENTIAL_WORDS
             .iter()
+            .chain(ALWAYS_REDACTED)
             .copied()
             .chain(redact_keys.iter().map(String::as_str)),
     )
@@ -714,19 +713,20 @@ mod tests {
     #[test]
     fn a_configured_key_matches_prefixed_and_kebab_names() {
         let r = redact_query_list(
-            "x-client-secret=s&my_client_secret=t&client=c&secretary=d",
+            "x-client-secret=s&my_client_secret=t&client=c&clientele=d",
             &["client_secret".to_owned()],
         );
         assert_eq!(
             r,
-            "x-client-secret=[redacted]&my_client_secret=[redacted]&client=c&secretary=d"
+            "x-client-secret=[redacted]&my_client_secret=[redacted]&client=c&clientele=d"
         );
     }
 
+    /// An empty list still hides the credential words.
     #[test]
     fn redact_query_handles_empty_list() {
-        let r = redact_query_list("password=x", &[]);
-        assert_eq!(r, "password=x");
+        let r = redact_query_list("password=x&page=2", &[]);
+        assert_eq!(r, "password=[redacted]&page=2");
     }
 
     #[test]

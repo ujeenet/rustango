@@ -344,8 +344,12 @@ impl ListView {
     /// name `<table>_list.html`, page size 20, max page size 100,
     /// no `ORDER BY`, all fields included, no filters, no search,
     /// no `?ordering=` override.
+    ///
+    /// # Panics
+    /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema) -> Self {
+        crate::core::table_policy::assert_generic(schema, "ListView::for_model");
         Self {
             schema,
             template: format!("{}_list.html", schema.table),
@@ -1036,8 +1040,11 @@ pub struct DetailView {
 }
 
 impl DetailView {
+    /// # Panics
+    /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema) -> Self {
+        crate::core::table_policy::assert_generic(schema, "DetailView::for_model");
         Self {
             schema,
             template: format!("{}_detail.html", schema.table),
@@ -1189,8 +1196,12 @@ pub struct DeleteView {
 impl DeleteView {
     /// Start a `DeleteView` for the given schema. Defaults: template
     /// `<table>_confirm_delete.html`, redirect on success to `/`.
+    ///
+    /// # Panics
+    /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema) -> Self {
+        crate::core::table_policy::assert_generic(schema, "DeleteView::for_model");
         Self {
             schema,
             template: format!("{}_confirm_delete.html", schema.table),
@@ -1343,8 +1354,12 @@ impl CreateView {
     /// Start a `CreateView` that renders and writes only `fields` (names or
     /// columns); any other posted key is ignored. Defaults: template
     /// `<table>_form.html`, redirect to `/` on success.
+    ///
+    /// # Panics
+    /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
+        crate::core::table_policy::assert_generic(schema, "CreateView::for_model");
         Self {
             schema,
             template: format!("{}_form.html", schema.table),
@@ -1501,8 +1516,12 @@ pub struct UpdateView {
 impl UpdateView {
     /// Start an `UpdateView` that renders and writes only `fields`; see
     /// [`CreateView::for_model`]. `object` holds `fields` and the primary key.
+    ///
+    /// # Panics
+    /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
+        crate::core::table_policy::assert_generic(schema, "UpdateView::for_model");
         Self {
             schema,
             template: format!("{}_form.html", schema.table),
@@ -4179,6 +4198,46 @@ use tenant::{
 mod tests {
     use super::*;
     use crate::core::FieldType;
+
+    /// No template view serves a table only the admin or its own flow writes.
+    #[cfg(feature = "admin")]
+    #[test]
+    fn every_view_refuses_admin_only_and_never_served_tables() {
+        use crate::core::table_policy::{table_access, TableAccess};
+        let refused: Vec<&'static ModelSchema> = inventory::iter::<crate::core::ModelEntry>
+            .into_iter()
+            .map(|e| e.schema)
+            .filter(|s| table_access(s.table) != TableAccess::Open)
+            .collect();
+        #[cfg(feature = "tenancy")]
+        assert!(
+            refused.iter().any(|s| s.table == "rustango_api_keys"),
+            "vacuous"
+        );
+        let panics = |f: &dyn Fn()| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+                .err()
+                .and_then(|e| e.downcast_ref::<String>().cloned())
+                .unwrap_or_default()
+        };
+        for s in refused {
+            let views: [(&str, &dyn Fn()); 5] = [
+                ("ListView", &|| drop(ListView::for_model(s))),
+                ("DetailView", &|| drop(DetailView::for_model(s))),
+                ("DeleteView", &|| drop(DeleteView::for_model(s))),
+                ("CreateView", &|| drop(CreateView::for_model(s, &["id"]))),
+                ("UpdateView", &|| drop(UpdateView::for_model(s, &["id"]))),
+            ];
+            for (view, build) in views {
+                let msg = panics(build);
+                assert!(
+                    msg.contains("admin only") && msg.contains(s.table),
+                    "{view} served {}",
+                    s.table
+                );
+            }
+        }
+    }
 
     fn schema_two_fields() -> &'static ModelSchema {
         // Build a tiny schema by leaking — fine in unit tests.

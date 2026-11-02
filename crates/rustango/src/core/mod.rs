@@ -19,6 +19,8 @@ pub mod joins;
 mod query;
 mod schema;
 pub mod subquery;
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) mod table_policy;
 mod validate;
 mod value;
 pub mod window;
