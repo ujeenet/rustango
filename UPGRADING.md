@@ -150,6 +150,29 @@ untouched.
 
 ## Unreleased
 
+- Model writes take a `rustango::sql::Pool` everywhere, and the PgPool-typed functions that had a `Pool` twin are gone. Pass `&pool.clone().into()` (or keep a `Pool`) where you held a `PgPool`:
+
+  | Before (0.61) | After (0.62.0) |
+  |---|---|
+  | `m.save(&pg)` / `m.save_pool(&pool)` | `m.save(&pool)` |
+  | `m.insert(&pg)` / `m.insert_pool(&pool)` | `m.insert(&pool)` |
+  | `m.delete(&pg)` / `m.delete_pool(&pool)` | `m.delete(&pool)` |
+  | `m.upsert(&pg)`, `M::bulk_insert(rows, &pg)` | `m.upsert(&pool)`, `M::bulk_insert(rows, &pool)` |
+  | `m.save_on(&mut *conn)` on an audited model | `m.save(&pool)`, or `save_tx` (writes no audit row) |
+  | `m.save_on_with(conn, src)` | `audit::with_source(src, m.save(&pool))` |
+  | `ViewSet::router_pool(p, pool)`, `MediaManager::new_pool` (deprecated, still compile) | `router(p, pool)`, `MediaManager::new` |
+  | `migrate::migrate(&pg, dir)`, `apply_all(&pg)` … | `migrate_pool(&pool, dir)`, `apply_all_pool(&pool)` … |
+  | `audit::ensure_table(&pg)`, `fetch_for_entity`, `cleanup_*` | the `_pool` forms |
+  | `tenancy::permissions::has_perm(…, &pg)` and friends, their `permissions::` re-exports, `permissions::*_for_model` | the `_pool` forms |
+  | `tenancy::authenticate_operator`, `tenancy::ensure_api_keys_table` | `authenticate_operator_pool`, `ensure_api_keys_table_pool` |
+  | `audit::upsert_returning_on` | `m.upsert(&pool)` (audited) |
+  | `qs.explain(&pg)`, `qs.fetch_paginated(&pg)`, `fk.get(&pg)` | `explain_on` / `explain_pool`, `fetch_paginated_on`, `get_pool` / `get_on` |
+  | `sql::fetch_with_prefetch`, `sql::annotate_count_children` | `fetch_with_prefetch_pool`, `annotate_count_children_on` |
+  | `Fixture::load_into`, `fixtures::load_all` | `load_into_pool`, `load_all_pool` |
+  | `NotificationContext::with_database(pg, t)` | the same, with any `Into<Pool>`; it now works on every backend |
+  | `migrate::Builder::migrate(&pg, dir)` … | the same methods, taking `&Pool` |
+
+  `sql::insert_on`, `update_on` and `bulk_insert_on` take any `SqlExecutor` instead of a Postgres executor; `bulk_insert_on` returns `Vec<InsertReturningPool>` and takes any `SqlExecutor`; on a raw sqlx executor a bulk insert past the bind cap is refused, so pass a `PoolTx` or the `Pool`. On MySQL `bulk_insert` leaves `Auto` fields unset. An audited `upsert` on MySQL is refused.
 - `PoolConn` is a struct: match `conn.conn()` (a `#[non_exhaustive]` `PooledConn`) instead of the connection. Before: `match &mut conn { PoolConn::Mysql(c) => … }`. After: `match conn.conn() { PooledConn::Mysql(c) => …, _ => … }`.
 - Outside code can no longer wrap its own sqlx `Transaction` in a `PoolTx` (`PoolTx::new` is crate-private). Open it with `transaction_pool`, `write_transaction` or `let mut conn = pool.acquire().await?; let tx = conn.begin().await?;`, so the transaction knows its pool.
 - Code generic over `DB: Database` that calls `DatabasePools::acquire` or extracts `DatabaseTenant<DB>` now needs the bound `rustango::sql::Pool: From<sqlx::Pool<DB>>`.

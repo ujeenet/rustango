@@ -12,6 +12,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
+- Model writes take a `rustango::sql::Pool` on every backend: `save`, `insert`, `delete`, `upsert` and `bulk_insert` replace the PgPool-only forms, their `_on` forms take any `SqlExecutor` (an audited model refuses them), and the `_pool` names are deprecated. The PgPool-typed functions that had a `Pool` twin are removed.
 - Auth links: `LinkTarget::audience` and `LinkScope::audience` take a `SingleDb` marker, so a tenant handler cannot confirm or verify an audience link that another tenant could also redeem.
 - `Model::truncate` is a `DELETE` on every backend, so a `RESTRICT` row refuses it with `ExecError::TruncateReferenced`; `Model::truncate_cascade` empties every referencing table on all three.
 - Admin bulk actions run only in the admin's transaction, their audit rows with them: the `&Pool` `register_action*` path is removed (`register_tx_action*` stays), and the SSO unlink and relink actions write in that transaction.
