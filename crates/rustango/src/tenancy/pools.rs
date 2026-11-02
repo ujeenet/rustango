@@ -2065,10 +2065,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("registry.db");
         let url = format!("sqlite:{}", file.display());
-        // First call wins; nextest runs each test in its own process.
+        // First call wins, and in a shared process another test may win
+        // without a size; either way the tuning is sealed from here on.
         let mut tuning = crate::sql::PoolTuning::default();
         tuning.max_connections = Some(3);
         crate::sql::configure_pools(tuning);
+        let want = crate::sql::pool_tuning()
+            .max_connections
+            .unwrap_or_else(|| sqlx::sqlite::SqlitePoolOptions::new().get_max_connections());
         let pool = <sqlx::Sqlite as RegistryConnect>::connect_registry(&url)
             .await
             .expect("a missing registry file is created");
@@ -2078,7 +2082,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mode.to_ascii_lowercase(), "wal");
-        let want = crate::sql::pool_tuning().max_connections.expect("tuned");
         assert_eq!(
             pool.options().get_max_connections(),
             want,

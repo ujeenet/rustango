@@ -1041,15 +1041,20 @@ mod tests {
             .await
             .unwrap();
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
-        // The bucket refills while Argon2 runs, so allow a few extra tries.
-        let tries = crate::login_throttle::shared().limits().ip_limit + 5;
+        // Other tests swap the shared gate mid-run; an explicit one is final,
+        // so install the default (or keep theirs) before reading its limits.
+        let _ = crate::login_throttle::configure_shared(crate::login_throttle::LoginThrottle::new(
+            crate::login_throttle::LoginLimits::default(),
+        ));
+        // Twice the limit covers refill during Argon2 and one fixed-window rollover.
+        let tries = 2 * crate::login_throttle::shared().limits().ip_limit + 5;
         let throttled = |r: LoginRefused| matches!(r, LoginRefused::Throttled { .. });
 
         let (slug, ip) = (&TenantSlug::new(1, "t-mint-limit"), client([10, 78, 0, 1]));
         let mut refused = false;
         for _ in 0..tries {
             match mint_agent_jwt(&jwt, &pool, slug, "bot", "wrong", &ip).await {
-                Err(MintError::Unauthorized) => {}
+                Err(MintError::Unauthorized | MintError::Refused(LoginRefused::Busy)) => {}
                 Err(MintError::Refused(r)) if throttled(r) => refused = true,
                 _ => panic!("unexpected mint outcome"),
             }
@@ -1073,7 +1078,9 @@ mod tests {
         let mut refused = false;
         for _ in 0..tries {
             match authenticate_bearer(&jwt, &pool, slug, junk, &ip).await {
-                Err(BearerRejection::Unauthorized) => {}
+                Err(
+                    BearerRejection::Unauthorized | BearerRejection::Refused(LoginRefused::Busy),
+                ) => {}
                 Err(BearerRejection::Refused(r)) if throttled(r) => refused = true,
                 _ => panic!("unexpected bearer outcome"),
             }
