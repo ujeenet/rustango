@@ -876,6 +876,20 @@ impl Cli {
         // #1609 / #1732 — login limits and the hash-slot wait; code-side config wins.
         apply_login_settings(&s.auth);
 
+        // `[server] trusted_proxies`; an earlier `with_trusted_proxies` wins.
+        if self.real_ip.is_none() && !s.server.trusted_proxies.is_empty() {
+            match crate::real_ip::RealIpLayer::default().trust_proxies(&s.server.trusted_proxies) {
+                Ok(layer) => self.real_ip = Some(layer),
+                Err(e) => {
+                    self.settings_error = Some(crate::config::ConfigError::Shape(
+                        <toml::de::Error as serde::de::Error>::custom(format!(
+                            "[server] trusted_proxies: {e}"
+                        )),
+                    ));
+                }
+            }
+        }
+
         // Stash a clone for `runserver` to apply layered settings
         // (security_headers, CORS, access_log, body_limit) on top
         // of the user's `api` Router. Done at run time rather than
@@ -1027,11 +1041,6 @@ impl Cli {
         } else {
             None
         };
-        // After logging is installed, so the warning is not lost (#2225).
-        #[cfg(feature = "config")]
-        if let Some(s) = self.settings_for_layers.as_ref() {
-            warn_unread_settings(&s.inert_keys());
-        }
         match verb {
             // v0.31.1 (#1): the hyphenated `run-server` form is what
             // `--help` has advertised since the start, but only the
@@ -1116,6 +1125,8 @@ impl Cli {
             pools = pools.config(cfg);
         }
         if let Some(cmd) = args.first().and_then(|v| self.command_set.get(v)).cloned() {
+            #[cfg(feature = "postgres")]
+            crate::tenancy::refuse_registry_shadow(&pools).await?;
             let ctx = self.command_context(pools.registry_pool());
             return command::run_tenancy(&cmd, ctx, std::sync::Arc::new(pools), args[1..].to_vec())
                 .await
@@ -1468,6 +1479,15 @@ impl Cli {
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
         }
+        // The tenant admin's title, as `[admin] title` documents it.
+        #[cfg(feature = "config")]
+        if let Some(title) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(admin_title_setting)
+        {
+            builder = builder.admin_title(title);
+        }
         // The api router got it in `apply_settings_layers`; the admin and console did not.
         #[cfg(feature = "config")]
         if let Some(layer) = self
@@ -1694,7 +1714,7 @@ impl Cli {
                     dir,
                     &mut std::io::stderr(),
                     crate::migrate::Signals::Fire { tenant: None },
-                    |held| crate::migrate::migrate_locked(held, &pool, dir, None),
+                    |held| crate::migrate::migrate_pool_locked(held, &enum_pool, dir, None),
                 ))
                 .await?;
             if let Some(seed) = self.seed.take() {
@@ -2040,20 +2060,6 @@ fn inert_layer_settings(s: &crate::config::Settings) -> Vec<&'static str> {
         inert.push("security.csrf_trusted_origins");
     }
     inert
-}
-
-/// One warning per set key that nothing reads, naming what to use
-/// instead. Stderr when no subscriber is installed, so it is never lost.
-#[cfg(feature = "config")]
-fn warn_unread_settings(keys: &[&crate::config::registry::Key]) {
-    for k in keys {
-        let msg = k.unread_message();
-        if tracing::dispatcher::has_been_set() {
-            tracing::warn!(target: "rustango::manage", key = k.path, "{msg}");
-        } else {
-            eprintln!("warning: {msg}");
-        }
-    }
 }
 
 /// Emit a `WARN` naming every layer-driving setting that is configured in the
@@ -2425,6 +2431,18 @@ async fn open_registry(
     })
 }
 
+/// `[admin] title`, else `[brand] name`: the admin title the settings name.
+#[cfg(all(feature = "config", feature = "tenancy"))]
+fn admin_title_setting(s: &crate::config::Settings) -> Option<String> {
+    let set = |t: &&String| !t.is_empty();
+    s.admin
+        .title
+        .as_ref()
+        .filter(set)
+        .or(s.brand.name.as_ref().filter(set))
+        .cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2476,21 +2494,20 @@ mod tests {
         let pool = crate::sql::Pool::connect(&url).await.expect("connect");
         // Receivers are global: record only runs on this test's database.
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let ours = move |t: &sig::MigrateTarget| {
-            t.pool
-                .as_sqlite()
+        let ours = move |pool: &crate::sql::Pool| {
+            pool.as_sqlite()
                 .is_some_and(|p| p.connect_options().get_filename() == db.as_path())
         };
         let (pre_seen, pre_ours) = (seen.clone(), ours.clone());
-        let pre = sig::connect_pre_migrate_with_target(move |_, t| {
-            if pre_ours(&t) {
+        let pre = sig::connect_pre_migrate(move |ctx| {
+            if pre_ours(&ctx.pool) {
                 pre_seen.lock().unwrap().push("pre");
             }
             async {}
         });
         let post_seen = seen.clone();
-        let post = sig::connect_post_migrate_with_target(move |_, t| {
-            if ours(&t) {
+        let post = sig::connect_post_migrate(move |ctx| {
+            if ours(&ctx.pool) {
                 post_seen.lock().unwrap().push("post");
             }
             async {}
@@ -2581,6 +2598,8 @@ mod tests {
                 "sqlite",
                 "--database-url",
                 &tenant_url,
+                "--host-pattern",
+                "acme.localhost",
                 "--no-migrate",
             ]),
             run(&["prewarm-pools"]),
@@ -2756,6 +2775,30 @@ mod tests {
         s.server.bind = Some("127.0.0.1:9090".into());
         let cli = Cli::new().with_settings(&s);
         assert_eq!(cli.bind, "127.0.0.1:9090");
+    }
+
+    /// `[server] trusted_proxies` installs the real-IP layer, a bad entry
+    /// stops `run`, and `with_trusted_proxies` in code wins.
+    #[cfg(feature = "config")]
+    #[test]
+    fn with_settings_trusts_the_configured_proxies() {
+        let mut s = crate::config::Settings::default();
+        s.server.trusted_proxies = vec!["10.0.0.0/8".into()];
+        let cli = Cli::new().with_settings(&s);
+        assert!(cli.real_ip.is_some());
+        assert!(cli.boot_settings_error().is_none());
+
+        let code = Cli::new()
+            .with_trusted_proxies(["192.168.0.1"])
+            .unwrap()
+            .with_settings(&s);
+        let peer = std::net::IpAddr::from([192, 168, 0, 1]);
+        assert!(code.real_ip.as_ref().is_some_and(|l| l.trusts(peer)));
+
+        s.server.trusted_proxies = vec!["not-a-cidr".into()];
+        let bad = Cli::new().with_settings(&s);
+        assert!(bad.real_ip.is_none());
+        assert!(bad.boot_settings_error().is_some());
     }
 
     /// `[database] url` reaches the one URL resolver; env vars still win there.
@@ -3057,6 +3100,20 @@ mod tests {
             res.headers()["access-control-allow-origin"],
             "https://app.example"
         );
+    }
+
+    /// The tenant admin's title is `[admin] title`, else `[brand] name`.
+    #[cfg(all(feature = "tenancy", feature = "config"))]
+    #[test]
+    fn the_admin_title_setting_falls_back_to_the_brand_name() {
+        let mut s = crate::config::Settings::default();
+        assert_eq!(admin_title_setting(&s), None);
+        s.brand.name = Some("Acme".into());
+        assert_eq!(admin_title_setting(&s).as_deref(), Some("Acme"));
+        s.admin.title = Some("Acme Admin".into());
+        assert_eq!(admin_title_setting(&s).as_deref(), Some("Acme Admin"));
+        s.admin.title = Some(String::new());
+        assert_eq!(admin_title_setting(&s).as_deref(), Some("Acme"));
     }
 
     /// #1699, #1700 — what both tenancy paths hand the builder, checked

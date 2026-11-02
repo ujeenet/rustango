@@ -14,6 +14,8 @@
 
 use base64::Engine;
 use hmac::{Hmac, Mac};
+
+pub use crate::sealed::{Expiring, SealError, SealedToken};
 use rand::{rngs::OsRng, RngCore};
 use sha2::Sha256;
 
@@ -21,6 +23,7 @@ use sha2::Sha256;
 /// Production boot paths return this instead of quietly falling back
 /// to a random key.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SessionSecretError {
     /// The env var is not set. Only the strict
     /// [`SessionSecret::require_from_env`] reports this; the other
@@ -56,6 +59,9 @@ impl core::fmt::Display for SessionSecretError {
 
 impl std::error::Error for SessionSecretError {}
 
+/// The env var that holds the base64 session signing key.
+pub(crate) const SESSION_SECRET_ENV: &str = "RUSTANGO_SESSION_SECRET";
+
 /// The dev key file for tenant sessions; API keys are MACed with it too,
 /// so the CLI that mints one and the server that checks it agree.
 #[cfg(feature = "tenancy")]
@@ -80,7 +86,7 @@ impl SessionSecret {
     /// mistyped secret is visible at boot and not only in the logs.
     #[must_use]
     pub fn from_env_or_random() -> Self {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
+        if let Ok(raw) = std::env::var(SESSION_SECRET_ENV) {
             // One definition of "valid secret", shared with build_jwt
             // and `check --deploy`.
             match Self::from_b64(&raw) {
@@ -94,14 +100,9 @@ impl SessionSecret {
                 }
             }
         } else {
-            tracing::warn!(
-                "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
-                 will not survive server restarts; set the env var for production)",
-            );
+            warn_secret_unset();
         }
-        let mut buf = vec![0u8; 32];
-        OsRng.fill_bytes(&mut buf);
-        Self(buf)
+        Self::random()
     }
 
     /// Like [`Self::from_env_or_random`], but saves a generated key to
@@ -117,10 +118,7 @@ impl SessionSecret {
     /// comes from the environment or a secret manager, not a file.
     #[must_use]
     pub fn from_env_or_disk(disk_path: &std::path::Path) -> Self {
-        Self::from_raw_or_disk(
-            std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
-            disk_path,
-        )
+        Self::from_raw_or_disk(std::env::var(SESSION_SECRET_ENV).ok().as_deref(), disk_path)
     }
 
     /// [`Self::from_env_or_disk`] with the env value passed in, so a test
@@ -134,7 +132,7 @@ impl SessionSecret {
                 Err(e) => warn_unusable_secret(&e.to_string()),
             }
         }
-        match load_or_create_key_file(disk_path, "session secret", "RUSTANGO_SESSION_SECRET") {
+        match load_or_create_key_file(disk_path, "session secret", SESSION_SECRET_ENV) {
             Ok(bytes) => Self(bytes),
             Err(e) => {
                 tracing::warn!(
@@ -142,9 +140,7 @@ impl SessionSecret {
                     error = %e,
                     "could not persist session secret to disk — using ephemeral random key",
                 );
-                let mut buf = vec![0u8; 32];
-                OsRng.fill_bytes(&mut buf);
-                Self(buf)
+                Self::random()
             }
         }
     }
@@ -160,16 +156,18 @@ impl SessionSecret {
     /// `SessionSecretError::TooShort` when the decoded bytes are
     /// fewer than 32.
     pub fn try_from_env() -> Result<Self, SessionSecretError> {
-        if let Ok(raw) = std::env::var("RUSTANGO_SESSION_SECRET") {
+        if let Ok(raw) = std::env::var(SESSION_SECRET_ENV) {
             return Self::from_b64(&raw);
         }
-        tracing::warn!(
-            "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
-             will not survive server restarts; set the env var for production)",
-        );
+        warn_secret_unset();
+        Ok(Self::random())
+    }
+
+    /// A fresh 32-byte key that lives only in this process.
+    fn random() -> Self {
         let mut buf = vec![0u8; 32];
         OsRng.fill_bytes(&mut buf);
-        Ok(Self(buf))
+        Self(buf)
     }
 
     /// Strict variant for production boot. `RUSTANGO_SESSION_SECRET`
@@ -183,7 +181,7 @@ impl SessionSecret {
     /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
     /// `TooShort` per [`Self::try_from_env`].
     pub fn require_from_env() -> Result<Self, SessionSecretError> {
-        match std::env::var("RUSTANGO_SESSION_SECRET") {
+        match std::env::var(SESSION_SECRET_ENV) {
             Ok(raw) => Self::from_b64(&raw),
             Err(_) => Err(SessionSecretError::Missing),
         }
@@ -316,6 +314,14 @@ fn resolve_secure_cookies(override_flag: Option<bool>, tier: &str) -> bool {
 #[must_use]
 pub fn secure_cookies() -> bool {
     resolve_secure_cookies(SECURE_COOKIES_OVERRIDE.get().copied(), &tier_from_env())
+}
+
+/// The secret is unset, so sessions end on every restart.
+fn warn_secret_unset() {
+    tracing::warn!(
+        "RUSTANGO_SESSION_SECRET not set — generating random key (sessions \
+         will not survive server restarts; set the env var for production)",
+    );
 }
 
 /// Report that `RUSTANGO_SESSION_SECRET` was set but unusable.
@@ -496,6 +502,13 @@ pub fn sign(secret: &SessionSecret, msg: &[u8]) -> [u8; 32] {
     out
 }
 
+/// [`sign`] over `tag.msg`. Each token kind has its own tag, so a token
+/// signed for one purpose never verifies as another under the same key.
+#[must_use]
+pub fn sign_tagged(secret: &SessionSecret, tag: &[u8], msg: &[u8]) -> [u8; 32] {
+    sign(secret, &[tag, b".", msg].concat())
+}
+
 /// HMAC of a user's `password_hash`, carried in a session cookie. Every
 /// password write makes a new salted hash, so the old sessions stop matching.
 ///
@@ -524,8 +537,8 @@ impl PasswordFingerprint {
     }
 }
 
-/// Who passed the first factor and still owes a TOTP code. Signed under a
-/// per-flow tag ending in `.`, so it never verifies as a session cookie.
+/// Who passed the first factor and still owes a TOTP code. Sealed under a
+/// per-flow tag, so it never verifies as a session cookie.
 #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct PendingSecondFactor {
@@ -556,28 +569,20 @@ impl PendingSecondFactor {
         }
     }
 
-    fn mac(secret: &SessionSecret, tag: &[u8], body: &str) -> [u8; 32] {
-        sign(secret, &[tag, body.as_bytes()].concat())
-    }
-
     pub(crate) fn seal(&self, secret: &SessionSecret, tag: &[u8]) -> String {
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let body = b64.encode(serde_json::to_vec(self).unwrap_or_default());
-        let sig = b64.encode(Self::mac(secret, tag, &body));
-        format!("{body}.{sig}")
+        SealedToken::seal(secret.key(), tag, self)
     }
 
     /// The pending state behind `value`, if signed under `tag` and not expired.
     pub(crate) fn open(secret: &SessionSecret, tag: &[u8], value: &str) -> Option<Self> {
-        use subtle::ConstantTimeEq as _;
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-        let (body, sig) = value.split_once('.')?;
-        let sig = b64.decode(sig).ok()?;
-        if Self::mac(secret, tag, body).ct_eq(&sig[..]).unwrap_u8() == 0 {
-            return None;
-        }
-        let p: Self = serde_json::from_slice(&b64.decode(body).ok()?).ok()?;
-        (chrono::Utc::now().timestamp() < p.exp).then_some(p)
+        SealedToken::open(secret.key(), tag, value).ok()
+    }
+}
+
+#[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+impl Expiring for PendingSecondFactor {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
     }
 }
 
@@ -702,6 +707,24 @@ pub async fn deactivate<T: crate::core::Model + Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pending second factor is a plain [`SealedToken`]: either side opens
+    /// what the other sealed, and another flow's tag does not.
+    #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
+    #[test]
+    fn pending_second_factor_uses_the_shared_codec() {
+        let secret = SessionSecret::from_bytes(vec![4; 32]);
+        let p = PendingSecondFactor::new(&secret, 9, "$argon2id$h");
+        let sealed = p.seal(&secret, b"flow-a");
+        let opened = SealedToken::<PendingSecondFactor>::open(secret.key(), b"flow-a", &sealed);
+        assert_eq!(opened.map(|o| o.uid), Ok(9));
+        let back = SealedToken::seal(secret.key(), b"flow-a", &p);
+        assert_eq!(
+            PendingSecondFactor::open(&secret, b"flow-a", &back).map(|o| o.uid),
+            Some(9)
+        );
+        assert!(PendingSecondFactor::open(&secret, b"flow-b", &sealed).is_none());
+    }
 
     /// A key file that exists but cannot be read is an error, never replaced.
     #[cfg(unix)]

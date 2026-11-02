@@ -62,7 +62,7 @@ async fn validator_rejects_with_per_field_errors_on_create() {
 
     // Seed a row directly so the validator has something to find.
     let mut m = Membership { id: Auto::Unset, org_id: 10, user_id: 20, role: "owner".into() };
-    m.save(&pool).await.unwrap();
+    m.save(&pool.clone().into()).await.unwrap();
 
     // Now a new form with the same (10, 20) pair must fail validation
     // BEFORE any INSERT.
@@ -84,7 +84,7 @@ async fn validator_accepts_different_pair() {
     fresh(&pool).await;
 
     let mut m = Membership { id: Auto::Unset, org_id: 10, user_id: 20, role: "owner".into() };
-    m.save(&pool).await.unwrap();
+    m.save(&pool.clone().into()).await.unwrap();
 
     // (10, 99) is a different tuple — ok.
     let mf = ModelFormFor::<Membership>::parse(&payload("10", "99", "viewer")).unwrap();
@@ -103,7 +103,7 @@ async fn validator_excludes_own_row_on_update() {
     fresh(&pool).await;
 
     let mut m = Membership { id: Auto::Unset, org_id: 10, user_id: 20, role: "owner".into() };
-    m.save(&pool).await.unwrap();
+    m.save(&pool.clone().into()).await.unwrap();
     let pk = match m.id { Auto::Set(v) => v, _ => unreachable!() };
 
     // UPDATE that "changes" the role but keeps (org, user) — without
@@ -115,7 +115,7 @@ async fn validator_excludes_own_row_on_update() {
 
     // But if we set a DIFFERENT row's tuple, validator still rejects.
     let mut m2 = Membership { id: Auto::Unset, org_id: 11, user_id: 21, role: "viewer".into() };
-    m2.save(&pool).await.unwrap();
+    m2.save(&pool.clone().into()).await.unwrap();
     let pk2 = match m2.id { Auto::Set(v) => v, _ => unreachable!() };
 
     // Try to UPDATE row #2 to row #1's tuple → conflict.

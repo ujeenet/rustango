@@ -64,20 +64,12 @@ pub struct M2MManager {
 }
 
 impl M2MManager {
-    /// Return all destination PKs linked to the source instance.
-    /// Tri-dialect via [`Pool`] dispatch.
-    ///
-    /// # Errors
-    /// Driver failures.
-    pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
-        self.all_as::<i64>(pool).await
-    }
-
-    /// [`Self::all`] decoded as `K`, for a `String` / `Uuid` target PK (#1950).
+    /// Every destination PK linked to the source instance, decoded as the
+    /// target's key type `K` (`i64`, `String`, `Uuid`, ...).
     ///
     /// # Errors
     /// Driver failures, including a `dst` column that does not decode as `K`.
-    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
+    pub async fn all<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let src = self.src_key()?;
         fetch_dst(
             self.junction(),
@@ -112,14 +104,15 @@ impl M2MManager {
         // `signals` is an optional feature, so every emission below is gated
         // (#1208) — these statements were unconditional while the module is not.
         #[cfg(feature = "signals")]
-        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
-            action: crate::signals::m2m::M2mAction::Add,
-            through: self.through,
-            src_col: self.src_col,
-            dst_col: self.dst_col,
-            src_pk: src,
-            dst_pks: vec![dst],
-        })
+        self.signal(
+            crate::signals::m2m::M2mAction::Add,
+            src,
+            vec![dst.clone()],
+            SetDiff {
+                added: vec![dst],
+                removed: Vec::new(),
+            },
+        )
         .await;
         Ok(())
     }
@@ -138,14 +131,15 @@ impl M2MManager {
         }
         // #410 — fire m2m_changed after successful junction-row remove.
         #[cfg(feature = "signals")]
-        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
-            action: crate::signals::m2m::M2mAction::Remove,
-            through: self.through,
-            src_col: self.src_col,
-            dst_col: self.dst_col,
-            src_pk: src,
-            dst_pks: vec![dst],
-        })
+        self.signal(
+            crate::signals::m2m::M2mAction::Remove,
+            src,
+            vec![dst.clone()],
+            SetDiff {
+                added: Vec::new(),
+                removed: vec![dst],
+            },
+        )
         .await;
         Ok(())
     }
@@ -173,7 +167,7 @@ impl M2MManager {
                 "M2M set: no registered source model, so concurrent sets are not serialized"
             );
         }
-        let changed = replace(
+        let Some(diff) = replace(
             locks,
             self.junction(),
             vec![eq(self.src_col, src.clone())],
@@ -183,21 +177,16 @@ impl M2MManager {
             rows,
             pool,
         )
-        .await?;
-        if !changed {
+        .await?
+        else {
             return Ok(());
-        }
+        };
         // `dst_pks` is the new full set (may be empty when `set([])` was called).
         #[cfg(feature = "signals")]
-        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
-            action: crate::signals::m2m::M2mAction::Set,
-            through: self.through,
-            src_col: self.src_col,
-            dst_col: self.dst_col,
-            src_pk: src,
-            dst_pks: dsts,
-        })
-        .await;
+        self.signal(crate::signals::m2m::M2mAction::Set, src, dsts, diff)
+            .await;
+        #[cfg(not(feature = "signals"))]
+        let _ = diff;
         Ok(())
     }
 
@@ -212,14 +201,12 @@ impl M2MManager {
             return Ok(());
         }
         #[cfg(feature = "signals")]
-        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
-            action: crate::signals::m2m::M2mAction::Clear,
-            through: self.through,
-            src_col: self.src_col,
-            dst_col: self.dst_col,
-            src_pk: src,
-            dst_pks: Vec::new(),
-        })
+        self.signal(
+            crate::signals::m2m::M2mAction::Clear,
+            src,
+            Vec::new(),
+            SetDiff::default(),
+        )
         .await;
         Ok(())
     }
@@ -242,6 +229,26 @@ impl M2MManager {
 
     fn src_key(&self) -> Result<SqlValue, ExecError> {
         src_key(&self.src_pk, self.through)
+    }
+
+    #[cfg(feature = "signals")]
+    async fn signal(
+        &self,
+        action: crate::signals::m2m::M2mAction,
+        src: SqlValue,
+        dst_pks: Vec<SqlValue>,
+        diff: SetDiff,
+    ) {
+        let ctx = crate::signals::m2m::M2mChangedContext::new(
+            action,
+            self.through,
+            self.src_col,
+            self.dst_col,
+            src,
+            dst_pks,
+        )
+        .with_diff(diff.added, diff.removed);
+        crate::signals::m2m::send_m2m_changed(ctx).await;
     }
 
     /// The manager does not name its source (a new pub field would break
@@ -448,8 +455,15 @@ async fn insert_link(
     Ok(inserted)
 }
 
+/// The destination keys a change linked and unlinked.
+#[derive(Default)]
+struct SetDiff {
+    added: Vec<SqlValue>,
+    removed: Vec<SqlValue>,
+}
+
 /// Delete the rows `owner` matches and insert `rows` in one transaction, so
-/// readers never see the empty state in between. `true` when the set of
+/// readers never see the empty state in between. `Some` when the set of
 /// `dst_col` keys changed; `dsts` is the new set, deduplicated.
 #[allow(clippy::too_many_arguments)]
 async fn replace(
@@ -461,7 +475,7 @@ async fn replace(
     columns: Vec<&'static str>,
     rows: Vec<Vec<SqlValue>>,
     pool: &Pool,
-) -> Result<bool, ExecError> {
+) -> Result<Option<SetDiff>, ExecError> {
     // A bad key fails before the DELETE runs, not after.
     let ins = BulkInsertQuery::new(junction, columns, rows);
     ins.validate()?;
@@ -488,35 +502,55 @@ async fn replace(
     let deleted = super::executor::delete_tx(&mut tx, &del).await?;
     super::executor::bulk_insert_tx(&mut tx, &ins).await?;
     tx.commit().await.map_err(ExecError::Driver)?;
-    if dsts.is_empty() {
-        return Ok(deleted > 0);
-    }
-    let new: std::collections::HashSet<String> =
-        dsts.iter().map(SqlValue::to_display_string).collect();
-    Ok(old.is_none_or(|old| old != new))
+    // Old keys unreadable: the change is unknown, so report no diff.
+    let Some(old) = old else {
+        let changed = !dsts.is_empty() || deleted > 0;
+        return Ok(changed.then(SetDiff::default));
+    };
+    let key = SqlValue::to_display_string;
+    let new: std::collections::HashSet<String> = dsts.iter().map(key).collect();
+    let was: std::collections::HashSet<String> = old.iter().map(key).collect();
+    // A keyless junction can hold one link twice: report it once.
+    let mut seen = std::collections::HashSet::new();
+    let diff = SetDiff {
+        added: dsts
+            .iter()
+            .filter(|d| !was.contains(&key(d)))
+            .cloned()
+            .collect(),
+        removed: old
+            .into_iter()
+            .filter(|o| !new.contains(&key(o)) && seen.insert(key(o)))
+            .collect(),
+    };
+    Ok((!diff.added.is_empty() || !diff.removed.is_empty()).then_some(diff))
 }
 
-/// The projected key column as display strings; `None` for a type it cannot decode.
+/// The projected key column, bound as `dst_key` binds; `None` for a type it cannot decode.
 async fn keys_on(
     tx: &mut crate::sql::PoolTx<'_>,
     query: &SelectQuery,
     ty: Option<FieldType>,
-) -> Result<Option<std::collections::HashSet<String>>, ExecError> {
+) -> Result<Option<Vec<SqlValue>>, ExecError> {
     use super::executor::fetch_values_flat_on as fetch;
-    let keys: Vec<String> = match ty {
+    let keys: Vec<SqlValue> = match ty {
         // PG decodes only the exact integer width.
-        Some(FieldType::I16) => strings(fetch::<i16, _>(tx, query).await?),
-        Some(FieldType::I32) => strings(fetch::<i32, _>(tx, query).await?),
-        Some(FieldType::I64) => strings(fetch::<i64, _>(tx, query).await?),
-        Some(FieldType::String) => fetch::<String, _>(tx, query).await?,
-        Some(FieldType::Uuid) => strings(fetch::<uuid::Uuid, _>(tx, query).await?),
+        Some(FieldType::I16) => wide(fetch::<i16, _>(tx, query).await?),
+        Some(FieldType::I32) => wide(fetch::<i32, _>(tx, query).await?),
+        Some(FieldType::I64) => wide(fetch::<i64, _>(tx, query).await?),
+        Some(FieldType::String) => values(fetch::<String, _>(tx, query).await?),
+        Some(FieldType::Uuid) => values(fetch::<uuid::Uuid, _>(tx, query).await?),
         _ => return Ok(None),
     };
-    Ok(Some(keys.into_iter().collect()))
+    Ok(Some(keys))
 }
 
-fn strings<K: ToString>(keys: Vec<K>) -> Vec<String> {
-    keys.iter().map(ToString::to_string).collect()
+fn wide<K: Into<i64>>(keys: Vec<K>) -> Vec<SqlValue> {
+    keys.into_iter().map(|k| SqlValue::I64(k.into())).collect()
+}
+
+fn values<K: Into<SqlValue>>(keys: Vec<K>) -> Vec<SqlValue> {
+    keys.into_iter().map(Into::into).collect()
 }
 
 /// The source PK bound as-is (#1926); an unsaved source has none.
@@ -702,12 +736,15 @@ impl GenericM2MManager {
 
     /// The `pk_col` / `ct_col` filters that pick this instance's rows.
     async fn owner(&self, pool: &Pool) -> Result<Vec<Filter>, ExecError> {
+        Ok(self.owner_ct(pool).await?.0)
+    }
+
+    /// [`Self::owner`] with the content type id it resolved.
+    async fn owner_ct(&self, pool: &Pool) -> Result<(Vec<Filter>, i64), ExecError> {
         let src = self.src_key()?;
         let ct = self.ct_id(pool).await?;
-        Ok(vec![
-            eq(self.pk_col, src),
-            eq(self.ct_col, SqlValue::I64(ct)),
-        ])
+        let filters = vec![eq(self.pk_col, src), eq(self.ct_col, SqlValue::I64(ct))];
+        Ok((filters, ct))
     }
 
     /// Resolve the owning model's `content_type_id`, erroring clearly
@@ -728,32 +765,33 @@ impl GenericM2MManager {
     /// optional `signals` module, so the signature itself cannot exist without
     /// the feature.
     #[cfg(feature = "signals")]
-    async fn signal(&self, action: crate::signals::m2m::M2mAction, dst_pks: Vec<SqlValue>) {
-        crate::signals::m2m::send_m2m_changed(crate::signals::m2m::M2mChangedContext {
+    async fn signal(
+        &self,
+        action: crate::signals::m2m::M2mAction,
+        ct: i64,
+        dst_pks: Vec<SqlValue>,
+        diff: SetDiff,
+    ) {
+        let ctx = crate::signals::m2m::M2mChangedContext::new(
             action,
-            through: self.through,
-            src_col: self.pk_col,
-            dst_col: self.dst_col,
-            src_pk: self.src_pk.clone(),
+            self.through,
+            self.pk_col,
+            self.dst_col,
+            self.src_pk.clone(),
             dst_pks,
-        })
-        .await;
+        )
+        .with_content_type(ct)
+        .with_diff(diff.added, diff.removed);
+        crate::signals::m2m::send_m2m_changed(ctx).await;
     }
 
-    /// Related PKs linked to this instance (scoped to its content type).
-    /// Decoded as `i64`; use [`Self::all_as`] for a non-integer target PK (#2050).
+    /// Related PKs linked to this instance (scoped to its content type),
+    /// decoded as the target's key type `K`.
     ///
     /// # Errors
-    /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
-    pub async fn all(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
-        self.all_as::<i64>(pool).await
-    }
-
-    /// [`Self::all`] decoded as `K`, for a `String` / `Uuid` target PK (#1950).
-    ///
-    /// # Errors
-    /// Driver failures, including a `dst` column that does not decode as `K`.
-    pub async fn all_as<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
+    /// Driver failures, a `dst` column that does not decode as `K`, or
+    /// [`ExecError::ContentTypeNotRegistered`].
+    pub async fn all<K: FlatScalar>(&self, pool: &Pool) -> Result<Vec<K>, ExecError> {
         let owner = self.owner(pool).await?;
         fetch_dst(self.junction(), self.dst_col, owner, pool).await
     }
@@ -764,12 +802,8 @@ impl GenericM2MManager {
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let mut values: Vec<SqlValue> = self
-            .owner(pool)
-            .await?
-            .into_iter()
-            .map(|f| f.value)
-            .collect();
+        let (owner, ct) = self.owner_ct(pool).await?;
+        let mut values: Vec<SqlValue> = owner.into_iter().map(|f| f.value).collect();
         values.push(dst.clone());
         let query = InsertQuery::new(
             self.junction(),
@@ -780,8 +814,18 @@ impl GenericM2MManager {
             return Ok(());
         }
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Add, vec![dst])
-            .await;
+        self.signal(
+            crate::signals::m2m::M2mAction::Add,
+            ct,
+            vec![dst.clone()],
+            SetDiff {
+                added: vec![dst],
+                removed: Vec::new(),
+            },
+        )
+        .await;
+        #[cfg(not(feature = "signals"))]
+        let _ = ct;
         Ok(())
     }
 
@@ -791,14 +835,24 @@ impl GenericM2MManager {
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn remove(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let mut filters = self.owner(pool).await?;
+        let (mut filters, ct) = self.owner_ct(pool).await?;
         filters.push(eq(self.dst_col, dst.clone()));
         if delete(self.junction(), filters, pool).await? == 0 {
             return Ok(());
         }
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Remove, vec![dst])
-            .await;
+        self.signal(
+            crate::signals::m2m::M2mAction::Remove,
+            ct,
+            vec![dst.clone()],
+            SetDiff {
+                added: Vec::new(),
+                removed: vec![dst],
+            },
+        )
+        .await;
+        #[cfg(not(feature = "signals"))]
+        let _ = ct;
         Ok(())
     }
 
@@ -813,7 +867,7 @@ impl GenericM2MManager {
         pool: &Pool,
     ) -> Result<(), ExecError> {
         let dsts = dst_keys(ids, self.through, self.dst_col)?;
-        let owner = self.owner(pool).await?;
+        let (owner, ct) = self.owner_ct(pool).await?;
         let rows = dsts
             .iter()
             .map(|d| {
@@ -829,7 +883,7 @@ impl GenericM2MManager {
         let locks = source_lock(self.src_schema, &self.src_key()?)
             .into_iter()
             .collect();
-        if !replace(
+        let Some(diff) = replace(
             locks,
             junction,
             owner,
@@ -840,11 +894,14 @@ impl GenericM2MManager {
             pool,
         )
         .await?
-        {
+        else {
             return Ok(());
-        }
+        };
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Set, dsts).await;
+        self.signal(crate::signals::m2m::M2mAction::Set, ct, dsts, diff)
+            .await;
+        #[cfg(not(feature = "signals"))]
+        let _ = (ct, diff);
         Ok(())
     }
 
@@ -853,13 +910,20 @@ impl GenericM2MManager {
     /// # Errors
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn clear(&self, pool: &Pool) -> Result<(), ExecError> {
-        let owner = self.owner(pool).await?;
+        let (owner, ct) = self.owner_ct(pool).await?;
         if delete(self.junction(), owner, pool).await? == 0 {
             return Ok(());
         }
         #[cfg(feature = "signals")]
-        self.signal(crate::signals::m2m::M2mAction::Clear, Vec::new())
-            .await;
+        self.signal(
+            crate::signals::m2m::M2mAction::Clear,
+            ct,
+            Vec::new(),
+            SetDiff::default(),
+        )
+        .await;
+        #[cfg(not(feature = "signals"))]
+        let _ = ct;
         Ok(())
     }
 
@@ -876,43 +940,5 @@ impl GenericM2MManager {
         let mut filters = self.owner(pool).await?;
         filters.push(eq(self.dst_col, dst));
         exists(self.junction(), filters, pool).await
-    }
-}
-
-// ============================================================ deprecated _pool aliases
-
-/// Source-compat shims for callers still using the pre-#891
-/// `_pool`-suffixed names. Each forwards verbatim to the bare-name
-/// method above. Slated for removal in the next major version —
-/// the deprecation attribute is the canary.
-impl M2MManager {
-    #[deprecated(note = "renamed to `all` — drop the `_pool` suffix")]
-    pub async fn all_pool(&self, pool: &Pool) -> Result<Vec<i64>, ExecError> {
-        self.all(pool).await
-    }
-
-    #[deprecated(note = "renamed to `add` — drop the `_pool` suffix")]
-    pub async fn add_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
-        self.add(dst_id, pool).await
-    }
-
-    #[deprecated(note = "renamed to `remove` — drop the `_pool` suffix")]
-    pub async fn remove_pool(&self, dst_id: i64, pool: &Pool) -> Result<(), ExecError> {
-        self.remove(dst_id, pool).await
-    }
-
-    #[deprecated(note = "renamed to `set` — drop the `_pool` suffix")]
-    pub async fn set_pool(&self, ids: &[i64], pool: &Pool) -> Result<(), ExecError> {
-        self.set(ids, pool).await
-    }
-
-    #[deprecated(note = "renamed to `clear` — drop the `_pool` suffix")]
-    pub async fn clear_pool(&self, pool: &Pool) -> Result<(), ExecError> {
-        self.clear(pool).await
-    }
-
-    #[deprecated(note = "renamed to `contains` — drop the `_pool` suffix")]
-    pub async fn contains_pool(&self, dst_id: i64, pool: &Pool) -> Result<bool, ExecError> {
-        self.contains(dst_id, pool).await
     }
 }

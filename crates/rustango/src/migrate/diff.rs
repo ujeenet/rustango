@@ -91,6 +91,13 @@ pub enum SchemaChange {
         from: Option<String>,
         to: Option<String>,
     },
+    /// Change a table's `db_table_comment`; `None` drops it. SQLite has
+    /// no comments, so it writes nothing there.
+    AlterTableComment {
+        table: String,
+        from: Option<String>,
+        to: Option<String>,
+    },
     /// Rename a table. `detect_changes` never emits this: a snapshot
     /// diff cannot tell a rename from a drop plus an add. Write it by
     /// hand with `manage makemigrations --empty <name>`, then edit
@@ -245,6 +252,7 @@ impl SchemaChange {
             | Self::AlterColumnDefault { table: t, .. }
             | Self::AlterColumnMaxLength { table: t, .. }
             | Self::AlterColumnComment { table: t, .. }
+            | Self::AlterTableComment { table: t, .. }
             | Self::RenameColumn { table: t, .. }
             | Self::AlterColumnUnique { table: t, .. }
             | Self::AlterFkOnDelete { table: t, .. }
@@ -421,6 +429,19 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
                 continue;
             };
             push_alter_changes(&ct.name, pf, cf, &mut changes);
+        }
+    }
+    // Table comments on tables that stay; a new table writes its own.
+    for ct in &current.tables {
+        let Some(pt) = prev.table(&ct.name) else {
+            continue;
+        };
+        if pt.db_table_comment != ct.db_table_comment {
+            changes.push(SchemaChange::AlterTableComment {
+                table: ct.name.clone(),
+                from: pt.db_table_comment.clone(),
+                to: ct.db_table_comment.clone(),
+            });
         }
     }
     // Dropped columns on remaining tables.
@@ -1343,6 +1364,10 @@ fn render_changes_split_inner(
                 for f in &table.fields {
                     out.immediate.extend(column_comment(name, f, dialect));
                 }
+                if let Some(comment) = &table.db_table_comment {
+                    out.immediate
+                        .extend(dialect.table_comment_statement(name, comment));
+                }
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
                         .extend(constraints_sql_from_snapshot(table, dialect, schema)?);
@@ -1674,6 +1699,9 @@ fn render_changes_split_inner(
                 column,
                 to.as_deref().unwrap_or(""),
             )),
+            SchemaChange::AlterTableComment { table, to, .. } => out
+                .immediate
+                .extend(dialect.alter_table_comment_statement(table, to.as_deref().unwrap_or(""))),
             SchemaChange::AlterColumnUnique {
                 table,
                 column,
@@ -2008,8 +2036,9 @@ fn render_changes_split_inner(
                     .push(composite_fk_sql(table, name, to, from, on, dialect, schema));
             }
             SchemaChange::DropCompositeFk { table, name } => {
-                // Same single owner as the CHECK arm above.
-                let Some(sql) = dialect.drop_foreign_key_sql(table, name) else {
+                // The usual name; the runner finds the live one by its columns.
+                let fk = super::ddl::fk_constraint_name(table, name);
+                let Some(sql) = dialect.drop_foreign_key_sql(table, &fk) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
                          dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
@@ -2173,6 +2202,14 @@ pub(super) fn create_table_sql_as(
         }
     }
     sql.push(')');
+    // MySQL's trailer; PG's `COMMENT ON TABLE` follows the CREATE.
+    if let Some(inline) = t
+        .db_table_comment
+        .as_deref()
+        .and_then(|c| dialect.write_inline_table_comment(c))
+    {
+        sql.push_str(&inline);
+    }
     sql
 }
 
@@ -2197,18 +2234,18 @@ fn constraints_sql_from_snapshot(
     Ok(out)
 }
 
-/// Each composite FK of `t` by name, with its `ADD CONSTRAINT … FOREIGN KEY`.
-pub(crate) fn composite_fks(
-    t: &TableSnapshot,
+/// Each composite FK of `t`, with its `ADD CONSTRAINT … FOREIGN KEY`.
+pub(crate) fn composite_fks<'t>(
+    t: &'t TableSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
-) -> Vec<(String, String)> {
+) -> Vec<(&'t super::snapshot::CompositeFkSnapshot, String)> {
     t.composite_fks
         .iter()
         .map(|cf| {
             let sql =
                 composite_fk_sql(&t.name, &cf.name, &cf.to, &cf.from, &cf.on, dialect, schema);
-            (cf.name.clone(), sql)
+            (cf, sql)
         })
         .collect()
 }
@@ -2231,7 +2268,7 @@ fn composite_fk_sql(
     format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
         dialect.quote_ident(table),
-        dialect.quote_ident(name),
+        dialect.quote_ident(&super::ddl::fk_constraint_name(table, name)),
         cols(from),
         fk_target(dialect, schema, to),
         cols(on),
@@ -2803,6 +2840,7 @@ mod sql_type_tests {
                 model: "T".into(),
                 fields: vec![fs("i32", false)],
                 composite_fks: Vec::new(),
+                db_table_comment: None,
             }],
             ..Default::default()
         };
@@ -2839,6 +2877,7 @@ mod sql_type_tests {
                 model: "T".into(),
                 fields: vec![fs("i32", false), nullable],
                 composite_fks: Vec::new(),
+                db_table_comment: None,
             }],
             ..Default::default()
         };
@@ -2875,6 +2914,7 @@ mod sql_type_tests {
             model: name.into(),
             fields,
             composite_fks: Vec::new(),
+            db_table_comment: None,
         };
         let prev = SchemaSnapshot {
             tables: vec![
@@ -3037,6 +3077,7 @@ mod sql_type_tests {
                 ..fs("i64", false)
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         };
         SchemaSnapshot {
             tables: vec![uniq("a_b", "c"), uniq("a", "b_c")],
@@ -3103,6 +3144,7 @@ mod sql_type_tests {
                     },
                 ],
                 composite_fks: vec![],
+                db_table_comment: None,
             }],
             ..SchemaSnapshot::default()
         };
@@ -3137,6 +3179,7 @@ mod sql_type_tests {
                 ..fs("i64", false)
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         };
         child.fields.insert(0, fs("i64", true));
         let snap = SchemaSnapshot {
@@ -3198,6 +3241,7 @@ mod sql_type_tests {
                 ..fs("i64", false)
             }],
             composite_fks: vec![],
+            db_table_comment: None,
         };
         let snap = SchemaSnapshot {
             tables: vec![child],
@@ -3239,6 +3283,7 @@ mod sql_type_tests {
                     },
                 ],
                 composite_fks: vec![],
+                db_table_comment: None,
             }],
             ..SchemaSnapshot::default()
         }
@@ -3365,6 +3410,7 @@ mod sql_type_tests {
                     string("name", false),
                 ],
                 composite_fks: vec![],
+                db_table_comment: None,
             }],
             ..SchemaSnapshot::default()
         }
@@ -4059,7 +4105,8 @@ mod sql_type_tests {
         assert_eq!(out.deferred_fks.len(), 1);
         let stmt = &out.deferred_fks[0];
         assert!(stmt.contains(r#"ALTER TABLE "child""#));
-        assert!(stmt.contains(r#"ADD CONSTRAINT "fk_child_parent_composite""#));
+        // Per table: MySQL names FKs per database.
+        assert!(stmt.contains(r#"ADD CONSTRAINT "child_fk_child_parent_composite_fkey""#));
         assert!(stmt.contains(r#"FOREIGN KEY ("pa_id", "pb_id")"#));
         assert!(stmt.contains(r#"REFERENCES "parent" ("a_id", "b_id")"#));
     }
@@ -4144,7 +4191,7 @@ mod sql_type_tests {
         assert_eq!(out.deferred_fks.len(), 1);
         let stmt = &out.deferred_fks[0];
         assert!(stmt.contains("ALTER TABLE `child`"));
-        assert!(stmt.contains("ADD CONSTRAINT `fk_child_parent_composite`"));
+        assert!(stmt.contains("ADD CONSTRAINT `child_fk_child_parent_composite_fkey`"));
         assert!(stmt.contains("FOREIGN KEY (`pa_id`, `pb_id`)"));
         assert!(stmt.contains("REFERENCES `parent` (`a_id`, `b_id`)"));
         assert!(
@@ -4164,7 +4211,7 @@ mod sql_type_tests {
             render_changes_split_with_dialect(&changes, &snap, &crate::sql::Postgres).unwrap();
         assert_eq!(
             out.immediate,
-            vec![r#"ALTER TABLE "child" DROP CONSTRAINT IF EXISTS "fk_x""#.to_string()]
+            vec![r#"ALTER TABLE "child" DROP CONSTRAINT IF EXISTS "child_fk_x_fkey""#.to_string()]
         );
     }
 
@@ -4186,7 +4233,7 @@ mod sql_type_tests {
         let out = render_changes_split_with_dialect(&changes, &snap, &crate::sql::MySql).unwrap();
         assert_eq!(
             out.immediate,
-            vec!["ALTER TABLE `child` DROP FOREIGN KEY `fk_x`".to_string()]
+            vec!["ALTER TABLE `child` DROP FOREIGN KEY `child_fk_x_fkey`".to_string()]
         );
         assert!(
             !out.immediate[0].contains("IF EXISTS"),

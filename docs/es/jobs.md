@@ -269,7 +269,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Despliégalo como su propio contenedor/servicio y escálalo a **N réplicas** —
 todas extraen de la tabla compartida de forma segura. El proceso web entonces
-solo necesita `dispatch` (no tiene que `start()` los workers). Empareja el worker
+solo necesita `dispatch`, pero debe `register` cada tipo de job que despacha (sin `start()`), o construir su cola con `.allow_unregistered_dispatch()`; un dispatch no registrado se rechaza. Empareja el worker
 con un barrido periódico
 [`reclaim_stuck_jobs_pool`](#la-cola-persistente-producción) para recuperar
 trabajos de un worker que se ha caído.
@@ -494,7 +494,7 @@ hechas por otro pool dentro, registran `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
-    note.insert_pool(&pool).await
+    note.insert(&pool).await
 })
 .await??;
 ```
@@ -542,7 +542,8 @@ tenant**:
 ```rust
 use rustango::distributed_lock::DistributedLock;
 
-let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+let tenant = TenantSlug::of(&org).expect("a registry org");
+let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
 lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
 ```
 

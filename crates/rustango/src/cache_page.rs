@@ -344,7 +344,7 @@ impl CachePageLayer {
             &page.path,
             &self.query_key.of(&page.query),
             &page.host,
-            self.page_tenant(page),
+            self.page_tenant(page).as_ref(),
             self.vary_on
                 .iter()
                 .map(|name| (name.as_str(), page.vary_value(name))),
@@ -354,9 +354,9 @@ impl CachePageLayer {
     }
 
     /// The page's tenant, or `None` when the layer does not key on tenants.
-    fn page_tenant<'a>(&self, page: &'a PageKey) -> Option<&'a str> {
+    fn page_tenant(&self, page: &PageKey) -> Option<OrgKey> {
         if tenant_keyed(self.tenant_agnostic) {
-            page.tenant.as_deref()
+            page.tenant.clone().map(OrgKey)
         } else {
             None
         }
@@ -387,7 +387,8 @@ impl CachePageLayer {
                     "invalidate: page has no tenant but the layer keys on it"
                 );
             }
-            let counter = generation_key(&self.key_prefix, &p.path, &p.host, self.page_tenant(p));
+            let tenant = self.page_tenant(p);
+            let counter = generation_key(&self.key_prefix, &p.path, &p.host, tenant.as_ref());
             // A long TTL, not `None`: a backend may give `None` its short
             // default, and a counter that expired would bring older entries back.
             let now = self.cache.incr(&counter, 1, Some(GENERATION_TTL)).await?;
@@ -436,10 +437,11 @@ impl PageKey {
         self
     }
 
-    /// The tenant slug the page was resolved for.
+    /// The tenant the page was resolved for.
+    #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn tenant(mut self, slug: impl Into<String>) -> Self {
-        self.tenant = Some(slug.into());
+    pub fn tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.tenant = Some(tenant.namespace());
         self
     }
 
@@ -550,11 +552,11 @@ where
             };
             let tenant = match tenant {
                 PageTenant::Unknown => return inner.call(req).await,
-                PageTenant::Slug(slug) => Some(slug),
+                PageTenant::Org(ns) => Some(OrgKey(ns)),
                 PageTenant::NoTenant => None,
             };
             let (host, uri) = request_page(&req);
-            let counter = generation_key(&prefix, uri.path(), host, tenant.as_deref());
+            let counter = generation_key(&prefix, uri.path(), host, tenant.as_ref());
             // Unknown generation: a purged page could be served, so bypass.
             let Ok(generation) = read_generation(&cache, &counter).await else {
                 return inner.call(req).await;
@@ -583,7 +585,7 @@ where
             let Some(key) = compute_cache_key(
                 &prefix,
                 &req,
-                tenant.as_deref(),
+                tenant.as_ref(),
                 &query_key,
                 &vary,
                 body_digest.as_deref(),
@@ -765,7 +767,8 @@ fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
 enum PageTenant {
     /// No tenant: tenancy is off, or the route is tenant-agnostic.
     NoTenant,
-    Slug(String),
+    /// The resolved tenant's `#org:<id>:<slug>`: a reused slug gets new keys.
+    Org(String),
     /// No tenant context, no match, or resolution failed: never share a page.
     Unknown,
 }
@@ -774,13 +777,15 @@ enum PageTenant {
 /// tenant context's resolver.
 #[cfg(feature = "tenancy")]
 async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
-    if let Some(crate::tenancy::TenantSlug(slug)) = req.extensions().get() {
-        let slug = slug.clone();
-        return (req, PageTenant::Slug(slug));
+    if let Some(t) = req.extensions().get::<crate::tenancy::TenantSlug>() {
+        let ns = t.namespace();
+        return (req, PageTenant::Org(ns));
     }
     let (parts, body) = req.into_parts();
     let tenant = match crate::tenancy::middleware::request_org(&parts, &parts.extensions).await {
-        Some(Ok(Some(org))) => PageTenant::Slug(org.slug),
+        // An org without an id cannot be told from a later one: never share its page.
+        Some(Ok(Some(org))) => crate::tenancy::TenantSlug::of(&org)
+            .map_or(PageTenant::Unknown, |t| PageTenant::Org(t.namespace())),
         // The route may still vary on an input the resolver ignored (#2045).
         Some(Ok(None)) => PageTenant::Unknown,
         Some(Err(e)) => {
@@ -842,7 +847,7 @@ fn request_page(req: &Request<Body>) -> (&str, &axum::http::Uri) {
 fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
-    tenant: Option<&str>,
+    tenant: Option<&OrgKey>,
     query_key: &QueryKey,
     vary_on: &[HeaderName],
     body_digest: Option<&str>,
@@ -885,13 +890,16 @@ const GENERATION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 
 
 /// The key of a path's generation counter, which every page key of the
 /// path carries. `#` never starts a page key's method part.
-fn generation_key(prefix: &str, path: &str, host: &str, tenant: Option<&str>) -> String {
+fn generation_key(prefix: &str, path: &str, host: &str, tenant: Option<&OrgKey>) -> String {
     let mut k = format!("{prefix}|#gen|");
     write_lp(&mut k, path);
     write_lp(&mut k, host);
-    write_lp(&mut k, tenant.unwrap_or(""));
+    write_lp(&mut k, tenant.map_or("", |t| t.0.as_str()));
     k
 }
+
+/// The tenant part of a key: [`TenantSlug::namespace`](crate::tenancy::TenantSlug).
+struct OrgKey(String);
 
 /// The path's current generation; 0 when it was never invalidated.
 async fn read_generation(cache: &BoxedCache, key: &str) -> Result<u64, CacheError> {
@@ -907,7 +915,7 @@ async fn read_generation(cache: &BoxedCache, key: &str) -> Result<u64, CacheErro
 /// Each part is length-prefixed, so a value holding a separator
 /// cannot make two different requests produce the same key.
 ///
-/// `Host` and the resolved tenant slug are always part of the key, so
+/// `Host` and the resolved org id are always part of the key, so
 /// neither a per-host nor a per-header tenant gets another's page.
 #[allow(clippy::too_many_arguments)]
 fn build_key<'a>(
@@ -916,7 +924,7 @@ fn build_key<'a>(
     path: &str,
     query: &str,
     host: &str,
-    tenant: Option<&str>,
+    tenant: Option<&OrgKey>,
     vary: impl Iterator<Item = (&'a str, &'a str)>,
     body_digest: Option<&str>,
     generation: u64,
@@ -928,8 +936,8 @@ fn build_key<'a>(
     write_lp(&mut k, path);
     write_lp(&mut k, query);
     write_lp(&mut k, host);
-    // Slugs are never empty, so "" means "tenant-agnostic".
-    write_lp(&mut k, tenant.unwrap_or(""));
+    // An org key is never empty, so "" means "tenant-agnostic".
+    write_lp(&mut k, tenant.map_or("", |t| t.0.as_str()));
     for (name, v) in vary {
         write_lp(&mut k, name);
         write_lp(&mut k, v);

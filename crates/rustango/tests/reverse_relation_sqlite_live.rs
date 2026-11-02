@@ -86,12 +86,12 @@ async fn seed(pool: &Pool) -> (i64, i64) {
         id: Auto::default(),
         name: "Ada".into(),
     };
-    ada.save_pool(pool).await.unwrap();
+    ada.save(pool).await.unwrap();
     let mut grace = Author {
         id: Auto::default(),
         name: "Grace".into(),
     };
-    grace.save_pool(pool).await.unwrap();
+    grace.save(pool).await.unwrap();
     let ada_pk = ada.id.get().copied().unwrap();
     let grace_pk = grace.id.get().copied().unwrap();
     for (title, fk) in [
@@ -104,7 +104,7 @@ async fn seed(pool: &Pool) -> (i64, i64) {
             title: title.into(),
             author: ForeignKey::unloaded(fk),
         };
-        a.save_pool(pool).await.unwrap();
+        a.save(pool).await.unwrap();
     }
     for (body, fk) in [
         ("nice work", ada_pk),
@@ -116,7 +116,7 @@ async fn seed(pool: &Pool) -> (i64, i64) {
             body: body.into(),
             author: ForeignKey::unloaded(fk),
         };
-        c.save_pool(pool).await.unwrap();
+        c.save(pool).await.unwrap();
     }
     (ada_pk, grace_pk)
 }
@@ -135,7 +135,7 @@ async fn override_emits_custom_named_accessor() {
         .unwrap();
     // `default_related_name = "articles"` → method is named
     // `articles_pool` on the parent (no `_set` suffix).
-    let articles = ada.articles_pool(&pool).await.unwrap();
+    let articles = ada.articles(&pool).await.unwrap();
     assert_eq!(articles.len(), 2);
     let titles: Vec<&str> = articles.iter().map(|a| a.title.as_str()).collect();
     assert!(titles.contains(&"Engine notes"));
@@ -148,7 +148,7 @@ async fn override_emits_custom_named_accessor() {
         .unwrap()
         .pop()
         .unwrap();
-    let articles = grace.articles_pool(&pool).await.unwrap();
+    let articles = grace.articles(&pool).await.unwrap();
     assert_eq!(articles.len(), 1);
     assert_eq!(articles[0].title, "Birth of the Bug");
 }
@@ -167,7 +167,7 @@ async fn default_name_falls_back_to_child_snake_set() {
         .unwrap();
     // Comment has no `default_related_name` override → falls back to
     // `<child_snake>_set_pool` → `comment_set_pool`.
-    let comments = ada.comment_set_pool(&pool).await.unwrap();
+    let comments = ada.comment_set(&pool).await.unwrap();
     assert_eq!(comments.len(), 2);
     let bodies: Vec<&str> = comments.iter().map(|c| c.body.as_str()).collect();
     assert!(bodies.contains(&"nice work"));
@@ -182,7 +182,7 @@ async fn empty_parent_returns_empty_vec() {
         id: Auto::default(),
         name: "Newcomer".into(),
     };
-    newcomer.save_pool(&pool).await.unwrap();
-    let articles = newcomer.articles_pool(&pool).await.unwrap();
+    newcomer.save(&pool).await.unwrap();
+    let articles = newcomer.articles(&pool).await.unwrap();
     assert_eq!(articles.len(), 0);
 }

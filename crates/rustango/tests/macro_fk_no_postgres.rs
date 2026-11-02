@@ -51,7 +51,7 @@ async fn get_pool_resolves_under_sqlite_only() {
         .await
         .expect("table");
     let mut parent = Parent { id: Auto::Unset };
-    parent.insert_pool(&pool).await.expect("parent");
+    parent.insert(&pool).await.expect("parent");
     let id = parent.id.get().copied().expect("id");
     let mut fk: ForeignKey<Parent> = ForeignKey::unloaded(id);
     assert_eq!(

@@ -39,6 +39,7 @@ use axum::middleware::Next;
 use axum::Router;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum IpFilterError {
     #[error("invalid CIDR or IP: {0}")]
     InvalidCidr(String),

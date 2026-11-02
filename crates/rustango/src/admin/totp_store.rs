@@ -25,7 +25,7 @@ pub struct AdminTotp {
     #[rustango(primary_key)]
     pub user_id: i64,
     /// Base32-encoded shared secret (RFC 4648, no padding).
-    #[rustango(max_length = 64)]
+    #[rustango(secret, max_length = 64)]
     pub secret_base32: String,
     /// `true` once the user has verified a code against the secret.
     #[rustango(default = "false")]
@@ -37,7 +37,7 @@ pub struct AdminTotp {
     pub last_used_step: Option<i64>,
     /// A re-enrollment's new secret. The confirmed one above keeps
     /// gating login until a code for this one promotes it (#1756).
-    #[rustango(max_length = 64)]
+    #[rustango(secret, max_length = 64)]
     pub pending_secret_base32: Option<String>,
 }
 

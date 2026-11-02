@@ -8,12 +8,10 @@
 //! two cookies differ in name and shape while the crypto stays in one
 //! place.
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
+use crate::session::PasswordFingerprint;
 pub use crate::session::SessionSecret as AdminSessionSecret;
-use crate::session::{sign, PasswordFingerprint};
 
 tokio::task_local! {
     /// Per-request session, set by the `require_session` middleware, so
@@ -41,26 +39,15 @@ pub(crate) fn acting_superuser(perms_scoped: bool) -> bool {
     !perms_scoped && current().is_none_or(|s| s.is_superuser)
 }
 
-/// [`acting_superuser`] for an object-permission hook; `false` outside
-/// an admin request.
+/// The old name of [`crate::object_permissions::is_superuser`], which also
+/// reads API principals.
+#[deprecated(
+    since = "0.62.0",
+    note = "use `rustango::object_permissions::is_superuser`"
+)]
 #[must_use]
 pub fn is_superuser(parts: &axum::http::request::Parts) -> bool {
-    parts
-        .extensions
-        .get::<PermsScoped>()
-        .is_some_and(|p| acting_superuser(p.0))
-}
-
-/// Object-permission hook: a superuser's row needs a superuser (#2521).
-pub(crate) fn superuser_row_needs_superuser(
-    parts: &axum::http::request::Parts,
-    row: Option<&serde_json::Value>,
-) -> bool {
-    let row_is_superuser = row.and_then(|r| r.get("is_superuser")).is_some_and(|v| {
-        v.as_bool()
-            .unwrap_or_else(|| v.as_i64().is_some_and(|n| n != 0))
-    });
-    !row_is_superuser || is_superuser(parts)
+    crate::object_permissions::is_superuser(parts)
 }
 
 /// The request's session: the extension, else the task-local. A
@@ -199,11 +186,14 @@ pub(crate) struct CookieAuth {
     pub(crate) exp: i64,
 }
 
-impl CookiePayload {
-    fn is_expired(&self) -> bool {
-        chrono::Utc::now().timestamp() >= self.exp
+impl crate::session::Expiring for CookiePayload {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
     }
 }
+
+/// Seal tag of the admin session cookie, apart from every other token kind.
+const ADMIN_SESSION_TAG: &[u8] = b"rustango-admin-session-v1";
 
 /// Sign a fresh session and return the cookie value to set. Lasts 8
 /// hours. `auth_hash` is the fingerprint of the user's current
@@ -252,11 +242,7 @@ pub(crate) fn encode_for(
         auth_hash: auth_hash.clone(),
         iat: crate::session::issued_at(sessions_revoked_at),
     };
-    let json = serde_json::to_vec(&payload).expect("payload serializes");
-    let body = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&json);
-    let sig = sign(secret, body.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{body}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), ADMIN_SESSION_TAG, &payload)
 }
 
 /// Verify and decode a cookie value. Returns `Some` only when the
@@ -269,23 +255,8 @@ pub(crate) fn decode_full(
     secret: &AdminSessionSecret,
     value: &str,
 ) -> Option<(AdminSession, CookieAuth)> {
-    let (body, sig_b64) = value.split_once('.')?;
-    let expected = sign(secret, body.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .ok()?;
-    // Constant-time comparison, the same primitive `tenancy::session`
-    // uses. It blocks timing probes that forge a cookie byte by byte.
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return None;
-    }
-    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(body)
-        .ok()?;
-    let payload: CookiePayload = serde_json::from_slice(&json).ok()?;
-    if payload.is_expired() {
-        return None;
-    }
+    let payload: CookiePayload =
+        crate::session::SealedToken::open(secret.key(), ADMIN_SESSION_TAG, value).ok()?;
     Some((
         AdminSession::new(payload.user_id, payload.username, payload.is_superuser),
         CookieAuth {
@@ -304,14 +275,6 @@ mod tests {
         AdminSession::new(user_id, username, is_superuser)
     }
 
-    fn parts(scoped: Option<bool>) -> axum::http::request::Parts {
-        let (mut p, ()) = axum::http::Request::new(()).into_parts();
-        if let Some(b) = scoped {
-            p.extensions.insert(PermsScoped(b));
-        }
-        p
-    }
-
     /// Both halves of the rule: the perm set and the session (#2520).
     #[tokio::test]
     async fn acting_superuser_needs_no_perm_set_and_a_superuser_session() {
@@ -323,26 +286,6 @@ mod tests {
         assert!(under(true, false).await);
         assert!(!under(false, false).await, "a non-superuser session");
         assert!(!under(true, true).await, "with_user_perms wins");
-        // Outside an admin request a hook fails closed.
-        assert!(!is_superuser(&parts(None)));
-        assert!(is_superuser(&parts(Some(false))));
-        assert!(!is_superuser(&parts(Some(true))));
-    }
-
-    #[test]
-    fn a_superuser_row_needs_a_superuser() {
-        let su = serde_json::json!({"is_superuser": true});
-        let su_int = serde_json::json!({"is_superuser": 1});
-        let member = serde_json::json!({"is_superuser": false});
-        let scoped = parts(Some(true));
-        assert!(!superuser_row_needs_superuser(&scoped, Some(&su)));
-        assert!(!superuser_row_needs_superuser(&scoped, Some(&su_int)));
-        assert!(superuser_row_needs_superuser(&scoped, Some(&member)));
-        assert!(superuser_row_needs_superuser(&scoped, None));
-        assert!(superuser_row_needs_superuser(
-            &parts(Some(false)),
-            Some(&su)
-        ));
     }
 
     #[test]

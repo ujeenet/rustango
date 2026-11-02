@@ -197,7 +197,7 @@ async fn insert_widget(pool: &Pool, n: i64) -> Result<(), rustango::sql::ExecErr
         id: Auto::default(),
         n,
     };
-    w.insert_pool(pool).await.map(|()| ())
+    w.insert(pool).await.map(|()| ())
 }
 
 /// Insert a child row through the ORM.
@@ -211,7 +211,7 @@ async fn insert_child(
         region: region.to_owned(),
         code,
     };
-    c.insert_pool(pool).await.map(|()| ())
+    c.insert(pool).await.map(|()| ())
 }
 
 /// A CHECK constraint: add it, prove it bites, drop it, prove it stopped.
@@ -432,13 +432,13 @@ async fn an_i32_pk_junction_gets_its_foreign_keys(pool: &Pool) {
     run(pool, &b.immediate).await;
     run(pool, &b.deferred_fks).await;
     let mut tag = I32Tag { id: Auto::Unset };
-    tag.insert_pool(pool).await.expect("tag");
+    tag.insert(pool).await.expect("tag");
     let mut post = I32Post { id: Auto::Unset };
-    post.insert_pool(pool).await.expect("post");
+    post.insert(pool).await.expect("post");
     let tag_id = tag.id.get().copied().expect("tag id");
     post.tags_m2m().add(tag_id, pool).await.expect("add");
     assert_eq!(
-        post.tags_m2m().all(pool).await.expect("all"),
+        post.tags_m2m().all::<i64>(pool).await.expect("all"),
         vec![i64::from(tag_id)]
     );
     drop_all().await;

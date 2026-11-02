@@ -130,7 +130,7 @@ struct PendingAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminActionFn,
+    handler: crate::admin::AdminTxActionFn,
 }
 
 #[cfg(feature = "postgres")]
@@ -606,10 +606,10 @@ impl<DB: Database> Builder<DB> {
     /// action name must also appear in the model's
     /// `#[rustango(admin(actions = "..."))]` allowlist.
     ///
-    /// Mirrors [`crate::admin::Builder::register_action`]; the only
-    /// difference is the handler receives the tenant-scoped pool.
+    /// Mirrors [`crate::admin::Builder::register_tx_action`]; the
+    /// transaction is on the tenant-scoped pool.
     #[must_use]
-    pub fn admin_register_action<F>(
+    pub fn admin_register_tx_action<F>(
         self,
         model_table: &'static str,
         action_name: &'static str,
@@ -617,14 +617,14 @@ impl<DB: Database> Builder<DB> {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::Pool,
+                &'a mut crate::sql::PoolTx<'static>,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send
             + Sync
             + 'static,
     {
-        self.admin_register_action_with_perm(
+        self.admin_register_tx_action_with_perm(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
@@ -632,10 +632,10 @@ impl<DB: Database> Builder<DB> {
         )
     }
 
-    /// [`Self::admin_register_action`] checked against `perm` (#1818).
-    /// See [`crate::admin::Builder::register_action_with_perm`].
+    /// [`Self::admin_register_tx_action`] checked against `perm`.
+    /// See [`crate::admin::Builder::register_tx_action_with_perm`].
     #[must_use]
-    pub fn admin_register_action_with_perm<F>(
+    pub fn admin_register_tx_action_with_perm<F>(
         mut self,
         model_table: &'static str,
         action_name: &'static str,
@@ -644,7 +644,7 @@ impl<DB: Database> Builder<DB> {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::Pool,
+                &'a mut crate::sql::PoolTx<'static>,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send
@@ -679,6 +679,8 @@ impl<DB: Database> Builder<DB> {
         F: FnOnce(Arc<TenantPools<DB>>, sqlx::Pool<DB>, String) -> Fut,
         Fut: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         hook(
             self.pools.clone(),
             self.registry.clone(),
@@ -725,6 +727,8 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let root = project_root.as_ref();
         std::fs::create_dir_all(root)?;
 
@@ -779,6 +783,8 @@ impl<DB: Database> Builder<DB> {
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        #[cfg(feature = "postgres")]
+        crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let resolver_for_admin = self.resolver();
         // Picks the prefixed admin routes for a path under its tenant's prefix.
         let dispatch_resolver = Arc::new(self.resolver());
@@ -848,11 +854,11 @@ impl<DB: Database> Builder<DB> {
         }
         for action in self.admin_actions {
             let handler = action.handler;
-            tenant_admin_builder = tenant_admin_builder.register_action_with_perm(
+            tenant_admin_builder = tenant_admin_builder.register_tx_action_with_perm(
                 action.table,
                 action.name,
                 action.perm,
-                move |pool, pks| handler(pool, pks),
+                move |tx, pks| handler(tx, pks),
             );
         }
         let tenant_admin = tenant_admin_builder
@@ -1522,7 +1528,7 @@ pub(crate) mod resolver_tests {
             backend_kind: "sqlite".into(),
             ..crate::testkit::org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
         (tmp, sq, url)
     }
 
@@ -1565,7 +1571,7 @@ pub(crate) mod resolver_tests {
                 host_pattern: Some("acme.localhost".into()),
                 ..crate::testkit::org()
             };
-            org.insert_pool(&pool).await.expect("insert org");
+            org.insert(&pool).await.expect("insert org");
         }
         (tmp, sq, url)
     }
@@ -1672,7 +1678,7 @@ pub(crate) mod resolver_tests {
             enabled: true,
             created_at: crate::sql::Auto::Unset,
         };
-        row.insert_pool(&pool).await.expect("apex row");
+        row.insert(&pool).await.expect("apex row");
         let app = app_with(sq, url, true).await;
         assert_eq!(
             get(&app, "localhost", "/setup").await,

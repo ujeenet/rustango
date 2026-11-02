@@ -75,7 +75,7 @@ async fn foreign_key_get_pool_resolves_parent_on_sqlite() {
         id: Auto::default(),
         name: "Ada Lovelace".to_owned(),
     };
-    author.insert_pool(&pool).await.expect("insert author");
+    author.insert(&pool).await.expect("insert author");
     let author_id = author.id.get().copied().expect("author pk");
 
     let mut post = Post {
@@ -83,7 +83,7 @@ async fn foreign_key_get_pool_resolves_parent_on_sqlite() {
         title: "On the Analytical Engine".to_owned(),
         author: ForeignKey::unloaded(author_id),
     };
-    post.insert_pool(&pool).await.expect("insert post");
+    post.insert(&pool).await.expect("insert post");
 
     // FK starts Unloaded.
     assert!(!post.author.is_loaded());
@@ -110,7 +110,7 @@ async fn foreign_key_get_pool_errors_on_missing_target() {
         title: "Orphan".to_owned(),
         author: ForeignKey::unloaded(9999),
     };
-    post.insert_pool(&pool).await.expect("insert orphan post");
+    post.insert(&pool).await.expect("insert orphan post");
 
     let err = post.author.get_pool(&pool).await;
     assert!(err.is_err(), "missing FK target should error");

@@ -109,13 +109,13 @@ async fn audited_insert_fills_the_pk(pool: &Pool) {
         id: Auto::Unset,
         name: "a".into(),
     };
-    n.insert_pool(pool).await.expect("audited insert_pool");
+    n.insert(pool).await.expect("audited insert_pool");
     let id = *n.id.get().expect("id filled");
     let mut m = Note {
         id: Auto::Unset,
         name: "b".into(),
     };
-    m.save_pool(pool).await.expect("audited save_pool");
+    m.save(pool).await.expect("audited save_pool");
     let entries = rustango::audit::fetch_for_entity_pool(pool, "v71934_note", &id.to_string())
         .await
         .expect("audit rows");
@@ -186,7 +186,7 @@ async fn bulk_writes_fill_the_pk(pool: &Pool) {
 /// A caller-set id that exists clashes on the PK, not the target: no backend may update that row.
 async fn bulk_upsert_of_a_set_existing_id_updates_no_row(pool: &Pool) {
     let mut a = item("a", 1);
-    a.insert_pool(pool).await.expect("insert");
+    a.insert(pool).await.expect("insert");
     let clash = Item {
         id: a.id.clone(),
         name: "b".into(),
@@ -204,7 +204,9 @@ async fn pg_bulk_insert_writes_ids_back(pool: &Pool) {
     #[cfg(feature = "postgres")]
     if let Some(pg) = pool.as_postgres() {
         let mut rows = vec![item("x", 1), item("y", 2)];
-        Item::bulk_insert(&mut rows, pg).await.expect("bulk_insert");
+        Item::bulk_insert(&mut rows, &pg.clone().into())
+            .await
+            .expect("bulk_insert");
         let mut stored: Vec<Uuid> = Item::objects()
             .fetch(pool)
             .await
@@ -221,7 +223,7 @@ async fn pg_bulk_insert_writes_ids_back(pool: &Pool) {
             id: Auto::Unset,
             name: "n".into(),
         }];
-        Note::bulk_insert(&mut notes, pg)
+        Note::bulk_insert(&mut notes, &pg.clone().into())
             .await
             .expect("audited bulk_insert");
         assert!(notes[0].id.get().is_some());
@@ -235,7 +237,7 @@ async fn db_pk_is_read_back_beside_a_rust_filled_auto(pool: &Pool) {
         id: Auto::Unset,
         name: "a".into(),
     };
-    t.insert_pool(pool).await.expect("insert_pool");
+    t.insert(pool).await.expect("insert_pool");
     let stored = Ticket::objects().fetch(pool).await.expect("fetch");
     assert_eq!(stored.len(), 1);
     assert_eq!(t.id.get(), stored[0].id.get(), "PK read back");
@@ -245,7 +247,7 @@ async fn db_pk_is_read_back_beside_a_rust_filled_auto(pool: &Pool) {
         created_at: Auto::Unset,
         id: Auto::Unset,
     };
-    s.insert_pool(pool).await.expect("insert_pool");
+    s.insert(pool).await.expect("insert_pool");
     let id = *s.id.get().expect("id filled");
     let stored = Stamp::objects().fetch(pool).await.expect("fetch");
     assert_eq!(stored[0].id.get(), Some(&id));
@@ -264,7 +266,7 @@ async fn pg_bulk_insert_set_pk_fills_unset_timestamps(pool: &Pool) {
         let at = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("ts");
         let mut rows = vec![ticket(10), ticket(11), ticket(12)];
         rows[2].created_at = Auto::Set(at);
-        Ticket::bulk_insert(&mut rows, pg)
+        Ticket::bulk_insert(&mut rows, &pg.clone().into())
             .await
             .expect("bulk_insert");
         let mut stored = Ticket::objects().fetch(pool).await.expect("fetch");
@@ -286,7 +288,7 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
         created_at: Auto::Unset,
         updated_at: Auto::Unset,
     };
-    b.insert_pool(pool).await.expect("insert");
+    b.insert(pool).await.expect("insert");
     let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
     let id = *b.id.get().expect("id");
     let stored = |pool: &Pool| {
@@ -305,7 +307,7 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
     };
 
     b.updated_at = Auto::Set(old);
-    b.save_pool(pool).await.expect("save_pool");
+    b.save(pool).await.expect("save_pool");
     let mem = *b.updated_at.get().expect("stamp");
     assert_ne!(mem, old, "save_pool left the stale stamp in memory");
     assert!(same(mem, stored(pool).await), "memory {mem} vs row");
@@ -327,9 +329,9 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
         created_at: Auto::Unset,
         updated_at: Auto::Unset,
     };
-    other.insert_pool(pool).await.expect("insert other");
+    other.insert(pool).await.expect("insert other");
     b.name = "taken".into();
-    b.save_pool(pool).await.expect_err("duplicate name");
+    b.save(pool).await.expect_err("duplicate name");
     assert_eq!(b.updated_at.get(), Some(&old), "a failed save stamped");
     b.save_partial(&["name", "updated_at"], pool)
         .await
@@ -340,8 +342,8 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
         "a failed save_partial stamped"
     );
     b.name = "c".into();
-    b.delete_pool(pool).await.expect("delete");
-    assert_eq!(b.save_pool(pool).await.expect("save_pool"), 0);
+    b.delete(pool).await.expect("delete");
+    assert_eq!(b.save(pool).await.expect("save_pool"), 0);
     assert_eq!(b.updated_at.get(), Some(&old), "a save of no row stamped");
 }
 
@@ -355,10 +357,10 @@ async fn pg_upsert_stamps_auto_now(pool: &Pool) {
             created_at: Auto::Unset,
             updated_at: Auto::Unset,
         };
-        b.insert_pool(pool).await.expect("insert");
+        b.insert(pool).await.expect("insert");
         let old = chrono::DateTime::from_timestamp(1_600_000_000, 0).expect("ts");
         b.updated_at = Auto::Set(old);
-        b.upsert(pg).await.expect("upsert");
+        b.upsert(&pg.clone().into()).await.expect("upsert");
         let mem = *b.updated_at.get().expect("stamp");
         assert_ne!(mem, old, "upsert sent the stale stamp");
         let id = *b.id.get().expect("id");
@@ -381,10 +383,12 @@ async fn pg_upsert_stamps_auto_now(pool: &Pool) {
             created_at: Auto::Unset,
             updated_at: Auto::Unset,
         };
-        other.insert_pool(pool).await.expect("insert other");
+        other.insert(pool).await.expect("insert other");
         b.updated_at = Auto::Set(old);
         b.name = "v".into();
-        b.upsert(pg).await.expect_err("duplicate name");
+        b.upsert(&pg.clone().into())
+            .await
+            .expect_err("duplicate name");
         assert_eq!(b.updated_at.get(), Some(&old), "a failed upsert stamped");
     }
     let _ = pool;

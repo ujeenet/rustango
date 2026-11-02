@@ -60,7 +60,7 @@ async fn fresh_pool() -> Option<Pool> {
             title: title.into(),
             published: pub_,
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
     Some(pool)
 }
@@ -107,7 +107,7 @@ async fn get_object_or_404_returns_not_found_on_no_match() {
                 "default 404 message: {message}"
             );
         }
-        ShortcutError::Database(e) => panic!("expected NotFound, got Database: {e}"),
+        other => panic!("expected NotFound, got {other:?}"),
     }
 }
 

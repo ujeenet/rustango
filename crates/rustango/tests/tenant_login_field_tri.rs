@@ -55,7 +55,7 @@ fn parts(user: &str, pass: &str) -> Parts {
     let creds = base64::engine::general_purpose::STANDARD.encode(format!("{user}:{pass}"));
     Request::builder()
         .header(header::AUTHORIZATION, format!("Basic {creds}"))
-        .extension(TenantSlug("login-field".into()))
+        .extension(TenantSlug::new(1, "login-field"))
         .extension(axum::extract::ConnectInfo(addr))
         .body(())
         .unwrap()
@@ -70,7 +70,7 @@ async fn seed(pool: &Pool, name: &str, email: Option<&str>) -> User {
         email: email.map(str::to_owned),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed user");
+    u.insert(pool).await.expect("seed user");
     u
 }
 
@@ -171,7 +171,7 @@ async fn gaps_count_missing_and_shared_emails(pool: &Pool) {
         email: Some("   ".to_owned()),
         ..rustango::testkit::user()
     };
-    let blank_saved = usize::from(spaces.insert_pool(pool).await.is_ok());
+    let blank_saved = usize::from(spaces.insert(pool).await.is_ok());
     let shared = format!("{name}@example.test");
     seed(pool, &format!("{name}a"), Some(&shared)).await;
     // Spaces around it: the same address to sign-in, a new value to the index.
@@ -182,7 +182,7 @@ async fn gaps_count_missing_and_shared_emails(pool: &Pool) {
         email: Some(shared.to_uppercase()),
         ..rustango::testkit::user()
     };
-    let twin_saved = twin.insert_pool(pool).await.is_ok();
+    let twin_saved = twin.insert(pool).await.is_ok();
 
     let gaps = rustango::tenancy::email_gaps(pool).await.unwrap();
     assert!(

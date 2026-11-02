@@ -107,7 +107,7 @@ async fn register(
         created_at: Auto::Unset,
     };
     // The raw DB error names tables and constraints; log it, answer plainly.
-    u.insert_pool(&pool).await.map_err(|e| {
+    u.insert(&pool).await.map_err(|e| {
         tracing::warn!(error = %e, "register failed");
         (StatusCode::CONFLICT, "username or email already taken".into())
     })?;

@@ -338,9 +338,8 @@ menos que uses `refresh_with`.
   que rustango, y rechazados incluso por `rustango::jwt::decode`. Si escribiste un
   verificador propio para sortearlo, puedes tirarlo.
 
-  Los tokens emitidos antes del arreglo se siguen aceptando al verificar, para que
-  una actualización no cierre la sesión de nadie. Esa ruta de compatibilidad
-  desaparece en 0.58, cuando cualquier token con la forma antigua haya caducado.
+  Desde 0.62.0 se rechaza un token de dos segmentos, tanto en `JwtLifecycle`
+  como en `JwtBackend`.
 
 
 ---

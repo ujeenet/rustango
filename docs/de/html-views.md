@@ -299,7 +299,7 @@ Jeder View stempelt einen konsistenten Kontext ein, damit Templates sauber zwisc
 | `ListView` | `object_list` (die Zeilen der Seite), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (die Zeile) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **kein `object`** |
-| `UpdateView` | `form` (`.fields`, `.errors`), `object` (die Zeile), `pk`, `is_create` (false), `is_update` (true) |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (die gelisteten Felder, der Primärschlüssel und `.context_fields()`), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (die zu bestätigende Zeile) |
 
 Zeilen werden als schlichte, nach Spaltennamen indizierte Maps bereitgestellt (`{{ post.title }}`),
@@ -365,7 +365,7 @@ passt, wie deine App Datenbankverbindungen verwaltet:
   [`Tenant`](https://docs.rs)-Extractor auf. Verfügbar mit den Features
   `template_views` + `tenancy`. Templates portieren unverändert zwischen beiden.
 
-Das spiegelt die ViewSet-Aufteilung (`router` / `router_pool` vs `tenant_router`).
+Das spiegelt die ViewSet-Aufteilung (`router` vs `tenant_router`).
 
 ---
 
@@ -381,7 +381,7 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     // HTML pages for browsers:
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));

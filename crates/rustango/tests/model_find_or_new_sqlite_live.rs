@@ -38,7 +38,7 @@ async fn find_or_new_returns_existing_with_exists_true() {
         id: Auto::default(),
         title: "real".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let pk = p.id.get().copied().unwrap();
 
     let (found, exists) = Post::find_or_new(pk, &pool, || Post {

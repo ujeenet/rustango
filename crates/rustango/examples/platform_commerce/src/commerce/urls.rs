@@ -1,7 +1,7 @@
 //! Commerce routes.
 //!
 //! **Near-twin.** `platform_commerce_saas/src/commerce/urls.rs` is this
-//! file with `.router_pool(prefix, pool)` replaced by
+//! file with `.router(prefix, pool)` replaced by
 //! `.tenant_router(prefix)` and the pool argument dropped. That one
 //! substitution is the entire difference between a single-tenant and a
 //! multi-tenant rustango app, and keeping it the *only* difference is
@@ -92,7 +92,7 @@ fn promotions(pool: &Pool) -> Router<AppState> {
         .filter_fields(&["code", "visible"])
         .search_fields(&["code"])
         .limit_offset_pagination()
-        .router_pool("/api/v1/promotions", pool.clone())
+        .router("/api/v1/promotions", pool.clone())
         .with_state(())
 }
 
@@ -100,7 +100,7 @@ fn promotions(pool: &Pool) -> Router<AppState> {
 fn gift_cards(pool: &Pool) -> Router<AppState> {
     ViewSet::for_model(GiftCard::SCHEMA, &["code", "balance_cents"])
         .allow_anonymous() // soak only: no single-database sign-in yet
-        .router_pool("/api/v1/gift-cards", pool.clone())
+        .router("/api/v1/gift-cards", pool.clone())
         .with_state(())
 }
 
@@ -254,7 +254,7 @@ fn products(pool: &Pool) -> Router<AppState> {
         .limit_offset_pagination()
         .page_size(25)
         .max_page_size(200)
-        .router_pool("/api/v1/products", pool.clone())
+        .router("/api/v1/products", pool.clone())
         .with_state(())
 }
 
@@ -285,7 +285,7 @@ fn orders(pool: &Pool) -> Router<AppState> {
         .filter_fields(&["status", "customer_id"])
         .cursor_pagination_desc("placed_at")
         .page_size(25)
-        .router_pool("/api/v1/orders", pool.clone())
+        .router("/api/v1/orders", pool.clone())
         .with_state(())
 }
 
@@ -309,7 +309,7 @@ fn orders_raw(pool: &Pool) -> Router<AppState> {
         .allow_anonymous() // soak only: no single-database sign-in yet
         .filter_fields(&["status", "customer_id"])
         .limit_offset_pagination()
-        .router_pool("/api/v1/orders-raw", pool.clone())
+        .router("/api/v1/orders-raw", pool.clone())
         .with_state(())
 }
 
@@ -322,7 +322,7 @@ fn order_lines(pool: &Pool) -> Router<AppState> {
         .allow_anonymous() // soak only: no single-database sign-in yet
         .filter_fields(&["order_id", "product_id"])
         .page_size(50)
-        .router_pool("/api/v1/order-lines", pool.clone())
+        .router("/api/v1/order-lines", pool.clone())
         .with_state(())
 }
 
@@ -333,7 +333,7 @@ fn customers(pool: &Pool) -> Router<AppState> {
         .filter_fields(&["loyalty_tier"])
         .search_fields(&["email", "full_name"])
         .limit_offset_pagination()
-        .router_pool("/api/v1/customers", pool.clone())
+        .router("/api/v1/customers", pool.clone())
         .with_state(())
 }
 
@@ -344,7 +344,7 @@ fn inventory(pool: &Pool) -> Router<AppState> {
         .allow_anonymous() // soak only: no single-database sign-in yet
         .filter_fields(&["product_id", "location"])
         .limit_offset_pagination()
-        .router_pool("/api/v1/inventory", pool.clone())
+        .router("/api/v1/inventory", pool.clone())
         .with_state(())
 }
 

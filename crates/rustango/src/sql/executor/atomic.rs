@@ -396,8 +396,8 @@ pub(crate) fn in_any_block() -> bool {
 /// The [`atomic!`](crate::atomic) macro hides the `Box::pin` ceremony.
 ///
 /// **Inside the closure** `tx` is an [`AtomicTx`]: lock it per
-/// statement and pass `&mut *guard` to the `_tx` helpers, or match the
-/// guard's [`PoolTx`] variant for raw sqlx.
+/// statement and pass `&mut *guard` to the `_tx` helpers, or match
+/// [`PoolTx::conn`] for raw sqlx.
 ///
 /// **Nesting** is per pool object: `atomic` on the same `Pool` (or a
 /// clone) inside the block runs in a savepoint on the same connection.

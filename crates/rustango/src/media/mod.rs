@@ -21,9 +21,7 @@
 //!     .set("avatars", Arc::new(s3_storage))
 //!     .with_default("avatars");
 //!
-//! // `new_pool` works on all three backends. `MediaManager::new` is
-//! // Postgres-only and takes a `PgPool`.
-//! let manager = MediaManager::new_pool(pool.clone(), registry);
+//! let manager = MediaManager::new(pool.clone(), registry);
 //!
 //! // Server-side save (small files):
 //! let media = manager.save_bytes(SaveOpts {
@@ -64,15 +62,12 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-#[cfg(feature = "postgres")]
-use sqlx::PgPool;
-
 use crate::core::Column as _;
 use crate::sql::Auto;
 use crate::storage::{StorageError, StorageRegistry};
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub mod collection;
 pub mod tag;
@@ -232,6 +227,7 @@ impl Media {
 // =====================================================================
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MediaError {
     #[error("unknown disk: {0} (configure via StorageRegistry::set)")]
     UnknownDisk(String),
@@ -346,21 +342,21 @@ pub struct MediaManager {
 }
 
 impl MediaManager {
-    /// PG back-compat constructor.
-    #[cfg(feature = "postgres")]
+    /// A manager over `pool`, on any backend.
     #[must_use]
-    pub fn new(pool: PgPool, registry: StorageRegistry) -> Self {
-        Self::new_pool(crate::sql::Pool::Postgres(pool), registry)
-    }
-
-    /// Constructor that works on all three backends.
-    #[must_use]
-    pub fn new_pool(pool: impl Into<crate::sql::Pool>, registry: StorageRegistry) -> Self {
+    pub fn new(pool: impl Into<crate::sql::Pool>, registry: StorageRegistry) -> Self {
         Self {
             pool: pool.into(),
             registry,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
         }
+    }
+
+    /// Old name of [`Self::new`].
+    #[deprecated(since = "0.62.0", note = "use `MediaManager::new`")]
+    #[must_use]
+    pub fn new_pool(pool: impl Into<crate::sql::Pool>, registry: StorageRegistry) -> Self {
+        Self::new(pool, registry)
     }
 
     /// Refuse a [`Self::begin_upload`] that declares more than `bytes`.
@@ -684,7 +680,7 @@ impl MediaManager {
     pub async fn delete(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
-            _ => return Err(MediaError::Other("Media has no id".into())),
+            _ => return Err(no_id()),
         };
         use crate::sql::UpdaterPool as _;
         Media::objects()
@@ -713,7 +709,7 @@ impl MediaManager {
     pub async fn purge(&self, m: &Media) -> Result<(), MediaError> {
         let id = match m.id {
             Auto::Set(v) => v,
-            _ => return Err(MediaError::Other("Media has no id".into())),
+            _ => return Err(no_id()),
         };
         // The storage delete is what revokes access, and this row is
         // the only record that the object exists: `orphans_older_than`
@@ -941,7 +937,7 @@ impl MediaManager {
     async fn purge_unconfirmed(&self, m: &Media) -> Result<bool, MediaError> {
         use crate::sql::UpdaterPool as _;
         let Auto::Set(id) = m.id else {
-            return Err(MediaError::Other("Media has no id".into()));
+            return Err(no_id());
         };
         let storage = self.resolve_disk(&m.disk)?;
         let claimed = Media::objects()
@@ -1487,6 +1483,19 @@ impl MediaManager {
         Ok(tag_ids_of(&self.tags_by_slug(&slugs).await?))
     }
 
+    /// Whether any of `slugs` names no stored tag yet. More than
+    /// [`MAX_TAGS_PER_CALL`] slugs answer `false`: tagging refuses them anyway.
+    #[cfg(feature = "admin")]
+    pub(crate) async fn names_new_tag(&self, slugs: &[&str]) -> Result<bool, MediaError> {
+        let mut slugs = slugs.to_vec();
+        slugs.sort_unstable();
+        slugs.dedup();
+        if slugs.is_empty() || slugs.len() > MAX_TAGS_PER_CALL {
+            return Ok(false);
+        }
+        Ok(self.tags_by_slug(&slugs).await?.len() < slugs.len())
+    }
+
     /// Tags whose slug is in `slugs` (at most [`MAX_TAGS_PER_CALL`]).
     async fn tags_by_slug(&self, slugs: &[&str]) -> Result<Vec<MediaTag>, MediaError> {
         use crate::sql::FetcherPool as _;
@@ -1926,6 +1935,11 @@ fn dead_collection(id: i64) -> MediaError {
     MediaError::Other(format!("collection {id} is missing or deleted"))
 }
 
+/// A `Media` that was never saved.
+fn no_id() -> MediaError {
+    MediaError::Other("Media has no id".into())
+}
+
 /// `root` and its live descendants, each level locked `FOR UPDATE`, so a
 /// `create_collection` under any of them waits for `tx` (#1573).
 /// `chunk` caps the ids bound per `IN` list.
@@ -2086,7 +2100,7 @@ mod tests {
     #[tokio::test]
     async fn pool_works_on_a_sqlite_manager() {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
-        let m = MediaManager::new_pool(pool, StorageRegistry::new());
+        let m = MediaManager::new(pool, StorageRegistry::new());
         assert!(m.pool().as_sqlite().is_some());
     }
 

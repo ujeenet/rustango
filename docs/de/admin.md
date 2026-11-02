@@ -271,28 +271,27 @@ Objekt-PK) statt über eine einzelne FK-Spalte angehängt sind, verwende
 ## Massenaktionen
 
 Benenne die Aktionen in `admin(actions = "...")` und registriere dann einen Handler pro
-Aktion am `Builder`. Der Handler erhält den Pool und die Primärschlüssel der
-ausgewählten Zeilen:
+Aktion am `Builder`. Der Handler erhält die Schreibtransaktion des Admins und die
+Primärschlüssel der ausgewählten Zeilen:
 
 ```rust
+use rustango::admin::AdminError;
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_action("posts", "publish", |pool, pks| {
+    .register_tx_action("posts", "publish", |tx, pks| {
         Box::pin(async move {
-            let ids: Vec<String> = pks.iter().filter_map(|v| match v {
-                SqlValue::I64(n) => Some(n.to_string()),
-                SqlValue::I32(n) => Some(n.to_string()),
-                _ => None,
-            }).collect();
-            if !ids.is_empty() {
-                let sql = format!("UPDATE posts SET status='published' WHERE id IN ({})", ids.join(","));
-                rustango::sql::raw_execute_pool(pool, &sql, Vec::new()).await?;
-            }
+            let query = Post::objects()
+                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .update()
+                .set("status", "published")
+                .compile()
+                .map_err(|e| AdminError::Internal(e.to_string()))?;
+            rustango::sql::update_tx(tx, &query).await?;
             Ok(())
         })
     })
-    .register_action("posts", "archive", /* … */)
+    .register_tx_action("posts", "archive", /* … */)
     .build();
 ```
 
@@ -303,14 +302,11 @@ erscheint schlicht nicht.
 
 Eine eigene Aktion wird wie eine Bearbeitung geprüft: `{table}.change` plus ein
 Objekt-Hook, der nach der Aktion benannt ist. Eine Aktion, die löscht, sollte das mit
-`register_action_with_perm(table, name, ActionPerm::Delete, handler)` sagen, dann
+`register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)` sagen, dann
 braucht sie `{table}.delete` und führt stattdessen den `delete`-Hook aus. Sie braucht
 weiterhin `{table}.change` und wird als Bearbeitung auditiert und signalisiert.
 
-Ein `register_action`-Handler schreibt über seine eigene Verbindung, daher werden
-die Prüfpfad-Zeilen eines geprüften Modells danach geschrieben, nach bestem Bemühen.
-`register_tx_action(table, name, handler)` (und `register_tx_action_with_perm`)
-übergibt dem Handler stattdessen `&mut PoolTx`, sodass seine Schreibvorgänge und
+Der Handler schreibt über dieses `&mut PoolTx`, sodass seine Schreibvorgänge und
 ihre Prüfpfad-Zeilen gemeinsam committen oder zurückrollen. Schreibe nur über
 diese Transaktion: Eine zweite Verbindung kann einen SQLite-Pool mit nur einer
 Verbindung blockieren.
@@ -400,13 +396,13 @@ Drei weitere Registrierungsmakros hängen sich in das Verhalten eines registrier
   und ein POST/PUT/PATCH/DELETE `{table}.change`; ergänze `perm = "publish"`, um
   `{table}.publish` zu verlangen.
 - **Queryset-Einschränkung** —
-  `register_admin_queryset!("posts", hook)`, wobei `hook: fn(&Parts) -> Vec<Filter>`
+  `register_queryset_scope!("posts", hook)`, wobei `hook: fn(&Parts) -> Vec<Filter>`
   einschränkt, was eine Anfrage sehen kann (z. B. nur die Zeilen des aktuellen
   Benutzers). Mehrere Hooks auf einer Tabelle fügen sich zusammen. Ein Anlegen,
   Bearbeiten oder eine Inline-Zeile, deren FK auf eine Zielzeile zeigt, die deren Hooks,
   Soft Delete oder `view`-Hook verbergen, wird mit "no such object" abgelehnt.
 - **Berechtigungen auf Zeilenebene** —
-  `register_admin_object_permission!("posts", "change", check)`, wobei
+  `register_object_permission!("posts", "change", check)`, wobei
   `check: fn(&Parts, Option<&Value>) -> bool` pro Zeile erlaubt oder verweigert.
   Eingebaute Handler konsultieren die Aktionen `add`, `change`, `delete` und `view`;
   mehrere Hooks werden mit UND verknüpft. Ein `view`-Hook verbirgt Zeilen auch in der
@@ -520,9 +516,6 @@ read_only_tables = ["orders"]
 | `url_prefix` | `/__admin` | `[routes] admin_url` | Präfix jedes Admin-Links. Hänge den Router unter demselben Pfad ein: `Builder::settings_prefix(&settings)` liefert ihn, und das Scaffold fällt auf `/admin` zurück |
 | `allowed_tables` | `[]`, jedes Modell | | Wie `show_only` |
 | `read_only_tables` | `[]` | | Wie `read_only` |
-| `primary_color` | | | Noch ohne Wirkung; nur `manage check --deploy` liest es |
-| `csrf_cookie_secure` | | | Noch ohne Wirkung; das CSRF-Cookie folgt `[security] secure_cookies` |
-| `session_timeout_minutes` | | | Noch ohne Wirkung; der Admin hat kein Idle-Timeout |
 
 Auch `[brand] primary_color` färbt diesen Admin nicht; es ist für die
 [Operator-Konsole](operator-console.md#branding). Das Session-Cookie ist
@@ -547,11 +540,12 @@ In einem Tenancy-Projekt läuft der Admin jedes Tenants auf dessen Host unter
 nicht). Alte `/__admin`-Links erreichen ihn weiterhin, außer
 `RouteConfig::legacy()` macht `/__admin` zum Hauptpfad.
 
-Der Tenant-Admin liest weder `[admin]` noch `[brand]`. Er nimmt seine Marke aus
-der `Org`-Zeile des Tenants: Der Name ist `brand_name`, sonst der Anzeigename
-des Tenants; das Logo ist das auf der Bearbeitungsseite der Konsole hochgeladene,
+Der Tenant-Admin nimmt seinen Namen aus `brand_name` der `Org`-Zeile, sonst
+`[admin] title`, sonst `[brand] name`, sonst dem Anzeigenamen des Tenants;
+Seitenleiste, `<title>` und Überschrift zeigen ihn. Der Rest kommt aus der
+`Org`-Zeile: Das Logo ist das auf der Bearbeitungsseite der Konsole hochgeladene,
 sonst das Framework-Logo (`rustango.png` unter der Static-URL); das Theme ist
-`theme_mode` und die Akzentfarbe `primary_color`. Siehe
+`theme_mode` und die Akzentfarbe `primary_color`, die auch Links färbt. Siehe
 [Branding pro Tenant](operator-console.md#branding-pro-tenant).
 
 ---
@@ -577,9 +571,8 @@ anders angegeben):
 | `skip_count_for([tables])` | Überspringt `COUNT(*)` auf riesigen Tabellen (Pager zeigt "Page N"). |
 | `view_hook_scan_cap(rows)` | Wie viele Zeilen die Liste durch `view`-Hooks prüft, bevor sie den Rest zurückhält. Standard 10 000. |
 | `with_user_perms([codenames])` | Sperrt Tabellen auf `{table}.view/add/change/delete`. |
-| `register_action(table, name, handler)` | Registriert einen Massenaktions-Handler. |
-| `register_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
-| `register_tx_action(table, name, handler)` / `register_tx_action_with_perm` | Dasselbe, aber der Handler erhält die Schreibtransaktion, sodass Prüfpfad-Zeilen mit ihr committen. |
+| `register_tx_action(table, name, handler)` | Registriert einen Massenaktions-Handler; er erhält die Schreibtransaktion, sodass Prüfpfad-Zeilen mit ihr committen. |
+| `register_tx_action_with_perm(table, name, perm, handler)` | Ebenso, aber gegen `ActionPerm::Delete` statt `change` geprüft. |
 | `with_session_auth(secret)` | Erfordert Cookie-Login (`/login` + `/logout`). |
 | `logout_url(u)` | POST-Ziel für die Logout-Schaltfläche der Seitenleiste. Standard `{admin_prefix}/logout`; Mandanten-Admins setzen es auf ihre Mandanten-Logout-Route. |
 | `secure_cookies(bool)` | Setzt das `Secure`-Flag (HTTPS-only) auf dem Session-Cookie. |

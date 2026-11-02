@@ -18,6 +18,7 @@ use crate::tenancy::auth::Operator;
 
 /// Why an activation change was refused.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum OperatorError {
     NotFound(String),
     /// The signed-in operator tried to deactivate themselves.
@@ -254,7 +255,7 @@ mod tests {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(pool).await.unwrap();
+        op.insert(pool).await.unwrap();
         op
     }
 

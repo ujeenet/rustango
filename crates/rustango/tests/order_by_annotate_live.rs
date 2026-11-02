@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use rustango::sql::{annotate_count_children, annotate_count_children_on};
+use rustango::sql::annotate_count_children_on;
 use rustango::sql::{sqlx, Auto, ForeignKey};
 use rustango::Model;
 use tokio::sync::Mutex;
@@ -91,7 +91,7 @@ async fn order_by_descending_published_at() {
         id: Auto::default(),
         name: "Solo".into(),
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let a_pk = a.id.get().copied().unwrap();
 
     let now = chrono::Utc::now();
@@ -102,7 +102,7 @@ async fn order_by_descending_published_at() {
             author: ForeignKey::unloaded(a_pk),
             published_at: now - chrono::Duration::hours(hours_ago),
         };
-        p.save(&pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
 
     let posts: Vec<Post> = Post::objects()
@@ -126,17 +126,17 @@ async fn annotate_count_children_groups_per_parent() {
         id: Auto::default(),
         name: "Ada".into(),
     };
-    ada.save(&pool).await.unwrap();
+    ada.save(&pool.clone().into()).await.unwrap();
     let mut grace = Author {
         id: Auto::default(),
         name: "Grace".into(),
     };
-    grace.save(&pool).await.unwrap();
+    grace.save(&pool.clone().into()).await.unwrap();
     let mut linus = Author {
         id: Auto::default(),
         name: "Linus".into(),
     };
-    linus.save(&pool).await.unwrap();
+    linus.save(&pool.clone().into()).await.unwrap();
 
     let ada_pk = ada.id.get().copied().unwrap();
     let grace_pk = grace.id.get().copied().unwrap();
@@ -149,13 +149,17 @@ async fn annotate_count_children_groups_per_parent() {
             author: ForeignKey::unloaded(fk),
             published_at: now,
         };
-        p.save(&pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
 
-    let counts: Vec<(Author, i64)> =
-        annotate_count_children::<Author>(Author::objects(), "rustango_ob_post", "author", &pool)
-            .await
-            .unwrap();
+    let counts: Vec<(Author, i64)> = annotate_count_children_on::<Author, _>(
+        Author::objects(),
+        "rustango_ob_post",
+        "author",
+        &pool,
+    )
+    .await
+    .unwrap();
     assert_eq!(counts.len(), 3);
     let by_name: std::collections::HashMap<&str, i64> =
         counts.iter().map(|(a, n)| (a.name.as_str(), *n)).collect();
@@ -181,12 +185,12 @@ async fn annotate_count_children_on_works_against_acquired_connection() {
         id: Auto::default(),
         name: "Ada".into(),
     };
-    ada.save(&pool).await.unwrap();
+    ada.save(&pool.clone().into()).await.unwrap();
     let mut grace = Author {
         id: Auto::default(),
         name: "Grace".into(),
     };
-    grace.save(&pool).await.unwrap();
+    grace.save(&pool.clone().into()).await.unwrap();
 
     let now = chrono::Utc::now();
     for fk in [
@@ -200,7 +204,7 @@ async fn annotate_count_children_on_works_against_acquired_connection() {
             author: ForeignKey::unloaded(fk),
             published_at: now,
         };
-        p.save(&pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
 
     let mut conn = pool.acquire().await.unwrap();

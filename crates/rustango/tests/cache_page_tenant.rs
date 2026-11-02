@@ -40,7 +40,7 @@ async fn registry() -> Pool {
             backend_kind: "sqlite".into(),
             ..rustango::testkit::org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
     }
     pool
 }
@@ -216,11 +216,11 @@ async fn tenant_slug_extension_skips_resolution() {
     let layer = CachePageLayer::new(Arc::new(InMemoryCache::new()));
     let acme = page(hits.clone())
         .layer(layer.clone())
-        .layer(Extension(TenantSlug("acme".into())))
+        .layer(Extension(TenantSlug::new(1, "acme")))
         .layer(Extension(ctx.clone()));
     let globex = page(hits.clone())
         .layer(layer)
-        .layer(Extension(TenantSlug("globex".into())))
+        .layer(Extension(TenantSlug::new(2, "globex")))
         .layer(Extension(ctx));
     get_with(&acme, None).await;
     get_with(&acme, None).await;
@@ -267,7 +267,7 @@ async fn server_builder_keys_the_page_on_the_tenant() {
             backend_kind: "sqlite".into(),
             ..rustango::testkit::org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
     }
     let hits = Arc::new(AtomicU32::new(0));
     let api = page(hits.clone()).layer(CachePageLayer::new(Arc::new(InMemoryCache::new())));
@@ -304,10 +304,71 @@ async fn invalidate_purges_one_tenants_page() {
     fetch(&app, "globex").await;
     assert_eq!(hits.load(Ordering::SeqCst), 2);
 
-    let page = PageKey::new("/page", "app.test").tenant("acme");
+    let page =
+        PageKey::new("/page", "app.test").tenant(&rustango::tenancy::TenantSlug::new(1, "acme"));
     layer.invalidate([&page]).await.unwrap();
     fetch(&app, "globex").await;
     assert_eq!(hits.load(Ordering::SeqCst), 2, "globex was purged");
     fetch(&app, "acme").await;
     assert_eq!(hits.load(Ordering::SeqCst), 3, "acme was not purged");
+}
+
+/// A tenant that reuses a purged tenant's slug never gets its cached page:
+/// keys hold the org id, which the new tenant does not share.
+#[tokio::test]
+async fn a_reused_slug_does_not_get_the_purged_tenants_page() {
+    use rustango::sql::FetcherPool as _;
+    let hits = Arc::new(AtomicU32::new(0));
+    let ctx = context().await;
+    let registry = ctx.registry.clone();
+    let app = page(hits.clone())
+        .layer(CachePageLayer::new(Arc::new(InMemoryCache::new())))
+        .layer(Extension(ctx));
+    fetch(&app, "acme").await;
+    fetch(&app, "acme").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "acme hits its own page");
+
+    let old = Org::objects()
+        .filter("slug", "acme")
+        .fetch(&registry)
+        .await
+        .unwrap()
+        .remove(0);
+    old.delete(&registry).await.unwrap();
+    let mut heir = Org {
+        slug: "acme".into(),
+        display_name: "acme".into(),
+        backend_kind: "sqlite".into(),
+        ..rustango::testkit::org()
+    };
+    heir.insert(&registry).await.unwrap();
+    assert_ne!(heir.id.get(), old.id.get());
+    rustango::tenancy::invalidate_org_cache();
+
+    fetch(&app, "acme").await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        2,
+        "the heir got the purged page"
+    );
+}
+
+/// Hand-built `TenantSlug`s that share an id keep their own pages by slug.
+#[tokio::test]
+async fn one_org_id_under_two_slugs_does_not_share_a_page() {
+    use rustango::tenancy::TenantSlug;
+    let hits = Arc::new(AtomicU32::new(0));
+    let layer = CachePageLayer::new(Arc::new(InMemoryCache::new()));
+    let ctx = context().await;
+    let acme = page(hits.clone())
+        .layer(layer.clone())
+        .layer(Extension(TenantSlug::new(0, "acme")))
+        .layer(Extension(ctx.clone()));
+    let globex = page(hits.clone())
+        .layer(layer)
+        .layer(Extension(TenantSlug::new(0, "globex")))
+        .layer(Extension(ctx));
+    get_with(&acme, None).await;
+    get_with(&globex, None).await;
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "globex got acme's page");
 }

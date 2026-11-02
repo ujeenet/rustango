@@ -153,7 +153,7 @@ Verwende sie nur in PostgreSQL-Deployments:
 
 Markiere ein Feld mit `#[rustango(primary_key)]`. Ein Modell ohne Primärschlüssel
 kompiliert trotzdem und lässt sich abfragen, aber das Derive lässt jede PK-basierte
-Zeilenmethode weg (`save_pool`, `find`, `delete_pool`, `refresh_from_db`, …).
+Zeilenmethode weg (`save`, `find`, `delete`, `refresh_from_db`, …).
 
 Der **Standard und häufigste** PK ist eine auto-inkrementierende 64-Bit-Ganzzahl,
 deklariert als `Auto<i64>`:
@@ -171,7 +171,7 @@ gespeichert:
 
 ```rust
 let mut g = Gadget { id: Auto::default(), /* … */ };   // Unset
-g.save_pool(&pool).await?;                              // DB assigns the id
+g.save(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
@@ -195,7 +195,7 @@ abgebildet wird, kann der PK sein; du weist den Wert selbst zu:
 | `i64` / `i32` + `primary_key` | `BIGINT` / `INTEGER` | du (Anwendung) |
 
 Ein **natürlicher String-Schlüssel** (z. B. ein Gutscheincode) — beachte, dass du den
-Wert selbst bereitstellst und mit [`insert_pool`](#save-vs-insert) einfügst, da es kein
+Wert selbst bereitstellst und mit [`insert`](#save-vs-insert) einfügst, da es kein
 `Auto::Unset` gibt, das `save` erkennen könnte:
 
 ```rust
@@ -208,7 +208,7 @@ pub struct Coupon {
 }
 
 let c = Coupon { code: "SAVE10".into(), discount: 10 };
-c.insert_pool(&pool).await?;                       // explicit INSERT
+c.insert(&pool).await?;                       // explicit INSERT
 let back = Coupon::find_or_fail("SAVE10".to_string(), &pool).await?;   // look up by the string PK
 ```
 
@@ -368,15 +368,9 @@ Auf dem **Modell** deklariert:
   `.where_(Post::author_id.eq(42))` für compilergeprüfte Filter.
 - **Finder** — `find(pk, &pool)` → `Option<Self>`; `find_or_fail(pk, &pool)` →
   `Self` (Fehler, wenn nicht vorhanden); `find_many(pks, &pool)`; `find_or_insert(...)`.
-- **Writer** — `save_pool` (INSERT oder UPDATE), `insert_pool` (explizites
-  Einfügen), `delete_pool` und `save_partial(&["title"], &pool)` (nur einige
-  Spalten aktualisieren). Die nackten `save` / `insert` / `delete` sind **keine**
-  Aliase davon: sie nehmen einen treiberspezifischen `sqlx::PgPool` und sind
-  `#[cfg(feature = "postgres")]`, existieren also in einem `sqlite`- oder
-  `mysql`-Build überhaupt nicht. Die `_pool`-Familie nimmt `rustango::sql::Pool`
-  und funktioniert auf allen dreien — schreiben Sie diese, sofern Sie nicht
-  sicher auf Postgres sind. Die Benennung ist bekanntermaßen vertauscht; siehe
-  [api-conventions](api-conventions.md#funktionen).
+- **Writer** — `save` (INSERT oder UPDATE), `insert` (explizites
+  Einfügen), `delete` und `save_partial(&["title"], &pool)` (nur einige
+  Spalten aktualisieren), alle mit `rustango::sql::Pool` auf jedem Backend.
 - **Soft-Delete** (wenn aktiviert) — `soft_delete`, `restore`, `force_delete`;
   `QuerySet::active()` / `with_trashed()` / `only_trashed()`.
 
@@ -386,13 +380,13 @@ Das bringt Leute durcheinander, daher ist es die klare Aussage wert:
 
 | Methode | Verhalten |
 |---|---|
-| `save_pool(&mut self, &pool)` | **INSERT**, wenn der `Auto`-PK `Unset` ist, andernfalls **UPDATE** |
-| `insert_pool(&self, &pool)` | immer **INSERT** |
+| `save(&mut self, &pool)` | **INSERT**, wenn der `Auto`-PK `Unset` ist, andernfalls **UPDATE** |
+| `insert(&self, &pool)` | immer **INSERT** |
 
-Für den Standard-`Auto<i64>`-PK macht `save_pool` automatisch das Richtige. Für einen
+Für den Standard-`Auto<i64>`-PK macht `save` automatisch das Richtige. Für einen
 **anwendungsseitig zugewiesenen PK** (ein `String`/`Uuid`, den du selbst setzt) gibt es
-keinen `Unset`-Zustand — daher würde `save_pool` eine (möglicherweise nicht existierende)
-Zeile UPDATEn. Verwende **`insert_pool`**, um eine brandneue Zeile mit einem
+keinen `Unset`-Zustand — daher würde `save` eine (möglicherweise nicht existierende)
+Zeile UPDATEn. Verwende **`insert`**, um eine brandneue Zeile mit einem
 benutzerdefinierten PK einzufügen (im begleitenden Test verifiziert).
 
 ---
@@ -430,7 +424,7 @@ spezifischer.
 | `through(...)` | Relationsspezifikation | benutzerdefinierter Through-Relation-Accessor |
 | `reverse_has(...)` / `generic_has(...)` | Relationsspezifikation | Rückwärts-has-many / Rückwärts-generischer-FK-Accessor |
 | `required_db_features` / `required_db_vendor` | Liste / Vendor | Deployment-Validierungs-Constraints |
-| `db_table_comment` | `"…"` | Tabellen-COMMENT; Datei-Migrationen schreiben ihn noch nicht, und `makemigrations` warnt |
+| `db_table_comment` | `"…"` | Tabellen-COMMENT (Postgres, MySQL; SQLite hat keinen) |
 | `admin(...)` | Admin-Optionen | Admin-UI-Konfiguration (siehe [admin.md](admin.md)) |
 | `fk_composite(...)` / `generic_fk(...)` | Spezifikation | zusammengesetzter FK / generischer (Content-Type-) FK |
 | `m2m(...)` / `generic_m2m(...)` | Spezifikation | Viele-zu-viele- / generische Viele-zu-viele-Beziehung |
@@ -454,6 +448,7 @@ spezifischer.
 | `min` / `max` | Zahl | Bereichsvalidierung |
 | `blank` | Flag | Leereingabe in Formularen/Admin erlauben |
 | `editable` | `true`/`false` | Bearbeitbarkeit in Formular/Admin |
+| `secret` | Flag oder `= false` | Zugangsdaten: Template-Views zeigen das Feld nur, wenn eine View es auflistet, der Admin maskiert es immer; Namen wie `passwd`, `encryption_key`, `*_token` zählen auch; `secret = false` nimmt einen Namen aus |
 | `verbose_name` | `"Label"` | Lesbare Feldbezeichnung in Formular/Admin |
 | `help_text` | `"…"` | Hilfetext unter dem Formular-/Admin-Widget |
 | `validators` | `"name, name"` | benannte Validatoren für dieses Feld |

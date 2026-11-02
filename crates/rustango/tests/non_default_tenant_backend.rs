@@ -67,7 +67,7 @@ async fn boot() -> Env {
     )
     .await
     .expect("migrate-registry");
-    let org = Org {
+    let mut org = Org {
         slug: "acme".into(),
         storage_mode: "database".into(),
         backend_kind: "sqlite".into(),
@@ -75,10 +75,8 @@ async fn boot() -> Env {
         host_pattern: Some("acme.app.test".into()),
         ..rustango::testkit::org()
     };
-    org.clone()
-        .insert_pool(&pools.registry_pool())
-        .await
-        .expect("seed org");
+    // Inserted in place: the resolved org must carry its id.
+    org.insert(&pools.registry_pool()).await.expect("seed org");
     let tenant = Pool::connect(&tenant_url).await.expect("tenant");
     rustango::testkit::migrate_framework(&tenant)
         .await
@@ -145,7 +143,7 @@ async fn tenant_extractor_reads_the_database_tenant_context() {
     let env = boot().await;
     // A tenant table every feature set has; `rustango_agents` needs `mcp` (#2362).
     rustango::testkit::user()
-        .insert_pool(&env.tenant)
+        .insert(&env.tenant)
         .await
         .expect("user");
     let app = env.mount_db(Router::new().route(
@@ -415,7 +413,7 @@ async fn member_sso_router_serves_a_non_default_backend() {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     };
-    provider.insert_pool(&env.tenant).await.unwrap();
+    provider.insert(&env.tenant).await.unwrap();
     let app = env.mount(
         member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
             auto_provision: true,

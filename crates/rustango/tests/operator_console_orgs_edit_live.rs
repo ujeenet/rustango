@@ -70,8 +70,8 @@ async fn body_text(resp: axum::response::Response) -> String {
 /// password) so individual tests can issue authenticated requests.
 async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
     let pool = pool().await?;
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Seed an operator. Pre-hashed password = "letmein".
     let username = unique("op");
@@ -86,7 +86,7 @@ async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert(&pool).await.unwrap();
+    op.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let secret = SessionSecret::from_env_or_random();
@@ -141,7 +141,7 @@ async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Op
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -271,6 +271,8 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
     let slug = unique("acme");
     let original_url = "env:DATABASE_URL_ACME";
     seed_org(&pool, &slug, StorageMode::Database, Some(original_url)).await;
+    // The edit keeps a routing key; slugs here carry `_`, which no host label may.
+    let host = format!("{}.localhost", slug.replace('_', "-"));
 
     let resp = app
         .clone()
@@ -282,9 +284,9 @@ async fn post_edit_with_blank_database_url_keeps_existing() {
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(
-                    "display_name=Updated&host_pattern=&active=on&database_url=",
-                ))
+                .body(Body::from(format!(
+                    "display_name=Updated&host_pattern={host}&active=on&database_url="
+                )))
                 .unwrap(),
         )
         .await
@@ -315,6 +317,7 @@ async fn post_edit_active_toggle_off() {
     };
     let slug = unique("acme");
     seed_org(&pool, &slug, StorageMode::Schema, None).await;
+    let host = format!("{}.localhost", slug.replace('_', "-"));
 
     // Submit without `active` field → unchecked → false.
     let resp = app
@@ -327,7 +330,9 @@ async fn post_edit_active_toggle_off() {
                 .uri(format!("/orgs/{slug}/edit"))
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("display_name=Soft+disabled&host_pattern="))
+                .body(Body::from(format!(
+                    "display_name=Soft+disabled&host_pattern={host}"
+                )))
                 .unwrap(),
         )
         .await

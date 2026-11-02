@@ -41,8 +41,12 @@ async fn pool() -> Option<PgPool> {
 }
 
 async fn fresh(pool: &PgPool) {
-    rustango::migrate::drop_all(pool).await.unwrap();
-    rustango::migrate::apply_all(pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 fn args(values: &[&str]) -> Vec<String> {
@@ -72,7 +76,7 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -111,7 +115,9 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         "password should be redacted in printed plan: {output}"
     );
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -136,7 +142,7 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -162,7 +168,9 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         format!("{err}").contains("already in `schema`"),
         "expected same-mode error: {err}"
     );
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -187,7 +195,7 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -213,7 +221,9 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         format!("{err}").contains("--database-url"),
         "expected validation error mentioning --database-url: {err}"
     );
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -251,7 +261,9 @@ async fn migrate_tenant_storage_rejects_unknown_slug() {
         format!("{err}").contains("not found"),
         "expected `not found` for unknown slug: {err}"
     );
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 /// #1864 — database → schema restores the rows into the target schema.
@@ -296,7 +308,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let migrate = |drain: &'static str| {
@@ -500,7 +512,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let migrate = |drain: &'static str| {
@@ -733,7 +745,9 @@ async fn sqlx_exec(pool: &PgPool, sql: &str) {
 async fn private_registry(prefix: &str) -> (ScratchDb, PgPool) {
     let db = ScratchDb::create(&std::env::var("DATABASE_URL").unwrap(), prefix).await;
     let pool = PgPool::connect(db.url()).await.unwrap();
-    rustango::migrate::apply_all(&pool).await.unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
     (db, pool)
 }
 
@@ -809,7 +823,7 @@ async fn a_foreign_owned_extension_on_the_target_is_refused_up_front() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let started = std::time::Instant::now();
     let mut out = Vec::<u8>::new();
@@ -862,14 +876,14 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
         schema_name: None,
         ..rustango::testkit::org()
     };
-    owner.insert(&pool).await.unwrap();
+    owner.insert(&pool.clone().into()).await.unwrap();
     let mut mover = Org {
         slug: "mover".into(),
         display_name: "Mover".into(),
         database_url: Some("postgres://example@db.example.com/mover".into()),
         ..rustango::testkit::org()
     };
-    mover.insert(&pool).await.unwrap();
+    mover.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -893,7 +907,9 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
     let err = res.expect_err("a used schema must be refused");
     assert!(err.to_string().contains("already used"), "{err}");
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 /// The refusal `create-tenant` gives for a schema that already exists.
@@ -926,7 +942,7 @@ async fn movable_tenant(pool: &PgPool, slug: &str, src_url: &str) {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 }
 
 async fn move_into_schema(
@@ -1054,7 +1070,9 @@ async fn a_move_and_a_create_racing_for_one_schema_never_share_it() {
                     ..CreateTenantOpts::default()
                 };
                 let dir = std::path::Path::new("no-migrations");
-                create_tenant(&pools, &url, dir, &format!("t1487-c{round}"), opts)
+                let slug = format!("t1487-c{round}");
+                let opts = rustango::testkit::routed_opts(&slug, opts);
+                create_tenant(&pools, &url, dir, &slug, opts)
                     .await
                     .map(|_| ())
                     .map_err(|e| e.to_string())

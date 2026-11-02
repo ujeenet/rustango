@@ -66,7 +66,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     // `router()` deliberately — the audit page is read-only and must be
     // there even on a console that cannot change anything, which is
@@ -145,7 +145,7 @@ impl Booted {
             source: rustango::audit::AuditSource::Custom(format!("operator:1:{verb}")),
             changes: serde_json::Value::Object(changes),
         };
-        rustango::audit::emit_one_pool(&self.registry, &entry)
+        rustango::audit::emit_one(&self.registry, &entry)
             .await
             .expect("record an audit entry");
     }

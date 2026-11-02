@@ -272,7 +272,7 @@ async fn a_first_visit_sets_one_csrf_cookie_that_logs_in() {
         .await
         .unwrap();
     let mut u = AdminUser::new_with_password("alice", "correct-horse", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let app = app_with_session_auth(pool);
 
     let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
@@ -337,7 +337,7 @@ async fn signed_in_as(superuser: bool) -> (axum::Router, String, String) {
         .await
         .unwrap();
     let mut u = AdminUser::new_with_password("alice", "correct-horse", superuser).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let app = app_with_session_auth(pool);
     let token = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_owned();
     let resp = app

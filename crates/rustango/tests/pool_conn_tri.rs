@@ -6,7 +6,7 @@
 use rustango::core::AggregateExpr;
 use rustango::query::QuerySet;
 use rustango::sql::sqlx;
-use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn};
+use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn, PooledConn};
 use rustango::{tri_dialect_test, Model};
 
 #[derive(Model, Debug, Clone, PartialEq)]
@@ -38,7 +38,7 @@ async fn seeded(pool: &Pool) {
             id,
             name: name.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed author");
     }
@@ -49,7 +49,7 @@ async fn seeded(pool: &Pool) {
             title: format!("b{id}"),
             author: ForeignKey::unloaded(author),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed book");
     }
@@ -57,21 +57,21 @@ async fn seeded(pool: &Pool) {
 
 /// The backend's id for the session `conn` holds.
 async fn session_id(conn: &mut PoolConn) -> String {
-    match conn {
+    match conn.conn() {
         #[cfg(feature = "postgres")]
-        PoolConn::Postgres(c) => sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
+        PooledConn::Postgres(c) => sqlx::query_scalar::<_, i32>("SELECT pg_backend_pid()")
             .fetch_one(&mut **c)
             .await
             .expect("pid")
             .to_string(),
         #[cfg(feature = "mysql")]
-        PoolConn::Mysql(c) => sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
+        PooledConn::Mysql(c) => sqlx::query_scalar::<_, u64>("SELECT CONNECTION_ID()")
             .fetch_one(&mut **c)
             .await
             .expect("connection id")
             .to_string(),
         #[cfg(feature = "sqlite")]
-        PoolConn::Sqlite(c) => {
+        PooledConn::Sqlite(c) => {
             let mut h = c.lock_handle().await.expect("handle");
             format!("{:p}", h.as_raw_handle())
         }
@@ -165,13 +165,13 @@ async fn on_conn_matches_pool(pool: &Pool) {
 async fn queries_run_on_the_held_session(pool: &Pool) {
     let mut conn = pool.acquire().await.expect("acquire");
     let ddl = "CREATE TEMPORARY TABLE pc_author (id BIGINT PRIMARY KEY, name VARCHAR(40) NOT NULL)";
-    match &mut conn {
+    match conn.conn() {
         #[cfg(feature = "postgres")]
-        PoolConn::Postgres(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
+        PooledConn::Postgres(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
         #[cfg(feature = "mysql")]
-        PoolConn::Mysql(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
+        PooledConn::Mysql(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
         #[cfg(feature = "sqlite")]
-        PoolConn::Sqlite(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
+        PooledConn::Sqlite(c) => drop(sqlx::query(ddl).execute(&mut **c).await.unwrap()),
         #[allow(unreachable_patterns)]
         _ => unreachable!("no backend enabled"),
     }
@@ -274,21 +274,6 @@ async fn former_pg_only_on_methods_run_on_a_held_conn(pool: &Pool) {
     let counts: Vec<(i64, i64)> = counts.into_iter().map(|(a, n)| (a.id, n)).collect();
     assert_eq!(counts, [(1, 2), (2, 1)]);
 
-    // The `&PgPool` wrappers count too.
-    #[cfg(feature = "postgres")]
-    #[allow(irrefutable_let_patterns)] // single-variant `Pool` in a postgres-only build
-    if let Pool::Postgres(pg) = pool {
-        let page = one(1, by_id().limit(1).fetch_paginated(pg)).await.unwrap();
-        assert_eq!((page.rows.len(), page.total), (1, 2));
-        let counts = one(
-            1,
-            rustango::sql::annotate_count_children(by_id(), "pc_book", "author", pg),
-        )
-        .await
-        .unwrap();
-        assert_eq!(counts.len(), 2);
-    }
-
     let plan = one(1, by_id().explain_on(&mut *c, ExplainOptions::default()))
         .await
         .unwrap();
@@ -365,7 +350,7 @@ async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
             review_no,
             author: ForeignKey::unloaded(author),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed review");
     }
@@ -404,7 +389,7 @@ async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
         id: 3,
         name: "Ada".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("second Ada");
     Book {
@@ -412,7 +397,7 @@ async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
         title: "b4".into(),
         author: ForeignKey::unloaded(3),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("her book");
     let distinct = Author::objects()
@@ -456,9 +441,9 @@ async fn one_conn(pool: &Pool) -> Pool {
 
 /// Read one session setting on `conn`, after setting it when `set`.
 async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
-    match conn {
+    match conn.conn() {
         #[cfg(feature = "postgres")]
-        PoolConn::Postgres(c) => {
+        PooledConn::Postgres(c) => {
             if set {
                 sqlx::query("SET application_name = 'rustango_leak'")
                     .execute(&mut **c)
@@ -471,7 +456,7 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
                 .unwrap()
         }
         #[cfg(feature = "mysql")]
-        PoolConn::Mysql(c) => {
+        PooledConn::Mysql(c) => {
             if set {
                 sqlx::query("SET @rustango_leak = 'rustango_leak'")
                     .execute(&mut **c)
@@ -484,7 +469,7 @@ async fn session_setting(conn: &mut PoolConn, set: bool) -> String {
                 .unwrap()
         }
         #[cfg(feature = "sqlite")]
-        PoolConn::Sqlite(c) => {
+        PooledConn::Sqlite(c) => {
             // Per connection; `cache_size` would live in the shared in-memory cache.
             if set {
                 sqlx::query("PRAGMA reverse_unordered_selects = 1")

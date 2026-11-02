@@ -13,6 +13,11 @@ use std::path::Path;
 
 /// `(file, table, why)` for tests allowed to build a framework table themselves.
 const ALLOWED: &[(&str, &str, &str)] = &[
+    (
+        "registry_role_schema_shadow_live.rs",
+        "rustango_orgs",
+        "a decoy copy in a role-named schema of a scratch database",
+    ),
     ("test_db_tri.rs", "rustango_users", "SQLite only"),
     (
         "queryset_rel_m2m_gfk_live.rs",

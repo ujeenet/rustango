@@ -330,7 +330,7 @@ async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
             database_url: Some(db.url().to_owned()),
             ..rustango::testkit::org()
         };
-        org.insert_pool(&registry).await.unwrap();
+        org.insert(&registry).await.unwrap();
     }
     let t2 = sqlx::MySqlPool::connect(dbs[2].url()).await.unwrap();
     let mut outcome = Ok(());

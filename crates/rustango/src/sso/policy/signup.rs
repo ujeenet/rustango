@@ -1166,7 +1166,7 @@ mod store {
                 "roles": names,
             }),
         };
-        if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
+        if let Err(e) = crate::audit::emit_one(pool, &entry).await {
             tracing::error!(target: "rustango::sso", error = %e, "an unknown SSO role was NOT written to the audit log");
         }
     }

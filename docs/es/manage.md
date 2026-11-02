@@ -800,7 +800,7 @@ Imprime la versión del framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.16
+rustango 0.62.0
 ```
 
 ### `about`
@@ -812,7 +812,7 @@ Incluye esto en los tickets de soporte cuando algo va mal.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.16
+  version:        0.62.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1144,8 +1144,9 @@ cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode
 
 Con varios servidores, desactiva primero (`drop-tenant`) y espera 30 s. Un
 servidor cuya caché aún tiene un tenant en modo schema mantiene
-`search_path = <schema>, public`; al borrar el schema, sus consultas caen en
-`public` hasta que la caché se refresca.
+su pool hasta que la caché se refresca; al borrar el schema, sus consultas
+fallan, o leen `public` si una extensión (citext, por ejemplo) mantiene `public`
+en su `search_path`.
 
 Cada paso se imprime al terminar y la purga queda registrada como una ejecución
 de tipo `purge` (`list-runs --kind purge`). Una base de datos que rustango creó
@@ -1383,9 +1384,12 @@ cargo run -- create-api-key acme alice --label "ci-bot"
 
 Poda las entradas antiguas del registro de auditoría (`rustango_audit_log`) para
 que no crezca indefinidamente. Recorta por antigüedad (`--days`) o por cantidad
-(`--keep-last`), y opcionalmente limítalo a un tenant.
+(`--keep-last`), y opcionalmente limítalo a un tenant. Sin ninguno de los dos
+flags borra las entradas más antiguas que `[audit] retention_days`, y falla si
+no está definido.
 
 ```bash
+cargo run -- audit-cleanup                                 # más antiguas que [audit] retention_days
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped

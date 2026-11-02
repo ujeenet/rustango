@@ -52,13 +52,16 @@ async fn seed_org(
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     org
 }
 
+/// A migrated tenant schema: a tenant pool refuses a bare one.
 async fn create_schema(pool: &sqlx::PgPool, name: &str) {
-    let sql = format!(r#"CREATE SCHEMA IF NOT EXISTS "{name}""#);
-    sqlx::query(&sql).execute(pool).await.unwrap();
+    let url = std::env::var("DATABASE_URL").unwrap();
+    rustango::testkit::migrate_schema(&TenantPools::new(pool.clone()), name, &url)
+        .await
+        .unwrap();
 }
 
 async fn drop_schema(pool: &sqlx::PgPool, name: &str) {
@@ -80,8 +83,8 @@ async fn schema_mode_pool_for_org_returns_schema_variant() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "acme_tp_t1").await;
 
     let acme = seed_org(
@@ -102,7 +105,7 @@ async fn schema_mode_pool_for_org_returns_schema_variant() {
     }
 
     drop_schema(&pool, "acme_tp_t1").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -111,8 +114,8 @@ async fn schema_mode_acquire_sets_search_path_to_tenant_schema() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "acme_tp_t2").await;
     create_schema(&pool, "acme_tp_t2").await;
 
@@ -135,7 +138,7 @@ async fn schema_mode_acquire_sets_search_path_to_tenant_schema() {
     assert_eq!(conn.schema(), Some("acme_tp_t2"));
 
     drop_schema(&pool, "acme_tp_t2").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Schema-mode `acquire` issues a session-level `SET search_path` on a
@@ -160,8 +163,8 @@ async fn schema_mode_acquire_resets_search_path_on_release() {
         .await
         .expect("connect to DATABASE_URL");
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "acme_tp_leak").await;
     create_schema(&pool, "acme_tp_leak").await;
 
@@ -206,7 +209,7 @@ async fn schema_mode_acquire_resets_search_path_on_release() {
     drop(plain);
 
     drop_schema(&pool, "acme_tp_leak").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// The same leak stated as data rather than as a setting: a table name
@@ -226,8 +229,8 @@ async fn released_registry_connection_does_not_read_tenant_rows() {
         .await
         .expect("connect to DATABASE_URL");
 
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "acme_tp_rows").await;
     create_schema(&pool, "acme_tp_rows").await;
 
@@ -274,7 +277,7 @@ async fn released_registry_connection_does_not_read_tenant_rows() {
         .await
         .unwrap();
     drop_schema(&pool, "acme_tp_rows").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -284,8 +287,8 @@ async fn schema_mode_pool_uses_slug_when_schema_name_is_none() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "fallback_tp_t3").await;
     create_schema(&pool, "fallback_tp_t3").await;
 
@@ -296,7 +299,7 @@ async fn schema_mode_pool_uses_slug_when_schema_name_is_none() {
     assert_eq!(current_schema(&mut conn).await, "fallback_tp_t3");
 
     drop_schema(&pool, "fallback_tp_t3").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -305,8 +308,8 @@ async fn database_mode_without_database_url_errors() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let bad = seed_org(&pool, "bad_tp_t4", StorageMode::Database, None, None).await;
     let pools = TenantPools::new(pool.clone());
@@ -314,7 +317,7 @@ async fn database_mode_without_database_url_errors() {
     let msg = format!("{err}");
     assert!(msg.contains("database_url"), "got: {msg}");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -328,8 +331,8 @@ async fn database_mode_pool_caches_per_slug() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let dbm = seed_org(&pool, "dbm_tp_t5", StorageMode::Database, None, Some(&url)).await;
 
@@ -348,7 +351,7 @@ async fn database_mode_pool_caches_per_slug() {
     pools.invalidate(&dbm.slug).await;
     assert_eq!(pools.cached_database_pool_count().await, 0);
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -366,8 +369,8 @@ async fn database_mode_resolves_secret_reference_via_resolver() {
     if std::env::var(url_var).is_err() {
         return;
     }
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let dbm = seed_org(
         &pool,
@@ -385,7 +388,7 @@ async fn database_mode_resolves_secret_reference_via_resolver() {
     let tp = pools.pool_for_org(&dbm).await.unwrap();
     assert!(!tp.is_schema(), "database-mode tenant");
 
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 // ---------------------------------------------------------------- #1235
@@ -405,8 +408,8 @@ async fn scoped_pool_is_cached_per_tenant() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "acme_sp_cache").await;
     create_schema(&pool, "acme_sp_cache").await;
 
@@ -440,7 +443,7 @@ async fn scoped_pool_is_cached_per_tenant() {
     drop(_c1);
     drop(_c2);
     drop_schema(&pool, "acme_sp_cache").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -449,8 +452,8 @@ async fn scoped_pool_cache_is_keyed_per_tenant_and_stays_scoped() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for s in ["acme_sp_key", "globex_sp_key"] {
         drop_schema(&pool, s).await;
         create_schema(&pool, s).await;
@@ -495,7 +498,7 @@ async fn scoped_pool_cache_is_keyed_per_tenant_and_stays_scoped() {
     for s in ["acme_sp_key", "globex_sp_key"] {
         drop_schema(&pool, s).await;
     }
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// #2325: a legacy `Acme` schema stays `Acme`, not the `acme` another
@@ -506,8 +509,8 @@ async fn scoped_pool_quotes_the_schema_name() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     let schemas = ["Acme_sp_q", "acme_sp_q", "acme sp q"];
     for s in schemas {
         drop_schema(&pool, s).await;
@@ -525,7 +528,7 @@ async fn scoped_pool_quotes_the_schema_name() {
     for s in schemas {
         drop_schema(&pool, s).await;
     }
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// A schema change made by another process reaches this cache: the fresh
@@ -536,8 +539,8 @@ async fn scoped_pool_follows_a_schema_change_without_invalidate() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for s in ["acme_src_old", "acme_src_new"] {
         drop_schema(&pool, s).await;
         create_schema(&pool, s).await;
@@ -570,7 +573,7 @@ async fn scoped_pool_follows_a_schema_change_without_invalidate() {
     for s in ["acme_src_old", "acme_src_new"] {
         drop_schema(&pool, s).await;
     }
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -579,8 +582,8 @@ async fn invalidate_drops_the_scoped_pool_too() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     drop_schema(&pool, "acme_sp_inval").await;
     create_schema(&pool, "acme_sp_inval").await;
 
@@ -615,7 +618,7 @@ async fn invalidate_drops_the_scoped_pool_too() {
     );
 
     drop_schema(&pool, "acme_sp_inval").await;
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 #[tokio::test]
@@ -624,8 +627,8 @@ async fn scoped_pool_past_the_cap_still_serves_every_tenant() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for s in ["acme_sp_cap", "globex_sp_cap"] {
         drop_schema(&pool, s).await;
         create_schema(&pool, s).await;
@@ -674,7 +677,7 @@ async fn scoped_pool_past_the_cap_still_serves_every_tenant() {
     for s in ["acme_sp_cap", "globex_sp_cap"] {
         drop_schema(&pool, s).await;
     }
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// Backends this database currently has open, excluding the counting
@@ -698,8 +701,8 @@ async fn scoped_pool_over_cap_holds_the_connection_budget() {
     let Some(pool) = pool().await else {
         return;
     };
-    migrate::drop_all(&pool).await.unwrap();
-    migrate::apply_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
+    migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
     for s in ["acme_sp_budget", "globex_sp_budget"] {
         drop_schema(&pool, s).await;
         create_schema(&pool, s).await;
@@ -759,7 +762,7 @@ async fn scoped_pool_over_cap_holds_the_connection_budget() {
     for s in ["acme_sp_budget", "globex_sp_budget"] {
         drop_schema(&pool, s).await;
     }
-    migrate::drop_all(&pool).await.unwrap();
+    migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
 }
 
 /// A resolver that returns one org without touching the registry.
@@ -799,6 +802,43 @@ fn schema_org(schema: &str) -> Org {
         schema_name: Some(schema.to_owned()),
         ..rustango::testkit::org()
     }
+}
+
+/// A schema-mode `Tenant` takes no connection until `conn()`: more live
+/// extractors than the held pool's size do not wait on it.
+#[tokio::test]
+async fn a_tenant_takes_its_connection_on_first_use() {
+    use axum::extract::FromRequestParts as _;
+    use std::sync::Arc;
+    let _g = live_lock().lock().await;
+    let Ok(url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let admin = pool().await.unwrap();
+    create_schema(&admin, "acme_tp_lazy").await;
+    let registry = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(8)
+        .connect(&url)
+        .await
+        .unwrap();
+    let cfg = rustango::tenancy::TenantPoolsConfig {
+        scoped_pool_max_connections: 2,
+        database_pool_acquire_timeout: std::time::Duration::from_secs(2),
+        ..Default::default()
+    };
+    let pools = Arc::new(TenantPools::new(registry).config(cfg));
+    let mut held = Vec::new();
+    for _ in 0..6 {
+        let mut parts = tenant_parts(pools.clone(), schema_org("acme_tp_lazy"));
+        let t = rustango::extractors::Tenant::<sqlx::Postgres>::from_request_parts(&mut parts, &())
+            .await
+            .unwrap_or_else(|_| panic!("extractor waited on the held pool"));
+        held.push(t);
+    }
+    assert_eq!(
+        current_schema(held[0].conn().await.unwrap()).await,
+        "acme_tp_lazy"
+    );
 }
 
 /// Requests that each hold a schema-mode `Tenant` and also query through
@@ -843,7 +883,10 @@ async fn schema_mode_tenants_using_pool_do_not_starve_it() {
                     .fetch_one(&pg)
                     .await
                     .map_err(|e| e.to_string())?;
-                assert_eq!(current_schema(t.conn()).await, "acme_tp_many");
+                assert_eq!(
+                    current_schema(t.conn().await.unwrap()).await,
+                    "acme_tp_many"
+                );
                 Ok::<_, String>(row.0)
             })
         })
@@ -901,7 +944,7 @@ async fn database_mode_tenants_using_pool_do_not_starve_it() {
                     .fetch_one(&pg)
                     .await
                     .map_err(|e| e.to_string())?;
-                let _ = current_schema(t.conn()).await;
+                let _ = current_schema(t.conn().await.unwrap()).await;
                 Ok::<_, String>(row.0)
             })
         })
@@ -991,9 +1034,15 @@ async fn a_busy_schema_tenant_does_not_block_other_tenants() {
         .await
         .expect("globex waited for acme's connections")
         .expect("globex request");
-    assert_eq!(current_schema(other.conn()).await, "globex_tp_busy");
+    assert_eq!(
+        current_schema(other.conn().await.unwrap()).await,
+        "globex_tp_busy"
+    );
     for t in &mut busy {
-        assert_eq!(current_schema(t.conn()).await, "acme_tp_busy");
+        assert_eq!(
+            current_schema(t.conn().await.unwrap()).await,
+            "acme_tp_busy"
+        );
         // `t.pool()` stays usable while every held slot is taken.
         let pg = t.pool().as_postgres().unwrap().clone();
         let mut c = pg.acquire().await.expect("t.pool() starved");

@@ -383,12 +383,12 @@ async fn prefetch_soft_groups_children_by_fk_value() {
         id: Auto::Unset,
         title: "first".into(),
     };
-    p1.insert(&pool).await.expect("insert p1");
+    p1.insert(&pool.clone().into()).await.expect("insert p1");
     let mut p2 = Post {
         id: Auto::Unset,
         title: "second".into(),
     };
-    p2.insert(&pool).await.expect("insert p2");
+    p2.insert(&pool.clone().into()).await.expect("insert p2");
     let p1_id = p1.id.get().copied().unwrap();
     let p2_id = p2.id.get().copied().unwrap();
 
@@ -402,7 +402,9 @@ async fn prefetch_soft_groups_children_by_fk_value() {
             post_id,
             body: body.into(),
         };
-        c.insert(&pool).await.expect("insert comment");
+        c.insert(&pool.clone().into())
+            .await
+            .expect("insert comment");
     }
 
     let parent_pks = vec![p1_id, p2_id];
@@ -457,17 +459,17 @@ async fn prefetch_generic_hydrates_typed_targets() {
         id: Auto::Unset,
         title: "alpha".into(),
     };
-    p1.insert(&pool).await.expect("insert p1");
+    p1.insert(&pool.clone().into()).await.expect("insert p1");
     let mut p2 = Post {
         id: Auto::Unset,
         title: "beta".into(),
     };
-    p2.insert(&pool).await.expect("insert p2");
+    p2.insert(&pool.clone().into()).await.expect("insert p2");
     let mut u = User {
         id: Auto::Unset,
         username: "carol".into(),
     };
-    u.insert(&pool).await.expect("insert u");
+    u.insert(&pool.clone().into()).await.expect("insert u");
 
     let p1_pk = p1.id.get().copied().unwrap();
     let p2_pk = p2.id.get().copied().unwrap();
@@ -545,61 +547,4 @@ fn generic_fk_relation_is_emitted_on_model_schema() {
     assert_eq!(rel.name, "target");
     assert_eq!(rel.ct_column, "target_content_type_id");
     assert_eq!(rel.pk_column, "target_object_pk");
-}
-
-// Kept for coverage until the deprecated helper is removed.
-#[allow(deprecated)]
-#[tokio::test]
-async fn render_generic_fk_link_resolves_via_content_type() {
-    use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};
-    let _g = ct_lock().lock().await;
-    let Some(pool) = fresh_pool().await else {
-        eprintln!("DATABASE_URL unset — skipping");
-        return;
-    };
-    contenttypes::ensure_seeded(&pool.clone().into())
-        .await
-        .expect("seed");
-    let mut p = Post {
-        id: Auto::Unset,
-        title: "rendered".into(),
-    };
-    p.insert(&pool).await.expect("insert post");
-    let pk = p.id.get().copied().unwrap();
-
-    let gfk = GenericForeignKey::for_target::<Post>(&pool.clone().into(), pk)
-        .await
-        .expect("for_target");
-    let html = render_generic_fk_link(&pool.clone().into(), gfk)
-        .await
-        .expect("render_generic_fk_link");
-
-    // Link to the target table's admin route, with app_label.model_name
-    // as the visible label.
-    assert!(html.contains(r#"href="/ct_live_post/"#));
-    assert!(html.contains("blog.post"));
-    assert!(html.contains(&format!("#{pk}")));
-}
-
-// Kept for coverage until the deprecated helper is removed.
-#[allow(deprecated)]
-#[tokio::test]
-async fn render_generic_fk_link_falls_back_on_unknown_ct_id() {
-    use rustango::contenttypes::{render_generic_fk_link, GenericForeignKey};
-    let _g = ct_lock().lock().await;
-    let Some(pool) = fresh_pool().await else {
-        eprintln!("DATABASE_URL unset — skipping");
-        return;
-    };
-    contenttypes::ensure_seeded(&pool.clone().into())
-        .await
-        .expect("seed");
-    let gfk = GenericForeignKey::new(/* unknown */ 99_999_999, 42);
-    let html = render_generic_fk_link(&pool.clone().into(), gfk)
-        .await
-        .expect("render_generic_fk_link");
-    // Fallback shape — raw pair, no anchor link, italics for visibility.
-    assert!(html.contains("ct=99999999"));
-    assert!(html.contains("pk=42"));
-    assert!(!html.contains("href="));
 }

@@ -165,7 +165,14 @@ async fn oauth_token_in(
             "missing client credentials (HTTP Basic or client_id/client_secret)",
         );
     };
-    let minted = mint_agent_jwt(jwt, t.pool(), &t.org.slug, &client_id, &client_secret, &ip);
+    let Some(tenant) = crate::tenancy::TenantSlug::of(&t.org) else {
+        return oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "tenant has no id",
+        );
+    };
+    let minted = mint_agent_jwt(jwt, t.pool(), &tenant, &client_id, &client_secret, &ip);
     match minted.await {
         Ok(m) => Json(json!({
             "access_token": m.token,

@@ -10,7 +10,7 @@
 //! #[tokio::main]
 //! async fn main() -> Result<(), Box<dyn std::error::Error>> {
 //!     let pool = PgPool::connect(&std::env::var("DATABASE_URL")?).await?;
-//!     migrate::apply_all(&pool).await?;
+//!     migrate::apply_all_pool(&pool).await?;
 //!
 //!     let app = admin::router(pool);
 //!     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
@@ -76,7 +76,7 @@ pub mod user;
 // signatures stay internal to the crate.
 pub(crate) mod render;
 mod templates;
-mod urls;
+pub(crate) mod urls;
 mod views;
 
 pub use auth::{protect_with_basic_auth, protect_with_csrf};
@@ -84,18 +84,18 @@ pub use computed_fields::{ComputedField, ComputedFieldLinkFn, ComputedFieldRende
 pub use custom_views::{AdminCustomView, CustomViewFuture, CustomViewHandler};
 pub use errors::AdminError;
 pub(crate) use helpers::current_csrf_input;
-#[allow(deprecated)]
-pub use inlines::InlineApplyOutcome;
 pub use inlines::{InlineAdmin, InlineAdminGeneric, InlineFormPanel, InlineKind, InlinePanel};
 #[cfg(feature = "totp")]
 pub use manage_admin::reset_admin_totp_cmd;
 pub use manage_admin::{
     change_password_cmd, create_admin_cmd, reset_password_cmd, set_admin_active_cmd,
 };
-pub use object_permissions::{
-    AdminObjectPermission, AdminSuperuserFields, AdminWrite, ObjectPermissionFn,
-};
-pub use queryset_hooks::{AdminQuerySetHook, QuerySetHookFn};
+#[allow(deprecated)]
+pub use object_permissions::AdminObjectPermission;
+pub use object_permissions::{AdminSuperuserFields, AdminWrite, ObjectPermissionFn};
+#[allow(deprecated)]
+pub use queryset_hooks::AdminQuerySetHook;
+pub use queryset_hooks::QuerySetHookFn;
 pub use session::{AdminSession, AdminSessionSecret};
 #[cfg(feature = "admin-sso")]
 pub use sso_provider::SsoProvider;
@@ -108,5 +108,5 @@ pub(crate) use urls::AdminDatabase;
 pub(crate) use urls::{per_request_router, RequestState};
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use urls::{reset_ungated_admin_built, ungated_flag_lock};
-pub use urls::{router, ActionPerm, AdminActionFn, AdminActionFuture, AdminTxActionFn, Builder};
+pub use urls::{router, ActionPerm, AdminActionFuture, AdminTxActionFn, Builder};
 pub use user::AdminUser;

@@ -123,7 +123,7 @@ Browser und gibt die letzte Antwort mit der `(status, location)`-Kette zurück.
   und sendet dann die Felder. Das Session-Cookie bleibt im Jar.
 - `client.logout(Some(path))` postet an die Logout-Route; `logout(None)` leert
   nur den Jar.
-- Mit `tenancy` legen `force_login_tenant_user(&secret, slug, &user, ttl_secs)`
+- Mit `tenancy` legen `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)`
   und `force_login_operator(&secret, &operator, ttl_secs)` ein Session-Cookie
   ohne Formular in den Jar. Die Zeile muss gespeichert sein.
 
@@ -221,9 +221,9 @@ gelaufen ist. Gut zu wissen, bevor du ein grünes Ergebnis als Abdeckung liest.
 
 | Variable | Suites | Was sie brauchen |
 |---|---:|---|
-| *(keine)* | 228 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
-| `DATABASE_URL` | 183 | Ein erreichbarer PostgreSQL-Server. |
-| `MYSQL_TEST_URL` | 115 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
+| *(keine)* | 229 | Nichts — eine In-Memory- oder temporäre Datei-SQLite. Laufen immer. |
+| `DATABASE_URL` | 186 | Ein erreichbarer PostgreSQL-Server. |
+| `MYSQL_TEST_URL` | 117 | Ein erreichbarer MySQL-8+-Server. **Nicht** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Ein erreichbares Redis. |
 
 Eine Suite, die zwei Variablen liest, wird unter beiden gezählt, die Spalte

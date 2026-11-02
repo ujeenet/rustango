@@ -44,7 +44,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
             label: label.into(),
             published,
         };
-        w.insert_pool(pool).await.unwrap();
+        w.insert(pool).await.unwrap();
         ids.push(*w.id.get().expect("PK assigned"));
     }
     ids
@@ -147,7 +147,7 @@ async fn contains_pk_after_delete_returns_false() {
         .into_iter()
         .next()
         .expect("seeded row");
-    row.delete_pool(&pool).await.unwrap();
+    row.delete(&pool).await.unwrap();
 
     assert!(!Widget::objects().contains_pk(&pool, ids[0]).await.unwrap());
 }

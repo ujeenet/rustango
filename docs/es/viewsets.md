@@ -503,7 +503,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Recurre al builder cuando necesites SQLite/MySQL, multi-tenencia, una
@@ -605,9 +605,9 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `pagination(PaginationStyle::…)` | Establece el estilo explícitamente. |
 | `filter_backend(closure)` | Añade predicados `WHERE` personalizados más allá de `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Límites de tasa de ventana fija por acción; `QUERY` gasta el presupuesto de list. |
-| `admin_add_hooks()` | Ejecuta los hooks de permiso por objeto `"add"` del admin al crear, sobre la petición y sobre cada fila escrita; un rechazo es un `403`. Desactivado por defecto. |
-| `router(prefix, pgpool)` | Monta (solo Postgres, `PgPool` estático; característica `postgres`). |
-| `router_pool(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
+| `skip_object_permissions()` | Omite los hooks de permiso por objeto y los scopes de queryset de la app, para una API que protege sus filas por su cuenta. Los hooks del framework siguen ejecutándose. |
+| `view_hook_scan_cap(n)` | Máximo de filas que una lista lee para el hook `"view"` (2 000 por defecto, 10 000 en el admin; como mucho 100 000); por encima, una lista por página u offset es un `400` (el modo cursor sigue funcionando). Un campo de serializer `nested` / `many` / `slug` hacia una tabla con hook `view` o scope de queryset hace fallar el montaje, salvo con `skip_object_permissions()`. |
+| `router(prefix, pool)` | Monta tri-dialecto (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenencia)* monta con resolución de inquilino por petición. |
 
 ---
@@ -765,7 +765,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
@@ -774,16 +774,24 @@ superusuarios la eluden, un usuario ausente se deniega. `.permissions_for_model:
 autocompleta los codenames estándar `<table>.view` / `.add` / `.change` /
 `.delete` (`posts.view`, … para la tabla `posts`).
 
-Un ViewSet aún no ejecuta los hooks de permiso por objeto `change`, `delete` o `view`
-del admin. Si su modelo tiene alguno, montarlo registra un aviso; la 0.62.0 los
-ejecutará al actualizar, eliminar y leer.
+**Permisos por objeto.** Un ViewSet ejecuta los mismos hooks que el admin
+(`register_object_permission!`, `register_queryset_scope!`): `add` al crear (un
+bulk create es todo o nada, `403` con `{"details": {"index": i}}`); `view` al
+leer, actualizar y eliminar (oculto es `404`), luego `change` o `delete` (`403`,
+también con soft delete); `view` en listas (las filas ocultas salen de la página
+y del `count`; por encima de `view_hook_scan_cap`, una lista por página u offset
+es un `400`: añade un scope de queryset o usa paginación por cursor). Los scopes de queryset acotan cada lectura y escritura; una escritura cuya fila saldría de ellos es un `403`. Los hooks leen la fila bloqueada en la transacción de escritura; una credencial de otro tenant es un `403`. `change` solo
+comprueba la fila guardada. `object_permissions::Actor::of(&parts)` le dice a un
+hook quién pregunta; un token de agente nunca es superuser. `ViewSet::for_model`
+y las cinco vistas de plantilla rechazan `rustango_api_keys`, `rustango_agents`, `rustango_agent_grants`,
+`rustango_operators`, `rustango_admin_users` y las tablas SSO.
 
 **El throttling** aplica límites de ventana fija por cliente, por acción:
 
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Sobre el límite → `429 Too Many Requests` + `Retry-After`. Los contadores son por
@@ -802,7 +810,7 @@ CRUD. Para endpoints adicionales, monta tus propios handlers junto al ViewSet:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -964,7 +972,7 @@ Compón el router del ViewSet en tu app. Un solo inquilino, pool estático:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-inquilino (sin pool capturado — cada petición resuelve su conexión de
@@ -984,7 +992,7 @@ let api = urls::api()
 
 ## Soporte de backends
 
-- **El builder + `router_pool` / `tenant_router`** es **tri-dialecto** —
+- **El builder + `router` / `tenant_router`** es **tri-dialecto** —
   PostgreSQL, SQLite y MySQL — y es la ruta recomendada.
 - **El `router(prefix, pool)` de la macro derive** recibe `impl Into<rustango::sql::Pool>`
   — un `PgPool`, `MySqlPool`, `SqlitePool` o el enum `Pool`. No es exclusivo de

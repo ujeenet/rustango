@@ -123,12 +123,11 @@ where
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await?;
+    op.insert(&registry).await?;
     let id = op.id.get().copied().unwrap_or_default();
     if generated {
         writeln!(w, "created operator `{username}` (id {id})")?;
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     } else {
         writeln!(w, "created operator `{username}` (id {id})")?;
     }
@@ -262,8 +261,7 @@ where
         )?;
     }
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }
@@ -458,8 +456,7 @@ where
     }
     writeln!(w, "password reset for user `{username}` in tenant `{slug}`")?;
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }
@@ -521,8 +518,7 @@ where
     }
     writeln!(w, "password reset for operator `{username}`")?;
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }
@@ -599,8 +595,7 @@ where
         "password changed for user `{username}` in tenant `{slug}`"
     )?;
     if generated {
-        writeln!(w, "  generated password: {new_plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &new_plain)?;
     }
     Ok(())
 }
@@ -669,8 +664,7 @@ where
     }
     writeln!(w, "password changed for operator `{username}`")?;
     if generated {
-        writeln!(w, "  generated password: {new_plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &new_plain)?;
     }
     Ok(())
 }
@@ -706,6 +700,8 @@ where
                     registry_url,
                     org.effective_schema(),
                     1,
+                    crate::tenancy::pools::FallThrough::OpenPool,
+                    pools.pool_config().database_pool_acquire_timeout,
                 )
                 .await?;
                 Ok(rustango::sql::Pool::Postgres(pg))

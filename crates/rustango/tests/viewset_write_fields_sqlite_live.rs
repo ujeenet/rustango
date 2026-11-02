@@ -116,8 +116,8 @@ async fn send(app: &axum::Router, r: Request<Body>) -> (StatusCode, Value) {
 #[tokio::test]
 async fn fields_limits_what_update_writes() {
     let sq = pool().await;
-    let app = ViewSet::for_model(Doc::SCHEMA, &["id", "title"])
-        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+    let app =
+        ViewSet::for_model(Doc::SCHEMA, &["id", "title"]).router("/docs", Pool::Sqlite(sq.clone()));
 
     let (status, _) = send(
         &app,
@@ -141,8 +141,8 @@ async fn fields_limits_what_update_writes() {
 #[tokio::test]
 async fn fields_limits_what_create_writes() {
     let sq = pool().await;
-    let app = ViewSet::for_model(Doc::SCHEMA, &["id", "title"])
-        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+    let app =
+        ViewSet::for_model(Doc::SCHEMA, &["id", "title"]).router("/docs", Pool::Sqlite(sq.clone()));
     let body = r#"{"title":"n","owner_id":7,"salary":99}"#;
     let (status, created) = send(&app, req(Method::POST, "/docs", body, None)).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
@@ -153,7 +153,7 @@ async fn fields_limits_what_create_writes() {
 fn owned(sq: &sqlx::SqlitePool) -> axum::Router {
     ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id"))
-        .router_pool("/docs", Pool::Sqlite(sq.clone()))
+        .router("/docs", Pool::Sqlite(sq.clone()))
 }
 
 #[tokio::test]
@@ -219,7 +219,7 @@ async fn owned_by_superuser_sees_all_may_set_the_owner() {
     let sq = pool().await;
     let app = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id").superuser_sees_all())
-        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+        .router("/docs", Pool::Sqlite(sq.clone()));
     let mut r = req(Method::PATCH, "/docs/1", r#"{"owner_id":2}"#, None);
     r.extensions_mut().insert(Principal::admin(9));
     let (status, _) = send(&app, r).await;
@@ -233,7 +233,7 @@ async fn ordering_falls_back_to_the_serializer_fields() {
     let app = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .serializer::<DocSerializer>()
         .ordering(&[("id", false)])
-        .router_pool("/docs", Pool::Sqlite(sq));
+        .router("/docs", Pool::Sqlite(sq));
     let titles = |v: &Value| -> Vec<String> {
         v["results"]
             .as_array()
@@ -296,7 +296,7 @@ async fn two_pins_on_one_field_write_it_once_or_deny() {
     let agree = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id"))
         .filter_backend(PinOwner(1))
-        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+        .router("/docs", Pool::Sqlite(sq.clone()));
     let body = r#"{"title":"t","salary":1}"#;
     let (status, created) = send(&agree, req(Method::POST, "/docs", body, Some(1))).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
@@ -305,7 +305,7 @@ async fn two_pins_on_one_field_write_it_once_or_deny() {
     let disagree = ViewSet::for_model(Doc::SCHEMA, DOC_FIELDS)
         .filter_backend(OwnedBy::column("owner_id"))
         .filter_backend(PinOwner(2))
-        .router_pool("/docs", Pool::Sqlite(sq.clone()));
+        .router("/docs", Pool::Sqlite(sq.clone()));
     let (status, _) = send(&disagree, req(Method::POST, "/docs", body, Some(1))).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(count(&sq).await, 4, "only the agreeing create wrote");
@@ -362,7 +362,7 @@ async fn item_pool() -> sqlx::SqlitePool {
 }
 
 fn items(sq: &sqlx::SqlitePool) -> axum::Router {
-    ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS).router_pool("/items", Pool::Sqlite(sq.clone()))
+    ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS).router("/items", Pool::Sqlite(sq.clone()))
 }
 
 /// Create one item through the API; returns its id.
@@ -592,7 +592,7 @@ async fn a_json_field_stores_the_value_as_sent() {
     let sq = item_pool().await;
     let with_serializer = ViewSet::for_model(Item::SCHEMA, ITEM_FIELDS)
         .serializer::<ItemSettingsSerializer>()
-        .router_pool("/items", Pool::Sqlite(sq.clone()));
+        .router("/items", Pool::Sqlite(sq.clone()));
     for app in [items(&sq), with_serializer] {
         for (sent, stored) in [(r#""dark""#, r#""dark""#), (r#""42""#, r#""42""#)] {
             let body = format!(r#"{{"title":"t","settings":{sent}}}"#);

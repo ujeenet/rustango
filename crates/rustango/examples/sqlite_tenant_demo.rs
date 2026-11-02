@@ -112,9 +112,7 @@ async fn whoami(t: TenantScope) -> Result<String, (axum::http::StatusCode, Strin
         id: Auto::default(),
         title: "hello".into(),
     };
-    post.insert_pool(pool)
-        .await
-        .map_err(rustango::server_error)?;
+    post.insert(pool).await.map_err(rustango::server_error)?;
     let n = Post::objects()
         .count(pool)
         .await

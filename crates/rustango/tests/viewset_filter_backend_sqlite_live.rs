@@ -61,7 +61,7 @@ async fn router() -> axum::Router {
         .page_size(100)
         .filter_fields(&["title"])
         .filter_backend(published_only)
-        .router_pool("/posts", pool)
+        .router("/posts", pool)
 }
 
 async fn body_json(resp: axum::response::Response) -> Value {

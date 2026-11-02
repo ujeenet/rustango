@@ -211,7 +211,7 @@ async fn array_agg_decodes_int_and_bigint_array_cells() {
             n32,
             n64,
         }
-        .insert_pool(&rustango::sql::Pool::Postgres(pool.clone()))
+        .insert(&rustango::sql::Pool::Postgres(pool.clone()))
         .await
         .unwrap();
     }

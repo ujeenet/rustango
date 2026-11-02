@@ -675,7 +675,7 @@ fn render_add_composite_fk_emits_alter_table() {
     .unwrap();
     assert_eq!(ddl.len(), 1);
     assert!(ddl[0].contains(r#"ALTER TABLE "diff_pair""#));
-    assert!(ddl[0].contains(r#"ADD CONSTRAINT "diff_pair_left_right_fkey""#));
+    assert!(ddl[0].contains(r#"ADD CONSTRAINT "diff_pair_diff_pair_left_right_fkey_fkey""#));
     assert!(ddl[0].contains(r#"FOREIGN KEY ("left_id", "right_id")"#));
     assert!(ddl[0].contains(r#"REFERENCES "diff_target" ("a_id", "b_id")"#));
 }
@@ -696,7 +696,9 @@ fn render_drop_composite_fk_emits_alter_table_drop_constraint() {
     .unwrap();
     assert_eq!(
         ddl,
-        vec![r#"ALTER TABLE "diff_pair" DROP CONSTRAINT IF EXISTS "diff_pair_left_right_fkey""#]
+        vec![
+            r#"ALTER TABLE "diff_pair" DROP CONSTRAINT IF EXISTS "diff_pair_diff_pair_left_right_fkey_fkey""#
+        ]
     );
 }
 

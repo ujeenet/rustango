@@ -8,6 +8,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::http::{header, Request, StatusCode};
 use rustango::admin::AdminSession;
+use rustango::object_permissions::Actor;
 use rustango::sql::{sqlx, Auto, FetcherPool as _};
 use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
@@ -24,17 +25,20 @@ static UNIQ: AtomicU64 = AtomicU64::new(0);
 /// thread can hide the handoff line from the capture test's scoped subscriber.
 static SUITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// What a user detail page saw: the audit source token and the admin session.
-static SEEN: std::sync::Mutex<Vec<(String, Option<AdminSession>)>> =
-    std::sync::Mutex::new(Vec::new());
+/// What a user detail page saw: the audit source token, the admin session
+/// and the hooks' actor.
+type Seen = (String, Option<AdminSession>, Actor);
+static SEEN: std::sync::Mutex<Vec<Seen>> = std::sync::Mutex::new(Vec::new());
 
 fn record_actor(parts: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
     let source = rustango::audit::current_source().as_token();
     let session = parts.extensions.get::<AdminSession>().cloned();
-    SEEN.lock().unwrap().push((source, session));
+    SEEN.lock()
+        .unwrap()
+        .push((source, session, Actor::of(parts)));
     true
 }
-rustango::register_admin_object_permission!("rustango_users", "view", record_actor);
+rustango::register_object_permission!("rustango_users", "view", record_actor);
 
 fn unique(prefix: &str) -> String {
     format!(
@@ -51,6 +55,8 @@ struct Env {
     tenant: rustango::sql::Pool,
     secret: SessionSecret,
     slug: String,
+    /// Slug and org id, as tenant cookies bind them.
+    bound: rustango::tenancy::TenantSlug,
     host: String,
     reg_url: String,
     _dir: tempfile::TempDir,
@@ -91,7 +97,8 @@ async fn boot() -> Env {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.expect("seed org");
+    org.insert(&registry).await.expect("seed org");
+    let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
     let tenant = rustango::sql::Pool::connect(&tenant_url)
         .await
@@ -116,6 +123,7 @@ async fn boot() -> Env {
         tenant,
         secret,
         slug,
+        bound,
         host,
         reg_url,
         _dir: dir,
@@ -168,12 +176,12 @@ async fn a_password_change_in_the_login_second_ends_a_tenant_admin_session() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
     let uid = user.id.get().copied().unwrap();
 
     let login = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &user.password_hash),
     );
@@ -186,7 +194,7 @@ async fn a_password_change_in_the_login_second_ends_a_tenant_admin_session() {
 
     user.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
     user.password_changed_at = chrono::DateTime::from_timestamp(login.iat, 999_000_000);
-    user.save_pool(&env.tenant).await.expect("change password");
+    user.save(&env.tenant).await.expect("change password");
 
     let res = env.get("/__change-password", &cookie).await;
     assert_eq!(
@@ -208,7 +216,7 @@ async fn console_session(env: &Env) -> (Operator, axum::Router, String) {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&env.registry).await.expect("seed operator");
+    op.insert(&env.registry).await.expect("seed operator");
 
     let console = rustango::tenancy::operator_console::router_with_impersonation(
         env.registry.clone(),
@@ -315,7 +323,7 @@ async fn impersonating_a_port_routed_org_lands_on_its_port() {
         .unwrap()
         .remove(0);
     org.port = Some(8443);
-    org.save_pool(&env.registry).await.expect("set port");
+    org.save(&env.registry).await.expect("set port");
     let (_, location) = start_impersonation(&env).await;
     assert!(
         location.contains(&format!("{}:8443/", env.host)),
@@ -375,7 +383,7 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
         .unwrap()
         .remove(0);
     org.path_prefix = Some("/acme".into());
-    org.save_pool(&env.registry).await.expect("set prefix");
+    org.save(&env.registry).await.expect("set prefix");
     rustango::tenancy::invalidate_org_cache();
 
     let (_, location) = start_impersonation(&env).await;
@@ -406,6 +414,23 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
     );
     let page = env.get("/acme/__admin/", &cookie).await;
     assert_eq!(page.status(), StatusCode::OK);
+    // On the apex path prefix too, the hooks see the impersonated tenant.
+    let mut seen_user = User {
+        username: "prefix-seen".into(),
+        ..rustango::testkit::user()
+    };
+    seen_user.insert(&env.tenant).await.expect("seed user");
+    let uid = seen_user.id.get().copied().unwrap();
+    SEEN.lock().unwrap().clear();
+    let detail = env
+        .get(&format!("/acme/__admin/rustango_users/{uid}"), &cookie)
+        .await;
+    assert_eq!(detail.status(), StatusCode::OK);
+    let (_, _, actor) = SEEN.lock().unwrap().pop().expect("the hook ran");
+    assert!(
+        matches!(&actor, Actor::Operator { impersonating: Some(t), .. } if *t == env.slug),
+        "{actor:?}"
+    );
     let html = axum::body::to_bytes(page.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -438,7 +463,7 @@ async fn a_path_prefix_tenant_admin_is_served_under_its_prefix() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
     let login = env
         .post(
             "/acme/__login",
@@ -483,7 +508,7 @@ async fn a_builder_serves_a_path_prefix_tenant_on_its_apex() {
         .remove(0);
     org.host_pattern = None;
     org.path_prefix = Some("/acme".into());
-    org.save_pool(&env.registry).await.expect("set prefix");
+    org.save(&env.registry).await.expect("set prefix");
     rustango::tenancy::invalidate_org_cache();
 
     let password = "operator-password-1";
@@ -496,7 +521,7 @@ async fn a_builder_serves_a_path_prefix_tenant_on_its_apex() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&env.registry).await.expect("seed operator");
+    op.insert(&env.registry).await.expect("seed operator");
 
     let registry = sqlx::SqlitePool::connect(&env.reg_url).await.unwrap();
     let app = rustango::server::Builder::from_pool(registry, env.reg_url.clone(), "apex.test")
@@ -595,7 +620,7 @@ async fn a_builder_serves_a_path_prefix_tenant_on_its_apex() {
 
     // With a host of its own too, its prefixed admin is served there.
     org.host_pattern = Some(env.host.clone());
-    org.save_pool(&env.registry).await.expect("set host");
+    org.save(&env.registry).await.expect("set host");
     rustango::tenancy::invalidate_org_cache();
     let anon = send(
         "GET",
@@ -620,7 +645,7 @@ async fn builder_app(env: &Env) -> (Operator, axum::Router) {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&env.registry).await.expect("seed operator");
+    op.insert(&env.registry).await.expect("seed operator");
     let registry = sqlx::SqlitePool::connect(&env.reg_url).await.unwrap();
     let app = rustango::server::Builder::from_pool(registry, env.reg_url.clone(), "apex.test")
         .routes(RouteConfig::legacy())
@@ -653,6 +678,115 @@ async fn apex_request(
         .unwrap()
 }
 
+/// The page an admin `GET` answers, as text.
+async fn page(res: axum::response::Response) -> String {
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// The `<title>`, the sidebar and the heading name the tenant admin one way,
+/// on its own host and on the apex path prefix; links take the org's color.
+#[tokio::test]
+async fn the_tenant_admin_names_itself_one_way_and_takes_the_org_color() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.display_name = "Org Display".into();
+    org.brand_name = None;
+    org.primary_color = Some("#123456".into());
+    org.save(&env.registry).await.expect("brand org");
+    rustango::tenancy::invalidate_org_cache();
+    let mut user = User {
+        username: "brand-boss".into(),
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("brand-password-1").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert(&env.tenant).await.expect("seed user");
+    let login = TenantSessionPayload::new(
+        user.id.get().copied().unwrap(),
+        &env.bound,
+        3600,
+        PasswordFingerprint::of(&env.secret, &user.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &login));
+    let named = |html: &str, name: &str| {
+        assert!(
+            html.contains(&format!("<title>{name}</title>")),
+            "<title>: {html}"
+        );
+        assert!(
+            html.contains(&format!("<h2>{name}</h2>")),
+            "sidebar: {html}"
+        );
+        assert!(
+            html.contains(&format!("<h1>{name}</h1>")),
+            "heading: {html}"
+        );
+        assert!(!html.contains("Rustango Admin"), "{html}");
+        assert!(html.contains("--color-link: #123456"), "link color: {html}");
+    };
+
+    // Own host: the configured title, then the org's display name.
+    let titled = TenantAdminBuilder::new(
+        env.pools.clone(),
+        env.reg_url.clone(),
+        ChainResolver::new().push(SubdomainResolver::new("app.test")),
+    )
+    .routes(RouteConfig::legacy())
+    .with_session(env.secret.clone())
+    .title("Acme Admin")
+    .build();
+    let get = |app: axum::Router| {
+        let req = Request::builder()
+            .uri("/__admin/")
+            .header(header::HOST, &env.host)
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        async move { app.oneshot(req).await.unwrap() }
+    };
+    named(&page(get(titled).await).await, "Acme Admin");
+    named(&page(get(env.admin.clone()).await).await, "Org Display");
+
+    // Apex + path prefix, through a server built with the title.
+    org.host_pattern = None;
+    org.path_prefix = Some("/acme".into());
+    org.save(&env.registry).await.expect("prefix org");
+    rustango::tenancy::invalidate_org_cache();
+    let registry = sqlx::SqlitePool::connect(&env.reg_url).await.unwrap();
+    let app = rustango::server::Builder::from_pool(registry, env.reg_url.clone(), "apex.test")
+        .routes(RouteConfig::legacy())
+        .admin_title("Acme Admin")
+        .into_router()
+        .await
+        .expect("router");
+    // This server signs its own sessions: sign in through its form.
+    let form = "username=brand-boss&password=brand-password-1&_csrf=t".to_owned();
+    let signed = apex_request(&app, "POST", "/acme/__login", "", form).await;
+    let session = signed.headers()["set-cookie"].to_str().unwrap();
+    let session = session.split(';').next().unwrap().to_owned();
+    let res = apex_request(&app, "GET", "/acme/__admin/", &session, String::new()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    named(&page(res).await, "Acme Admin");
+}
+
+/// The operator console answers the browser's `/favicon.ico` with the admin icon.
+#[tokio::test]
+async fn the_console_serves_a_favicon() {
+    let env = boot().await;
+    let (_, app) = builder_app(&env).await;
+    let res = apex_request(&app, "GET", "/favicon.ico", "", String::new()).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(res.headers()[header::CONTENT_TYPE], "image/png");
+}
+
 /// A tenant prefix equal to a console path never takes it over: the console
 /// keeps `/orgs` and warns once; a path it does not serve reaches the tenant.
 #[tokio::test]
@@ -666,7 +800,7 @@ async fn a_console_route_wins_over_a_tenant_prefix() {
         .remove(0);
     org.host_pattern = None;
     org.path_prefix = Some("/orgs".into());
-    org.save_pool(&env.registry).await.expect("set prefix");
+    org.save(&env.registry).await.expect("set prefix");
     rustango::tenancy::invalidate_org_cache();
     let (op, app) = builder_app(&env).await;
 
@@ -700,14 +834,15 @@ async fn a_console_route_wins_over_a_tenant_prefix() {
             "not the console's tenant list"
         );
     }
+    // The shadow check logs from a spawned task: wait for it, then make
+    // sure it warned once, not once per request.
+    let warned = |s: &str| s.matches("shadowed by an operator console route").count();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while warned(&out.contents()) == 0 && std::time::Instant::now() < deadline {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
     let logged = out.contents();
-    assert_eq!(
-        logged
-            .matches("shadowed by an operator console route")
-            .count(),
-        1,
-        "{logged}"
-    );
+    assert_eq!(warned(&logged), 1, "{logged}");
     let anon = apex_request(&app, "GET", "/orgs/__admin/", "", String::new()).await;
     let to = anon.headers()["location"].to_str().unwrap();
     assert!(to.starts_with("/orgs/__login"), "got {to}");
@@ -780,7 +915,7 @@ async fn an_operator_password_change_ends_their_impersonation_session() {
     // A reset: new hash, stamped now.
     op.password_hash = rustango::tenancy::password::hash("operator-password-2").unwrap();
     op.password_changed_at = Some(chrono::Utc::now());
-    op.save_pool(&env.registry).await.expect("reset password");
+    op.save(&env.registry).await.expect("reset password");
 
     assert_eq!(
         env.get("/__admin/", &imp_cookie).await.status(),
@@ -832,7 +967,7 @@ async fn ending_an_impersonation_revokes_a_copy_of_its_cookie() {
     let (op, _) = start_impersonation(&env).await;
     let mut legacy = TenantSessionPayload::impersonation(
         op.id.get().copied().unwrap(),
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &op.password_hash),
         "unused",
@@ -927,11 +1062,11 @@ async fn a_short_new_password_is_refused_by_the_tenant_admin() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
     let uid = user.id.get().copied().unwrap();
     let login = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &user.password_hash),
     );
@@ -983,11 +1118,11 @@ async fn tenant_pages_pass_a_strict_csp() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
     let uid = user.id.get().copied().unwrap();
     let login = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &env.bound,
         3600,
         PasswordFingerprint::of(&env.secret, &user.password_hash),
     );
@@ -1059,7 +1194,7 @@ async fn api_create_tenant_checks_the_host() {
         .remove(0);
     org.path_prefix = Some("/taken".into());
     org.port = Some(8443);
-    org.save_pool(&env.registry)
+    org.save(&env.registry)
         .await
         .expect("claim prefix and port");
     let dir = tempfile::tempdir().unwrap();
@@ -1121,7 +1256,7 @@ async fn an_impersonation_is_attributed_to_the_operator_id() {
         username: format!("operator:{}", op.username),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
     let uid = user.id.get().copied().unwrap();
 
     let handoff = &location[location
@@ -1141,7 +1276,16 @@ async fn an_impersonation_is_attributed_to_the_operator_id() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 
-    let (source, session) = SEEN.lock().unwrap().pop().expect("the action ran");
+    let (source, session, actor) = SEEN.lock().unwrap().pop().expect("the action ran");
+    // Superuser in the impersonated tenant, the one the host routed to.
+    let impersonating = Some(env.slug.clone());
+    assert_eq!(
+        actor,
+        Actor::Operator {
+            id: op_id,
+            impersonating
+        }
+    );
     let token = format!("operator:{op_id}:impersonating");
     assert_eq!(source, token, "audited writes");
     let session = session.expect("an admin session");
@@ -1162,13 +1306,13 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
         .unwrap()
         .remove(0);
     org.path_prefix = Some("/t1".into());
-    org.save_pool(&env.registry).await.expect("set prefix");
+    org.save(&env.registry).await.expect("set prefix");
     rustango::tenancy::invalidate_org_cache();
     let mut user = User {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
 
     // Opened directly: the form's `next` is the tenant root.
     let form = env.get("/t1/__login", "").await;
@@ -1227,7 +1371,7 @@ async fn a_host_tenant_login_defaults_to_the_root() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&env.tenant).await.expect("seed user");
+    user.insert(&env.tenant).await.expect("seed user");
     let resp = env
         .post(
             "/__login",
@@ -1280,7 +1424,7 @@ async fn console_pages_speak_to_operators_and_impersonate_flashes_refusals() {
         .unwrap()
         .remove(0);
     org.active = false;
-    org.save_pool(&env.registry).await.expect("deactivate");
+    org.save(&env.registry).await.expect("deactivate");
     assert!(
         !body(send("GET", edit.clone()).await)
             .await

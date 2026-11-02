@@ -69,7 +69,7 @@ async fn save_inserts_when_pk_unset_and_populates_it() {
     };
     assert!(matches!(t.id, Auto::Unset));
 
-    t.save(&pool).await.unwrap();
+    t.save(&pool.clone().into()).await.unwrap();
 
     assert!(matches!(t.id, Auto::Set(_)));
     assert_eq!(Thing::objects().count_on(&pool).await.unwrap(), 1);
@@ -87,7 +87,7 @@ async fn save_updates_when_pk_set_without_changing_pk() {
         label: "alpha".into(),
         count: 1,
     };
-    t.save(&pool).await.unwrap();
+    t.save(&pool.clone().into()).await.unwrap();
     let original_id = match t.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("save() should have populated id"),
@@ -95,7 +95,7 @@ async fn save_updates_when_pk_set_without_changing_pk() {
 
     t.label = "beta".into();
     t.count = 42;
-    t.save(&pool).await.unwrap();
+    t.save(&pool.clone().into()).await.unwrap();
 
     let after_id = match t.id {
         Auto::Set(v) => v,
@@ -126,7 +126,7 @@ async fn save_with_set_pk_matching_no_row_is_silent_ok() {
         label: "ghost".into(),
         count: 0,
     };
-    t.save(&pool).await.unwrap();
+    t.save(&pool.clone().into()).await.unwrap();
 
     assert_eq!(Thing::objects().count_on(&pool).await.unwrap(), 0);
 }

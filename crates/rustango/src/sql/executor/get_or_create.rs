@@ -40,7 +40,7 @@ use crate::sql::Pool;
 ///             slug: "hello".into(),
 ///             title: "Hello".into(),
 ///         };
-///         p.insert_pool(&pool).await?;
+///         p.insert(&pool).await?;
 ///         Ok(p)
 ///     },
 ///     &pool,
@@ -199,12 +199,12 @@ where
 ///     Post::objects().filter("slug", "hello"),
 ///     |pool, mut existing| async move {
 ///         existing.title = "New title".into();
-///         existing.save_pool(&pool).await?;
+///         existing.save(&pool).await?;
 ///         Ok(existing)
 ///     },
 ///     |pool| async move {
 ///         let mut p = Post { /* defaults */ };
-///         p.insert_pool(&pool).await?;
+///         p.insert(&pool).await?;
 ///         Ok(p)
 ///     },
 ///     &pool,

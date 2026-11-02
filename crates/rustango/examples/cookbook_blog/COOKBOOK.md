@@ -764,15 +764,13 @@ example (`schema_self_fk_resolves_to_own_table`, `live_self_fk_round_trip`).
 pub struct Post { ... }
 
 // CRUD on the junction — bare-name methods:
-post.tags_m2m().all(&pool).await?;                  // -> Vec<i64>
+post.tags_m2m().all::<i64>(&pool).await?;           // the target's key type
 post.tags_m2m().add(42, &pool).await?;
 post.tags_m2m().remove(42, &pool).await?;
 post.tags_m2m().set(&[1, 2, 3], &pool).await?;
 post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
-
-The older `_pool`-suffixed names (`all_pool` / `add_pool` / …) still work but are deprecated forwarders to the bare-name methods — each emits one deprecation warning.
 
 **Verified by**: `m2m_through_junction_table_round_trips`
 
@@ -2773,7 +2771,7 @@ API:         [`crates/rustango/src/sql/backend.rs`](../../src/sql/backend.rs)
 Recipe:
 ```rust,ignore
 let mut alice = Author { id: Auto::Unset, name: "Alice".into(), age: 32 };
-alice.insert_pool(&pool).await?;
+alice.insert(&pool).await?;
 assert!(alice.id.is_set());  // populated from RETURNING
 ```
 Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
@@ -2797,7 +2795,7 @@ Every `_pool` executor function has a SQLite arm now. The
 | FK join (`select_related`)    | `QuerySet::select_related` (`LoadRelatedSqlite`) |
 | Parents + children prefetch   | `fetch_with_prefetch_pool`                   |
 | Filtered/ordered prefetch     | `fetch_with_prefetch_filtered` (prefetch a narrowed child set) |
-| `BEGIN` / `COMMIT`            | `transaction_pool` → `PoolTx::Sqlite(tx)`    |
+| `BEGIN` / `COMMIT`            | `transaction_pool` → `TxConn::Sqlite(tx)`    |
 | `GROUP BY` + `MIN/MAX/AVG/SUM/COUNT` | `QuerySet::aggregate().compile()` + `fetch_aggregate_pool` |
 | Raw SQL (typed)               | `raw_query_pool::<T>(sql, binds, &pool)`     |
 | Raw SQL (rows affected)       | `raw_execute_pool(&pool, sql, binds)`        |
@@ -2954,9 +2952,9 @@ combine with the existing dialect features:
 
 ```toml
 [dependencies]
-rustango = { version = "0.61", features = ["sqlite"] }
+rustango = { version = "0.62", features = ["sqlite"] }
 # or both at once:
-rustango = { version = "0.61", features = ["postgres", "sqlite"] }
+rustango = { version = "0.62", features = ["postgres", "sqlite"] }
 ```
 
 The macro emits per-backend trait impls only when the feature is
@@ -3422,13 +3420,13 @@ UPDATE`, `INSERT … RETURNING`) translated to portable equivalents.
 
 ```toml
 # Tri-dialect media
-rustango = { version = "0.61", default-features = false, features = ["sqlite", "media", "storage"] }
+rustango = { version = "0.62", default-features = false, features = ["sqlite", "media", "storage"] }
 ```
 
 ```rust,ignore
 let pool = rustango::sql::Pool::connect("sqlite:./var/app.db?mode=rwc").await?;
 rustango::media::ensure_all_tables_pool(&pool).await?;
-let manager = MediaManager::new_pool(pool, registry);
+let manager = MediaManager::new(pool, registry);
 let m = manager.save_bytes(opts).await?;
 let m = manager.get(m.id.get().copied().unwrap()).await?.unwrap();
 ```
@@ -3484,7 +3482,7 @@ your framework-exposed **tools** over JSON-RPC 2.0 / Streamable HTTP.
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.61", features = ["mcp"] }
+rustango = { version = "0.62", features = ["mcp"] }
 # mcp pulls tenancy + sse + serializer + openapi automatically.
 ```
 

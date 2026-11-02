@@ -28,7 +28,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut admin =
             AdminUser::new_with_password(username.clone(), &password, /* superuser */ true)?;
-        admin.save_pool(pool).await?;
+        admin.save(pool).await?;
         println!("→ seed: admin user created: {username} / {shown}");
     }
 
@@ -48,7 +48,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         body: "This post has tags + comments attached via a generic FK.".into(),
         published_at: now,
     };
-    p1.save_pool(pool).await?;
+    p1.save(pool).await?;
     let p1_pk = *p1.id.get().unwrap();
 
     let mut p2 = Post {
@@ -57,7 +57,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         body: "Same Tag table, different parent type.".into(),
         published_at: now,
     };
-    p2.save_pool(pool).await?;
+    p2.save(pool).await?;
     let p2_pk = *p2.id.get().unwrap();
 
     // Articles.
@@ -67,7 +67,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         body: "Articles use the same Tag model as Posts.".into(),
         published_at: now,
     };
-    a1.save_pool(pool).await?;
+    a1.save(pool).await?;
     let a1_pk = *a1.id.get().unwrap();
 
     let mut a2 = Article {
@@ -76,7 +76,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
         body: "Click 'Edit' to add tags + comments via inline forms.".into(),
         published_at: now,
     };
-    a2.save_pool(pool).await?;
+    a2.save(pool).await?;
     let a2_pk = *a2.id.get().unwrap();
 
     // Tags + Comments attached via the typed setter. The macro emits
@@ -93,7 +93,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
                 name: (*name).to_owned(),
             };
             t.set_target_for::<Post>(pool, post_pk).await?;
-            t.save_pool(pool).await?;
+            t.save(pool).await?;
         }
         let mut c = Comment {
             id: Auto::Unset,
@@ -103,7 +103,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
             created_at: now,
         };
         c.set_target_for::<Post>(pool, post_pk).await?;
-        c.save_pool(pool).await?;
+        c.save(pool).await?;
     }
 
     for (article_pk, names) in [
@@ -118,7 +118,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
                 name: (*name).to_owned(),
             };
             t.set_target_for::<Article>(pool, article_pk).await?;
-            t.save_pool(pool).await?;
+            t.save(pool).await?;
         }
         let mut c = Comment {
             id: Auto::Unset,
@@ -128,7 +128,7 @@ pub async fn run(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> {
             created_at: now,
         };
         c.set_target_for::<Article>(pool, article_pk).await?;
-        c.save_pool(pool).await?;
+        c.save(pool).await?;
     }
 
     println!(

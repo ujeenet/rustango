@@ -156,7 +156,7 @@ el cuerpo byte por byte tal como lo firmaste — cualquier proxy que lo reescrib
 La cabecera de tenant y el puerto no se firman por defecto, y la capa no conoce
 ningún tenant. En una app que resuelve tenants:
 
-- `.bind_tenants(tenant_of)` asigna a cada id de clave el slug del tenant por el
+- `.bind_tenants(tenant_of)` asigna a cada id de clave el tenant (`TenantSlug`: slug e id de org) por el
   que puede actuar (un `KeyTenantResolver`; `None` significa que la clave puede
   actuar para cualquier tenant). La capa resuelve el tenant de la solicitud con
   el contexto de tenant montado y responde `403` cuando no coincide, o cuando no

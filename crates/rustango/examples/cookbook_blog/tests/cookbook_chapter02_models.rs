@@ -236,7 +236,7 @@ async fn save_assigns_auto_pk() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.expect("save author");
+    a.save(&pool.clone().into()).await.expect("save author");
     let id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("Auto<i64> never assigned"),
@@ -257,7 +257,7 @@ async fn option_field_round_trips_null() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
 
     let id = match a.id {
         Auto::Set(v) => v,
@@ -288,7 +288,7 @@ async fn auto_now_add_assigns_at_insert() {
         bio: Some("hi".into()),
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -320,7 +320,7 @@ async fn unique_constraint_rejects_duplicates() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
 
     let mut b = Author {
         id: Auto::Unset,
@@ -329,7 +329,7 @@ async fn unique_constraint_rejects_duplicates() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    let err = b.save(&pool).await.expect_err("duplicate email must fail");
+    let err = b.save(&pool.clone().into()).await.expect_err("duplicate email must fail");
     assert!(
         format!("{err:?}").to_lowercase().contains("unique")
             || format!("{err:?}").to_lowercase().contains("duplicate"),
@@ -347,13 +347,13 @@ async fn min_max_check_rejects_out_of_range() {
         id: Auto::Unset,
         score: 3,
     };
-    ok.save(&pool).await.expect("score 3 is valid");
+    ok.save(&pool.clone().into()).await.expect("score 3 is valid");
 
     let mut bad = Rating {
         id: Auto::Unset,
         score: 99,
     };
-    let err = bad.save(&pool).await.expect_err("score 99 violates max=5");
+    let err = bad.save(&pool.clone().into()).await.expect_err("score 99 violates max=5");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
         // Defense in depth: rustango client-validates against `min`/`max`
@@ -377,7 +377,7 @@ async fn fk_column_round_trips() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -394,7 +394,7 @@ async fn fk_column_round_trips() {
         metadata: serde_json::json!({"tags": ["intro"]}),
         published_at: None,
     };
-    p.save(&pool).await.unwrap();
+    p.save(&pool.clone().into()).await.unwrap();
 
     let posts: Vec<Post> = Post::objects()
         .filter_op("author_id", Op::Eq, author_id)
@@ -419,7 +419,7 @@ async fn jsonb_field_round_trips_structured_data() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -440,7 +440,7 @@ async fn jsonb_field_round_trips_structured_data() {
         metadata: payload.clone(),
         published_at: Some(chrono::Utc::now()),
     };
-    p.save(&pool).await.unwrap();
+    p.save(&pool.clone().into()).await.unwrap();
 
     let posts: Vec<Post> = Post::objects()
         .filter_op("slug", Op::Eq, "j")
@@ -463,7 +463,7 @@ async fn datetime_option_round_trips() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -481,7 +481,7 @@ async fn datetime_option_round_trips() {
         metadata: serde_json::json!({}),
         published_at: Some(when),
     };
-    p1.save(&pool).await.unwrap();
+    p1.save(&pool.clone().into()).await.unwrap();
 
     let mut p2 = Post {
         id: Auto::Unset,
@@ -494,7 +494,7 @@ async fn datetime_option_round_trips() {
         metadata: serde_json::json!({}),
         published_at: None,
     };
-    p2.save(&pool).await.unwrap();
+    p2.save(&pool.clone().into()).await.unwrap();
 
     let now_back: Vec<Post> = Post::objects()
         .filter_op("slug", Op::Eq, "now")
@@ -523,7 +523,7 @@ async fn auto_uuid_assigns_server_side_uuid() {
         id: Auto::Unset,
         user_token: "tok".into(),
     };
-    s.save(&pool).await.expect("save session");
+    s.save(&pool.clone().into()).await.expect("save session");
     let id = match s.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("Auto<Uuid> not assigned"),
@@ -548,7 +548,7 @@ async fn o2o_unique_fk_rejects_duplicate() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -559,13 +559,13 @@ async fn o2o_unique_fk_rejects_duplicate() {
         author_id,
         avatar_url: "/a.png".into(),
     };
-    p1.save(&pool).await.expect("first profile");
+    p1.save(&pool.clone().into()).await.expect("first profile");
     let mut p2 = AuthorProfile {
         id: Auto::Unset,
         author_id,
         avatar_url: "/b.png".into(),
     };
-    let err = p2.save(&pool).await.expect_err("o2o duplicate must fail");
+    let err = p2.save(&pool.clone().into()).await.expect_err("o2o duplicate must fail");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
         msg.contains("unique") || msg.contains("duplicate"),
@@ -586,7 +586,7 @@ async fn m2m_through_junction_table_round_trips() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -603,7 +603,7 @@ async fn m2m_through_junction_table_round_trips() {
         metadata: serde_json::json!({}),
         published_at: None,
     };
-    p.save(&pool).await.unwrap();
+    p.save(&pool.clone().into()).await.unwrap();
     let post_id = match p.id {
         Auto::Set(v) => v,
         Auto::Unset => unreachable!(),
@@ -613,12 +613,12 @@ async fn m2m_through_junction_table_round_trips() {
         id: Auto::Unset,
         name: "rust".into(),
     };
-    t1.save(&pool).await.unwrap();
+    t1.save(&pool.clone().into()).await.unwrap();
     let mut t2 = Tag {
         id: Auto::Unset,
         name: "framework".into(),
     };
-    t2.save(&pool).await.unwrap();
+    t2.save(&pool.clone().into()).await.unwrap();
     let t1_id = match t1.id {
         Auto::Set(v) => v,
         _ => unreachable!(),
@@ -657,7 +657,7 @@ async fn table_level_check_rejects_invalid_row() {
         qty: 5,
         price_cents: 1500,
     };
-    ok.save(&pool).await.expect("valid row");
+    ok.save(&pool.clone().into()).await.expect("valid row");
 
     let mut bad = InventoryItem {
         id: Auto::Unset,
@@ -665,7 +665,7 @@ async fn table_level_check_rejects_invalid_row() {
         qty: 0,
         price_cents: 0, // violates `price_cents > 0`
     };
-    let err = bad.save(&pool).await.expect_err("CHECK violation");
+    let err = bad.save(&pool.clone().into()).await.expect_err("CHECK violation");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
         msg.contains("check") || msg.contains("violates"),
@@ -686,7 +686,7 @@ async fn fk_composite_rejects_unmatched_pair() {
         b_id: 20,
         label: "ten-twenty".into(),
     };
-    t.save(&pool).await.unwrap();
+    t.save(&pool.clone().into()).await.unwrap();
 
     // Source pointing at the matching pair → ok.
     let mut ok = PairLink {
@@ -694,7 +694,7 @@ async fn fk_composite_rejects_unmatched_pair() {
         left_ref: 10,
         right_ref: 20,
     };
-    ok.save(&pool).await.expect("matching pair link");
+    ok.save(&pool.clone().into()).await.expect("matching pair link");
 
     // Source pointing at a pair that doesn't exist → FK violation.
     let mut bad = PairLink {
@@ -702,7 +702,7 @@ async fn fk_composite_rejects_unmatched_pair() {
         left_ref: 99,
         right_ref: 99,
     };
-    let err = bad.save(&pool).await.expect_err("composite FK violation");
+    let err = bad.save(&pool.clone().into()).await.expect_err("composite FK violation");
     let msg = format!("{err:?}").to_lowercase();
     assert!(
         msg.contains("foreign key")
@@ -752,7 +752,7 @@ async fn generic_fk_schema_and_content_type_lookup() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let author_id = match a.id {
         Auto::Set(v) => v,
         _ => unreachable!(),
@@ -768,7 +768,7 @@ async fn generic_fk_schema_and_content_type_lookup() {
         target_object_pk: author_id,
         action: "viewed".into(),
     };
-    act.save(&pool).await.expect("activity insert");
+    act.save(&pool.clone().into()).await.expect("activity insert");
 
     let rows: Vec<Activity> = Activity::objects()
         .filter_op("target_object_pk", Op::Eq, author_id)
@@ -790,7 +790,7 @@ async fn soft_delete_column_round_trips_and_deleted_at_defaults_null() {
         note: "alive".into(),
         deleted_at: None,
     };
-    n.save(&pool).await.unwrap();
+    n.save(&pool.clone().into()).await.unwrap();
     let id = match n.id {
         Auto::Set(v) => v,
         _ => unreachable!(),

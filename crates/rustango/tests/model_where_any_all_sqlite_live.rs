@@ -51,7 +51,7 @@ async fn seed(pool: &Pool) {
             email: e.into(),
             display_name: d.into(),
         };
-        row.save_pool(pool).await.unwrap();
+        row.save(pool).await.unwrap();
     }
 }
 

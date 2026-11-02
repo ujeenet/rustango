@@ -44,7 +44,7 @@ async fn is_empty_returns_false_when_rows_match() {
         id: Auto::default(),
         title: "alpha".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     assert!(!Post::objects().is_empty(&pool).await.unwrap());
 }
 
@@ -62,7 +62,7 @@ async fn is_empty_is_inverse_of_exists() {
         id: Auto::default(),
         title: "beta".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     assert_eq!(
         Post::objects().exists(&pool).await.unwrap(),
         !Post::objects().is_empty(&pool).await.unwrap()

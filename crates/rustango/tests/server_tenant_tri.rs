@@ -257,7 +257,7 @@ impl Env {
     async fn provision(&self, request: &ProvisionRequest) {
         let dir = self.dir("good");
         typed!(self.registry, p => provision::provision_tenant_recorded(
-            &p, &self.url, &dir, request, None, None, None,
+            &p, &self.url, &dir, &rustango::testkit::routed(request.clone()), None, None, None,
         )
         .await)
         .expect("provision");
@@ -265,7 +265,7 @@ impl Env {
 
     async fn run(&self, args: &[&str]) -> Result<String, TenancyError> {
         let dir = self.dir("good");
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let mut out = Vec::new();
         typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, &dir, args, &mut out).await)
             .map(|()| String::from_utf8_lossy(&out).into_owned())
@@ -686,7 +686,7 @@ impl Console {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(&env.registry).await.expect("seed operator");
+        op.insert(&env.registry).await.expect("seed operator");
         let dir = env.dir("good");
         let app = typed!(env.registry, p => {
             let pools = std::sync::Arc::new(p);
@@ -859,7 +859,7 @@ async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
         ..rustango::testkit::org()
     };
     other
-        .insert_pool(&env.registry)
+        .insert(&env.registry)
         .await
         .expect("org with a bad URL");
 

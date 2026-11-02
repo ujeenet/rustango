@@ -59,8 +59,6 @@ pub use manage::{append_data_op, make_data_migration, make_data_migration_in_sco
 pub use progress::{MigrationEvent, MigrationObserver, Outcome};
 pub use rebuild::TableRebuild;
 pub use runner::migrate_dry_run_pool_with_ledger;
-#[cfg(all(feature = "postgres", any(feature = "manage", feature = "tenancy")))]
-pub(crate) use runner::migrate_locked;
 #[cfg(any(feature = "manage", feature = "tenancy"))]
 pub(crate) use runner::migrate_pool_locked;
 pub use runner::migrate_pool_with_ledger;
@@ -87,12 +85,5 @@ pub use runner::{
     migrate_dry_run_pool, migrate_embedded_pool, migrate_pool, migrate_to_pool, registered_models,
     sqlmigrate_one, unapply_force_pool, unapply_pool, with_lock_timeout, Builder, MigrationPreview,
     LEDGER_TABLE,
-};
-// PG-typed back-compat, only when the `postgres` feature is on.
-// SQLite and MySQL apps use the `_pool` variants above.
-#[cfg(feature = "postgres")]
-pub use runner::{
-    applied_set, apply_all, downgrade, drop_all, ensure_ledger, migrate, migrate_dry_run,
-    migrate_embedded, migrate_to, migrate_with_progress, unapply, unapply_force,
 };
 pub use snapshot::{FieldSnapshot, IndexSnapshot, RelationSnapshot, SchemaSnapshot, TableSnapshot};

@@ -63,21 +63,21 @@ async fn seed(pool: &Pool) {
         id: Auto::default(),
         name: "Alice".into(),
     };
-    alice.save_pool(pool).await.unwrap();
+    alice.save(pool).await.unwrap();
     let alice_id = *alice.id.get().unwrap();
 
     let mut bob = Author {
         id: Auto::default(),
         name: "Bob".into(),
     };
-    bob.save_pool(pool).await.unwrap();
+    bob.save(pool).await.unwrap();
 
     let mut book = Book {
         id: Auto::default(),
         author_id: alice_id,
         title: "Alpha".into(),
     };
-    book.save_pool(pool).await.unwrap();
+    book.save(pool).await.unwrap();
 }
 
 #[tokio::test]

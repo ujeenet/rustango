@@ -67,20 +67,20 @@ async fn seed(pool: &Pool) {
         id: Auto::default(),
         name: "Alice".into(),
     };
-    alice.save_pool(pool).await.unwrap();
+    alice.save(pool).await.unwrap();
     let alice_id = *alice.id.get().unwrap();
     let mut bob = Author {
         id: Auto::default(),
         name: "Bob".into(),
     };
-    bob.save_pool(pool).await.unwrap();
+    bob.save(pool).await.unwrap();
     // Alice has a book; Bob doesn't.
     let mut book = Book {
         id: Auto::default(),
         title: "Alpha".into(),
         author_id: ForeignKey::from(alice_id),
     };
-    book.save_pool(pool).await.unwrap();
+    book.save(pool).await.unwrap();
 }
 
 #[tokio::test]

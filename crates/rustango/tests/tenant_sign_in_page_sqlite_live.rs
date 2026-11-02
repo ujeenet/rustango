@@ -75,7 +75,7 @@ async fn org(reg: &Registry, display_name: &str) -> String {
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&reg.pools.registry_pool())
+    org.insert(&reg.pools.registry_pool())
         .await
         .expect("seed org");
     slug

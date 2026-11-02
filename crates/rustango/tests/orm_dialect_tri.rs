@@ -104,12 +104,12 @@ async fn seed_meas(pool: &Pool, n: i64, at: &str) {
         at,
         taken_on: at.date_naive(),
     };
-    m.insert_pool(pool).await.expect("seed meas");
+    m.insert(pool).await.expect("seed meas");
     Reading {
         id: Auto::default(),
         meas: rustango::sql::ForeignKey::unloaded(m.id.get().copied().expect("id")),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed reading");
 }
@@ -141,7 +141,7 @@ async fn citext_keeps_accents_and_spaces(pool: &Pool) {
             id,
             name: name.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -165,7 +165,7 @@ async fn citext_filter_ignores_case(pool: &Pool) {
         id: 1,
         name: "bob".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let ids = |key: &'static str, v: SqlValue| async move {
@@ -220,7 +220,7 @@ async fn insert_reads_back_a_text_uuid_key(pool: &Pool) {
         id: Auto::default(),
         name: "k".into(),
     };
-    let got = k.insert_pool(pool).await;
+    let got = k.insert(pool).await;
     if pool.dialect().name() == "mysql" {
         assert!(got.is_err(), "MySQL cannot read the key back: {got:?}");
         return;
@@ -238,7 +238,7 @@ async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
             number,
             name: name.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed acct");
     }
@@ -267,7 +267,7 @@ async fn pk_lookups_on_a_renamed_pk_column(pool: &Pool) {
         id: Auto::default(),
         acct: rustango::sql::ForeignKey::unloaded(2),
     };
-    e.insert_pool(pool).await.expect("seed entry");
+    e.insert(pool).await.expect("seed entry");
     assert_eq!(
         e.acct.clone().get_on(pool).await.expect("fk get_on").name,
         "b"
@@ -331,7 +331,7 @@ async fn distinct_on_honours_nulls_order(pool: &Pool) {
     ] {
         let mut p = post(slug, parent);
         p.title = title.into();
-        p.insert_pool(pool).await.expect("seed");
+        p.insert(pool).await.expect("seed");
     }
     let winners = |desc: bool, nulls: NullsOrder| async move {
         let rows: Vec<Post> = Post::objects()
@@ -361,9 +361,7 @@ async fn pg_bulk_insert_reads_back_a_default_uuid_key() {
         id: Auto::default(),
         name: "k".into(),
     }];
-    TextKey::bulk_insert(&mut rows, pool.as_postgres().expect("pg"))
-        .await
-        .expect("bulk");
+    TextKey::bulk_insert(&mut rows, &pool).await.expect("bulk");
     let want = uuid::uuid!("7c9e6679-7425-40de-944b-e07fc1f90ae7");
     assert_eq!(rows[0].id.get().copied(), Some(want));
 }
@@ -421,7 +419,7 @@ async fn pg_bulk_insert_chunks_past_the_bind_cap() {
             f: n,
         })
         .collect();
-    Wide::bulk_insert(&mut rows, pg)
+    Wide::bulk_insert(&mut rows, &pg.clone().into())
         .await
         .expect("chunked bulk");
     let ids: Vec<i64> = rows
@@ -447,10 +445,69 @@ async fn pg_bulk_insert_chunks_past_the_bind_cap() {
             f: n,
         })
         .collect();
-    WideFixed::bulk_insert(&fixed, pg)
+    WideFixed::bulk_insert(&fixed, &pg.clone().into())
         .await
         .expect("chunked bulk");
     assert_eq!(WideFixed::objects().count(&pool).await.unwrap(), 10_000);
+}
+
+/// `bulk_insert_on` chunks past the bind cap on a connection or pool, keeps
+/// read-back order, and a failing later chunk writes nothing.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn pg_bulk_insert_on_chunks_and_stays_atomic() {
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(pool) = rustango::testkit::matrix::Backend::Postgres.pool().await else {
+        eprintln!("DATABASE_URL not set — skipping");
+        return;
+    };
+    fresh_table::<Wide>(&pool).await;
+    fresh_table::<WideFixed>(&pool).await;
+    // 12 000 rows x 6 columns is past the 65 535 bind cap.
+    let mut rows: Vec<Wide> = (0..12_000_i64)
+        .map(|n| Wide {
+            id: Auto::default(),
+            a: n,
+            b: n,
+            c: n,
+            d: n,
+            e: n,
+            f: n,
+        })
+        .collect();
+    let mut tx = rustango::sql::transaction_pool(&pool).await.unwrap();
+    Wide::bulk_insert_on(&mut rows, &mut tx)
+        .await
+        .expect("chunked bulk on a transaction");
+    tx.commit().await.unwrap();
+    let ids: Vec<i64> = rows
+        .iter()
+        .map(|r| *r.id.get().expect("read back"))
+        .collect();
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "keys in input order");
+    assert_eq!(Wide::objects().count(&pool).await.unwrap(), 12_000);
+
+    // The last row repeats the first key, so only the final chunk fails.
+    let mut fixed: Vec<WideFixed> = (0..10_000_i64)
+        .map(|n| WideFixed {
+            id: n,
+            a: n,
+            b: n,
+            c: n,
+            d: n,
+            e: n,
+            f: n,
+        })
+        .collect();
+    fixed.last_mut().unwrap().id = 0;
+    WideFixed::bulk_insert_on(&fixed, &pool)
+        .await
+        .expect_err("duplicate key in the last chunk");
+    assert_eq!(
+        WideFixed::objects().count(&pool).await.unwrap(),
+        0,
+        "earlier chunks rolled back"
+    );
 }
 
 /// Every row `qs.iterator(2)` yields.
@@ -468,7 +525,7 @@ async fn drain(pool: &Pool, qs: rustango::query::QuerySet<Post>) -> Vec<String> 
 async fn iterator_keeps_the_queryset_window(pool: &Pool) {
     for n in 0..10 {
         post(&format!("p{n:02}"), None)
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("seed");
     }
@@ -525,7 +582,7 @@ async fn distinct_on_keeps_join_columns_and_order(pool: &Pool) {
         id: Auto::default(),
         meas: rustango::sql::ForeignKey::unloaded(first.get().copied().expect("id")),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("second reading");
     let per_meas = || {
@@ -648,7 +705,7 @@ fn is_row_not_found<T>(r: &Result<T, rustango::sql::ExecError>) -> bool {
 /// A skip in a transaction is `RowNotFound`, and the skip's MySQL session
 /// id must not leak into the next insert's reported PK.
 async fn skip_in_a_tx_leaves_no_stale_id(pool: &Pool) {
-    post("x", None).insert_pool(pool).await.expect("seed");
+    post("x", None).insert(pool).await.expect("seed");
     let skip = InsertQuery::new(
         Post::SCHEMA,
         vec!["slug", "title"],
@@ -674,8 +731,8 @@ async fn skip_in_a_tx_leaves_no_stale_id(pool: &Pool) {
 
 /// #1887: MySQL's LAST_INSERT_ID() named a stale row after an update.
 async fn upsert_reports_the_updated_row(pool: &Pool) {
-    post("a", None).insert_pool(pool).await.expect("seed a");
-    post("b", None).insert_pool(pool).await.expect("seed b");
+    post("a", None).insert(pool).await.expect("seed a");
+    post("b", None).insert(pool).await.expect("seed b");
     let a_id = posts(pool).await[0].id.get().copied().expect("a id");
 
     let q = InsertQuery::new(
@@ -758,8 +815,8 @@ async fn batch_conflicts_inside_one_insert(pool: &Pool) {
 
 /// #1888: PG typed an all-NULL VALUES column as text.
 async fn bulk_update_sets_null_in_every_row(pool: &Pool) {
-    post("a", Some(5)).insert_pool(pool).await.expect("seed a");
-    post("b", Some(6)).insert_pool(pool).await.expect("seed b");
+    post("a", Some(5)).insert(pool).await.expect("seed a");
+    post("b", Some(6)).insert(pool).await.expect("seed b");
     let mut rows = posts(pool).await;
     for r in &mut rows {
         r.parent_id = None;
@@ -773,8 +830,8 @@ async fn bulk_update_sets_null_in_every_row(pool: &Pool) {
 
 /// Each row gets its own values; MariaDB has no `VALUES ROW(…)`.
 async fn bulk_update_writes_each_rows_values(pool: &Pool) {
-    post("a", None).insert_pool(pool).await.expect("seed a");
-    post("b", Some(1)).insert_pool(pool).await.expect("seed b");
+    post("a", None).insert(pool).await.expect("seed a");
+    post("b", Some(1)).insert(pool).await.expect("seed b");
     let mut rows = posts(pool).await;
     for r in &mut rows {
         r.title = format!("t-{}", r.slug);
@@ -797,7 +854,7 @@ async fn seed(pool: &Pool, rows: &[(&str, &str)]) {
     for (slug, title) in rows {
         let mut p = post(slug, None);
         p.title = (*title).into();
-        p.insert_pool(pool).await.expect("seed");
+        p.insert(pool).await.expect("seed");
     }
 }
 
@@ -943,7 +1000,7 @@ async fn paginated_distinct_counts_distinct_rows(pool: &Pool) {
         id: Auto::default(),
         meas: rustango::sql::ForeignKey::unloaded(first.get().copied().expect("id")),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("second reading");
     // Joined to its 3 readings, the 2 measurements are 3 rows before DISTINCT.
@@ -975,7 +1032,7 @@ async fn paginated_distinct_counts_distinct_rows(pool: &Pool) {
         id: Auto::default(),
         meas: rustango::sql::ForeignKey::unloaded(second.get().copied().expect("id")),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("another reading");
     let readings = Reading::objects().compile().expect("sub");
@@ -1015,7 +1072,7 @@ async fn paginate_orders_by_pk(pool: &Pool) {
     // An UPDATE moves the row to the end of a PostgreSQL heap.
     let mut a = posts(pool).await.remove(0);
     a.title = "a2".into();
-    a.save_pool(pool).await.expect("update a");
+    a.save(pool).await.expect("update a");
     let (rows, total) = Post::objects()
         .paginate(1, 2, pool)
         .await
@@ -1034,7 +1091,7 @@ async fn values_decode_uuid_and_bytes(pool: &Pool) {
         token: tok,
         data: vec![0, 1, 255],
     };
-    b.insert_pool(pool).await.expect("seed");
+    b.insert(pool).await.expect("seed");
     let want = [SqlValue::Uuid(tok), SqlValue::Binary(vec![0, 1, 255])];
 
     let list = Blob::objects()
@@ -1073,7 +1130,7 @@ async fn ilike_on_int_and_uuid_columns(pool: &Pool) {
             token: tok,
             data: vec![],
         };
-        b.insert_pool(pool).await.expect("seed");
+        b.insert(pool).await.expect("seed");
         ids.push(*b.id.get().expect("id"));
     }
     let got = |rows: Vec<Blob>| -> Vec<i64> { rows.iter().map(|b| *b.id.get().unwrap()).collect() };
@@ -1120,7 +1177,7 @@ async fn like_on_int_and_uuid_columns(pool: &Pool) {
         token: tok,
         data: vec![],
     };
-    b.insert_pool(pool).await.expect("seed");
+    b.insert(pool).await.expect("seed");
     let mut q = Blob::objects().compile().expect("compile");
     q.where_clause = WhereExpr::Predicate(Filter::new("token", Op::Like, "%2a4e-9b7d%"));
     let rows: Result<Vec<Blob>, _> = rustango::sql::select_rows_pool(pool, &q).await;
@@ -1240,7 +1297,7 @@ async fn upsert_never_updates_a_row_of_another_unique_key(pool: &Pool) {
             username: username.into(),
             note: String::new(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed account");
     }
@@ -1273,7 +1330,7 @@ async fn string_agg_is_not_capped(pool: &Pool) {
     for i in 0..30 {
         let mut p = post(&format!("s{i:02}"), None);
         p.title = title.clone();
-        p.insert_pool(pool).await.expect("seed");
+        p.insert(pool).await.expect("seed");
     }
     let rows = Post::objects()
         .aggregate()
@@ -1550,11 +1607,9 @@ mod upsert_target_pg {
             id: Auto::default(),
             slug: "a".into(),
         };
-        t.insert_pool(&pool).await.expect("seed");
+        t.insert(&pool).await.expect("seed");
         t.slug = "b".into();
-        t.upsert(pool.as_postgres().expect("pg"))
-            .await
-            .expect("upsert");
+        t.upsert(&pool).await.expect("upsert");
         let rows: Vec<Tagged> = Tagged::objects().fetch(&pool).await.expect("fetch");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slug, "b");
@@ -1569,11 +1624,9 @@ mod upsert_target_pg {
             id: Auto::default(),
             slug: "a".into(),
         };
-        p.insert_pool(&pool).await.expect("seed");
+        p.insert(&pool).await.expect("seed");
         p.slug = "b".into();
-        p.upsert(pool.as_postgres().expect("pg"))
-            .await
-            .expect("upsert");
+        p.upsert(&pool).await.expect("upsert");
         let rows: Vec<Partial> = Partial::objects().fetch(&pool).await.expect("fetch");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].slug, "b");

@@ -175,6 +175,7 @@ pub trait Form: Sized {
 /// New code should use [`FormErrors`] (multi-error). This type is kept
 /// for the admin's CRUD path which reports one error at a time.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum FormError {
     #[error("required field `{field}` was missing from the form")]
     Missing { field: String },
@@ -669,6 +670,7 @@ pub(crate) fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'stati
 
 /// Error returned by [`ModelForm::save`].
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ModelFormError {
     #[error("form validation failed:\n{0}")]
     Validation(FormErrors),
@@ -710,6 +712,23 @@ pub struct ModelForm {
     locked: Vec<&'static str>,
 }
 
+/// The superuser-only fields a form locks until `acting_superuser(true)`.
+#[cfg(feature = "admin")]
+fn default_locks(schema: &'static ModelSchema, update: bool) -> Vec<&'static str> {
+    use crate::admin::object_permissions::{superuser_fields, AdminWrite};
+    let action = if update {
+        AdminWrite::Change
+    } else {
+        AdminWrite::Add
+    };
+    superuser_fields(schema.table, action)
+}
+
+#[cfg(not(feature = "admin"))]
+fn default_locks(_schema: &'static ModelSchema, _update: bool) -> Vec<&'static str> {
+    Vec::new()
+}
+
 impl ModelForm {
     /// Create a form for **inserting** a new row.
     pub fn new(schema: &'static ModelSchema, data: HashMap<String, String>) -> Self {
@@ -719,7 +738,7 @@ impl ModelForm {
             pk_value: None,
             include_fields: None,
             exclude_fields: Vec::new(),
-            locked: Vec::new(),
+            locked: default_locks(schema, false),
         }
     }
 
@@ -735,7 +754,7 @@ impl ModelForm {
             pk_value: Some(pk),
             include_fields: None,
             exclude_fields: Vec::new(),
-            locked: Vec::new(),
+            locked: default_locks(schema, true),
         }
     }
 
@@ -759,23 +778,16 @@ impl ModelForm {
         self
     }
 
-    /// Apply the admin's superuser-only field locks
-    /// (`register_admin_superuser_fields!`): unless `is_superuser`, the
-    /// form leaves them out and a locked NOT NULL flag stores `false`.
-    /// Without this call no field is locked.
+    /// The admin's superuser-only fields (`register_admin_superuser_fields!`)
+    /// are locked by default: the form leaves them out and a locked NOT NULL
+    /// flag stores `false`. `acting_superuser(true)` unlocks them.
     #[cfg(feature = "admin")]
     #[must_use]
     pub fn acting_superuser(mut self, is_superuser: bool) -> Self {
-        use crate::admin::object_permissions::{superuser_fields, AdminWrite};
-        let action = if self.pk_value.is_some() {
-            AdminWrite::Change
-        } else {
-            AdminWrite::Add
-        };
         self.locked = if is_superuser {
             Vec::new()
         } else {
-            superuser_fields(self.schema.table, action)
+            default_locks(self.schema, self.pk_value.is_some())
         };
         self
     }
@@ -1334,19 +1346,18 @@ impl DynamicForm {
                             );
                         }
                     }
-                    if field.field_type == DynamicFieldType::Email && !raw_str.is_empty() {
-                        if !raw_str.contains('@') {
-                            errors.add(&field.name, "Enter a valid email address.");
-                        } else if !is_strict_email(raw_str) {
-                            warn_lenient(&field.name, "an email address SmtpMailer would refuse");
-                        }
+                    if field.field_type == DynamicFieldType::Email
+                        && !raw_str.is_empty()
+                        && !is_strict_email(raw_str)
+                    {
+                        errors.add(&field.name, "Enter a valid email address.");
                     }
-                    if field.field_type == DynamicFieldType::Url && !raw_str.is_empty() {
-                        if is_script_url(raw_str) {
-                            errors.add(&field.name, "Enter a valid URL.");
-                        } else if crate::validators::validate_url(raw_str).is_err() {
-                            warn_lenient(&field.name, "not an http(s) URL");
-                        }
+                    // `validate_url` takes http(s) only, so script schemes fail too.
+                    if field.field_type == DynamicFieldType::Url
+                        && !raw_str.is_empty()
+                        && crate::validators::validate_url(raw_str).is_err()
+                    {
+                        errors.add(&field.name, "Enter a valid URL.");
                     }
                 }
                 DynamicFieldType::Select => {
@@ -1482,22 +1493,6 @@ pub fn checkbox(raw: &str) -> Option<bool> {
     }
 }
 
-/// A URL a browser would run rather than follow: `javascript:`,
-/// `vbscript:` or `data:`, spelled as the browser reads it.
-fn is_script_url(raw: &str) -> bool {
-    // Browsers drop tab/LF/CR anywhere and leading controls and spaces.
-    let cleaned: String = raw
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .collect();
-    let s = cleaned.trim_start_matches(|c: char| c <= ' ');
-    s.split_once(':').is_some_and(|(scheme, _)| {
-        ["javascript", "vbscript", "data"]
-            .iter()
-            .any(|bad| scheme.eq_ignore_ascii_case(bad))
-    })
-}
-
 /// The framework's email check, plus `SmtpMailer`'s parser with `email`.
 fn is_strict_email(s: &str) -> bool {
     #[cfg(feature = "email")]
@@ -1505,15 +1500,6 @@ fn is_strict_email(s: &str) -> bool {
     #[cfg(not(feature = "email"))]
     let parses = true;
     parses && crate::validators::validate_email(s).is_ok()
-}
-
-/// Accepted for compatibility; a later minor release refuses it.
-fn warn_lenient(field: &str, what: &str) {
-    tracing::warn!(
-        target: "rustango::forms",
-        field,
-        "DynamicForm accepted {what}; a later minor release will refuse it"
-    );
 }
 
 #[cfg(test)]
@@ -1597,17 +1583,14 @@ mod dynamic_form_tests {
             "\u{1}java\nscript:x",
             "data:text/html,<script>x</script>",
             "vbscript:x",
+            // Not http(s): refused too.
+            "example.com",
+            "mailto:a@b.co",
         ] {
             f.bind(HashMap::from([("u".into(), bad.into())]));
             assert!(!f.is_valid(), "{bad:?} accepted");
         }
-        // Accepted; the non-http(s) ones only log a warning for now.
-        for ok in [
-            "https://example.com/a?b#c",
-            "http://x:8080",
-            "example.com",
-            "mailto:a@b.co",
-        ] {
+        for ok in ["https://example.com/a?b#c", "http://x:8080"] {
             f.bind(HashMap::from([("u".into(), ok.into())]));
             assert!(f.is_valid(), "{ok:?}: {:?}", f.errors());
         }
@@ -1625,9 +1608,9 @@ mod dynamic_form_tests {
         let mut f = form(serde_json::json!([{"name": "e", "field_type": "email"}]));
         f.bind(HashMap::from([("e".into(), "nope".into())]));
         assert!(!f.is_valid());
-        // Loose but with an `@`: still accepted, with a warning.
+        // Loose but with an `@`: refused.
         f.bind(HashMap::from([("e".into(), "a@localhost".into())]));
-        assert!(f.is_valid(), "{:?}", f.errors());
+        assert!(!f.is_valid());
     }
 
     #[test]
@@ -2477,6 +2460,9 @@ mod model_form_tests {
         assert_eq!(at.map(|i| &prep.values[i]), Some(&SqlValue::Bool(false)));
         let su = ModelForm::new(schema, data.clone()).acting_superuser(true);
         assert_eq!(su.included_field_names(), vec!["name", "is_staff", "owner"]);
+        // With no acting user stated, the lock still applies.
+        let unstated = ModelForm::new(schema, data.clone());
+        assert_eq!(unstated.included_field_names(), vec!["name", "owner"]);
         let change = ModelForm::for_update(schema, data, SqlValue::I64(1)).acting_superuser(false);
         assert_eq!(change.included_field_names(), vec!["name", "is_staff"]);
     }

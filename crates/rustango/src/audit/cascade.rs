@@ -11,7 +11,7 @@ use crate::core::{
 };
 use crate::sql::{ExecError, PoolTx};
 
-use super::{emit_many_tx, pk_in, AuditOp, PendingEntry, Via, BULK_AUDIT_CHUNK};
+use super::{emit_many_tx, pk_in, AuditOp, PendingEntry, BULK_AUDIT_CHUNK};
 
 /// `child.fk_column` references `parent.on` with `ON DELETE CASCADE`, or
 /// with `SET NULL` / `SET DEFAULT` to an audited child (`sets`).
@@ -109,15 +109,15 @@ fn build_graph() -> HashMap<&'static str, Vec<Edge>> {
 }
 
 /// An audited table a truncate of `table` changes: rows it takes, or, for a
-/// MySQL/SQLite `DELETE`, the FK it sets to NULL / default (`set`).
+/// plain truncate, the FK it sets to NULL / default (`set`).
 pub(crate) struct Reached {
     schema: &'static ModelSchema,
     set: Option<&'static str>,
     before: i64,
 }
 
-/// The audited tables a truncate of `table` reaches besides it: PG's
-/// `TRUNCATE … CASCADE` empties every FK child, a `DELETE` only follows
+/// The audited tables a truncate of `table` reaches besides it: a cascading
+/// one empties every FK child, a plain `DELETE` only follows
 /// `ON DELETE CASCADE` and sets the `SET NULL` / `SET DEFAULT` children.
 fn truncate_reach(
     table: &str,
@@ -176,8 +176,9 @@ fn truncate_reach(
 pub(crate) async fn truncate_counts(
     tx: &mut PoolTx<'_>,
     table: &str,
+    mode: crate::sql::TruncateMode,
 ) -> Result<Vec<Reached>, ExecError> {
-    let every_fk = crate::sql::truncate_cascades_every_fk(tx.dialect());
+    let every_fk = mode == crate::sql::TruncateMode::Cascade;
     let mut out = Vec::new();
     for (schema, set) in truncate_reach(table, every_fk) {
         let before = row_count(tx, schema, set).await?;
@@ -236,7 +237,7 @@ pub(crate) async fn emit_truncated(
             });
         }
     }
-    emit_many_tx(tx, Via::Scoped, &entries).await
+    emit_many_tx(tx, &entries).await
 }
 
 /// Whether deleting `model` rows may cascade to an audited model.
@@ -413,7 +414,7 @@ async fn emit_set(
                 }
             }
         }
-        emit_many_tx(tx, Via::Scoped, &entries).await?;
+        emit_many_tx(tx, &entries).await?;
     }
     Ok(())
 }
@@ -439,7 +440,7 @@ async fn emit_removed(
             .filter(|(k, _)| !left.contains(&format!("{k:?}")))
             .map(|(_, e)| e)
             .collect();
-        emit_many_tx(tx, Via::Scoped, &entries).await?;
+        emit_many_tx(tx, &entries).await?;
     }
     Ok(())
 }
@@ -464,20 +465,186 @@ async fn column_values(
         .collect())
 }
 
-/// Run `fut`, a delete through `pool`, so cascade entries keep the source.
-pub(crate) async fn via_pool<F: std::future::Future>(pool: &crate::sql::Pool, fut: F) -> F::Output {
-    super::writing_via(pool, fut).await
-}
+#[cfg(all(test, feature = "tenancy"))]
+mod tx_source_tests {
+    use crate::audit::{fetch_for_entity_pool, with_tenant_source, writing_to_tenant, AuditSource};
+    use crate::core::Model as _;
+    #[cfg(feature = "postgres")]
+    use crate::sql::CounterPool as _;
+    use crate::sql::Pool;
 
-/// Warn once that a delete on a single-statement executor cascaded to an
-/// audited model without audit rows.
-pub(crate) fn warn_unaudited(table: &str) {
-    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        tracing::warn!(
-            table,
-            "delete cascades to an audited model, but this executor runs one statement, \
-             so the cascaded rows get no audit rows; use `delete_pool` or a `PoolTx`"
-        );
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(table = "audit_txsrc_shelf", app = "audit_txsrc")]
+    #[allow(dead_code)]
+    pub struct Shelf {
+        #[rustango(primary_key)]
+        pub id: i64,
     }
+
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(
+        table = "audit_txsrc_book",
+        app = "audit_txsrc",
+        audit(track = "title")
+    )]
+    #[allow(dead_code)]
+    pub struct Book {
+        #[rustango(primary_key)]
+        pub id: i64,
+        #[rustango(on_delete = "cascade")]
+        pub shelf: crate::sql::ForeignKey<Shelf>,
+        #[rustango(max_length = 32)]
+        pub title: String,
+    }
+
+    async fn setup(pool: &Pool) {
+        crate::testkit::matrix::drop_table(pool, Book::SCHEMA.table).await;
+        crate::testkit::matrix::fresh_table::<Shelf>(pool).await;
+        crate::testkit::matrix::fresh_table::<Book>(pool).await;
+        crate::audit::ensure_table_pool(pool).await.unwrap();
+        crate::audit::AuditLog::delete_where("entity_table", Book::SCHEMA.table, pool)
+            .await
+            .unwrap();
+        Shelf { id: 1 }.insert(pool).await.unwrap();
+        let mut book = Book {
+            id: 1,
+            shelf: crate::sql::ForeignKey::unloaded(1_i64),
+            title: "b".into(),
+        };
+        book.insert(pool).await.unwrap();
+    }
+
+    /// How the test deletes the shelf.
+    #[derive(Clone, Copy)]
+    enum Via {
+        DeleteTx,
+        DeleteOnTx,
+        ConnBegin,
+        DeleteOnConn,
+        DeleteOnTenantConn,
+    }
+
+    /// Deletes the shelf as tenant `a`'s user, scoped to `pool`.
+    async fn cascade_source(pool: &Pool, via: Via) -> Option<String> {
+        let user = AuditSource::User { id: "7".into() };
+        let query = || {
+            Shelf::objects()
+                .filter("id", 1_i64)
+                .compile_delete()
+                .unwrap()
+        };
+        with_tenant_source(user, "a".into(), async {
+            writing_to_tenant("a".into(), Some(pool), async {
+                match via {
+                    Via::DeleteTx | Via::DeleteOnTx => {
+                        let mut tx = crate::sql::transaction_pool(pool).await.unwrap();
+                        if matches!(via, Via::DeleteTx) {
+                            crate::sql::delete_tx(&mut tx, &query()).await.unwrap();
+                        } else {
+                            let qs = Shelf::objects().filter("id", 1_i64);
+                            qs.delete_on(&mut tx).await.unwrap();
+                        }
+                        tx.commit().await.unwrap();
+                    }
+                    Via::ConnBegin => {
+                        let mut conn = pool.acquire().await.unwrap();
+                        let mut tx = conn.begin().await.unwrap();
+                        crate::sql::delete_tx(&mut tx, &query()).await.unwrap();
+                        tx.commit().await.unwrap();
+                    }
+                    Via::DeleteOnConn => {
+                        let mut conn = pool.acquire().await.unwrap();
+                        let qs = Shelf::objects().filter("id", 1_i64);
+                        qs.delete_on(&mut conn).await.unwrap();
+                    }
+                    Via::DeleteOnTenantConn => delete_on_tenant_conn(pool).await,
+                }
+            })
+            .await;
+        })
+        .await;
+        let rows = fetch_for_entity_pool(pool, Book::SCHEMA.table, "1")
+            .await
+            .unwrap();
+        rows.first().map(|e| e.source.clone())
+    }
+
+    /// `delete_on` through a database-mode tenant connection out of `pool`.
+    async fn delete_on_tenant_conn(pool: &Pool) {
+        #[cfg(any(feature = "mysql", feature = "sqlite"))]
+        use crate::tenancy::DatabaseConn;
+        #[cfg(any(feature = "mysql", feature = "sqlite"))]
+        let qs = Shelf::objects().filter("id", 1_i64);
+        match pool {
+            #[cfg(feature = "mysql")]
+            Pool::Mysql(p) => {
+                let mut conn = DatabaseConn::new(p.acquire().await.unwrap(), pool);
+                qs.delete_on(&mut conn).await.unwrap();
+            }
+            #[cfg(feature = "sqlite")]
+            Pool::Sqlite(p) => {
+                let mut conn = DatabaseConn::new(p.acquire().await.unwrap(), pool);
+                qs.delete_on(&mut conn).await.unwrap();
+            }
+            #[allow(unreachable_patterns)]
+            _ => unreachable!(),
+        }
+    }
+
+    async fn delete_on_tenant_conn_keeps_the_tenant_source(pool: &Pool) {
+        // Postgres tenants run `delete_on` on the raw sqlx connection.
+        if pool.dialect().name() == "postgres" {
+            return;
+        }
+        let source = cascade_source(pool, Via::DeleteOnTenantConn).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    /// A raw sqlx executor cannot audit the cascade, so the delete refuses.
+    async fn raw_executor_cascade_is_refused(pool: &Pool) {
+        #[cfg(not(feature = "postgres"))]
+        let _ = pool;
+        #[cfg(feature = "postgres")]
+        #[allow(irrefutable_let_patterns)]
+        if let Pool::Postgres(pg) = pool {
+            let res = Shelf::objects().filter("id", 1_i64).delete_on(pg).await;
+            assert!(
+                matches!(res, Err(crate::sql::ExecError::AuditUnsupported { .. })),
+                "{res:?}"
+            );
+            assert_eq!(Book::objects().count(pool).await.unwrap(), 1);
+        }
+    }
+
+    async fn delete_tx_keeps_the_tenant_source(pool: &Pool) {
+        let source = cascade_source(pool, Via::DeleteTx).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    async fn delete_on_tx_keeps_the_tenant_source(pool: &Pool) {
+        let source = cascade_source(pool, Via::DeleteOnTx).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    async fn conn_begin_keeps_the_tenant_source(pool: &Pool) {
+        let source = cascade_source(pool, Via::ConnBegin).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    async fn delete_on_conn_keeps_the_tenant_source(pool: &Pool) {
+        let source = cascade_source(pool, Via::DeleteOnConn).await;
+        assert_eq!(source.as_deref(), Some("user:7"));
+    }
+
+    crate::tri_dialect_test!(
+        setup: setup,
+        scenarios: [
+            raw_executor_cascade_is_refused,
+            delete_tx_keeps_the_tenant_source,
+            delete_on_tx_keeps_the_tenant_source,
+            conn_begin_keeps_the_tenant_source,
+            delete_on_conn_keeps_the_tenant_source,
+            delete_on_tenant_conn_keeps_the_tenant_source,
+        ],
+    );
 }

@@ -125,7 +125,6 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::email_jobs` | Two queues on one jobs table given different mailers |
 | `rustango::error` | The cause behind a 5xx, which the response body withholds |
 | `rustango::errors` | An error-page template that failed to render, or a template dir that did not load |
-| `rustango::forms` | `DynamicForm` values accepted now but refused in a later release |
 | `rustango::auth` | Permission checks that failed on a database error |
 | `rustango::auth_flows` | Single-use auth links refused by the cache |
 | `rustango::aead` | A blank previous secret key, or a dev secret key that cannot be saved |
@@ -138,13 +137,13 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::media::auth` | Media-router authorization refusals |
 | `rustango::messages` | Flash messages |
 | `rustango::migrate` | Migration runner |
+| `rustango::object_permissions` | "view" hook scan cap reached on a list |
 | `rustango::outbound` | Checked outbound calls (SSO, Slack, webhooks) |
 | `rustango::passkey` | Passkey challenges refused by the cache |
 | `rustango::passwords` | Password-hash upgrades on login |
 | `rustango::rate_limit` | Rate limiting |
 | `rustango::request_timeout` | Per-request timeout |
 | `rustango::scheduler` | Cron / scheduled tasks |
-| `rustango::security_headers` | Security-header settings (HSTS) |
 | `rustango::server` | Server boot and shutdown |
 | `rustango::shutdown` | Signal handling and shutdown hooks |
 | `rustango::sql` | Query execution |
@@ -384,6 +383,7 @@ AccessLogLayer::default()
     .slow_threshold_ms(250)      // what counts as slow
     .without_ip()                // omit the client IP
     .use_real_ip(true)           // TrustedRealIp from RealIpLayer, never raw headers
+    .skip_paths(["/health", "/ready"]) // no line for probes; matches whole segments
 ```
 
 `RealIpLayer` must run before the access log. With `server::Builder`, pass it
@@ -395,8 +395,10 @@ written. A key is masked when it holds a secret word, matched by word, so
 `password`, `pass`, `pwd`, `token`, `jwt`, `secret`, `key`, `signature`,
 `auth`, `credential`, `cookie`, `session`, `otp`, plus the OAuth names `code`,
 `state` and `assertion`. Extend with `.redact_additional("ref")`, or replace
-the whole list with `.redact(vec![...])`; `token`, `signature` and `code` stay
-masked either way. The request span's `url.query` is masked the same way.
+the whole list with `.redact(vec![...])`; the credential words (`password`, `passwd`,
+`token`, `secret`, `api_key`, `encryption_key`, ...), `signature` and `code`
+stay masked either way, also inside a joined key (`secretary` contains
+`secret`), and a custom list cannot undo that. The request span's `url.query` is masked the same way.
 This covers **query strings only**; see
 [security.md](security.md#keeping-secrets-out-of-your-logs) for the rest.
 

@@ -75,19 +75,19 @@ async fn seed(pool: &Pool) {
         id: Auto::default(),
         name: "Alice".into(),
     };
-    alice.save_pool(pool).await.unwrap();
+    alice.save(pool).await.unwrap();
     let alice_id = *alice.id.get().unwrap();
     let mut bob = Author {
         id: Auto::default(),
         name: "Bob".into(),
     };
-    bob.save_pool(pool).await.unwrap();
+    bob.save(pool).await.unwrap();
     let bob_id = *bob.id.get().unwrap();
     let mut carol = Author {
         id: Auto::default(),
         name: "Carol".into(),
     };
-    carol.save_pool(pool).await.unwrap();
+    carol.save(pool).await.unwrap();
 
     // Alice has a published book.
     Book {
@@ -96,7 +96,7 @@ async fn seed(pool: &Pool) {
         author_id: ForeignKey::from(alice_id),
         published: true,
     }
-    .save_pool(pool)
+    .save(pool)
     .await
     .unwrap();
     // Bob has only a draft.
@@ -106,7 +106,7 @@ async fn seed(pool: &Pool) {
         author_id: ForeignKey::from(bob_id),
         published: false,
     }
-    .save_pool(pool)
+    .save(pool)
     .await
     .unwrap();
     // Carol has no books.

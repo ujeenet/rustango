@@ -45,7 +45,7 @@ async fn seed(pool: &Pool) -> (Vec<i64>, Vec<i64>) {
             views: 10,
             published,
         };
-        row.save_pool(pool).await.unwrap();
+        row.save(pool).await.unwrap();
         let pk = *row.id.get().unwrap();
         if published {
             pub_ids.push(pk);

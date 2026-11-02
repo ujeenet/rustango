@@ -16,7 +16,7 @@
 //!   - `select_related` (FK join decoded via LoadRelatedSqlite)
 //!   - `fetch_with_prefetch_pool` (parents + their children, two trips)
 //!   - `bulk_insert_pool` via the IR (`BulkInsertQuery`)
-//!   - Transactions via `transaction_pool` + `PoolTx::Sqlite`
+//!   - Transactions via `transaction_pool` + `TxConn::Sqlite`
 //!   - Raw query / raw execute helpers
 //!   - Aggregations via `fetch_aggregate_pool` + `AggregateBuilder`
 
@@ -27,7 +27,7 @@ use rustango::core::{AggregateExpr, BulkInsertQuery, Model as _, Op, SqlValue};
 use rustango::query::QuerySet;
 use rustango::sql::{
     raw_execute_pool, raw_query_pool, transaction_pool, Auto, CounterPool, FetcherPool, ForeignKey,
-    Pool, PoolTx,
+    Pool, TxConn,
 };
 use rustango::Model;
 
@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "Alice".into(),
         age: 32,
     };
-    alice.insert_pool(&pool).await?;
+    alice.insert(&pool).await?;
     let alice_id = *alice.id.get().expect("Alice has an id");
     println!("inserted Alice with id = {alice_id}");
 
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "Bob".into(),
         age: 47,
     };
-    bob.insert_pool(&pool).await?;
+    bob.insert(&pool).await?;
     let bob_id = *bob.id.get().expect("Bob has an id");
     println!("inserted Bob with id   = {bob_id}");
 
@@ -221,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .pop()
         .expect("at least one post");
     first.views = 999;
-    first.save_pool(&pool).await?;
+    first.save(&pool).await?;
     let refetched: Post = QuerySet::<Post>::new()
         .filter_op("id", Op::Eq, *first.id.get().unwrap())
         .fetch(&pool)
@@ -234,8 +234,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n== 7. transaction_pool — BEGIN / COMMIT around two writes ==");
     {
         let mut tx = transaction_pool(&pool).await?;
-        match &mut tx {
-            PoolTx::Sqlite(t) => {
+        match tx.conn() {
+            TxConn::Sqlite(t) => {
                 sqlx::query("UPDATE demo_post SET views = views + 1 WHERE author_id = ?")
                     .bind(alice_id)
                     .execute(&mut **t)
@@ -245,10 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .execute(&mut **t)
                     .await?;
             }
-            #[cfg(feature = "postgres")]
-            PoolTx::Postgres(_) => unreachable!("pool is sqlite"),
-            #[cfg(feature = "mysql")]
-            PoolTx::Mysql(_) => unreachable!("pool is sqlite"),
+            _ => unreachable!("pool is sqlite"),
         }
         tx.commit().await?;
     }
@@ -319,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .pop()
         .expect("Draft post exists");
-    let removed = doomed.delete_pool(&pool).await?;
+    let removed = doomed.delete(&pool).await?;
     println!("delete_pool removed {removed} row");
     let after = Post::objects().count(&pool).await?;
     println!("Post count after delete: {after}");

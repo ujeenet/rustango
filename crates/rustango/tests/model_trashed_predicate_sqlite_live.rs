@@ -44,7 +44,7 @@ async fn trashed_is_false_for_live_row() {
         title: "hi".into(),
         deleted_at: None,
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     assert!(!p.trashed());
 }
 
@@ -56,7 +56,7 @@ async fn trashed_is_true_after_soft_delete_and_refetch() {
         title: "hi".into(),
         deleted_at: None,
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     p.soft_delete(&pool).await.unwrap();
     // The local instance still has deleted_at=None; trashed() is a
     // pure in-memory predicate so we must refetch from DB.

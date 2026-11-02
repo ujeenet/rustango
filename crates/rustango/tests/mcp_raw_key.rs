@@ -84,10 +84,14 @@ async fn raw_credential_resolves_live_rbac_scope() {
         .expect("key");
 
     // The raw show-once token authenticates directly.
-    let agent = verify_raw_agent_credential(&pool, "acme", &issued.token)
-        .await
-        .expect("check runs")
-        .expect("raw credential verifies");
+    let agent = verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &issued.token,
+    )
+    .await
+    .expect("check runs")
+    .expect("raw credential verifies");
     assert_eq!(agent.user_id, Some(uid));
     assert_eq!(agent.tenant, "acme");
     assert_eq!(agent.skills, vec!["editor"]);
@@ -99,10 +103,14 @@ async fn raw_credential_resolves_live_rbac_scope() {
     set_user_perm_pool(uid, "thing.edit", false, &pool)
         .await
         .expect("deny perm");
-    let narrowed = verify_raw_agent_credential(&pool, "acme", &issued.token)
-        .await
-        .expect("check runs")
-        .expect("still authenticates");
+    let narrowed = verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &issued.token,
+    )
+    .await
+    .expect("check runs")
+    .expect("still authenticates");
     assert!(narrowed.skills.is_empty(), "denied perm drops the skill");
     assert!(narrowed.tools.is_empty());
 }
@@ -121,20 +129,28 @@ async fn revoked_key_is_refused_immediately() {
     let agent_id = issued.agent.id.get().copied().unwrap();
 
     // Warm the verification cache with a successful call…
-    assert!(verify_raw_agent_credential(&pool, "acme", &issued.token)
-        .await
-        .expect("check runs")
-        .is_some());
+    assert!(verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &issued.token
+    )
+    .await
+    .expect("check runs")
+    .is_some());
     // …then revoke: the liveness check runs per request, so even a cached
     // verification is refused straight away.
     revoke_user_key_pool(&pool, uid, agent_id)
         .await
         .expect("revoke");
     assert!(
-        verify_raw_agent_credential(&pool, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_none(),
+        verify_raw_agent_credential(
+            &pool,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_none(),
         "revoked key must be refused despite the warm cache"
     );
 }
@@ -164,10 +180,14 @@ async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
     // Warm the cache, so a subsequent call would skip Argon2 and take
     // whatever the entry says.
     assert!(
-        verify_raw_agent_credential(&pool, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_some(),
+        verify_raw_agent_credential(
+            &pool,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_some(),
         "precondition: the freshly issued token authenticates",
     );
 
@@ -176,20 +196,28 @@ async fn a_rotated_secret_stops_working_even_with_a_warm_cache() {
         .expect("rotate");
 
     assert!(
-        verify_raw_agent_credential(&pool, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_none(),
+        verify_raw_agent_credential(
+            &pool,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_none(),
         "the OLD secret must stop working the moment the row records a \
          rotation — the first attempt at this cleared a process-local \
          cache from the `manage` CLI, which never reaches the serving \
          process, so the old secret kept working for the whole TTL",
     );
     assert!(
-        verify_raw_agent_credential(&pool, "acme", &rotated.token)
-            .await
-            .expect("check runs")
-            .is_some(),
+        verify_raw_agent_credential(
+            &pool,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &rotated.token
+        )
+        .await
+        .expect("check runs")
+        .is_some(),
         "control: the NEW secret must authenticate, or the assertion \
          above would pass on a rotation that simply broke the key",
     );
@@ -202,10 +230,14 @@ async fn deactivated_owner_is_refused() {
     let issued = create_user_key_pool(&pool, uid, "carol's key", &[])
         .await
         .expect("key");
-    assert!(verify_raw_agent_credential(&pool, "acme", &issued.token)
-        .await
-        .expect("check runs")
-        .is_some());
+    assert!(verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &issued.token
+    )
+    .await
+    .expect("check runs")
+    .is_some());
 
     let Pool::Sqlite(sq) = &pool else {
         unreachable!()
@@ -216,10 +248,14 @@ async fn deactivated_owner_is_refused() {
         .await
         .expect("deactivate");
     assert!(
-        verify_raw_agent_credential(&pool, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_none(),
+        verify_raw_agent_credential(
+            &pool,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_none(),
         "a deactivated owner's keys must be refused"
     );
 }
@@ -233,28 +269,44 @@ async fn garbage_and_wrong_secrets_are_refused() {
         .expect("key");
 
     // No dot → shape gate refuses without touching the DB.
-    assert!(verify_raw_agent_credential(&pool, "acme", "not-a-key")
-        .await
-        .expect("check runs")
-        .is_none());
+    assert!(verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "not-a-key"
+    )
+    .await
+    .expect("check runs")
+    .is_none());
     // Empty halves.
-    assert!(verify_raw_agent_credential(&pool, "acme", ".")
-        .await
-        .expect("check runs")
-        .is_none());
+    assert!(verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "."
+    )
+    .await
+    .expect("check runs")
+    .is_none());
     // Right prefix, wrong secret.
     let prefix = issued.token.split('.').next().unwrap();
     let forged = format!("{prefix}.deadbeefdeadbeefdeadbeefdeadbeef");
-    assert!(verify_raw_agent_credential(&pool, "acme", &forged)
-        .await
-        .expect("check runs")
-        .is_none());
+    assert!(verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &forged
+    )
+    .await
+    .expect("check runs")
+    .is_none());
     // A JWT-shaped bearer (three dot-separated base64 parts) must not
     // authenticate as a raw credential either.
-    assert!(verify_raw_agent_credential(&pool, "acme", "eyJx.eyJy.sig")
-        .await
-        .expect("check runs")
-        .is_none());
+    assert!(verify_raw_agent_credential(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "eyJx.eyJy.sig"
+    )
+    .await
+    .expect("check runs")
+    .is_none());
 }
 
 /// A credential minted in one tenant must not authenticate against another —
@@ -283,20 +335,28 @@ async fn credential_does_not_cross_tenants() {
 
     // Warm the cache on the owning tenant first.
     assert!(
-        verify_raw_agent_credential(&acme, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_some(),
+        verify_raw_agent_credential(
+            &acme,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_some(),
         "owning tenant must authenticate"
     );
 
     // Same token, other tenant's pool + slug: no such agent, and the warm
     // cache entry must not be reused across the slug boundary.
     assert!(
-        verify_raw_agent_credential(&globex, "globex", &issued.token)
-            .await
-            .expect("check runs")
-            .is_none(),
+        verify_raw_agent_credential(
+            &globex,
+            &rustango::tenancy::TenantSlug::new(2, "globex"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_none(),
         "credential must not authenticate against another tenant"
     );
 
@@ -322,10 +382,14 @@ async fn credential_does_not_cross_tenants() {
     );
 
     assert!(
-        verify_raw_agent_credential(&globex, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_none(),
+        verify_raw_agent_credential(
+            &globex,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_none(),
         "a warm entry must not be redeemable against another tenant's \
          storage: the cached id resolves to a different agent there, \
          whose owner and grants would otherwise be handed to the caller"
@@ -334,10 +398,14 @@ async fn credential_does_not_cross_tenants() {
     // The owning tenant still works afterwards — isolation must not have
     // poisoned the legitimate entry.
     assert!(
-        verify_raw_agent_credential(&acme, "acme", &issued.token)
-            .await
-            .expect("check runs")
-            .is_some(),
+        verify_raw_agent_credential(
+            &acme,
+            &rustango::tenancy::TenantSlug::new(1, "acme"),
+            &issued.token
+        )
+        .await
+        .expect("check runs")
+        .is_some(),
         "owning tenant still authenticates after cross-tenant attempts"
     );
 }

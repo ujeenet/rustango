@@ -287,13 +287,13 @@ async fn registry_admin_hides_credentials(pool: &Pool) {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(pool).await.expect("seed operator");
+    op.insert(pool).await.expect("seed operator");
     let mut org = Org {
         slug: unique("o"),
         database_url: Some("postgres://app:URL1158MARK@db/t".into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(pool).await.expect("seed org");
+    org.insert(pool).await.expect("seed org");
     let op_pk = op.id.get().copied().unwrap();
     let org_pk = org.id.get().copied().unwrap();
     for uri in [
@@ -608,7 +608,7 @@ async fn seed_operator(pool: &Pool, name: &str) -> i64 {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(pool).await.expect("seed operator");
+    op.insert(pool).await.expect("seed operator");
     op.id.get().copied().unwrap()
 }
 
@@ -761,7 +761,7 @@ async fn seed_link(pool: &Pool, source: &str, user_id: i64) -> String {
         provisioned: false,
         last_used_at: None,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     subject

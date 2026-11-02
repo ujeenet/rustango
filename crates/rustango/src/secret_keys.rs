@@ -1,29 +1,43 @@
 //! One word-based test for "this key names a secret", shared by the MCP
 //! audit and the access-log / span query redaction.
 
-/// Words whose values are hidden. A `_` entry is a run of words; `key`
-/// alone hides every `*_key` (`api_key`, `encryption_key`).
-pub(crate) const SECRET_WORDS: &[&str] = &[
+/// The single list of credential words. A column is a credential when its
+/// name is one or ends in `_<word>`; the redaction words below include them all.
+pub(crate) const CREDENTIAL_WORDS: &[&str] = &[
     "password",
     "passwd",
-    "pass",
-    "pwd",
     "passphrase",
-    "pin",
-    "ssn",
+    "pwd",
+    "password_hash",
+    "secret",
     "token",
     "jwt",
-    "bearer",
-    "secret",
-    "key",
+    "api_key",
     "apikey",
+    "private_key",
     "privatekey",
+    "encryption_key",
+    "signing_key",
+    "secret_key",
+    "access_key",
+    "credential",
+    "credentials",
+    "database_url",
+];
+
+/// Words hidden in logs and the MCP audit but too common for a column
+/// rule. A `_` entry is a run of words; `key` alone hides every `*_key`.
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
+const REDACT_ONLY_WORDS: &[&str] = &[
+    "pass",
+    "pin",
+    "ssn",
+    "bearer",
+    "key",
     "signature",
     "sig",
     "auth",
     "authorization",
-    "credential",
-    "credentials",
     "cookie",
     "session",
     "sessionid",
@@ -33,9 +47,25 @@ pub(crate) const SECRET_WORDS: &[&str] = &[
     "code_verifier",
 ];
 
+/// Every word whose value is hidden in logs and the MCP audit.
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
+pub(crate) fn secret_words() -> impl Iterator<Item = &'static str> {
+    CREDENTIAL_WORDS.iter().chain(REDACT_ONLY_WORDS).copied()
+}
+
+/// `true` when a column named `name` holds a credential by [`CREDENTIAL_WORDS`].
+pub(crate) fn is_credential_column_name(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    CREDENTIAL_WORDS.iter().any(|w| {
+        name.strip_suffix(w)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('_'))
+    })
+}
+
 /// Names also matched inside a joined key (`accesstoken`, `JSESSIONID`).
 /// Short or common words (`key`, `pin`, `auth`) are left out: they sit
 /// inside ordinary names like `keyboard` or `author`.
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
 const JOINED_WORDS: &[&str] = &[
     "password",
     "passwd",
@@ -55,6 +85,7 @@ const JOINED_WORDS: &[&str] = &[
 /// The byte ranges of `key`'s words. A word breaks at any other
 /// character, between letters and digits, at a lower-to-upper change
 /// and before the last capital of a run (`PASSWORDConfirm`).
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
 fn word_ranges(key: &str) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut start: Option<usize> = None;
@@ -89,6 +120,7 @@ fn word_ranges(key: &str) -> Vec<(usize, usize)> {
 }
 
 /// A list of secret names, split once so a lookup only splits the key.
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SecretNames {
     /// Each name's lowercase words.
@@ -97,6 +129,7 @@ pub(crate) struct SecretNames {
     joined: Vec<Box<str>>,
 }
 
+#[cfg(any(feature = "mcp", feature = "_http_layers"))]
 impl SecretNames {
     pub(crate) fn new<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
         let mut out = Self::default();
@@ -144,20 +177,48 @@ impl SecretNames {
     }
 }
 
-/// `true` when `key` names a secret by [`SECRET_WORDS`].
+/// `true` when `key` names a secret by [`secret_words`].
 #[cfg(feature = "mcp")]
 pub(crate) fn is_secret(key: &str) -> bool {
     static NAMES: std::sync::LazyLock<SecretNames> =
-        std::sync::LazyLock::new(|| SecretNames::new(SECRET_WORDS.iter().copied()));
+        std::sync::LazyLock::new(|| SecretNames::new(secret_words()));
     NAMES.matches(key)
 }
 
 #[cfg(test)]
+mod column_tests {
+    /// The column rule: a credential word, alone or after `_`.
+    #[test]
+    fn credential_columns_match_by_word_suffix() {
+        for n in [
+            "passwd",
+            "encryption_key",
+            "db_password",
+            "Reset_Token",
+            "aws_access_key",
+            "database_url",
+        ] {
+            assert!(super::is_credential_column_name(n), "{n}");
+        }
+        for n in [
+            "password_changed_at",
+            "secret_prefix",
+            "token_ttl",
+            "access_key_id",
+            "notoken",
+            "storage_key",
+        ] {
+            assert!(!super::is_credential_column_name(n), "{n}");
+        }
+    }
+}
+
+#[cfg(all(test, any(feature = "mcp", feature = "_http_layers")))]
 mod tests {
     use super::*;
 
     fn defaults() -> SecretNames {
-        SecretNames::new(SECRET_WORDS.iter().copied())
+        SecretNames::new(secret_words())
     }
 
     #[test]
@@ -188,6 +249,15 @@ mod tests {
             "api_key",
         ] {
             assert!(names.matches(k), "{k} must be hidden");
+        }
+    }
+
+    /// One list: every credential column word is hidden in logs and the MCP audit.
+    #[test]
+    fn credential_words_are_redaction_words() {
+        let names = defaults();
+        for w in CREDENTIAL_WORDS {
+            assert!(names.matches(w), "{w}");
         }
     }
 

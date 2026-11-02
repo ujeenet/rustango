@@ -108,7 +108,7 @@ async fn inline_datetime_renders_in_datetime_local_format() {
         id: Auto::default(),
         name: "Conf".into(),
     };
-    event.insert(&pool).await.unwrap();
+    event.insert(&pool.clone().into()).await.unwrap();
     let event_id = *event.id.get().expect("PK assigned");
 
     let mut session = Session {
@@ -117,7 +117,7 @@ async fn inline_datetime_renders_in_datetime_local_format() {
         label: "Keynote".into(),
         starts_at: Utc.with_ymd_and_hms(2025, 1, 2, 13, 1, 0).unwrap(),
     };
-    session.insert(&pool).await.unwrap();
+    session.insert(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let req = Request::builder()

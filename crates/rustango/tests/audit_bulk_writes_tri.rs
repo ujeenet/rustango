@@ -96,6 +96,39 @@ async fn latest(pool: &Pool, table: &str, pk: &str) -> audit::AuditEntry {
         .unwrap_or_else(|| panic!("no audit row for {table}/{pk}"))
 }
 
+/// An audited bulk insert names each row's PK, or refuses where the
+/// database cannot report it (MySQL) and writes nothing.
+async fn audited_bulk_insert_names_every_pk(pool: &Pool) {
+    let mut rows = vec![
+        Item {
+            id: Auto::default(),
+            name: "x".into(),
+            score: 1,
+        },
+        Item {
+            id: Auto::default(),
+            name: "y".into(),
+            score: 2,
+        },
+    ];
+    let res = Item::bulk_insert(&mut rows, pool).await;
+    if pool.dialect().name() == "mysql" {
+        assert!(
+            matches!(res, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
+            "{res:?}"
+        );
+        assert_eq!(Item::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(ops(pool, ITEM, "create").await, 0);
+        return;
+    }
+    res.expect("bulk insert");
+    for row in &rows {
+        let pk = row.id.get().expect("pk read back").to_string();
+        assert_eq!(latest(pool, ITEM, &pk).await.operation, "create");
+    }
+    assert_eq!(ops(pool, ITEM, "create").await, 2);
+}
+
 /// Three items: `a` (1), `b` (2), `b` (3). Returns their PKs.
 async fn seed(pool: &Pool) -> Vec<i64> {
     let mut pks = Vec::new();
@@ -105,7 +138,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
             name: name.into(),
             score,
         };
-        item.insert_pool(pool).await.expect("insert");
+        item.insert(pool).await.expect("insert");
         pks.push(*item.id.get().expect("pk assigned"));
     }
     assert_eq!(ops(pool, ITEM, "create").await, 3);
@@ -195,7 +228,7 @@ async fn failed_bulk_write_writes_no_audit_row(pool: &Pool) {
             slug: slug.into(),
             label: slug.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("insert");
     }
@@ -283,7 +316,7 @@ async fn conflict_bulk_inserts_audit_each_written_row(pool: &Pool) {
     if pool.dialect().name() == "mysql" {
         return;
     }
-    tag("a", "one").insert_pool(pool).await.expect("seed");
+    tag("a", "one").insert(pool).await.expect("seed");
     let rows = [tag("a", "uno"), tag("b", "two")];
     Tag::bulk_upsert_pool(&rows, &["slug"], &["label"], pool)
         .await
@@ -339,11 +372,17 @@ async fn upsert_on_unique_target_records_its_op(pool: &Pool) {
             qty,
         };
         let mut first = sku(1);
-        first.upsert(pg).await.expect("upsert insert");
+        first
+            .upsert(&pg.clone().into())
+            .await
+            .expect("upsert insert");
         let pk = first.id.get().expect("pk assigned").to_string();
         assert_eq!(latest(pool, SKU, &pk).await.operation, "create");
         let mut second = sku(5);
-        second.upsert(pg).await.expect("upsert update");
+        second
+            .upsert(&pg.clone().into())
+            .await
+            .expect("upsert update");
         assert_eq!(second.id.get().map(ToString::to_string), Some(pk.clone()));
         let entry = latest(pool, SKU, &pk).await;
         assert_eq!(entry.operation, "update");
@@ -384,7 +423,9 @@ async fn bulk_insert_and_upsert_audit_on_postgres(pool: &Pool) {
                 label: "two".into(),
             },
         ];
-        Tag::bulk_insert(&tags, pg).await.expect("bulk insert");
+        Tag::bulk_insert(&tags, &pg.clone().into())
+            .await
+            .expect("bulk insert");
         assert_eq!(ops(pool, TAG, "create").await, 2);
         assert_eq!(latest(pool, TAG, "q").await.changes["label"], "two");
 
@@ -393,11 +434,15 @@ async fn bulk_insert_and_upsert_audit_on_postgres(pool: &Pool) {
             name: "u".into(),
             score: 1,
         };
-        item.upsert(pg).await.expect("upsert insert");
+        item.upsert(&pg.clone().into())
+            .await
+            .expect("upsert insert");
         let pk = item.id.get().expect("pk assigned").to_string();
         assert_eq!(latest(pool, ITEM, &pk).await.operation, "create");
         item.score = 9;
-        item.upsert(pg).await.expect("upsert update");
+        item.upsert(&pg.clone().into())
+            .await
+            .expect("upsert update");
         let entry = latest(pool, ITEM, &pk).await;
         assert_eq!(entry.operation, "update");
         assert_eq!(entry.changes["score"], 9);
@@ -433,7 +478,7 @@ async fn large_audit_batch_is_chunked(pool: &Pool) {
             changes: serde_json::json!({}),
         })
         .collect();
-    audit::emit_many_pool(pool, &entries).await.expect("emit");
+    audit::emit_many(pool, &entries).await.expect("emit");
     assert_eq!(ops(pool, ITEM, "create").await, OVER_BIND_CAP as i64);
 }
 
@@ -500,7 +545,9 @@ async fn large_bulk_insert_audits_on_postgres(pool: &Pool) {
                 label: format!("l{i}"),
             })
             .collect();
-        Tag::bulk_insert(&tags, pg).await.expect("bulk insert");
+        Tag::bulk_insert(&tags, &pg.clone().into())
+            .await
+            .expect("bulk insert");
         assert_eq!(ops(pool, TAG, "create").await, OVER_BIND_CAP as i64);
     }
 }
@@ -508,6 +555,7 @@ async fn large_bulk_insert_audits_on_postgres(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        audited_bulk_insert_names_every_pk,
         destroy_audits_each_deleted_row,
         delete_where_audits_each_deleted_row,
         prune_audits_each_deleted_row,
@@ -606,12 +654,12 @@ mod cascade {
                 .expect("clear audit rows");
         }
         for id in [1, 2] {
-            Shelf { id }.insert_pool(pool).await.expect("shelf");
+            Shelf { id }.insert(pool).await.expect("shelf");
             Rack {
                 id: id * 10,
                 shelf_id: id,
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("rack");
         }
@@ -628,7 +676,7 @@ mod cascade {
                 rack_id,
                 parent_id,
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("crate");
         }
@@ -654,7 +702,7 @@ mod cascade {
                 body: format!("n{id}"),
                 shelf_id,
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("note");
         }
@@ -670,34 +718,51 @@ mod cascade {
         assert_eq!(entry.changes["body"], "n1");
     }
 
-    /// A truncate's FK cascade gets a bulk entry on each audited table it
-    /// empties: every FK on PG (`TRUNCATE … CASCADE`), `ON DELETE CASCADE`
-    /// elsewhere (a `DELETE`).
+    /// A plain truncate's `ON DELETE CASCADE` gets a bulk entry on each
+    /// audited table it empties; the `SET NULL` note stays.
+    async fn truncate_audits_the_tables_its_delete_empties(pool: &Pool) {
+        Note {
+            id: 1,
+            body: "n".into(),
+            shelf_id: Some(1),
+        }
+        .insert(pool)
+        .await
+        .expect("note");
+        Shelf::truncate(pool).await.expect("truncate");
+        assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(entries(pool, CRATE, "", "delete").await, 1);
+        assert_eq!(entries(pool, NOTE, "", "delete").await, 0);
+    }
+
+    /// `truncate_cascade` empties every FK child, `SET NULL` ones too, with
+    /// a bulk `delete` entry on each audited one.
     async fn truncate_cascade_audits_the_tables_it_empties(pool: &Pool) {
         Note {
             id: 1,
             body: "n".into(),
             shelf_id: Some(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
-        Shelf::truncate(pool).await.expect("truncate");
+        Shelf::truncate_cascade(pool).await.expect("truncate");
         assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
+        assert_eq!(Note::objects().count(pool).await.unwrap(), 0);
         assert_eq!(entries(pool, CRATE, "", "delete").await, 1);
-        let pg = pool.dialect().name() == "postgres";
-        assert_eq!(entries(pool, NOTE, "", "delete").await, i64::from(pg));
+        assert_eq!(entries(pool, NOTE, "", "delete").await, 1);
+        assert_eq!(entries(pool, NOTE, "", "update").await, 0);
     }
 
-    /// A MySQL/SQLite truncate's `DELETE` sets `Note.shelf_id` to NULL: one
-    /// bulk `update` entry, none when no note pointed at a shelf.
+    /// A plain truncate's `DELETE` sets `Note.shelf_id` to NULL: one bulk
+    /// `update` entry, none when no note pointed at a shelf.
     async fn truncate_set_null_audits_the_table_it_changes(pool: &Pool) {
         Note {
             id: 1,
             body: "n".into(),
             shelf_id: None,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
         Crate::truncate(pool).await.expect("empty crates");
@@ -709,16 +774,13 @@ mod cascade {
             body: "n".into(),
             shelf_id: Some(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
         Shelf::truncate(pool).await.expect("truncate");
-        let pg = pool.dialect().name() == "postgres";
-        assert_eq!(entries(pool, NOTE, "", "update").await, i64::from(!pg));
-        if !pg {
-            let note = Note::objects().fetch(pool).await.unwrap();
-            assert_eq!(note[0].shelf_id, None);
-        }
+        assert_eq!(entries(pool, NOTE, "", "update").await, 1);
+        let note = Note::objects().fetch(pool).await.unwrap();
+        assert_eq!(note[0].shelf_id, None);
     }
 
     /// Audited tables the truncate reaches but takes no rows from get no entry.
@@ -751,7 +813,7 @@ mod cascade {
         assert_eq!(deletes(pool, 4).await, 0);
         let entry = latest(pool, CRATE, "3").await;
         assert_eq!(entry.changes["label"], "y");
-        Shelf { id: 2 }.delete_pool(pool).await.unwrap();
+        Shelf { id: 2 }.delete(pool).await.unwrap();
         assert_eq!(deletes(pool, 4).await, 1);
         assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
     }
@@ -793,25 +855,20 @@ mod cascade {
 
     /// A raw PG executor runs one statement: the delete still works (as in
     /// 0.61.1), the cascade just goes unaudited.
-    async fn single_statement_pg_paths_still_delete(pool: &Pool) {
+    async fn raw_pg_cascade_delete_is_refused(pool: &Pool) {
         let _ = pool;
         #[cfg(feature = "postgres")]
         {
             let Some(pg) = pool.as_postgres() else {
                 return;
             };
-            Shelf { id: 1 }
-                .delete(pg)
-                .await
-                .expect("Model::delete(&PgPool)");
-            let n = Shelf::objects()
-                .filter("id", 2_i64)
-                .delete_on(pg)
-                .await
-                .expect("QuerySet::delete_on(&PgPool)");
-            assert_eq!(n, 1);
-            assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
-            assert_eq!(deletes(pool, 1).await, 0);
+            // A raw executor cannot audit the cascade, so it refuses.
+            let res = Shelf::objects().filter("id", 2_i64).delete_on(pg).await;
+            assert!(
+                matches!(res, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
+                "{res:?}"
+            );
+            assert_eq!(Shelf::objects().count(pool).await.unwrap(), 2);
         }
     }
 
@@ -821,8 +878,9 @@ mod cascade {
             fk_cascade_audits_each_removed_child,
             audited_delete_audits_each_row_once,
             cascade_audit_follows_the_atomic_block,
-            single_statement_pg_paths_still_delete,
+            raw_pg_cascade_delete_is_refused,
             fk_set_null_audits_each_changed_child,
+            truncate_audits_the_tables_its_delete_empties,
             truncate_cascade_audits_the_tables_it_empties,
             truncate_set_null_audits_the_table_it_changes,
             truncate_skips_reached_tables_without_rows,

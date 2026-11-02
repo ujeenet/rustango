@@ -267,7 +267,7 @@ async fn read_only_child_table_refuses_inline_writes() {
 fn not_locked(_parts: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
     row.is_none_or(|r| r["title"] != "locked")
 }
-rustango::register_admin_object_permission!("ips_child", "change", not_locked);
+rustango::register_object_permission!("ips_child", "change", not_locked);
 
 async fn raw(pool: &Pool, sql: &str) {
     rustango::sql::raw_execute_pool(pool, sql, Vec::new())

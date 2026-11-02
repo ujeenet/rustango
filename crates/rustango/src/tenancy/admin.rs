@@ -59,6 +59,7 @@ use super::org::Org;
 use super::pools::{DefaultTenantDb, TenantPools};
 use super::resolver::OrgResolver;
 use super::tenant_console::{self, TenantSessionPayload};
+use super::TenantSlug;
 use crate::storage::BoxedStorage;
 
 /// Builder for the tenant-aware admin router.
@@ -95,7 +96,7 @@ struct RegisteredAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminActionFn,
+    handler: crate::admin::AdminTxActionFn,
 }
 
 struct TenantSessionConfig {
@@ -267,11 +268,11 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     }
 
     /// Register a user-defined bulk action handler. Same semantics as
-    /// [`crate::admin::Builder::register_action`]. The handler runs on
-    /// the resolved tenant's pool — search_path is already scoped to
-    /// the tenant's schema.
+    /// [`crate::admin::Builder::register_tx_action`]. The handler writes in
+    /// a transaction on the resolved tenant's pool, search_path already
+    /// scoped to the tenant's schema.
     #[must_use]
-    pub fn register_action<F>(
+    pub fn register_tx_action<F>(
         self,
         model_table: &'static str,
         action_name: &'static str,
@@ -279,14 +280,14 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::Pool,
+                &'a mut crate::sql::PoolTx<'static>,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send
             + Sync
             + 'static,
     {
-        self.register_action_with_perm(
+        self.register_tx_action_with_perm(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
@@ -294,10 +295,10 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         )
     }
 
-    /// [`Self::register_action`] checked against `perm` (#1818). Same
-    /// semantics as [`crate::admin::Builder::register_action_with_perm`].
+    /// [`Self::register_tx_action`] checked against `perm`. Same
+    /// semantics as [`crate::admin::Builder::register_tx_action_with_perm`].
     #[must_use]
-    pub fn register_action_with_perm<F>(
+    pub fn register_tx_action_with_perm<F>(
         mut self,
         model_table: &'static str,
         action_name: &'static str,
@@ -306,7 +307,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     ) -> Self
     where
         F: for<'a> Fn(
-                &'a crate::sql::Pool,
+                &'a mut crate::sql::PoolTx<'static>,
                 &'a [crate::core::SqlValue],
             ) -> crate::admin::AdminActionFuture<'a>
             + Send
@@ -640,7 +641,7 @@ where
             };
             // Best-effort: decode the session cookie so the signal
             // carries user_id / username. Receivers tolerate `None`.
-            let (uid, uname) = decode_session_user(&parts.headers, cfg, &org.slug);
+            let (uid, uname) = decode_session_user(&parts.headers, cfg, &org);
             let meta = meta_from_parts(
                 &parts.extensions,
                 &parts.headers,
@@ -648,7 +649,7 @@ where
             );
             // End the user's sessions everywhere. An impersonation logout
             // ends only that impersonation.
-            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
+            end_impersonation_session(&parts.headers, cfg, &org).await;
             let revoked =
                 match validate_session(&parts.headers, cfg, &org, &pool, &pools.registry_pool())
                     .await
@@ -697,7 +698,7 @@ where
         if (path == end_imp_full || path == "/__end-impersonation")
             && method == axum::http::Method::POST
         {
-            end_impersonation_session(&parts.headers, cfg, &org.slug).await;
+            end_impersonation_session(&parts.headers, cfg, &org).await;
             return end_impersonation_response(cookie_path, &cfg.link_apex);
         }
 
@@ -824,6 +825,10 @@ where
         parts.extensions.insert(sess.clone());
     }
     parts.extensions.insert(admin_state);
+    // Hooks bind the session, and an impersonation, to this tenant.
+    parts
+        .extensions
+        .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays
@@ -924,12 +929,15 @@ impl SessionActor {
 fn decode_session_user(
     headers: &HeaderMap,
     cfg: &TenantSessionConfig,
-    slug: &str,
+    org: &Org,
 ) -> (Option<i64>, Option<String>) {
     let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
         return (None, None);
     };
-    match tenant_console::decode(&cfg.secret, slug, &cookie_value) {
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (None, None);
+    };
+    match tenant_console::decode(&cfg.secret, &tenant, &cookie_value) {
         Ok(p) => (Some(p.uid), None),
         Err(_) => (None, None),
     }
@@ -948,7 +956,10 @@ async fn validate_session(
     let Some(cookie_value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
         return SessionCheck::Anonymous;
     };
-    let payload = match tenant_console::decode(&cfg.secret, &org.slug, &cookie_value) {
+    let Some(tenant) = TenantSlug::of(org) else {
+        return SessionCheck::Anonymous;
+    };
+    let payload = match tenant_console::decode(&cfg.secret, &tenant, &cookie_value) {
         Ok(p) => p,
         Err(_) => return SessionCheck::Anonymous,
     };
@@ -1348,16 +1359,13 @@ async fn login_submit(
         &user.password_hash,
     )
     .await;
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     let mut resp = Redirect::to(&next).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
-        user_session_cookie(
-            &cfg.secret,
-            &org.slug,
-            cookie_path,
-            &user,
-            route_ttl(routes),
-        ),
+        user_session_cookie(&cfg.secret, &tenant, cookie_path, &user, route_ttl(routes)),
     );
     send_user_logged_in(UserLoggedInContext {
         source: "tenant_admin",
@@ -1374,14 +1382,14 @@ async fn login_submit(
 /// A new tenant session cookie for the saved `user`, bound to its current hash.
 fn user_session_cookie(
     secret: &tenant_console::SessionSecret,
-    slug: &str,
+    tenant: &TenantSlug,
     cookie_path: &str,
     user: &super::auth::User,
     ttl_secs: i64,
 ) -> HeaderValue {
     let mut payload = TenantSessionPayload::new(
         user.id.get().copied().unwrap_or_default(),
-        slug,
+        tenant,
         ttl_secs,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
     );
@@ -1444,7 +1452,10 @@ async fn redeem_impersonation_handoff(
         Some(t) => t,
         None => return (StatusCode::UNAUTHORIZED, "missing token").into_response(),
     };
-    let payload = match decode(&cfg.secret, &org.slug, &token) {
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
+    let payload = match decode(&cfg.secret, &tenant, &token) {
         Ok(p) => p,
         Err(e) => {
             tracing::info!(
@@ -1498,7 +1509,7 @@ async fn redeem_impersonation_handoff(
         .unwrap_or(tenant_console::IMPERSONATION_TTL_SECS);
     let mut session = TenantSessionPayload::impersonation(
         payload.op,
-        &org.slug,
+        &tenant,
         ttl_secs,
         payload.pwf,
         payload.jti,
@@ -1554,8 +1565,11 @@ fn extract_token_param(query: &str) -> Option<String> {
 
 /// Revoke the request's impersonation cookie, if it is one; the
 /// operator stays signed in to the console (#2038).
-async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfig, slug: &str) {
-    let Some(value) = read_cookie(headers, tenant_console::COOKIE_NAME) else {
+async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfig, org: &Org) {
+    let (Some(value), Some(tenant)) = (
+        read_cookie(headers, tenant_console::COOKIE_NAME),
+        TenantSlug::of(org),
+    ) else {
         return;
     };
     if let Ok(TenantSessionPayload {
@@ -1563,7 +1577,7 @@ async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfi
         sid: Some(sid),
         exp,
         ..
-    }) = tenant_console::decode(&cfg.secret, slug, &value)
+    }) = tenant_console::decode(&cfg.secret, &tenant, &value)
     {
         cfg.jti().end_session(&sid, exp).await;
     }
@@ -1823,6 +1837,9 @@ async fn change_password_submit(
     // The old cookie no longer matches the hash: re-issue this one, so only
     // the other sessions end.
     user.password_hash = new_hash;
+    let Some(tenant) = TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     let mut resp = flash::signed_redirect(
         secret,
         &routes.change_password_url,
@@ -1833,7 +1850,7 @@ async fn change_password_submit(
         // The same session, re-bound to the new hash: it keeps its expiry.
         user_session_cookie(
             secret,
-            &org.slug,
+            &tenant,
             cookie_path,
             &user,
             route_ttl(routes)
@@ -2097,20 +2114,13 @@ fn inner_admin_state(
     if let Some(perms) = user_perms {
         builder = builder.with_user_perms(perms);
     }
-    if let Some(t) = title {
-        builder = builder.title(t);
-    }
     if let Some(s) = subtitle {
         builder = builder.subtitle(s);
     }
 
-    // Per-tenant branding overrides the static title/subtitle when
-    // set on the resolved Org. Fall through to `display_name` as a
-    // last resort so the sidebar always names the current tenant.
-    if let Some(name) = org.brand_name.as_deref() {
-        builder = builder.brand_name(name);
-    } else if !org.display_name.is_empty() {
-        builder = builder.brand_name(&org.display_name);
+    // One name for the sidebar, the `<title>` and the index heading.
+    if let Some(name) = tenant_admin_name(org, title) {
+        builder = builder.title(name).brand_name(name);
     }
     if let Some(tag) = org.brand_tagline.as_deref() {
         builder = builder.brand_tagline(tag);
@@ -2137,14 +2147,25 @@ fn inner_admin_state(
 
     for action in actions {
         let handler = action.handler.clone();
-        builder = builder.register_action_with_perm(
+        builder = builder.register_tx_action_with_perm(
             action.table,
             action.name,
             action.perm,
-            move |pool, pks| handler(pool, pks),
+            move |tx, pks| handler(tx, pks),
         );
     }
     builder.into_request_state()
+}
+
+/// The org's brand name, then the configured title (`[admin] title`, else
+/// `[brand] name`), then the org's display name.
+fn tenant_admin_name<'a>(org: &'a Org, title: Option<&'a str>) -> Option<&'a str> {
+    let set = |s: &&str| !s.is_empty();
+    org.brand_name
+        .as_deref()
+        .filter(set)
+        .or(title.filter(set))
+        .or(Some(org.display_name.as_str()).filter(set))
 }
 
 /// The brand asset at `path` when it is under `routes.brand_url`, else `None`.

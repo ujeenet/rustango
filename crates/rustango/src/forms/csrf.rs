@@ -57,6 +57,9 @@ pub const CSRF_COOKIE: &str = "rustango_csrf";
 /// echo the cookie value here (the standard double-submit pattern).
 const CSRF_HEADER: &str = "X-CSRF-Token";
 
+/// The 403 body when the submitted token does not match the cookie.
+const TOKEN_REFUSED: &str = "CSRF token missing or mismatched";
+
 /// Form-field name the middleware looks for on
 /// `application/x-www-form-urlencoded` bodies. Templates render it as
 /// a hidden input carrying the same token as the cookie.
@@ -592,7 +595,7 @@ where
                     } else if let Some(h) = header_value {
                         // Header path — short-circuit, no body buffering.
                         if !tokens_match(cookie_value.as_deref(), Some(&h)) {
-                            return Ok(forbid_response("CSRF token missing or mismatched"));
+                            return Ok(forbid_response(TOKEN_REFUSED));
                         }
                         req
                     } else if is_form_encoded(&req) {
@@ -615,12 +618,12 @@ where
                         };
                         let form_token = read_form_field(&bytes, CSRF_FORM_FIELD);
                         if !tokens_match(cookie_value.as_deref(), form_token.as_deref()) {
-                            return Ok(forbid_response("CSRF token missing or mismatched"));
+                            return Ok(forbid_response(TOKEN_REFUSED));
                         }
                         Request::from_parts(parts, Body::from(bytes))
                     } else {
                         // Neither header nor form body — reject.
-                        return Ok(forbid_response("CSRF token missing or mismatched"));
+                        return Ok(forbid_response(TOKEN_REFUSED));
                     }
                 } else {
                     req

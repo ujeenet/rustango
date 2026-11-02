@@ -45,7 +45,7 @@ async fn seed(pool: &Pool) -> Vec<(i64, String)> {
             title: title.into(),
             published,
         };
-        row.save_pool(pool).await.unwrap();
+        row.save(pool).await.unwrap();
         if published {
             out.push((*row.id.get().unwrap(), title.to_string()));
         }

@@ -259,8 +259,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Deploy it as its own container/service and scale to **N replicas** — they all
-pull from the shared table safely. The web process then only needs to
-`dispatch` (it doesn't have to `start()` workers). Pair the worker with a
+pull from the shared table safely. The web process only dispatches: it must
+still `register` every job type it dispatches (no `start()` needed), or build
+its queue with `.allow_unregistered_dispatch()`; an unregistered dispatch is
+refused. Pair the worker with a
 periodic [`reclaim_stuck_jobs_pool`](#the-persistent-queue-production) sweep to
 recover jobs from a crashed worker.
 
@@ -476,7 +478,7 @@ through another pool inside it, record `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
-    note.insert_pool(&pool).await
+    note.insert(&pool).await
 })
 .await??;
 ```
@@ -523,7 +525,8 @@ tenant**:
 ```rust
 use rustango::distributed_lock::DistributedLock;
 
-let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+let tenant = TenantSlug::of(&org).expect("a registry org");
+let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
 // Tick every minute; this runs once per UTC day across replicas.
 lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```

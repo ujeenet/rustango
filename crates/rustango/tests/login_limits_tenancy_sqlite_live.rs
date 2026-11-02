@@ -76,6 +76,22 @@ impl OrgResolver for FixedResolver {
     }
 }
 
+/// The env's tenant as the `Tenant` extractor builds it.
+#[cfg(feature = "sso")]
+fn tenant_of(env: &Env) -> rustango::extractors::Tenant<sqlx::Sqlite> {
+    let sq = match &env.tenant {
+        Pool::Sqlite(sq) => sq.clone(),
+        #[allow(unreachable_patterns)]
+        _ => unreachable!("sqlite tenant"),
+    };
+    let org = rustango::tenancy::Org {
+        id: Auto::Set(env.org_id),
+        slug: env.slug.clone(),
+        ..rustango::testkit::org()
+    };
+    rustango::extractors::Tenant::for_test_sqlite(org, sq)
+}
+
 struct Env {
     /// Operator console.
     console: Router,
@@ -89,6 +105,7 @@ struct Env {
     tenant: Pool,
     secret: SessionSecret,
     slug: String,
+    org_id: i64,
     host: String,
     _dir: tempfile::TempDir,
 }
@@ -129,7 +146,7 @@ async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Con
 
     let slug = unique("t");
     let host = format!("{slug}.app.test");
-    let org = Org {
+    let mut org = Org {
         slug: slug.clone(),
         storage_mode: "database".into(),
         backend_kind: "sqlite".into(),
@@ -137,8 +154,9 @@ async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Con
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    let mut row = org.clone();
-    row.insert_pool(&registry).await.expect("seed org");
+    // The resolver hands out the stored row: tokens bind to its id.
+    org.insert(&registry).await.expect("seed org");
+    let org_id = *org.id.get().expect("org id");
 
     let tenant = Pool::connect(&tenant_url).await.expect("tenant");
     rustango::testkit::create_tables_for::<User>(&tenant)
@@ -215,6 +233,7 @@ async fn boot_with(jwt_cfg: impl FnOnce(&mut rustango::tenancy::auth_routes::Con
         tenant,
         secret,
         slug,
+        org_id,
         host,
         _dir: dir,
     }
@@ -229,7 +248,7 @@ impl Env {
             is_superuser: true,
             ..rustango::testkit::user()
         };
-        u.insert_pool(&self.tenant).await.expect("seed user");
+        u.insert(&self.tenant).await.expect("seed user");
         u.id.get().copied().unwrap()
     }
 
@@ -243,7 +262,7 @@ impl Env {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(&self.registry).await.expect("seed operator");
+        op.insert(&self.registry).await.expect("seed operator");
     }
 
     async fn console_login(&self, ip: &str, user: &str, pass: &str) -> axum::response::Response {
@@ -552,7 +571,7 @@ async fn change_password_misses_lock_the_account() {
         .password_hash;
     let payload = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &rustango::tenancy::TenantSlug::new(env.org_id, env.slug.clone()),
         3600,
         PasswordFingerprint::of(&env.secret, &hash),
     );
@@ -763,9 +782,7 @@ async fn a_logout_elsewhere_ends_the_access_token() {
         .unwrap()
         .remove(0);
     user.sessions_revoked_at = Some(chrono::Utc::now());
-    user.save_pool(&env.tenant)
-        .await
-        .expect("log out everywhere");
+    user.save(&env.tenant).await.expect("log out everywhere");
 
     let r = send(&env.api, &next_ip(), get("/bearer")).await;
     assert_eq!(r.status(), StatusCode::UNAUTHORIZED, "require_bearer_for");
@@ -814,7 +831,7 @@ async fn a_password_change_ends_the_access_token() {
     let mut user = env.user_row(id).await;
     user.password_hash = rustango::tenancy::password::hash("another-password").unwrap();
     user.password_changed_at = Some(chrono::Utc::now());
-    user.save_pool(&env.tenant).await.expect("change password");
+    user.save(&env.tenant).await.expect("change password");
 
     assert_eq!(
         env.bearer_status("/bearer", &access).await,
@@ -840,6 +857,7 @@ async fn a_token_without_a_session_is_refused() {
         });
     let mut custom = serde_json::Map::new();
     custom.insert("tenant".into(), env.slug.clone().into());
+    custom.insert("org_id".into(), env.org_id.into());
     let token = jwt.lifecycle().issue_access_with(id, custom).unwrap();
     assert_eq!(
         env.bearer_status("/bearer", &token).await,
@@ -866,7 +884,7 @@ async fn a_token_from_another_tenant_is_refused_with_the_same_hash() {
 
     let mut row = acme.user_row(acme_id).await;
     row.password_hash = globex.user_row(globex_id).await.password_hash;
-    row.save_pool(&acme.tenant).await.expect("same hash");
+    row.save(&acme.tenant).await.expect("same hash");
 
     assert_eq!(
         globex.bearer_status("/bearer", &token).await,
@@ -1145,7 +1163,7 @@ async fn api_keys_sharing_a_prefix_each_authenticate() {
         .unwrap()
         .remove(0);
     row.key_prefix = prefix.to_owned();
-    row.save_pool(&env.tenant).await.unwrap();
+    row.save(&env.tenant).await.unwrap();
 
     let second = format!("{prefix}.{secret}");
     assert_eq!(
@@ -1232,7 +1250,7 @@ async fn a_full_hash_queue_answers_503_everywhere() {
         .password_hash;
     let payload = TenantSessionPayload::new(
         uid,
-        &env.slug,
+        &rustango::tenancy::TenantSlug::new(env.org_id, env.slug.clone()),
         3600,
         PasswordFingerprint::of(&env.secret, &hash),
     );
@@ -1300,8 +1318,12 @@ async fn a_full_hash_queue_answers_503_everywhere() {
     let agent_auth =
         rustango::tenancy::authenticate_agent_pool(&env.tenant, "busy-bot", &agent.token).await;
     #[cfg(feature = "mcp")]
-    let raw_auth =
-        rustango::mcp::verify_raw_agent_credential(&env.tenant, &env.slug, &agent.token).await;
+    let raw_auth = rustango::mcp::verify_raw_agent_credential(
+        &env.tenant,
+        &rustango::tenancy::TenantSlug::new(env.org_id, env.slug.clone()),
+        &agent.token,
+    )
+    .await;
     drop(held);
     for (what, r) in answers {
         let status = r.status();
@@ -1368,7 +1390,7 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
         is_superuser: false,
         ..rustango::testkit::user()
     };
-    u.insert_pool(&env.tenant).await.unwrap();
+    u.insert(&env.tenant).await.unwrap();
     let ann_id = u.id.get().copied().unwrap();
     rustango::testkit::create_tables_for::<SsoTenantPolicy>(&env.tenant)
         .await
@@ -1382,11 +1404,11 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
         default_provider: None,
         signups_per_hour: None,
     };
-    policy.insert_pool(&env.tenant).await.unwrap();
+    policy.insert(&env.tenant).await.unwrap();
     // Before the rule both sign in.
     assert!(has_session(&env.admin_login(&next_ip(), &ann, PASS).await));
     policy.sso_only = true;
-    policy.save_pool(&env.tenant).await.unwrap();
+    policy.save(&env.tenant).await.unwrap();
 
     // Every path, so one run names each one that lets the password through.
     let mut through = Vec::new();
@@ -1406,17 +1428,18 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
     {
         through.push("authenticate_user_pool");
     }
-    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+    use rustango::auth_flows::{AuthFlowError, LinkScope, PasswordReset};
+    let tenant = tenant_of(&env);
     let secret = b"reset-secret-reset-secret-32byte";
     let url = PasswordReset::issue(
-        &LinkScope::audience("t"),
+        &LinkScope::from(&tenant),
         "https://x/reset",
         ann_id,
         secret,
         Duration::from_secs(600),
     );
     if rustango::auth_flows::confirm_password_reset_pool(
-        LinkTarget::audience(&env.tenant, "t"),
+        &tenant,
         &url,
         "Another-strong-pass-9!",
         secret,
@@ -1431,14 +1454,14 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
         let cache: Arc<dyn rustango::cache::Cache> =
             Arc::new(rustango::cache::InMemoryCache::new());
         let url = PasswordReset::issue(
-            &LinkScope::audience("t"),
+            &LinkScope::from(&tenant),
             "https://x/reset-once",
             ann_id,
             secret,
             Duration::from_secs(600),
         );
         if rustango::auth_flows::confirm_password_reset_single_use(
-            LinkTarget::audience(&env.tenant, "t"),
+            &tenant,
             &url,
             "Another-strong-pass-9!",
             secret,
@@ -1463,7 +1486,7 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
     );
 
     policy.password_login = "off".into();
-    policy.save_pool(&env.tenant).await.unwrap();
+    policy.save(&env.tenant).await.unwrap();
     assert!(!has_session(
         &env.admin_login(&next_ip(), &boss, PASS).await
     ));
@@ -1474,10 +1497,11 @@ async fn sso_only_refuses_every_password_path_but_a_superuser() {
 #[cfg(all(feature = "sso", feature = "cache"))]
 #[tokio::test]
 async fn sso_only_refuses_the_reset_into_variants() {
-    use rustango::auth_flows::{AuthFlowError, LinkScope, LinkTarget, PasswordReset};
+    use rustango::auth_flows::{AuthFlowError, LinkScope, PasswordReset};
     use rustango::sso::policy::SsoTenantPolicy;
     let _g = SUITE.lock().await;
     let env = boot().await;
+    let tenant = tenant_of(&env);
     let ann = unique("ann-into");
     let mut u = User {
         username: ann.clone(),
@@ -1485,14 +1509,14 @@ async fn sso_only_refuses_the_reset_into_variants() {
         is_superuser: false,
         ..rustango::testkit::user()
     };
-    u.insert_pool(&env.tenant).await.unwrap();
+    u.insert(&env.tenant).await.unwrap();
     let ann_id = u.id.get().copied().unwrap();
     rustango::testkit::create_tables_for::<SsoTenantPolicy>(&env.tenant)
         .await
         .unwrap();
     // Another test may have left the settings row.
     for old in SsoTenantPolicy::objects().fetch(&env.tenant).await.unwrap() {
-        old.delete_pool(&env.tenant).await.unwrap();
+        old.delete(&env.tenant).await.unwrap();
     }
     let mut policy = SsoTenantPolicy {
         id: Auto::default(),
@@ -1503,10 +1527,10 @@ async fn sso_only_refuses_the_reset_into_variants() {
         default_provider: None,
         signups_per_hour: None,
     };
-    policy.insert_pool(&env.tenant).await.unwrap();
+    policy.insert(&env.tenant).await.unwrap();
     let secret = b"reset-secret-reset-secret-32byte";
     let url = PasswordReset::issue(
-        &LinkScope::audience("t"),
+        &LinkScope::from(&tenant),
         "https://x/reset",
         ann_id,
         secret,
@@ -1517,7 +1541,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     let pass = "Another-strong-pass-9!";
     assert_eq!(
         rustango::auth_flows::confirm_password_reset_pool_into(
-            LinkTarget::audience(&env.tenant, "t"),
+            &tenant,
             &url,
             pass,
             secret,
@@ -1530,7 +1554,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     );
     let once = || {
         rustango::auth_flows::confirm_password_reset_single_use_into(
-            LinkTarget::audience(&env.tenant, "t"),
+            &tenant,
             &url,
             pass,
             secret,
@@ -1543,7 +1567,7 @@ async fn sso_only_refuses_the_reset_into_variants() {
     assert_eq!(once().await, Err(AuthFlowError::PasswordLoginDisabled));
     // The refusal did not spend the link.
     policy.sso_only = false;
-    policy.save_pool(&env.tenant).await.unwrap();
+    policy.save(&env.tenant).await.unwrap();
     assert_eq!(once().await, Ok(ann_id));
-    policy.delete_pool(&env.tenant).await.unwrap();
+    policy.delete(&env.tenant).await.unwrap();
 }

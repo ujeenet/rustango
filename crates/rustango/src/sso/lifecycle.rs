@@ -370,7 +370,7 @@ async fn deactivate(
         source: crate::audit::AuditSource::Custom("sso".into()),
         changes: serde_json::json!({"event": "sso_deactivated_idle", "active": false}),
     };
-    if let Err(e) = crate::audit::emit_one_pool(pool, &entry).await {
+    if let Err(e) = crate::audit::emit_one(pool, &entry).await {
         tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
     }
     Ok(true)

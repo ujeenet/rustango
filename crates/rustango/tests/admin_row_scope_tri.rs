@@ -1,4 +1,4 @@
-//! `register_admin_queryset!` scopes by-pk reads, facet counts and FK
+//! `register_queryset_scope!` scopes by-pk reads, facet counts and FK
 //! facet labels and FK cells on every backend (#1859, #2029, #2080); inlines hide secrets and
 //! rows the view hook refuses, cap rows and insert natural PKs (#1861, #1717).
 
@@ -33,13 +33,13 @@ pub struct Item {
 fn owner_one(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("owner_id", Op::Eq, SqlValue::I64(1))]
 }
-rustango::register_admin_queryset!("rowscope_item", owner_one);
+rustango::register_queryset_scope!("rowscope_item", owner_one);
 
 fn not_locked_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
     row.and_then(|r| r.get("title")) != Some(&serde_json::json!("locked"))
 }
-rustango::register_admin_object_permission!("rowscope_item", "add", not_locked_title);
-rustango::register_admin_object_permission!("rowscope_item", "change", not_locked_title);
+rustango::register_object_permission!("rowscope_item", "add", not_locked_title);
+rustango::register_object_permission!("rowscope_item", "change", not_locked_title);
 
 /// An FK facet onto `rowscope_item`, whose hook hides owner 77.
 #[derive(Model, Debug, Clone)]
@@ -99,17 +99,17 @@ fn not_hidden(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -
     row.and_then(|r| r.get("hidden"))
         .is_none_or(|v| !(v == &serde_json::json!(true) || v == &serde_json::json!(1)))
 }
-rustango::register_admin_object_permission!("rowscope_child", "view", not_hidden);
+rustango::register_object_permission!("rowscope_child", "view", not_hidden);
 
 fn not_out(_: &axum::http::request::Parts) -> Vec<Filter> {
     vec![Filter::new("label", Op::Ne, SqlValue::String("out".into()))]
 }
-rustango::register_admin_queryset!("rowscope_child", not_out);
+rustango::register_queryset_scope!("rowscope_child", not_out);
 
 fn not_noadd(_: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
     row.and_then(|r| r.get("label")) != Some(&serde_json::json!("noadd"))
 }
-rustango::register_admin_object_permission!("rowscope_child", "add", not_noadd);
+rustango::register_object_permission!("rowscope_child", "add", not_noadd);
 
 /// An audited child under the same scope and `add` hook, so the audited
 /// write arms run the after-write check too.
@@ -132,8 +132,8 @@ rustango::register_admin_inline!(
     extra = 1,
     max_num = Some(2),
 );
-rustango::register_admin_queryset!("rowscope_achild", not_out);
-rustango::register_admin_object_permission!("rowscope_achild", "add", not_noadd);
+rustango::register_queryset_scope!("rowscope_achild", not_out);
+rustango::register_object_permission!("rowscope_achild", "add", not_noadd);
 
 /// An auto-PK child with a secret, capped at one row per parent.
 #[derive(Model, Debug, Clone)]
@@ -219,11 +219,24 @@ fn not_hide_title(_: &axum::http::request::Parts, row: Option<&serde_json::Value
     row.and_then(|r| r["title"].as_str())
         .is_none_or(|t| !t.starts_with("hide"))
 }
-rustango::register_admin_object_permission!("rowscope_doc", "view", not_hide_title);
+rustango::register_object_permission!("rowscope_doc", "view", not_hide_title);
+
+/// Bulk actions on a table whose view hook hides `hide*` titles.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "rowscope_bulk", admin(actions = "delete_selected"))]
+#[allow(dead_code)]
+pub struct Bulk {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub title: String,
+}
+rustango::register_object_permission!("rowscope_bulk", "view", not_hide_title);
 
 async fn setup(pool: &Pool) {
     use rustango::testkit::matrix::{drop_table, fresh_table};
     fresh_table::<Doc>(pool).await;
+    fresh_table::<Bulk>(pool).await;
     drop_table(pool, "rowscope_note").await;
     fresh_table::<Item>(pool).await;
     fresh_table::<Note>(pool).await;
@@ -289,7 +302,7 @@ async fn seed(pool: &Pool, title: &str, owner_id: i64) -> i64 {
         title: title.into(),
         owner_id,
     };
-    item.insert_pool(pool).await.expect("insert");
+    item.insert(pool).await.expect("insert");
     *item.id.get().expect("pk")
 }
 
@@ -429,7 +442,7 @@ async fn audited_inline_child_outside_scope_is_refused(pool: &Pool) {
         parent_id: p,
         label: "one".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("insert child");
     let label = |code: &'static str| async move {
@@ -500,7 +513,7 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
             kind: kind.into(),
             filed_on: day(y),
         };
-        d.insert_pool(pool).await.expect("insert doc");
+        d.insert(pool).await.expect("insert doc");
     }
     let (status, body) = get(pool, "/rowscope_doc").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -541,7 +554,7 @@ async fn view_hook_rows_are_uncounted(pool: &Pool) {
         kind: "a".into(),
         filed_on: day(2024),
     };
-    d.insert_pool(pool).await.expect("insert doc");
+    d.insert(pool).await.expect("insert doc");
     let next = "next &rarr;</a>";
     let (_, body) = get_as(pool, "/rowscope_doc?page=2", |b| b.view_hook_scan_cap(2)).await;
     assert!(body.contains(next), "an admitted next row: {body}");
@@ -559,7 +572,7 @@ async fn fk_facet_hides_a_hidden_targets_name(pool: &Pool) {
         body: "n".into(),
         item_id: theirs,
     };
-    note.insert_pool(pool).await.expect("insert note");
+    note.insert(pool).await.expect("insert note");
     let (status, body) = get(pool, "/rowscope_note").await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains(&format!("item_id={theirs}")), "facet: {body}");
@@ -579,7 +592,7 @@ async fn fk_cell_shows_a_visible_targets_name(pool: &Pool) {
         body: "n".into(),
         item_id: mine,
     };
-    note.insert_pool(pool).await.expect("insert note");
+    note.insert(pool).await.expect("insert note");
     let (status, body) = get(pool, &format!("/rowscope_note/{}", note.id.get().unwrap())).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("shown-title"), "detail: {body}");
@@ -608,7 +621,7 @@ async fn seed_child(pool: &Pool, code: &str, parent_id: i64, label: &str, hidden
         secret: format!("pw-{code}"),
         hidden: Some(hidden),
     };
-    c.insert_pool(pool).await.expect("insert child");
+    c.insert(pool).await.expect("insert child");
 }
 
 async fn seed_parent(pool: &Pool) -> i64 {
@@ -616,7 +629,7 @@ async fn seed_parent(pool: &Pool) -> i64 {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("insert parent");
+    p.insert(pool).await.expect("insert parent");
     *p.id.get().expect("pk")
 }
 
@@ -761,7 +774,7 @@ async fn seed_auto_child(pool: &Pool, parent_id: i64, note: &str) -> i64 {
         note: note.into(),
         token: "tok".into(),
     };
-    c.insert_pool(pool).await.expect("insert auto child");
+    c.insert(pool).await.expect("insert auto child");
     *c.id.get().expect("pk")
 }
 
@@ -879,7 +892,7 @@ async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("insert parent");
+    p.insert(pool).await.expect("insert parent");
     let p = *p.id.get().expect("pk");
     let form = "name=p&rowscope_flag-TOTAL_FORMS=3&rowscope_flag-INITIAL_FORMS=0\
         &rowscope_flag-0-active=true&rowscope_flag-0-maybe=\
@@ -892,9 +905,41 @@ async fn nullable_bool_round_trips_in_inline(pool: &Pool) {
     );
 }
 
+/// A bulk action skips rows the `view` hook hides, as the item pages do:
+/// a hidden row is neither changed nor confirmed by a refusal.
+async fn bulk_actions_skip_hidden_rows(pool: &Pool) {
+    let mut ids = Vec::new();
+    for title in ["ok-bulk", "hide-bulk"] {
+        let mut b = Bulk {
+            id: Auto::default(),
+            title: title.into(),
+        };
+        b.insert(pool).await.expect("insert");
+        ids.push(*b.id.get().expect("pk"));
+    }
+    let form = format!(
+        "action=delete_selected&_selected={}&_selected={}",
+        ids[0], ids[1]
+    );
+    let (status, body) = post(pool, "/rowscope_bulk/__action", &form).await;
+    assert!(
+        status.is_redirection() || status.is_success(),
+        "{status}: {body}"
+    );
+    let left: Vec<String> = Bulk::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|b| b.title)
+        .collect();
+    assert_eq!(left, ["hide-bulk"], "the hidden row was acted on");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        bulk_actions_skip_hidden_rows,
         nullable_bool_round_trips_in_admin_form,
         nullable_bool_round_trips_in_inline,
         hidden_rows_are_404_and_uncounted,

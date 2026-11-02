@@ -68,7 +68,7 @@ async fn seeded(pool: &Pool) {
             rank,
             tag: "new".into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed");
     }
@@ -221,7 +221,7 @@ async fn anti_join_delete(pool: &Pool) {
     use rustango::core::{subquery::outer_ref, Column as _};
     rustango::testkit::matrix::fresh_table::<Link>(pool).await;
     for (id, item_id) in [(1, 1), (2, 99), (3, 5), (4, 98)] {
-        Link { id, item_id }.insert_pool(pool).await.unwrap();
+        Link { id, item_id }.insert(pool).await.unwrap();
     }
     let alive = Item::objects()
         .where_(Item::id.eq_expr(outer_ref("item_id")))
@@ -404,7 +404,7 @@ async fn self_relation_where_has_dml(pool: &Pool) {
             parent_id,
             tag: "new".into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -441,7 +441,7 @@ async fn nested_and_correlated_in_subquery_dml(pool: &Pool) {
     use rustango::core::{subquery::outer_ref, Column as _};
     rustango::testkit::matrix::fresh_table::<Link>(pool).await;
     for (id, item_id) in [(1, 1), (2, 99), (3, 5), (4, 3)] {
-        Link { id, item_id }.insert_pool(pool).await.unwrap();
+        Link { id, item_id }.insert(pool).await.unwrap();
     }
     let high = || {
         Item::objects()
@@ -506,7 +506,7 @@ async fn nested_in_wraps_once(pool: &Pool) {
     use rustango::sql::{Dialect as _, MySql};
     rustango::testkit::matrix::fresh_table::<Link>(pool).await;
     for (id, item_id) in [(1, 1), (2, 99), (3, 5), (4, 3)] {
-        Link { id, item_id }.insert_pool(pool).await.unwrap();
+        Link { id, item_id }.insert(pool).await.unwrap();
     }
     rustango::testkit::matrix::fresh_table::<Child>(pool).await;
     for id in [1, 2, 3] {
@@ -514,7 +514,7 @@ async fn nested_in_wraps_once(pool: &Pool) {
             id,
             item: ForeignKey::unloaded(id),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -605,7 +605,7 @@ async fn join_dml_is_refused(pool: &Pool) {
         id: 1,
         item: ForeignKey::unloaded(1_i64),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let on = || WhereExpr::ExprCompare {

@@ -60,12 +60,12 @@ async fn seed_parent_and_child(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     let mut c = Child {
         id: Auto::default(),
         parent: ForeignKey::unloaded(p.id.get().copied().expect("pk")),
     };
-    c.insert_pool(pool).await.expect("child");
+    c.insert(pool).await.expect("child");
 }
 
 async fn counts(pool: &Pool) -> (i64, i64) {
@@ -154,7 +154,7 @@ async fn truncate_unlisted_child_follows_the_dialect(pool: &Pool) {
         id: Auto::default(),
         name: "after".into(),
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     let id = p.id.get().copied().expect("pk");
     if pool.dialect().name() == "postgres" {
         assert_eq!(id, 1, "RESTART IDENTITY");
@@ -201,7 +201,7 @@ async fn fixture_loads_typed_values_and_resets_the_sequence(pool: &Pool) {
         token: uuid::Uuid::from_u128(2),
         label: "next".into(),
     };
-    next.insert_pool(pool)
+    next.insert(pool)
         .await
         .expect("an insert after the load reused a loaded id");
 
@@ -258,9 +258,9 @@ async fn create_tables_builds_declared_indexes(pool: &Pool) {
         a: 1,
         b: 2,
     };
-    row().insert_pool(pool).await.expect("first row");
+    row().insert(pool).await.expect("first row");
     assert!(
-        row().insert_pool(pool).await.is_err(),
+        row().insert(pool).await.is_err(),
         "the unique_together index is missing"
     );
 }

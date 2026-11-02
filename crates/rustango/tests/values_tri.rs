@@ -83,12 +83,12 @@ async fn seeded(pool: &Pool) {
             score,
             meta: Some(serde_json::json!({ "views": view_count })),
         };
-        p.insert_pool(pool).await.expect("seed row");
+        p.insert(pool).await.expect("seed row");
     }
     rustango::testkit::matrix::fresh_table::<Author>(pool).await;
     for (id, active) in [(1, false), (2, false), (3, true), (4, true)] {
         Author { id, active }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("seed author");
     }
@@ -468,7 +468,7 @@ async fn seed_typed(pool: &Pool) -> Vec<SqlValue> {
         doc: Some(doc.clone()),
         blob: Some(blob.clone()),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed typed");
     Typed {
@@ -488,7 +488,7 @@ async fn seed_typed(pool: &Pool) -> Vec<SqlValue> {
         doc: None,
         blob: None,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed nulls");
     vec![
@@ -627,7 +627,7 @@ mod decimal {
     async fn values_decode_decimal(pool: &Pool) {
         let v: Decimal = "12.34".parse().unwrap();
         for (id, amount) in [(1, Some(v)), (2, None)] {
-            Money { id, amount }.insert_pool(pool).await.expect("seed");
+            Money { id, amount }.insert(pool).await.expect("seed");
         }
         let want = vec![
             vec![SqlValue::I64(1), SqlValue::Decimal(v)],
@@ -772,7 +772,7 @@ mod related {
             id: 1,
             name: "Acme".into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("press");
         Writer {
@@ -780,7 +780,7 @@ mod related {
             name: "Ann".into(),
             press: ForeignKey::unloaded(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("writer");
         for (id, title, writer) in [(1, "One", Some(1)), (2, "Two", None)] {
@@ -790,7 +790,7 @@ mod related {
                 body: "long text".into(),
                 writer: writer.map(ForeignKey::unloaded),
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("book");
         }

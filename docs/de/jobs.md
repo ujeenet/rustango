@@ -272,7 +272,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Deploye es als eigenen Container/Service und skaliere auf **N Replicas** — sie
 ziehen alle sicher aus der geteilten Tabelle. Der Web-Prozess muss dann nur noch
-`dispatch` (er muss keine Worker `start()`). Kopple den Worker mit einem
+`dispatch`, muss aber jeden Job-Typ, den er sendet, `register`n (ohne `start()`), oder seine Queue mit `.allow_unregistered_dispatch()` bauen; ein nicht registrierter Dispatch wird abgelehnt. Kopple den Worker mit einem
 periodischen [`reclaim_stuck_jobs_pool`](#die-persistente-queue-produktion)-Sweep,
 um Jobs eines abgestürzten Workers zurückzuholen.
 
@@ -499,7 +499,7 @@ einen anderen Pool darin, erfassen `system`:
 
 ```rust
 rustango::tenancy::with_tenant(&pools, &org, |pool| async move {
-    note.insert_pool(&pool).await
+    note.insert(&pool).await
 })
 .await??;
 ```
@@ -547,7 +547,8 @@ Wenn du den Sweep so absicherst, dass nur eine Replica ihn ausführt, dann
 ```rust
 use rustango::distributed_lock::DistributedLock;
 
-let lock = DistributedLock::new(cache.clone()).for_tenant(&org.slug);
+let tenant = TenantSlug::of(&org).expect("a registry org");
+let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
 // Tick every minute; this runs once per UTC day across replicas.
 lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```

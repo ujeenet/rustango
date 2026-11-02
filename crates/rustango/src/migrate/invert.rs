@@ -281,6 +281,13 @@ fn invert_one(
             from: to.clone(),
             to: from.clone(),
         })),
+        Operation::Schema(SchemaChange::AlterTableComment { table, from, to }) => {
+            Ok(Operation::Schema(SchemaChange::AlterTableComment {
+                table: table.clone(),
+                from: to.clone(),
+                to: from.clone(),
+            }))
+        }
         Operation::Schema(SchemaChange::AlterColumnUnique {
             table,
             column,

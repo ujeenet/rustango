@@ -230,8 +230,8 @@ impl SecurityHeadersLayer {
     ///
     /// - `csp` sets the Content-Security-Policy header as given.
     /// - `hsts_max_age_secs = 0` turns HSTS off.
-    /// - A larger value rebuilds HSTS with that age and keeps
-    ///   `includeSubDomains` and `preload`.
+    /// - A larger value sets that age and keeps the preset's other
+    ///   directives; a preset with no HSTS gets a bare `max-age`.
     ///
     /// ```no_run
     /// # use rustango::security_headers::{SecurityHeadersLayer, SecurityHeadersRouterExt};
@@ -252,29 +252,27 @@ impl SecurityHeadersLayer {
             layer.csp = Some(csp.clone());
         }
         if let Some(secs) = s.hsts_max_age_secs {
-            if adds_hsts_directives(layer.hsts.as_deref(), secs) {
-                tracing::warn!(
-                    target: "rustango::security_headers",
-                    "[security] hsts_max_age_secs adds `includeSubDomains; preload` to preset {:?}, \
-                     which sends neither; 0.62.0 will keep the preset's directives",
-                    s.headers_preset.as_deref().unwrap_or("strict"),
-                );
-            }
-            layer.hsts = if secs == 0 {
-                None
-            } else {
-                Some(format!("max-age={secs}; includeSubDomains; preload"))
-            };
+            layer.hsts = (secs != 0).then(|| with_max_age(layer.hsts.as_deref(), secs));
         }
         layer
     }
 }
 
-/// `hsts_max_age_secs = secs` would add `preload` the preset's HSTS lacks:
-/// browsers cache it, so 0.61 keeps adding it and only warns.
+/// `preset`'s HSTS value with its `max-age` set to `secs`; its other
+/// directives (`includeSubDomains`, `preload`) stay as they were.
 #[cfg(feature = "config")]
-fn adds_hsts_directives(preset: Option<&str>, secs: u64) -> bool {
-    secs != 0 && !preset.is_some_and(|v| v.split(';').any(|p| p.trim() == "preload"))
+fn with_max_age(preset: Option<&str>, secs: u64) -> String {
+    std::iter::once(format!("max-age={secs}"))
+        .chain(
+            preset
+                .unwrap_or_default()
+                .split(';')
+                .map(str::trim)
+                .filter(|d| !d.is_empty() && !d.to_ascii_lowercase().starts_with("max-age"))
+                .map(str::to_owned),
+        )
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// Extension trait — `.security_headers(layer)` on Router.
@@ -803,25 +801,26 @@ mod tests {
         );
     }
 
-    /// A max-age on a preset without `preload` still adds it, with a warning.
+    /// A max-age keeps the preset's directives: `relaxed` gains no
+    /// `preload`, and a preset with no HSTS gets a bare `max-age`.
     #[cfg(feature = "config")]
     #[test]
-    fn a_max_age_on_a_preset_without_preload_warns() {
-        let relaxed = SecurityHeadersLayer::relaxed();
-        let strict = SecurityHeadersLayer::strict();
-        assert!(adds_hsts_directives(relaxed.hsts.as_deref(), 60));
-        assert!(adds_hsts_directives(None, 60), "dev / none send no HSTS");
-        assert!(!adds_hsts_directives(strict.hsts.as_deref(), 60));
-        assert!(!adds_hsts_directives(relaxed.hsts.as_deref(), 0));
-
-        let mut s = crate::config::SecuritySettings::default();
-        s.headers_preset = Some("relaxed".into());
-        s.hsts_max_age_secs = Some(60);
+    fn a_max_age_keeps_the_presets_directives() {
+        let hsts = |preset: &str, secs| {
+            let mut s = crate::config::SecuritySettings::default();
+            s.headers_preset = Some(preset.into());
+            s.hsts_max_age_secs = Some(secs);
+            SecurityHeadersLayer::from_settings(&s).hsts
+        };
+        let relaxed = hsts("relaxed", 60).unwrap();
+        assert!(relaxed.starts_with("max-age=60"), "{relaxed}");
+        assert!(!relaxed.contains("preload"), "{relaxed}");
         assert_eq!(
-            SecurityHeadersLayer::from_settings(&s).hsts.as_deref(),
-            Some("max-age=60; includeSubDomains; preload"),
-            "the output itself is unchanged in 0.61"
+            hsts("strict", 60).as_deref(),
+            Some("max-age=60; includeSubDomains; preload")
         );
+        assert_eq!(hsts("dev", 60).as_deref(), Some("max-age=60"));
+        assert_eq!(hsts("strict", 0), None);
     }
 
     #[cfg(feature = "config")]

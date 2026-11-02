@@ -127,7 +127,6 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::email_jobs` | Zwei Queues auf einer Jobs-Tabelle mit verschiedenen Mailern |
 | `rustango::error` | Die Ursache eines 5xx, die der Response-Body zurückhält |
 | `rustango::errors` | Ein Fehlerseiten-Template, das nicht renderte, oder ein Template-Verzeichnis, das nicht lud |
-| `rustango::forms` | `DynamicForm`-Werte, die jetzt noch akzeptiert, später abgelehnt werden |
 | `rustango::auth` | Rechteprüfungen, die an einem Datenbankfehler scheiterten |
 | `rustango::auth_flows` | Vom Cache abgewiesene Einmal-Auth-Links |
 | `rustango::aead` | Ein leerer vorheriger Geheimschlüssel oder ein Dev-Schlüssel, der sich nicht speichern lässt |
@@ -140,13 +139,13 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::media::auth` | Ablehnungen der Media-Router-Autorisierung |
 | `rustango::messages` | Flash-Messages |
 | `rustango::migrate` | Migrations-Runner |
+| `rustango::object_permissions` | Scan-Grenze des `"view"`-Hooks in einer Liste erreicht |
 | `rustango::outbound` | Geprüfte ausgehende Aufrufe (SSO, Slack, Webhooks) |
 | `rustango::passkey` | Vom Cache abgewiesene Passkey-Challenges |
 | `rustango::passwords` | Passwort-Hash-Upgrades beim Login |
 | `rustango::rate_limit` | Rate-Limiting |
 | `rustango::request_timeout` | Request-Timeout |
 | `rustango::scheduler` | Cron / geplante Tasks |
-| `rustango::security_headers` | Einstellungen der Sicherheits-Header (HSTS) |
 | `rustango::server` | Serverstart und -shutdown |
 | `rustango::shutdown` | Signalbehandlung und Shutdown-Hooks |
 | `rustango::sql` | Query-Ausführung |
@@ -394,6 +393,7 @@ AccessLogLayer::default()
     .slow_threshold_ms(250)      // was als langsam gilt
     .without_ip()                // Client-IP weglassen
     .use_real_ip(true)           // TrustedRealIp aus RealIpLayer, nie rohe Header
+    .skip_paths(["/health", "/ready"]) // keine Zeile für Probes; ganze Segmente
 ```
 
 `RealIpLayer` muss vor dem Access-Log laufen. Mit `server::Builder` übergeben Sie
@@ -406,8 +406,9 @@ enthält, wortweise verglichen; also zählen `api_key`, `reset_token` und
 `secret`, `key`, `signature`, `auth`, `credential`, `cookie`, `session`,
 `otp`, dazu die OAuth-Namen `code`, `state` und `assertion`. Erweitern mit
 `.redact_additional("ref")`, oder die ganze Liste ersetzen mit
-`.redact(vec![...])`; `token`, `signature` und `code` bleiben in jedem Fall
-maskiert. Das `url.query` des Request-Spans wird genauso maskiert. Das betrifft **nur Query-Strings**; für den Rest siehe
+`.redact(vec![...])`; die Zugangsdaten-Wörter (`password`, `token`, `secret`, `api_key`, ...),
+`signature` und `code` bleiben in jedem Fall maskiert, auch in einem
+zusammengesetzten Schlüssel (`secretary` enthält `secret`); eine eigene Liste hebt das nicht auf. Das `url.query` des Request-Spans wird genauso maskiert. Das betrifft **nur Query-Strings**; für den Rest siehe
 [security.md](security.md#secrets-aus-deinen-logs-heraushalten).
 
 ## Welcher Mandant war das?

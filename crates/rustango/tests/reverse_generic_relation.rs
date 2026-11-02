@@ -95,7 +95,7 @@ async fn seed_post_with_tag(pool: &Pool, post_title: &str, tag_name: &str) -> (i
         id: Auto::Unset,
         title: post_title.into(),
     };
-    p.save_pool(pool).await.unwrap();
+    p.save(pool).await.unwrap();
     let post_pk = *p.id.get().unwrap();
     let tag_pk = add_tag_for_post(pool, post_pk, tag_name).await;
     (post_pk, tag_pk)
@@ -115,7 +115,7 @@ async fn add_tag_for_post(pool: &Pool, post_pk: i64, tag_name: &str) -> i64 {
         object_pk: post_pk,
         name: tag_name.into(),
     };
-    t.save_pool(pool).await.unwrap();
+    t.save(pool).await.unwrap();
     *t.id.get().unwrap()
 }
 
@@ -156,14 +156,14 @@ async fn fetch_reverse_generic_filters_by_content_type() {
         id: Auto::Unset,
         title: "post 1".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let post_pk = *p.id.get().unwrap();
 
     let mut a = Article {
         id: Auto::Unset,
         title: "article 1".into(),
     };
-    a.save_pool(&pool).await.unwrap();
+    a.save(&pool).await.unwrap();
     let article_pk = *a.id.get().unwrap();
     // Force the IDs to overlap by inserting until we line them up — in
     // sqlite autoincrement starts at 1 for each table, so post_pk == 1
@@ -188,7 +188,7 @@ async fn fetch_reverse_generic_filters_by_content_type() {
         object_pk: post_pk,
         name: "for-post".into(),
     };
-    tp.save_pool(&pool).await.unwrap();
+    tp.save(&pool).await.unwrap();
     // Tag the Article with "for-article"
     let mut ta = Tag {
         id: Auto::Unset,
@@ -196,7 +196,7 @@ async fn fetch_reverse_generic_filters_by_content_type() {
         object_pk: article_pk,
         name: "for-article".into(),
     };
-    ta.save_pool(&pool).await.unwrap();
+    ta.save(&pool).await.unwrap();
 
     // Reverse-fetch for Post: should ONLY get "for-post".
     let rows = contenttypes::fetch_reverse_generic(&pool, Tag::SCHEMA, post_ct_id, post_pk, None)

@@ -468,6 +468,7 @@ fn shape_at(
             SC::AlterColumnComment { column, from, .. } => {
                 field(&mut t, column)?.db_comment.clone_from(from);
             }
+            SC::AlterTableComment { from, .. } => t.db_table_comment.clone_from(from),
             SC::AlterColumnUnique { column, unique, .. } => {
                 field(&mut t, column)?.unique = !unique;
             }

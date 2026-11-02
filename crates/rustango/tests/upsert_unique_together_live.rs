@@ -72,7 +72,7 @@ async fn upsert_uses_unique_together_as_conflict_target() {
         codename: "manage".into(),
         note: "initial".into(),
     };
-    first.upsert(&pool).await.unwrap();
+    first.upsert(&pool.clone().into()).await.unwrap();
     let id_first = *first.id.get().expect("PK assigned by RETURNING");
 
     // Second upsert with the SAME (team_id, codename) but a fresh
@@ -86,7 +86,7 @@ async fn upsert_uses_unique_together_as_conflict_target() {
         codename: "manage".into(),
         note: "updated".into(),
     };
-    second.upsert(&pool).await.unwrap();
+    second.upsert(&pool.clone().into()).await.unwrap();
 
     let rows: Vec<DemoMembership> = DemoMembership::objects()
         .where_(DemoMembership::team_id.eq(7_i64))

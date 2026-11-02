@@ -53,7 +53,7 @@ async fn vector_column_round_trip_and_knn() {
             title: title.to_owned(),
             embedding: Vector::new(emb),
         };
-        d.save_pool(&pool).await.unwrap();
+        d.save(&pool).await.unwrap();
     }
 
     // k-NN: the 2 nearest to [1,0,0] by L2 distance are A (dist 0) then B.
@@ -118,7 +118,7 @@ async fn bulk_update_sets_a_vector_column_to_null() {
             id: Auto::default(),
             embedding: Some(Vector::new(vec![1.0, 0.0, 0.0])),
         };
-        n.save_pool(&pool).await.unwrap();
+        n.save(&pool).await.unwrap();
     }
     let mut rows = Note::objects().fetch(&pool).await.unwrap();
     for r in &mut rows {

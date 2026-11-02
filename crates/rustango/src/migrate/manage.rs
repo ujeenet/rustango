@@ -372,7 +372,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
             "      Remove an admin user's two-factor device (lost phone).\n"
         )?;
     }
-    writeln!(w, "  audit-cleanup --days <N> | --keep-last <N> [--yes]")?;
+    writeln!(w, "  audit-cleanup [--days <N> | --keep-last <N>] [--yes]")?;
     writeln!(
         w,
         "      Trim the audit log: entries older than N days, or all but the"
@@ -577,6 +577,32 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A flag this command does not know.
+fn unknown_flag(flag: &str) -> MigrateError {
+    MigrateError::Validation(format!("unknown flag: {flag}"))
+}
+
+/// A positional argument this command does not take.
+fn unexpected_positional(arg: &str) -> MigrateError {
+    MigrateError::Validation(format!("unexpected positional argument: {arg}"))
+}
+
+/// A flag given as the last argument, without its value.
+fn missing_value(flag: &str) -> MigrateError {
+    MigrateError::Validation(format!("{flag} requires a value"))
+}
+
+/// Scaffolders never overwrite a file the user may have edited.
+fn refuse_overwrite(path: &Path) -> Result<(), MigrateError> {
+    if path.exists() {
+        return Err(MigrateError::Validation(format!(
+            "{} already exists — refusing to overwrite",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(), MigrateError> {
     let mut empty = false;
     let mut merge = false;
@@ -628,13 +654,11 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if name.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 name = Some(other.to_owned());
             }
@@ -837,13 +861,11 @@ async fn migrate<W: Write>(
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if positional.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 positional = Some(other);
             }
@@ -1496,13 +1518,11 @@ fn sqlmigrate_cmd<W: Write>(
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if positional.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 positional = Some(other);
             }
@@ -1965,21 +1985,21 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
                 };
             }
             "--sql" => {
-                sql =
-                    Some(iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--sql requires a value".into())
-                    })?);
+                sql = Some(iter.next().cloned().ok_or_else(|| missing_value("--sql"))?);
             }
             "--reverse-sql" => {
-                reverse_sql = Some(iter.next().cloned().ok_or_else(|| {
-                    MigrateError::Validation("--reverse-sql requires a value".into())
-                })?);
+                reverse_sql = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| missing_value("--reverse-sql"))?,
+                );
             }
             "--name" => {
-                name =
-                    Some(iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--name requires a value".into())
-                    })?);
+                name = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| missing_value("--name"))?,
+                );
             }
             "--to" => {
                 to = Some(iter.next().cloned().ok_or_else(|| {
@@ -1994,7 +2014,7 @@ fn add_data_op_cmd<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<(
                 return Ok(());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 return Err(MigrateError::Validation(format!(
@@ -2737,16 +2757,17 @@ fn parse_name_and_model_as(
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--model" => {
-                model =
-                    Some(iter.next().cloned().ok_or_else(|| {
-                        MigrateError::Validation("--model requires a value".into())
-                    })?);
+                model = Some(
+                    iter.next()
+                        .cloned()
+                        .ok_or_else(|| missing_value("--model"))?,
+                );
             }
             "--crate" => {
                 let v = iter
                     .next()
                     .cloned()
-                    .ok_or_else(|| MigrateError::Validation("--crate requires a value".into()))?;
+                    .ok_or_else(|| missing_value("--crate"))?;
                 let trimmed = v.trim();
                 if trimmed.is_empty() {
                     return Err(MigrateError::Validation(
@@ -2905,12 +2926,7 @@ fn write_generated<W: Write>(
     contents: String,
 ) -> Result<(), MigrateError> {
     let path = std::path::PathBuf::from("src").join(file_name);
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3368,7 +3384,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
             let v = iter
                 .next()
                 .cloned()
-                .ok_or_else(|| MigrateError::Validation("--crate requires a value".into()))?;
+                .ok_or_else(|| missing_value("--crate"))?;
             let trimmed = v.trim();
             if trimmed.is_empty() {
                 return Err(MigrateError::Validation(
@@ -3432,12 +3448,7 @@ fn make_api_routes_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Migra
     }
 
     let path = app_dir.join("api_routes.rs");
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
 
     let body = if tenant_aware {
         api_routes_template_tenant(app)
@@ -3811,12 +3822,7 @@ fn write_generated_bin<W: Write>(
     let path = std::path::PathBuf::from("src")
         .join("bin")
         .join(format!("{bin_name}.rs"));
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3931,12 +3937,7 @@ async fn {snake}() {{
     );
     // Tests live in tests/ not src/
     let path = std::path::PathBuf::from("tests").join(format!("{snake}.rs"));
-    if path.exists() {
-        return Err(MigrateError::Validation(format!(
-            "{} already exists — refusing to overwrite",
-            path.display()
-        )));
-    }
+    refuse_overwrite(&path)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -3976,7 +3977,7 @@ fn parse_db_dump_args(args: &[String]) -> Result<DbDumpArgs, MigrateError> {
             "--schema-only" => schema_only = true,
             "--no-owner" => no_owner = true,
             other => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
         }
     }
@@ -4060,7 +4061,7 @@ fn parse_db_restore_args(args: &[String]) -> Result<DbRestoreArgs, MigrateError>
             "--clean" => clean = true,
             "--yes" => yes = true,
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if file.is_some() {
@@ -4319,32 +4320,24 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
                 return Ok(out);
             }
             "--model" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--model"))?;
                 out.model_filters.push(v.clone());
             }
             "--exclude" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--exclude expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--exclude"))?;
                 out.excludes.push(v.clone());
             }
             "--indent" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--indent expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--indent"))?;
                 out.indent = v.parse().map_err(|e| {
                     MigrateError::Validation(format!("--indent: not an integer ({e})"))
                 })?;
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -4870,13 +4863,11 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
             }
             "--fail-fast" => fail_fast = true,
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
                 if file.is_some() {
-                    return Err(MigrateError::Validation(format!(
-                        "unexpected positional argument: {other}"
-                    )));
+                    return Err(unexpected_positional(other));
                 }
                 file = Some(other.to_owned());
             }
@@ -5696,9 +5687,7 @@ fn showurls_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError
                 return Ok(());
             }
             "--format" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--format expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--format"))?;
                 match v.as_str() {
                     "plain" | "json" => {
                         format = match v.as_str() {
@@ -5715,12 +5704,10 @@ fn showurls_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateError
                 }
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -5791,9 +5778,7 @@ fn showmodels_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 return Ok(());
             }
             "--format" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--format expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--format"))?;
                 match v.as_str() {
                     "plain" => format = "plain",
                     "json" => format = "json",
@@ -5805,18 +5790,14 @@ fn showmodels_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), MigrateErr
                 }
             }
             "--app" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--app expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--app"))?;
                 app_filter = Some(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -5916,24 +5897,18 @@ fn parse_flush_args(args: &[String]) -> Result<FlushArgs, MigrateError> {
             }
             "--yes" => out.yes = true,
             "--app" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--app expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--app"))?;
                 out.apps.push(v.clone());
             }
             "--model" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--model"))?;
                 out.models.push(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -6305,30 +6280,22 @@ fn parse_sendtestemail_args(args: &[String]) -> Result<SendTestEmailArgs, Migrat
         match a.as_str() {
             "--help" | "-h" => out.help = true,
             "--to" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--to requires a value".to_owned()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--to"))?;
                 out.to = Some(v.clone());
             }
             "--from" => {
-                let v = iter.next().ok_or_else(|| {
-                    MigrateError::Validation("--from requires a value".to_owned())
-                })?;
+                let v = iter.next().ok_or_else(|| missing_value("--from"))?;
                 out.from = Some(v.clone());
             }
             "--subject" => {
-                let v = iter.next().ok_or_else(|| {
-                    MigrateError::Validation("--subject requires a value".to_owned())
-                })?;
+                let v = iter.next().ok_or_else(|| missing_value("--subject"))?;
                 out.subject = Some(v.clone());
             }
             other if other.starts_with("--") => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -6361,42 +6328,37 @@ fn parse_prune_args(args: &[String]) -> Result<PruneArgs, MigrateError> {
             }
             "--pretend" | "--dry-run" => out.pretend = true,
             "--model" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--model expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--model"))?;
                 out.only.push(v.clone());
             }
             "--except" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--except expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--except"))?;
                 out.except.push(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
     Ok(out)
 }
 
-/// `manage audit-cleanup --days <N> | --keep-last <N> [--yes]`: audit-log
-/// retention on the one database, the rule the tenancy verb uses.
+/// `manage audit-cleanup [--days <N> | --keep-last <N>] [--yes]`: audit-log
+/// retention on the one database, the rule the tenancy verb uses. With
+/// neither flag it deletes entries older than `[audit] retention_days`.
 async fn audit_cleanup_cmd<W: Write>(
     pool: &Pool,
     args: &[String],
     w: &mut W,
 ) -> Result<(), MigrateError> {
-    const USAGE: &str = "audit-cleanup --days <N> | --keep-last <N> [--yes]";
+    const USAGE: &str = "audit-cleanup [--days <N> | --keep-last <N>] [--yes]";
     let (mut days, mut keep_last, mut yes) = (None, None, false);
     let mut iter = args.iter();
     let number = |flag: &str, v: Option<&String>| -> Result<i64, MigrateError> {
-        let raw = v.ok_or_else(|| MigrateError::Validation(format!("{flag} requires a value")))?;
+        let raw = v.ok_or_else(|| missing_value(flag))?;
         raw.parse::<i64>().map_err(|_| {
             MigrateError::Validation(format!("{flag} expects an integer, got `{raw}`"))
         })
@@ -6417,7 +6379,12 @@ async fn audit_cleanup_cmd<W: Write>(
             }
         }
     }
-    let rule = crate::audit::Retention::from_flags(days, keep_last, yes)
+    let configured = if days.is_none() && keep_last.is_none() {
+        crate::audit::Retention::configured_days().map_err(MigrateError::Validation)?
+    } else {
+        None
+    };
+    let rule = crate::audit::Retention::from_flags(days, keep_last, yes, configured)
         .map_err(MigrateError::Validation)?;
     let deleted = rule.prune(pool).await?;
     writeln!(w, "audit-cleanup done: deleted={deleted}")?;
@@ -6529,18 +6496,14 @@ fn parse_clear_cache_args(args: &[String]) -> Result<ClearCacheArgs, MigrateErro
                 return Ok(out);
             }
             "--table" => {
-                let v = iter
-                    .next()
-                    .ok_or_else(|| MigrateError::Validation("--table expects a value".into()))?;
+                let v = iter.next().ok_or_else(|| missing_value("--table"))?;
                 out.table = Some(v.clone());
             }
             other if other.starts_with('-') => {
-                return Err(MigrateError::Validation(format!("unknown flag: {other}")));
+                return Err(unknown_flag(other));
             }
             other => {
-                return Err(MigrateError::Validation(format!(
-                    "unexpected positional argument: {other}"
-                )));
+                return Err(unexpected_positional(other));
             }
         }
     }
@@ -7096,7 +7059,6 @@ fn write_settings_report<W: Write>(
         };
         let note = match (key.reader, set) {
             (_, false) if missing.is_some() => format!("  {}", missing.unwrap_or_default()),
-            (Reader::Unread { instead, .. }, true) => format!("  (nothing reads it; {instead})"),
             (Reader::App(by), true) => format!("  (read only by {by})"),
             _ => String::new(),
         };
@@ -7324,8 +7286,8 @@ pub fn settings_audit_check(
     // info-flagging so the operator decides intentionally.
     if settings.audit.retention_days.is_none() {
         out.info.push(
-            "[audit] retention_days unset — log grows forever; consider setting + scheduling \
-             `manage audit-cleanup --days <N>`"
+            "[audit] retention_days unset — log grows forever; set it and schedule \
+             `manage audit-cleanup`, which prunes to it"
                 .into(),
         );
     }
@@ -7384,29 +7346,6 @@ pub fn settings_audit_check(
     // `admin::Builder::from_settings`; flag dev-defaults left in prod.
     let admin = &settings.admin;
 
-    // These three [admin] keys have no reader yet (#1379); say so.
-    if matches!(admin.csrf_cookie_secure, Some(false)) {
-        out.warnings.push(
-            "[admin] csrf_cookie_secure = false in prod tier — this key has no effect yet \
-             (#1379): the CSRF cookie follows `[security] secure_cookies`. Remove it."
-                .into(),
-        );
-    }
-
-    // Hex color sanity — common typo is missing `#` or RGB shorthand.
-    if let Some(hex) = admin.primary_color.as_deref() {
-        let stripped = hex.trim_start_matches('#');
-        let valid_len = matches!(stripped.len(), 3 | 6 | 8);
-        let all_hex = stripped.chars().all(|c| c.is_ascii_hexdigit());
-        if !hex.starts_with('#') || !valid_len || !all_hex {
-            out.warnings.push(format!(
-                "[admin] primary_color = `{hex}` does not parse as a hex color (expected \
-                 `#RRGGBB`, `#RGB`, or `#RRGGBBAA`). The key has no effect yet (#1379), so \
-                 the admin accent is unchanged either way."
-            ));
-        }
-    }
-
     // theme_mode allowlist — typo-detection.
     if let Some(mode) = admin.theme_mode.as_deref() {
         if !matches!(mode, "auto" | "light" | "dark") {
@@ -7415,15 +7354,6 @@ pub fn settings_audit_check(
                  the chrome will ignore it and fall back to `auto`."
             ));
         }
-    }
-
-    // Info-level: the key does nothing yet (#1379).
-    if matches!(admin.session_timeout_minutes, Some(0)) {
-        out.info.push(
-            "[admin] session_timeout_minutes = 0 in prod tier — this key has no effect yet \
-             (#1379): the admin has no idle timeout whatever it says."
-                .into(),
-        );
     }
 
     // url_prefix smell tests — trailing slash trips up some
@@ -8123,6 +8053,7 @@ mod gen_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }
     }
 
@@ -8789,7 +8720,7 @@ version = "0.1.0"
 
 [dependencies]
 name = "not-this-one"
-rustango = { version = "0.61", features = ["batteries"] }
+rustango = { version = "0.62", features = ["batteries"] }
 "#;
         assert_eq!(
             package_name_from_cargo_toml(manifest).as_deref(),
@@ -9036,9 +8967,9 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             !out.warnings.iter().any(|w| w.contains("account lockout")),
             "{out:?}"
         );
-        let scoped = crate::cache::ScopedCache::for_tenant(
+        let scoped = crate::cache::ScopedCache::new(
             Arc::new(crate::cache::InMemoryCache::new()),
-            "acme",
+            "tenant:acme",
         );
         assert!(Lockout::new(Arc::new(scoped)).is_process_local());
         // A store shared across replicas: nothing to say.
@@ -9057,7 +8988,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         );
         // Also behind a tenant scope.
         let scoped =
-            crate::cache::ScopedCache::for_tenant(Arc::new(crate::cache::NullCache), "acme");
+            crate::cache::ScopedCache::new(Arc::new(crate::cache::NullCache), "tenant:acme");
         let mut out = DeployAuditFindings::default();
         login_store_audit(&Lockout::new(Arc::new(scoped)), &mut out);
         assert!(
@@ -9073,6 +9004,13 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
     #[cfg(feature = "cache")]
     #[async_trait::async_trait]
     impl crate::cache::Cache for SharedStandIn {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
             Ok(None)
         }
@@ -9912,8 +9850,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         std::fs::write(
             dir.path().join("default.toml"),
             "[database]\nurl = \"postgres://app:DBSECRET@db/app\"\npool_max_size = 7\n\
-             [server]\nbind = \"127.0.0.1:9\"\n[sso]\nclient_id = \"abc\"\n\
-             client_secret = \"SSOSECRET\"\n[mail]\nsmtp_host = \"smtp.x\"\n",
+             [server]\nbind = \"127.0.0.1:9\"\n[mail]\nsmtp_host = \"smtp.x\"\n",
         )
         .unwrap();
         let env = vec![(
@@ -9943,7 +9880,7 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
             .map(|(_, v)| (*v).to_owned())
         };
         let text = report(&vars);
-        for secret in ["DBSECRET", "SSOSECRET", "MAILSECRET"] {
+        for secret in ["DBSECRET", "MAILSECRET"] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
         let db = line(&text, "database.url");
@@ -9955,7 +9892,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         assert!(line(&text, "server.bind").contains("env RUSTANGO_BIND = 0.0.0.0:1"));
         assert!(line(&text, "mail.smtp_password")
             .contains("env RUSTANGO__MAIL__SMTP_PASSWORD = <hidden>"));
-        assert!(line(&text, "sso.client_id").contains("nothing reads it"));
         assert!(line(&text, "database.backend").contains("default"));
 
         // A bare DATABASE_URL beats the file.
@@ -10233,57 +10169,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
 
     // -------- v0.36 slice 7+10 — [admin] section audit --------
 
-    /// `csrf_cookie_secure = false` in prod is a footgun — admin
-    /// CSRF cookie sent over plain HTTP loses tamper resistance.
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_csrf_insecure_warns_in_prod() {
-        let mut s = crate::config::Settings::default();
-        s.admin.csrf_cookie_secure = Some(false);
-        let r = settings_run("prod", &s);
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("[admin]") && w.contains("csrf_cookie_secure")),
-            "expected CSRF secure warning, got: {:?}",
-            r.warnings
-        );
-    }
-
-    /// Malformed hex color trips the format check.
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_bad_primary_color_warns() {
-        let mut s = crate::config::Settings::default();
-        s.admin.primary_color = Some("not-a-color".into());
-        let r = settings_run("prod", &s);
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("[admin]") && w.contains("primary_color")),
-            "expected primary_color warning, got: {:?}",
-            r.warnings
-        );
-    }
-
-    /// Valid hex colors (3 / 6 / 8 hex digits, leading #) stay quiet.
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_valid_hex_color_is_quiet() {
-        for hex in ["#abc", "#2c6fb0", "#2c6fb0ff"] {
-            let mut s = crate::config::Settings::default();
-            s.admin.primary_color = Some(hex.into());
-            let r = settings_run("prod", &s);
-            assert!(
-                !r.warnings
-                    .iter()
-                    .any(|w| w.contains("[admin]") && w.contains("primary_color")),
-                "expected `{hex}` to be quiet, got: {:?}",
-                r.warnings
-            );
-        }
-    }
-
     /// Bogus theme_mode trips the allowlist.
     #[cfg(feature = "config")]
     #[test]
@@ -10297,23 +10182,6 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
                 .any(|w| w.contains("[admin]") && w.contains("theme_mode")),
             "expected theme_mode warning, got: {:?}",
             r.warnings
-        );
-    }
-
-    /// `session_timeout_minutes = 0` is info-level (some deploys
-    /// want never-expire kiosk sessions deliberately).
-    #[cfg(feature = "config")]
-    #[test]
-    fn settings_audit_admin_zero_session_timeout_is_info() {
-        let mut s = crate::config::Settings::default();
-        s.admin.session_timeout_minutes = Some(0);
-        let r = settings_run("prod", &s);
-        assert!(
-            r.info
-                .iter()
-                .any(|i| i.contains("[admin]") && i.contains("session_timeout_minutes")),
-            "expected session_timeout_minutes info, got: {:?}",
-            r.info
         );
     }
 

@@ -309,6 +309,25 @@ impl Dialect for Postgres {
         )]
     }
 
+    fn referencing_tables_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// `CASCADE` finds the referencing tables itself; ids keep counting, as
+    /// a `DELETE` leaves them on MySQL / SQLite.
+    fn truncate_sql(
+        &self,
+        table: &str,
+        mode: crate::sql::TruncateMode,
+        _referencing: &[String],
+    ) -> Vec<String> {
+        let quoted = self.quote_ident(table);
+        match mode {
+            crate::sql::TruncateMode::Plain => vec![format!("DELETE FROM {quoted}")],
+            crate::sql::TruncateMode::Cascade => vec![format!("TRUNCATE TABLE {quoted} CASCADE")],
+        }
+    }
+
     fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
@@ -325,6 +344,21 @@ impl Dialect for Postgres {
              WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
              AND a.attname = $2 AND cardinality(c.conkey) = 1",
         )
+    }
+
+    fn foreign_key_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT c.conname::text, a.attname::text, r.relname::text FROM pg_constraint c \
+             CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
+             JOIN pg_class r ON r.oid = c.confrelid \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
+             ORDER BY c.conname, k.ord",
+        )
+    }
+
+    fn drops_missing_foreign_key(&self) -> bool {
+        true
     }
 
     /// A renamed column keeps its UNIQUE constraint's old name (#2133).

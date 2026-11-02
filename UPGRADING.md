@@ -148,6 +148,123 @@ untouched.
 
 ---
 
+## 0.62.0
+
+- Two-part JWTs (pre-0.57.5 shape) are refused and `JwtBackend::issue*` mint standard three-part tokens. Admin session, TOTP-pending, passkey challenge and OAuth2 flow cookies change format, and password links get a new scope value: those in flight end once. `tenancy` now enables the `jwt` feature.
+- Model writes take a `rustango::sql::Pool` everywhere, and the PgPool-typed functions that had a `Pool` twin are gone. Pass `&pool.clone().into()` (or keep a `Pool`) where you held a `PgPool`:
+
+  | Before (0.61) | After (0.62.0) |
+  |---|---|
+  | `m.save(&pg)` / `m.save_pool(&pool)` | `m.save(&pool)` |
+  | `m.insert(&pg)` / `m.insert_pool(&pool)` | `m.insert(&pool)` |
+  | `m.delete(&pg)` / `m.delete_pool(&pool)` | `m.delete(&pool)` |
+  | `m.upsert(&pg)`, `M::bulk_insert(rows, &pg)` | `m.upsert(&pool)`, `M::bulk_insert(rows, &pool)` |
+  | `m.save_on(&mut *conn)` on an audited model | `m.save(&pool)`, or `m.save_tx(&mut tx)` |
+  | `m.save_on_with(conn, src)` | `audit::with_source(src, m.save(&pool))` |
+  | `ViewSet::router_pool(p, pool)`, `MediaManager::new_pool` (deprecated, still compile) | `router(p, pool)`, `MediaManager::new` |
+  | `migrate::migrate(&pg, dir)`, `apply_all(&pg)` … | `migrate_pool(&pool, dir)`, `apply_all_pool(&pool)` … |
+  | `audit::ensure_table(&pg)`, `fetch_for_entity`, `cleanup_*` | the `_pool` forms |
+  | `tenancy::permissions::has_perm(…, &pg)` and friends, their `permissions::` re-exports, `permissions::*_for_model` | the `_pool` forms |
+  | `tenancy::authenticate_operator`, `tenancy::ensure_api_keys_table` | `authenticate_operator_pool`, `ensure_api_keys_table_pool` |
+  | `audit::upsert_returning_on` | `m.upsert(&pool)` (audited) |
+  | `audit::emit_one(&pg, e)` / `emit_many`, `emit_one_my`, `emit_one_sqlite`, `emit_one_pool` / `emit_many_pool` | `audit::emit_one(&pool, e)` / `emit_many(&pool, es)` |
+  | `tenancy::permissions::has_perm_on(uid, c, &mut *conn)` | `has_perm_pool(uid, c, &pool)` |
+  | `sql::select_rows_on(&pg, &q)` | `select_rows_pool(&pool, &q)` or `QuerySet::fetch_on` |
+  | `parent.child_set(&pg)` / `child_set_pool(&pool)` | `parent.child_set(executor)`, any `SqlExecutor` |
+  | `qs.explain(&pg)`, `qs.fetch_paginated(&pg)`, `fk.get(&pg)` | `explain_on` / `explain_pool`, `fetch_paginated_on`, `get_pool` / `get_on` |
+  | `sql::fetch_with_prefetch`, `sql::annotate_count_children` | `fetch_with_prefetch_pool`, `annotate_count_children_on` |
+  | `Fixture::load_into`, `fixtures::load_all` | `load_into_pool`, `load_all_pool` |
+  | `NotificationContext::with_database(pg, t)` | the same, with any `Into<Pool>`; it now works on every backend |
+  | `migrate::Builder::migrate(&pg, dir)` … | the same methods, taking `&Pool` |
+
+  `sql::insert_on`, `update_on` and `bulk_insert_on` take any `SqlExecutor` instead of a Postgres executor; `bulk_insert_on` returns `Vec<InsertReturningPool>` and takes any `SqlExecutor`; on a raw sqlx executor a bulk insert past the bind cap is refused, so pass a `PoolTx` or the `Pool`. On MySQL `bulk_insert` leaves `Auto` fields unset. An audited `upsert` and an audited `bulk_insert` are refused on MySQL, and so is `insert` on an audited model without a PK. `delete_on` on a raw sqlx executor refuses a delete that cascades into an audited model; run it on a `Pool`, `PoolConn` or `PoolTx`. `insert_tx` / `save_tx` / `delete_tx` now write the audit row of an audited model.
+- `PoolConn` is a struct: match `conn.conn()` (a `#[non_exhaustive]` `PooledConn`) instead of the connection. Before: `match &mut conn { PoolConn::Mysql(c) => … }`. After: `match conn.conn() { PooledConn::Mysql(c) => …, _ => … }`.
+- Outside code can no longer wrap its own sqlx `Transaction` in a `PoolTx` (`PoolTx::new` is crate-private). Open it with `transaction_pool`, `write_transaction` or `let mut conn = pool.acquire().await?; let tx = conn.begin().await?;`, so the transaction knows its pool.
+- Code generic over `DB: Database` that calls `DatabasePools::acquire` or extracts `DatabaseTenant<DB>` now needs the bound `rustango::sql::Pool: From<sqlx::Pool<DB>>`.
+- `PoolTx` is a struct: match `tx.conn()` (a `#[non_exhaustive]` `TxConn`) instead of the tx. Before: `match &mut tx { PoolTx::Postgres(t) => … }`. After: `match tx.conn() { TxConn::Postgres(t) => …, _ => … }`.
+- Migrate signal receivers read `ctx.pool` and `ctx.tenant`; build contexts with `PreMigrateContext::new` / `PostMigrateContext::new`. Before: `connect_post_migrate_with_target(|ctx, t| … t.pool …)`. After: `connect_post_migrate(|ctx| … ctx.pool …)`.
+- `LinkTarget::audience` and `LinkScope::audience` take a `rustango::auth_flows::SingleDb`, so a tenant pool or handler cannot use an unbound scope by mistake: `LinkTarget::audience(&pool, "app")` becomes `LinkTarget::audience(SingleDb::new(&pool), "app")`, and `LinkScope::audience("app")` becomes `LinkScope::audience(SingleDb::new(&pool), "app")`. Multi-tenant apps use `LinkScope::from(&tenant)` and `LinkTarget::from(&tenant)`.
+- On Postgres `Model::truncate` no longer cascades or restarts ids: it fails while `RESTRICT` / `NO ACTION` rows point at the table. Call `Model::truncate_cascade` (or `sql::truncate_cascade`) to empty them too. `sql::truncate_sql` is gone; `audit::truncate_with_audit` takes a `TruncateMode`.
+- A schema-mode tenant's `search_path` keeps `public` only while an extension lives there (citext installs into it). Then its pool refuses to open while `public` has tenant tables the tenant's schema lacks: run `migrate-tenants`. Without one, `public` leaves the path: registry tables are read through the registry pool. Extensions in a schema that holds tables (such as another tenant's) stay off the path; move them with `ALTER EXTENSION … SET SCHEMA public`.
+- A schema-mode tenant whose schema has a database role's name is refused when its pool opens (requests and `migrate-tenants`); `check --deploy` lists it as an error. Rename the role or move the tenant to another schema before upgrading.
+- On Postgres, the server (`migrate`, `seed_with`, `serve`) and every tenancy CLI verb refuse to run when a schema named after the database role holds a registry table that also exists later in `search_path`. Drop or rename one copy, or pin `search_path` on the registry URL.
+- `testkit::create_tables` also creates the auto-created M2M junctions between the models it is given; a test that built them by hand afterwards can drop that step (`create_junctions` stays and is idempotent).
+- Tenant JWTs must carry the org id (`org_id`) as well as the slug: tokens minted before this release are refused, so users sign in again. `TenantSlug` is now `TenantSlug::new(org_id, slug)`, `JwtBackend::issue_for_tenant*` and `UserTokenScope::Tenant` take a `&TenantSlug`, `PageKey::tenant` takes a `&TenantSlug`, and an `OrgResolver` must return orgs with an id for `require_auth` and the JWT routes.
+- Tenant session cookies, impersonation handoffs and MCP agent tokens carry the org id: existing ones end once. `TenantSessionPayload::new` / `impersonation`, `tenant_console::decode`, `HandoffPayload::new`, `impersonation_handoff::decode`, `issue_agent_token`, `verify_agent_token`, `verify_raw_agent_credential` and `TestClient::force_login_tenant_user` take a `&TenantSlug`; `hmac_auth::KeyTenantResolver` returns one; both payloads gain `org`.
+- Member cookies and SSO flows carry the org id (existing ones end once). `ScopedCache::for_tenant`, `DistributedLock::for_tenant`, `member_auth::mint_cookie` / `decode` and `MemberSessionPayload::new` take a `&TenantSlug` (the first two need `tenancy`; old scoped keys and locks are not read again); `FlowScope::for_tenant` replaces `FlowScope::new` for tenancy orgs; `org` is required in tenant, member and handoff payloads.
+- `[security] hsts_max_age_secs` keeps the preset's directives: on `relaxed` it no longer adds `includeSubDomains; preload`, and on `dev` it sends a bare `max-age`. Sites that relied on the added `preload` should use `strict` or set the header.
+- A tenant database URL that reaches the registry's own database under another name is refused at create, edit and `migrate-tenant-storage`, and resuming a half-made tenant whose URL now reaches the registry fails; both only warned before. `org_edit::Applied::warning` is gone.
+- Migrating a schema-mode tenant into a schema that already holds tables but no rustango ledger is refused; move the tenant to a schema of its own.
+- `config::CacheSettings` is `#[non_exhaustive]`: build it from `Default` and set fields.
+- Migrations name a new composite FK `<table>_<name>_fkey`, as bootstrap DDL does, not `<name>`; existing ones keep their name and drop as before.
+- `Tenant<Postgres>::conn()` is async and takes the connection on first use: write `t.conn().await?` (it returns `Result<&mut PgConnection, TenancyError>`). `Tenant::for_test_pools` takes `&Arc<TenantPools>`.
+- `Tenant::for_test` and `contenttypes::render_generic_fk_link` are removed; use `Tenant::for_test_pools` / `for_test_sqlite` / `for_test_mysql`, and build links from `ContentType::by_id`.
+- `Cache::touch` has no default: a custom backend implements it without a `get` then `set`.
+- Every public `*Error` enum is `#[non_exhaustive]`: add a `_ =>` arm to matches. `AdminError` gains `BadRequest` and `Conflict`; `admin::InlineApplyOutcome` is removed.
+- `SslRedirectLayer::exempt` matches whole path segments: `/health` no longer exempts `/healthz`. List each probe path.
+- `POST /media/{id}/tags` with a slug that is not stored yet also needs `Add(NewTag)` (`rustango_media_tags.add` under `MediaPerms`).
+- On the prod tier `email::from_settings` refuses an unset `[mail].backend`; set it (`console` still works when named).
+- `cache::from_settings` panics, and `from_settings_async` errors, on an unknown or mis-cased `[cache].backend` or `file` without `file_cache_dir`, instead of using a per-process cache.
+- `DynamicForm` `url` fields take http(s) only and `email` fields must be a deliverable address; both used to accept other values with a warning.
+- An admin custom view whose suffix shadows a built-in route (`{id}`, `{id}/edit`, ...) is skipped; rename its suffix.
+- `ViewSet::cursor_pagination` on a nullable column panics at build time.
+- `#[derive(Model)]` index or `get_latest_by` names that are no column, and unknown `#[rustango::main]` arguments (tokio's included), are compile errors.
+- `ModelForm` locks the admin's superuser-only fields by default. A form that should write them, for a superuser or a trusted job, calls `.acting_superuser(true)`.
+- `signals::m2m::M2mChangedContext` is `#[non_exhaustive]`: build it with `M2mChangedContext::new(..)`, not a struct literal.
+- `TableSnapshot` is `#[non_exhaustive]` and gains `db_table_comment`: build it with `SchemaSnapshot::from_models` or serde, not a struct literal. `SchemaChange` gains `AlterTableComment`. The next `makemigrations` writes a migration for each model that sets a table comment.
+- `config::ServerSettings` is `#[non_exhaustive]`: build it from `Default` and set fields, not with a struct literal.
+- Operator console cookies, tenant admin cookies and impersonation handoff tokens are signed under a per-kind tag. Every existing operator and tenant session ends once on upgrade; users sign in again.
+- `AccessLogLayer` is `#[non_exhaustive]`: build it with `AccessLogLayer::new()` and the setters (or set fields on it), not a struct literal.
+- `email::Attachment::content` is queued as base64 text. Workers must run 0.61.3+ (or drain the email queue) before 0.62.0 web nodes enqueue mail.
+- `M2MManager::all` and `GenericM2MManager::all` are generic over the key type and `all_as` is gone: write `m.all::<i64>(&pool)` (or annotate `let ids: Vec<i64>`); use `String` / `Uuid` for those keys.
+- The deprecated `M2MManager` `_pool` aliases (`all_pool`, `add_pool`, `remove_pool`, `set_pool`, `clear_pool`, `contains_pool`) are removed; drop the suffix.
+- `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
+- `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
+- UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
+- ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.63.0. `ObjectPermission` gains `origin`: build it with the macro.
+- A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
+- `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
+- A ViewSet page or offset list under a `view` hook is a 400 past `view_hook_scan_cap` rows; add a queryset scope or use cursor pagination for big tables.
+- `ViewSet::view_hook_scan_cap` defaults to 2 000 (was 10 000): set it back for bigger hooked lists. A serializer `nested`/`many`/`slug` field onto a table with a `view` hook or queryset scope now panics at mount; drop the field or call `skip_object_permissions()`.
+- Admin bulk actions skip selected rows the `view` hook hides, as they skip rows outside the queryset scopes.
+- The admin answers 404 instead of 403 on the item pages of a row its `view` hook hides.
+- A tenant ViewSet refuses (403) a principal bound to another tenant, and its hooks see a principal with no tenant as anonymous: set `TenantSlug` next to your own `AuthenticatedUser` / `Principal`, or use `require_auth`.
+- A ViewSet create or update whose row would leave a `register_queryset_scope!` scope is a 403; `ViewSet::for_model` also panics on the tables the admin never serves (TOTP secrets, passkeys, database servers).
+- `TestClient` panics when a response body fails to read or passes 16 MiB; it used to return an empty body.
+
+- A tenant needs a host, a path prefix or a port: `create-tenant`, the console and the webhook refuse one with none (a configured apex domain still gives the `<slug>.<apex>` default), and `edit-tenant` refuses clearing the last. `FirstAdminHandover::hand_over` returns `Result`.
+- `JobQueue::dispatch` refuses a job type with no handler registered on that queue (`JobError::Queue`). A producer whose jobs a worker in another process runs registers them too, or builds its `PgJobQueue` with `.allow_unregistered_dispatch()`.
+- A `RUSTANGO_SESSION_SECRET` that is not a valid base64 key no longer signs MCP agent tokens: they use the saved session key off prod and a per-process key on prod, so tokens issued under a passphrase stop verifying. Set a key from `openssl rand -base64 32`.
+- `apply_all` / `apply_all_pool` fail when a declared or `unique_together` index cannot be created, instead of skipping it with a warning.
+- The tenant admin's sidebar and `<title>` now show `[admin] title` (else `[brand] name`) before the tenant's display name when the org has no `brand_name`; set `brand_name` on the org to keep a per-tenant name.
+- Template views without `.fields()` now hide `#[rustango(secret)]` fields, sealed casts and columns named `secret`, `token`, `api_key`, `private_key` or ending in `_password`, `_secret`, `_token`, `_api_key`, `_private_key`, and the admin always masks them. List a field in the view to show it there; `#[rustango(secret = false)]` opts a non-sealed name out everywhere.
+- `FieldSchema` and the derive's `FieldSchemaParts` gain `secret: Option<bool>`; neither has `Default`. Build a `FieldSchema` with `FieldSchema::new` (it is `#[non_exhaustive]`), and set `secret: None` in a hand-written `FieldSchemaParts`.
+- `ListView`, `DetailView`, `CreateView`, `UpdateView` and `DeleteView` `for_model` panic on `rustango_api_keys`, `rustango_agents`, the SSO tables and the TOTP, passkey, database-server and tenant-database tables; serve those through the admin or their own flows.
+- `ViewSet` and the template views also refuse `rustango_operators`, `rustango_admin_users` and `rustango_agent_grants`; the admin still serves them.
+- These column names now also count as secret (alone or after `_`): `passwd`, `passphrase`, `pwd`, `jwt`, `apikey`, `privatekey`, `encryption_key`, `signing_key`, `secret_key`, `access_key`, `credential`, `credentials`, plus `*_password_hash` and `*_database_url`. Add `#[rustango(secret = false)]` to keep one visible. A custom access-log `redact` list can no longer drop any credential word (`password`, `token`, `secret`, `api_key`, ... and these), even inside a joined key such as `secretary`.
+- Settings keys that did nothing are removed, and a file or `RUSTANGO__*` var that still sets one fails to load with what to use instead: `[sso]` (add a provider in the admin), `[admin] primary_color` (`[brand] primary_color`), `[admin] csrf_cookie_secure` (`[security] secure_cookies`), `[admin] session_timeout_minutes`, `[auth.jwt] issuer` / `audience`. `config::SsoSettings` is gone. `manage audit-cleanup` with neither `--days` nor `--keep-last` now prunes to `[audit] retention_days`.
+- Admin bulk actions run only in the admin's transaction: `register_action`, `register_action_with_perm`, `AdminActionFn` and their `TenantAdminBuilder` / `server::Builder::admin_register_action*` twins are removed. Use `register_tx_action*` (`admin_register_tx_action*` on `server::Builder`) and write through the transaction:
+
+  ```rust
+  // before
+  .register_action("posts", "publish", |pool, pks| Box::pin(async move {
+      Post::objects().filter("id__in", SqlValue::List(pks.to_vec()))
+          .update().set("status", "published").execute_pool(pool).await?;
+      Ok(())
+  }))
+  // after
+  .register_tx_action("posts", "publish", |tx, pks| Box::pin(async move {
+      let q = Post::objects().filter("id__in", SqlValue::List(pks.to_vec()))
+          .update().set("status", "published").compile()
+          .map_err(|e| AdminError::Internal(e.to_string()))?;
+      rustango::sql::update_tx(tx, &q).await?;
+      Ok(())
+  }))
+  ```
+
+---
+
 ## 0.61.16
 
 - `HeaderResolver` and `PortResolver` now cache for 30 s like the host resolvers. A tenant created, suspended or re-slugged by another process is seen within the fingerprint poll (`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 s by default); writes through rustango in the same process are seen at once.

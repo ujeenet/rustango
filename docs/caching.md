@@ -242,9 +242,10 @@ you and the call site cannot forget:
 use rustango::cache::ScopedCache;
 
 // From the Org the resolver already produced:
-let cache = ScopedCache::for_tenant(shared.clone(), &t.org.slug);
+let tenant = TenantSlug::of(&t.org).expect("a registry org");
+let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -311,7 +312,7 @@ by default:
 
 To drop a page after a write, call
 `layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
-(add `.tenant(slug)` to the key under tenancy). It purges every cached variant
+(add `.tenant(org_id)` to the key under tenancy). It purges every cached variant
 of that path: any query string, any `vary_on` value, GET and `QUERY` alike. It
 works through a per-path generation counter, so each cached GET reads one more
 small cache key.

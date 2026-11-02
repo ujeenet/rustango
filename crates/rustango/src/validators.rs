@@ -135,6 +135,115 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Errors several validators return, so each code keeps one message.
+mod err {
+    use super::ValidationError;
+
+    pub(super) fn separated_digits() -> ValidationError {
+        ValidationError::new(
+            "invalid",
+            "Enter only digits separated by the configured separator.",
+        )
+    }
+
+    pub(super) fn invalid_card_number() -> ValidationError {
+        ValidationError::new("invalid_card_number", "Enter a valid credit card number.")
+    }
+
+    pub(super) fn invalid_comma_separated_integer_list() -> ValidationError {
+        ValidationError::new(
+            "invalid_comma_separated_integer_list",
+            "Enter only digits separated by commas.",
+        )
+    }
+
+    pub(super) fn invalid_decimal() -> ValidationError {
+        ValidationError::new("invalid_decimal", "Enter a number.")
+    }
+
+    pub(super) fn invalid_email() -> ValidationError {
+        ValidationError::new("invalid_email", "Enter a valid email address.")
+    }
+
+    pub(super) fn invalid_hex_color() -> ValidationError {
+        ValidationError::new(
+            "invalid_hex_color",
+            "Enter a hex color like `#fff` or `#ffaa00`.",
+        )
+    }
+
+    pub(super) fn invalid_hostname() -> ValidationError {
+        ValidationError::new("invalid_hostname", "Enter a valid hostname.")
+    }
+
+    pub(super) fn invalid_iban() -> ValidationError {
+        ValidationError::new("invalid_iban", "Enter a valid IBAN.")
+    }
+
+    pub(super) fn invalid_integer() -> ValidationError {
+        ValidationError::new("invalid_integer", "Enter a valid integer.")
+    }
+
+    pub(super) fn invalid_ip_address() -> ValidationError {
+        ValidationError::new("invalid_ip_address", "Enter a valid IPv4 or IPv6 address.")
+    }
+
+    pub(super) fn invalid_isbn() -> ValidationError {
+        ValidationError::new("invalid_isbn", "Enter a valid ISBN-10 or ISBN-13.")
+    }
+
+    pub(super) fn invalid_jwt() -> ValidationError {
+        ValidationError::new(
+            "invalid_jwt",
+            "Enter a valid JWT (header.payload.signature).",
+        )
+    }
+
+    pub(super) fn invalid_mac_address() -> ValidationError {
+        ValidationError::new(
+            "invalid_mac_address",
+            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
+        )
+    }
+
+    pub(super) fn invalid_phone() -> ValidationError {
+        ValidationError::new(
+            "invalid_phone",
+            "Enter a phone number in E.164 format (e.g. +14155552671).",
+        )
+    }
+
+    pub(super) fn invalid_slug() -> ValidationError {
+        ValidationError::new(
+            "invalid_slug",
+            "Enter a valid slug consisting of letters, numbers, underscores or hyphens.",
+        )
+    }
+
+    pub(super) fn invalid_unicode_slug() -> ValidationError {
+        ValidationError::new(
+            "invalid_unicode_slug",
+            "Enter a valid slug consisting of Unicode letters, numbers, underscores or hyphens.",
+        )
+    }
+
+    pub(super) fn invalid_url() -> ValidationError {
+        ValidationError::new("invalid_url", "Enter a valid URL.")
+    }
+
+    pub(super) fn not_alpha() -> ValidationError {
+        ValidationError::new("not_alpha", "Enter only letters.")
+    }
+
+    pub(super) fn not_alphanumeric() -> ValidationError {
+        ValidationError::new("not_alphanumeric", "Enter only letters and digits.")
+    }
+
+    pub(super) fn not_numeric() -> ValidationError {
+        ValidationError::new("not_numeric", "Enter only digits.")
+    }
+}
+
 // ------------------------------------------------------------------ email
 
 /// Validate that `s` looks like an email address.
@@ -150,49 +259,29 @@ impl std::error::Error for ValidationError {}
 pub fn validate_email(s: &str) -> Result<(), ValidationError> {
     // No trimming: the caller stores `s` as given, so it must be valid as given.
     if s.is_empty() || s.len() > 254 || s.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(ValidationError::new(
-            "invalid_email",
-            "Enter a valid email address.",
-        ));
+        return Err(err::invalid_email());
     }
     let (local, domain) = match s.split_once('@') {
         Some(parts) => parts,
-        None => {
-            return Err(ValidationError::new(
-                "invalid_email",
-                "Enter a valid email address.",
-            ))
-        }
+        None => return Err(err::invalid_email()),
     };
     // RFC 5321: a local part is at most 64 octets.
     if local.is_empty() || domain.is_empty() || local.len() > 64 {
-        return Err(ValidationError::new(
-            "invalid_email",
-            "Enter a valid email address.",
-        ));
+        return Err(err::invalid_email());
     }
     // Reject a SECOND @ — split_once gave us first occurrence;
     // any remaining @ in the domain is invalid.
     if domain.contains('@') {
-        return Err(ValidationError::new(
-            "invalid_email",
-            "Enter a valid email address.",
-        ));
+        return Err(err::invalid_email());
     }
     // Domain must have a dot, and that dot can't be at either end
     // (".com" / "example." both invalid).
     if !domain.contains('.') || domain.starts_with('.') || domain.ends_with('.') {
-        return Err(ValidationError::new(
-            "invalid_email",
-            "Enter a valid email address.",
-        ));
+        return Err(err::invalid_email());
     }
     // Reject consecutive dots in domain or local — common typo.
     if domain.contains("..") || local.contains("..") {
-        return Err(ValidationError::new(
-            "invalid_email",
-            "Enter a valid email address.",
-        ));
+        return Err(err::invalid_email());
     }
     Ok(())
 }
@@ -257,14 +346,14 @@ pub fn is_email_with_name(s: &str) -> bool {
 pub fn validate_url(s: &str) -> Result<(), ValidationError> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
+        return Err(err::invalid_url());
     }
     let rest = if let Some(r) = trimmed.strip_prefix("https://") {
         r
     } else if let Some(r) = trimmed.strip_prefix("http://") {
         r
     } else {
-        return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
+        return Err(err::invalid_url());
     };
     // Host portion: everything up to the first '/', '?', or '#'.
     let host_end = rest
@@ -272,14 +361,14 @@ pub fn validate_url(s: &str) -> Result<(), ValidationError> {
         .unwrap_or(rest.len());
     let host = &rest[..host_end];
     if host.is_empty() || host.starts_with(':') {
-        return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
+        return Err(err::invalid_url());
     }
     // Strip optional :port off the host and require a hostname part.
     let Some((hostname, _)) = crate::urls::split_host_port(host) else {
-        return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
+        return Err(err::invalid_url());
     };
     if hostname.is_empty() {
-        return Err(ValidationError::new("invalid_url", "Enter a valid URL."));
+        return Err(err::invalid_url());
     }
     Ok(())
 }
@@ -299,18 +388,12 @@ pub fn is_url(s: &str) -> bool {
 /// `ValidationError { code: "invalid_slug", ... }`.
 pub fn validate_slug(s: &str) -> Result<(), ValidationError> {
     if s.is_empty() {
-        return Err(ValidationError::new(
-            "invalid_slug",
-            "Enter a valid slug consisting of letters, numbers, underscores or hyphens.",
-        ));
+        return Err(err::invalid_slug());
     }
     for ch in s.chars() {
         let ok = ch.is_ascii_alphanumeric() || ch == '_' || ch == '-';
         if !ok {
-            return Err(ValidationError::new(
-                "invalid_slug",
-                "Enter a valid slug consisting of letters, numbers, underscores or hyphens.",
-            ));
+            return Err(err::invalid_slug());
         }
     }
     Ok(())
@@ -330,18 +413,12 @@ pub fn is_slug(s: &str) -> bool {
 /// `ValidationError { code: "invalid_unicode_slug", ... }`.
 pub fn validate_unicode_slug(s: &str) -> Result<(), ValidationError> {
     if s.is_empty() {
-        return Err(ValidationError::new(
-            "invalid_unicode_slug",
-            "Enter a valid slug consisting of Unicode letters, numbers, underscores or hyphens.",
-        ));
+        return Err(err::invalid_unicode_slug());
     }
     for ch in s.chars() {
         let ok = ch.is_alphanumeric() || ch == '_' || ch == '-';
         if !ok {
-            return Err(ValidationError::new(
-                "invalid_unicode_slug",
-                "Enter a valid slug consisting of Unicode letters, numbers, underscores or hyphens.",
-            ));
+            return Err(err::invalid_unicode_slug());
         }
     }
     Ok(())
@@ -398,24 +475,15 @@ pub fn validate_phone_e164(s: &str) -> Result<(), ValidationError> {
     let rest = match s.strip_prefix('+') {
         Some(r) => r,
         None => {
-            return Err(ValidationError::new(
-                "invalid_phone",
-                "Enter a phone number in E.164 format (e.g. +14155552671).",
-            ));
+            return Err(err::invalid_phone());
         }
     };
     let len = rest.len();
     if !(1..=15).contains(&len) {
-        return Err(ValidationError::new(
-            "invalid_phone",
-            "Enter a phone number in E.164 format (e.g. +14155552671).",
-        ));
+        return Err(err::invalid_phone());
     }
     if !rest.chars().all(|c| c.is_ascii_digit()) {
-        return Err(ValidationError::new(
-            "invalid_phone",
-            "Enter a phone number in E.164 format (e.g. +14155552671).",
-        ));
+        return Err(err::invalid_phone());
     }
     Ok(())
 }
@@ -452,23 +520,14 @@ pub fn validate_hex_color(s: &str) -> Result<(), ValidationError> {
     let rest = match s.strip_prefix('#') {
         Some(r) => r,
         None => {
-            return Err(ValidationError::new(
-                "invalid_hex_color",
-                "Enter a hex color like `#fff` or `#ffaa00`.",
-            ));
+            return Err(err::invalid_hex_color());
         }
     };
     if !matches!(rest.len(), 3 | 4 | 6 | 8) {
-        return Err(ValidationError::new(
-            "invalid_hex_color",
-            "Enter a hex color like `#fff` or `#ffaa00`.",
-        ));
+        return Err(err::invalid_hex_color());
     }
     if !rest.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(ValidationError::new(
-            "invalid_hex_color",
-            "Enter a hex color like `#fff` or `#ffaa00`.",
-        ));
+        return Err(err::invalid_hex_color());
     }
     Ok(())
 }
@@ -568,16 +627,10 @@ pub fn validate_iso_datetime(s: &str) -> Result<(), ValidationError> {
 /// `ValidationError { code: "not_alphanumeric", ... }`.
 pub fn validate_alphanumeric(s: &str) -> Result<(), ValidationError> {
     if s.is_empty() {
-        return Err(ValidationError::new(
-            "not_alphanumeric",
-            "Enter only letters and digits.",
-        ));
+        return Err(err::not_alphanumeric());
     }
     if !s.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(ValidationError::new(
-            "not_alphanumeric",
-            "Enter only letters and digits.",
-        ));
+        return Err(err::not_alphanumeric());
     }
     Ok(())
 }
@@ -590,10 +643,10 @@ pub fn validate_alphanumeric(s: &str) -> Result<(), ValidationError> {
 /// `ValidationError { code: "not_numeric", ... }`.
 pub fn validate_numeric(s: &str) -> Result<(), ValidationError> {
     if s.is_empty() {
-        return Err(ValidationError::new("not_numeric", "Enter only digits."));
+        return Err(err::not_numeric());
     }
     if !s.chars().all(|c| c.is_ascii_digit()) {
-        return Err(ValidationError::new("not_numeric", "Enter only digits."));
+        return Err(err::not_numeric());
     }
     Ok(())
 }
@@ -605,10 +658,10 @@ pub fn validate_numeric(s: &str) -> Result<(), ValidationError> {
 /// `ValidationError { code: "not_alpha", ... }`.
 pub fn validate_alpha(s: &str) -> Result<(), ValidationError> {
     if s.is_empty() {
-        return Err(ValidationError::new("not_alpha", "Enter only letters."));
+        return Err(err::not_alpha());
     }
     if !s.chars().all(|c| c.is_ascii_alphabetic()) {
-        return Err(ValidationError::new("not_alpha", "Enter only letters."));
+        return Err(err::not_alpha());
     }
     Ok(())
 }
@@ -636,16 +689,10 @@ pub fn validate_creditcard_luhn(s: &str) -> Result<(), ValidationError> {
         .filter(|c| !c.is_whitespace() && *c != '-')
         .collect();
     if !cleaned.chars().all(|c| c.is_ascii_digit()) {
-        return Err(ValidationError::new(
-            "invalid_card_number",
-            "Enter a valid credit card number.",
-        ));
+        return Err(err::invalid_card_number());
     }
     if !(12..=19).contains(&cleaned.len()) {
-        return Err(ValidationError::new(
-            "invalid_card_number",
-            "Enter a valid credit card number.",
-        ));
+        return Err(err::invalid_card_number());
     }
     // Luhn: walk digits right-to-left. Every second digit (starting
     // at the second from the right) is doubled; if the doubled value
@@ -665,10 +712,7 @@ pub fn validate_creditcard_luhn(s: &str) -> Result<(), ValidationError> {
         double = !double;
     }
     if sum % 10 != 0 {
-        return Err(ValidationError::new(
-            "invalid_card_number",
-            "Enter a valid credit card number.",
-        ));
+        return Err(err::invalid_card_number());
     }
     Ok(())
 }
@@ -700,10 +744,7 @@ pub fn validate_isbn(s: &str) -> Result<(), ValidationError> {
     match cleaned.len() {
         10 => validate_isbn_10(&cleaned),
         13 => validate_isbn_13(&cleaned),
-        _ => Err(ValidationError::new(
-            "invalid_isbn",
-            "Enter a valid ISBN-10 or ISBN-13.",
-        )),
+        _ => Err(err::invalid_isbn()),
     }
 }
 
@@ -717,29 +758,20 @@ fn validate_isbn_10(s: &str) -> Result<(), ValidationError> {
         } else if let Some(d) = ch.to_digit(10) {
             d
         } else {
-            return Err(ValidationError::new(
-                "invalid_isbn",
-                "Enter a valid ISBN-10 or ISBN-13.",
-            ));
+            return Err(err::invalid_isbn());
         };
         // Weight = (i + 1) per the ISBN-10 spec.
         sum += digit * (u32::try_from(i).unwrap_or(0) + 1);
     }
     if sum % 11 != 0 {
-        return Err(ValidationError::new(
-            "invalid_isbn",
-            "Enter a valid ISBN-10 or ISBN-13.",
-        ));
+        return Err(err::invalid_isbn());
     }
     Ok(())
 }
 
 fn validate_isbn_13(s: &str) -> Result<(), ValidationError> {
     if !s.chars().all(|c| c.is_ascii_digit()) {
-        return Err(ValidationError::new(
-            "invalid_isbn",
-            "Enter a valid ISBN-10 or ISBN-13.",
-        ));
+        return Err(err::invalid_isbn());
     }
     let mut sum = 0u32;
     for (i, ch) in s.chars().enumerate() {
@@ -749,10 +781,7 @@ fn validate_isbn_13(s: &str) -> Result<(), ValidationError> {
         sum += d * weight;
     }
     if sum % 10 != 0 {
-        return Err(ValidationError::new(
-            "invalid_isbn",
-            "Enter a valid ISBN-10 or ISBN-13.",
-        ));
+        return Err(err::invalid_isbn());
     }
     Ok(())
 }
@@ -780,36 +809,21 @@ fn validate_isbn_13(s: &str) -> Result<(), ValidationError> {
 /// `ValidationError { code: "invalid_hostname", ... }`.
 pub fn validate_hostname(s: &str) -> Result<(), ValidationError> {
     if s.is_empty() || s.len() > 253 {
-        return Err(ValidationError::new(
-            "invalid_hostname",
-            "Enter a valid hostname.",
-        ));
+        return Err(err::invalid_hostname());
     }
     // Reject leading/trailing dot at the whole-name level.
     if s.starts_with('.') || s.ends_with('.') {
-        return Err(ValidationError::new(
-            "invalid_hostname",
-            "Enter a valid hostname.",
-        ));
+        return Err(err::invalid_hostname());
     }
     for label in s.split('.') {
         if label.is_empty() || label.len() > 63 {
-            return Err(ValidationError::new(
-                "invalid_hostname",
-                "Enter a valid hostname.",
-            ));
+            return Err(err::invalid_hostname());
         }
         if label.starts_with('-') || label.ends_with('-') {
-            return Err(ValidationError::new(
-                "invalid_hostname",
-                "Enter a valid hostname.",
-            ));
+            return Err(err::invalid_hostname());
         }
         if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
-            return Err(ValidationError::new(
-                "invalid_hostname",
-                "Enter a valid hostname.",
-            ));
+            return Err(err::invalid_hostname());
         }
     }
     Ok(())
@@ -841,7 +855,7 @@ pub fn validate_hostname(s: &str) -> Result<(), ValidationError> {
 pub fn validate_iban(s: &str) -> Result<(), ValidationError> {
     let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
     if !(5..=34).contains(&cleaned.len()) {
-        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+        return Err(err::invalid_iban());
     }
     let bytes = cleaned.as_bytes();
     // First 2 must be uppercase letters (country code), next 2 digits.
@@ -850,14 +864,14 @@ pub fn validate_iban(s: &str) -> Result<(), ValidationError> {
         || !bytes[2].is_ascii_digit()
         || !bytes[3].is_ascii_digit()
     {
-        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+        return Err(err::invalid_iban());
     }
     // Remaining chars must be uppercase alphanumeric.
     if !bytes[4..]
         .iter()
         .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
     {
-        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+        return Err(err::invalid_iban());
     }
     // Rearrange: move first 4 to end. Then convert letters → digits.
     let rearranged: String = cleaned[4..]
@@ -880,7 +894,7 @@ pub fn validate_iban(s: &str) -> Result<(), ValidationError> {
         remainder = (remainder * 10 + u64::from(d)) % 97;
     }
     if remainder != 1 {
-        return Err(ValidationError::new("invalid_iban", "Enter a valid IBAN."));
+        return Err(err::invalid_iban());
     }
     Ok(())
 }
@@ -903,32 +917,20 @@ pub fn validate_iban(s: &str) -> Result<(), ValidationError> {
 pub fn validate_mac_address(s: &str) -> Result<(), ValidationError> {
     // 6 pairs of hex digits + 5 separators = 17 chars exactly.
     if s.len() != 17 {
-        return Err(ValidationError::new(
-            "invalid_mac_address",
-            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
-        ));
+        return Err(err::invalid_mac_address());
     }
     // Detect the separator from position 2.
     let sep = s.as_bytes()[2] as char;
     if sep != ':' && sep != '-' {
-        return Err(ValidationError::new(
-            "invalid_mac_address",
-            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
-        ));
+        return Err(err::invalid_mac_address());
     }
     let parts: Vec<&str> = s.split(sep).collect();
     if parts.len() != 6 {
-        return Err(ValidationError::new(
-            "invalid_mac_address",
-            "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
-        ));
+        return Err(err::invalid_mac_address());
     }
     for part in parts {
         if part.len() != 2 || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(ValidationError::new(
-                "invalid_mac_address",
-                "Enter a valid MAC address (e.g. 00:1A:2B:3C:4D:5E).",
-            ));
+            return Err(err::invalid_mac_address());
         }
     }
     Ok(())
@@ -1022,25 +1024,14 @@ fn validate_base64_impl(s: &str, urlsafe: bool) -> Result<(), ValidationError> {
 pub fn validate_jwt_shape(s: &str) -> Result<(), ValidationError> {
     let parts: Vec<&str> = s.split('.').collect();
     if parts.len() != 3 {
-        return Err(ValidationError::new(
-            "invalid_jwt",
-            "Enter a valid JWT (header.payload.signature).",
-        ));
+        return Err(err::invalid_jwt());
     }
     for part in &parts {
         if part.is_empty() {
-            return Err(ValidationError::new(
-                "invalid_jwt",
-                "Enter a valid JWT (header.payload.signature).",
-            ));
+            return Err(err::invalid_jwt());
         }
         // Each part is unpadded URL-safe base64.
-        validate_base64_urlsafe(part).map_err(|_| {
-            ValidationError::new(
-                "invalid_jwt",
-                "Enter a valid JWT (header.payload.signature).",
-            )
-        })?;
+        validate_base64_urlsafe(part).map_err(|_| err::invalid_jwt())?;
     }
     Ok(())
 }
@@ -1554,14 +1545,11 @@ pub fn validate_step_value(n: f64, step: f64, offset: f64) -> Result<(), Validat
 /// `ValidationError { code: "invalid_integer", ... }`.
 pub fn validate_integer(s: &str) -> Result<(), ValidationError> {
     if s != s.trim() || s.is_empty() {
-        return Err(ValidationError::new(
-            "invalid_integer",
-            "Enter a valid integer.",
-        ));
+        return Err(err::invalid_integer());
     }
     s.parse::<i64>()
         .map(|_| ())
-        .map_err(|_| ValidationError::new("invalid_integer", "Enter a valid integer."))
+        .map_err(|_| err::invalid_integer())
 }
 
 /// Validate a decimal-number string: at most `max_digits` total
@@ -1585,7 +1573,7 @@ pub fn validate_decimal(
 ) -> Result<(), ValidationError> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return Err(ValidationError::new("invalid_decimal", "Enter a number."));
+        return Err(err::invalid_decimal());
     }
     let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
     let (int_part, frac_part) = match unsigned.split_once('.') {
@@ -1595,12 +1583,12 @@ pub fn validate_decimal(
     // Either side may be empty individually (".5" or "5."), but
     // not both (a bare "." or empty string).
     if int_part.is_empty() && frac_part.is_empty() {
-        return Err(ValidationError::new("invalid_decimal", "Enter a number."));
+        return Err(err::invalid_decimal());
     }
     if !int_part.chars().all(|c| c.is_ascii_digit())
         || !frac_part.chars().all(|c| c.is_ascii_digit())
     {
-        return Err(ValidationError::new("invalid_decimal", "Enter a number."));
+        return Err(err::invalid_decimal());
     }
     // Leading and trailing zeros hold no digit: "007.50" counts 2.
     let int_digits = int_part.trim_start_matches('0').len();
@@ -1686,10 +1674,7 @@ pub fn validate_ipv46_address(s: &str) -> Result<(), ValidationError> {
     if validate_ipv4_address(s).is_ok() || validate_ipv6_address(s).is_ok() {
         return Ok(());
     }
-    Err(ValidationError::new(
-        "invalid_ip_address",
-        "Enter a valid IPv4 or IPv6 address.",
-    ))
+    Err(err::invalid_ip_address())
 }
 
 /// Normalize an IPv6 address into the canonical RFC 5952 compressed
@@ -1738,10 +1723,7 @@ pub fn validate_ip_address(s: &str) -> Result<(), ValidationError> {
     if std::net::Ipv4Addr::from_str(s).is_ok() || std::net::Ipv6Addr::from_str(s).is_ok() {
         return Ok(());
     }
-    Err(ValidationError::new(
-        "invalid_ip_address",
-        "Enter a valid IPv4 or IPv6 address.",
-    ))
+    Err(err::invalid_ip_address())
 }
 
 /// Validate that `s` looks like a safe filesystem path string:
@@ -1814,10 +1796,7 @@ pub fn validate_email_list(s: &str) -> Result<(), ValidationError> {
     for part in s.split(',') {
         let entry = part.trim();
         if entry.is_empty() {
-            return Err(ValidationError::new(
-                "invalid_email",
-                "Enter a valid email address.",
-            ));
+            return Err(err::invalid_email());
         }
         validate_email(entry)?;
     }
@@ -1835,18 +1814,12 @@ pub fn validate_email_list(s: &str) -> Result<(), ValidationError> {
 /// `ValidationError { code: "invalid_comma_separated_integer_list", ... }`.
 pub fn validate_comma_separated_integer_list(s: &str) -> Result<(), ValidationError> {
     if s.trim().is_empty() {
-        return Err(ValidationError::new(
-            "invalid_comma_separated_integer_list",
-            "Enter only digits separated by commas.",
-        ));
+        return Err(err::invalid_comma_separated_integer_list());
     }
     for part in s.split(',') {
         let part = part.trim();
         if part.is_empty() || part.parse::<i64>().is_err() {
-            return Err(ValidationError::new(
-                "invalid_comma_separated_integer_list",
-                "Enter only digits separated by commas.",
-            ));
+            return Err(err::invalid_comma_separated_integer_list());
         }
     }
     Ok(())
@@ -1882,10 +1855,7 @@ pub fn validate_comma_separated_integer_list(s: &str) -> Result<(), ValidationEr
 /// negative value is found and `allow_negative` is false.
 pub fn int_list_validator(s: &str, sep: &str, allow_negative: bool) -> Result<(), ValidationError> {
     if s.trim().is_empty() {
-        return Err(ValidationError::new(
-            "invalid",
-            "Enter only digits separated by the configured separator.",
-        ));
+        return Err(err::separated_digits());
     }
     if sep.is_empty() {
         // Without a separator the function would split-by-empty into
@@ -1898,10 +1868,7 @@ pub fn int_list_validator(s: &str, sep: &str, allow_negative: bool) -> Result<()
     for part in s.split(sep) {
         let part = part.trim();
         if part.is_empty() {
-            return Err(ValidationError::new(
-                "invalid",
-                "Enter only digits separated by the configured separator.",
-            ));
+            return Err(err::separated_digits());
         }
         let parsed: Result<i64, _> = part.parse();
         match parsed {
@@ -1914,10 +1881,7 @@ pub fn int_list_validator(s: &str, sep: &str, allow_negative: bool) -> Result<()
                 }
             }
             Err(_) => {
-                return Err(ValidationError::new(
-                    "invalid",
-                    "Enter only digits separated by the configured separator.",
-                ));
+                return Err(err::separated_digits());
             }
         }
     }

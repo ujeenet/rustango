@@ -103,7 +103,7 @@ async fn router() -> axum::Router {
     ViewSet::for_model(Note::SCHEMA, &["id", "owner_id", "body"])
         .page_size(100)
         .filter_backend(OwnerFilter)
-        .router_pool("/notes", Pool::Sqlite(sq))
+        .router("/notes", Pool::Sqlite(sq))
 }
 
 /// A request carrying `uid` as the authenticated principal.
@@ -278,7 +278,7 @@ mod owned_by {
         ViewSet::for_model(Note::SCHEMA, &["id", "owner_id", "body"])
             .page_size(100)
             .filter_backend(backend)
-            .router_pool("/notes", Pool::Sqlite(sq))
+            .router("/notes", Pool::Sqlite(sq))
     }
 
     #[tokio::test]

@@ -73,7 +73,8 @@ fn framework_models() -> Vec<&'static ModelSchema> {
 }
 
 /// Create the given models' tables for the pool's dialect, from their
-/// `SCHEMA`. Same create → constraints → comments sequence as
+/// `SCHEMA`, then the auto-created M2M junctions between them. Same
+/// create → constraints → comments sequence as
 /// [`create_framework_tables`].
 ///
 /// # Errors
@@ -82,7 +83,8 @@ pub async fn create_tables(
     pool: &Pool,
     models: &[&'static ModelSchema],
 ) -> Result<(), MigrateError> {
-    emit_tables(pool, models).await
+    emit_tables(pool, models).await?;
+    create_junctions(pool, models).await
 }
 
 /// Create a single model's table (convenience over [`create_tables`]).
@@ -95,7 +97,8 @@ pub async fn create_tables_for<M: crate::core::Model>(pool: &Pool) -> Result<(),
 }
 
 /// Create the auto-created M2M junctions of `models` as migrations build
-/// them, FKs included. Pass both ends, and create their tables first.
+/// them, FKs included. Only junctions whose two ends are both in `models`
+/// are made; create their tables first.
 ///
 /// # Errors
 /// Any DDL failure ([`MigrateError`]).
@@ -107,7 +110,16 @@ pub async fn create_junctions(
     let junctions: Vec<crate::migrate::SchemaChange> =
         crate::migrate::detect_changes(&crate::migrate::SchemaSnapshot::default(), &snapshot)
             .into_iter()
-            .filter(|c| matches!(c, crate::migrate::SchemaChange::CreateM2MTable { .. }))
+            .filter(|c| match c {
+                crate::migrate::SchemaChange::CreateM2MTable {
+                    src_table,
+                    dst_table,
+                    ..
+                } => [src_table, dst_table]
+                    .iter()
+                    .all(|t| models.iter().any(|m| m.table == t.as_str())),
+                _ => false,
+            })
             .collect();
     crate::migrate::ensure::apply_changes_idempotent(pool, &snapshot, &junctions).await?;
     Ok(())
@@ -226,6 +238,43 @@ pub async fn migrate_framework(pool: &Pool) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// Migrate one schema-mode tenant, creating its schema and every framework
+/// tenant table, as `migrate-tenants` would; a tenant pool refuses a bare schema.
+///
+/// # Errors
+/// Anything [`crate::tenancy::migrate_one_tenant`] raises.
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub async fn migrate_schema_tenant(
+    pools: &crate::tenancy::TenantPools,
+    org: &crate::tenancy::Org,
+    registry_url: &str,
+) -> Result<(), crate::tenancy::TenancyError> {
+    let dir = tempfile::tempdir().map_err(|e| {
+        crate::tenancy::TenancyError::Validation(format!("no temp dir for migrations: {e}"))
+    })?;
+    crate::tenancy::migrate_one_tenant(pools, org, dir.path(), registry_url, None).await?;
+    Ok(())
+}
+
+/// [`migrate_schema_tenant`] for a bare schema, through an unsaved org named after it.
+///
+/// # Errors
+/// As [`migrate_schema_tenant`].
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub async fn migrate_schema(
+    pools: &crate::tenancy::TenantPools,
+    schema: &str,
+    registry_url: &str,
+) -> Result<(), crate::tenancy::TenancyError> {
+    let org = crate::tenancy::Org {
+        slug: schema.to_owned(),
+        storage_mode: crate::tenancy::StorageMode::Schema.as_str().to_owned(),
+        schema_name: Some(schema.to_owned()),
+        ..org()
+    };
+    migrate_schema_tenant(pools, &org, registry_url).await
+}
+
 /// Add the columns `M`'s table lacks, so a table created by a build
 /// with fewer features (an optional `email`, say) fits this one.
 ///
@@ -254,6 +303,51 @@ pub async fn add_missing_columns<M: crate::core::Model>(pool: &Pool) -> Result<(
 }
 
 // ======================================================= factories
+
+/// `request` with host `<slug>.localhost` when it has no host, path prefix
+/// or port: provisioning refuses a tenant no resolver routes.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn routed(
+    mut request: crate::tenancy::provision::ProvisionRequest,
+) -> crate::tenancy::provision::ProvisionRequest {
+    if request.host_pattern.is_none() && request.path_prefix.is_none() && request.port.is_none() {
+        request.host_pattern = Some(format!("{}.localhost", request.slug));
+    }
+    request
+}
+
+/// `opts` for `api::create_tenant` with `<slug>.localhost`, as [`routed`].
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn routed_opts(
+    slug: &str,
+    mut opts: crate::tenancy::manage::api::CreateTenantOpts,
+) -> crate::tenancy::manage::api::CreateTenantOpts {
+    if opts.host_pattern.is_none() && opts.path_prefix.is_none() && opts.port.is_none() {
+        opts.host_pattern = Some(format!("{slug}.localhost"));
+    }
+    opts
+}
+
+/// Tenancy verb argv; a `create-tenant <slug>` with no routing flag gains
+/// `--host-pattern <slug>.localhost`, as [`routed`] does for a request.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn routed_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().map(|a| a.as_ref().to_owned()).collect();
+    let routing = ["--host-pattern", "--path-prefix", "--port"];
+    if let [verb, slug, rest @ ..] = out.as_slice() {
+        if verb == "create-tenant"
+            && !slug.starts_with('-')
+            && !rest.iter().any(|a| routing.contains(&a.as_str()))
+        {
+            let host = format!("{slug}.localhost");
+            out.extend(["--host-pattern".to_owned(), host]);
+        }
+    }
+    out
+}
 
 /// A fully-populated [`Org`](crate::tenancy::Org) with valid defaults,
 /// for struct-update construction: `Org { slug: "x".into(), ..testkit::org() }`.
@@ -471,10 +565,10 @@ pub mod sso_check {
     pub use crate::tenancy::sso::SharedSsoProvider;
 }
 
-/// The `SsoLink` re-link admin action, reachable from integration tests.
+/// The `SsoLink` unlink and re-link admin actions, reachable from integration tests.
 #[cfg(all(feature = "sso", feature = "tenancy"))]
 pub mod sso_admin {
-    pub use crate::sso::policy::admin::relink;
+    pub use crate::sso::policy::admin::{relink, unlink};
 }
 
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]
@@ -509,17 +603,17 @@ mod tests {
             slug: "acme".into(),
             ..org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
         let mut admin = crate::admin::AdminUser {
             username: "root".into(),
             ..admin_user()
         };
-        admin.insert_pool(&pool).await.expect("insert admin");
+        admin.insert(&pool).await.expect("insert admin");
         let mut user = crate::tenancy::User {
             username: "alice".into(),
             ..user()
         };
-        user.insert_pool(&pool).await.expect("insert user");
+        user.insert(&pool).await.expect("insert user");
 
         // All three inserts succeeding proves the tables exist with the
         // full column set (from SCHEMA) and the factories are

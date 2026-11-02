@@ -196,6 +196,9 @@ pub struct FieldSchema {
     pub validators: &'static [&'static str],
     /// The cast of a `Cast<C>` field; `None` for any other field.
     pub cast: Option<FieldCast>,
+    /// `#[rustango(secret)]` is `Some(true)`, `secret = false` is `Some(false)`
+    /// (overrides the name rules); `None` leaves it to [`Self::is_credential`]'s names.
+    pub secret: Option<bool>,
 }
 
 /// How a `Cast<C>` field stores its value.
@@ -316,12 +319,6 @@ pub enum FieldCast {
 #[cfg(doctest)]
 pub struct KeyedStringsNeedMaxLength;
 
-/// Credential columns: secret wherever they are rendered.
-#[cfg(any(feature = "admin", feature = "template_views"))]
-pub(crate) fn is_credential_column(name: &str) -> bool {
-    ["password_hash", "password", "database_url"].contains(&name)
-}
-
 impl FieldSchema {
     /// A plain `NOT NULL` column; every other field is off or empty,
     /// except `editable`. Set the rest by assigning fields:
@@ -362,6 +359,7 @@ impl FieldSchema {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }
     }
 
@@ -371,6 +369,17 @@ impl FieldSchema {
     #[must_use]
     pub fn display_label(&self) -> &'static str {
         self.verbose_name.unwrap_or(self.name)
+    }
+
+    /// `true` for a credential: a sealed cast, `#[rustango(secret)]`, or, unless
+    /// `secret = false`, a credential name on the field or its column.
+    #[must_use]
+    pub fn is_credential(&self) -> bool {
+        matches!(self.cast, Some(FieldCast::Sealed))
+            || self.secret.unwrap_or_else(|| {
+                crate::secret_keys::is_credential_column_name(self.name)
+                    || crate::secret_keys::is_credential_column_name(self.column)
+            })
     }
 
     /// `true` for a server-assigned timestamp: an
@@ -980,7 +989,7 @@ pub struct ModelSchema {
     ///
     /// `ViewSet` and the template views apply them too. The admin does
     /// not, so staff can reach every row; narrow it with
-    /// `register_admin_queryset!`.
+    /// `register_queryset_scope!`.
     pub global_scopes: &'static [GlobalScope],
 }
 
@@ -1943,6 +1952,7 @@ pub struct FieldSchemaParts {
     pub fk_on_delete: Option<OnDeleteAction>,
     pub validators: &'static [&'static str],
     pub cast: Option<FieldCast>,
+    pub secret: Option<bool>,
 }
 
 impl FieldSchema {
@@ -1975,6 +1985,7 @@ impl FieldSchema {
             fk_on_delete,
             validators,
             cast,
+            secret,
         } = parts;
         Self {
             name,
@@ -2001,6 +2012,7 @@ impl FieldSchema {
             fk_on_delete,
             validators,
             cast,
+            secret,
         }
     }
 }

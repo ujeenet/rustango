@@ -110,8 +110,57 @@ async fn insert_note(pool: &Pool) -> Note {
         title: "hello".into(),
         deleted_at: None,
     };
-    note.insert_pool(pool).await.expect("insert");
+    note.insert(pool).await.expect("insert");
     note
+}
+
+/// An audited model refuses every `_on` write, on every executor, and writes nothing.
+async fn audited_on_writes_are_refused(pool: &Pool) {
+    use rustango::sql::ExecError;
+    let refused = |r: Result<u64, ExecError>| {
+        assert!(
+            matches!(r, Err(ExecError::AuditUnsupported { .. })),
+            "{r:?}"
+        );
+    };
+    let mut note = insert_note(pool).await;
+    let before = audit_rows(pool).await;
+    refused(note.save_on(pool).await);
+    let mut conn = pool.acquire().await.expect("acquire");
+    refused(note.delete_on(&mut conn).await);
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+    refused(note.soft_delete_on(&mut tx).await);
+    let mut fresh = Note {
+        id: Auto::default(),
+        title: "never".into(),
+        deleted_at: None,
+    };
+    refused(fresh.insert_on(&mut tx).await.map(|()| 0));
+    tx.rollback().await.expect("rollback");
+    assert_eq!(audit_rows(pool).await, before);
+    assert_eq!(Note::objects().count(pool).await.expect("count"), 1);
+}
+
+/// `insert_tx` / `save_tx` / `delete_tx` write their audit rows in the tx.
+async fn tx_writes_are_audited(pool: &Pool) {
+    let mut tx = rustango::sql::transaction_pool(pool).await.expect("begin");
+    let mut note = Note {
+        id: Auto::default(),
+        title: "in-tx".into(),
+        deleted_at: None,
+    };
+    note.insert_tx(&mut tx).await.expect("insert_tx");
+    note.title = "changed".into();
+    note.save_tx(&mut tx).await.expect("save_tx");
+    note.delete_tx(&mut tx).await.expect("delete_tx");
+    tx.commit().await.expect("commit");
+    let pk = note.id.get().expect("pk").to_string();
+    let ops: Vec<String> = entries(pool, &pk)
+        .await
+        .into_iter()
+        .map(|e| e.operation)
+        .collect();
+    assert_eq!(ops, ["delete", "update", "create"]);
 }
 
 async fn insert_records_the_assigned_pk(pool: &Pool) {
@@ -149,7 +198,7 @@ async fn soft_delete_and_restore_each_write_one_row(pool: &Pool) {
 async fn delete_writes_one_row(pool: &Pool) {
     let note = insert_note(pool).await;
     let pk = note.id.get().expect("pk assigned").to_string();
-    assert_eq!(note.delete_pool(pool).await.unwrap(), 1);
+    assert_eq!(note.delete(pool).await.unwrap(), 1);
     assert_eq!(audit_rows(pool).await, 2);
     let rows = entries(pool, &pk).await;
     assert_eq!(rows[0].operation, "delete");
@@ -158,9 +207,9 @@ async fn delete_writes_one_row(pool: &Pool) {
 
 async fn no_row_changed_writes_no_audit_row(pool: &Pool) {
     let note = insert_note(pool).await;
-    assert_eq!(note.delete_pool(pool).await.unwrap(), 1);
+    assert_eq!(note.delete(pool).await.unwrap(), 1);
     assert_eq!(audit_rows(pool).await, 2);
-    assert_eq!(note.delete_pool(pool).await.unwrap(), 0);
+    assert_eq!(note.delete(pool).await.unwrap(), 0);
     assert_eq!(note.soft_delete(pool).await.unwrap(), 0);
     assert_eq!(note.restore(pool).await.unwrap(), 0);
     assert_eq!(audit_rows(pool).await, 2);
@@ -168,14 +217,14 @@ async fn no_row_changed_writes_no_audit_row(pool: &Pool) {
 
 async fn noop_save_writes_no_audit_row(pool: &Pool) {
     let mut note = insert_note(pool).await;
-    note.save_pool(pool).await.expect("no-op save");
+    note.save(pool).await.expect("no-op save");
     assert_eq!(
         audit_rows(pool).await,
         1,
         "a no-op save wrote an update row"
     );
     note.title = "changed".into();
-    note.save_pool(pool).await.expect("save");
+    note.save(pool).await.expect("save");
     assert_eq!(audit_rows(pool).await, 2);
 }
 
@@ -204,7 +253,7 @@ async fn failed_pre_read_fails_the_save(pool: &Pool) {
         title: "old".into(),
         created_at: Auto::default(),
     };
-    stamp.insert_pool(pool).await.expect("insert");
+    stamp.insert(pool).await.expect("insert");
     let d = pool.dialect();
     let sql = format!(
         "ALTER TABLE {} DROP COLUMN {}",
@@ -215,7 +264,7 @@ async fn failed_pre_read_fails_the_save(pool: &Pool) {
         .await
         .expect("drop column");
     stamp.title = "new".into();
-    assert!(stamp.save_pool(pool).await.is_err(), "save ran unaudited");
+    assert!(stamp.save(pool).await.is_err(), "save ran unaudited");
     let updated = Stamp::objects()
         .filter("title", "new")
         .count(pool)
@@ -323,7 +372,7 @@ async fn save_waits_for_a_concurrent_writer(pool: &Pool) {
         let pool = pool.clone();
         tokio::spawn(async move {
             note.title = "saved".into();
-            note.save_pool(&pool).await
+            note.save(&pool).await
         })
     };
     wait_until_blocked(pool, 1).await;
@@ -362,7 +411,7 @@ async fn pg_macro_saves_queue_behind_each_other(pool: &Pool) {
                 let (pg, mut note) = (pg.clone(), note.clone());
                 tokio::spawn(async move {
                     note.title = title.into();
-                    note.save(&pg).await
+                    note.save(&pg.clone().into()).await
                 })
             })
             .collect();
@@ -397,14 +446,14 @@ async fn pg_macro_save(pool: &Pool) {
         return;
     };
     let mut note = insert_note(pool).await;
-    note.save(pg).await.expect("no-op save");
+    note.save(&pg.clone().into()).await.expect("no-op save");
     assert_eq!(
         audit_rows(pool).await,
         1,
         "a no-op save wrote an update row"
     );
     note.title = "changed".into();
-    note.save(pg).await.expect("save");
+    note.save(&pg.clone().into()).await.expect("save");
     assert_eq!(audit_rows(pool).await, 2);
 
     let mut stamp = Stamp {
@@ -412,7 +461,7 @@ async fn pg_macro_save(pool: &Pool) {
         title: "old".into(),
         created_at: Auto::default(),
     };
-    stamp.insert_pool(pool).await.expect("insert");
+    stamp.insert(pool).await.expect("insert");
     rustango::sql::raw_execute_pool(
         pool,
         r#"ALTER TABLE "audit1907_stamp" DROP COLUMN "created_at""#,
@@ -421,7 +470,10 @@ async fn pg_macro_save(pool: &Pool) {
     .await
     .expect("drop column");
     stamp.title = "new".into();
-    assert!(stamp.save(pg).await.is_err(), "save ran unaudited");
+    assert!(
+        stamp.save(&pg.clone().into()).await.is_err(),
+        "save ran unaudited"
+    );
     let updated = Stamp::objects()
         .filter("title", "new")
         .count(pool)
@@ -454,18 +506,24 @@ async fn pg_macro_save_retries_after_failed_commit(pool: &Pool) {
             title: "hello".into(),
             deleted_at: None,
         };
-        assert!(note.save(pg).await.is_err(), "the COMMIT must fail");
+        assert!(
+            note.save(&pg.clone().into()).await.is_err(),
+            "the COMMIT must fail"
+        );
         assert!(
             note.id.get().is_none(),
             "pk kept after a rolled-back insert"
         );
-        assert!(note.insert(pg).await.is_err(), "the COMMIT must fail");
+        assert!(
+            note.insert(&pg.clone().into()).await.is_err(),
+            "the COMMIT must fail"
+        );
         assert!(
             note.id.get().is_none(),
             "insert kept the pk of a rolled-back row"
         );
         note.title = "retried".into();
-        assert_eq!(note.save(pg).await.expect("retry"), 1);
+        assert_eq!(note.save(&pg.clone().into()).await.expect("retry"), 1);
         let written = Note::objects()
             .filter("title", "retried")
             .count(pool)
@@ -503,8 +561,8 @@ async fn pg_macro_atomic(pool: &Pool) {
         title: "unaudited".into(),
         deleted_at: None,
     };
-    let inserted = note.insert(pg).await;
-    let deleted = kept.delete(pg).await;
+    let inserted = note.insert(&pg.clone().into()).await;
+    let deleted = kept.delete(&pg.clone().into()).await;
     ddl(r#"ALTER TABLE "rustango_audit_log" DROP CONSTRAINT "audit_atomic_refuse""#)
         .await
         .unwrap();
@@ -571,7 +629,7 @@ mod ctx_jobs {
                 title: self.title.clone(),
                 deleted_at: None,
             };
-            note.insert_pool(&pool)
+            note.insert(&pool)
                 .await
                 .map_err(|e| JobError::Fatal(e.to_string()))
         }
@@ -741,7 +799,7 @@ async fn scheduled_task_audits_as_its_registration(pool: &Pool) {
                             title: "by-cron".into(),
                             deleted_at: None,
                         };
-                        note.insert_pool(&p).await.expect("insert");
+                        note.insert(&p).await.expect("insert");
                     }
                 },
             );
@@ -772,13 +830,13 @@ async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
         id: 1,
         label: "a".into(),
     };
-    shelf.insert_pool(pool).await.expect("shelf");
+    shelf.insert(pool).await.expect("shelf");
     Book {
         id: 1,
         shelf: rustango::sql::ForeignKey::unloaded(1),
         title: "b".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("book");
     let update = Shelf::objects()
@@ -793,7 +851,7 @@ async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
         .unwrap();
     let deleter = {
         let pool = pool.clone();
-        tokio::spawn(async move { shelf.delete_pool(&pool).await })
+        tokio::spawn(async move { shelf.delete(&pool).await })
     };
     wait_until_blocked_on(pool, Shelf::SCHEMA.table, 1).await;
     writer.commit().await.unwrap();
@@ -808,6 +866,8 @@ async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        audited_on_writes_are_refused,
+        tx_writes_are_audited,
         insert_records_the_assigned_pk,
         soft_delete_and_restore_each_write_one_row,
         delete_writes_one_row,

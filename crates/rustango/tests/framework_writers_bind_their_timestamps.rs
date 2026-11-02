@@ -100,7 +100,7 @@ async fn audit_emit_one_binds_occurred_at() {
     let pool = Pool::connect("sqlite::memory:").await.expect("sqlite");
     legacy_audit_table(&pool).await;
 
-    rustango::audit::emit_one_pool(&pool, &entry("1"))
+    rustango::audit::emit_one(&pool, &entry("1"))
         .await
         .expect("emit");
 
@@ -117,7 +117,7 @@ async fn audit_emit_many_binds_occurred_at() {
     legacy_audit_table(&pool).await;
 
     let entries: Vec<_> = (1..=3).map(|i| entry(&i.to_string())).collect();
-    rustango::audit::emit_many_pool(&pool, &entries)
+    rustango::audit::emit_many(&pool, &entries)
         .await
         .expect("emit batch");
 
@@ -167,7 +167,7 @@ async fn keeping_the_last_entry_keeps_the_newest_one() {
     .await
     .expect("seed the swept row");
 
-    rustango::audit::emit_one_pool(&pool, &entry("1"))
+    rustango::audit::emit_one(&pool, &entry("1"))
         .await
         .expect("emit");
 
@@ -233,6 +233,7 @@ mod jobs {
         .await;
 
         let queue = PgJobQueue::with_workers_pool(pool.clone(), 0);
+        queue.register::<Noop>().await;
         queue.dispatch(&Noop).await.expect("dispatch");
 
         let run_at = column(&pool, "SELECT run_at FROM rustango_jobs").await;

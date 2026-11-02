@@ -69,6 +69,7 @@ pub use async_trait::async_trait;
 // ------------------------------------------------------------------ Errors
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StorageError {
     #[error("file not found: {0}")]
     NotFound(String),

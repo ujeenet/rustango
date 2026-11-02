@@ -97,7 +97,7 @@ async fn typed_setter_assigns_ct_and_pk_for_target_model() {
         id: Auto::Unset,
         title: "Original post".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     // Build a comment and attach it to the Post via the generated setter.
@@ -130,7 +130,7 @@ async fn typed_setter_assigns_ct_and_pk_for_target_model() {
     );
 
     // Persist + re-load and the columns survive the round-trip.
-    comment.save_pool(&pool).await.unwrap();
+    comment.save(&pool).await.unwrap();
     let comment_pk = *comment.id.get().unwrap();
     assert!(comment_pk > 0, "comment should have been INSERTed");
 }
@@ -143,7 +143,7 @@ async fn typed_accessor_resolves_to_target_row_as_json() {
         id: Auto::Unset,
         title: "Post for accessor test".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     let mut comment = Comment {
@@ -156,7 +156,7 @@ async fn typed_accessor_resolves_to_target_row_as_json() {
         .set_content_object_for::<Post>(&pool, post_pk)
         .await
         .unwrap();
-    comment.save_pool(&pool).await.unwrap();
+    comment.save(&pool).await.unwrap();
 
     // The emitted accessor reads self.content_type_id + self.object_pk
     // and resolves to the target row as a JSON map.
@@ -182,14 +182,14 @@ async fn typed_accessor_dispatches_across_target_models() {
         id: Auto::Unset,
         title: "Post body".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     let mut article = Article {
         id: Auto::Unset,
         title: "Article body".into(),
     };
-    article.save_pool(&pool).await.unwrap();
+    article.save(&pool).await.unwrap();
     let article_pk = *article.id.get().unwrap();
 
     // Comment 1 → Post
@@ -202,7 +202,7 @@ async fn typed_accessor_dispatches_across_target_models() {
     c1.set_content_object_for::<Post>(&pool, post_pk)
         .await
         .unwrap();
-    c1.save_pool(&pool).await.unwrap();
+    c1.save(&pool).await.unwrap();
 
     // Comment 2 → Article
     let mut c2 = Comment {
@@ -214,7 +214,7 @@ async fn typed_accessor_dispatches_across_target_models() {
     c2.set_content_object_for::<Article>(&pool, article_pk)
         .await
         .unwrap();
-    c2.save_pool(&pool).await.unwrap();
+    c2.save(&pool).await.unwrap();
 
     // Each accessor call resolves to the right target type's row.
     let j1 = c1.content_object_pool(&pool).await.unwrap().unwrap();
@@ -245,7 +245,7 @@ async fn typed_accessor_returns_none_for_stale_target() {
         object_pk: 999_999, // no such Post
         body: "orphan".into(),
     };
-    comment.save_pool(&pool).await.unwrap();
+    comment.save(&pool).await.unwrap();
 
     let resolved = comment
         .content_object_pool(&pool)

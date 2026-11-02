@@ -127,7 +127,7 @@ atajo para `GET`.
   uno y luego envía los campos. La cookie de sesión queda en el jar.
 - `client.logout(Some(path))` envía un POST a la ruta de cierre de sesión;
   `logout(None)` solo vacía el jar.
-- Con `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)` y
+- Con `tenancy`, `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)` y
   `force_login_operator(&secret, &operator, ttl_secs)` ponen una cookie de
   sesión en el jar sin el formulario. La fila debe estar guardada.
 
@@ -227,9 +227,9 @@ ejecutado. Conviene saberlo antes de leer un resultado en verde como cobertura.
 
 | Variable | Suites | Qué necesitan |
 |---|---:|---|
-| *(ninguna)* | 228 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
-| `DATABASE_URL` | 183 | Un servidor PostgreSQL accesible. |
-| `MYSQL_TEST_URL` | 115 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
+| *(ninguna)* | 229 | Nada — una SQLite en memoria o en archivo temporal. Se ejecutan siempre. |
+| `DATABASE_URL` | 186 | Un servidor PostgreSQL accesible. |
+| `MYSQL_TEST_URL` | 117 | Un servidor MySQL 8+ accesible. **No** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis accesible. |
 
 Una suite que lee dos variables se cuenta en ambas, así que la columna no suma el

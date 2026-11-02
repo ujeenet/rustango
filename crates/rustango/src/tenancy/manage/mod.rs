@@ -264,6 +264,8 @@ async fn dispatch_with<W: Write + Send, DB: sqlx::Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    #[cfg(feature = "postgres")]
+    crate::tenancy::refuse_registry_shadow(pools).await?;
     let cmd = args.first().map_or("", String::as_str);
 
     match cmd {
@@ -1015,6 +1017,10 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     )?;
     writeln!(
         w,
+        "  audit-cleanup                Neither flag: delete older than [audit] retention_days."
+    )?;
+    writeln!(
+        w,
         "                [--tenant <s>]  Scope to one tenant instead of all."
     )?;
     #[cfg(feature = "sso")]
@@ -1097,14 +1103,16 @@ where
     if facts.provisioning {
         secret_key_audit(crate::aead::key_status(), &mut out);
     }
-    role_schema_audit(&pools.registry_pool(), &mut out).await;
+    let timeout = pools.pool_config().database_pool_acquire_timeout;
+    role_schema_audit(&pools.registry_pool(), timeout, &mut out).await;
     out
 }
 
 /// A tenant schema named like a role leads that role's default
-/// `search_path`; new ones are refused, existing ones are only named.
+/// `search_path`; the tenant's pools refuse to open, so name it here too.
 async fn role_schema_audit(
     registry: &crate::sql::Pool,
+    timeout: std::time::Duration,
     out: &mut rustango::migrate::manage::DeployAuditFindings,
 ) {
     #[cfg(feature = "postgres")]
@@ -1122,28 +1130,34 @@ async fn role_schema_audit(
         {
             Ok(orgs) => orgs,
             Err(e) => {
-                out.warnings
+                out.errors
                     .push(format!("could not list schema-mode tenants: {e}"));
                 return;
             }
         };
+        // The same checks the tenant's pools run, so this lists exactly those that refuse.
         for org in orgs {
-            let schema = org.effective_schema();
-            if crate::tenancy::provision::is_role_name(pg, schema)
-                .await
-                .unwrap_or(false)
-            {
-                out.warnings.push(format!(
-                    "tenant `{}` lives in schema `{schema}`, the name of a database role: that \
-                     role's sessions see this tenant's tables before `public`; move it to another \
-                     schema (a database move and back) or rename the role",
+            let checked = crate::tenancy::pools::TenantSearchPath::open(
+                pg,
+                org.effective_schema(),
+                crate::tenancy::pools::FallThrough::Refuse,
+                timeout,
+            )
+            .await;
+            match checked {
+                Ok(_) => {}
+                Err(crate::tenancy::TenancyError::Validation(why)) => out.errors.push(format!(
+                    "tenant `{}`: its pools refuse to open: {why}",
                     org.slug
-                ));
+                )),
+                Err(e) => out
+                    .errors
+                    .push(format!("could not check tenant `{}`: {e}", org.slug)),
             }
         }
     }
     #[cfg(not(feature = "postgres"))]
-    let _ = (registry, out);
+    let _ = (registry, timeout, out);
 }
 
 /// Provisioning seals server passwords and tenant URLs with this key.

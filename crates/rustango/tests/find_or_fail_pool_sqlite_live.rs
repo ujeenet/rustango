@@ -39,7 +39,7 @@ async fn find_or_fail_returns_ok_for_existing_pk() {
         id: Auto::default(),
         title: "first".into(),
     };
-    p1.save_pool(&pool).await.unwrap();
+    p1.save(&pool).await.unwrap();
     let pk = p1.id.get().copied().unwrap();
 
     let row = Post::find_or_fail(pk, &pool).await.unwrap();

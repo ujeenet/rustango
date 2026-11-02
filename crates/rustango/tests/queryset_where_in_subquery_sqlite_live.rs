@@ -59,13 +59,13 @@ async fn seed(pool: &Pool) {
         id: Auto::default(),
         is_public: true,
     };
-    pub_cat.save_pool(pool).await.unwrap();
+    pub_cat.save(pool).await.unwrap();
     let pub_id = *pub_cat.id.get().unwrap();
     let mut priv_cat = Category {
         id: Auto::default(),
         is_public: false,
     };
-    priv_cat.save_pool(pool).await.unwrap();
+    priv_cat.save(pool).await.unwrap();
     let priv_id = *priv_cat.id.get().unwrap();
     for (cat_id, title) in [
         (pub_id, "alpha"),
@@ -78,7 +78,7 @@ async fn seed(pool: &Pool) {
             category_id: cat_id,
             title: title.into(),
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

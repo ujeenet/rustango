@@ -78,7 +78,7 @@ async fn seed(pool: &Pool) {
             title: title.into(),
             deleted_at: deleted,
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 
@@ -151,12 +151,12 @@ async fn active_is_noop_on_model_without_soft_delete_column() {
         id: Auto::default(),
         label: "a".into(),
     };
-    p1.save_pool(&pool).await.unwrap();
+    p1.save(&pool).await.unwrap();
     let mut p2 = Plain {
         id: Auto::default(),
         label: "b".into(),
     };
-    p2.save_pool(&pool).await.unwrap();
+    p2.save(&pool).await.unwrap();
 
     let rows: Vec<Plain> = QuerySet::<Plain>::default()
         .active()

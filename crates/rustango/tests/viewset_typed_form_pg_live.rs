@@ -52,7 +52,7 @@ async fn app() -> Option<axum::Router> {
     Some(
         rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "tags", "attrs", "blob"])
             .serializer::<PostSerializer>()
-            .router_pool("/posts", pool),
+            .router("/posts", pool),
     )
 }
 

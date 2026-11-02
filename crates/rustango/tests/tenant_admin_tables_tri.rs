@@ -181,7 +181,7 @@ async fn database_mode_tenant_admin(backend: Backend) {
         database_url: Some(tenant_url),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
     let tenant = match &registry {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
@@ -411,7 +411,7 @@ async fn schema_mode_tenant_admin() {
         database_url: None,
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
     let pg = registry.as_postgres().expect("a Postgres pool");
     let pools = rustango::tenancy::TenantPools::new(pg.clone());
     let report = rustango::tenancy::migrate_tenants(&pools, &dir, &registry_url)
@@ -467,7 +467,7 @@ async fn schema_mode_passkeys_stay_per_tenant() {
             database_url: None,
             ..rustango::testkit::org()
         };
-        org.insert_pool(&registry).await.unwrap();
+        org.insert(&registry).await.unwrap();
         orgs.push(org);
     }
     let pools = rustango::tenancy::TenantPools::new(registry.as_postgres().unwrap().clone());

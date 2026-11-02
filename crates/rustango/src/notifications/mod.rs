@@ -80,6 +80,7 @@ pub mod slack;
 use std::time::Duration;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum NotificationError {
     #[error("mail channel failed: {0}")]
     Mail(String),
@@ -173,9 +174,7 @@ pub type BroadcastFn = Arc<
 #[derive(Default, Clone)]
 pub struct NotificationContext {
     mailer: Option<BoxedMailer>,
-    #[cfg(feature = "postgres")]
-    database_pool: Option<crate::sql::sqlx::PgPool>,
-    #[cfg(feature = "postgres")]
+    database_pool: Option<crate::sql::Pool>,
     database_table: Option<String>,
     broadcast: Option<BroadcastFn>,
 }
@@ -196,15 +195,14 @@ impl NotificationContext {
     /// `(notifiable_id BIGINT, type TEXT, data JSONB, created_at TIMESTAMPTZ DEFAULT NOW())`.
     /// Create the table separately via your migrations.
     ///
-    /// Requires the `postgres` feature.
-    #[cfg(feature = "postgres")]
+    /// Works on every backend.
     #[must_use]
     pub fn with_database(
         mut self,
-        pool: crate::sql::sqlx::PgPool,
+        pool: impl Into<crate::sql::Pool>,
         table: impl Into<String>,
     ) -> Self {
-        self.database_pool = Some(pool);
+        self.database_pool = Some(pool.into());
         self.database_table = Some(table.into());
         self
     }
@@ -294,8 +292,6 @@ pub async fn notify<N: Notifiable, T: Notification<N>>(
         };
     }
 
-    // Database (postgres-only for now — see NotificationContext docs).
-    #[cfg(feature = "postgres")]
     if let Some(payload) = &dispatch.database {
         result.database = match (
             &ctx.database_pool,
@@ -319,12 +315,6 @@ pub async fn notify<N: Notifiable, T: Notification<N>>(
             (_, _, None) => ChannelOutcome::Skipped, // recipient opted out via notification_id
         };
     }
-    #[cfg(not(feature = "postgres"))]
-    if dispatch.database.is_some() {
-        result.database =
-            ChannelOutcome::Failed("database channel requires the `postgres` feature".into());
-    }
-
     // Log
     if let Some(line) = &dispatch.log {
         tracing::info!(notification = %line, "notifications");
@@ -359,29 +349,38 @@ pub async fn notify_many<N: Notifiable, T: Notification<N>>(
     out
 }
 
-#[cfg(feature = "postgres")]
 async fn insert_database_notification(
-    pool: &crate::sql::sqlx::PgPool,
+    pool: &crate::sql::Pool,
     table: &str,
     notifiable_id: i64,
     kind: &str,
     payload: &serde_json::Value,
 ) -> Result<(), String> {
+    use crate::core::SqlValue;
     validate_table_name(table)?;
-    let sql =
-        format!(r#"INSERT INTO "{table}" ("notifiable_id", "type", "data") VALUES ($1, $2, $3)"#,);
-    crate::sql::sqlx::query(&sql)
-        .bind(notifiable_id)
-        .bind(kind)
-        .bind(payload)
-        .execute(pool)
+    let d = pool.dialect();
+    let sql = format!(
+        "INSERT INTO {} ({}, {}, {}) VALUES ({}, {}, {})",
+        d.quote_ident(table),
+        d.quote_ident("notifiable_id"),
+        d.quote_ident("type"),
+        d.quote_ident("data"),
+        d.placeholder(1),
+        d.placeholder(2),
+        d.placeholder(3),
+    );
+    let params = vec![
+        SqlValue::I64(notifiable_id),
+        SqlValue::String(kind.to_owned()),
+        SqlValue::Json(payload.clone()),
+    ];
+    crate::sql::raw_execute_pool(pool, &sql, params)
         .await
         .map_err(|e| e.to_string())
-        .map(|_| ())
+        .map(drop)
 }
 
 /// Reject table names with characters that could break the quoted form.
-#[cfg(feature = "postgres")]
 fn validate_table_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("table name is empty".into());
@@ -593,6 +592,13 @@ mod tests {
         struct Gated(InMemoryCache, tokio::sync::Barrier);
         #[async_trait::async_trait]
         impl Cache for Gated {
+            async fn touch(
+                &self,
+                _: &str,
+                _: Option<std::time::Duration>,
+            ) -> Result<bool, crate::cache::CacheError> {
+                Ok(false)
+            }
             async fn get(&self, k: &str) -> Result<Option<String>, CacheError> {
                 self.0.get(k).await
             }

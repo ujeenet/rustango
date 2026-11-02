@@ -38,7 +38,7 @@ async fn in_random_order_returns_every_row() {
             id: Auto::default(),
             n: i,
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     let rows = Post::objects()
         .in_random_order()
@@ -59,7 +59,7 @@ async fn in_random_order_with_take_caps_result() {
             id: Auto::default(),
             n: i,
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     let rows = Post::objects()
         .in_random_order()

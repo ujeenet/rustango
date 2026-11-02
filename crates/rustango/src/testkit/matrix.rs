@@ -3,9 +3,9 @@
 //!
 //! ## Why this exists
 //!
-//! The integration suite is shaped by dialect rather than by feature
-//! (#1461). Of 205 `*_sqlite_live.rs` files, 17 stems have a sibling
-//! file for another backend and **187 have no MySQL or PG counterpart at
+//! The integration suite is shaped by dialect rather than by feature.
+//! Of 206 `*_sqlite_live.rs` files, 17 stems have a sibling
+//! file for another backend and **188 have no MySQL or PG counterpart at
 //! all** — not because those features are SQLite-only, but because
 //! writing the second and third copy by hand costs more than it returns.
 //! The `orm_*` scenario files already solved this for eight features;
@@ -958,9 +958,7 @@ mod tests {
             id: crate::sql::Auto::Unset,
             label: "hello".into(),
         };
-        row.save_pool(&pool)
-            .await
-            .expect("insert into emitted table");
+        row.save(&pool).await.expect("insert into emitted table");
 
         let found: Vec<Row> = Row::objects().fetch(&pool).await.expect("fetch");
         assert_eq!(found.len(), 1, "the row written should be the row read");

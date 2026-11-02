@@ -213,10 +213,10 @@ async fn content_types_still_take_auto_ids(pool: &rustango::sql::Pool) {
         model_name: "probe".into(),
         table: "rmg_probe".into(),
     };
-    ct.insert_pool(pool)
+    ct.insert(pool)
         .await
         .expect("a content type with an auto id");
-    ct.delete_pool(pool).await.expect("drop the probe row");
+    ct.delete(pool).await.expect("drop the probe row");
 }
 
 /// Seed statements shared across dialects. `reserved_table` is the
@@ -257,7 +257,7 @@ async fn seed_content_types(pool: &rustango::sql::Pool) -> (i64, i64) {
             model_name: model.into(),
             table: table.into(),
         };
-        ct.insert_pool(pool).await.expect("content type");
+        ct.insert(pool).await.expect("content type");
         ids.push(*ct.id.get().expect("ct id"));
     }
     (ids[0], ids[1])

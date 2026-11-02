@@ -53,7 +53,7 @@ pub const SSO_FLOW_COOKIE: &str = "rustango_admin_sso_flow";
 /// One surface's flow cookie at one cookie `Path`. A host-only cookie with
 /// `Path=/` over HTTPS takes the `__Host-` prefix, so a sibling subdomain
 /// cannot plant or shadow it; a prefix tenant (`Path=/acme`) cannot.
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FlowCookie<'a> {
     name: &'static str,
@@ -61,7 +61,7 @@ pub(crate) struct FlowCookie<'a> {
     secure: bool,
 }
 
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 impl<'a> FlowCookie<'a> {
     pub(crate) fn new(name: &'static str, path: &'a str, secure: bool) -> Self {
         Self { name, path, secure }
@@ -109,7 +109,7 @@ impl<'a> FlowCookie<'a> {
     }
 }
 
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 /// Flows already completed in this process, oldest first, kept as long as
 /// a flow can live.
 struct UsedFlows {
@@ -117,7 +117,7 @@ struct UsedFlows {
     seen: std::collections::HashSet<String>,
 }
 
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 static USED_FLOWS: LazyLock<Mutex<UsedFlows>> = LazyLock::new(|| {
     Mutex::new(UsedFlows {
         order: std::collections::VecDeque::new(),
@@ -125,11 +125,11 @@ static USED_FLOWS: LazyLock<Mutex<UsedFlows>> = LazyLock::new(|| {
     })
 });
 
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 /// Most completed flows remembered; past it the oldest is forgotten.
 const USED_FLOWS_MAX: usize = 100_000;
 
-#[cfg(feature = "admin")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 /// Claim `flow` for its one callback: `false` when this process already
 /// took it. Per process; across replicas the IdP's one-time code still holds.
 pub(crate) fn claim_flow(flow: &OAuth2Flow) -> bool {
@@ -185,6 +185,7 @@ impl std::fmt::Debug for ResolvedSso {
 /// Errors surfaced by the SSO login flow. Rendered as a generic
 /// user-facing message by the handlers — details go to `tracing`.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum SsoError {
     /// `provider` key isn't a known preset or `"oidc"`.
     UnknownProvider(String),
@@ -581,7 +582,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "admin")]
+    #[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
     /// `__Host-` only for a host-only HTTPS cookie at `/`; the old name still reads.
     #[test]
     fn flow_cookies_take_the_host_prefix_only_at_the_root() {
@@ -607,7 +608,7 @@ mod tests {
         assert_eq!(root.read(&h), Some("new"));
     }
 
-    #[cfg(feature = "admin")]
+    #[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
     /// A flow completes once.
     #[test]
     fn a_flow_is_claimed_once() {

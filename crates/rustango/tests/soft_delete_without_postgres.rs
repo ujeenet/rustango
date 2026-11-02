@@ -55,7 +55,7 @@ async fn a_note(pool: &Pool, title: &str) -> Note {
         title: title.to_owned(),
         deleted_at: None,
     };
-    n.insert_pool(pool).await.expect("insert");
+    n.insert(pool).await.expect("insert");
     n
 }
 

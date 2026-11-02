@@ -44,8 +44,10 @@ use axum::http::Response;
 use axum::middleware::Next;
 use axum::Router;
 
-/// Configuration for the access log middleware.
+/// Configuration for the access log middleware. Build it with
+/// [`AccessLogLayer::new`] and the setters.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct AccessLogLayer {
     /// Log every request (default). When `false`, only 4xx and 5xx are
     /// logged, which keeps production volume down.
@@ -69,6 +71,9 @@ pub struct AccessLogLayer {
     /// Which tenant identifier goes on the line. Default
     /// [`TenantField::Slug`], and `-` when no tenant resolved.
     pub tenant_field: TenantField,
+    /// Path prefixes never logged, matched by whole segment. Empty by
+    /// default; see [`AccessLogLayer::skip_paths`].
+    pub skip_paths: Vec<String>,
 }
 
 /// How the access log names the request's tenant.
@@ -107,7 +112,29 @@ impl AccessLogLayer {
             redact_query_params: default_redact_params(),
             use_real_ip: false,
             tenant_field: TenantField::default(),
+            skip_paths: Vec::new(),
         }
+    }
+
+    /// Add path prefixes that are never logged, such as health and
+    /// readiness probes. `/health` skips `/health/live`, not `/healthz`.
+    #[must_use]
+    pub fn skip_paths<I, S>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.skip_paths.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    /// `true` when `path` is a skipped prefix or under one, segment by
+    /// segment.
+    #[must_use]
+    pub fn is_skipped(&self, path: &str) -> bool {
+        self.skip_paths
+            .iter()
+            .any(|p| crate::urls::path_under_prefix(path, p))
     }
 
     /// Pick the tenant identifier for the line, or [`TenantField::Off`]
@@ -279,6 +306,10 @@ async fn handle(
     req: Request<Body>,
     next: Next,
 ) -> Response<Body> {
+    // Skipped paths still run the handler, with no line and no tenant scope.
+    if cfg.is_skipped(req.uri().path()) {
+        return next.run(req).await;
+    }
     let started = Instant::now();
     let method = req.method().clone();
     // `next.run` takes the request; path and query borrow this copy.
@@ -403,23 +434,22 @@ fn resolve_client_ip(req: &Request, use_real_ip: bool) -> Option<String> {
 /// Query parameters whose values are redacted by default: the shared
 /// secret words plus the OAuth / OIDC callback names they miss.
 pub(crate) fn default_redact_params() -> Vec<String> {
-    crate::secret_keys::SECRET_WORDS
-        .iter()
-        .chain(&["code", "state", "assertion"])
-        .map(|w| (*w).to_owned())
+    crate::secret_keys::secret_words()
+        .chain(["code", "state", "assertion"])
+        .map(str::to_owned)
         .collect()
 }
 
-/// Params the framework itself puts credentials in (the console's
-/// `?token=`, signed URLs, SSO callbacks), so a custom `redact` list
-/// cannot drop them (#1818).
-const ALWAYS_REDACTED: &[&str] = &["token", "signature", "code"];
+/// Params a custom `redact` list cannot drop: the credential words, plus the
+/// signed-URL and SSO callback params the framework itself sends.
+const ALWAYS_REDACTED: &[&str] = &["signature", "code"];
 
-/// The configured list plus [`ALWAYS_REDACTED`], split once per layer.
+/// The configured list plus the credential words and [`ALWAYS_REDACTED`], split once per layer.
 pub(crate) fn query_names(redact_keys: &[String]) -> crate::secret_keys::SecretNames {
     crate::secret_keys::SecretNames::new(
-        ALWAYS_REDACTED
+        crate::secret_keys::CREDENTIAL_WORDS
             .iter()
+            .chain(ALWAYS_REDACTED)
             .copied()
             .chain(redact_keys.iter().map(String::as_str)),
     )
@@ -495,6 +525,14 @@ mod tests {
         assert!(l.log_success);
         assert!(l.include_ip);
         assert_eq!(l.slow_threshold_ms, 1000);
+    }
+
+    #[test]
+    fn skip_paths_match_whole_segments() {
+        let l = AccessLogLayer::new().skip_paths(["/health", "/ready"]);
+        assert!(l.is_skipped("/health") && l.is_skipped("/ready/db"));
+        assert!(!l.is_skipped("/healthz") && !l.is_skipped("/"));
+        assert!(!AccessLogLayer::default().is_skipped("/health"));
     }
 
     #[test]
@@ -675,19 +713,20 @@ mod tests {
     #[test]
     fn a_configured_key_matches_prefixed_and_kebab_names() {
         let r = redact_query_list(
-            "x-client-secret=s&my_client_secret=t&client=c&secretary=d",
+            "x-client-secret=s&my_client_secret=t&client=c&clientele=d",
             &["client_secret".to_owned()],
         );
         assert_eq!(
             r,
-            "x-client-secret=[redacted]&my_client_secret=[redacted]&client=c&secretary=d"
+            "x-client-secret=[redacted]&my_client_secret=[redacted]&client=c&clientele=d"
         );
     }
 
+    /// An empty list still hides the credential words.
     #[test]
     fn redact_query_handles_empty_list() {
-        let r = redact_query_list("password=x", &[]);
-        assert_eq!(r, "password=x");
+        let r = redact_query_list("password=x&page=2", &[]);
+        assert_eq!(r, "password=[redacted]&page=2");
     }
 
     #[test]
@@ -987,6 +1026,41 @@ mod observability_mount_tests {
         assert!(
             out.contains("http.request"),
             "no span context on the normal path either:\n{out}"
+        );
+    }
+
+    /// Probe paths are not logged; a sibling like `/healthz` still is.
+    #[tokio::test]
+    async fn skip_paths_drops_probe_lines_by_segment() {
+        let _l = lock().lock().unwrap_or_else(|e| e.into_inner());
+        let buf = crate::testkit::CaptureWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        let _g = tracing::subscriber::set_default(subscriber);
+        let app = Router::new()
+            .route("/health", get(|| async { "ok" }))
+            .route("/health/live", get(|| async { "ok" }))
+            .route("/healthz", get(|| async { "ok" }))
+            .access_log(AccessLogLayer::new().skip_paths(["/health"]));
+        for uri in ["/health", "/health/live", "/healthz"] {
+            let resp = app
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .expect("router answers");
+            assert_eq!(resp.status(), StatusCode::OK);
+        }
+        let out = buf.contents();
+        assert!(
+            out.contains("url.path=/healthz "),
+            "sibling not logged:\n{out}"
+        );
+        assert!(!out.contains("url.path=/health "), "probe logged:\n{out}");
+        assert!(
+            !out.contains("url.path=/health/live"),
+            "subpath logged:\n{out}"
         );
     }
 }

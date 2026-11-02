@@ -184,9 +184,8 @@ la opción puede repetirse para reparar una serie de filas en un solo comando.
 ## Señales de migrate
 
 Los receptores `rustango::signals::migrate::connect_pre_migrate` y
-`connect_post_migrate` se ejecutan antes y después de una ejecución de migrate. Los
-receptores `connect_pre_migrate_with_target` y `connect_post_migrate_with_target`
-reciben además un `MigrateTarget`: el `pool` de la ejecución y su slug `tenant`
+`connect_post_migrate` se ejecutan antes y después de una ejecución de migrate. Su
+contexto lleva el `pool` de la ejecución y su slug `tenant`
 (`None` para el registro o una ejecución de una sola base de datos). Una ejecución de
 tenant envía la señal una vez por tenant con el pool de ese tenant, en todos los
 backends, así que un receptor `post_migrate` puede sembrar datos en cada tenant.

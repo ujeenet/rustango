@@ -53,6 +53,7 @@ use crate::email::{BoxedMailer, Email, MailError};
 use crate::email_templates::{EmailRenderError, EmailRenderer};
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum MailableError {
     #[error("render: {0}")]
     Render(#[from] EmailRenderError),

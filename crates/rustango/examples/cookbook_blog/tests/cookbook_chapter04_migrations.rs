@@ -123,7 +123,7 @@ async fn apply_then_unapply_round_trip() {
     fs::write(&path, serde_json::to_string_pretty(&mig_json).unwrap()).unwrap();
 
     // Apply.
-    let applied = migrate::migrate(&pool, &dir).await.expect("apply");
+    let applied = migrate::migrate_pool(&pool.clone().into(), &dir).await.expect("apply");
     assert_eq!(applied.len(), 1, "one migration applied");
     assert_eq!(applied[0].name, mig_name);
 
@@ -141,7 +141,7 @@ async fn apply_then_unapply_round_trip() {
     assert_eq!(idx_count, 1, "index {idx_name} should exist");
 
     // Unapply.
-    migrate::unapply(&pool, &dir, &mig_name).await.expect("unapply");
+    migrate::unapply_pool(&pool.clone().into(), &dir, &mig_name).await.expect("unapply");
     let table_count_after: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM pg_tables WHERE tablename = $1"
     ).bind(&table).fetch_one(&pool).await.unwrap();

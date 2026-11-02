@@ -77,7 +77,7 @@ async fn drop_schema(pool: &sqlx::PgPool, name: &str) {
 }
 
 fn args_vec(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|s| (*s).to_string()).collect()
+    rustango::testkit::routed_args(parts)
 }
 
 async fn run(
@@ -98,8 +98,8 @@ async fn create_tenant_inserts_row_creates_schema_and_runs_migrations() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("acme");
     drop_schema(&pool, &slug).await;
@@ -152,7 +152,7 @@ async fn create_tenant_inserts_row_creates_schema_and_runs_migrations() {
     assert!(exists, "schema `{slug}` should exist");
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -163,8 +163,8 @@ async fn create_tenant_database_mode_requires_database_url() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("nodb");
     let dir = fresh_dir("create_nodb");
@@ -184,7 +184,7 @@ async fn create_tenant_database_mode_requires_database_url() {
         "expected database_url validation error, got: {err}"
     );
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -195,8 +195,8 @@ async fn create_tenant_rejects_duplicate_slug() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("dup");
     drop_schema(&pool, &slug).await;
@@ -223,7 +223,7 @@ async fn create_tenant_rejects_duplicate_slug() {
     assert!(format!("{err}").contains("already exists"), "got: {err}");
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -234,8 +234,8 @@ async fn drop_tenant_soft_deletes_with_confirm() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("drop-me");
     drop_schema(&pool, &slug).await;
@@ -289,7 +289,7 @@ async fn drop_tenant_soft_deletes_with_confirm() {
     assert!(!rows[0].active, "active flipped to false");
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -300,8 +300,8 @@ async fn list_tenants_prints_all_orgs() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("list");
     let pools = TenantPools::new(pool.clone());
@@ -354,7 +354,7 @@ async fn list_tenants_prints_all_orgs() {
     assert!(out.contains("database"), "database mode missing: {out}");
 
     drop_schema(&pool, &s1).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -366,8 +366,8 @@ async fn migrate_tenants_seeds_reserved_perms_in_a_database_mode_tenant() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let tenant_db = "rustango_tenant_perm_test";
     sqlx::query(&format!("DROP DATABASE IF EXISTS {tenant_db} WITH (FORCE)"))
         .execute(&pool)
@@ -403,7 +403,7 @@ async fn migrate_tenants_seeds_reserved_perms_in_a_database_mode_tenant() {
     .unwrap();
     assert_eq!(seeded, 1, "database-mode tenant lacks auth.access_admin");
     tenant.close().await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -415,8 +415,8 @@ async fn unrecognized_subcommand_delegates_to_migrate_manage() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("delegate");
     let pools = TenantPools::new(pool.clone());
@@ -425,7 +425,7 @@ async fn unrecognized_subcommand_delegates_to_migrate_manage() {
     res.unwrap();
     assert!(out.contains("print the SQL the named migration"), "{out}");
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -436,8 +436,8 @@ async fn migrate_tenants_runs_against_active_only() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("active");
     drop_schema(&pool, &slug).await;
@@ -504,7 +504,7 @@ async fn migrate_tenants_runs_against_active_only() {
     assert!(exists, "tenant table should be created");
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -517,8 +517,8 @@ async fn a_new_schema_tenant_does_not_read_publics_project_ledger() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("ledger");
     drop_schema(&pool, &slug).await;
@@ -593,7 +593,7 @@ async fn a_new_schema_tenant_does_not_read_publics_project_ledger() {
         .await
         .unwrap();
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -607,8 +607,8 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("purgeme");
     drop_schema(&pool, &slug).await;
@@ -682,7 +682,7 @@ async fn purge_tenant_schema_mode_drops_schema_and_org_row() {
             .0;
     assert_eq!(row_count, 0);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -695,8 +695,8 @@ async fn purge_tenant_drops_a_legacy_schema_name() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let dir = fresh_dir("purge_legacy");
     let pools = TenantPools::new(pool.clone());
     let slug = unique("legacy");
@@ -711,14 +711,13 @@ async fn purge_tenant_drops_a_legacy_schema_name() {
     .1
     .unwrap();
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{legacy}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
     sqlx::query("UPDATE rustango_orgs SET schema_name = $1 WHERE slug = $2")
         .bind(&legacy)
         .bind(&slug)
         .execute(&pool)
+        .await
+        .unwrap();
+    rustango::testkit::migrate_schema(&pools, &legacy, &url)
         .await
         .unwrap();
 
@@ -774,7 +773,7 @@ async fn purge_tenant_drops_a_legacy_schema_name() {
         .to_string();
     assert!(err.contains("public"), "{err}");
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -789,8 +788,8 @@ async fn purge_tenant_forgets_slug_keyed_state() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let dir = fresh_dir("purge_state");
     let pools = TenantPools::new(pool.clone());
     let slug = unique("forget");
@@ -806,8 +805,16 @@ async fn purge_tenant_forgets_slug_keyed_state() {
 
     let cache: BoxedCache = std::sync::Arc::new(InMemoryCache::new());
     rustango::tenancy::decommission::clear_on_purge(cache.clone());
-    let mine = ScopedCache::for_tenant(cache.clone(), &slug);
-    let theirs = ScopedCache::for_tenant(cache.clone(), format!("{slug}x"));
+    let org = Org::objects()
+        .where_(Org::slug.eq(slug.clone()))
+        .fetch_on(&pool)
+        .await
+        .unwrap()
+        .remove(0);
+    let tenant = rustango::tenancy::TenantSlug::of(&org).expect("org id");
+    let mine = ScopedCache::for_tenant(cache.clone(), &tenant);
+    let other = rustango::tenancy::TenantSlug::new(tenant.org_id + 1, format!("{slug}x"));
+    let theirs = ScopedCache::for_tenant(cache.clone(), &other);
     mine.set_forever("stats", "old").await.unwrap();
     theirs.set_forever("stats", "kept").await.unwrap();
 
@@ -841,7 +848,7 @@ async fn purge_tenant_forgets_slug_keyed_state() {
     assert_eq!(mine.get("stats").await.unwrap(), None);
     assert_eq!(theirs.get("stats").await.unwrap().as_deref(), Some("kept"));
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -853,8 +860,8 @@ async fn purge_tenant_rejects_confirm_mismatch() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("safe");
     drop_schema(&pool, &slug).await;
@@ -892,7 +899,7 @@ async fn purge_tenant_rejects_confirm_mismatch() {
     assert!(exists, "schema should still exist after rejected purge");
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -905,8 +912,8 @@ async fn purge_tenant_database_mode_requires_purge_database_flag() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("dbmode");
     let dir = fresh_dir("purge_db_no_flag");
@@ -949,7 +956,7 @@ async fn purge_tenant_database_mode_requires_purge_database_flag() {
             .0;
     assert_eq!(row_count, 1);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -962,8 +969,8 @@ async fn purge_tenant_unknown_slug_errors() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("purge_missing");
     let pools = TenantPools::new(pool.clone());
@@ -978,7 +985,7 @@ async fn purge_tenant_unknown_slug_errors() {
     let err = res.unwrap_err().to_string();
     assert!(err.contains("no tenant"), "{err}");
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -991,8 +998,8 @@ async fn purge_tenant_works_on_soft_deleted_org() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let slug = unique("ghost");
     drop_schema(&pool, &slug).await;
@@ -1046,7 +1053,7 @@ async fn purge_tenant_works_on_soft_deleted_org() {
             .0;
     assert_eq!(row_count, 0);
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1069,7 +1076,7 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
 
     // Clean slate: drop registry tables AND both migration ledgers so the
     // system migrations re-apply on this run.
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     for ledger in ["__rustango_migrations__", "__rustango_system_migrations__"] {
         sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
             .execute(&pool)
@@ -1329,7 +1336,7 @@ async fn full_provision_lifecycle_via_init_tenancy_and_migrate() {
 
     // Cleanup.
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     for ledger in ["__rustango_migrations__", "__rustango_system_migrations__"] {
         sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
             .execute(&pool)
@@ -1348,8 +1355,8 @@ async fn create_tenant_refuses_a_schema_another_tenant_uses() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let dir = fresh_dir("schema_clash");
     let pools = TenantPools::new(pool.clone());
 
@@ -1393,7 +1400,7 @@ async fn create_tenant_refuses_a_schema_another_tenant_uses() {
         schema_name: None,
         ..rustango::testkit::org()
     };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+    org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
     let other = unique("other");
@@ -1425,7 +1432,7 @@ async fn create_tenant_refuses_a_schema_another_tenant_uses() {
     assert_eq!(slugs, want, "a refused tenant left a row");
 
     drop_schema(&pool, &shared).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1444,8 +1451,8 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let dir = fresh_dir("console_schema_clash");
     let pools = std::sync::Arc::new(TenantPools::new(pool.clone()));
     let registry = pools.registry_pool();
@@ -1459,7 +1466,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
         schema_name: Some(shared.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
 
     let username = unique("op");
     let mut op = rustango::tenancy::Operator {
@@ -1471,7 +1478,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.unwrap();
+    op.insert(&registry).await.unwrap();
     let provisioner = Provisioner::new(pools.clone(), url.clone(), &dir).erased();
     let app = router_with_provisioning(
         registry.clone(),
@@ -1514,7 +1521,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
                 .header("cookie", &cookie)
                 .header("content-type", "application/x-www-form-urlencoded")
                 .body(Body::from(format!(
-                    "slug={shared}&storage_mode=schema&backend_kind=postgres&no_migrate=1"
+                    "slug={shared}&host_pattern=new-{shared}.localhost&storage_mode=schema&backend_kind=postgres&no_migrate=1"
                 )))
                 .unwrap(),
         )
@@ -1534,7 +1541,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
     );
 
     drop_schema(&pool, &shared).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1547,8 +1554,8 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let dir = fresh_dir("schema_free");
     let pools = TenantPools::new(pool.clone());
     let registry = rustango::sql::Pool::from(pool.clone());
@@ -1560,7 +1567,7 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
         database_url: Some("postgres://example@db.example.com/x".into()),
         ..rustango::testkit::org()
     };
-    db_org.save_pool(&registry).await.unwrap();
+    db_org.save(&registry).await.unwrap();
     let moved = unique("moved");
     let elsewhere = unique("elsewhere");
     let mut schema_org = Org {
@@ -1570,7 +1577,7 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
         schema_name: Some(elsewhere.clone()),
         ..rustango::testkit::org()
     };
-    schema_org.save_pool(&registry).await.unwrap();
+    schema_org.save(&registry).await.unwrap();
 
     for taken_slug in [&db_slug, &moved] {
         let fresh = unique("fresh");
@@ -1594,7 +1601,7 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
         drop_schema(&pool, taken_slug).await;
     }
 
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1608,8 +1615,8 @@ async fn check_deploy_does_not_wait_on_silent_tenants() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     // Accepts connections and never answers.
     let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1632,7 +1639,7 @@ async fn check_deploy_does_not_wait_on_silent_tenants() {
             database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
             ..rustango::testkit::org()
         };
-        org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        org.save(&rustango::sql::Pool::from(pool.clone()))
             .await
             .unwrap();
     }
@@ -1655,7 +1662,7 @@ async fn check_deploy_does_not_wait_on_silent_tenants() {
     };
     let (c, b, a) = (at(&slugs[0]), at(&slugs[1]), at(&slugs[2]));
     assert!(a < b && b < c, "{out}");
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1673,8 +1680,8 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
     let url = std::env::var("DATABASE_URL").unwrap();
     // The provider's client secret is encrypted with it; the lock covers the env.
     std::env::set_var("RUSTANGO_SECRET_KEY", "manage-live-sso-key");
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     // A probe that looked in `public` would find no provider table there.
     sqlx::query("DROP TABLE IF EXISTS public.rustango_sso_providers CASCADE")
         .execute(&pool)
@@ -1683,10 +1690,6 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
 
     let slug = unique("ssoschema");
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
     let mut org = Org {
         slug: slug.clone(),
         display_name: slug.clone(),
@@ -1694,10 +1697,13 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         schema_name: Some(slug.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+    org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
     let pools = TenantPools::new(pool.clone());
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &url)
+        .await
+        .unwrap();
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
         .await
@@ -1711,7 +1717,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         email: Some("ann@example.com".into()),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&tenant).await.unwrap();
+    user.insert(&tenant).await.unwrap();
     SsoProvider {
         id: Auto::default(),
         slug: "corp".into(),
@@ -1745,7 +1751,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     }
-    .insert_pool(&tenant)
+    .insert(&tenant)
     .await
     .unwrap();
 
@@ -1766,7 +1772,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
     assert!(!out.contains(&line), "{out}");
 
     drop_schema(&pool, &slug).await;
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1780,8 +1786,8 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
         return;
     };
     let url = std::env::var("DATABASE_URL").unwrap();
-    rmig::drop_all(&pool).await.unwrap();
-    rmig::apply_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
+    rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let ghost = unique("ghost");
     drop_schema(&pool, &ghost).await;
     let mut org = Org {
@@ -1791,7 +1797,7 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
         schema_name: Some(ghost.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+    org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
     let pools = TenantPools::new(pool.clone());
@@ -1803,6 +1809,6 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
         )),
         "{out}"
     );
-    rmig::drop_all(&pool).await.unwrap();
+    rmig::drop_all_pool(&pool.clone().into()).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

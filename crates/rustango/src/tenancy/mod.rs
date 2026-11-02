@@ -162,34 +162,24 @@ pub use agents::{
 };
 #[cfg(feature = "postgres")]
 #[allow(deprecated)]
-pub use auth::{authenticate_operator, authenticate_user};
+pub use auth::authenticate_user;
 pub use auth::{
     authenticate_operator_pool, authenticate_user_pool, validate_tenant_user_schema, Operator,
     PasswordVerified, TenantUserModel, User, REQUIRED_USER_COLUMNS,
 };
-#[cfg(feature = "postgres")]
-pub use auth_backends::ensure_api_keys_table;
 pub use auth_backends::{
     create_api_key, ensure_api_keys_table_pool, set_api_key_secret, ApiKeyBackend, AuthBackend,
     AuthError, AuthUser, BoxedBackend, JwtBackend, ModelBackend,
 };
 pub use bootstrap::{init_tenancy, init_tenancy_with, InitTenancyReport};
 pub use middleware::{AuthenticatedUser, CurrentUser, RouterAuthExt};
-pub use principal::{OptionalPrincipal, Principal, PrincipalKind, TenantSlug};
-// v0.38 — the PG-typed permission helpers stay PG-only re-exports;
-// the tri-dialect `_pool` variants are the cross-dialect entry points.
-#[cfg(feature = "postgres")]
-pub use permissions::{
-    assign_role, auto_create_permissions, clear_user_perm, get_or_create_role, grant_role_perm,
-    has_all_perms, has_any_perm, has_perm, remove_role, revoke_role_perm, set_user_perm,
-    user_permissions, user_roles,
-};
 pub use permissions::{
     auto_create_permissions_pool, clear_user_perm_pool, create_role_pool, ensure_tables_pool,
     get_or_create_role_pool, grant_role_perm_pool, has_all_perms_pool, has_any_perm_pool,
     has_perm_pool, model_codenames, revoke_role_perm_pool, set_user_perm_pool,
     user_permissions_pool, user_roles_pool, user_roles_qs_pool,
 };
+pub use principal::{OptionalPrincipal, Principal, PrincipalKind, TenantSlug};
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use db_server::{
@@ -223,6 +213,8 @@ pub use org_host::{
 };
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) use pools::build_database_pool;
+#[cfg(feature = "postgres")]
+pub(crate) use pools::refuse_registry_shadow;
 #[cfg(all(test, feature = "postgres"))]
 pub(crate) use pools::scoped_pool_options;
 #[cfg(any(feature = "postgres", feature = "manage"))]

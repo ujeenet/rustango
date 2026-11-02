@@ -81,7 +81,7 @@ async fn send(
 
 async fn seed(pool: &Pool, prefix: &str) -> AdminUser {
     let mut u = AdminUser::new_with_password(unique(prefix), PASSWORD, true).unwrap();
-    u.insert_pool(pool).await.expect("seed admin");
+    u.insert(pool).await.expect("seed admin");
     u
 }
 

@@ -76,7 +76,7 @@ async fn auth_on(
         .unwrap();
     let (mut parts, ()) = req.into_parts();
     if let Some(slug) = slug {
-        parts.extensions.insert(TenantSlug(slug.to_owned()));
+        parts.extensions.insert(TenantSlug::new(1, slug));
     }
     backend
         .authenticate(&parts, pool)
@@ -234,11 +234,7 @@ async fn the_backends_own_tokens_still_authenticate() {
     let backend = JwtBackend::new(secret());
     let token = backend.issue(42);
 
-    assert_eq!(
-        token.split('.').count(),
-        2,
-        "issue() emits the legacy shape"
-    );
+    assert_eq!(token.split('.').count(), 3, "issue() emits a standard JWT");
     assert_eq!(auth(&backend, &pool, &token).await, Some(42));
 }
 
@@ -255,9 +251,9 @@ async fn a_token_minted_on_tenant_a_is_refused_on_tenant_b() {
     let pool = pool().await;
     let life = JwtLifecycle::new(secret());
     let backend = JwtBackend::new(secret());
-    let token = life
-        .issue_access_with(42, claims(&[("tenant", "acme")]))
-        .unwrap();
+    let mut bound = claims(&[("tenant", "acme")]);
+    bound.insert("org_id".into(), 1.into());
+    let token = life.issue_access_with(42, bound).unwrap();
 
     assert_eq!(
         auth_on(&backend, &pool, &token, Some("acme")).await,
@@ -285,7 +281,7 @@ async fn a_tenantless_token_is_refused_where_a_tenant_is_resolved() {
         auth_on(&backend, &pool, &backend.issue(42), Some("acme")).await,
         None
     );
-    let bound = backend.issue_for_tenant(42, "acme");
+    let bound = backend.issue_for_tenant(42, &TenantSlug::new(1, "acme"));
     assert_eq!(
         auth_on(&backend, &pool, &bound, Some("acme")).await,
         Some(42)

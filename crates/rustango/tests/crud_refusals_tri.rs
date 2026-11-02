@@ -68,11 +68,8 @@ fn app(pool: &Pool) -> axum::Router {
     .unwrap();
     let t = Arc::new(t);
     ViewSet::for_model(Author::SCHEMA, &["id", "name"])
-        .router_pool("/api/authors", pool.clone())
-        .merge(
-            ViewSet::for_model(Tag::SCHEMA, &["code", "name"])
-                .router_pool("/api/tags", pool.clone()),
-        )
+        .router("/api/authors", pool.clone())
+        .merge(ViewSet::for_model(Tag::SCHEMA, &["code", "name"]).router("/api/tags", pool.clone()))
         .merge(
             DeleteView::for_model(Author::SCHEMA)
                 .template("detail.html")
@@ -124,14 +121,14 @@ async fn seed(pool: &Pool) -> (i64, i64) {
         id: Auto::default(),
         name: "a".into(),
     };
-    a.insert_pool(pool).await.expect("author");
+    a.insert(pool).await.expect("author");
     let a = *a.id.get().expect("pk");
     let mut p = Post {
         id: Auto::default(),
         author_id: a,
         title: "t".into(),
     };
-    p.insert_pool(pool).await.expect("post");
+    p.insert(pool).await.expect("post");
     (a, *p.id.get().expect("pk"))
 }
 

@@ -104,61 +104,43 @@ async fn issued_tokens_still_verify() {
     assert_eq!(claims.typ, "access");
 }
 
-/// A token in the pre-#1397 two-segment shape still verifies, so
-/// upgrading the framework does not log out everyone holding one that
-/// has not expired.
-///
-/// Built by hand rather than by an old code path, because the old code
-/// path is gone — which is the point: this pins the compatibility
-/// window rather than the implementation that needed it.
+/// A correctly signed token in the older two-segment shape is refused,
+/// by the lifecycle and by `JwtBackend` alike: one codec, three segments.
+#[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn legacy_two_segment_tokens_still_verify() {
+async fn a_two_segment_token_is_refused() {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
 
     let life = JwtLifecycle::new(secret());
     let exp = chrono::Utc::now().timestamp() + 600;
     let payload = serde_json::json!({
-        "sub": 42, "exp": exp, "jti": "legacy-jti", "typ": "access",
+        "sub": 42, "exp": exp, "iat": exp - 600, "jti": "legacy-jti", "typ": "access",
     });
     let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .encode(serde_json::to_vec(&payload).unwrap());
-
-    // Legacy signing input: the payload alone, no header.
     let mut mac = <Hmac<Sha256>>::new_from_slice(&secret()).unwrap();
     mac.update(payload_b64.as_bytes());
     let sig_b64 =
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
-
     let legacy = format!("{payload_b64}.{sig_b64}");
-    assert_eq!(legacy.split('.').count(), 2);
 
-    let claims = life
-        .verify_access(&legacy)
+    assert!(life.verify_access(&legacy).await.is_none(), "lifecycle");
+    assert!(!life.revoke(&legacy).await, "revoke reads the same codec");
+
+    let backend = rustango::tenancy::auth_backends::JwtBackend::new(secret());
+    let req = axum::http::Request::builder()
+        .header("authorization", format!("Bearer {legacy}"))
+        .body(())
+        .unwrap();
+    let (parts, ()) = req.into_parts();
+    let pool = rustango::sql::Pool::connect("sqlite::memory:")
         .await
-        .expect("a token issued before #1397 must still verify");
-    assert_eq!(claims.sub, 42);
-}
-
-/// Compatibility is not credulity: a two-segment token signed with the
-/// wrong key is still refused.
-///
-/// Without this, "accept the old shape" could have meant "accept
-/// anything shaped like the old one".
-#[tokio::test]
-async fn a_legacy_token_with_a_bad_signature_is_refused() {
-    let life = JwtLifecycle::new(secret());
-    let exp = chrono::Utc::now().timestamp() + 600;
-    let payload = serde_json::json!({
-        "sub": 42, "exp": exp, "jti": "forged", "typ": "access",
-    });
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .encode(serde_json::to_vec(&payload).unwrap());
-    let forged = format!("{payload_b64}.{}", "A".repeat(43));
-
+        .unwrap();
+    use rustango::tenancy::auth_backends::AuthBackend as _;
     assert!(
-        life.verify_access(&forged).await.is_none(),
-        "a legacy-shaped token with a bad signature must be refused"
+        !matches!(backend.authenticate(&parts, &pool).await, Ok(Some(_))),
+        "JwtBackend"
     );
 }
 
@@ -274,8 +256,16 @@ async fn mcp_agent_tokens_are_jwt_shaped_and_still_resolve() {
     let skills = vec!["search".to_owned(), "summarise".to_owned()];
     let tools = vec!["fetch".to_owned()];
 
-    let token = issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5), "abcd1234")
-        .expect("agent token issues");
+    let token = issue_agent_token(
+        &life,
+        99,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &skills,
+        &tools,
+        Some(5),
+        "abcd1234",
+    )
+    .expect("agent token issues");
 
     assert_eq!(
         token.split('.').count(),
@@ -283,9 +273,13 @@ async fn mcp_agent_tokens_are_jwt_shaped_and_still_resolve() {
         "an agent token is a JWT like any other"
     );
 
-    let agent = verify_agent_token(&life, &token, "acme")
-        .await
-        .expect("agent token must still verify");
+    let agent = verify_agent_token(
+        &life,
+        &token,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+    )
+    .await
+    .expect("agent token must still verify");
     assert_eq!(agent.agent_id, 99);
     assert_eq!(agent.tenant, "acme");
     assert_eq!(agent.skills, skills);
@@ -303,8 +297,16 @@ fn mcp_agent_claims_are_readable_by_a_standard_decoder() {
     let life = JwtLifecycle::new(secret());
     let skills = vec!["search".to_owned(), "summarise".to_owned()];
     let tools = vec!["fetch".to_owned()];
-    let token = issue_agent_token(&life, 99, "acme", &skills, &tools, Some(5), "abcd1234")
-        .expect("agent token issues");
+    let token = issue_agent_token(
+        &life,
+        99,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &skills,
+        &tools,
+        Some(5),
+        "abcd1234",
+    )
+    .expect("agent token issues");
 
     let std_claims = rustango::jwt::decode(&token, &secret()).expect("standard decode");
     assert_eq!(std_claims.get::<String>("kind").as_deref(), Some("agent"));
@@ -323,10 +325,25 @@ async fn an_mcp_agent_token_is_still_pinned_to_its_tenant() {
     use rustango::mcp::auth::{issue_agent_token, verify_agent_token};
 
     let life = JwtLifecycle::new(secret());
-    let token = issue_agent_token(&life, 99, "acme", &[], &[], None, "abcd1234").expect("issue");
+    let token = issue_agent_token(
+        &life,
+        99,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &[],
+        &[],
+        None,
+        "abcd1234",
+    )
+    .expect("issue");
 
     assert!(
-        verify_agent_token(&life, &token, "globex").await.is_none(),
+        verify_agent_token(
+            &life,
+            &token,
+            &rustango::tenancy::TenantSlug::new(2, "globex")
+        )
+        .await
+        .is_none(),
         "a token minted for acme must not verify against globex"
     );
 }
@@ -342,9 +359,13 @@ async fn a_non_agent_token_is_refused_by_the_mcp_path() {
     let pair = life.issue_pair(42); // ordinary login token, no `kind`
 
     assert!(
-        verify_agent_token(&life, &pair.access, "acme")
-            .await
-            .is_none(),
+        verify_agent_token(
+            &life,
+            &pair.access,
+            &rustango::tenancy::TenantSlug::new(1, "acme")
+        )
+        .await
+        .is_none(),
         "an ordinary access token must not be accepted as an agent"
     );
 }

@@ -157,9 +157,9 @@ impl TestClient {
     /// (typing through the form per test is slow, and tests of
     /// non-auth handlers shouldn't depend on the auth surface working).
     ///
-    /// `slug` is the tenant slug the cookie should be bound to (the
-    /// decoder rejects cookies minted for a different slug, so this
-    /// must match the resolved tenant at request time). `ttl_secs` is
+    /// `tenant` is the slug and org id the cookie is bound to (the decoder
+    /// rejects a cookie minted for another, so it must match the resolved
+    /// tenant at request time). `ttl_secs` is
     /// the session expiry; one hour (3600) is a fine default for a
     /// test run.
     ///
@@ -168,7 +168,7 @@ impl TestClient {
     pub fn force_login_tenant_user(
         &self,
         secret: &crate::tenancy::session::SessionSecret,
-        slug: impl Into<String>,
+        tenant: &crate::tenancy::TenantSlug,
         user: &crate::tenancy::User,
         ttl_secs: i64,
     ) -> &Self {
@@ -178,7 +178,7 @@ impl TestClient {
                 .get()
                 .copied()
                 .expect("force_login_tenant_user needs a saved user row"),
-            slug,
+            tenant,
             ttl_secs,
             tenant_console::PasswordFingerprint::of(secret, &user.password_hash),
         );
@@ -955,17 +955,16 @@ impl TestResponse {
             .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or("").to_owned()))
             .collect();
         let header_map = parts.headers;
-        // Empty as before, but said out loud; 0.62.0 makes this a panic.
-        let body = match to_bytes(body, RESPONSE_BODY_LIMIT).await {
-            Ok(b) => b.to_vec(),
-            Err(e) => {
-                tracing::warn!(
-                    "TestClient: reading the response body failed (limit \
-                     {RESPONSE_BODY_LIMIT} bytes), using an empty body: {e}"
-                );
-                Vec::new()
-            }
-        };
+        // Loud, as a bad request header is: an empty body hid the failure.
+        let body = to_bytes(body, RESPONSE_BODY_LIMIT)
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "TestClient could not read the response body (limit \
+                     {RESPONSE_BODY_LIMIT} bytes): {e}"
+                )
+            })
+            .to_vec();
         Self {
             status,
             headers,
@@ -1770,6 +1769,11 @@ mod tests {
     // ---------------- force_login (tenancy) ----------------
 
     #[cfg(feature = "tenancy")]
+    fn acme() -> crate::tenancy::TenantSlug {
+        crate::tenancy::TenantSlug::new(1, "acme")
+    }
+
+    #[cfg(feature = "tenancy")]
     fn user_with_id(id: i64) -> crate::tenancy::User {
         crate::tenancy::User {
             id: crate::sql::Auto::Set(id),
@@ -1785,10 +1789,10 @@ mod tests {
 
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&secret, "acme", &user_with_id(42), 3600);
+        c.force_login_tenant_user(&secret, &acme(), &user_with_id(42), 3600);
 
         let cookie = c.cookie(COOKIE_NAME).expect("session cookie present");
-        let payload = decode(&secret, "acme", &cookie).expect("cookie decodes");
+        let payload = decode(&secret, &acme(), &cookie).expect("cookie decodes");
         assert_eq!(payload.uid, 42);
         assert_eq!(payload.slug, "acme");
         assert!(!payload.is_impersonation());
@@ -1802,13 +1806,17 @@ mod tests {
 
         let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&secret, "acme", &user_with_id(42), 3600);
+        c.force_login_tenant_user(&secret, &acme(), &user_with_id(42), 3600);
         let cookie = c
             .cookie(crate::tenancy::tenant_console::COOKIE_NAME)
             .unwrap();
 
         // Cross-tenant replay fails — the slug binding holds.
-        assert!(decode(&secret, "globex", &cookie).is_err());
+        let globex = crate::tenancy::TenantSlug::new(2, "globex");
+        assert!(decode(&secret, &globex, &cookie).is_err());
+        // So does a tenant that reused the slug after a purge.
+        let heir = crate::tenancy::TenantSlug::new(2, "acme");
+        assert!(decode(&secret, &heir, &cookie).is_err());
     }
 
     #[cfg(feature = "tenancy")]
@@ -1841,7 +1849,7 @@ mod tests {
     fn force_login_tenant_user_refuses_an_unsaved_user() {
         let secret = crate::tenancy::session::SessionSecret::from_bytes(vec![3u8; 32]);
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&secret, "acme", &crate::testkit::user(), 3600);
+        c.force_login_tenant_user(&secret, &acme(), &crate::testkit::user(), 3600);
     }
 
     #[cfg(feature = "tenancy")]
@@ -1854,12 +1862,12 @@ mod tests {
         let wrong_secret = SessionSecret::from_bytes(b"wrong-secret-thirty-two-bytes-xx".to_vec());
 
         let c = TestClient::new(Router::new());
-        c.force_login_tenant_user(&mint_secret, "acme", &user_with_id(1), 3600);
+        c.force_login_tenant_user(&mint_secret, &acme(), &user_with_id(1), 3600);
         let cookie = c
             .cookie(crate::tenancy::tenant_console::COOKIE_NAME)
             .unwrap();
 
-        assert!(decode(&wrong_secret, "acme", &cookie).is_err());
+        assert!(decode(&wrong_secret, &acme(), &cookie).is_err());
     }
 
     // -- RequestFactory --
@@ -1999,16 +2007,28 @@ mod tests {
         let _ = RequestFactory::new().get("/x").header("bad name", "v");
     }
 
-    /// Still empty in 0.61.x, as before; only a warning is new.
     #[tokio::test]
-    async fn an_oversized_body_reads_as_empty() {
+    #[should_panic(expected = "could not read the response body")]
+    async fn an_oversized_body_panics() {
         let big = Router::new().route(
             "/big",
             get(|| async { vec![b'x'; RESPONSE_BODY_LIMIT + 1] }),
         );
-        let res = TestClient::new(big).get("/big").send().await;
-        assert_eq!(res.status, 200);
-        assert!(res.body.is_empty());
+        let _ = TestClient::new(big).get("/big").send().await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "could not read the response body")]
+    async fn a_failing_body_panics() {
+        let broken = Router::new().route(
+            "/broken",
+            get(|| async {
+                let chunks: [Result<&'static [u8], std::io::Error>; 2] =
+                    [Ok(b"ok"), Err(std::io::Error::other("stream broke"))];
+                Body::from_stream(futures_util::stream::iter(chunks))
+            }),
+        );
+        let _ = TestClient::new(broken).get("/broken").send().await;
     }
 
     #[tokio::test]

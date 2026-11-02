@@ -45,9 +45,9 @@ peut se compiler sans tirer `crate::admin` :
 ```toml
 [dependencies]
 # Connexion admin avec SSO :
-rustango = { version = "0.61", features = ["admin-sso"] }
+rustango = { version = "0.62", features = ["admin-sso"] }
 # SSO membre (utilisateur final) sans l'auto-admin :
-rustango = { version = "0.61", features = ["tenancy", "sso"] }
+rustango = { version = "0.62", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` et les anciens chemins du cœur `admin::sso::*` sont

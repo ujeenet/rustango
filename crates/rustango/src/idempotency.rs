@@ -555,16 +555,24 @@ fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
     false
 }
 
-/// The request's tenant slug. `Err` when the tenant context failed to resolve.
+/// The request's `#org:<id>:<slug>`, not its slug alone: a tenant that reuses a purged slug
+/// must not replay the old one's responses. `Err` when it cannot be resolved.
 #[cfg(feature = "tenancy")]
 async fn request_tenant(parts: &Parts) -> Result<Option<String>, ()> {
     use crate::tenancy::TenantSlug;
-    if let Some(TenantSlug(s)) = parts.extensions.get::<TenantSlug>() {
-        return Ok(Some(s.clone()));
+    if let Some(t) = parts.extensions.get::<TenantSlug>() {
+        return Ok(Some(t.namespace()));
     }
     match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
         None => Ok(None),
-        Some(Ok(org)) => Ok(org.map(|o| o.slug)),
+        Some(Ok(None)) => Ok(None),
+        Some(Ok(Some(org))) => match TenantSlug::of(&org) {
+            Some(t) => Ok(Some(t.namespace())),
+            None => {
+                tracing::warn!(slug = %org.slug, "idempotency: org has no id, key not used");
+                Err(())
+            }
+        },
         Some(Err(e)) => {
             tracing::warn!(error = %e, "idempotency: tenant resolution failed, key not used");
             Err(())
@@ -1139,8 +1147,11 @@ mod tests {
                 None
             )
         );
-        assert_ne!(plain, k(base(), Some("acme")));
-        assert_ne!(k(base(), Some("acme")), k(base(), Some("globex")));
+        assert_ne!(plain, k(base(), Some("#org:1:acme")));
+        assert_ne!(
+            k(base(), Some("#org:1:acme")),
+            k(base(), Some("#org:2:acme"))
+        );
         assert_ne!(plain, k(base().header("cookie", "sid=1"), None));
         assert_ne!(plain, k(base().header("x-api-key", "live_1"), None));
         assert_ne!(
@@ -1293,6 +1304,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for MissFirstRead {
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
         async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
             if !key.ends_with(":inflight") && !self.missed.swap(true, Ordering::SeqCst) {
                 return Ok(None);
@@ -1539,7 +1557,7 @@ mod tests {
         assert_eq!(body_string(r).await, "call-1:");
     }
 
-    /// Inserts `Principal::user(<x-test-user>)` and `TenantSlug(<x-test-slug>)`,
+    /// Inserts `Principal::user(<x-test-user>)` and `TenantSlug` for `<x-test-org>` (`<id>:<slug>`),
     /// standing in for an auth layer mounted outside the idempotency layer.
     #[cfg(feature = "tenancy")]
     fn with_test_identity(app: Router) -> Router {
@@ -1551,16 +1569,17 @@ mod tests {
                     .get("x-test-user")
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<i64>().ok());
-                let slug = h
-                    .get("x-test-slug")
+                let org = h
+                    .get("x-test-org")
                     .and_then(|v| v.to_str().ok())
-                    .map(str::to_owned);
+                    .and_then(|s| s.split_once(':'))
+                    .and_then(|(id, slug)| Some(TenantSlug::new(id.parse().ok()?, slug)));
                 if let Some(id) = user {
                     req.extensions_mut()
                         .insert(Principal::user(id, false, None));
                 }
-                if let Some(s) = slug {
-                    req.extensions_mut().insert(TenantSlug(s));
+                if let Some(t) = org {
+                    req.extensions_mut().insert(t);
                 }
                 next.run(req).await
             },
@@ -1592,21 +1611,43 @@ mod tests {
 
     #[cfg(feature = "tenancy")]
     #[tokio::test]
-    async fn same_key_under_two_tenant_slugs_does_not_replay() {
+    /// A tenant that reuses a purged tenant's slug gets a new org id: no replay.
+    async fn same_key_under_a_reused_slug_does_not_replay() {
         let counter = StdArc::new(AtomicUsize::new(0));
         let app = with_test_identity(counting_app(
             counter.clone(),
             IdempotencyLayer::new(cache()),
         ));
-        let send = |slug: &'static str| {
+        let send = |org: &'static str| {
             keyed("/a")
-                .header("x-test-slug", slug)
+                .header("x-test-org", org)
                 .body(Body::empty())
                 .unwrap()
         };
-        let r = app.clone().oneshot(send("acme")).await.unwrap();
+        let r = app.clone().oneshot(send("1:acme")).await.unwrap();
         assert_eq!(body_string(r).await, "call-0:");
-        let r = app.oneshot(send("globex")).await.unwrap();
+        let r = app.oneshot(send("2:acme")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-1:");
+    }
+
+    /// Two hand-built `TenantSlug`s sharing id 0 stay apart by slug.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn same_key_under_one_org_id_and_two_slugs_does_not_replay() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = with_test_identity(counting_app(
+            counter.clone(),
+            IdempotencyLayer::new(cache()),
+        ));
+        let send = |org: &'static str| {
+            keyed("/a")
+                .header("x-test-org", org)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(send("0:acme")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let r = app.oneshot(send("0:globex")).await.unwrap();
         assert_eq!(body_string(r).await, "call-1:");
     }
 
@@ -1627,6 +1668,7 @@ mod tests {
                 .get("x-org")
                 .and_then(|v| v.to_str().ok())
                 .map(|slug| crate::tenancy::Org {
+                    id: crate::sql::Auto::Set(i64::from(slug == "globex") + 1),
                     slug: slug.to_owned(),
                     ..crate::testkit::org()
                 }))

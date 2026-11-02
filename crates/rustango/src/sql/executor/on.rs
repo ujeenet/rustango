@@ -5,8 +5,8 @@ use futures_util::future::BoxFuture;
 use futures_util::stream::{BoxStream, TryStreamExt as _};
 
 use super::atomic::{self, Gate};
-use super::{Dialect, ExecError, PoolTx};
-use crate::core::SqlValue;
+use super::{Dialect, ExecError, InsertReturningPool, PoolTx, TxConn};
+use crate::core::{BulkInsertQuery, InsertQuery, SqlValue};
 use crate::sql::{DeletePlan, Pool};
 
 /// One connection held from a [`Pool`]. Every `_on` query given
@@ -24,8 +24,17 @@ use crate::sql::{DeletePlan, Pool};
 ///
 /// Do not call a `&Pool` method while holding one: that takes a second
 /// connection, and `max_connections` such requests deadlock the pool.
+///
+/// Reach the driver connection through [`Self::conn`]. It remembers its
+/// pool, so audit rows in [`Self::begin`] keep a tenant-bound source.
+pub struct PoolConn {
+    conn: PooledConn,
+    pool: crate::sql::PoolId,
+}
+
+/// The driver-typed connection inside a [`PoolConn`].
 #[non_exhaustive]
-pub enum PoolConn {
+pub enum PooledConn {
     #[cfg(feature = "postgres")]
     Postgres(sqlx::pool::PoolConnection<sqlx::Postgres>),
     #[cfg(feature = "mysql")]
@@ -40,28 +49,37 @@ impl Pool {
     /// # Errors
     /// The driver's acquire error, e.g. a pool timeout.
     pub async fn acquire(&self) -> Result<PoolConn, ExecError> {
-        Ok(match self {
+        let conn = match self {
             #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => PoolConn::Postgres(p.acquire().await?),
+            Pool::Postgres(p) => PooledConn::Postgres(p.acquire().await?),
             #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => PoolConn::Mysql(p.acquire().await?),
+            Pool::Mysql(p) => PooledConn::Mysql(p.acquire().await?),
             #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => PoolConn::Sqlite(p.acquire().await?),
+            Pool::Sqlite(p) => PooledConn::Sqlite(p.acquire().await?),
+        };
+        Ok(PoolConn {
+            conn,
+            pool: crate::sql::PoolId::of(self),
         })
     }
 }
 
 impl PoolConn {
+    /// The driver-typed connection, to run sqlx queries on.
+    pub fn conn(&mut self) -> &mut PooledConn {
+        &mut self.conn
+    }
+
     /// The dialect of this connection's backend.
     #[must_use]
     pub fn dialect(&self) -> &'static dyn Dialect {
-        match self {
+        match &self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(_) => crate::sql::postgres::DIALECT,
+            PooledConn::Postgres(_) => crate::sql::postgres::DIALECT,
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(_) => crate::sql::mysql::DIALECT,
+            PooledConn::Mysql(_) => crate::sql::mysql::DIALECT,
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
+            PooledConn::Sqlite(_) => crate::sql::sqlite::DIALECT,
         }
     }
 
@@ -69,13 +87,13 @@ impl PoolConn {
     /// session state set on it cannot reach the next borrower. sqlx never
     /// resets it, and a reset would also undo an `after_connect` setup.
     pub fn close_on_drop(&mut self) {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => c.close_on_drop(),
+            PooledConn::Postgres(c) => c.close_on_drop(),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => c.close_on_drop(),
+            PooledConn::Mysql(c) => c.close_on_drop(),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => c.close_on_drop(),
+            PooledConn::Sqlite(c) => c.close_on_drop(),
         }
     }
 
@@ -84,15 +102,14 @@ impl PoolConn {
     /// # Errors
     /// Driver errors from `BEGIN`.
     pub async fn begin(&mut self) -> Result<PoolTx<'_>, ExecError> {
-        use sqlx::Connection as _;
-        Ok(match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => PoolTx::Postgres((**c).begin().await?),
+            PooledConn::Postgres(c) => PoolTx::begin_on(&mut **c, &self.pool).await,
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => PoolTx::Mysql((**c).begin().await?),
+            PooledConn::Mysql(c) => PoolTx::begin_on(&mut **c, &self.pool).await,
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => PoolTx::Sqlite((**c).begin().await?),
-        })
+            PooledConn::Sqlite(c) => PoolTx::begin_on(&mut **c, &self.pool).await,
+        }
     }
 }
 
@@ -193,6 +210,26 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
     fn runs_plans(&self) -> bool {
         false
     }
+
+    /// INSERT … RETURNING one row (MySQL: the new auto id) on one connection.
+    #[doc(hidden)]
+    fn insert_returning<'e>(
+        self,
+        query: InsertQuery,
+    ) -> BoxFuture<'e, Result<InsertReturningPool, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e;
+
+    /// Bulk INSERT in one transaction, returning its `RETURNING` rows.
+    #[doc(hidden)]
+    fn bulk_insert<'e>(
+        self,
+        query: BulkInsertQuery,
+    ) -> BoxFuture<'e, Result<Vec<InsertReturningPool>, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e;
 
     /// Runs a delete plan's statements in one transaction. Only reached
     /// on dialects that split it, so never on a Postgres sqlx executor.
@@ -405,6 +442,33 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
     {
         Box::pin(super::delete_plan_pool(self, plan))
     }
+
+    fn insert_returning<'e>(
+        self,
+        query: InsertQuery,
+    ) -> BoxFuture<'e, Result<InsertReturningPool, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move { super::insert_returning_pool(self, &query).await })
+    }
+
+    fn bulk_insert<'e>(
+        self,
+        query: BulkInsertQuery,
+    ) -> BoxFuture<'e, Result<Vec<InsertReturningPool>, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            let mut tx = super::transaction_pool(self).await?;
+            let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
+            tx.commit().await?;
+            Ok(rows)
+        })
+    }
 }
 
 impl<'c> sealed::Sealed<'c> for &'c mut PoolConn {}
@@ -426,13 +490,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => pg_rows(&mut **c, sql, params, decode),
+            PooledConn::Postgres(c) => pg_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => my_rows(&mut **c, sql, params, decode),
+            PooledConn::Mysql(c) => my_rows(&mut **c, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => sq_rows(&mut **c, sql, params, decode),
+            PooledConn::Sqlite(c) => sq_rows(&mut **c, sql, params, decode),
         }
     }
 
@@ -444,13 +508,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
     where
         'c: 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolConn::Postgres(c) => pg_exec(&mut **c, sql, params),
+            PooledConn::Postgres(c) => pg_exec(&mut **c, sql, params),
             #[cfg(feature = "mysql")]
-            PoolConn::Mysql(c) => my_exec(&mut **c, sql, params),
+            PooledConn::Mysql(c) => my_exec(&mut **c, sql, params),
             #[cfg(feature = "sqlite")]
-            PoolConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
+            PooledConn::Sqlite(c) => sq_exec(&mut **c, sql, params),
         }
     }
 
@@ -467,6 +531,38 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
             let n = super::run_delete_plan_tx(&mut tx, plan).await?;
             tx.commit().await?;
             Ok(n)
+        })
+    }
+
+    fn insert_returning<'e>(
+        self,
+        query: InsertQuery,
+    ) -> BoxFuture<'e, Result<InsertReturningPool, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            let mut tx = self.begin().await?;
+            let row = super::insert_returning_tx(&mut tx, &query).await?;
+            tx.commit().await?;
+            Ok(row)
+        })
+    }
+
+    fn bulk_insert<'e>(
+        self,
+        query: BulkInsertQuery,
+    ) -> BoxFuture<'e, Result<Vec<InsertReturningPool>, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            let mut tx = self.begin().await?;
+            let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
+            tx.commit().await?;
+            Ok(rows)
         })
     }
 }
@@ -494,13 +590,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         U: Send + 'e,
         F: FnMut(RowRef<'_>) -> Result<U, sqlx::Error> + Send + 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => pg_rows(&mut **t, sql, params, decode),
+            TxConn::Postgres(t) => pg_rows(&mut **t, sql, params, decode),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(t) => my_rows(&mut **t, sql, params, decode),
+            TxConn::Mysql(t) => my_rows(&mut **t, sql, params, decode),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => sq_rows(&mut **t, sql, params, decode),
+            TxConn::Sqlite(t) => sq_rows(&mut **t, sql, params, decode),
         }
     }
 
@@ -512,13 +608,13 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     where
         'c: 'e,
     {
-        match self {
+        match &mut self.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => pg_exec(&mut **t, sql, params),
+            TxConn::Postgres(t) => pg_exec(&mut **t, sql, params),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(t) => my_exec(&mut **t, sql, params),
+            TxConn::Mysql(t) => my_exec(&mut **t, sql, params),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => sq_exec(&mut **t, sql, params),
+            TxConn::Sqlite(t) => sq_exec(&mut **t, sql, params),
         }
     }
 
@@ -532,9 +628,31 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
     {
         Box::pin(super::run_delete_plan_tx(self, plan))
     }
+
+    fn insert_returning<'e>(
+        self,
+        query: InsertQuery,
+    ) -> BoxFuture<'e, Result<InsertReturningPool, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move { super::insert_returning_tx(self, &query).await })
+    }
+
+    fn bulk_insert<'e>(
+        self,
+        query: BulkInsertQuery,
+    ) -> BoxFuture<'e, Result<Vec<InsertReturningPool>, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move { super::bulk_insert_rows_tx(self, &query).await })
+    }
 }
 
-// Any Postgres sqlx executor, so `fetch_on(t.conn())` keeps compiling.
+// Any Postgres sqlx executor, so `fetch_on(t.conn().await?)` keeps compiling.
 #[cfg(feature = "postgres")]
 impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> sealed::Sealed<'c> for E {}
 #[cfg(feature = "postgres")]
@@ -566,6 +684,58 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         'c: 'e,
     {
         pg_exec(self, sql, params)
+    }
+
+    fn insert_returning<'e>(
+        self,
+        query: InsertQuery,
+    ) -> BoxFuture<'e, Result<InsertReturningPool, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            let row = super::pg_insert_returning(self, &query).await?;
+            Ok(InsertReturningPool::PgRow(row))
+        })
+    }
+
+    fn bulk_insert<'e>(
+        self,
+        query: BulkInsertQuery,
+    ) -> BoxFuture<'e, Result<Vec<InsertReturningPool>, ExecError>>
+    where
+        'c: 'e,
+        Self: 'e,
+    {
+        Box::pin(async move {
+            // One executor, one statement: no transaction to span chunks.
+            let mut stmts =
+                super::compile_bulk_insert_batches(crate::sql::postgres::DIALECT, &query)?;
+            if stmts.len() != 1 {
+                return Err(ExecError::Sql(
+                    crate::sql::SqlError::OperatorNotSupportedInDialect {
+                        op: "a multi-statement bulk INSERT on a raw sqlx executor",
+                        dialect: "postgres",
+                    },
+                ));
+            }
+            let stmt = stmts.remove(0);
+            crate::test_assertions::query_counter::bump();
+            let q = stmt
+                .params
+                .into_iter()
+                .fold(sqlx::query(&stmt.sql), super::bind_query);
+            if query.returning.is_empty() {
+                q.execute(self).await?;
+                return Ok(Vec::new());
+            }
+            Ok(q.fetch_all(self)
+                .await?
+                .into_iter()
+                .map(InsertReturningPool::PgRow)
+                .collect())
+        })
     }
 }
 
@@ -607,16 +777,54 @@ macro_rules! database_conn_executor {
                 $exec(&mut ***self, sql, params)
             }
 
+            fn runs_plans(&self) -> bool {
+                true
+            }
+
             fn run_delete_plan<'e>(self, plan: DeletePlan) -> BoxFuture<'e, Result<u64, ExecError>>
             where
                 'c: 'e,
             {
                 Box::pin(async move {
-                    use sqlx::Connection as _;
-                    let mut tx = PoolTx::$variant((***self).begin().await?);
+                    let pool = self.pool_id().clone();
+                    let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
                     let n = super::run_delete_plan_tx(&mut tx, plan).await?;
                     tx.commit().await?;
                     Ok(n)
+                })
+            }
+
+            fn insert_returning<'e>(
+                self,
+                query: InsertQuery,
+            ) -> BoxFuture<'e, Result<InsertReturningPool, ExecError>>
+            where
+                'c: 'e,
+                Self: 'e,
+            {
+                Box::pin(async move {
+                    let pool = self.pool_id().clone();
+                    let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
+                    let row = super::insert_returning_tx(&mut tx, &query).await?;
+                    tx.commit().await?;
+                    Ok(row)
+                })
+            }
+
+            fn bulk_insert<'e>(
+                self,
+                query: BulkInsertQuery,
+            ) -> BoxFuture<'e, Result<Vec<InsertReturningPool>, ExecError>>
+            where
+                'c: 'e,
+                Self: 'e,
+            {
+                Box::pin(async move {
+                    let pool = self.pool_id().clone();
+                    let mut tx = PoolTx::begin_on(&mut ***self, &pool).await?;
+                    let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
+                    tx.commit().await?;
+                    Ok(rows)
                 })
             }
         }

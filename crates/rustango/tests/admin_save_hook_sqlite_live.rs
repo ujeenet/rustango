@@ -349,7 +349,7 @@ fn log_saves(pool: &Pool) -> Arc<Mutex<Vec<String>>> {
 }
 
 fn noop<'a>(
-    _: &'a Pool,
+    _: &'a mut rustango::sql::PoolTx<'static>,
     _: &'a [rustango::core::SqlValue],
 ) -> rustango::admin::AdminActionFuture<'a> {
     Box::pin(async { Ok(()) })
@@ -384,7 +384,7 @@ async fn custom_action_sends_per_row_save_signals() {
     let log = log_saves(&pool);
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
-        .register_action("sh_post", "touch_selected", noop)
+        .register_tx_action("sh_post", "touch_selected", noop)
         .build();
     let status = post_form(
         &app,
@@ -421,7 +421,7 @@ async fn refused_or_noop_bulk_action_sends_no_signal() {
     let read_only = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
         .read_only(["sh_post"])
-        .register_action("sh_post", "touch_selected", noop)
+        .register_tx_action("sh_post", "touch_selected", noop)
         .build();
     let plain = build_app(pool.clone());
     let mut signalled = Vec::new();

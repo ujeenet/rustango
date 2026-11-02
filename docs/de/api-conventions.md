@@ -31,14 +31,7 @@ Der Name einer Methode sagt Ihnen, was sie tut. Sobald Sie diese Suffixe gelernt
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — der schlichte Name nimmt einen `rustango::sql::Pool` und ist der Alltagsweg. Er funktioniert auf Postgres, MySQL und SQLite und wählt den Dialekt intern. Das ist es, was fast jeder Anwendungscode will.
 - **`fetch_on(executor)`, `count_on(executor)`** — das Suffix `_on` bedeutet „führe dies gegen den *Executor* aus, den ich dir übergebe“ — eine Verbindung oder eine offene Transaktion statt des Pools. Greif dazu, wenn du mehrere Statements in einer Transaktion brauchst. `fetch_on` / `first_on` / `count_on` / `exists_on` und das `fetch_on` von `values` / `aggregate` nehmen jeden `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) auf allen drei Backends; der Rest der `_on`-Familie ist weiterhin nur für Postgres.
-- **Schreibvorgänge kehren dies um, und das ist die einzige Stelle, an der die Regel nicht gilt.** `save(&pool)`, `insert(&pool)` und `delete(&pool)` nehmen einen treiberspezifischen `sqlx::PgPool`; auf einem Build ohne das Feature `postgres` **existieren sie gar nicht** — die Auswahl von `sqlite` lässt die Methode verschwinden, statt mit einer Meldung zu scheitern, die die Ursache benennt. Die Mehr-Backend-Varianten tragen das Suffix `_pool`: `save_pool`, `insert_pool`, `delete_pool`, jeweils mit `rustango::sql::Pool`.
-
-  | | schlichter Name | Mehr-Backend-Variante |
-  |---|---|---|
-  | **Lesen** (`QuerySet`) | `fetch(&pool)` — bereits Mehr-Backend | *ist* der schlichte Name |
-  | **Schreiben** (Modell) | `save(&pool)` — **nur Postgres** | `save_pool(&pool)` |
-
-  Der kurze Name ist beim Schreiben also der engere und beim Lesen der breitere. Diese Umkehrung ist ein Schönheitsfehler, kein Entwurf: sie wird über einen Deprecation-Zyklus statt einer Umbenennung aufgelöst. Bis dahin gilt: **wer nicht auf Postgres arbeitet, schreibt `save_pool` / `insert_pool` / `delete_pool`.**
+- **Schreibvorgänge folgen derselben Regel.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` und `bulk_insert(rows, &pool)` nehmen auf jedem Backend einen `rustango::sql::Pool`; ihre `_on`-Formen nehmen jeden `SqlExecutor`. Ein auditiertes Modell lehnt die `_on`-Formen ab, nutze dort die `&pool`-Varianten. Die alten `_pool`-Namen kompilieren noch, sind aber veraltet.
 - **`from_X(value)`** — konvertiert AUS einem anderen Wert (z. B. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — eine Builder-Methode, die eine Option setzt und das Objekt zurückgibt, sodass Sie Aufrufe verketten können (z. B. `with_default_ttl(d)`, `with_access_ttl(secs)`).
 - **`new()`** — der minimale Konstruktor. Alle Argumente, die er entgegennimmt, sind erforderliche Abhängigkeiten (z. B. `RedisCache::new(url)` — Sie können den Cache nicht ohne URL bauen).
@@ -122,7 +115,7 @@ Die Faustregel: Wenn eine Methode auf etwas wartet (die Datenbank, das Netzwerk 
 Jeder ORM-Aufruf nimmt einen Pool oder Executor (das Datenbank-Handle) als **letztes** Argument entgegen. Sie übergeben die Verbindung jedes Mal, anstatt sich auf einen versteckten globalen Zustand zu verlassen:
 
 ```rust
-post.save_pool(&pool).await?
+post.save(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```
@@ -251,10 +244,10 @@ Verwenden, wenn:
 ### Config-Struct: Felder direkt setzen, auf `Default` zurückfallen
 
 ```rust
-let l = AccessLogLayer {
-    log_success: false,
-    include_ip: true,
-    slow_threshold_ms: 500,
+let e = Email {
+    to: vec!["ada@example.com".into()],
+    subject: "Welcome".into(),
+    body: "Hello".into(),
     ..Default::default()
 };
 ```
@@ -264,7 +257,7 @@ Verwenden, wenn:
 - Reflection / Serialisierung von Bedeutung ist
 - In-Place-Aktualisierung üblich ist (`config.field = ...`)
 
-**Als Regel verwendet **Rustango** Builder** für HTTP-Middleware (`security_headers`, `cors`, `rate_limit` und so weiter) und Config-Structs für einfache Datenträger (`Email`, `AccessLogLayer`, den internen Zustand von `RateLimitLayer`).
+**Als Regel verwendet **Rustango** Builder** für HTTP-Middleware (`security_headers`, `cors`, `rate_limit`, `access_log` und so weiter) und Config-Structs für einfache Datenträger (`Email`, den internen Zustand von `RateLimitLayer`).
 
 ---
 
@@ -300,7 +293,7 @@ anderes Backend zu wählen: `default-features = false, features = ["batteries", 
 Um ein Binary zu verschlanken, das nicht alles braucht, deaktivieren Sie die Standardwerte und listen Sie nur auf, was Sie verwenden:
 
 ```toml
-rustango = { version = "0.61", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.62", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

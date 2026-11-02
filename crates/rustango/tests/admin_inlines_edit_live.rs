@@ -128,7 +128,7 @@ async fn edit_page_round_trips_update_delete_insert_across_inline_rows() {
         id: Auto::default(),
         name: "Edit Inlines Blog".into(),
     };
-    blog.insert(&pool).await.unwrap();
+    blog.insert(&pool.clone().into()).await.unwrap();
     let blog_id = *blog.id.get().expect("PK assigned");
 
     let mut post_keep = BlogPost {
@@ -137,7 +137,7 @@ async fn edit_page_round_trips_update_delete_insert_across_inline_rows() {
         title: "Keep me".into(),
         body: "original body".into(),
     };
-    post_keep.insert(&pool).await.unwrap();
+    post_keep.insert(&pool.clone().into()).await.unwrap();
     let keep_id = *post_keep.id.get().expect("PK assigned");
 
     let mut post_drop = BlogPost {
@@ -146,7 +146,7 @@ async fn edit_page_round_trips_update_delete_insert_across_inline_rows() {
         title: "Drop me".into(),
         body: "to be removed".into(),
     };
-    post_drop.insert(&pool).await.unwrap();
+    post_drop.insert(&pool.clone().into()).await.unwrap();
     let drop_id = *post_drop.id.get().expect("PK assigned");
 
     // ----- 1. GET edit form -----
@@ -282,7 +282,7 @@ async fn edit_page_skips_blank_extra_rows_without_failures() {
         id: Auto::default(),
         name: "Blank Extras Blog".into(),
     };
-    blog.insert(&pool).await.unwrap();
+    blog.insert(&pool.clone().into()).await.unwrap();
     let blog_id = *blog.id.get().expect("PK assigned");
 
     let app = rustango::admin::router(pool.clone());

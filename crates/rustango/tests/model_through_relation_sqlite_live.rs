@@ -115,13 +115,13 @@ async fn seed(pool: &Pool) -> (i64, i64) {
         id: Auto::default(),
         name: "Atlantis".into(),
     };
-    a.save_pool(pool).await.unwrap();
+    a.save(pool).await.unwrap();
     let a_id = a.id.get().copied().unwrap();
     let mut b = Country {
         id: Auto::default(),
         name: "Brookland".into(),
     };
-    b.save_pool(pool).await.unwrap();
+    b.save(pool).await.unwrap();
     let b_id = b.id.get().copied().unwrap();
 
     for (country_id, names) in [
@@ -134,7 +134,7 @@ async fn seed(pool: &Pool) -> (i64, i64) {
                 name: (*n).into(),
                 country_id: ForeignKey::unloaded(country_id),
             };
-            u.save_pool(pool).await.unwrap();
+            u.save(pool).await.unwrap();
             let user_id = u.id.get().copied().unwrap();
             for i in 0..3 {
                 let mut p = Post {
@@ -142,7 +142,7 @@ async fn seed(pool: &Pool) -> (i64, i64) {
                     title: format!("{n}-post-{i}"),
                     author_id: ForeignKey::unloaded(user_id),
                 };
-                p.save_pool(pool).await.unwrap();
+                p.save(pool).await.unwrap();
             }
         }
     }
@@ -221,7 +221,7 @@ async fn through_accessor_returns_empty_for_country_with_no_users() {
         id: Auto::default(),
         name: "Empty".into(),
     };
-    empty.save_pool(&pool).await.unwrap();
+    empty.save(&pool).await.unwrap();
     let posts = empty.posts_through().fetch(&pool).await.unwrap();
     assert!(posts.is_empty());
 }
@@ -245,7 +245,7 @@ async fn posts_through_count_returns_far_side_count() {
         id: Auto::default(),
         name: "Empty".into(),
     };
-    empty.save_pool(&pool).await.unwrap();
+    empty.save(&pool).await.unwrap();
     assert_eq!(empty.posts_through_count(&pool).await.unwrap(), 0);
 }
 
@@ -279,7 +279,7 @@ async fn posts_through_first_returns_first_far_or_none() {
         id: Auto::default(),
         name: "Empty".into(),
     };
-    empty.save_pool(&pool).await.unwrap();
+    empty.save(&pool).await.unwrap();
     assert!(empty.posts_through_first(&pool).await.unwrap().is_none());
 }
 

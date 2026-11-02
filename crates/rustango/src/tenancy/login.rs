@@ -220,13 +220,13 @@ mod sweep_tests {
         .unwrap();
         let p = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
         let db = tmp.path().join("acme.db");
-        let req = ProvisionRequest::new(
+        let req = crate::testkit::routed(ProvisionRequest::new(
             "acme",
             TenantStorage::Database(DatabaseSource::Url(format!(
                 "sqlite://{}?mode=rwc",
                 db.display()
             ))),
-        );
+        ));
         p.provision(&req, None, None).await.unwrap();
         pools.invalidate("acme").await;
         assert_eq!(pools.cached_database_pool_count().await, 0);

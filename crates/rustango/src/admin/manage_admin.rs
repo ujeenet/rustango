@@ -154,7 +154,7 @@ pub async fn create_admin_cmd<W: Write + Send>(
         created_at: chrono::Utc::now(),
         sessions_revoked_at: None,
     };
-    user.save_pool(pool)
+    user.save(pool)
         .await
         .map_err(|e| MigrateError::Validation(format!("insert failed: {e}")))?;
     let user_id = user.id.get().copied().unwrap_or_default();
@@ -213,8 +213,7 @@ pub async fn reset_password_cmd<W: Write + Send>(
     audit_account(pool, &user, "password_reset").await?;
     writeln!(w, "password reset for admin user `{username}`")?;
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }
@@ -269,8 +268,7 @@ pub async fn change_password_cmd<W: Write + Send>(
     audit_account(pool, &user, "password_change").await?;
     writeln!(w, "password changed for admin user `{username}`")?;
     if generated {
-        writeln!(w, "  generated password: {plain}")?;
-        writeln!(w, "  store this safely — it won't be shown again")?;
+        manage_interactive::print_secret_once(w, "generated password", &plain)?;
     }
     Ok(())
 }
@@ -449,6 +447,6 @@ async fn audit_account(pool: &Pool, user: &AdminUser, action: &str) -> Result<()
         source: AuditSource::Custom("cli".into()),
         changes: serde_json::json!({ "action": action }),
     };
-    crate::audit::emit_one_pool(pool, &entry).await?;
+    crate::audit::emit_one(pool, &entry).await?;
     Ok(())
 }

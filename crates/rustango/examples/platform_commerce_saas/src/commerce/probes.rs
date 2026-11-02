@@ -61,7 +61,7 @@ async fn promotion(
         visible,
         deleted_at: None,
     };
-    row.insert_pool(pool).await.map_err(internal)?;
+    row.insert(pool).await.map_err(internal)?;
     row.id.get().copied().ok_or_else(|| internal("no pk"))
 }
 
@@ -167,7 +167,7 @@ pub async fn audit_probe(pool: &Pool) -> ProbeResult {
         visible: true,
         deleted_at: None,
     };
-    row.insert_pool(pool).await.map_err(internal)?;
+    row.insert(pool).await.map_err(internal)?;
     let pk = row.id.get().copied().ok_or_else(|| internal("no pk"))?;
     let deleted = row.soft_delete(pool).await.map_err(internal)?;
     let restored = row.restore(pool).await.map_err(internal)?;
@@ -200,7 +200,7 @@ pub async fn dml_bounded(pool: &Pool) -> ProbeResult {
             active: false,
             created_at: Auto::default(),
         };
-        p.insert_pool(pool).await.map_err(internal)?;
+        p.insert(pool).await.map_err(internal)?;
     }
     let tagged = || Product::objects().filter("sku__startswith", tag.clone());
     let updated = tagged()

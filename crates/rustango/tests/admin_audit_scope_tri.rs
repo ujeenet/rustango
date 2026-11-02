@@ -38,12 +38,12 @@ fn hide_all_rows(_: &axum::http::request::Parts) -> Vec<rustango::core::Filter> 
         rustango::core::SqlValue::I64(-1),
     )]
 }
-rustango::register_admin_queryset!(QS_HOOKED, hide_all_rows);
+rustango::register_queryset_scope!(QS_HOOKED, hide_all_rows);
 
 fn deny_view(_: &axum::http::request::Parts, _: Option<&serde_json::Value>) -> bool {
     false
 }
-rustango::register_admin_object_permission!(VIEW_HOOKED, "view", deny_view);
+rustango::register_object_permission!(VIEW_HOOKED, "view", deny_view);
 
 async fn setup(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Audit>(pool).await;
@@ -52,7 +52,7 @@ async fn setup(pool: &Pool) {
         AuditLog::delete_where("entity_table", t, pool)
             .await
             .expect("clear audit rows");
-        audit::emit_one_pool(
+        audit::emit_one(
             pool,
             &PendingEntry {
                 entity_table: t,
@@ -287,7 +287,7 @@ async fn seed_facet_tables(pool: &Pool, many: usize, hot: usize) {
     for i in 0..hot {
         push(format!("audfacet_hot_{i:02}"), 50);
     }
-    audit::emit_many_pool(pool, &entries).await.expect("emit");
+    audit::emit_many(pool, &entries).await.expect("emit");
 }
 
 async fn superuser_get(pool: &Pool, uri: &str) -> (StatusCode, String) {

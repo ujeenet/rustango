@@ -178,7 +178,7 @@ async fn run(&self) -> Result<(), JobError> {
 `email_jobs` (Features `email` + `jobs`) verdrahtet dies für dich: rufe
 `register_email_job(&queue, EmailJobConfig::new(mailer))` einmal beim Start auf, dann
 `dispatch_email(&queue, &email)` im Handler. Es validiert vor dem Einreihen,
-und nur ein `Transport`-Fehler wird wiederholt.
+und nur ein `Transport`-Fehler wird wiederholt. Anhänge werden als base64 eingereiht.
 
 ---
 

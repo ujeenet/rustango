@@ -41,7 +41,7 @@ async fn seed(pool: &Pool) {
             label: label.into(),
             rating,
         };
-        w.insert_pool(pool).await.unwrap();
+        w.insert(pool).await.unwrap();
     }
 }
 
@@ -101,19 +101,19 @@ async fn reverse_flips_each_field_of_a_multi_column_sort() {
         label: "a".into(),
         rating: 1,
     };
-    w1.insert_pool(&pool).await.unwrap();
+    w1.insert(&pool).await.unwrap();
     let mut w2 = Widget {
         id: Auto::default(),
         label: "b".into(),
         rating: 1,
     };
-    w2.insert_pool(&pool).await.unwrap();
+    w2.insert(&pool).await.unwrap();
     let mut w3 = Widget {
         id: Auto::default(),
         label: "c".into(),
         rating: 2,
     };
-    w3.insert_pool(&pool).await.unwrap();
+    w3.insert(&pool).await.unwrap();
 
     // ORDER BY rating ASC, label ASC → [(1,a), (1,b), (2,c)]
     let asc: Vec<Widget> = Widget::objects()

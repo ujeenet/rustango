@@ -253,6 +253,13 @@ mod tests {
     struct ExplodingCache;
     #[async_trait]
     impl Cache for ExplodingCache {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
             Err(crate::cache::CacheError::Connection("boom".into()))
         }

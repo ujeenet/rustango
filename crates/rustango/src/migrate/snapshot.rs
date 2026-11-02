@@ -159,6 +159,7 @@ impl PartialOrd for M2MTableSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[non_exhaustive]
 pub struct TableSnapshot {
     pub name: String,
     pub model: String,
@@ -168,6 +169,9 @@ pub struct TableSnapshot {
     /// diff-clean.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub composite_fks: Vec<CompositeFkSnapshot>,
+    /// Table comment from `db_table_comment = "..."`; absent in older snapshots.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub db_table_comment: Option<String>,
 }
 
 /// Serialized [`crate::core::CompositeFkRelation`], stored per table
@@ -874,6 +878,7 @@ impl TableSnapshot {
             model: s.name.to_owned(),
             fields,
             composite_fks,
+            db_table_comment: s.db_table_comment.map(str::to_owned),
         }
     }
 
@@ -1282,6 +1287,7 @@ mod composite_fk_snapshot_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }];
         static COMPS: [CompositeFkRelation; 1] = [CompositeFkRelation {
             name: "target",
@@ -1368,6 +1374,7 @@ mod composite_fk_snapshot_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }];
         static MANAGED: ModelSchema = ModelSchema {
             name: "Managed",
@@ -1475,6 +1482,7 @@ mod composite_fk_snapshot_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }];
         static MS: ModelSchema = ModelSchema {
             name: "Plain",
@@ -1625,6 +1633,7 @@ mod generated_as_and_db_comment_capture {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: None,
             },
             FieldSchema {
                 name: "total",
@@ -1651,6 +1660,7 @@ mod generated_as_and_db_comment_capture {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: None,
             },
             FieldSchema {
                 name: "label",
@@ -1677,6 +1687,7 @@ mod generated_as_and_db_comment_capture {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: None,
             },
         ];
         static MS: ModelSchema = ModelSchema {

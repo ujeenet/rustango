@@ -116,14 +116,14 @@ async fn seeded(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Wide>(pool).await;
     rustango::testkit::matrix::fresh_table::<Shelf>(pool).await;
     rustango::testkit::matrix::fresh_table::<ShelfBook>(pool).await;
-    Shelf { id: 1 }.insert_pool(pool).await.expect("seed shelf");
+    Shelf { id: 1 }.insert(pool).await.expect("seed shelf");
     for (id, book_id) in [(1, 1), (2, 2)] {
         ShelfBook {
             id,
             shelf_id: 1,
             book_id,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed shelf book");
     }
@@ -132,7 +132,7 @@ async fn seeded(pool: &Pool) {
             id,
             name: name.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed author");
     }
@@ -143,7 +143,7 @@ async fn seeded(pool: &Pool) {
             price,
             pages,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed book");
     }
@@ -157,7 +157,7 @@ async fn renamed_fk_column_loads_on_every_path(pool: &Pool) {
             id,
             writer: ForeignKey::unloaded(writer),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed rbook");
     }
@@ -191,10 +191,7 @@ async fn renamed_fk_column_loads_on_every_path(pool: &Pool) {
         .fetch(pool)
         .await
         .expect("ada");
-    let books = ada[0]
-        .renamed_fk_book_set_pool(pool)
-        .await
-        .expect("reverse");
+    let books = ada[0].renamed_fk_book_set(pool).await.expect("reverse");
     assert_eq!(books.len(), 2);
 }
 
@@ -206,7 +203,7 @@ async fn raw_ident_fk_loads_on_every_path(pool: &Pool) {
             id,
             r#ref: ForeignKey::unloaded(author),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed rawbook");
     }
@@ -240,7 +237,7 @@ async fn raw_ident_fk_loads_on_every_path(pool: &Pool) {
         .fetch(pool)
         .await
         .expect("ada");
-    let books = ada[0].raw_fk_book_set_pool(pool).await.expect("reverse");
+    let books = ada[0].raw_fk_book_set(pool).await.expect("reverse");
     assert_eq!(books.len(), 2);
 }
 
@@ -929,7 +926,7 @@ mod decimal {
                 id,
                 amount: amount.parse().unwrap(),
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("seed ledger");
         }
@@ -945,7 +942,7 @@ mod decimal {
     async fn decimal_keeps_its_fraction(pool: &Pool) {
         let v: Decimal = "0.123456789012345".parse().unwrap();
         Ledger { id: 1, amount: v }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("seed ledger");
         let n = Ledger::objects().filter("amount", v).count(pool).await;
@@ -960,7 +957,7 @@ mod decimal {
         use rustango::core::{Expr, FieldType};
         let v: Decimal = "0.1234567890123456789012345678".parse().unwrap();
         Ledger { id: 1, amount: v }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("seed ledger");
         let back = Ledger::objects().fetch(pool).await.unwrap();
@@ -985,7 +982,7 @@ mod decimal {
             id: 1,
             amount: "1".parse().unwrap(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed ledger");
         let quarter = Expr::BinOp {

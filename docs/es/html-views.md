@@ -305,7 +305,7 @@ ellas:
 | `ListView` | `object_list` (las filas de la página), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (la fila) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **sin `object`** |
-| `UpdateView` | `form` (`.fields`, `.errors`), `object` (la fila), `pk`, `is_create` (false), `is_update` (true) |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (los campos listados, la clave primaria y los `.context_fields()`), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (la fila a confirmar) |
 
 Las filas se exponen como mapas planos indexados por nombre de columna (`{{ post.title }}`), con
@@ -372,7 +372,7 @@ coincida con cómo tu app gestiona las conexiones a la base de datos:
   el extractor [`Tenant`](https://docs.rs). Disponible con las características
   `template_views` + `tenancy`. Las plantillas se portan sin cambios entre ambos.
 
-Esto refleja la división de ViewSet (`router` / `router_pool` vs `tenant_router`).
+Esto refleja la división de ViewSet (`router` vs `tenant_router`).
 
 ---
 
@@ -388,7 +388,7 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     // HTML pages for browsers:
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));

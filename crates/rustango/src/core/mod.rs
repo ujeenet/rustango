@@ -19,6 +19,8 @@ pub mod joins;
 mod query;
 mod schema;
 pub mod subquery;
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) mod table_policy;
 mod validate;
 mod value;
 pub mod window;
@@ -35,8 +37,6 @@ pub use query::{
     OrderItem, RelAggKind, RelCorrelation, SearchClause, SelectQuery, SetOp, SubqueryJoin,
     UpdateQuery, WhereExpr, LIKE_ESCAPE_CHAR, LIKE_ESCAPE_CLAUSE,
 };
-#[cfg(any(feature = "admin", feature = "template_views"))]
-pub(crate) use schema::is_credential_column;
 pub use schema::{
     infer_app_label_from_module_path, AdminConfig, CheckConstraint, CompositeFkRelation,
     ExclusionConstraint, FieldCast, FieldSchema, Fieldset, GenericRelation, GenericReverseRelation,

@@ -49,7 +49,7 @@ async fn insert_or_ignore_returns_false_when_unique_conflict() {
         id: Auto::default(),
         slug: "dup".into(),
     };
-    p1.save_pool(&pool).await.unwrap();
+    p1.save(&pool).await.unwrap();
 
     // Second insert with the same unique slug → conflict → skip.
     let mut p2 = Post {

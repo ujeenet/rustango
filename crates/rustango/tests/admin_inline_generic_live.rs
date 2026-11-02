@@ -119,7 +119,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
         id: Auto::Unset,
         title: "Tagged Post".into(),
     };
-    post.save_pool(&p).await.unwrap();
+    post.save(&p).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     // Attach two tags to the post via the typed setter (#240).
@@ -133,7 +133,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
         .set_content_object_for::<Post>(&p, post_pk)
         .await
         .unwrap();
-    tag_a.save_pool(&p).await.unwrap();
+    tag_a.save(&p).await.unwrap();
 
     let mut tag_b = Tag {
         id: Auto::Unset,
@@ -145,7 +145,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
         .set_content_object_for::<Post>(&p, post_pk)
         .await
         .unwrap();
-    tag_b.save_pool(&p).await.unwrap();
+    tag_b.save(&p).await.unwrap();
 
     // Also attach a tag to a different Post — must NOT appear in the
     // first post's panel.
@@ -153,7 +153,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
         id: Auto::Unset,
         title: "Other".into(),
     };
-    other_post.save_pool(&p).await.unwrap();
+    other_post.save(&p).await.unwrap();
     let other_pk = *other_post.id.get().unwrap();
     let mut tag_c = Tag {
         id: Auto::Unset,
@@ -165,7 +165,7 @@ async fn parent_detail_renders_generic_inline_panel_with_child_rows() {
         .set_content_object_for::<Post>(&p, other_pk)
         .await
         .unwrap();
-    tag_c.save_pool(&p).await.unwrap();
+    tag_c.save(&p).await.unwrap();
 
     // GET the parent detail page.
     let app = rustango::admin::router(pool.clone());
@@ -217,7 +217,7 @@ async fn parent_detail_renders_empty_state_when_no_generic_children() {
         id: Auto::Unset,
         title: "No tags here".into(),
     };
-    post.save_pool(&p).await.unwrap();
+    post.save(&p).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     let app = rustango::admin::router(pool.clone());

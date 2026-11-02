@@ -291,7 +291,7 @@ async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
         id: Auto::default(),
         name: "o".into(),
     };
-    o.insert_pool(pool).await.expect("order");
+    o.insert(pool).await.expect("order");
     let o = *o.id.get().expect("pk");
     for qty in 0..101 {
         let mut l = SLine {
@@ -299,7 +299,7 @@ async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
             order_id: o,
             qty,
         };
-        l.insert_pool(pool).await.expect("line");
+        l.insert(pool).await.expect("line");
     }
     rustango::audit::ensure_table_pool(pool)
         .await
@@ -317,7 +317,7 @@ async fn detail_page_bounds_inline_rows_and_history(pool: &Pool) {
             changes: serde_json::json!({ "n": i }),
             occurred_at: chrono::Utc::now(),
         };
-        e.insert_pool(pool).await.expect("audit row");
+        e.insert(pool).await.expect("audit row");
     }
     let (status, html) = send(pool, "GET", &format!("/aed_sorder/{o}"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
@@ -353,7 +353,7 @@ async fn inline_save_reads_children_in_one_select(pool: &Pool) {
         id: Auto::default(),
         name: "o".into(),
     };
-    o.insert_pool(pool).await.expect("order");
+    o.insert(pool).await.expect("order");
     let o = *o.id.get().expect("pk");
     let mut form_rows = Vec::new();
     for qty in 0..10 {
@@ -362,7 +362,7 @@ async fn inline_save_reads_children_in_one_select(pool: &Pool) {
             order_id: o,
             qty,
         };
-        l.insert_pool(pool).await.expect("line");
+        l.insert(pool).await.expect("line");
         form_rows.push((*l.id.get().expect("pk"), qty));
     }
     let form = |rows: &[(i64, i64)]| {
@@ -396,7 +396,7 @@ async fn inline_child_writes_send_admin_signals(pool: &Pool) {
         id: Auto::default(),
         name: "o".into(),
     };
-    o.insert_pool(pool).await.expect("order");
+    o.insert(pool).await.expect("order");
     let o = *o.id.get().expect("pk");
     let mut ids = Vec::new();
     for qty in [1, 2] {
@@ -405,7 +405,7 @@ async fn inline_child_writes_send_admin_signals(pool: &Pool) {
             order_id: o,
             qty,
         };
-        l.insert_pool(pool).await.expect("line");
+        l.insert(pool).await.expect("line");
         ids.push(*l.id.get().expect("pk"));
     }
     let _guard = signal_lock().lock().await;
@@ -488,7 +488,7 @@ async fn seed_order(pool: &Pool) -> i64 {
         id: Auto::default(),
         name: "o".into(),
     };
-    o.insert_pool(pool).await.expect("order");
+    o.insert(pool).await.expect("order");
     *o.id.get().expect("pk")
 }
 
@@ -604,7 +604,7 @@ async fn rename_through_the_form(
         meta,
         status: "draft".into(),
     };
-    d.insert_pool(pool).await.expect("insert");
+    d.insert(pool).await.expect("insert");
     let id = *d.id.get().expect("pk");
     if legacy {
         // Written before `choices` dropped it; the ORM refuses it now.
@@ -641,7 +641,7 @@ async fn untouched_empty_string_is_kept(pool: &Pool) {
             memo: memo.clone(),
             score: None,
         };
-        n.insert_pool(pool).await.expect("insert");
+        n.insert(pool).await.expect("insert");
         let id = *n.id.get().expect("pk");
         let (status, html) = send(pool, "GET", &format!("/aed_note/{id}/edit"), "").await;
         assert_eq!(status, StatusCode::OK, "{html}");
@@ -657,7 +657,7 @@ async fn untouched_empty_string_is_kept(pool: &Pool) {
             ("renamed", memo),
             "memo rewritten"
         );
-        row.delete_pool(pool).await.expect("delete");
+        row.delete(pool).await.expect("delete");
     }
 }
 
@@ -669,7 +669,7 @@ async fn non_finite_float_is_refused(pool: &Pool) {
         memo: None,
         score: Some(1.5),
     };
-    n.insert_pool(pool).await.expect("insert");
+    n.insert(pool).await.expect("insert");
     let id = *n.id.get().expect("pk");
     for bad in ["NaN", "inf", "-infinity"] {
         let form = encode(&[("name", "a".to_owned()), ("score", bad.to_owned())]);
@@ -678,7 +678,7 @@ async fn non_finite_float_is_refused(pool: &Pool) {
         let row = Note::objects().fetch(pool).await.expect("fetch").remove(0);
         assert_eq!(row.score, Some(1.5), "{bad}");
     }
-    n.delete_pool(pool).await.expect("delete");
+    n.delete(pool).await.expect("delete");
 }
 
 /// A stored value outside `choices` survives a rename.
@@ -698,7 +698,7 @@ async fn stale_form_still_wins(pool: &Pool) {
         meta: None,
         status: "draft".into(),
     };
-    d.insert_pool(pool).await.expect("insert");
+    d.insert(pool).await.expect("insert");
     let id = *d.id.get().expect("pk");
     let (status, html) = send(pool, "GET", &format!("/aed_doc/{id}/edit"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
@@ -717,7 +717,7 @@ async fn stale_form_still_wins(pool: &Pool) {
             if x.table == "aed_doc" {
                 let mut row = Doc::objects().fetch(&other).await.expect("fetch").remove(0);
                 row.name = "z".into();
-                row.save_pool(&other).await.expect("concurrent edit");
+                row.save(&other).await.expect("concurrent edit");
             }
         }
     });
@@ -735,14 +735,14 @@ async fn inline_rows_read_renamed_columns(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     let p = *p.id.get().expect("pk");
     let mut l = CLine {
         id: Auto::default(),
         parent_id: p,
         amount: 4242,
     };
-    l.insert_pool(pool).await.expect("line");
+    l.insert(pool).await.expect("line");
     let l = *l.id.get().expect("pk");
 
     let (status, html) = send(pool, "GET", &format!("/aed_cparent/{p}"), "").await;
@@ -774,7 +774,7 @@ async fn seed_slugs(pool: &Pool) {
             slug: slug.to_owned(),
             name: Some(format!("n-{slug}")),
         };
-        row.insert_pool(pool).await.expect("insert slug");
+        row.insert(pool).await.expect("insert slug");
     }
 }
 
@@ -834,7 +834,7 @@ async fn string_fk_cell_link_is_encoded(pool: &Pool) {
             id: Auto::default(),
             slug_id: (*slug).to_owned(),
         };
-        r.insert_pool(pool).await.expect("insert ref");
+        r.insert(pool).await.expect("insert ref");
     }
     let (status, html) = send(pool, "GET", "/aed_slugref", "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
@@ -872,7 +872,7 @@ async fn seed_dparent(pool: &Pool) -> i64 {
         id: Auto::default(),
         name: "p".into(),
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     *p.id.get().expect("pk")
 }
 
@@ -900,7 +900,7 @@ async fn inline_edit_keeps_microseconds(pool: &Pool) {
         status: "live".into(),
         at: Some(at),
     };
-    line.insert_pool(pool).await.expect("line");
+    line.insert(pool).await.expect("line");
     let lid = *line.id.get().expect("pk");
     let (status, html) = send(pool, "GET", &format!("/aed_dparent/{p}/edit"), "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
@@ -926,7 +926,7 @@ async fn refused_edit_keeps_the_typed_inline_rows(pool: &Pool) {
         name: "p".into(),
         rank: 1,
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     let pid = *p.id.get().expect("pk");
     let mut l = RLine {
         id: Auto::default(),
@@ -934,7 +934,7 @@ async fn refused_edit_keeps_the_typed_inline_rows(pool: &Pool) {
         qty: 1,
         done: false,
     };
-    l.insert_pool(pool).await.expect("line");
+    l.insert(pool).await.expect("line");
     let lid = *l.id.get().expect("pk");
     let form = |rank: &str, new_qty: &str| {
         format!(
@@ -990,7 +990,7 @@ async fn refused_edit_keys_typed_rows_by_pk(pool: &Pool) {
         name: "p".into(),
         rank: 1,
     };
-    p.insert_pool(pool).await.expect("parent");
+    p.insert(pool).await.expect("parent");
     let pid = *p.id.get().expect("pk");
     let mut lines = Vec::new();
     for qty in [1, 2, 3] {
@@ -1000,12 +1000,12 @@ async fn refused_edit_keys_typed_rows_by_pk(pool: &Pool) {
             qty,
             done: false,
         };
-        l.insert_pool(pool).await.expect("line");
+        l.insert(pool).await.expect("line");
         lines.push(l);
     }
     let [a, b, c] = [0, 1, 2].map(|i| *lines[i].id.get().expect("pk"));
     // Another user deletes b after the page loaded.
-    lines[1].delete_pool(pool).await.expect("delete b");
+    lines[1].delete(pool).await.expect("delete b");
     let form = format!(
         "name=p&rank=abc&aed_rline-TOTAL_FORMS=4&aed_rline-INITIAL_FORMS=3\
          &aed_rline-0-id={a}&aed_rline-0-qty=10\
@@ -1073,7 +1073,7 @@ async fn seed_xfers(pool: &Pool) -> (i64, i64, i64, i64) {
             id: Auto::default(),
             name: name.into(),
         };
-        acct.insert_pool(pool).await.expect("acct");
+        acct.insert(pool).await.expect("acct");
         ids.push(*acct.id.get().expect("pk"));
     }
     let (a, b) = (ids[0], ids[1]);
@@ -1086,7 +1086,7 @@ async fn seed_xfers(pool: &Pool) -> (i64, i64, i64, i64) {
             rank: 1,
             note: format!("n{amount}"),
         };
-        x.insert_pool(pool).await.expect("xfer");
+        x.insert(pool).await.expect("xfer");
         ids.push(*x.id.get().expect("pk"));
     }
     (a, b, ids[2], ids[3])
@@ -1455,7 +1455,7 @@ mod sqlite_only {
             id: Auto::default(),
             name: "p".into(),
         };
-        parent.insert_pool(&pool).await.expect("parent");
+        parent.insert(&pool).await.expect("parent");
         let pid = *parent.id.get().expect("pk");
         let add = "name=p&aed_tline-TOTAL_FORMS=1&aed_tline-INITIAL_FORMS=0&aed_tline-0-qty=3";
         let (status, body) = send(&pool, "POST", &format!("/aed_tparent/{pid}"), add).await;
@@ -1542,7 +1542,7 @@ mod pg_only {
             emb: Vector::new(vec![1.0, 2.0, 3.0]),
             opt_emb: Some(Vector::new(vec![0.5, 0.0, 0.0])),
         };
-        row.insert_pool(&pool).await.expect("insert");
+        row.insert(&pool).await.expect("insert");
         let id = *row.id.get().expect("pk");
         let (status, html) = send(&pool, "GET", &format!("/aed_pgkinds/{id}/edit"), "").await;
         assert_eq!(status, StatusCode::OK, "{html}");

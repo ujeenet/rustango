@@ -73,15 +73,15 @@ async fn a_duplicate_grant_row_is_refused(pool: &Pool) {
         skill_id,
         data: serde_json::json!({}),
     };
-    row().insert_pool(pool).await.unwrap();
-    assert!(row().insert_pool(pool).await.is_err());
+    row().insert(pool).await.unwrap();
+    assert!(row().insert(pool).await.is_err());
     let perm = || AgentSkillPermission {
         id: Auto::default(),
         skill_id,
         permission_codename: "post.view".into(),
     };
-    perm().insert_pool(pool).await.unwrap();
-    assert!(perm().insert_pool(pool).await.is_err());
+    perm().insert(pool).await.unwrap();
+    assert!(perm().insert(pool).await.is_err());
 }
 
 tri_dialect_test!(

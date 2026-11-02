@@ -62,7 +62,7 @@
 //!   `fetch_on` / `first_on` / `count_on` / `exists_on` and the values
 //!   and aggregate `fetch_on`
 //! - the PostgreSQL-only `_on` reads: `fetch_paginated_on` /
-//!   `explain_on`, `select_rows_on`, `fetch_aggregate_on`,
+//!   `explain_on`, `fetch_aggregate_on`,
 //!   `annotate_count_children_on`, and `fetch_with_prefetch` (two
 //!   queries)
 //!
