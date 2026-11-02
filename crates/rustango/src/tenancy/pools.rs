@@ -1633,6 +1633,8 @@ struct UncheckedPath {
     skipped: Vec<String>,
     /// The schema is a role's name, so the default `"$user"` path leads with it.
     role_named: bool,
+    /// The schema exists; a path naming a missing one silently skips it.
+    exists: bool,
 }
 
 /// The tenant-scoped model tables, walked once per process.
@@ -1735,12 +1737,14 @@ impl TenantSearchPath {
                      JOIN pg_catalog.pg_namespace tn ON tn.oid = t.relnamespace \
                      WHERE tn.nspname = $1 AND t.relname = c.relname) \
                    ORDER BY 1), \
-                 EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1)"
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = $1), \
+                 EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)"
         );
-        let (extension_schemas, skipped, shadowed, role_named): (
+        let (extension_schemas, skipped, shadowed, role_named, exists): (
             Vec<String>,
             Vec<String>,
             Vec<String>,
+            bool,
             bool,
         ) = sqlx::query_as(&sql)
             .bind(schema)
@@ -1754,6 +1758,7 @@ impl TenantSearchPath {
             shadowed,
             skipped,
             role_named,
+            exists,
         })
     }
 
@@ -1797,10 +1802,16 @@ impl UncheckedPath {
         )))
     }
 
-    /// Every check a tenant pool must pass: [`Self::refuse_role_name`], and no
-    /// extra schema serving tenant tables the schema lacks.
+    /// Every check a tenant pool must pass: [`Self::refuse_role_name`], the schema
+    /// exists, and no extra schema serves tenant tables the schema lacks.
     fn strict(self) -> Result<TenantSearchPath, TenancyError> {
         self.refuse_role_name()?;
+        if !self.exists {
+            return Err(TenancyError::Validation(format!(
+                "schema `{}` is missing; run `migrate-tenants` for the tenant",
+                self.path.schemas[0]
+            )));
+        }
         if self.shadowed.is_empty() {
             return Ok(self.path);
         }

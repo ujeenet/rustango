@@ -9,7 +9,6 @@ use crate::sql::{FetcherPool as _, Pool};
 use crate::sso::check;
 use crate::tenancy::org::Org;
 use crate::tenancy::pools::TenantPools;
-use crate::tenancy::StorageMode;
 
 /// Tenants checked at once.
 const CONCURRENCY: usize = 8;
@@ -128,23 +127,13 @@ where
 {
     let tenant = match pools.scoped_pool_dyn(org).await {
         Ok(p) => p,
+        // A schema check's refusal (a missing schema, say) names no secret.
+        Err(crate::tenancy::TenancyError::Validation(why)) => {
+            return TenantFindings::failed(&org.slug, why)
+        }
         // Not `{e}`: a secrets error can echo the database URL into CI logs.
         Err(_) => return TenantFindings::failed(&org.slug, "could not open the tenant pool"),
     };
-    // A missing schema drops out of `search_path`, leaving at most the extension schemas.
-    if matches!(
-        StorageMode::parse(&org.storage_mode),
-        Ok(StorageMode::Schema)
-    ) {
-        let want = org.effective_schema();
-        match crate::migrate::ensure::current_schema(&tenant).await {
-            Ok(Some(got)) if got == want => {}
-            Ok(_) => {
-                return TenantFindings::failed(&org.slug, format!("schema `{want}` is missing"))
-            }
-            Err(e) => return TenantFindings::failed(&org.slug, e),
-        }
-    }
     let mut out = match check::tenant_providers(&tenant).await {
         Ok(found) => TenantFindings {
             warnings: found
