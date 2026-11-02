@@ -303,7 +303,7 @@ Every view stamps a consistent context so templates port cleanly between them:
 | `ListView` | `object_list` (the page's rows), `page`, `page_size`, `total`, `total_pages`, `has_next`, `has_prev`, `page_marks`, `prev_page_url` / `next_page_url`, `ordering`, `filters`, `search` (and `bulk_actions` when on) |
 | `DetailView` | `object` (the row) |
 | `CreateView` | `form` (`.fields`, `.errors`), `is_create` (true), `is_update` (false) — **no `object`** |
-| `UpdateView` | `form` (`.fields`, `.errors`), `object` (the row), `pk`, `is_create` (false), `is_update` (true) |
+| `UpdateView` | `form` (`.fields`, `.errors`), `object` (the listed fields, the primary key and any `.context_fields()`), `pk`, `is_create` (false), `is_update` (true) |
 | `DeleteView` | `object` (the row to confirm) |
 
 Rows are exposed as plain maps keyed by column name (`{{ post.title }}`), with
@@ -370,7 +370,7 @@ matches how your app manages database connections:
   `template_views` + `tenancy` features. Templates port between the two
   unchanged.
 
-This mirrors the ViewSet split (`router` / `router_pool` vs `tenant_router`).
+This mirrors the ViewSet split (`router` vs `tenant_router`).
 
 ---
 
@@ -386,7 +386,7 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     // HTML pages for browsers:
     .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
     .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));

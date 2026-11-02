@@ -86,7 +86,7 @@ async fn setup(pool: &Pool) {
 async fn seed_tokens(pool: &Pool) {
     for (id, parent) in [(ID, Some(PARENT)), (PARENT, None)] {
         Token { id, parent }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("insert token");
     }
@@ -138,7 +138,7 @@ async fn auto_uuid_pk_round_trips(pool: &Pool) {
         id: Auto::default(),
         label: "s".into(),
     };
-    s.insert_pool(pool).await.expect("insert session");
+    s.insert(pool).await.expect("insert session");
     let id = s.id.get().copied().expect("pk set");
     let rows: Vec<Session> = Session::objects().fetch(pool).await.expect("fetch");
     assert_eq!(
@@ -173,7 +173,7 @@ async fn uuid_fk_loads_through_select_related(pool: &Pool) {
         token: ForeignKey::unloaded(ID),
         backup: Some(ForeignKey::unloaded(PARENT)),
     };
-    grant.insert_pool(pool).await.expect("insert grant");
+    grant.insert(pool).await.expect("insert grant");
     let rows: Vec<Grant> = Grant::objects()
         .select_related("token")
         .fetch(pool)
@@ -212,7 +212,7 @@ async fn unbounded_string_holds_more_than_64_kib(pool: &Pool) {
         id: Auto::default(),
         body: body.clone(),
     };
-    page.insert_pool(pool).await.expect("insert 70 KB body");
+    page.insert(pool).await.expect("insert 70 KB body");
     let rows: Vec<Page> = Page::objects().fetch(pool).await.expect("fetch");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].body.len(), body.len(), "{}", pool.dialect().name());
@@ -225,9 +225,9 @@ async fn audit_diff_skips_an_unchanged_uuid(pool: &Pool) {
         owner: ID,
         label: "a".into(),
     };
-    key.insert_pool(pool).await.expect("insert key");
+    key.insert(pool).await.expect("insert key");
     key.label = "b".into();
-    key.save_pool(pool).await.expect("save key");
+    key.save(pool).await.expect("save key");
     let pk = key.id.get().expect("pk").to_string();
     let rows = audit::fetch_for_entity_pool(pool, Key::SCHEMA.table, &pk)
         .await

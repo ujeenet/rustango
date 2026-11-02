@@ -595,41 +595,6 @@ impl GenericForeignKey {
     }
 }
 
-/// Render a generic FK as `<a href="/{table}/{pk}">`, root-relative and
-/// with no permission check. The admin uses its own prefixed, gated renderer.
-///
-/// # Errors
-/// Driver failures from the ContentType lookup.
-#[deprecated(
-    since = "0.61.2",
-    note = "the link ignores the mount prefix and view permissions; \
-            build your own from `ContentType::by_id`"
-)]
-pub async fn render_generic_fk_link(
-    pool: &crate::sql::Pool,
-    gfk: GenericForeignKey,
-) -> Result<String, ExecError> {
-    let escape = crate::text::html_escape;
-    let ct = match ContentType::by_id(&pool.clone().into(), gfk.content_type_id).await? {
-        Some(c) => c,
-        None => {
-            return Ok(format!(
-                "<em>(ct={}, pk={})</em>",
-                gfk.content_type_id, gfk.object_pk
-            ));
-        }
-    };
-    let label = format!("{}.{}", ct.app_label, ct.model_name);
-    let table_esc = escape(&ct.table);
-    let label_esc = escape(&label);
-    Ok(format!(
-        r#"<a href="/{table}/{pk}">{label} #{pk}</a>"#,
-        table = table_esc,
-        pk = gfk.object_pk,
-        label = label_esc,
-    ))
-}
-
 /// Tri-dialect counterpart of [`prefetch_soft`] (v0.38). Same shape
 /// — one batched SELECT against `target_fk_column`, grouped by
 /// parent PK — but routes through [`crate::sql::FetcherPool::fetch`]

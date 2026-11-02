@@ -240,12 +240,16 @@ async fn pg_get_or_create_role_survives_concurrent_callers(backend: &Pool) {
         let Pool::Postgres(pg) = &pool else {
             unreachable!()
         };
-        let ids = race("get_or_create_role", &pool, &[], |_, round| {
+        let ids = race("get_or_create_role_pool", &pool, &[], |_, round| {
             let pg = pg.clone();
             async move {
-                rustango::tenancy::permissions::get_or_create_role(&format!("pg{round}"), "", &pg)
-                    .await
-                    .map_err(|e| e.to_string())
+                rustango::tenancy::permissions::get_or_create_role_pool(
+                    &format!("pg{round}"),
+                    "",
+                    &pg.clone().into(),
+                )
+                .await
+                .map_err(|e| e.to_string())
             }
         })
         .await;

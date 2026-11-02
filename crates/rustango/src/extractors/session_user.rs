@@ -73,7 +73,10 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             None => return Ok(SessionUser(None)),
         };
 
-        let payload = match tenant_console::decode(keys.session, &org.slug, &cookie_value) {
+        let Some(tenant) = crate::tenancy::TenantSlug::of(&org) else {
+            return Ok(SessionUser(None));
+        };
+        let payload = match tenant_console::decode(keys.session, &tenant, &cookie_value) {
             Ok(p) => p,
             Err(_) => return Ok(SessionUser(None)),
         };

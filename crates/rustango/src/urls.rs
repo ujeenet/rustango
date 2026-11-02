@@ -98,6 +98,7 @@ macro_rules! register_url {
 
 /// Failure modes for [`reverse`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ReverseError {
     /// No `register_url!` ran for this name. Either the module holding
     /// it was never loaded, or the name is a typo.

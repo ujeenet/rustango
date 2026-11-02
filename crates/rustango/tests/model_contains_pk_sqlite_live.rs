@@ -38,7 +38,7 @@ async fn contains_pk_returns_true_when_row_exists() {
         id: Auto::default(),
         title: "alpha".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let pk = p.id.get().copied().unwrap();
     assert!(Post::contains_pk(pk, &pool).await.unwrap());
 }

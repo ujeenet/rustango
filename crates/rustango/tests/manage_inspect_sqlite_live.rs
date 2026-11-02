@@ -51,7 +51,7 @@ async fn boot() -> Booted {
 impl Booted {
     async fn run(&self, args: &[&str]) -> Result<String, String> {
         let mut buf: Vec<u8> = Vec::new();
-        let argv: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let argv = rustango::testkit::routed_args(args);
         rustango::tenancy::manage::run_with_writer(
             self.pools.as_ref(),
             &self.url,
@@ -92,7 +92,7 @@ impl Booted {
             changes: serde_json::json!({}),
             occurred_at: chrono::Utc::now(),
         };
-        row.insert_pool(&self.registry).await.expect("seed audit");
+        row.insert(&self.registry).await.expect("seed audit");
     }
 }
 

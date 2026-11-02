@@ -67,7 +67,7 @@ async fn seed_author(pool: &Pool, name: &str, book_count: usize) -> i64 {
         id: Auto::default(),
         name: name.into(),
     };
-    author.save_pool(pool).await.unwrap();
+    author.save(pool).await.unwrap();
     let id = *author.id.get().unwrap();
     for i in 0..book_count {
         let mut book = Book {
@@ -75,7 +75,7 @@ async fn seed_author(pool: &Pool, name: &str, book_count: usize) -> i64 {
             title: format!("{name}-{i}"),
             author_id: ForeignKey::from(id),
         };
-        book.save_pool(pool).await.unwrap();
+        book.save(pool).await.unwrap();
     }
     id
 }

@@ -410,7 +410,7 @@ async fn an_upgraded_table_with_the_old_default_still_gets_canonical_rows() {
         label: "through-the-orm".to_owned(),
         created_at: Auto::Unset,
     };
-    row.save_pool(&pool).await.expect("save");
+    row.save(&pool).await.expect("save");
 
     let stored = stored_text(&pool).await;
     assert_eq!(stored.len(), 1, "one row expected, got {stored:?}");

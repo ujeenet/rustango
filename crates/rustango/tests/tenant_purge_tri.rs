@@ -15,6 +15,12 @@ async fn setup(pool: &Pool) {
         .expect("framework tables");
 }
 
+/// The registry URL the Postgres matrix pool connects to.
+#[cfg(feature = "postgres")]
+fn registry_url() -> String {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL")
+}
+
 async fn purge_on(pool: &Pool, slug: &str) -> Result<Report, TenancyError> {
     let action = Action::Purge {
         purge_database: true,
@@ -40,7 +46,7 @@ async fn tenant_with_host(pool: &Pool, tag: &str) -> (String, i64) {
         database_url: Some("sqlite::memory:".into()),
         ..rustango::testkit::org()
     };
-    org.save_pool(pool).await.expect("insert org");
+    org.save(pool).await.expect("insert org");
     let id = *org.id.get().expect("org id");
     let mut host = OrgHost {
         id: Auto::default(),
@@ -49,7 +55,7 @@ async fn tenant_with_host(pool: &Pool, tag: &str) -> (String, i64) {
         enabled: true,
         created_at: Auto::default(),
     };
-    host.save_pool(pool).await.expect("insert host");
+    host.save(pool).await.expect("insert host");
     (slug, id)
 }
 
@@ -88,9 +94,24 @@ async fn purge_unlinks_its_unsucceeded_runs(pool: &Pool) {
     );
 }
 
+/// Tokens and cache keys bind to the org id, so a slug reused after a
+/// purge must get a new one, on every backend.
+async fn a_reused_slug_gets_a_new_org_id(pool: &Pool) {
+    let (slug, old) = tenant_with_host(pool, "reuse").await;
+    purge_on(pool, &slug).await.expect("purge");
+    let (again, new) = tenant_with_host(pool, "reuse").await;
+    assert_eq!(again, slug);
+    assert_ne!(new, old, "the heir reused the purged org id");
+    purge_on(pool, &slug).await.expect("cleanup");
+}
+
 tri_dialect_test!(
     setup: setup,
-    scenarios: [purge_deletes_org_with_extra_host, purge_unlinks_its_unsucceeded_runs]
+    scenarios: [
+        purge_deletes_org_with_extra_host,
+        purge_unlinks_its_unsucceeded_runs,
+        a_reused_slug_gets_a_new_org_id
+    ]
 );
 
 /// #2569 — purge deletes the tenant's media objects, lists what it had
@@ -123,7 +144,7 @@ async fn purge_deletes_the_tenants_media_objects() {
                 database_url: Some(url),
                 ..rustango::testkit::org()
             };
-            org.save_pool(&reg).await.unwrap();
+            org.save(&reg).await.unwrap();
             slug
         }
     };
@@ -262,7 +283,7 @@ async fn mysql_purge_sees_through_a_host_alias() {
                 database_url: Some(url),
                 ..rustango::testkit::org()
             };
-            org.save_pool(&pool).await.unwrap();
+            org.save(&pool).await.unwrap();
             slug
         }
     };
@@ -352,7 +373,7 @@ async fn upload(pool: &Pool, storage: &rustango::storage::StorageRegistry) -> Ve
     rustango::testkit::create_tables_for::<Media>(pool)
         .await
         .unwrap();
-    let mgr = MediaManager::new_pool(pool.clone(), storage.clone());
+    let mgr = MediaManager::new(pool.clone(), storage.clone());
     let mut keys = Vec::new();
     for file in ["a.txt", "b.txt"] {
         let m = mgr
@@ -412,12 +433,10 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
 
     // The schema exists and holds the tenant's media.
     let mut org = schema_org("live");
-    let schema = org.schema_name.clone().unwrap();
-    rustango::sql::sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-        .execute(pg)
+    org.save(&pool).await.unwrap();
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
         .await
-        .unwrap();
-    org.save_pool(&pool).await.unwrap();
+        .expect("migrate tenant");
     let scoped = Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
     let keys = upload(&scoped, &storage).await;
     drop(scoped);
@@ -431,7 +450,7 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
 
     // A retried purge: the schema is already gone.
     let mut org = schema_org("gone");
-    org.save_pool(&pool).await.unwrap();
+    org.save(&pool).await.unwrap();
     let report = decommission(&pools, &org.slug, action)
         .await
         .expect("purge");
@@ -504,10 +523,6 @@ async fn schema_purge_evicts_the_scoped_pool() {
         unreachable!()
     };
     let slug = format!("purge-schema-{}", std::process::id());
-    rustango::sql::sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{slug}\""))
-        .execute(pg)
-        .await
-        .unwrap();
     let mut org = Org {
         slug: slug.clone(),
         display_name: slug.clone(),
@@ -515,8 +530,11 @@ async fn schema_purge_evicts_the_scoped_pool() {
         schema_name: Some(slug.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&pool).await.expect("insert org");
+    org.save(&pool).await.expect("insert org");
     let pools = TenantPools::new(pg.clone());
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
+        .await
+        .expect("migrate tenant");
     pools.scoped_pool(&org).await.expect("scoped pool");
     assert_eq!(pools.cached_scoped_pool_count().await, 1);
 
@@ -558,7 +576,7 @@ async fn org_with_database(pool: &Pool, tag: &str) -> (Org, String) {
         database_url: Some(format!("{}/{db}", url.rsplit_once('/').unwrap().0)),
         ..rustango::testkit::org()
     };
-    org.save_pool(pool).await.expect("insert org");
+    org.save(pool).await.expect("insert org");
     (org, db)
 }
 
@@ -729,7 +747,7 @@ async fn database_purge_refuses_the_registry_database() {
         database_url: Some(std::env::var("DATABASE_URL").unwrap()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&pool).await.expect("insert org");
+    org.save(&pool).await.expect("insert org");
 
     let err = purge_on(&pool, &slug)
         .await
@@ -749,7 +767,7 @@ async fn database_purge_refuses_the_registry_database() {
         rows[0].active,
         "the refused purge still deactivated the org"
     );
-    org.delete_pool(&pool).await.unwrap();
+    org.delete(&pool).await.unwrap();
 }
 
 /// A schema another tenant shares, or a reserved one, is never dropped (#2290).
@@ -767,12 +785,6 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         unreachable!()
     };
     let shared = format!("purge_shared_{}", std::process::id());
-    rustango::sql::sqlx::raw_sql(&format!(
-        "CREATE SCHEMA IF NOT EXISTS \"{shared}\"; CREATE TABLE IF NOT EXISTS \"{shared}\".marker (id INT)"
-    ))
-    .execute(pg)
-    .await
-    .unwrap();
     // A legacy pair: one by slug default, one by explicit name.
     let mut owner = Org {
         slug: shared.replace('_', "-"),
@@ -781,7 +793,18 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         schema_name: Some(shared.clone()),
         ..rustango::testkit::org()
     };
-    owner.save_pool(&pool).await.unwrap();
+    owner.save(&pool).await.unwrap();
+    rustango::testkit::migrate_schema_tenant(
+        &TenantPools::new(pg.clone()),
+        &owner,
+        &registry_url(),
+    )
+    .await
+    .expect("migrate tenant");
+    rustango::sql::sqlx::query(&format!("CREATE TABLE \"{shared}\".marker (id INT)"))
+        .execute(pg)
+        .await
+        .unwrap();
     let mut legacy = Org {
         slug: format!("{}-legacy", owner.slug),
         display_name: "legacy".into(),
@@ -789,7 +812,7 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         schema_name: Some(shared.clone()),
         ..rustango::testkit::org()
     };
-    legacy.save_pool(&pool).await.unwrap();
+    legacy.save(&pool).await.unwrap();
 
     let err = purge_on(&pool, &legacy.slug)
         .await
@@ -810,7 +833,7 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
     assert!(rows[0].active, "the refused purge deactivated the org");
 
     for org in [owner, legacy] {
-        org.delete_pool(&pool).await.unwrap();
+        org.delete(&pool).await.unwrap();
     }
     rustango::sql::sqlx::query(&format!("DROP SCHEMA \"{shared}\" CASCADE"))
         .execute(pg)
@@ -854,7 +877,7 @@ async fn schema_purge_refuses_a_reserved_schema() {
         schema_name: Some("public".into()),
         ..rustango::testkit::org()
     };
-    reserved.save_pool(&registry).await.unwrap();
+    reserved.save(&registry).await.unwrap();
 
     let err = purge_on(&registry, "reserved").await.expect_err("public");
     assert!(err.to_string().contains("public"), "{err}");
@@ -915,14 +938,8 @@ where
     let registry = Pool::from(private.clone());
     setup(&registry).await;
     let [a, b] = schemas;
-    rustango::sql::sqlx::raw_sql(&format!(r#"CREATE SCHEMA "{a}"; CREATE SCHEMA "{b}""#))
-        .execute(&private)
-        .await
-        .unwrap();
-    rustango::sql::sqlx::raw_sql(sql)
-        .execute(&private)
-        .await
-        .unwrap();
+    let private_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
+    let pools = TenantPools::new(private.clone());
     for (slug, name) in [("ext-a", a), ("ext-b", b)] {
         let mut org = Org {
             slug: slug.into(),
@@ -931,8 +948,16 @@ where
             schema_name: Some(name.into()),
             ..rustango::testkit::org()
         };
-        org.save_pool(&registry).await.unwrap();
+        org.save(&registry).await.unwrap();
+        rustango::testkit::migrate_schema_tenant(&pools, &org, &private_url)
+            .await
+            .expect("migrate tenant");
     }
+    drop(pools);
+    rustango::sql::sqlx::raw_sql(sql)
+        .execute(&private)
+        .await
+        .unwrap();
 
     check(purge_on(&registry, "ext-a").await, registry).await;
 
@@ -1080,7 +1105,7 @@ async fn database_purge_refuses_a_database_another_tenant_shares() {
         database_url: Some(url.clone()),
         ..rustango::testkit::org()
     };
-    b.save_pool(&pool).await.unwrap();
+    b.save(&pool).await.unwrap();
     let mut seed = PgConnection::connect(&url).await.unwrap();
     rustango::sql::sqlx::raw_sql("CREATE TABLE b_data (id INT); INSERT INTO b_data VALUES (1)")
         .execute(&mut seed)
@@ -1104,7 +1129,7 @@ async fn database_purge_refuses_a_database_another_tenant_shares() {
         "the refused purge deactivated A"
     );
 
-    b.delete_pool(&pool).await.unwrap();
+    b.delete(&pool).await.unwrap();
     purge_on(&pool, &a.slug)
         .await
         .expect("purge once A is alone");
@@ -1142,7 +1167,7 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
         database_url: Some(alias),
         ..rustango::testkit::org()
     };
-    b.save_pool(&pool).await.unwrap();
+    b.save(&pool).await.unwrap();
 
     let err = purge_on(&pool, &a.slug)
         .await
@@ -1158,7 +1183,7 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
         "the refused purge deactivated A"
     );
 
-    b.delete_pool(&pool).await.unwrap();
+    b.delete(&pool).await.unwrap();
     purge_on(&pool, &a.slug)
         .await
         .expect("purge once A is alone");
@@ -1185,9 +1210,9 @@ async fn database_purge_skips_a_tenant_whose_url_does_not_resolve() {
         database_url: Some("env://RUSTANGO_PURGE_TEST_UNSET_URL".into()),
         ..rustango::testkit::org()
     };
-    b.save_pool(&pool).await.unwrap();
+    b.save(&pool).await.unwrap();
     let purged = purge_on(&pool, &a.slug).await;
-    b.delete_pool(&pool).await.unwrap();
+    b.delete(&pool).await.unwrap();
     purged.expect("an unresolvable other tenant does not block the purge");
     assert!(!database_exists(&pool, &db).await);
 }
@@ -1222,7 +1247,7 @@ async fn database_purge_refuses_the_registry_under_another_host_name() {
         database_url: Some(alias),
         ..rustango::testkit::org()
     };
-    org.save_pool(&pool).await.unwrap();
+    org.save(&pool).await.unwrap();
 
     let err = purge_on(&pool, &slug).await.expect_err("registry by alias");
     assert!(err.to_string().contains("did not open"), "{err}");
@@ -1230,7 +1255,7 @@ async fn database_purge_refuses_the_registry_under_another_host_name() {
         org_active(&pool, &slug).await,
         "the refused purge deactivated the org"
     );
-    org.delete_pool(&pool).await.unwrap();
+    org.delete(&pool).await.unwrap();
 }
 
 /// The org id is in the tag: another tenant's tagged session is foreign (#2291).
@@ -1270,7 +1295,7 @@ async fn database_purge_does_not_end_another_tenants_tagged_session() {
 
     drop(held);
     other_pod.invalidate(&b.slug).await;
-    a.delete_pool(&pool).await.unwrap();
+    a.delete(&pool).await.unwrap();
     rustango::sql::sqlx::query(&format!("DROP DATABASE \"{db}\" WITH (FORCE)"))
         .execute(pg)
         .await

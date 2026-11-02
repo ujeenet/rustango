@@ -36,6 +36,13 @@
 //! in a write body unless the request's `AuthenticatedUser` is a superuser.
 //! A create that sets a locked NOT NULL field with no default is a `403`.
 //!
+//! The [`object_permissions`](crate::object_permissions) hooks and queryset
+//! scopes run as in the admin: a row `view` hides is a `404`, a refused
+//! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`].
+//! Update and delete judge the row locked in their transaction. One limit: a
+//! model whose hand-written `ModelEntry` audits updates only on a pool is
+//! updated there, unlocked and without the queryset-scope re-check.
+//!
 //! ## Query parameters (list endpoint)
 //!
 //! ### Page-number pagination (default)
@@ -122,8 +129,8 @@ use axum::Router;
 use serde_json::{json, Value};
 
 use crate::core::{
-    Assignment, CountQuery, DeleteQuery, FieldType, Filter, InsertQuery, ModelSchema, Op,
-    SearchClause, SelectQuery, SqlValue, UpdateQuery, WhereExpr,
+    Assignment, CountQuery, FieldType, Filter, InsertQuery, ModelSchema, Op, SearchClause,
+    SelectQuery, SqlValue, UpdateQuery, WhereExpr,
 };
 use crate::forms::{
     absent_takes_default, collect_insert_values_with, json_number_text, parse_body_value,
@@ -336,6 +343,9 @@ trait SerializerBridge: Send + Sync {
 
     /// The JSON keys of [`Self::readable_model_fields`], in order.
     fn readable_field_names(&self) -> &'static [&'static str];
+
+    /// `(field, table)` of each field that renders another table's rows.
+    fn related_tables(&self) -> Vec<(&'static str, &'static str)>;
 }
 
 /// Zero-sized carrier that pins a concrete serializer type `S`, so
@@ -416,6 +426,10 @@ where
     fn readable_field_names(&self) -> &'static [&'static str] {
         S::readable_fields()
     }
+
+    fn related_tables(&self) -> Vec<(&'static str, &'static str)> {
+        S::related_tables()
+    }
 }
 
 /// A pluggable filter backend.
@@ -445,7 +459,7 @@ where
 ///             ))]
 ///         })
 ///     })
-///     .router_pool("/posts", pool);
+///     .router("/posts", pool);
 /// ```
 ///
 /// Backends run on **every** action. They narrow the list query and
@@ -692,16 +706,12 @@ where
     }
 }
 
-/// SSO tables: their admin hooks are superuser-only, which a ViewSet
-/// does not run, so [`ViewSet::for_model`] refuses them.
-const ADMIN_ONLY_TABLES: &[&str] = &[
-    "rustango_sso_providers",
-    "rustango_shared_sso_providers",
-    "rustango_sso_links",
-    "rustango_sso_invites",
-    "rustango_sso_shared_overrides",
-    "rustango_sso_tenant_policy",
-];
+/// The default `view_hook_scan_cap`: an API list reads at most this many
+/// rows per request, a fifth of the admin's default.
+const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
+
+/// The largest `view_hook_scan_cap`: each list request reads that many rows.
+const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
 /// Builder for a set of REST CRUD endpoints over a single
 /// [`Model`](crate::core::Model) table.
@@ -744,8 +754,10 @@ pub struct ViewSet {
     pk_param: String,
     /// Most rows one bulk create may carry. See [`ViewSet::max_bulk_create`].
     max_bulk_create: usize,
-    /// Run the admin's `add` hooks on create. See [`ViewSet::admin_add_hooks`].
-    admin_add_hooks: bool,
+    /// The object-permission hooks it runs. See [`ViewSet::skip_object_permissions`].
+    hooks: crate::object_permissions::Hooks,
+    /// Rows a list's "view" hook scan reads. See [`ViewSet::view_hook_scan_cap`].
+    view_hook_scan_cap: usize,
     /// Per FK field, the rows a write may point it at. See [`ViewSet::related_filter`].
     related_filters: Vec<(String, std::sync::Arc<dyn ViewSetFilter>)>,
 }
@@ -768,16 +780,13 @@ impl ViewSet {
     ///
     /// If a name in `fields` is not a field of the model. The same holds
     /// for `filter_fields`, `search_fields`, `ordering_fields`, `ordering`
-    /// and `related_filter`. Also if `schema` is an SSO table: only the
-    /// admin, with its superuser-only hooks, may write those.
+    /// and `related_filter`. Also if `schema` is an SSO table, or
+    /// `rustango_api_keys` / `rustango_agents`, or a table the admin never
+    /// serves (TOTP secrets, passkeys, database servers): only the admin or
+    /// their own flows may write those.
     #[must_use]
     pub fn for_model(schema: &'static ModelSchema, fields: &[&str]) -> Self {
-        assert!(
-            !ADMIN_ONLY_TABLES.contains(&schema.table),
-            "ViewSet::for_model: `{}` holds SSO configuration and is managed through the admin \
-             only; a ViewSet would skip its superuser-only checks",
-            schema.table
-        );
+        crate::core::table_policy::assert_generic(schema, "ViewSet::for_model");
         let vs = Self {
             schema,
             fields: fields.iter().map(|&s| s.to_owned()).collect(),
@@ -797,7 +806,8 @@ impl ViewSet {
             max_page_size: 100,
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
-            admin_add_hooks: false,
+            hooks: crate::object_permissions::Hooks::All,
+            view_hook_scan_cap: DEFAULT_VIEW_HOOK_SCAN_CAP,
             related_filters: Vec::new(),
         };
         vs.assert_known_names("fields", fields.iter().copied(), false);
@@ -846,8 +856,7 @@ impl ViewSet {
     /// # Panics
     ///
     /// If `field` is not on the model, or has a type that cannot be a
-    /// cursor (float, bool, json or blob). A nullable field is logged as
-    /// a warning for now and refused from 0.62.0. Caught at mount time, not
+    /// cursor (float, bool, json or blob), or is nullable. Caught at mount time, not
     /// per request, so a misconfigured ViewSet fails where the
     /// mistake is instead of returning 500 to every caller.
     #[must_use]
@@ -891,15 +900,12 @@ impl ViewSet {
              totally. Use an integer, timestamp, date, uuid or string column.",
             f.ty
         );
-        // NULL has no place in `col > v`: rows go missing, or the token
-        // fails. Warned, not refused, until 0.62.0.
-        if f.nullable {
-            tracing::warn!(
-                target: "rustango::viewset",
-                "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable; NULL rows \
-                 are skipped or fail the page. Use a NOT NULL column; 0.62.0 refuses this."
-            );
-        }
+        // NULL has no place in `col > v`: rows go missing, or the token fails.
+        assert!(
+            !f.nullable,
+            "cursor_pagination(\"{field}\"): `{table}.{field}` is nullable; NULL rows \
+             are skipped or fail the page. Use a NOT NULL column."
+        );
     }
 
     /// Refuse a name the model lacks: a typo would silently drop a field
@@ -1063,12 +1069,21 @@ impl ViewSet {
         self
     }
 
-    /// Run the admin's `register_admin_object_permission!(table, "add", …)`
-    /// hooks on create: on the request, then on each written row; a refusal
-    /// is a `403` and writes nothing. Off by default.
+    /// Skip the app's `register_object_permission!` hooks and
+    /// `register_queryset_scope!` scopes, for an API that guards its rows
+    /// itself. The framework's own hooks still run.
     #[must_use]
-    pub fn admin_add_hooks(mut self) -> Self {
-        self.admin_add_hooks = true;
+    pub fn skip_object_permissions(mut self) -> Self {
+        self.hooks = crate::object_permissions::Hooks::FrameworkOnly;
+        self
+    }
+
+    /// Most rows a list reads to run the "view" hook (default 2 000, at
+    /// most 100 000): each list request reads that many rows. Past it a page
+    /// or offset list is a `400`; a queryset scope or cursor pagination scales.
+    #[must_use]
+    pub fn view_hook_scan_cap(mut self, rows: usize) -> Self {
+        self.view_hook_scan_cap = rows.clamp(1, MAX_VIEW_HOOK_SCAN_CAP);
         self
     }
 
@@ -1203,21 +1218,19 @@ impl ViewSet {
     }
 
     /// Build an `axum::Router` mounted at `prefix`. The pool is baked
-    /// in at mount time, so every request uses the same `PgPool`. For
+    /// in at mount time, so every request uses the same pool. For
     /// tenancy projects use [`Self::tenant_router`] instead, so each
     /// request resolves its own tenant connection.
     ///
     /// A trailing `/` on the prefix makes no difference.
-    #[cfg(feature = "postgres")]
-    pub fn router(self, prefix: &str, pool: crate::sql::sqlx::PgPool) -> Router {
-        Self::router_with_source(self, prefix, PoolSource::Static(pool))
+    pub fn router(self, prefix: &str, pool: impl Into<crate::sql::Pool>) -> Router {
+        Self::router_with_source(self, prefix, PoolSource::StaticPool(pool.into()))
     }
 
-    /// [`Self::router`], but taking the backend-erasing
-    /// [`crate::sql::Pool`] enum. SQLite and MySQL projects use this;
-    /// Postgres projects may use either.
+    /// Old name of [`Self::router`].
+    #[deprecated(since = "0.62.0", note = "use `ViewSet::router`")]
     pub fn router_pool(self, prefix: &str, pool: crate::sql::Pool) -> Router {
-        Self::router_with_source(self, prefix, PoolSource::StaticPool(pool))
+        self.router(prefix, pool)
     }
 
     /// Build a router that resolves the database connection per
@@ -1260,6 +1273,7 @@ impl ViewSet {
 
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
         self.assert_cursor_is_rendered();
+        self.assert_related_rows_are_unhooked();
         let open = self.open_write_actions();
         if !open.is_empty() {
             tracing::warn!(
@@ -1270,21 +1284,6 @@ impl ViewSet {
                 "ViewSet write actions need no permission, so any caller that reaches this \
                  router can run them; set .permissions_for_model(), .read_only(), or \
                  .allow_anonymous() if this is intended"
-            );
-        }
-        // Enforcing these would change who may write; planned for 0.62.0.
-        let ignored: Vec<&str> = ["change", "delete", "view"]
-            .into_iter()
-            .filter(|a| crate::admin::object_permissions::has_hook(self.schema.table, a))
-            .collect();
-        if !ignored.is_empty() {
-            tracing::warn!(
-                target: "rustango::viewset",
-                model = self.schema.table,
-                prefix,
-                hooks = ?ignored,
-                "ViewSet does not run the admin object-permission hooks registered for \
-                 these actions; 0.62.0 will enforce them"
             );
         }
         let state = Arc::new(ViewSetState {
@@ -1332,10 +1331,7 @@ impl ViewSet {
 /// Where a [`ViewSet`] gets its database pool.
 #[derive(Clone)]
 enum PoolSource {
-    /// PG-typed static pool, from `router(prefix, pool)`.
-    #[cfg(feature = "postgres")]
-    Static(crate::sql::sqlx::PgPool),
-    /// Any-dialect static pool, from `router_pool(prefix, pool)`.
+    /// A static pool, from `router(prefix, pool)`.
     StaticPool(crate::sql::Pool),
     /// Each handler resolves a connection through the
     /// [`crate::extractors::Tenant`] extractor at request time. A
@@ -1543,14 +1539,6 @@ impl AcquiredConn {
         crate::audit::update(&self.pool, q).await
     }
 
-    async fn delete(&mut self, q: &DeleteQuery) -> Result<u64, crate::sql::ExecError> {
-        crate::audit::delete(&self.pool, q).await
-    }
-
-    async fn soft_delete(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
-        crate::audit::update_as(&self.pool, q, crate::audit::AuditOp::SoftDelete).await
-    }
-
     #[cfg(feature = "tenancy")]
     async fn has_perm(
         &mut self,
@@ -1596,6 +1584,24 @@ impl ViewSet {
             .zip(bridge.readable_field_names())
             .find(|(m, _)| **m == model_field)
             .map(|(_, key)| *key)
+    }
+
+    /// A serializer field may not render another table's rows when that
+    /// table hides rows: the related rows would skip its hooks and scopes.
+    fn assert_related_rows_are_unhooked(&self) {
+        let Some(bridge) = &self.serializer else {
+            return;
+        };
+        for (field, table) in bridge.related_tables() {
+            let hidden = self.hooks.any(table, "view") || !self.hooks.scope_filters_empty(table);
+            assert!(
+                !hidden,
+                "ViewSet `{}`: serializer field `{field}` renders rows of `{table}`, which has \
+                 a \"view\" hook or queryset scope those rows would skip. Drop the field or \
+                 call .skip_object_permissions()",
+                self.schema.table
+            );
+        }
     }
 
     /// A serializer must render the cursor column and the primary key.
@@ -1671,8 +1677,6 @@ impl ViewSetState {
     #[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
     async fn resolve(&self, parts: &axum::http::request::Parts) -> Result<Scope, Response> {
         match &self.pool_source {
-            #[cfg(feature = "postgres")]
-            PoolSource::Static(_) => Ok(Scope::Static),
             PoolSource::StaticPool(_) => Ok(Scope::Static),
             #[cfg(feature = "tenancy")]
             PoolSource::Tenant => {
@@ -1696,8 +1700,6 @@ impl ViewSetState {
         parts: &axum::http::request::Parts,
     ) -> Result<AcquiredConn, Response> {
         let pool = match (&self.pool_source, &scope) {
-            #[cfg(feature = "postgres")]
-            (PoolSource::Static(pool), _) => Pool::from(pool.clone()),
             (PoolSource::StaticPool(pool), _) => pool.clone(),
             #[cfg(feature = "tenancy")]
             (PoolSource::Tenant, scope) => {
@@ -1999,28 +2001,36 @@ struct WriteSet {
     superuser_only: Vec<&'static str>,
     /// FK fields whose target rows are narrowed for this principal.
     fk_targets: Vec<FkTarget>,
+    /// The request and hooks a target's "view" hook judges with.
+    view_gate: (axum::http::request::Parts, crate::object_permissions::Hooks),
+    /// The rows of this model the request reaches.
+    owner_scope: Vec<WhereExpr>,
 }
 
 /// Every FK of `writable` whose target hides rows: its global scopes,
-/// soft delete and the ViewSet's `related_filter`s. Others need no read.
+/// soft delete, queryset scopes, "view" hook and the ViewSet's
+/// `related_filter`s. Others need no read.
 fn fk_targets(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     writable: &[&'static crate::core::FieldSchema],
 ) -> Vec<FkTarget> {
     let no_params = HashMap::new();
+    let hooks = state.vs.hooks;
     writable
         .iter()
         .filter_map(|&field| {
             FkTarget::of(field, |model| {
                 let mut scope = model.global_scope_exprs(&[]);
                 scope.extend(crate::soft_delete::active_filter(model));
+                let scopes = hooks.scope_filters(model.table, parts);
+                scope.extend(scopes.into_iter().map(WhereExpr::Predicate));
                 for (name, backend) in &state.vs.related_filters {
                     if name == field.name {
                         scope.extend(backend.filter_with(parts, &no_params, model));
                     }
                 }
-                (scope, false)
+                (scope, hooks.any(model.table, "view"))
             })
         })
         .collect()
@@ -2113,6 +2123,8 @@ impl WriteSet {
             pinned,
             superuser_only,
             fk_targets,
+            view_gate: (parts.clone(), state.vs.hooks),
+            owner_scope: scope_filters(state, parts, &HashMap::new()),
         })
     }
 
@@ -2126,14 +2138,17 @@ impl WriteSet {
         values: &[(&'static str, SqlValue)],
         stored: Option<(&'static crate::core::FieldSchema, &SqlValue)>,
     ) -> Result<Result<(), Refusal>, crate::sql::ExecError> {
+        let (parts, hooks) = &self.view_gate;
+        let admits =
+            |t: &FkTarget, row: &Value| hooks.allows(t.model.table, "view", parts, Some(row));
         let hidden = fk_target::first_hidden(
             &acq.pool,
             tx,
-            self.schema,
+            (self.schema, &self.owner_scope),
             &self.fk_targets,
             values,
             stored,
-            |_, _| true,
+            admits,
         )
         .await?;
         Ok(match hidden {
@@ -2178,7 +2193,7 @@ impl WriteSet {
     }
 
     /// `body` cut to the keys the UPDATE writes, so PATCH validation
-    /// overlays only those on the stored row (#1995).
+    /// overlays only those on the stored row.
     fn patch_body(&self, bridge: &dyn SerializerBridge, body: &Value) -> Value {
         let Some(obj) = body.as_object() else {
             return body.clone();
@@ -2332,16 +2347,25 @@ macro_rules! or_500 {
     };
 }
 
-/// The model's global scopes, its soft-delete liveness and every filter
-/// backend's predicates, to be ANDed into whatever query the action runs.
+/// The model's global scopes, its soft-delete liveness, its queryset scopes
+/// and every filter backend's predicates, ANDed into whatever query the action runs.
 fn scope_filters(
     state: &ViewSetState,
     parts: &axum::http::request::Parts,
     params: &HashMap<String, String>,
 ) -> Vec<WhereExpr> {
-    let mut all = state.vs.schema.global_scope_exprs(&[]);
+    let schema = state.vs.schema;
+    let mut all = schema.global_scope_exprs(&[]);
     // A soft-deleted row reads as gone to every action (#1998).
-    all.extend(crate::soft_delete::active_filter(state.vs.schema));
+    all.extend(crate::soft_delete::active_filter(schema));
+    all.extend(
+        state
+            .vs
+            .hooks
+            .scope_filters(schema.table, parts)
+            .into_iter()
+            .map(WhereExpr::Predicate),
+    );
     all.extend(
         state
             .vs
@@ -2350,6 +2374,22 @@ fn scope_filters(
             .flat_map(|b| b.filter_with(parts, params, state.vs.schema)),
     );
     all
+}
+
+/// `pk IN (pks)`, or no row when `pks` is empty: SQL has no `IN ()`.
+fn pk_in(
+    schema: &'static ModelSchema,
+    pk_field: &'static crate::core::FieldSchema,
+    pks: Vec<SqlValue>,
+) -> WhereExpr {
+    if pks.is_empty() {
+        return match_nothing(schema);
+    }
+    WhereExpr::Predicate(Filter {
+        column: pk_field.column,
+        op: Op::In,
+        value: SqlValue::List(pks),
+    })
 }
 
 /// `expr` narrowed by `extra`. An empty `extra` returns `expr`
@@ -2398,10 +2438,26 @@ async fn enter(
     codenames: &[String],
     action: &'static str,
 ) -> Result<(axum::http::request::Parts, Body, AcquiredConn), Response> {
-    let (parts, body) = req.into_parts();
+    #[cfg_attr(not(feature = "tenancy"), allow(unused_mut))]
+    let (mut parts, body) = req.into_parts();
     // Resolve, throttle, then connect: the budget is per tenant, and a
     // throttled request must not touch the tenant pool (#2076).
     let scope = state.resolve(&parts).await?;
+    // A credential bound to another tenant is refused outright, as
+    // `require_auth` refuses it; the marker binds the hooks to this tenant.
+    #[cfg(feature = "tenancy")]
+    if let Scope::Tenant(org) = &scope {
+        match crate::tenancy::Principal::from_parts(&parts).map(|p| p.tenant) {
+            Some(Some(t)) if t != org.slug => {
+                return Err(json_error(StatusCode::FORBIDDEN, "tenant mismatch"));
+            }
+            Some(None) => warn_untenanted(state.vs.schema.table),
+            _ => {}
+        }
+        parts
+            .extensions
+            .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
+    }
     if let Some(resp) = check_throttle(state, action, &parts, &scope) {
         return Err(resp);
     }
@@ -2430,6 +2486,26 @@ async fn enter(
         }
     }
     Ok((parts, body, acq))
+}
+
+/// Log once per table that a principal with no tenant met a tenant route:
+/// its hooks see nobody, so the request fails closed.
+#[cfg(feature = "tenancy")]
+fn warn_untenanted(table: &'static str) {
+    static WARNED: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+    let mut warned = WARNED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !warned.contains(&table) {
+        warned.push(table);
+        tracing::warn!(
+            target: "rustango::viewset",
+            table,
+            "a principal with no tenant reached a tenant ViewSet: object-permission hooks \
+             see it as anonymous. Set `TenantSlug` next to your own AuthenticatedUser or \
+             Principal, or use require_auth"
+        );
+    }
 }
 
 /// Per-action fixed-window throttle. Returns `Some(429)` when the
@@ -2817,7 +2893,7 @@ async fn run_list(
     // `filter_fields` parsed above.
     filters.extend(scope_filters(&state, parts, &params));
 
-    let where_clause = if filters.len() == 1 {
+    let mut where_clause = if filters.len() == 1 {
         filters.remove(0)
     } else if filters.is_empty() {
         WhereExpr::And(vec![])
@@ -2863,6 +2939,44 @@ async fn run_list(
 
     let fields = state.effective_fields();
 
+    // The "view" hook as one PK filter, so the count and the pages leave its
+    // denied rows out. Past the scan cap a page or offset list is refused: a
+    // window counted over hidden rows would reveal their positions. A cursor
+    // page scans from its position instead.
+    // A page is still judged row by row when rendered: a row that changed
+    // since the scan never reaches the client.
+    let hooked = state.vs.hooks.any(state.vs.schema.table, "view");
+    if hooked && !matches!(state.vs.pagination, PaginationStyle::Cursor { .. }) {
+        use crate::object_permissions::ViewHookRows;
+        let hooks = (parts, state.vs.hooks);
+        let query = (where_clause.clone(), search_clause.clone());
+        // The PK list shares the bind budget with the query's own `__in` values.
+        let limits = (
+            state.vs.view_hook_scan_cap,
+            in_budget.saturating_sub(in_values),
+        );
+        match crate::object_permissions::view_hook_rows(
+            &acq.pool,
+            hooks,
+            state.vs.schema,
+            query,
+            limits,
+        )
+        .await
+        {
+            Ok(ViewHookRows::All) => {}
+            Ok(ViewHookRows::Only(f)) => where_clause.push_and(WhereExpr::Predicate(f)),
+            Ok(ViewHookRows::TooMany) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "this list matches more rows than its \"view\" hook can scan; narrow it \
+                     with filters, register a queryset scope, or use cursor pagination",
+                )
+            }
+            Err(e) => return json_server_error("viewset::list::view_hook", &e),
+        }
+    }
+
     match &state.vs.pagination {
         PaginationStyle::PageNumber => {
             let page = crate::list_params::parse_page(&params);
@@ -2892,7 +3006,11 @@ async fn run_list(
             // `render_list` goes through the registered serializer
             // when there is one, else the default
             // `select_rows_as_json` projection.
-            let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
+            let results = if hooked {
+                or_500!(render_admitted(&state, &mut acq, parts, select_q, &fields).await)
+            } else {
+                or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
+            };
             let count = or_500!(acq.count_rows(&count_q).await);
             let last_page = ((count - 1).max(0) / page_size) + 1;
             json_response(json!({
@@ -2909,7 +3027,7 @@ async fn run_list(
         } => {
             handle_list_cursor(
                 state.as_ref(),
-                &mut acq,
+                (&mut acq, parts),
                 params,
                 where_clause,
                 search_clause,
@@ -2951,7 +3069,11 @@ async fn run_list(
                 search: search_clause,
                 source: None,
             };
-            let results = or_500!(render_list(&state, &mut acq, &select_q, &fields).await);
+            let results = if hooked {
+                or_500!(render_admitted(&state, &mut acq, parts, select_q, &fields).await)
+            } else {
+                or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
+            };
             let count = or_500!(acq.count_rows(&count_q).await);
             json_response(json!({
                 "count": count,
@@ -2961,6 +3083,35 @@ async fn run_list(
             }))
         }
     }
+}
+
+/// The page `window` selects, with the rows the "view" hook denies left out:
+/// a row may have changed since the scan.
+async fn render_admitted(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    parts: &axum::http::request::Parts,
+    window: SelectQuery,
+    fields: &[&'static crate::core::FieldSchema],
+) -> Result<Vec<Value>, crate::sql::ExecError> {
+    let schema = state.vs.schema;
+    let Some(pk_field) = schema.primary_key() else {
+        return Ok(Vec::new());
+    };
+    let scalar: Vec<_> = schema.scalar_fields().collect();
+    let rows = acq.select_rows_as_json(&window, &scalar).await?;
+    let hooks = state.vs.hooks;
+    let admitted: Vec<SqlValue> = rows
+        .iter()
+        .filter(|row| hooks.allows(schema.table, "view", parts, Some(row)))
+        .filter_map(|row| crate::object_permissions::row_pk(row, pk_field))
+        .collect();
+    let q = SelectQuery {
+        where_clause: pk_in(schema, pk_field, admitted),
+        order_by: window.order_by,
+        ..SelectQuery::new(schema)
+    };
+    render_list(state, acq, &q, fields).await
 }
 
 /// `.ordering(..)`, else the model's `default_order`, as ListView and the admin do (#2047).
@@ -3088,7 +3239,7 @@ fn json_value_to_param(v: &Value) -> String {
 
 async fn handle_list_cursor(
     state: &ViewSetState,
-    acq: &mut AcquiredConn,
+    (acq, parts): (&mut AcquiredConn, &axum::http::request::Parts),
     params: HashMap<String, String>,
     where_clause: WhereExpr,
     search_clause: Option<SearchClause>,
@@ -3143,39 +3294,10 @@ async fn handle_list_cursor(
     };
 
     // Build WHERE = filters AND (cursor predicate, if any)
+    let filters = where_clause.clone();
     let final_where = match cursor_pos {
         Some((v, pk_v)) => {
-            let op = if desc { Op::Lt } else { Op::Gt };
-            let cursor_pred = match (tiebreak, pk_v) {
-                // `col > v OR (col = v AND pk > pk_v)` — strictly after
-                // the last row of the previous page, ties included.
-                (Some(pk), Some(pk_v)) => WhereExpr::Or(vec![
-                    WhereExpr::Predicate(Filter {
-                        column: cursor_schema.column,
-                        op,
-                        value: v.clone(),
-                    }),
-                    WhereExpr::And(vec![
-                        WhereExpr::Predicate(Filter {
-                            column: cursor_schema.column,
-                            op: Op::Eq,
-                            value: v,
-                        }),
-                        WhereExpr::Predicate(Filter {
-                            column: pk.column,
-                            op,
-                            value: pk_v,
-                        }),
-                    ]),
-                ]),
-                // No tiebreak: the cursor is the PK, or the token is a
-                // pre-#1459 one that carries no pk component.
-                _ => WhereExpr::Predicate(Filter {
-                    column: cursor_schema.column,
-                    op,
-                    value: v,
-                }),
-            };
+            let cursor_pred = cursor_after((cursor_schema, tiebreak, desc), v, pk_v);
             match where_clause {
                 WhereExpr::And(v) if v.is_empty() => cursor_pred,
                 WhereExpr::And(mut v) => {
@@ -3193,6 +3315,18 @@ async fn handle_list_cursor(
     let mut order_by = vec![crate::core::OrderItem::column(cursor_schema.column, desc)];
     if let Some(pk) = tiebreak {
         order_by.push(crate::core::OrderItem::column(pk.column, desc));
+    }
+
+    if state.vs.hooks.any(state.vs.schema.table, "view") {
+        let scan = SelectQuery {
+            where_clause: final_where,
+            search: search_clause,
+            order_by,
+            ..SelectQuery::new(state.vs.schema)
+        };
+        let cursor = (cursor_schema, tiebreak, desc);
+        let page = (&fields[..], page_size);
+        return cursor_page_admitted(state, (acq, parts), (scan, filters), cursor, page).await;
     }
 
     // Fetch `page_size + 1` rows to tell whether a next page exists.
@@ -3284,6 +3418,134 @@ async fn handle_list_cursor(
     json_response(json!({
         "page_size": page_size,
         "next": next_cursor,
+        "results": results,
+    }))
+}
+
+/// `col > v OR (col = v AND pk > pk_v)` (`<` when descending): strictly
+/// after a row, ties included. No tiebreak when the cursor is the PK, or
+/// the token is an older one that carries no pk component.
+fn cursor_after(
+    (cursor, tiebreak, desc): (
+        &'static crate::core::FieldSchema,
+        Option<&'static crate::core::FieldSchema>,
+        bool,
+    ),
+    v: SqlValue,
+    pk_v: Option<SqlValue>,
+) -> WhereExpr {
+    let op = if desc { Op::Lt } else { Op::Gt };
+    let pred = |column, op, value| WhereExpr::Predicate(Filter { column, op, value });
+    match (tiebreak, pk_v) {
+        (Some(pk), Some(pk_v)) => WhereExpr::Or(vec![
+            pred(cursor.column, op, v.clone()),
+            WhereExpr::And(vec![
+                pred(cursor.column, Op::Eq, v),
+                pred(pk.column, op, pk_v),
+            ]),
+        ]),
+        _ => pred(cursor.column, op, v),
+    }
+}
+
+/// Scan windows a cursor page reads past rows the "view" hook hides
+/// before it gives up and ends the list.
+const CURSOR_HIDDEN_WINDOWS: usize = 10;
+
+/// A cursor page under a "view" hook: scan forward from the position in
+/// windows of the scan cap and keep the first `page_size` rows the hook
+/// admits. `next` resumes after the last admitted row, never a hidden one.
+async fn cursor_page_admitted(
+    state: &ViewSetState,
+    (acq, parts): (&mut AcquiredConn, &axum::http::request::Parts),
+    (scan, filters): (SelectQuery, WhereExpr),
+    cursor: (
+        &'static crate::core::FieldSchema,
+        Option<&'static crate::core::FieldSchema>,
+        bool,
+    ),
+    (fields, page_size): (&[&'static crate::core::FieldSchema], i64),
+) -> Response {
+    let schema = state.vs.schema;
+    let (cursor_field, tiebreak, _) = cursor;
+    let Some(pk_field) = schema.primary_key() else {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a cursor list needs a primary key",
+        );
+    };
+    let cap = state.vs.view_hook_scan_cap.max(1);
+    let size = usize::try_from(page_size).unwrap_or(usize::MAX);
+    let scalar: Vec<_> = schema.scalar_fields().collect();
+    let hooks = state.vs.hooks;
+    // The value of `field` in a read row, parsed back into a bind.
+    let value_of = |row: &Value, field: &'static crate::core::FieldSchema| {
+        cursor_value_of(row, field.name).and_then(|v| parse_cursor_scalar(&v, field.ty))
+    };
+    let mut window = SelectQuery {
+        limit: Some(i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1)),
+        ..scan.clone()
+    };
+    let mut admitted: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    for _ in 0..CURSOR_HIDDEN_WINDOWS {
+        let mut rows = or_500!(acq.select_rows_as_json(&window, &scalar).await);
+        truncated = rows.len() > cap;
+        rows.truncate(cap);
+        let last = rows.last().cloned();
+        admitted.extend(
+            rows.into_iter()
+                .filter(|row| hooks.allows(schema.table, "view", parts, Some(row))),
+        );
+        if admitted.len() > size || !truncated || !admitted.is_empty() {
+            break;
+        }
+        // A whole window hidden: move past it without naming any of it.
+        let Some(after) = last.and_then(|row| {
+            let pk = match tiebreak {
+                Some(pk) => Some(value_of(&row, pk)?),
+                None => None,
+            };
+            Some(cursor_after(cursor, value_of(&row, cursor_field)?, pk))
+        }) else {
+            break;
+        };
+        let mut next = filters.clone();
+        next.push_and(after);
+        window.where_clause = next;
+    }
+    let page = &admitted[..admitted.len().min(size)];
+    let resume = if admitted.len() > size || truncated {
+        page.last()
+    } else {
+        None
+    };
+    if truncated && admitted.is_empty() {
+        crate::object_permissions::warn_scan_cap(schema.table, cap);
+    }
+    let pks: Vec<SqlValue> = page
+        .iter()
+        .filter_map(|row| crate::object_permissions::row_pk(row, pk_field))
+        .collect();
+    let q = SelectQuery {
+        where_clause: pk_in(schema, pk_field, pks),
+        order_by: scan.order_by,
+        ..SelectQuery::new(schema)
+    };
+    let results = or_500!(render_list(state, acq, &q, fields).await);
+    let next = resume.and_then(|row| {
+        let pk = match tiebreak {
+            Some(pk) => Some(cursor_value_of(row, pk.name)?),
+            None => None,
+        };
+        Some(encode_cursor(
+            &cursor_value_of(row, cursor_field.name)?,
+            pk.as_deref(),
+        ))
+    });
+    json_response(json!({
+        "page_size": page_size,
+        "next": next,
         "results": results,
     }))
 }
@@ -3413,10 +3675,15 @@ async fn handle_retrieve(
         Err(resp) => return resp,
     };
 
-    let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     // Narrowed by the filter backends, so a row this principal may
     // not see reads as absent. A 403 would confirm the id exists.
     let scope = scope_filters(&state, &parts, &HashMap::new());
+    let item = (pk_field, &pk_val);
+    let read = (&scope[..], ItemRead::IfHooked);
+    if let Err(resp) = gate_item(&state, &mut acq, &parts, item, read, None).await {
+        return resp;
+    }
+    let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     select_q.where_clause = narrow(select_q.where_clause, scope);
 
     let fields = state.effective_fields();
@@ -3425,6 +3692,84 @@ async fn handle_retrieve(
         Ok(None) => json_error(StatusCode::NOT_FOUND, "not found"),
         Err(e) => json_server_error("viewset::retrieve", &e),
     }
+}
+
+/// How [`gate_item`] reads the stored row.
+enum ItemRead<'t> {
+    /// On the pool, only when a hook is registered: the retrieve, whose own
+    /// read is scoped.
+    IfHooked,
+    /// Always; locked in `tx` when the write holds one, so the hooks judge
+    /// the row the write changes and no other.
+    Always(Option<&'t mut crate::sql::PoolTx<'static>>),
+}
+
+/// Run the "view" hook, then `action`'s, on the stored row inside `scope`:
+/// hidden or missing is a `404`, refused a `403`.
+async fn gate_item(
+    state: &ViewSetState,
+    acq: &mut AcquiredConn,
+    parts: &axum::http::request::Parts,
+    (pk_field, pk): (&'static crate::core::FieldSchema, &SqlValue),
+    (scope, read): (&[WhereExpr], ItemRead<'_>),
+    action: Option<&'static str>,
+) -> Result<(), Response> {
+    let (schema, hooks) = (state.vs.schema, state.vs.hooks);
+    let hooked = std::iter::once("view")
+        .chain(action)
+        .any(|a| hooks.any(schema.table, a));
+    let mut q = SelectQuery::by_pk(schema, pk_field.column, pk.clone());
+    q.where_clause = narrow(q.where_clause, scope.to_vec());
+    let fields: Vec<_> = schema.scalar_fields().collect();
+    let row = match read {
+        ItemRead::IfHooked if !hooked => return Ok(()),
+        ItemRead::IfHooked | ItemRead::Always(None) => acq.select_one_as_json(&q, &fields).await,
+        ItemRead::Always(Some(tx)) => {
+            q.lock_mode = Some(crate::core::LockMode {
+                silent_on_sqlite: true,
+                ..crate::core::LockMode::default()
+            });
+            crate::sql::select_one_row_as_json_tx(tx, &q, &fields).await
+        }
+    }
+    .map_err(|e| json_server_error("viewset::object_permissions", &e))?;
+    let not_found = || json_error(StatusCode::NOT_FOUND, "not found");
+    let Some(row) = row else {
+        return Err(not_found());
+    };
+    if !hooks.allows(schema.table, "view", parts, Some(&row)) {
+        return Err(not_found());
+    }
+    match action {
+        Some(a) if !hooks.allows(schema.table, a, parts, Some(&row)) => {
+            Err(json_error(StatusCode::FORBIDDEN, "forbidden"))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Whether the row `pk` is still inside the queryset `scope` in `tx`, after
+/// a write: one that moved it out is refused.
+async fn stays_in_scope(
+    state: &ViewSetState,
+    tx: &mut crate::sql::PoolTx<'_>,
+    (pk_field, pk): (&'static crate::core::FieldSchema, &SqlValue),
+    scope: &[WhereExpr],
+) -> Result<bool, crate::sql::ExecError> {
+    if scope.is_empty() {
+        return Ok(true);
+    }
+    let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk.clone());
+    q.where_clause = narrow(q.where_clause, scope.to_vec());
+    let row = crate::sql::select_one_row_as_json_tx(tx, &q, &[pk_field]).await?;
+    Ok(row.is_some())
+}
+
+/// The queryset scopes alone, which every write must stay inside.
+fn queryset_scope(state: &ViewSetState, parts: &axum::http::request::Parts) -> Vec<WhereExpr> {
+    let table = state.vs.schema.table;
+    let filters = state.vs.hooks.scope_filters(table, parts);
+    filters.into_iter().map(WhereExpr::Predicate).collect()
 }
 
 async fn handle_create(
@@ -3443,7 +3788,7 @@ async fn handle_create(
         Ok(w) => w,
         Err(resp) => return resp,
     };
-    let add_hooks = match AddHooks::of(&state.vs, &parts) {
+    let add_hooks = match AddHooks::of(&state, &parts) {
         Ok(h) => h,
         Err(resp) => return resp,
     };
@@ -3579,35 +3924,37 @@ async fn insert_and_fetch_one(
         })
 }
 
-/// The admin's `add` hooks for a create, run as the admin runs them: on
-/// the request, then on each written row inside the write's transaction.
+/// The `add` hooks for a create, run as the admin runs them: on the
+/// request, then on each written row inside the write's transaction, which
+/// must also land inside the queryset scopes.
 struct AddHooks {
+    hooks: crate::object_permissions::Hooks,
     /// The request, kept only when a hook is registered for a row check.
     parts: Option<axum::http::request::Parts>,
+    /// The queryset scopes the written row must stay inside.
+    scope: Vec<WhereExpr>,
 }
 
 impl AddHooks {
-    /// None unless the ViewSet opted in. `Err` is a `403` when a hook
-    /// refuses the request itself.
-    fn of(vs: &ViewSet, parts: &axum::http::request::Parts) -> Result<Self, Response> {
-        use crate::admin::object_permissions::{has_hook, is_allowed};
-        let table = vs.schema.table;
-        if !vs.admin_add_hooks {
-            return Ok(Self { parts: None });
-        }
-        if !is_allowed(table, "add", parts, None) {
+    /// `Err` is a `403` when a hook refuses the request itself.
+    fn of(state: &ViewSetState, parts: &axum::http::request::Parts) -> Result<Self, Response> {
+        let (table, hooks) = (state.vs.schema.table, state.vs.hooks);
+        if !hooks.allows(table, "add", parts, None) {
             return Err(json_error(StatusCode::FORBIDDEN, "forbidden"));
         }
         Ok(Self {
-            parts: has_hook(table, "add").then(|| parts.clone()),
+            hooks,
+            parts: hooks.any(table, "add").then(|| parts.clone()),
+            scope: queryset_scope(state, parts),
         })
     }
 
     fn on_rows(&self) -> bool {
-        self.parts.is_some()
+        self.parts.is_some() || !self.scope.is_empty()
     }
 
-    /// Whether every hook admits the row `pk` as written in `tx`.
+    /// Whether the row `pk` as written in `tx` is inside the scopes and
+    /// every hook admits it.
     async fn admit(
         &self,
         tx: &mut crate::sql::PoolTx<'_>,
@@ -3615,14 +3962,17 @@ impl AddHooks {
         pk_field: &'static crate::core::FieldSchema,
         pk: SqlValue,
     ) -> Result<bool, crate::sql::ExecError> {
-        let Some(parts) = &self.parts else {
+        if !self.on_rows() {
             return Ok(true);
-        };
+        }
         let fields: Vec<_> = model.scalar_fields().collect();
-        let select = SelectQuery::by_pk(model, pk_field.column, pk);
+        let mut select = SelectQuery::by_pk(model, pk_field.column, pk);
+        select.where_clause = narrow(select.where_clause, self.scope.clone());
         let row = crate::sql::select_one_row_as_json_tx(tx, &select, &fields).await?;
         Ok(row.is_some_and(|row| {
-            crate::admin::object_permissions::is_allowed(model.table, "add", parts, Some(&row))
+            self.parts
+                .as_ref()
+                .is_none_or(|parts| self.hooks.allows(model.table, "add", parts, Some(&row)))
         }))
     }
 }
@@ -3776,7 +4126,7 @@ async fn insert_admitted(
             .begin(&acq.pool, &SqlValue::Null)
             .await
             .map_err(|e| e.into_failure("viewset::create"))?;
-        let pk = match crate::audit::insert_tx_on(&acq.pool, &mut tx, query, pk_field).await {
+        let pk = match crate::audit::insert_tx_on(&mut tx, query, pk_field).await {
             Ok(pk) => pk,
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -3835,7 +4185,7 @@ async fn update_claimed(
             Err(e) if e.is_deadlock() && std::mem::take(&mut retry) => continue,
             Err(e) => return Err(e.into_failure("viewset::update")),
         };
-        let n = match update.run(&mut tx, pool, query, pk.clone()).await {
+        let n = match update.run(&mut tx, query, pk.clone()).await {
             Ok(n) => n,
             Err(e) => {
                 let _ = tx.rollback().await;
@@ -4046,7 +4396,7 @@ async fn create_many(
                 on_conflict: None,
                 generated: vec![],
             };
-            match crate::audit::insert_tx_on(&acq.pool, &mut tx, &query, pk_field).await {
+            match crate::audit::insert_tx_on(&mut tx, &query, pk_field).await {
                 Ok(pk) => match add_hooks
                     .admit(&mut tx, query.model, pk_field, pk.clone())
                     .await
@@ -4064,10 +4414,11 @@ async fn create_many(
                     }
                     Ok(false) => {
                         let _ = tx.rollback().await;
-                        return json_error(
-                            StatusCode::FORBIDDEN,
-                            &format!("bulk entry {i}: forbidden"),
-                        );
+                        return crate::api_errors::ApiError::forbidden(format!(
+                            "bulk entry {i}: forbidden"
+                        ))
+                        .with_details(json!({ "index": i }))
+                        .into_response();
                     }
                     Err(e) => {
                         let _ = tx.rollback().await;
@@ -4133,13 +4484,10 @@ async fn fetch_many_by_pk_scoped(
     };
     let mut out = Vec::with_capacity(pks.len());
     for chunk in pks.chunks(READ_BACK_CHUNK) {
+        let visible = read_back.visible(state, acq, pk_field, chunk).await?;
         let mut q = SelectQuery::new(state.vs.schema);
         q.where_clause = narrow(
-            WhereExpr::Predicate(Filter {
-                column: pk_field.column,
-                op: Op::In,
-                value: SqlValue::List(chunk.to_vec()),
-            }),
+            pk_in(state.vs.schema, pk_field, visible),
             read_back.scope().to_vec(),
         );
         let rows = read_back.render(state, acq, &q, pk_field, fields).await?;
@@ -4206,6 +4554,34 @@ async fn update_inner(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    // The body is in memory before the transaction opens: a slow upload
+    // must not hold the write lock. Its errors still answer after the gate.
+    let buffered = read_capped(&parts, body).await;
+    // The row, read before the body is parsed: hidden is a 404 before any
+    // field or FK check can answer. Locked in the UPDATE's transaction, so
+    // the hooks judge the row the write changes. A model audited
+    // only on a pool is read and updated unlocked, rather than lose its
+    // audit entry.
+    let mut locked = match crate::audit::TxUpdate::for_model(state.vs.schema) {
+        Some(u) => match crate::sql::write_transaction(&acq.pool).await {
+            Ok(tx) => Some((u, tx)),
+            Err(e) => return json_server_error("viewset::update::begin", &e),
+        },
+        None => None,
+    };
+    let item = (pk_field, &pk_val);
+    let read = (
+        &scope[..],
+        ItemRead::Always(locked.as_mut().map(|(_, tx)| tx)),
+    );
+    if let Err(resp) = gate_item(&state, &mut acq, &parts, item, read, Some("change")).await {
+        return resp;
+    }
+    let qs_scope = queryset_scope(&state, &parts);
+    let body = match buffered {
+        Ok(bytes) => Body::from(bytes),
+        Err(e) => return e.into_response(),
+    };
 
     let (form, json) = match extract_form_body(parts, body, Some(body_types(&state))).await {
         Ok(b) => b,
@@ -4218,9 +4594,7 @@ async fn update_inner(
     };
     let json = write_json(&state, &form, json);
 
-    // PATCH checks only the sent fields, over the stored row (#1995),
-    // locked until the UPDATE in the same transaction commits (#2010).
-    let mut locked = None;
+    // PATCH checks only the sent fields, over the stored row.
     let validated = match &state.vs.serializer {
         Some(bridge) if partial => {
             let mut q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val.clone());
@@ -4229,19 +4603,18 @@ async fn update_inner(
                 silent_on_sqlite: true,
                 ..crate::core::LockMode::default()
             });
-            let mut tx = match crate::sql::write_transaction(&acq.pool).await {
-                Ok(tx) => tx,
-                Err(e) => return json_server_error("viewset::update::begin", &e),
-            };
             let body = write_set.patch_body(bridge.as_ref(), &json);
-            let checked = match bridge.validate_patch(&mut tx, &q, &body).await {
+            let checked = match locked.as_mut() {
+                Some((_, tx)) => bridge.validate_patch(tx, &q, &body).await,
+                None => match crate::sql::write_transaction(&acq.pool).await {
+                    Ok(mut tx) => bridge.validate_patch(&mut tx, &q, &body).await,
+                    Err(e) => return json_server_error("viewset::update::begin", &e),
+                },
+            };
+            match checked {
                 Ok(r) => r.map_err(|errs| json_form_errors(&errs)),
                 Err(e) => return json_server_error("viewset::update::validate", &e),
-            };
-            // A model audited only on a pool updates there, unlocked,
-            // rather than lose its audit entry.
-            locked = crate::audit::TxUpdate::for_model(state.vs.schema).map(|u| (u, tx));
-            checked
+            }
         }
         _ => serializer_validate(&state, &json, None),
     };
@@ -4323,11 +4696,16 @@ async fn update_inner(
     };
 
     let updated = match locked.as_mut() {
-        Some((u, tx)) => match u.run(tx, &acq.pool, &query, pk_val.clone()).await {
+        Some((u, tx)) => match u.run(tx, &query, pk_val.clone()).await {
             Ok(0) => Ok(0),
-            Ok(n) => match claims.claim_in(tx, &pk_val).await {
-                Ok(()) => Ok(n),
-                Err(e) => Err(e.into_failure("viewset::update")),
+            // A write may not move the row out of the queryset scopes.
+            Ok(n) => match stays_in_scope(&state, tx, item, &qs_scope).await {
+                Ok(false) => Err((StatusCode::FORBIDDEN, "forbidden".to_owned())),
+                Err(e) => Err(write_failure("viewset::update::scope", &e)),
+                Ok(true) => match claims.claim_in(tx, &pk_val).await {
+                    Ok(()) => Ok(n),
+                    Err(e) => Err(e.into_failure("viewset::update")),
+                },
             },
             Err(e) => Err(write_failure("viewset::update", &e)),
         },
@@ -4380,31 +4758,40 @@ async fn handle_destroy(
         Ok(v) => v,
         Err(resp) => return resp,
     };
-
+    // The row, locked in the delete's transaction: the hooks judge the row
+    // the write removes. Before either path, as a soft delete is a delete.
+    let schema = state.vs.schema;
+    let mut tx = match crate::sql::write_transaction(&acq.pool).await {
+        Ok(tx) => tx,
+        Err(e) => return json_server_error("viewset::destroy::begin", &e),
+    };
+    let item = (pk_field, &pk_val);
+    let read = (&scope[..], ItemRead::Always(Some(&mut tx)));
+    if let Err(resp) = gate_item(&state, &mut acq, &parts, item, read, Some("delete")).await {
+        return resp;
+    }
+    let by_pk = WhereExpr::Predicate(Filter {
+        column: pk_field.column,
+        op: Op::Eq,
+        value: pk_val.clone(),
+    });
+    let row = narrow(by_pk.clone(), scope.clone());
     // A soft-delete model stamps its column, as the admin does (#1998).
-    let deleted = if let Some(col) = state.vs.schema.soft_delete_column {
+    let stamp = schema.soft_delete_column.map(|col| {
         let mut query = crate::soft_delete::__mark_query(
-            state.vs.schema,
+            schema,
             col,
             pk_field.column,
-            pk_val,
+            pk_val.clone(),
             Some(chrono::Utc::now()),
         );
-        query.where_clause = narrow(query.where_clause, scope);
-        acq.soft_delete(&query).await
-    } else {
-        let query = DeleteQuery {
-            model: state.vs.schema,
-            where_clause: narrow(
-                WhereExpr::Predicate(Filter {
-                    column: pk_field.column,
-                    op: Op::Eq,
-                    value: pk_val,
-                }),
-                scope,
-            ),
-        };
-        acq.delete(&query).await
+        query.where_clause = narrow(query.where_clause, scope.clone());
+        query
+    });
+    let deleted = crate::audit::remove_one_tx(&mut tx, schema, (row, by_pk), stamp.as_ref()).await;
+    let deleted = match deleted {
+        Ok(n) if n > 0 => tx.commit().await.map(|()| n).map_err(Into::into),
+        other => other,
     };
     match deleted {
         Ok(0) => json_error(StatusCode::NOT_FOUND, "not found"),
@@ -4431,11 +4818,13 @@ fn wrote(state: &ViewSetState) {
     let _ = state;
 }
 
-/// What a write echoes of a row inside the scope: all of it, or only
-/// its primary key to a caller without the retrieve permission.
-enum ReadBack {
-    Row(Vec<WhereExpr>),
-    PkOnly(Vec<WhereExpr>),
+/// What a write echoes of a row inside the scope and the "view" hook:
+/// all of it, or only its primary key to a caller without the retrieve permission.
+struct ReadBack {
+    pk_only: bool,
+    scope: Vec<WhereExpr>,
+    /// The request, kept only when a "view" hook judges the row.
+    view_gate: Option<axum::http::request::Parts>,
 }
 
 impl ReadBack {
@@ -4445,21 +4834,49 @@ impl ReadBack {
         acq: &mut AcquiredConn,
         scope: Vec<WhereExpr>,
     ) -> Self {
-        match state.check_perm(&state.vs.perms.retrieve, parts, acq).await {
-            PermOutcome::Allow => Self::Row(scope),
-            PermOutcome::Unauthenticated | PermOutcome::Forbidden => Self::PkOnly(scope),
+        let pk_only = match state.check_perm(&state.vs.perms.retrieve, parts, acq).await {
+            PermOutcome::Allow => false,
+            PermOutcome::Unauthenticated | PermOutcome::Forbidden => true,
             // The write is done; echo only the key rather than fail it.
             PermOutcome::Unavailable(e) => {
                 tracing::warn!(target: "rustango::viewset", error = %e, "permission read failed; echoing the key only");
-                Self::PkOnly(scope)
+                true
             }
+        };
+        let hooked = state.vs.hooks.any(state.vs.schema.table, "view");
+        Self {
+            pk_only,
+            scope,
+            view_gate: hooked.then(|| parts.clone()),
         }
     }
 
     fn scope(&self) -> &[WhereExpr] {
-        match self {
-            Self::Row(scope) | Self::PkOnly(scope) => scope,
-        }
+        &self.scope
+    }
+
+    /// The `pks` the "view" hook admits, in order: all of them when unhooked.
+    async fn visible(
+        &self,
+        state: &ViewSetState,
+        acq: &mut AcquiredConn,
+        pk_field: &'static crate::core::FieldSchema,
+        pks: &[SqlValue],
+    ) -> Result<Vec<SqlValue>, crate::sql::ExecError> {
+        let Some(parts) = &self.view_gate else {
+            return Ok(pks.to_vec());
+        };
+        let schema = state.vs.schema;
+        let mut q = SelectQuery::by_pk_in(schema, pk_field.column, pks.to_vec());
+        q.where_clause = narrow(q.where_clause, self.scope.clone());
+        let fields: Vec<_> = schema.scalar_fields().collect();
+        let rows = acq.select_rows_as_json(&q, &fields).await?;
+        let hooks = state.vs.hooks;
+        Ok(rows
+            .iter()
+            .filter(|row| hooks.allows(schema.table, "view", parts, Some(row)))
+            .filter_map(|row| crate::object_permissions::row_pk(row, pk_field))
+            .collect())
     }
 
     /// The rows matching `q`, rendered as this read-back allows.
@@ -4471,15 +4888,16 @@ impl ReadBack {
         pk_field: &'static crate::core::FieldSchema,
         fields: &[&'static crate::core::FieldSchema],
     ) -> Result<Vec<Value>, crate::sql::ExecError> {
-        match self {
-            Self::Row(_) => render_list(state, acq, q, fields).await,
-            Self::PkOnly(_) => acq.select_rows_as_json(q, &[pk_field]).await,
+        if self.pk_only {
+            acq.select_rows_as_json(q, &[pk_field]).await
+        } else {
+            render_list(state, acq, q, fields).await
         }
     }
 }
 
 /// The read-back after a write, per `read_back`: `None` when the
-/// written row is outside the scope, so it is never echoed.
+/// written row is outside the scope or hidden, so it is never echoed.
 async fn fetch_by_pk_scoped(
     state: &ViewSetState,
     acq: &mut AcquiredConn,
@@ -4488,11 +4906,18 @@ async fn fetch_by_pk_scoped(
     fields: &[&'static crate::core::FieldSchema],
     read_back: &ReadBack,
 ) -> Result<Option<Value>, crate::sql::ExecError> {
+    let visible = read_back
+        .visible(state, acq, pk_field, std::slice::from_ref(&pk_val))
+        .await?;
+    if visible.is_empty() {
+        return Ok(None);
+    }
     let mut select_q = SelectQuery::by_pk(state.vs.schema, pk_field.column, pk_val);
     select_q.where_clause = narrow(select_q.where_clause, read_back.scope().to_vec());
-    match read_back {
-        ReadBack::Row(_) => render_single(state, acq, &select_q, fields).await,
-        ReadBack::PkOnly(_) => acq.select_one_as_json(&select_q, &[pk_field]).await,
+    if read_back.pk_only {
+        acq.select_one_as_json(&select_q, &[pk_field]).await
+    } else {
+        render_single(state, acq, &select_q, fields).await
     }
 }
 
@@ -4585,25 +5010,20 @@ pub(crate) enum CreateBody {
 /// Create/update body cap when no `BodyLimitLayer` sets one.
 const DEFAULT_BODY_CAP: usize = 4 * 1024 * 1024;
 
-pub(crate) async fn extract_create_body(
-    parts: axum::http::request::Parts,
+/// The whole body, up to the `BodyLimitLayer` cap or [`DEFAULT_BODY_CAP`].
+async fn read_capped(
+    parts: &axum::http::request::Parts,
     body: Body,
-    typed: Option<BodyTypes>,
-) -> Result<CreateBody, BodyError> {
-    use axum::body::to_bytes;
-
-    let content_type = parts
-        .headers
-        .get(header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
+) -> Result<axum::body::Bytes, BodyError> {
     // A `BodyLimitLayer`'s cap, raised or lowered, replaces the default.
     #[cfg(feature = "_http_layers")]
     let cap = crate::body_limit::stream_cap(&parts.extensions);
     #[cfg(not(feature = "_http_layers"))]
-    let cap = None;
-    let bytes = to_bytes(body, cap.unwrap_or(DEFAULT_BODY_CAP))
+    let cap = {
+        let _ = parts;
+        None
+    };
+    axum::body::to_bytes(body, cap.unwrap_or(DEFAULT_BODY_CAP))
         .await
         .map_err(|e| {
             // Our own cap or an outer `BodyLimitLayer` stream cap.
@@ -4612,7 +5032,21 @@ pub(crate) async fn extract_create_body(
                 return BodyError::TooLarge;
             }
             BodyError::Bad(e.to_string())
-        })?;
+        })
+}
+
+pub(crate) async fn extract_create_body(
+    parts: axum::http::request::Parts,
+    body: Body,
+    typed: Option<BodyTypes>,
+) -> Result<CreateBody, BodyError> {
+    let content_type = parts
+        .headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let bytes = read_capped(&parts, body).await?;
 
     if content_type.contains("application/json") {
         let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
@@ -5139,6 +5573,24 @@ mod cursor_tests {
     }
 }
 
+#[cfg(test)]
+mod scan_cap_tests {
+    use super::ViewSet;
+    use crate::core::Model as _;
+
+    /// An API list scans fewer rows than the admin by default; the clamp holds.
+    #[test]
+    fn the_default_scan_cap_suits_api_traffic() {
+        let vs = || ViewSet::for_model(crate::contenttypes::ContentType::SCHEMA, &["id"]);
+        assert_eq!(vs().view_hook_scan_cap, 2_000);
+        assert_eq!(vs().view_hook_scan_cap(0).view_hook_scan_cap, 1);
+        assert_eq!(
+            vs().view_hook_scan_cap(usize::MAX).view_hook_scan_cap,
+            100_000
+        );
+    }
+}
+
 #[cfg(all(test, feature = "sso"))]
 mod sso_table_tests {
     use super::ViewSet;
@@ -5165,6 +5617,48 @@ mod sso_table_tests {
         schemas.push(crate::tenancy::sso::SharedSsoProvider::SCHEMA);
         for s in schemas {
             assert!(refused(s), "{} must be refused", s.table);
+        }
+    }
+
+    /// Credentials minted once and the tables the admin never serves.
+    #[cfg(all(feature = "mcp", feature = "totp"))]
+    #[test]
+    fn viewset_refuses_credential_and_never_served_tables() {
+        for s in [
+            crate::tenancy::auth_backends::ApiKey::SCHEMA,
+            crate::tenancy::agents::Agent::SCHEMA,
+            crate::tenancy::DbServer::SCHEMA,
+            crate::tenancy::TenantDatabase::SCHEMA,
+            crate::admin::totp_store::AdminTotp::SCHEMA,
+            crate::tenancy::OperatorTotp::SCHEMA,
+        ] {
+            assert!(refused(s), "{} must be refused", s.table);
+        }
+    }
+
+    /// The framework's own secrets are credentials wherever a row is rendered.
+    #[cfg(all(feature = "mcp", feature = "totp", feature = "sso"))]
+    #[test]
+    fn framework_secret_columns_are_credentials() {
+        for (s, f) in [
+            (crate::tenancy::auth_backends::ApiKey::SCHEMA, "key_hash"),
+            (crate::tenancy::agents::Agent::SCHEMA, "secret_hash"),
+            (crate::tenancy::DbServer::SCHEMA, "admin_password"),
+            (crate::admin::totp_store::AdminTotp::SCHEMA, "secret_base32"),
+            (
+                crate::admin::totp_store::AdminTotp::SCHEMA,
+                "pending_secret_base32",
+            ),
+            (crate::tenancy::OperatorTotp::SCHEMA, "secret"),
+            (crate::tenancy::OperatorTotp::SCHEMA, "pending_secret"),
+            (crate::sso::provider::SsoProvider::SCHEMA, "client_secret"),
+            (
+                crate::tenancy::sso::SharedSsoProvider::SCHEMA,
+                "client_secret",
+            ),
+        ] {
+            let field = s.field(f).unwrap_or_else(|| panic!("{}.{f}", s.table));
+            assert!(field.is_credential(), "{}.{f} is not a credential", s.table);
         }
     }
 
@@ -5296,6 +5790,7 @@ mod lookup_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }
     }
 
@@ -5325,6 +5820,7 @@ mod lookup_tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         }
     }
 
@@ -5747,7 +6243,7 @@ mod bulk_create_source_tests {
         crate::testkit::matrix::fresh_table::<Note>(&pool).await;
         audit::ensure_table_pool(&pool).await.unwrap();
         let app = super::ViewSet::for_model(<Note as crate::core::Model>::SCHEMA, &["id", "title"])
-            .router_pool("/notes", pool.clone());
+            .router("/notes", pool.clone());
         let req = Request::builder()
             .method(Method::POST)
             .uri("/notes")

@@ -334,7 +334,7 @@ admite dos flujos de subida:
 ```rust
 use rustango::media::{Media, MediaManager};
 
-let manager = MediaManager::new_pool(pool.clone(), registry);
+let manager = MediaManager::new(pool.clone(), registry);
 // Hand the browser a short-lived download link:
 // Devuelve Option<String> — None en backends que no pueden firmar (p. ej. disco local).
 let Some(url) = manager.presigned_get(&media, Duration::from_secs(3600)).await else {

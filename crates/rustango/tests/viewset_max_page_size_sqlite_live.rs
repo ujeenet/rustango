@@ -80,7 +80,7 @@ async fn count_returned(app: axum::Router, uri: &str) -> usize {
 async fn client_cannot_exceed_the_default_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=1000").await;
     assert_eq!(
         n, 100,
@@ -94,7 +94,7 @@ async fn app_can_lower_the_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
         .max_page_size(25)
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=1000").await;
     assert_eq!(n, 25, "the app's ceiling must win");
 }
@@ -104,7 +104,7 @@ async fn app_can_lower_the_ceiling() {
 async fn app_can_raise_the_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .max_page_size(200)
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?page_size=200").await;
     assert_eq!(n, 200, "a raised ceiling must be honoured");
 }
@@ -116,7 +116,7 @@ async fn limit_offset_respects_the_same_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .max_page_size(30)
         .pagination(rustango::viewset::PaginationStyle::LimitOffset)
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes?limit=1000").await;
     assert_eq!(n, 30, "?limit= must clamp to max_page_size too");
 }
@@ -128,7 +128,7 @@ async fn default_page_size_is_clamped_to_the_ceiling() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(500)
         .max_page_size(50)
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let n = count_returned(app, "/notes").await;
     assert_eq!(n, 50, "the default must be clamped by the ceiling as well");
 }
@@ -145,7 +145,7 @@ async fn status_of(app: axum::Router, uri: &str) -> StatusCode {
 async fn huge_page_number_is_an_empty_page() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let n = count_returned(app, &format!("/notes?page={}", i64::MAX)).await;
     assert_eq!(n, 0);
 }
@@ -157,7 +157,7 @@ async fn in_list_over_the_cap_is_a_400() {
     let ids = |n: usize| (1..=n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .filter_fields(&["id"])
-        .router_pool("/notes", pool_with_rows().await);
+        .router("/notes", pool_with_rows().await);
     let at_cap = status_of(app.clone(), &format!("/notes?id__in={}", ids(cap))).await;
     assert_eq!(at_cap, StatusCode::OK);
     let over = status_of(app, &format!("/notes?id__in={}", ids(cap + 1))).await;
@@ -204,7 +204,7 @@ async fn in_lists_over_the_bind_total_are_a_400() {
     let refs: Vec<&str> = names.iter().map(String::as_str).collect();
     let app = ViewSet::for_model(Wide::SCHEMA, &["id"])
         .filter_fields(&refs)
-        .router_pool("/wide", pool);
+        .router("/wide", pool);
     let ids = (1..=rustango::list_params::MAX_IN_VALUES)
         .map(|i| i.to_string())
         .collect::<Vec<_>>()

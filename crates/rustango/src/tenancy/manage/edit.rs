@@ -112,9 +112,6 @@ where
     }
 
     writeln!(w, "updated `{slug}`: {}", applied.touched.join(", "))?;
-    if let Some(warning) = applied.warning {
-        writeln!(w, "  {warning}")?;
-    }
     if applied.database_url_rotated {
         // This process holds no server's pools (#1882).
         writeln!(

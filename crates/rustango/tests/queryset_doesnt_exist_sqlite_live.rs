@@ -35,7 +35,7 @@ async fn insert(pool: &Pool, published: bool) {
         id: Auto::default(),
         published,
     };
-    p.save_pool(pool).await.unwrap();
+    p.save(pool).await.unwrap();
 }
 
 #[tokio::test]

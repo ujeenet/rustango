@@ -196,7 +196,7 @@ mod scenarios {
         stale.qty = 99;
         // #1029 — a 0-row UPDATE now surfaces as `Ok(0)`, where it
         // used to be a silent `Ok(())`.
-        let affected = stale.save_pool(pool).await.expect("save on a stale row");
+        let affected = stale.save(pool).await.expect("save on a stale row");
         assert_eq!(affected, 0, "stale-row save affected zero rows");
         assert_eq!(
             Sku::objects()
@@ -210,7 +210,7 @@ mod scenarios {
         );
         // A fresh row (Unset PK) inserts → exactly one row affected.
         let mut fresh = sku("notupdated_fresh", 7, 7);
-        let inserted = fresh.save_pool(pool).await.expect("insert fresh");
+        let inserted = fresh.save(pool).await.expect("insert fresh");
         assert_eq!(inserted, 1, "insert affects one row");
     }
 
@@ -221,7 +221,7 @@ mod scenarios {
             .get_or_create(
                 |pool| async move {
                     let mut s = sku("goc", 1, 10);
-                    s.save_pool(&pool).await?;
+                    s.save(&pool).await?;
                     Ok(s)
                 },
                 pool,
@@ -251,7 +251,7 @@ mod scenarios {
                 |_pool, _row| async move { panic!("missing row — update must not run") },
                 |pool| async move {
                     let mut s = sku("uoc", 1, 10);
-                    s.save_pool(&pool).await?;
+                    s.save(&pool).await?;
                     Ok(s)
                 },
                 pool,
@@ -266,7 +266,7 @@ mod scenarios {
             .update_or_create(
                 |pool, mut row| async move {
                     row.qty = 5;
-                    row.save_pool(&pool).await?;
+                    row.save(&pool).await?;
                     Ok(row)
                 },
                 |_pool| async move { panic!("row exists — create must not run") },

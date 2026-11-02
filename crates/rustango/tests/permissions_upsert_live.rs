@@ -1,11 +1,11 @@
 #![cfg(feature = "postgres")]
 //! Live regression for `permissions.rs` upserts after migrating
-//! `grant_role_perm` / `assign_role` / `set_user_perm` from raw sqlx
+//! `grant_role_perm_pool` / `assign_role_pool` / `set_user_perm_pool` from raw sqlx
 //! to the ORM's `InsertQuery` + `ConflictClause` IR (ORM roadmap P1).
 //!
 //! Each test: call the function twice with the same args, assert it's
 //! idempotent (no DB error), and inspect the row count to confirm the
-//! ON CONFLICT clause did the right thing. `set_user_perm` additionally
+//! ON CONFLICT clause did the right thing. `set_user_perm_pool` additionally
 //! checks that the second call with `granted = false` flips the
 //! existing row instead of inserting a duplicate.
 
@@ -15,8 +15,8 @@ use rustango::core::Column as _;
 use rustango::sql::sqlx;
 use rustango::sql::Pool;
 use rustango::tenancy::permissions::{
-    assign_role, get_or_create_role, grant_role_perm, set_user_perm, RolePermission,
-    UserPermission, UserRole,
+    assign_role_pool, get_or_create_role_pool, grant_role_perm_pool, set_user_perm_pool,
+    RolePermission, UserPermission, UserRole,
 };
 use rustango::tenancy::User;
 
@@ -43,8 +43,12 @@ async fn pool() -> Option<sqlx::PgPool> {
 }
 
 async fn fresh(pool: &sqlx::PgPool) {
-    rustango::migrate::drop_all(pool).await.unwrap();
-    rustango::migrate::apply_all(pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
+    rustango::migrate::apply_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
     // The permission models now declare their composite UNIQUE
     // constraints as `unique_together` (v0.47), so the framework's
     // schema — whether emitted by the inventory-driven auto-DDL or the
@@ -80,7 +84,7 @@ async fn make_user(pool: &sqlx::PgPool, username_prefix: &str) -> i64 {
         // The rest from testkit, so a feature-gated field cannot break the literal.
         ..rustango::testkit::user()
     };
-    user.insert(pool).await.unwrap();
+    user.insert(&pool.clone().into()).await.unwrap();
     *user.id.get().expect("PK assigned by RETURNING")
 }
 
@@ -93,15 +97,19 @@ async fn grant_role_perm_is_idempotent_via_on_conflict_do_nothing() {
     };
     fresh(&pool).await;
 
-    let role_id = get_or_create_role("test-role", "test", &pool)
+    let role_id = get_or_create_role_pool("test-role", "test", &pool.clone().into())
         .await
         .unwrap();
-    grant_role_perm(role_id, "post.add", &pool).await.unwrap();
+    grant_role_perm_pool(role_id, "post.add", &pool.clone().into())
+        .await
+        .unwrap();
     // Second grant: must be a no-op, not an error. This is the
     // race-safety guarantee we get from ON CONFLICT DO NOTHING — if we
     // had used a fetch-then-insert pattern instead, two concurrent
     // grants could both observe "absent" and both INSERT.
-    grant_role_perm(role_id, "post.add", &pool).await.unwrap();
+    grant_role_perm_pool(role_id, "post.add", &pool.clone().into())
+        .await
+        .unwrap();
 
     let rows: Vec<RolePermission> = RolePermission::objects()
         .where_(RolePermission::role_id.eq(role_id))
@@ -115,7 +123,9 @@ async fn grant_role_perm_is_idempotent_via_on_conflict_do_nothing() {
         "two grants of the same codename should leave one row"
     );
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -127,11 +137,17 @@ async fn assign_role_is_idempotent_via_on_conflict_do_nothing() {
     };
     fresh(&pool).await;
 
-    let role_id = get_or_create_role("seat", "test", &pool).await.unwrap();
+    let role_id = get_or_create_role_pool("seat", "test", &pool.clone().into())
+        .await
+        .unwrap();
     let user_id = make_user(&pool, "perm_test_assign").await;
 
-    assign_role(user_id, role_id, &pool).await.unwrap();
-    assign_role(user_id, role_id, &pool).await.unwrap();
+    assign_role_pool(user_id, role_id, &pool.clone().into())
+        .await
+        .unwrap();
+    assign_role_pool(user_id, role_id, &pool.clone().into())
+        .await
+        .unwrap();
 
     let rows: Vec<UserRole> = UserRole::objects()
         .where_(UserRole::user_id.eq(user_id))
@@ -141,7 +157,9 @@ async fn assign_role_is_idempotent_via_on_conflict_do_nothing() {
         .unwrap();
     assert_eq!(rows.len(), 1, "two assigns should leave one row");
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -157,7 +175,9 @@ async fn set_user_perm_flips_existing_row_via_on_conflict_do_update() {
     let codename = "post.delete";
 
     // Initial grant.
-    set_user_perm(user_id, codename, true, &pool).await.unwrap();
+    set_user_perm_pool(user_id, codename, true, &pool.clone().into())
+        .await
+        .unwrap();
     let rows: Vec<UserPermission> = UserPermission::objects()
         .where_(UserPermission::user_id.eq(user_id))
         .where_(UserPermission::codename.eq(codename))
@@ -171,7 +191,7 @@ async fn set_user_perm_flips_existing_row_via_on_conflict_do_update() {
     // one. Pre-migration this used `ON CONFLICT (user_id, codename)
     // DO UPDATE SET granted = EXCLUDED.granted` in raw SQL; the IR
     // path emits the same shape via ConflictClause::DoUpdate.
-    set_user_perm(user_id, codename, false, &pool)
+    set_user_perm_pool(user_id, codename, false, &pool.clone().into())
         .await
         .unwrap();
     let rows: Vec<UserPermission> = UserPermission::objects()
@@ -183,5 +203,7 @@ async fn set_user_perm_flips_existing_row_via_on_conflict_do_update() {
     assert_eq!(rows.len(), 1, "second call should NOT insert a duplicate");
     assert!(!rows[0].granted, "second call should flip granted to false");
 
-    rustango::migrate::drop_all(&pool).await.unwrap();
+    rustango::migrate::drop_all_pool(&pool.clone().into())
+        .await
+        .unwrap();
 }

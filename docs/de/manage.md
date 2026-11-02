@@ -811,7 +811,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.16
+rustango 0.62.0
 ```
 
 ### `about`
@@ -823,7 +823,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.16
+  version:        0.62.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1162,8 +1162,9 @@ cargo run -- purge-tenant beta --confirm beta --purge-database   # database-mode
 
 Bei mehreren Servern erst deaktivieren (`drop-tenant`) und 30 s warten. Ein
 Server, dessen Tenant-Cache noch einen Schema-Mode-Tenant hält, behält
-`search_path = <schema>, public`; nach dem Löschen des Schemas fallen seine
-Abfragen bis zur Cache-Auffrischung auf `public` durch.
+seinen Pool bis zur Cache-Auffrischung; nach dem Löschen des Schemas schlagen
+seine Abfragen fehl oder lesen `public`, wenn eine Extension (etwa citext)
+`public` in seinem `search_path` hält.
 
 ### `rotate-tenant-password <slug>`
 
@@ -1395,9 +1396,12 @@ cargo run -- create-api-key acme alice --label "ci-bot"
 
 Beschneidet alte Einträge aus dem Audit-Log (`rustango_audit_log`), damit es
 nicht ewig wächst. Kürzen Sie nach Alter (`--days`) oder nach Anzahl
-(`--keep-last`), und optional auf einen Tenant beschränkt.
+(`--keep-last`), und optional auf einen Tenant beschränkt. Ohne beide Flags
+löscht es Einträge, die älter als `[audit] retention_days` sind, und schlägt
+fehl, wenn das nicht gesetzt ist.
 
 ```bash
+cargo run -- audit-cleanup                                 # älter als [audit] retention_days
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped

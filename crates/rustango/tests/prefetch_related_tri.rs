@@ -268,7 +268,7 @@ async fn m2m_prefetch_runs_constant_queries(pool: &Pool) {
     let per_instance = QueryCounter::scope(async {
         let posts = Post::objects().fetch(pool).await.unwrap();
         for p in &posts {
-            let ids = p.tags_m2m().all(pool).await.unwrap();
+            let ids = p.tags_m2m().all::<i64>(pool).await.unwrap();
             if ids.is_empty() {
                 continue;
             }
@@ -476,7 +476,7 @@ async fn reverse_fk_on_a_unique_column(pool: &Pool) {
             id,
             code: code.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -485,7 +485,7 @@ async fn reverse_fk_on_a_unique_column(pool: &Pool) {
             id,
             shop: ForeignKey::unloaded(shop.to_owned()),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -515,7 +515,7 @@ async fn reverse_over_a_plain_column(pool: &Pool) {
             id,
             parent_id: parent,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -557,7 +557,7 @@ async fn reverse_split_keys_load_each_child_once(pool: &Pool) {
         id: 1,
         bin_label: "abc".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let rows: Vec<(Bin, Vec<Part>)> =

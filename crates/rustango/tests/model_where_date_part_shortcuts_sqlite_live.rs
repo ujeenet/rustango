@@ -50,7 +50,7 @@ async fn seed(pool: &Pool) {
             label: label.into(),
             at,
         };
-        e.save_pool(pool).await.unwrap();
+        e.save(pool).await.unwrap();
     }
 }
 

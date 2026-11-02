@@ -31,7 +31,7 @@ async fn seed(pool: &Pool) {
             id: Auto::default(),
             name: (*name).into(),
         };
-        it.save_pool(pool).await.unwrap();
+        it.save(pool).await.unwrap();
     }
 }
 

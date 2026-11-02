@@ -262,7 +262,7 @@ async fn integer_pk_inserts_beside_non_integer_returning_columns(pool: &Pool) {
         price: 1.5,
         doubled: 0.0,
     };
-    line.insert_pool(pool).await.expect("insert");
+    line.insert(pool).await.expect("insert");
     assert!(
         matches!(line.id, rustango::sql::Auto::Set(_)),
         "{:?}",
@@ -322,7 +322,7 @@ async fn inline_row_fills_a_v7_pk(pool: &Pool) {
         id: rustango::sql::Auto::Unset,
         name: "A".into(),
     };
-    doc.insert_pool(pool).await.expect("parent");
+    doc.insert(pool).await.expect("parent");
     let doc = *doc.id.get().expect("parent pk");
     let body = format!(
         "name=A&pk1725_line-TOTAL_FORMS=1&pk1725_line-INITIAL_FORMS=0\
@@ -341,7 +341,7 @@ async fn inline_row_fills_a_v7_pk(pool: &Pool) {
 /// #2416: an INSERT naming no column. MySQL needs `() VALUES ()`.
 async fn an_insert_of_only_defaults_writes_them(pool: &Pool) {
     let app = rustango::viewset::ViewSet::for_model(Flag::SCHEMA, &["id", "status", "is_public"])
-        .router_pool("/flags", pool.clone());
+        .router("/flags", pool.clone());
     let resp = app
         .oneshot(
             Request::builder()

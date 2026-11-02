@@ -73,7 +73,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
     let my_id = op.id.get().copied().unwrap_or_default();
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
@@ -734,7 +734,7 @@ async fn a_reset_in_the_login_second_still_signs_that_operator_out() {
     // Pin the reset into the second the session was issued in.
     let mut row = b.find(&name).await.unwrap();
     row.password_changed_at = chrono::DateTime::from_timestamp(issued_at, 999_000_000);
-    row.save_pool(&b.registry).await.unwrap();
+    row.save(&b.registry).await.unwrap();
 
     assert!(
         orgs_status(their_cookie).await.is_redirection(),

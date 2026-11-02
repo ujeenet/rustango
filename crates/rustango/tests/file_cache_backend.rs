@@ -100,11 +100,9 @@ async fn long_or_funny_keys_dont_break_filenames() {
 #[tokio::test]
 async fn from_settings_file_backend_round_trips() {
     let dir = unique_tmp_dir("settings");
-    let s = CacheSettings {
-        backend: Some("file".into()),
-        file_cache_dir: Some(dir.clone()),
-        ..Default::default()
-    };
+    let mut s = CacheSettings::default();
+    s.backend = Some("file".into());
+    s.file_cache_dir = Some(dir.clone());
     let cache = from_settings(&s);
     cache.set("k", "v", None).await.unwrap();
     assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
@@ -118,18 +116,15 @@ async fn from_settings_file_backend_round_trips() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-#[tokio::test]
-async fn from_settings_file_backend_without_dir_falls_back_to_memory() {
-    let s = CacheSettings {
-        backend: Some("file".into()),
-        file_cache_dir: None,
-        ..Default::default()
-    };
-    // No panic, no error — we fall back to InMemoryCache, which still
-    // round-trips.
-    let cache = from_settings(&s);
-    cache.set("k", "v", None).await.unwrap();
-    assert_eq!(cache.get("k").await.unwrap().as_deref(), Some("v"));
+/// `file` without a directory is refused, never swapped for a
+/// per-process cache.
+#[test]
+#[should_panic(expected = "file_cache_dir is unset")]
+fn from_settings_file_backend_without_dir_is_refused() {
+    let mut s = CacheSettings::default();
+    s.backend = Some("file".into());
+    s.file_cache_dir = None;
+    let _ = from_settings(&s);
 }
 
 /// #1233 — an entry must be readable for the *whole* TTL it was

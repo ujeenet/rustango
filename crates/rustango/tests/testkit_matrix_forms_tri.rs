@@ -2,7 +2,7 @@
 //!
 //! `explain_pool_tri` and `bulk_upsert_tri` both use the common shape —
 //! `model:` plus in-memory SQLite. This file covers the other two, which
-//! exist because a minority of the 205 `*_sqlite_live.rs` suites cannot
+//! exist because a minority of the 206 `*_sqlite_live.rs` suites cannot
 //! use either:
 //!
 //! * **`setup:`** — the suite builds its own tables. The job queue calls
@@ -50,7 +50,7 @@ async fn build_and_seed(pool: &Pool) {
         label: "from-setup".into(),
     };
     seeded
-        .save_pool(pool)
+        .save(pool)
         .await
         .expect("seed row written by the custom setup");
 }
@@ -92,7 +92,7 @@ async fn insert_and_expect_only_our_own(pool: &Pool, label: &str) {
         id: Auto::Unset,
         label: label.into(),
     };
-    mine.save_pool(pool).await.expect("write our own row");
+    mine.save(pool).await.expect("write our own row");
 
     assert_eq!(
         Row::objects().count(pool).await.expect("count"),

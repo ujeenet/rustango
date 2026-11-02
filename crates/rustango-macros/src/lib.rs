@@ -337,12 +337,9 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // runtime ourselves keeps the dep transitive through the
     // `runtime` feature on rustango.
     //
-    // Parse optional `flavor = "current_thread"` / `flavor =
-    // "multi_thread"` from the attribute args. Unknown args still
-    // compile, with a warning that they are ignored.
+    // `flavor` and `logging`; anything else is a compile error.
     let root = rustango_root();
-    let arg_warnings = main_arg_warnings(&args);
-    let flavor = parse_flavor(&args);
+    let MainArgs { flavor, logging } = parse_main_args(&args)?;
     let builder_call = match flavor {
         Flavor::CurrentThread => quote! {
             #root::__private_runtime::tokio::runtime::Builder::new_current_thread()
@@ -360,7 +357,7 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // `logging = false` drops the block entirely, so a later
     // `Cli::with_logging()` is the first installer and its
     // `[logging]` settings actually take effect (#1465).
-    let logging_prologue = if parse_logging(&args) {
+    let logging_prologue = if logging {
         quote! {
             // `Setup`'s defaults, not a copy of them: filter, format and
             // the `Color::Auto` rule live in one place (#1493).
@@ -376,7 +373,6 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     };
 
     input.block = syn::parse2(quote! {{
-        #arg_warnings
         { #logging_prologue }
         let __rt = #builder_call
             .enable_all()
@@ -395,86 +391,53 @@ enum Flavor {
     CurrentThread,
 }
 
-/// `#[tokio::main]` argument names, accepted without a warning.
-const TOKIO_MAIN_ARGS: &[&str] = &[
-    "flavor",
-    "worker_threads",
-    "start_paused",
-    "crate",
-    "unhandled_panic",
-];
+/// What `#[rustango::main]` was asked for.
+struct MainArgs {
+    flavor: Flavor,
+    logging: bool,
+}
 
-/// A warning per `#[rustango::main]` argument the parsers below ignore.
-fn main_arg_warnings(args: &TokenStream2) -> TokenStream2 {
+const MAIN_ARGS_HELP: &str =
+    "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`";
+
+/// Parse `#[rustango::main(...)]`; an unknown or misspelt argument is an error.
+fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
     use syn::parse::Parser as _;
-    let parsed = syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
-        .parse2(args.clone());
-    let metas = match parsed {
-        Ok(m) => m,
-        Err(e) => {
-            return deprecation_warning(
+    let metas = syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated
+        .parse2(args.clone())
+        .map_err(|e| {
+            syn::Error::new(
                 e.span(),
-                &format!("#[rustango::main]: cannot parse the arguments ({e}); they are ignored"),
+                format!("#[rustango::main]: {e}; {MAIN_ARGS_HELP}"),
             )
-        }
+        })?;
+    let mut out = MainArgs {
+        flavor: Flavor::MultiThread,
+        logging: true,
     };
-    let lit_bool = |m: &syn::MetaNameValue| match &m.value {
-        syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Bool(_),
-            ..
-        }) => true,
-        _ => false,
-    };
-    metas
-        .iter()
-        .filter_map(|meta| {
-            // `#[tokio::main]`'s own names stay silent: a `deny(warnings)`
-            // crate passing one must keep compiling in a patch release.
-            let tokio_arg = TOKIO_MAIN_ARGS.iter().any(|n| meta.path().is_ident(n));
-            let ok = match meta {
-                syn::Meta::NameValue(m) if m.path.is_ident("logging") => lit_bool(m),
-                _ => tokio_arg,
-            };
-            (!ok).then(|| {
-                deprecation_warning(
-                    meta.span(),
-                    "#[rustango::main]: unknown argument, ignored (supported: \
-                     `flavor = \"current_thread\" | \"multi_thread\"`, `logging = false`)",
-                )
-            })
-        })
-        .collect()
-}
-
-/// A compile warning at `span`: a proc macro's only stable way to warn
-/// is a `#[deprecated]` item that its own output then uses.
-fn deprecation_warning(span: proc_macro2::Span, note: &str) -> TokenStream2 {
-    quote::quote_spanned! {span=>
-        const _: () = {
-            #[deprecated(note = #note)]
-            const RUSTANGO_WARNING: () = ();
-            RUSTANGO_WARNING
+    for meta in &metas {
+        let lit = match &meta.value {
+            syn::Expr::Lit(l) => Some(&l.lit),
+            _ => None,
         };
+        let name = meta.path.get_ident().map(ToString::to_string);
+        match (name.as_deref(), lit) {
+            (Some("flavor"), Some(syn::Lit::Str(s))) if s.value() == "current_thread" => {
+                out.flavor = Flavor::CurrentThread;
+            }
+            (Some("flavor"), Some(syn::Lit::Str(s))) if s.value() == "multi_thread" => {
+                out.flavor = Flavor::MultiThread;
+            }
+            (Some("logging"), Some(syn::Lit::Bool(b))) => out.logging = b.value,
+            _ => {
+                return Err(syn::Error::new(
+                    meta.span(),
+                    format!("#[rustango::main]: unsupported argument; {MAIN_ARGS_HELP}"),
+                ))
+            }
+        }
     }
-}
-
-fn parse_flavor(args: &TokenStream2) -> Flavor {
-    // Cheap parser: look for the literal token sequence
-    // `flavor = "current_thread"`. Everything else (including
-    // bare `multi_thread` or no args) defaults to multi-thread.
-    let s = args.to_string();
-    if s.contains("current_thread") {
-        Flavor::CurrentThread
-    } else {
-        Flavor::MultiThread
-    }
-}
-
-/// `false` when the attribute carries `logging = false` — the caller
-/// installs their own subscriber, usually via `Cli::with_logging`
-/// (#1465). Same cheap token match as `parse_flavor`.
-fn parse_logging(args: &TokenStream2) -> bool {
-    !args.to_string().replace(' ', "").contains("logging=false")
+    Ok(out)
 }
 
 /// Parse form for `Q!()` — `<TypePath>.<Ident> = <Expr>`.
@@ -803,6 +766,27 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let model_name = struct_name.to_string();
 
     let collected = collect_fields(named, &table)?;
+    // An explicit `self_pk_column` must name a column of this model.
+    let explicit_pks = container
+        .reverse_has_relations
+        .iter()
+        .map(|r| (&r.self_pk_column, r.self_pk_span))
+        .chain(
+            container
+                .generic_has_relations
+                .iter()
+                .map(|r| (&r.self_pk_column, r.self_pk_span)),
+        );
+    for (column, span) in explicit_pks {
+        if let (Some(column), Some(span)) = (column, span) {
+            if !collected.column_entries.iter().any(|c| &c.column == column) {
+                return Err(syn::Error::new(
+                    span,
+                    format!("`self_pk_column = \"{column}\"` names no column of `{model_name}`"),
+                ));
+            }
+        }
+    }
     // `reverse_has` / `generic_has` join on the PK column unless they name another.
     if let Some((_, pk_column)) = &collected.primary_key {
         for rel in &mut container.reverse_has_relations {
@@ -909,8 +893,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
-    let column_warnings =
-        unknown_column_warnings(&container.indexes, &container.get_latest_by, &collected);
+    check_known_columns(&container.indexes, &container.get_latest_by, &collected)?;
 
     // Build the audit_track list for ModelSchema: None when no audit attr,
     // Some(empty) when audit present without track, Some(names) when explicit.
@@ -1078,7 +1061,6 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     );
 
     Ok(quote! {
-        #column_warnings
         #model_impl
         #inherent_impl
         #from_row_impl
@@ -1112,13 +1094,13 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
     })
 }
 
-/// A deprecation-style warning per index or `get_latest_by` name that is
-/// no column of the model: an error would break code that compiles today.
-fn unknown_column_warnings(
+/// An index or `get_latest_by` name that is no column of the model is a
+/// compile error; an expression index such as `lower(email)` is not checked.
+fn check_known_columns(
     indexes: &[IndexAttr],
     get_latest_by: &Option<(String, bool, proc_macro2::Span)>,
     collected: &CollectedFields,
-) -> TokenStream2 {
+) -> syn::Result<()> {
     let is_column = |c: &str| collected.column_entries.iter().any(|e| e.column == c);
     // Only plain names: an expression index such as `lower(email)` is legal.
     let plain = |c: &str| c.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
@@ -1139,10 +1121,14 @@ fn unknown_column_warnings(
             ));
         }
     }
-    found
+    let mut errors = found
         .into_iter()
-        .map(|(span, note)| deprecation_warning(span, &note))
-        .collect()
+        .map(|(span, note)| syn::Error::new(span, note));
+    let Some(mut first) = errors.next() else {
+        return Ok(());
+    };
+    first.extend(errors);
+    Err(first)
 }
 
 /// Guard before decoding a `select_related` target (#2293): a NULL nullable
@@ -1492,13 +1478,8 @@ const NO_REVERSE_ACCESSOR: &str = "+";
 /// Reads the column the FK points at (`on`, else the PK) and runs one
 /// `SELECT … WHERE <fk_column> = $1`: one round trip, no N+1.
 ///
-/// **PG-only emission**: the accessor is bounded on
-/// `sqlx::Executor<Database = sqlx::Postgres>` and calls `fetch_on`,
-/// both of which are gated behind the `postgres` cargo feature. The
-/// emitted code is wrapped in `#[cfg(feature = "postgres")]` so the
-/// model derive itself compiles on tri-dialect / sqlite-only
-/// downstream builds — the accessor just isn't materialised. A tri-
-/// dialect `_set_pool` variant is a separate follow-up.
+/// The accessor takes any `SqlExecutor`; `_set_pool` is its deprecated
+/// old name.
 fn reverse_helper_tokens(
     child_ident: &syn::Ident,
     fk_relations: &[FkRelation],
@@ -1567,49 +1548,35 @@ fn reverse_helper_tokens(
              generated from the FK declaration on `{child_ident}::{fk_col}`. Composes with \
              further `{child_ident}::objects()` filters via direct queryset use."
         );
-        let pool_doc = format!(
-            "Tri-dialect counterpart of [`Self::{pg_suffix}`] — takes \
-             [`#root::sql::Pool`] and dispatches per backend so the \
-             reverse-FK fetch works on PG / MySQL / SQLite under one method. \
-             Use this from framework code that holds a `&Pool` (admin, \
-             tenancy resolver, viewset handlers); reach for the executor- \
-             bound variant when you already have a typed `sqlx::Executor`."
-        );
         quote! {
-            #[cfg(feature = "postgres")]
             impl #parent_ty {
                 #[doc = #doc]
+                ///
+                /// Runs on any [`#root::sql::SqlExecutor`]: a `&Pool`, a held
+                /// `PoolConn`, a `PoolTx` or a Postgres sqlx executor.
                 ///
                 /// # Errors
                 /// Returns [`#root::sql::ExecError`] for SQL-writing
                 /// or driver failures.
-                pub async fn #pg_method_ident<'_c, _E>(
+                pub async fn #pg_method_ident<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
                     _executor: _E,
                 ) -> ::core::result::Result<
                     ::std::vec::Vec<#child_ident>,
                     #root::sql::ExecError,
-                >
-                where
-                    _E: #root::sql::sqlx::Executor<
-                        '_c,
-                        Database = #root::sql::sqlx::Postgres,
-                    >,
-                {
+                > {
                     let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
                     #root::query::QuerySet::<#child_ident>::new()
                         .filter_op(#fk_col, #root::core::Op::Eq, _key)
                         .fetch_on(_executor)
                         .await
                 }
-            }
 
-            impl #parent_ty {
-                #[doc = #pool_doc]
+                /// Old name of the reverse accessor without `_pool`.
                 ///
                 /// # Errors
-                /// Returns [`#root::sql::ExecError`] for SQL-writing
-                /// or driver failures.
+                /// As the accessor.
+                #[deprecated(since = "0.62.0", note = "drop the `_pool` suffix")]
                 pub async fn #pool_method_ident(
                     &self,
                     pool: &#root::sql::Pool,
@@ -1617,12 +1584,7 @@ fn reverse_helper_tokens(
                     ::std::vec::Vec<#child_ident>,
                     #root::sql::ExecError,
                 > {
-                    use #root::sql::FetcherPool as _;
-                    let _key = #root::sql::__reverse_fk_key::<Self, #child_ident>(self, #fk_col)?;
-                    #root::query::QuerySet::<#child_ident>::new()
-                        .filter_op(#fk_col, #root::core::Op::Eq, _key)
-                        .fetch(pool)
-                        .await
+                    self.#pg_method_ident(pool).await
                 }
             }
         }
@@ -3213,138 +3175,6 @@ fn inherent_impl_tokens(
     manager_fns: &[syn::Ident],
 ) -> TokenStream2 {
     let root = rustango_root();
-    // Audit-emit fragments threaded into write paths. Non-empty only
-    // when the model carries `#[rustango(audit(...))]`. They reborrow
-    // `_executor` (a `&mut PgConnection` for audited models — the
-    // macro switches the signature below) so the data write and the
-    // audit INSERT both run on the same caller-supplied connection.
-    let executor_passes_to_data_write = if audited_fields.is_some() {
-        quote!(&mut *_executor)
-    } else {
-        quote!(_executor)
-    };
-    let executor_param = if audited_fields.is_some() {
-        quote!(_executor: &mut #root::sql::sqlx::PgConnection)
-    } else {
-        quote!(_executor: _E)
-    };
-    let executor_generics = if audited_fields.is_some() {
-        quote!()
-    } else {
-        quote!(<'_c, _E>)
-    };
-    let executor_where = if audited_fields.is_some() {
-        quote!()
-    } else {
-        quote! {
-            where
-                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
-        }
-    };
-    // Audited `_on` methods take `&mut PgConnection`; `&PgPool` is an Executor for the rest.
-    // One transaction: the before-image's FOR UPDATE must hold through
-    // the UPDATE and its audit row.
-    let pool_to_save_on = if audited_fields.is_some() {
-        // Any failure, COMMIT included, rolls the INSERT back: put the pk and
-        // stamps back too, or a retry takes the UPDATE path and writes nothing.
-        let restored: Vec<&syn::Ident> = primary_key
-            .map(|(pk, _)| pk)
-            .into_iter()
-            .chain(&fields.auto_now_idents)
-            .collect();
-        let prev: Vec<syn::Ident> = (0..restored.len())
-            .map(|i| quote::format_ident!("__rustango_save_prev_{}", i))
-            .collect();
-        quote! {
-            #( let #prev = ::core::clone::Clone::clone(&self.#restored); )*
-            let _saved: ::core::result::Result<u64, #root::sql::ExecError> = async {
-                let mut _tx = pool.begin().await?;
-                let _affected = self.save_on(&mut *_tx).await?;
-                _tx.commit().await?;
-                ::core::result::Result::Ok(_affected)
-            }
-            .await;
-            if _saved.is_err() {
-                #( self.#restored = #prev; )*
-            }
-            _saved
-        }
-    } else {
-        quote!(self.save_on(pool).await)
-    };
-    // One transaction so the write and its audit row commit together.
-    let pool_to_insert_on = if audited_fields.is_some() {
-        // A failed COMMIT leaves the RETURNING values on `self`; put them back.
-        let assigned: Vec<syn::Ident> = fields
-            .auto_field_idents
-            .iter()
-            .map(|(ident, _, _)| ident.clone())
-            .collect();
-        restore_auto_now_unless(
-            &assigned,
-            &quote!(::core::result::Result<(), #root::sql::ExecError>),
-            &quote!(_saved.is_ok()),
-            &quote! {
-                let mut _tx = pool.begin().await?;
-                self.insert_on(&mut *_tx).await?;
-                _tx.commit().await?;
-                ::core::result::Result::Ok(())
-            },
-        )
-    } else {
-        quote!(self.insert_on(pool).await)
-    };
-    let pool_to_delete_on = if audited_fields.is_some() {
-        quote! {
-            let mut _tx = pool.begin().await?;
-            let _affected = self.delete_on(&mut *_tx).await?;
-            _tx.commit().await?;
-            ::core::result::Result::Ok(_affected)
-        }
-    } else {
-        quote!(self.delete_on(pool).await)
-    };
-    // Past the bind cap one statement per chunk, all in one transaction.
-    let bulk_columns = fields.bulk_columns_all.len();
-    let one_statement = if audited_fields.is_some() {
-        quote!()
-    } else {
-        quote! {
-            if rows.len() <= _per {
-                return Self::bulk_insert_on(rows, pool).await;
-            }
-        }
-    };
-    let pool_to_bulk_insert_on = |chunks: TokenStream2| {
-        quote! {
-            let _per = #root::sql::__macro_internals::bulk_insert_rows_per_statement(#bulk_columns);
-            #one_statement
-            let mut _tx = pool.begin().await?;
-            for _chunk in rows.#chunks(_per) {
-                Self::bulk_insert_on(_chunk, &mut *_tx).await?;
-            }
-            _tx.commit().await?;
-            ::core::result::Result::Ok(())
-        }
-    };
-    let pool_to_bulk_insert_mut = pool_to_bulk_insert_on(quote!(chunks_mut));
-    let pool_to_bulk_insert_on = pool_to_bulk_insert_on(quote!(chunks));
-    // Pre-existing bug surfaced by batch 22's first audited Auto<T>
-    // PK test model: `upsert(&PgPool)` body called `self.upsert_on(pool)`
-    // directly, but `upsert_on` for audited models takes
-    // `&mut PgConnection` (the audit emit needs a real connection).
-    // Add the missing acquire shim to keep audited Auto-PK upsert
-    // compiling.
-    let pool_to_upsert_on = if audited_fields.is_some() {
-        quote! {
-            let mut _tx = pool.begin().await?;
-            self.upsert_on(&mut *_tx).await?;
-            _tx.commit().await?;
-            ::core::result::Result::Ok(())
-        }
-    } else {
-        quote!(self.upsert_on(pool).await)
-    };
 
     // `insert_pool(&Pool)` — v0.23.0-batch9. Non-audited models only
     // (audit-on-connection over &Pool needs a bi-dialect transaction
@@ -3379,7 +3209,6 @@ fn inherent_impl_tokens(
         quote!()
     } else if fields.has_auto {
         let pushes = &fields.insert_pushes;
-        let returning_cols = &fields.returning_cols;
         // A row not inserted was never saved, so a Rust-filled value must not stay (#1937).
         let filled = &fields.rust_filled_idents;
         let was_unset: Vec<syn::Ident> = filled
@@ -3412,29 +3241,7 @@ fn inherent_impl_tokens(
         // LAST_INSERT_ID round-trip.
         if fields.returning_cols.is_empty() {
             quote! {
-                /// Insert this row against either backend. Every
-                /// `Auto<T>` PK on this model is filled Rust-side
-                /// (e.g. `default_uuid_v7`) before binding, so no
-                /// RETURNING round-trip is needed.
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    );
-                    #root::sql::insert_pool(pool, &_query).await
-                }
+
 
                 /// Eloquent `Model::insertOrIgnore()` — same shape
                 /// as the auto-PK branch above. Returns `Ok(true)`
@@ -3452,31 +3259,7 @@ fn inherent_impl_tokens(
             }
         } else {
             quote! {
-                /// Insert this row against either backend, populating any
-                /// `Auto<T>` PK from the auto-assigned value.
-                ///
-                /// # Errors
-                /// As [`Self::insert`].
-                pub async fn insert_pool(
-                    &mut self,
-                    pool: &#root::sql::Pool,
-                ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    )
-                    .returning(::std::vec![ #( #returning_cols ),* ]);
-                    let _result = #root::sql::insert_returning_pool(
-                        pool, &_query,
-                    ).await?;
-                    #root::sql::apply_auto_pk(_result, self)
-                }
+
 
                 /// Eloquent `Model::insertOrIgnore()` — INSERT this
                 /// row or silently skip on unique-constraint
@@ -3506,23 +3289,7 @@ fn inherent_impl_tokens(
         let insert_columns = &fields.insert_columns;
         let insert_values = &fields.insert_values;
         quote! {
-            /// Insert this row into its table against either backend.
-            /// Equivalent to [`Self::insert`] but takes
-            /// [`#root::sql::Pool`].
-            ///
-            /// # Errors
-            /// As [`Self::insert`].
-            pub async fn insert_pool(
-                &self,
-                pool: &#root::sql::Pool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #insert_columns ),* ],
-                    ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::insert_pool(pool, &_query).await
-            }
+
 
             /// Eloquent `Model::insertOrIgnore()` — INSERT this row
             /// or silently skip on unique-constraint violation. Maps
@@ -3772,35 +3539,6 @@ fn inherent_impl_tokens(
     let soft_deleted_json = quote!(#root::__serde_json::to_value(&_now)
         .unwrap_or(#root::__serde_json::Value::Null));
     let restored_json = quote!(#root::__serde_json::Value::Null);
-    // `_on` emit; `affected` paths skip the row when nothing changed.
-    let make_op_emit =
-        |op_path: TokenStream2, written: Option<TokenStream2>, affected: bool| -> TokenStream2 {
-            if audited_fields.is_none() {
-                return quote!();
-            }
-            let entry = make_entry(op_path, written);
-            let emit = quote! {
-                #entry
-                #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-            };
-            if affected {
-                quote!(if _affected > 0 { #emit })
-            } else {
-                emit
-            }
-        };
-    let audit_insert_emit = make_op_emit(quote!(#root::audit::AuditOp::Create), None, false);
-    let audit_delete_emit = make_op_emit(quote!(#root::audit::AuditOp::Delete), None, true);
-    let audit_softdelete_emit = make_op_emit(
-        quote!(#root::audit::AuditOp::SoftDelete),
-        Some(soft_deleted_json.clone()),
-        true,
-    );
-    let audit_restore_emit = make_op_emit(
-        quote!(#root::audit::AuditOp::Restore),
-        Some(restored_json.clone()),
-        true,
-    );
     // `&Pool` update runner for soft_delete / restore: one tx with the
     // audit row when audited, a plain UPDATE otherwise.
     let make_pool_update = |op_path: TokenStream2, written: TokenStream2| -> TokenStream2 {
@@ -3891,12 +3629,12 @@ fn inherent_impl_tokens(
             /// Auto-PK models with an unset PK return
             /// [`#root::core::QueryError::UnknownField`] with
             /// field name `<pk>` — `save_partial` is an
-            /// UPDATE-only path. Call [`Self::insert_pool`]
-            /// (or [`Self::save_pool`] which dispatches based on
+            /// UPDATE-only path. Call [`Self::insert`]
+            /// (or [`Self::save`] which dispatches based on
             /// PK state) for the INSERT case.
             ///
             /// # Errors
-            /// As [`Self::save_pool`], plus `UnknownField` for
+            /// As [`Self::save`], plus `UnknownField` for
             /// unknown / empty / Auto-Unset cases.
             pub async fn save_partial(
                 &mut self,
@@ -3970,7 +3708,6 @@ fn inherent_impl_tokens(
     };
     let pool_save_method = if let Some((pk_ident, pk_col)) = primary_key {
         let pk_column_lit = pk_col.as_str();
-        let assignments = &fields.update_assignments;
         if audited_fields.is_some() {
             quote!()
         } else {
@@ -3979,35 +3716,6 @@ fn inherent_impl_tokens(
                 pk_column_lit,
                 quote!(#root::sql::update_pool(pool, &_query).await),
             );
-            let dispatch_unset = if fields.pk_is_auto {
-                quote! {
-                    if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await.map(|()| 1u64);
-                    }
-                }
-            } else {
-                quote!()
-            };
-            let write = restore_auto_now_unless(
-                &fields.auto_now_idents,
-                &save_ret,
-                &save_keep,
-                &quote! {
-                    let _query = #root::core::UpdateQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        ::std::vec![ #( #assignments ),* ],
-                        #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                            #pk_column_lit,
-                            #root::core::Op::Eq,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        )),
-                    );
-                    let _affected = #root::sql::update_pool(pool, &_query).await?;
-                    ::core::result::Result::Ok(_affected)
-                },
-            );
             quote! {
                 /// Save this row to its table against either backend.
                 /// `INSERT` when the `Auto<T>` PK is `Unset`, else
@@ -4015,12 +3723,11 @@ fn inherent_impl_tokens(
                 ///
                 /// # Errors
                 /// As [`Self::save`].
-                pub async fn save_pool(
+                pub async fn save(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    #dispatch_unset
-                    #write
+                    self.__rustango_save_exec(pool).await
                 }
 
                 #partial
@@ -4038,25 +3745,6 @@ fn inherent_impl_tokens(
     // PendingEntry's `changes` carries post-write field values).
     let pool_insert_method = if audited_fields.is_some() {
         if let Some(_) = primary_key {
-            let pushes = if fields.has_auto {
-                fields.insert_pushes.clone()
-            } else {
-                // For non-Auto-PK models, the macro normally builds
-                // {columns, values} from fields.insert_columns +
-                // fields.insert_values rather than insert_pushes.
-                // Map those into the pushes shape.
-                fields
-                    .insert_columns
-                    .iter()
-                    .zip(&fields.insert_values)
-                    .map(|(col, val)| {
-                        quote! {
-                            _columns.push(#col);
-                            _values.push(#val);
-                        }
-                    })
-                    .collect()
-            };
             // Rust-filled Auto PKs (`default_uuid_v7`) leave the list empty (#1934).
             let returning_cols: Vec<proc_macro2::TokenStream> = if !fields.returning_cols.is_empty()
             {
@@ -4075,34 +3763,41 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
+            // A failed COMMIT rolls the row back: put the read-back values back too.
+            let assigned: Vec<syn::Ident> = fields
+                .auto_field_idents
+                .iter()
+                .map(|(ident, _, _)| ident.clone())
+                .collect();
+            let body = restore_auto_now_unless(
+                &assigned,
+                &quote!(::core::result::Result<(), #root::sql::ExecError>),
+                &quote!(_saved.is_ok()),
+                &quote! {
+                    let mut _query = self.__rustango_insert_query();
+                    // The audit row needs the PK even when Rust filled it.
+                    if _query.returning.is_empty() {
+                        _query.returning = ::std::vec![ #( #returning_cols ),* ];
+                    }
+                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self, _op| {
+                        _m.__rustango_audit_entry(_op)
+                    })
+                    .await
+                },
+            );
             quote! {
-                /// Insert this row against either backend with audit
-                /// emission inside the same transaction. Bi-dialect
-                /// counterpart of [`Self::insert`] for audited models.
+                /// Insert this row on any backend, with its audit row in the
+                /// same transaction.
                 ///
                 /// Snapshot-style audit (post-write field values).
                 ///
                 /// # Errors
                 /// As [`Self::insert`].
-                pub async fn insert_pool(
+                pub async fn insert(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _columns: ::std::vec::Vec<&'static str> =
-                        ::std::vec::Vec::new();
-                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #pushes )*
-                    let _query = #root::core::InsertQuery::new(
-                        <Self as #root::core::Model>::SCHEMA,
-                        _columns,
-                        _values,
-                    )
-                    .returning(::std::vec![ #( #returning_cols ),* ]);
-                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self| {
-                        _m.__rustango_audit_entry(#root::audit::AuditOp::Create)
-                    })
-                    .await
+                    #body
                 }
             }
         } else {
@@ -4196,7 +3891,7 @@ fn inherent_impl_tokens(
             let unset_dispatch = if fields.has_auto {
                 quote! {
                     if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                        return self.insert_pool(pool).await.map(|()| 1u64);
+                        return self.insert(pool).await.map(|()| 1u64);
                     }
                 }
             } else {
@@ -4223,21 +3918,18 @@ fn inherent_impl_tokens(
                 },
             );
             quote! {
-                /// Save this row against either backend with audit
-                /// emission (diff-style: BEFORE+AFTER) inside the
-                /// same transaction. Auto::Unset PK routes to
-                /// insert_pool. Bi-dialect counterpart of
-                /// [`Self::save`] for audited models.
+                /// Save this row on any backend, with a diff audit row
+                /// (before and after) in the same transaction. An `Unset`
+                /// `Auto` PK inserts instead.
                 ///
                 /// The audit row's `changes` JSON contains one
                 /// `{ "field": { "before": …, "after": … } }` entry
                 /// per tracked column whose value actually changed
-                /// — same shape as the existing &PgPool save() emits.
                 /// Keyed on the PK; global scopes do not apply.
                 ///
                 /// # Errors
                 /// As [`Self::save`].
-                pub async fn save_pool(
+                pub async fn save(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
@@ -4299,14 +3991,13 @@ fn inherent_impl_tokens(
         if let Some(pk_ident) = pk_ident_for_pool {
             if audited_fields.is_some() {
                 quote! {
-                    /// Delete this row against either backend with audit
-                    /// emission inside the same transaction. Bi-dialect
-                    /// counterpart of [`Self::delete`] for audited models.
+                    /// Delete this row on any backend, with its audit row in
+                    /// the same transaction.
                     /// Keyed on the PK; global scopes do not apply.
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
-                    pub async fn delete_pool(
+                    pub async fn delete(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
@@ -4333,18 +4024,11 @@ fn inherent_impl_tokens(
                     ///
                     /// # Errors
                     /// As [`Self::delete`].
-                    pub async fn delete_pool(
+                    pub async fn delete(
                         &self,
                         pool: &#root::sql::Pool,
                     ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                        let _query = #root::core::DeleteQuery::by_pk(
-                            <Self as #root::core::Model>::SCHEMA,
-                            #pk_column_lit,
-                            ::core::convert::Into::<#root::core::SqlValue>::into(
-                                ::core::clone::Clone::clone(&self.#pk_ident)
-                            ),
-                        );
-                        #root::sql::delete_pool(pool, &_query).await
+                        self.__rustango_delete_exec(pool).await
                     }
                 }
             }
@@ -4355,35 +4039,44 @@ fn inherent_impl_tokens(
 
     // Bulk writers on audited models write one audit row per affected
     // row, in the write's transaction (#1747).
-    let (bulk_delete_run, destroy_run, bulk_update_run, truncate_run) = if audited_fields.is_some()
-    {
-        (
-            quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+    let (bulk_delete_run, destroy_run, bulk_update_run, truncate_run, truncate_cascade_run) =
+        if audited_fields.is_some() {
+            (
+                quote!(#root::audit::delete_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
             })
             .await),
-            quote!(#root::audit::delete_each_with_audit::<Self>(pool, &_queries, |_r: &Self| {
+                quote!(#root::audit::delete_each_with_audit::<Self>(pool, &_queries, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Delete)
             })
             .await),
-            quote!(#root::audit::update_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
+                quote!(#root::audit::update_many_with_audit::<Self>(pool, &_query, |_r: &Self| {
                 _r.__rustango_audit_entry(#root::audit::AuditOp::Update)
             })
             .await),
-            quote! {
-                let _table = <Self as #root::core::Model>::SCHEMA.table;
-                let _sql = #root::sql::truncate_sql(pool.dialect(), _table);
-                #root::audit::truncate_with_audit(pool, _table, &_sql).await
-            },
-        )
-    } else {
-        (
-            quote!(#root::sql::delete_pool(pool, &_query).await),
-            quote!(#root::sql::__rustango_delete_all_or_none(pool, _queries).await),
-            quote!(#root::sql::update_pool(pool, &_query).await),
-            quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
-        )
-    };
+                quote!(#root::audit::truncate_with_audit(
+                pool,
+                <Self as #root::core::Model>::SCHEMA.table,
+                #root::sql::TruncateMode::Plain,
+            )
+            .await),
+                quote!(#root::audit::truncate_with_audit(
+                pool,
+                <Self as #root::core::Model>::SCHEMA.table,
+                #root::sql::TruncateMode::Cascade,
+            )
+            .await
+            .map(drop)),
+            )
+        } else {
+            (
+                quote!(#root::sql::delete_pool(pool, &_query).await),
+                quote!(#root::sql::__rustango_delete_all_or_none(pool, _queries).await),
+                quote!(#root::sql::update_pool(pool, &_query).await),
+                quote!(#root::sql::truncate(pool, <Self as #root::core::Model>::SCHEMA).await),
+                quote!(#root::sql::truncate_cascade(pool, <Self as #root::core::Model>::SCHEMA).await),
+            )
+        };
 
     // `refresh_from_db_pool(&mut self, pool)` — re-SELECT the row
     // matching this instance's PK and overwrite the in-memory state
@@ -5147,17 +4840,14 @@ fn inherent_impl_tokens(
                 }
             }
 
-            /// Delete every row of this model — `TRUNCATE TABLE
-            /// <table> RESTART IDENTITY CASCADE` on Postgres,
-            /// `DELETE FROM <table>` on MySQL / SQLite (which don't
-            /// support `TRUNCATE` inside foreign-key constraints
-            /// or — for SQLite — at all). Eloquent `Model::truncate()`
-            /// parity.
+            /// Delete every row of this model with one `DELETE FROM
+            /// <table>` on every backend; returns the rows deleted. Each
+            /// FK's `ON DELETE` applies, so a `RESTRICT` / `NO ACTION`
+            /// row still pointing here refuses it; see
+            /// [`truncate_cascade`](Self::truncate_cascade).
             ///
-            /// **Use only in tests / fixture-reset flows.** Production
-            /// writes through this would silently bypass the
-            /// `pre_delete` / `post_delete` signals (no per-row hooks
-            /// fire on a TRUNCATE / bulk DELETE FROM). An audited model
+            /// **Use only in tests / fixture-reset flows.** No per-row
+            /// `pre_delete` / `post_delete` signals fire. An audited model
             /// gets one bulk audit entry, not one per row. Global scopes
             /// do not apply: every row goes, generic M2M links too.
             ///
@@ -5169,6 +4859,20 @@ fn inherent_impl_tokens(
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                 #truncate_run
+            }
+
+            /// [`truncate`](Self::truncate), also emptying every table
+            /// that references this one, transitively and whatever its
+            /// `ON DELETE`. The same on every backend.
+            ///
+            /// # Errors
+            /// As [`truncate_cascade`].
+            ///
+            /// [`truncate_cascade`]: rustango::sql::truncate_cascade
+            pub async fn truncate_cascade(
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #truncate_cascade_run
             }
 
             /// Bulk-delete every row whose primary key is in
@@ -6610,7 +6314,7 @@ fn inherent_impl_tokens(
             /// the conflict error if you need race-free semantics.
             ///
             /// # Errors
-            /// As [`Self::find`] and [`Self::save_pool`].
+            /// As [`Self::find`] and [`Self::save`].
             pub async fn find_or_insert<F>(
                 pk: impl ::core::convert::Into<#root::core::SqlValue>,
                 pool: &#root::sql::Pool,
@@ -6623,7 +6327,7 @@ fn inherent_impl_tokens(
                     return ::core::result::Result::Ok((_row, true));
                 }
                 let mut _new = fallback();
-                _new.save_pool(pool).await?;
+                _new.save(pool).await?;
                 ::core::result::Result::Ok((_new, false))
             }
 
@@ -6687,69 +6391,126 @@ fn inherent_impl_tokens(
         quote!()
     };
 
-    // `_tx` family — `insert_tx`, `save_tx`, `delete_tx`. These mirror
-    // the non-audited `_pool` methods but execute against an open
-    // `PoolTx` so the writes participate in the caller's transaction.
-    // Auditing inside TX is deferred; these always use the plain
-    // executor primitives regardless of whether the model is audited.
-    let tx_insert_method = if fields.has_auto {
-        let pushes = &fields.insert_pushes;
-        let returning_cols = &fields.returning_cols;
-        quote! {
-            /// Insert this row inside an open transaction, populating
-            /// any `Auto<T>` PK from the auto-assigned value. Works
-            /// against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::insert_pool`].
-            pub async fn insert_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #( #pushes )*
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
+    // `_tx` family: the shared `__rustango_*_exec` bodies on an open
+    // `PoolTx`; an audited model writes its snapshot entry in the same tx.
+    let tx_emit = |op: TokenStream2| -> TokenStream2 {
+        if audited_fields.is_some() && primary_key.is_some() {
+            quote! {
+                #root::audit::__emit_many_tx(
+                    tx,
+                    &[self.__rustango_audit_entry(#root::audit::AuditOp::#op)],
                 )
-                .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _result = #root::sql::insert_returning_tx(tx, &_query).await?;
-                #root::sql::apply_auto_pk(_result, self)
+                .await?;
             }
+        } else {
+            quote!()
         }
-    } else {
-        let insert_columns = &fields.insert_columns;
-        let insert_values = &fields.insert_values;
+    };
+    let tx_insert_method = {
+        let self_ref = if fields.has_auto {
+            quote!(&mut self)
+        } else {
+            quote!(&self)
+        };
+        let emit = tx_emit(quote!(Create));
+        let refuse_pkless = if audited_fields.is_some() && primary_key.is_none() {
+            quote! {
+                return ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                });
+            }
+        } else {
+            quote!()
+        };
         quote! {
-            /// Insert this row inside an open transaction.
+            /// Insert this row inside an open transaction; an audited model
+            /// writes its audit row there too.
             ///
             /// # Errors
-            /// As [`Self::insert_pool`].
+            /// As [`Self::insert`].
+            #[allow(unreachable_code)]
             pub async fn insert_tx(
-                &self,
+                #self_ref,
                 tx: &mut #root::sql::PoolTx<'_>,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                let _query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #insert_columns ),* ],
-                    ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::insert_tx(tx, &_query).await
+                #refuse_pkless
+                self.__rustango_insert_exec(&mut *tx).await?;
+                #emit
+                ::core::result::Result::Ok(())
             }
         }
     };
+    let tx_save_method = if let Some((pk_ident, _)) = primary_key {
+        let emit_create = tx_emit(quote!(Create));
+        let emit_update = tx_emit(quote!(Update));
+        let was_unset = if fields.pk_is_auto {
+            quote!(matches!(self.#pk_ident, #root::sql::Auto::Unset))
+        } else {
+            quote!(false)
+        };
+        quote! {
+            /// Save this row inside an open transaction; an audited model
+            /// writes its audit row there too.
+            ///
+            /// # Errors
+            /// As [`Self::save`].
+            pub async fn save_tx(
+                &mut self,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _was_unset = #was_unset;
+                let _n = self.__rustango_save_exec(&mut *tx).await?;
+                if _n > 0 {
+                    if _was_unset {
+                        #emit_create
+                    } else {
+                        #emit_update
+                    }
+                }
+                ::core::result::Result::Ok(_n)
+            }
+        }
+    } else {
+        quote!()
+    };
+    let tx_delete_method = if primary_key.is_some() {
+        let emit = tx_emit(quote!(Delete));
+        quote! {
+            /// Delete this row inside an open transaction; an audited model
+            /// writes its audit row there too.
+            ///
+            /// # Errors
+            /// As [`Self::delete`].
+            pub async fn delete_tx(
+                &self,
+                tx: &mut #root::sql::PoolTx<'_>,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _n = self.__rustango_delete_exec(&mut *tx).await?;
+                if _n > 0 {
+                    #emit
+                }
+                ::core::result::Result::Ok(_n)
+            }
+        }
+    } else {
+        quote!()
+    };
 
-    let tx_save_method = if let Some((pk_ident, pk_col)) = primary_key {
-        let pk_column_lit = pk_col.as_str();
+    // The one statement-level write path: `_on` (refusing audited models)
+    // and `_tx` share these `__rustango_*_exec` bodies; non-audited `&Pool`
+    // methods forward to them too.
+    let refuse = |method: &str| -> TokenStream2 {
+        let reason = format!("`{method}` cannot audit; use the `&Pool` method");
+        quote!(#root::sql::__macro_internals::refuse_audited::<Self>(#reason)?;)
+    };
+    let refuse_save = refuse("save_on");
+    let save_method = if let Some((pk_ident, pk_column)) = primary_key {
+        let pk_column_lit = pk_column.as_str();
         let assignments = &fields.update_assignments;
         let dispatch_unset = if fields.pk_is_auto {
             quote! {
                 if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                    return self.insert_tx(tx).await.map(|()| 1u64);
+                    return self.__rustango_insert_exec(_executor).await.map(|()| 1u64);
                 }
             }
         } else {
@@ -6771,380 +6532,165 @@ fn inherent_impl_tokens(
                         ),
                     )),
                 );
-                let _affected = #root::sql::update_tx(tx, &_query).await?;
-                ::core::result::Result::Ok(_affected)
+                #root::sql::__macro_internals::update_on(_executor, &_query).await
             },
         );
-        quote! {
-            /// Save this row inside an open transaction. `INSERT` when
-            /// the `Auto<T>` PK is `Unset`, else `UPDATE` keyed on the
-            /// PK. Works against any backend that `tx` wraps.
-            ///
-            /// # Errors
-            /// As [`Self::save_pool`].
-            pub async fn save_tx(
-                &mut self,
-                tx: &mut #root::sql::PoolTx<'_>,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #dispatch_unset
-                #write
-            }
-        }
-    } else {
-        quote!()
-    };
-
-    let tx_delete_method = {
-        let pk_column_lit = primary_key.map(|(_, col)| col.as_str()).unwrap_or("id");
-        let pk_ident_for_tx = primary_key.map(|(ident, _)| ident);
-        if let Some(pk_ident) = pk_ident_for_tx {
+        let upsert = if fields.pk_is_auto {
+            let upsert_cols = &fields.upsert_update_columns;
+            let upsert_pushes = &fields.insert_pushes;
+            let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
+                fields.uuid_v7_fields.iter().cloned().unzip();
+            let upsert_returning = &fields.returning_cols;
+            let auto_now_idents = &fields.auto_now_idents;
+            // Prefer the first `unique_together`: a server-assigned PK never
+            // collides, so a PK-only target would always insert.
+            let upsert_target_columns: Vec<String> =
+                upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
+            let upsert_target_lits = upsert_target_columns
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let conflict_clause = if fields.upsert_update_columns.is_empty() {
+                quote!(#root::core::ConflictClause::DoNothing)
+            } else {
+                quote!(#root::core::ConflictClause::DoUpdate {
+                    target: ::std::vec![ #( #upsert_target_lits ),* ],
+                    update_columns: ::std::vec![ #( #upsert_cols ),* ],
+                })
+            };
+            let unit_ret = quote!(::core::result::Result<(), #root::sql::ExecError>);
+            let unit_keep = quote!(_saved.is_ok());
+            let exec_body = restore_auto_now_unless(
+                auto_now_idents,
+                &unit_ret,
+                &unit_keep,
+                &quote! {
+                    let _query = self.__rustango_upsert_query();
+                    let _row = #root::sql::__macro_internals::insert_returning_on(
+                        _executor, &_query,
+                    )
+                    .await?;
+                    #root::sql::apply_auto_pk(_row, self)
+                },
+            );
+            let pool_body = if audited_fields.is_some() {
+                restore_auto_now_unless(
+                    auto_now_idents,
+                    &unit_ret,
+                    &unit_keep,
+                    &quote! {
+                        let _query = self.__rustango_upsert_query();
+                        #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self, _op| {
+                            _m.__rustango_audit_entry(_op)
+                        })
+                        .await
+                    },
+                )
+            } else {
+                quote!(self.__rustango_upsert_exec(pool).await)
+            };
+            let refuse_upsert = refuse("upsert_on");
             quote! {
-                /// Delete the row identified by this instance's PK
-                /// inside an open transaction. Works against any backend
-                /// that `tx` wraps.
+                /// Insert this row, or update the row it conflicts with: one
+                /// `INSERT … ON CONFLICT` (MySQL: `ON DUPLICATE KEY UPDATE`).
+                /// The target is the first `unique_together`, else the PK.
+                /// Fills the `Auto<T>` fields from the written row.
                 ///
                 /// # Errors
-                /// As [`Self::delete_pool`].
-                pub async fn delete_tx(
-                    &self,
-                    tx: &mut #root::sql::PoolTx<'_>,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    let _query = #root::core::DeleteQuery::by_pk(
+                /// As [`Self::insert`].
+                pub async fn upsert(
+                    &mut self,
+                    pool: &#root::sql::Pool,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #pool_body
+                }
+
+                /// [`Self::upsert`] on any [`#root::sql::SqlExecutor`]. An
+                /// audited model refuses it: use [`Self::upsert`].
+                ///
+                /// # Errors
+                /// As [`Self::upsert`].
+                pub async fn upsert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                    &mut self,
+                    _executor: _E,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #refuse_upsert
+                    self.__rustango_upsert_exec(_executor).await
+                }
+
+                #[doc(hidden)]
+                pub async fn __rustango_upsert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                    &mut self,
+                    _executor: _E,
+                ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                    #exec_body
+                }
+
+                /// The upsert statement; stamps `auto_now` like `save`.
+                #[doc(hidden)]
+                pub fn __rustango_upsert_query(&mut self) -> #root::core::InsertQuery {
+                    let mut _columns: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                    let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
+                        ::std::vec::Vec::new();
+                    #[allow(unused_mut)]
+                    let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                    #(
+                        if matches!(&self.#gen_idents, #root::sql::Auto::Unset) {
+                            _generated.push(#gen_cols);
+                        }
+                    )*
+                    #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
+                    #( #upsert_pushes )*
+                    #root::core::InsertQuery::new(
                         <Self as #root::core::Model>::SCHEMA,
-                        #pk_column_lit,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    );
-                    #root::sql::delete_tx(tx, &_query).await
+                        _columns,
+                        _values,
+                    )
+                    .returning(::std::vec![ #( #upsert_returning ),* ])
+                    .on_conflict(#conflict_clause)
+                    .generated(_generated)
                 }
             }
         } else {
             quote!()
-        }
-    };
-
-    // Update emission captures both BEFORE and AFTER state — runs an
-    // extra SELECT against `_executor` BEFORE the UPDATE, captures
-    // each tracked field's prior value, then after the UPDATE diffs
-    // against the in-memory `&self`. `diff_changes` drops unchanged
-    // columns so the JSON only contains the actual delta.
-    //
-    // Two-fragment shape: `audit_update_pre` runs before the UPDATE
-    // and binds `_audit_before_pairs`; `audit_update_post` runs
-    // after the UPDATE and emits the PendingEntry.
-    let (audit_update_pre, audit_update_post): (TokenStream2, TokenStream2) = if let Some(tracked) =
-        audited_fields
-    {
-        if tracked.is_empty() {
-            (quote!(), quote!())
-        } else {
-            let tracked_cols: Vec<&str> = tracked.iter().map(|c| c.column.as_str()).collect();
-            let pk_column_lit_for_select =
-                primary_key.map(|(_, col)| col.clone()).unwrap_or_default();
-            let pk_value_for_bind = if let Some((pk_ident, _)) = primary_key {
-                if fields.pk_is_auto {
-                    quote!(self.#pk_ident.get().copied().unwrap_or_default())
-                } else {
-                    quote!(::core::clone::Clone::clone(&self.#pk_ident))
-                }
-            } else {
-                quote!(0_i64)
-            };
-            let before_pairs = tracked.iter().map(|c| {
-                let column_lit = c.column.as_str();
-                let value_ty = &c.value_ty;
-                quote! {
-                    (
-                        #column_lit,
-                        match #root::sql::sqlx::Row::try_get::<#value_ty, _>(
-                            &_audit_before_row, #column_lit,
-                        ) {
-                            ::core::result::Result::Ok(v) => #root::core::__json_value(&v),
-                            ::core::result::Result::Err(_) => #root::__serde_json::Value::Null,
-                        },
-                    )
-                }
-            });
-            let pre = quote! {
-                let _audit_before_query = #root::audit::before_image_query(
-                    <Self as #root::core::Model>::SCHEMA,
-                    #pk_column_lit_for_select,
-                    ::core::convert::Into::<#root::core::SqlValue>::into(#pk_value_for_bind),
-                    &[ #( #tracked_cols ),* ],
-                );
-                // A failed pre-read must not let the UPDATE run unaudited (#1907).
-                let _audit_before_pairs:
-                    ::std::option::Option<::std::vec::Vec<(&'static str, #root::__serde_json::Value)>> =
-                    #root::sql::select_rows_on(&mut *_executor, &_audit_before_query)
-                        .await?
-                        .into_iter()
-                        .next()
-                        .map(|_audit_before_row| ::std::vec![ #( #before_pairs ),* ]);
-            };
-            let post = quote! {
-                if let ::core::option::Option::Some(_audit_before) = _audit_before_pairs {
-                    let _audit_after = self.__rustango_audit_pairs();
-                    if let ::core::option::Option::Some(_audit_entry) =
-                        #root::audit::PendingEntry::update_diff(
-                            <Self as #root::core::Model>::SCHEMA.table,
-                            self.__rustango_audit_pk(),
-                            &_audit_before,
-                            &_audit_after,
-                        )
-                    {
-                        #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-                    }
-                }
-            };
-            (pre, post)
-        }
-    } else {
-        (quote!(), quote!())
-    };
-
-    // Bulk-insert audit: one `Create` entry per row once RETURNING has
-    // set its PK, written in one batched INSERT.
-    let audit_bulk_insert_emit: TokenStream2 = if audited_fields.is_some() {
-        quote! {
-            let _audit_entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
-                .iter()
-                .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
-                .collect();
-            #root::audit::emit_many(&mut *_executor, &_audit_entries).await?;
-        }
-    } else {
-        quote!()
-    };
-
-    let save_method = if fields.pk_is_auto {
-        let (pk_ident, pk_column) = primary_key.expect("pk_is_auto implies primary_key is Some");
-        let pk_column_lit = pk_column.as_str();
-        let assignments = &fields.update_assignments;
-        let upsert_cols = &fields.upsert_update_columns;
-        let upsert_pushes = &fields.insert_pushes;
-        // Read before the pushes, which fill each unset id.
-        let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
-            fields.uuid_v7_fields.iter().cloned().unzip();
-        let upsert_returning = &fields.returning_cols;
-        let upsert_auto_assigns = &fields.auto_assigns;
-        let auto_now_idents = &fields.auto_now_idents;
-        // Conflict target: prefer the first declared `unique_together`
-        // when it exists. Plain `Auto<T>` PKs are server-assigned via
-        // `BIGSERIAL` and never collide on insert, so a PK-only target
-        // would silently turn `upsert()` into "always-insert" for
-        // surrogate-PK models with composite UNIQUE constraints — see
-        // `RolePermission` / `UserRole` / `UserPermission` in the
-        // tenancy permission engine. When no `unique_together` is
-        // declared we keep the PK target (the original behaviour).
-        let upsert_target_columns: Vec<String> =
-            upsert_unique.map_or_else(|| vec![pk_column.clone()], <[String]>::to_vec);
-        let upsert_target_lits = upsert_target_columns
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        let conflict_clause = if fields.upsert_update_columns.is_empty() {
-            quote!(#root::core::ConflictClause::DoNothing)
-        } else {
-            quote!(#root::core::ConflictClause::DoUpdate {
-                target: ::std::vec![ #( #upsert_target_lits ),* ],
-                update_columns: ::std::vec![ #( #upsert_cols ),* ],
-            })
         };
-        // Audited: the upsert reports whether it inserted or updated (#1795).
-        let (upsert_run, audit_upsert_emit) = if audited_fields.is_some() {
-            (
-                quote! {
-                    let (_returning_row_v, _audit_op) =
-                        #root::audit::upsert_returning_on(&mut *_executor, &query).await?;
-                },
-                quote! {
-                    let _audit_entry = self.__rustango_audit_entry(_audit_op);
-                    #root::audit::emit_one(&mut *_executor, &_audit_entry).await?;
-                },
-            )
-        } else {
-            (
-                quote! {
-                    let _returning_row_v =
-                        #root::sql::__macro_internals::insert_returning_on(_executor, &query)
-                            .await?;
-                },
-                quote!(),
-            )
-        };
-        let save_on_write = restore_auto_now_unless(
-            auto_now_idents,
-            &save_ret,
-            &save_keep,
-            &quote! {
-                #audit_update_pre
-                let _query = #root::core::UpdateQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #assignments ),* ],
-                    #root::core::WhereExpr::Predicate(#root::core::Filter::new(
-                        #pk_column_lit,
-                        #root::core::Op::Eq,
-                        ::core::convert::Into::<#root::core::SqlValue>::into(
-                            ::core::clone::Clone::clone(&self.#pk_ident)
-                        ),
-                    )),
-                );
-                let _affected = #root::sql::__macro_internals::update_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #audit_update_post
-                ::core::result::Result::Ok(_affected)
-            },
-        );
-        let upsert_write = restore_auto_now_unless(
-            auto_now_idents,
-            &quote!(::core::result::Result<(), #root::sql::ExecError>),
-            &quote!(_saved.is_ok()),
-            &quote! {
-                // The UPDATE branch writes `auto_now` too, so stamp it like `save`.
-                #( self.#auto_now_idents = #root::sql::Auto::Set(#root::__chrono::Utc::now()); )*
-                #( #upsert_pushes )*
-                let query = #root::core::InsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    _columns,
-                    _values,
-                )
-                .returning(::std::vec![ #( #upsert_returning ),* ])
-                .on_conflict(#conflict_clause)
-                .generated(_generated);
-                #upsert_run
-                let _returning_row = &_returning_row_v;
-                #( #upsert_auto_assigns )*
-                #audit_upsert_emit
-                ::core::result::Result::Ok(())
-            },
-        );
         Some(quote! {
-            /// Insert this row if its `Auto<T>` primary key is
-            /// `Unset`, otherwise update the existing row matching the
-            /// PK. The caller doesn't need to pick `insert` vs the
-            /// bulk-update path manually.
-            ///
-            /// On the insert branch, populates the PK from `RETURNING`
-            /// (same behavior as `insert`). On the update branch,
-            /// writes every non-PK column back; if no row matches the
-            /// PK, returns `Ok(())` silently.
-            ///
-            /// Only generated when the primary key is declared as
-            /// `Auto<T>`. Models with a manually-managed PK must use
-            /// `insert` or the QuerySet update builder.
-            ///
-            /// **Postgres only — prefer [`Self::save_pool`].** This takes a
-            /// driver-specific `PgPool`, so it does not exist at all on a
-            /// build without the `postgres` feature: selecting `sqlite`
-            /// makes the method vanish rather than fail with anything that
-            /// names the cause.
-            ///
-            /// [`Self::save_pool`] takes `rustango::sql::Pool` and works on
-            /// all three backends. The naming is inverted — the short name
-            /// is the narrow one — and that is tracked in #1293.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing
-            /// or driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn save(
-                &mut self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #pool_to_save_on
-            }
-
-            /// Like [`Self::save`] but accepts any sqlx executor —
-            /// `&PgPool`, `&mut PgConnection`, or a transaction. The
-            /// escape hatch for tenant-scoped writes: schema-mode
-            /// tenants share the registry pool but rely on a per-
-            /// checkout `SET search_path`, so passing `&PgPool` would
-            /// silently hit the wrong schema. Acquire a connection
-            /// via `TenantPools::acquire(&org)` and pass `&mut *conn`.
+            /// [`Self::save`] on any [`#root::sql::SqlExecutor`]: a held
+            /// `PoolConn`, a `PoolTx`, a tenant connection or a Postgres sqlx
+            /// executor. An audited model refuses it: use [`Self::save`].
             ///
             /// # Errors
             /// As [`Self::save`].
-            #[cfg(feature = "postgres")]
-            pub async fn save_on #executor_generics (
+            pub async fn save_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &mut self,
-                #executor_param,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                // #1029 — INSERT writes exactly one row → 1; UPDATE returns
-                // the rows-affected count (0 when the PK no longer exists).
-                if matches!(self.#pk_ident, #root::sql::Auto::Unset) {
-                    return self.insert_on(#executor_passes_to_data_write).await.map(|()| 1u64);
-                }
-                #save_on_write
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #refuse_save
+                self.__rustango_save_exec(_executor).await
             }
 
-            /// Per-call override for the audit source. Runs
-            /// [`Self::save_on`] inside an [`#root::audit::with_source`]
-            /// scope so the resulting audit entry records `source`
-            /// instead of the task-local default. Useful for seed
-            /// scripts and one-off CLI tools that don't sit inside an
-            /// admin handler. The override applies only to this call;
-            /// no global state changes.
-            ///
-            /// # Errors
-            /// As [`Self::save_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn save_on_with #executor_generics (
+            #[doc(hidden)]
+            pub async fn __rustango_save_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &mut self,
-                #executor_param,
-                source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                #root::audit::with_source(source, self.save_on(_executor)).await
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #dispatch_unset
+                #write
             }
 
-            /// Insert this row or update it in-place if the primary key already
-            /// exists — single round-trip via `INSERT … ON CONFLICT (pk) DO UPDATE`.
-            ///
-            /// With `Auto::Unset` PK the server assigns a new key and no conflict
-            /// can occur (equivalent to `insert`). With `Auto::Set` PK the row is
-            /// inserted if absent or all non-PK columns are overwritten if present.
+            /// Old name of [`Self::save`].
             ///
             /// # Errors
-            /// As [`Self::insert_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn upsert(
+            /// As [`Self::save`].
+            #[deprecated(since = "0.62.0", note = "use `save`")]
+            pub async fn save_pool(
                 &mut self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_upsert_on
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                self.save(pool).await
             }
 
-            /// Like [`Self::upsert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
-            ///
-            /// # Errors
-            /// As [`Self::upsert`].
-            #[cfg(feature = "postgres")]
-            pub async fn upsert_on #executor_generics (
-                &mut self,
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
-                #[allow(unused_mut)]
-                let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
-                #(
-                    if matches!(&self.#gen_idents, #root::sql::Auto::Unset) {
-                        _generated.push(#gen_cols);
-                    }
-                )*
-                #upsert_write
-            }
+            #upsert
         })
     } else {
         None
@@ -7152,6 +6698,7 @@ fn inherent_impl_tokens(
 
     let pk_methods = primary_key.map(|(pk_ident, pk_column)| {
         let pk_column_lit = pk_column.as_str();
+        let refuse_delete = refuse("delete_on");
         // Optional `soft_delete_on` / `restore_on` companions when the
         // model has a `#[rustango(soft_delete)]` column. They land
         // alongside the regular `delete_on` so callers have both
@@ -7164,23 +6711,20 @@ fn inherent_impl_tokens(
                 .soft_delete_field_ident
                 .clone()
                 .expect("soft_delete_column without ident");
+            let refuse_soft_delete = refuse("soft_delete_on");
+            let refuse_restore = refuse("restore_on");
             quote! {
-                /// Soft-delete this row by setting its
-                /// `#[rustango(soft_delete)]` column to `NOW()`.
-                /// The row stays in the table; query helpers can
-                /// filter it out by checking the column for `IS NOT
-                /// NULL`.
+                /// Soft-delete this row on any [`#root::sql::SqlExecutor`]: set
+                /// its `#[rustango(soft_delete)]` column to now. An audited
+                /// model refuses it: use [`Self::soft_delete`].
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
-                #[cfg(feature = "postgres")]
-                pub async fn soft_delete_on #executor_generics (
+                pub async fn soft_delete_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
-                    #executor_param,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError>
-                #executor_where
-                {
-                    let _now = #root::__chrono::Utc::now();
+                    _executor: _E,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    #refuse_soft_delete
                     let _query = #root::soft_delete::__mark_query(
                         <Self as #root::core::Model>::SCHEMA,
                         #col_lit,
@@ -7188,29 +6732,21 @@ fn inherent_impl_tokens(
                         ::core::convert::Into::<#root::core::SqlValue>::into(
                             ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                        ::core::option::Option::Some(_now),
+                        ::core::option::Option::Some(#root::__chrono::Utc::now()),
                     );
-                    let _affected = #root::sql::__macro_internals::update_on(
-                        #executor_passes_to_data_write,
-                        &_query,
-                    ).await?;
-                    #audit_softdelete_emit
-                    ::core::result::Result::Ok(_affected)
+                    #root::sql::__macro_internals::update_on(_executor, &_query).await
                 }
 
-                /// Inverse of [`Self::soft_delete_on`] — clears the
-                /// soft-delete column back to NULL so the row is
-                /// considered live again.
+                /// Inverse of [`Self::soft_delete_on`]: clear the soft-delete
+                /// column. An audited model refuses it: use [`Self::restore`].
                 ///
                 /// # Errors
                 /// As [`Self::delete`].
-                #[cfg(feature = "postgres")]
-                pub async fn restore_on #executor_generics (
+                pub async fn restore_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                     &self,
-                    #executor_param,
-                ) -> ::core::result::Result<u64, #root::sql::ExecError>
-                #executor_where
-                {
+                    _executor: _E,
+                ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                    #refuse_restore
                     let _query = #root::soft_delete::__mark_query(
                         <Self as #root::core::Model>::SCHEMA,
                         #col_lit,
@@ -7220,17 +6756,10 @@ fn inherent_impl_tokens(
                         ),
                         ::core::option::Option::None,
                     );
-                    let _affected = #root::sql::__macro_internals::update_on(
-                        #executor_passes_to_data_write,
-                        &_query,
-                    ).await?;
-                    #audit_restore_emit
-                    ::core::result::Result::Ok(_affected)
+                    #root::sql::__macro_internals::update_on(_executor, &_query).await
                 }
 
-                /// Tri-dialect counterpart of [`Self::soft_delete_on`]
-                /// — takes [`#root::sql::Pool`] and dispatches per
-                /// backend. Eloquent `Model::delete()` semantics on
+                /// Soft-delete this row on any backend. Eloquent `Model::delete()` semantics on
                 /// soft-delete-enabled models (closes #821 partial).
                 ///
                 /// Sets the `#[rustango(soft_delete)]` column to
@@ -7301,7 +6830,7 @@ fn inherent_impl_tokens(
                     &self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                    Self::delete_pool(self, pool).await
+                    Self::delete(self, pool).await
                 }
 
                 /// Returns `true` when this row is soft-deleted (its
@@ -7398,70 +6927,49 @@ fn inherent_impl_tokens(
             quote!()
         };
         quote! {
-            /// Delete the row identified by this instance's primary key.
-            ///
-            /// Returns the number of rows affected (0 or 1).
-            ///
-            /// **Postgres only — prefer [`Self::delete_pool`].** This takes
-            /// a driver-specific `PgPool`, so it does not exist on a build
-            /// without the `postgres` feature. [`Self::delete_pool`] takes
-            /// `rustango::sql::Pool` and works on all three. The naming is
-            /// inverted; tracked in #1293.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing or
-            /// driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn delete(
-                &self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
-                #pool_to_delete_on
-            }
 
-            /// Like [`Self::delete`] but accepts any sqlx executor —
-            /// for tenant-scoped deletes against an explicitly-acquired
-            /// connection. See [`Self::save_on`] for the rationale.
+
+            /// [`Self::delete`] on any [`#root::sql::SqlExecutor`]. An audited
+            /// model refuses it: use [`Self::delete`].
             ///
             /// # Errors
             /// As [`Self::delete`].
-            #[cfg(feature = "postgres")]
-            pub async fn delete_on #executor_generics (
+            pub async fn delete_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &self,
-                #executor_param,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                let query = #root::core::DeleteQuery::by_pk(
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                #refuse_delete
+                self.__rustango_delete_exec(_executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_delete_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                &self,
+                _executor: _E,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                let _query = #root::core::DeleteQuery::by_pk(
                     <Self as #root::core::Model>::SCHEMA,
                     #pk_column_lit,
                     ::core::convert::Into::<#root::core::SqlValue>::into(
                         ::core::clone::Clone::clone(&self.#pk_ident)
                     ),
                 );
-                let _affected = #root::sql::__macro_internals::delete_on(
-                    #executor_passes_to_data_write,
-                    &query,
-                ).await?;
-                #audit_delete_emit
-                ::core::result::Result::Ok(_affected)
+                #root::sql::__macro_internals::delete_on(_executor, &_query).await
             }
 
-            /// Per-call audit-source override for [`Self::delete_on`].
-            /// See [`Self::save_on_with`] for shape rationale.
+            /// Old name of [`Self::delete`].
             ///
             /// # Errors
-            /// As [`Self::delete_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn delete_on_with #executor_generics (
+            /// As [`Self::delete`].
+            #[deprecated(since = "0.62.0", note = "use `delete`")]
+            pub async fn delete_pool(
                 &self,
-                #executor_param,
-                source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<u64, #root::sql::ExecError>
-            #executor_where
-            {
-                #root::audit::with_source(source, self.delete_on(_executor)).await
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<u64, #root::sql::ExecError> {
+                self.delete(pool).await
             }
+
+
             #pool_delete_method
             #pool_insert_method
             #audit_entry_method
@@ -7505,151 +7013,203 @@ fn inherent_impl_tokens(
         }
     });
 
+    let refuse_insert = refuse("insert_on");
+    // The audited `insert` is built with the PK methods; an audited model
+    // without a PK has no row to name, so its insert refuses.
+    let audited_insert = audited_fields.is_some() && primary_key.is_some();
+    let insert_pool_body = if audited_fields.is_some() {
+        quote! {
+            ::core::result::Result::Err(#root::sql::ExecError::MissingPrimaryKey {
+                table: <Self as #root::core::Model>::SCHEMA.table,
+            })
+        }
+    } else {
+        quote!(self.__rustango_insert_exec(pool).await)
+    };
+    let plain_insert_auto = if audited_insert {
+        quote!()
+    } else {
+        quote! {
+            /// Insert this row on any backend, reading each `Auto` field
+            /// back from the written row.
+            ///
+            /// # Errors
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or driver failures.
+            pub async fn insert(
+                &mut self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #insert_pool_body
+            }
+        }
+    };
+    let plain_insert_plain = if audited_insert {
+        quote!()
+    } else {
+        quote! {
+            /// Insert this row on any backend.
+            ///
+            /// # Errors
+            /// Returns [`#root::sql::ExecError`] for SQL-writing or driver failures.
+            pub async fn insert(
+                &self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #insert_pool_body
+            }
+        }
+    };
     let insert_method = if fields.has_auto {
         let pushes = &fields.insert_pushes;
         let returning_cols = &fields.returning_cols;
-        let auto_assigns = &fields.auto_assigns;
         quote! {
-            /// Insert this row into its table. Skips columns whose
-            /// `Auto<T>` value is `Unset` so Postgres' SERIAL/BIGSERIAL
-            /// sequence fills them in, then reads each `Auto` column
-            /// back via `RETURNING` and stores it on `self`.
-            ///
-            /// **Postgres only — prefer [`Self::insert_pool`].** This takes
-            /// a driver-specific `PgPool`, so it does not exist on a build
-            /// without the `postgres` feature. [`Self::insert_pool`] takes
-            /// `rustango::sql::Pool` and works on all three. The naming is
-            /// inverted; tracked in #1293.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing or
-            /// driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn insert(
-                &mut self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_insert_on
-            }
-
-            /// Like [`Self::insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            #plain_insert_auto
+            /// [`Self::insert`] on any [`#root::sql::SqlExecutor`]. An audited
+            /// model refuses it: use [`Self::insert`].
             ///
             /// # Errors
             /// As [`Self::insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn insert_on #executor_generics (
+            pub async fn insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &mut self,
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
-                let mut _columns: ::std::vec::Vec<&'static str> =
-                    ::std::vec::Vec::new();
-                let mut _values: ::std::vec::Vec<#root::core::SqlValue> =
-                    ::std::vec::Vec::new();
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_insert
+                self.__rustango_insert_exec(_executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                &mut self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                let _query = self.__rustango_insert_query();
+                // Every `Auto` filled Rust-side: nothing to read back.
+                if _query.returning.is_empty() {
+                    return #root::sql::__macro_internals::insert_on(_executor, &_query).await;
+                }
+                let _row = #root::sql::__macro_internals::insert_returning_on(
+                    _executor, &_query,
+                )
+                .await?;
+                #root::sql::apply_auto_pk(_row, self)
+            }
+
+            /// The INSERT for this row; fills Rust-side `Auto` values first.
+            #[doc(hidden)]
+            pub fn __rustango_insert_query(&mut self) -> #root::core::InsertQuery {
+                let mut _columns: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
+                let mut _values: ::std::vec::Vec<#root::core::SqlValue> = ::std::vec::Vec::new();
                 #( #pushes )*
-                let query = #root::core::InsertQuery::new(
+                #root::core::InsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
                     _values,
                 )
-                .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _returning_row_v = #root::sql::__macro_internals::insert_returning_on(
-                    #executor_passes_to_data_write,
-                    &query,
-                ).await?;
-                let _returning_row = &_returning_row_v;
-                #( #auto_assigns )*
-                #audit_insert_emit
-                ::core::result::Result::Ok(())
+                .returning(::std::vec![ #( #returning_cols ),* ])
             }
 
-            /// Per-call audit-source override for [`Self::insert_on`].
-            /// See [`Self::save_on_with`] for shape rationale.
+            /// Old name of [`Self::insert`].
             ///
             /// # Errors
-            /// As [`Self::insert_on`].
-            #[cfg(feature = "postgres")]
-            pub async fn insert_on_with #executor_generics (
+            /// As [`Self::insert`].
+            #[deprecated(since = "0.62.0", note = "use `insert`")]
+            pub async fn insert_pool(
                 &mut self,
-                #executor_param,
-                source: #root::audit::AuditSource,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
-                #root::audit::with_source(source, self.insert_on(_executor)).await
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                self.insert(pool).await
             }
         }
     } else {
         let insert_columns = &fields.insert_columns;
         let insert_values = &fields.insert_values;
+        // The audited `insert` takes `&mut self` for its audit helper.
+        let pool_self = if audited_fields.is_some() {
+            quote!(&mut self)
+        } else {
+            quote!(&self)
+        };
         quote! {
-            /// Insert this row into its table.
-            ///
-            /// # Errors
-            /// Returns [`#root::sql::ExecError`] for SQL-writing or
-            /// driver failures.
-            #[cfg(feature = "postgres")]
-            pub async fn insert(
-                &self,
-                pool: &#root::sql::sqlx::PgPool,
-            ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                self.insert_on(pool).await
-            }
-
-            /// Like [`Self::insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            #plain_insert_plain
+            /// [`Self::insert`] on any [`#root::sql::SqlExecutor`]. An audited
+            /// model refuses it: use [`Self::insert`].
             ///
             /// # Errors
             /// As [`Self::insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn insert_on<'_c, _E>(
+            pub async fn insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 &self,
                 _executor: _E,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            where
-                _E: #root::sql::sqlx::Executor<'_c, Database = #root::sql::sqlx::Postgres>,
-            {
-                let query = #root::core::InsertQuery::new(
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_insert
+                self.__rustango_insert_exec(_executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                &self,
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #root::sql::__macro_internals::insert_on(_executor, &self.__rustango_insert_query())
+                    .await
+            }
+
+            /// The INSERT for this row.
+            #[doc(hidden)]
+            pub fn __rustango_insert_query(&self) -> #root::core::InsertQuery {
+                #root::core::InsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     ::std::vec![ #( #insert_columns ),* ],
                     ::std::vec![ #( #insert_values ),* ],
-                );
-                #root::sql::__macro_internals::insert_on(_executor, &query).await
+                )
+            }
+
+            /// Old name of [`Self::insert`].
+            ///
+            /// # Errors
+            /// As [`Self::insert`].
+            #[deprecated(since = "0.62.0", note = "use `insert`")]
+            pub async fn insert_pool(
+                #pool_self,
+                pool: &#root::sql::Pool,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                self.insert(pool).await
             }
         }
     };
 
+    // `bulk_insert(&Pool)`: audited models write their rows and one
+    // `Create` entry each in one transaction.
+    let bulk_pool_body = if audited_fields.is_some() {
+        quote! {
+            let mut _tx = #root::sql::write_transaction(pool).await?;
+            Self::__rustango_bulk_insert_exec(rows, &mut _tx).await?;
+            // MySQL has no RETURNING: a database-filled PK stays unset.
+            if rows.iter().any(|_row| _row.__rustango_audit_pk().is_empty()) {
+                return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
+                    table: <Self as #root::core::Model>::SCHEMA.table,
+                    reason: "MySQL has no RETURNING to read the written rows",
+                });
+            }
+            let _entries: ::std::vec::Vec<#root::audit::PendingEntry> = rows
+                .iter()
+                .map(|_row| _row.__rustango_audit_entry(#root::audit::AuditOp::Create))
+                .collect();
+            #root::audit::__emit_many_tx(&mut _tx, &_entries).await?;
+            _tx.commit().await?;
+            ::core::result::Result::Ok(())
+        }
+    } else {
+        quote!(Self::__rustango_bulk_insert_exec(rows, pool).await)
+    };
+    let refuse_bulk = refuse("bulk_insert_on");
     let bulk_insert_method = if fields.has_auto {
         let cols_no_auto = &fields.bulk_columns_no_auto;
         let cols_all = &fields.bulk_columns_all;
         let pushes_no_auto = &fields.bulk_pushes_no_auto;
         let pushes_all = &fields.bulk_pushes_all;
         let returning_cols = &fields.returning_cols;
-        let auto_assigns_for_row = bulk_auto_assigns_for_row(fields);
         let uniformity = &fields.bulk_auto_uniformity;
         let fill_in_place = &fields.bulk_fill_in_place;
-        // Nothing to read back when every Auto field is filled Rust-side (#1934).
-        let read_back = if fields.returning_cols.is_empty() {
-            quote!()
-        } else {
-            quote! {
-                if _returned.len() != rows.len() {
-                    return ::core::result::Result::Err(
-                        #root::sql::ExecError::Sql(
-                            #root::sql::SqlError::BulkInsertReturningMismatch {
-                                expected: rows.len(),
-                                actual: _returned.len(),
-                            }
-                        )
-                    );
-                }
-                for (_returning_row, _row_mut) in _returned.iter().zip(rows.iter_mut()) {
-                    #auto_assigns_for_row
-                }
-            }
-        };
         // The DB-filled `Auto` picks the path; Rust-filled ones fill per row (#1950).
         let first_auto_ident = fields
             .first_db_auto
@@ -7658,40 +7218,40 @@ fn inherent_impl_tokens(
             .or(fields.first_auto_ident.as_ref())
             .expect("has_auto implies first_auto_ident is Some");
         quote! {
-            /// Bulk-insert `rows`: one statement, or one per chunk in a
-            /// transaction past the bind cap. Every row's
-            /// `Auto<T>` PK fields must uniformly be `Auto::Unset`
-            /// (sequence fills them in) or uniformly `Auto::Set(_)`
-            /// (caller-supplied values). Mixed Set/Unset is rejected
-            /// — call `insert` per row for that case.
-            ///
-            /// Empty slice is a no-op. Each row's `Auto` fields are
-            /// populated from the `RETURNING` clause in input order
-            /// before this returns.
+            /// Bulk-insert `rows`: one statement, or one per chunk in one
+            /// transaction past the bind cap. Every row's `Auto<T>` PK must
+            /// be `Auto::Unset` (the database fills it) or every one `Set`.
+            /// Each row's `Auto` fields are read back from `RETURNING`; MySQL
+            /// has none, so it leaves them unset. An empty slice is a no-op.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, mixed-Auto rejection, or driver failures.
-            #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &mut [Self],
-                pool: &#root::sql::sqlx::PgPool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_mut
+                #bulk_pool_body
             }
 
-            /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            /// [`Self::bulk_insert`] on any [`#root::sql::SqlExecutor`]. An
+            /// audited model refuses it: use [`Self::bulk_insert`].
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn bulk_insert_on #executor_generics (
+            pub async fn bulk_insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 rows: &mut [Self],
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_bulk
+                Self::__rustango_bulk_insert_exec(rows, _executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_bulk_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                rows: &mut [Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7703,7 +7263,6 @@ fn inherent_impl_tokens(
                 for _row in rows.iter_mut() {
                     #( #fill_in_place )*
                 }
-
                 let mut _all_rows: ::std::vec::Vec<
                     ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
@@ -7724,19 +7283,28 @@ fn inherent_impl_tokens(
                     }
                     ::std::vec![ #( #cols_all ),* ]
                 };
-
                 let _query = #root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
                     _all_rows,
                 )
                 .returning(::std::vec![ #( #returning_cols ),* ]);
-                let _returned = #root::sql::__macro_internals::bulk_insert_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #read_back
-                #audit_bulk_insert_emit
+                let _returned =
+                    #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                if _returned.is_empty() {
+                    return ::core::result::Result::Ok(());
+                }
+                if _returned.len() != rows.len() {
+                    return ::core::result::Result::Err(#root::sql::ExecError::Sql(
+                        #root::sql::SqlError::BulkInsertReturningMismatch {
+                            expected: rows.len(),
+                            actual: _returned.len(),
+                        },
+                    ));
+                }
+                for (_row, _row_mut) in _returned.into_iter().zip(rows.iter_mut()) {
+                    #root::sql::apply_auto_pk(_row, _row_mut)?;
+                }
                 ::core::result::Result::Ok(())
             }
         }
@@ -7744,36 +7312,37 @@ fn inherent_impl_tokens(
         let cols_all = &fields.bulk_columns_all;
         let pushes_all = &fields.bulk_pushes_all;
         quote! {
-            /// Bulk-insert `rows`: one statement, or one per chunk in a
-            /// transaction past the bind cap. Every row's
-            /// fields are written verbatim — there are no `Auto<T>`
-            /// fields on this model.
-            ///
-            /// Empty slice is a no-op.
+            /// Bulk-insert `rows`: one statement, or one per chunk in one
+            /// transaction past the bind cap. An empty slice is a no-op.
             ///
             /// # Errors
             /// Returns [`#root::sql::ExecError`] for validation,
             /// SQL-writing, or driver failures.
-            #[cfg(feature = "postgres")]
             pub async fn bulk_insert(
                 rows: &[Self],
-                pool: &#root::sql::sqlx::PgPool,
+                pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #pool_to_bulk_insert_on
+                #bulk_pool_body
             }
 
-            /// Like [`Self::bulk_insert`] but accepts any sqlx executor.
-            /// See [`Self::save_on`] for tenancy-scoped rationale.
+            /// [`Self::bulk_insert`] on any [`#root::sql::SqlExecutor`]. An
+            /// audited model refuses it: use [`Self::bulk_insert`].
             ///
             /// # Errors
             /// As [`Self::bulk_insert`].
-            #[cfg(feature = "postgres")]
-            pub async fn bulk_insert_on #executor_generics (
+            pub async fn bulk_insert_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
                 rows: &[Self],
-                #executor_param,
-            ) -> ::core::result::Result<(), #root::sql::ExecError>
-            #executor_where
-            {
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
+                #refuse_bulk
+                Self::__rustango_bulk_insert_exec(rows, _executor).await
+            }
+
+            #[doc(hidden)]
+            pub async fn __rustango_bulk_insert_exec<'_c, _E: #root::sql::SqlExecutor<'_c>>(
+                rows: &[Self],
+                _executor: _E,
+            ) -> ::core::result::Result<(), #root::sql::ExecError> {
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7791,12 +7360,9 @@ fn inherent_impl_tokens(
                     ::std::vec![ #( #cols_all ),* ],
                     _all_rows,
                 );
-                let _ = #root::sql::__macro_internals::bulk_insert_on(
-                    #executor_passes_to_data_write,
-                    &_query,
-                ).await?;
-                #audit_bulk_insert_emit
-                ::core::result::Result::Ok(())
+                #root::sql::__macro_internals::bulk_insert_on(_executor, &_query)
+                    .await
+                    .map(drop)
             }
         }
     };
@@ -8376,23 +7942,6 @@ fn inherent_impl_tokens(
     }
 }
 
-/// Per-row Auto-field assigns for `bulk_insert` — equivalent to
-/// `auto_assigns` but reading from `_returning_row` and writing to
-/// `_row_mut` instead of `self`.
-fn bulk_auto_assigns_for_row(fields: &CollectedFields) -> TokenStream2 {
-    let root = rustango_root();
-    let lines = fields.auto_field_idents.iter().map(|(ident, column, _)| {
-        let col_lit = column.as_str();
-        quote! {
-            _row_mut.#ident = #root::sql::sqlx::Row::try_get(
-                _returning_row,
-                #col_lit,
-            )?;
-        }
-    });
-    quote! { #( #lines )* }
-}
-
 /// Emit `pub const id: …Id = …Id;` per field, inside the inherent impl.
 fn column_const_tokens(module_ident: &syn::Ident, entries: &[ColumnEntry]) -> TokenStream2 {
     let lines = entries.iter().map(|e| {
@@ -8841,6 +8390,8 @@ struct ReverseHasAttr {
     /// Column on **this** model's table the child FK references — the
     /// `OuterRef` target. Defaults to the PK column (`"id"` without one).
     self_pk_column: Option<String>,
+    /// Where an explicit `self_pk_column` was written, for its error.
+    self_pk_span: Option<proc_macro2::Span>,
 }
 
 impl ReverseHasAttr {
@@ -8869,6 +8420,8 @@ struct GenericHasAttr {
     /// SQL primary-key column on **this** (parent) model's table.
     /// Defaults to the PK column (`"id"` without one).
     self_pk_column: Option<String>,
+    /// Where an explicit `self_pk_column` was written, for its error.
+    self_pk_span: Option<proc_macro2::Span>,
 }
 
 impl GenericHasAttr {
@@ -9622,6 +9175,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut child_ident: Option<syn::Ident> = None;
                 let mut child_fk_column: Option<String> = None;
                 let mut self_pk_column: Option<String> = None;
+                let mut self_pk_span: Option<proc_macro2::Span> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9672,6 +9226,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             ));
                         }
                         self_pk_column = Some(trimmed.to_owned());
+                        self_pk_span = Some(s.span());
                         return Ok(());
                     }
                     Err(inner.error(
@@ -9712,6 +9267,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     child,
                     child_fk_column,
                     self_pk_column,
+                    self_pk_span,
                 });
                 return Ok(());
             }
@@ -9727,6 +9283,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                 let mut ct_column: Option<String> = None;
                 let mut pk_column: Option<String> = None;
                 let mut self_pk_column: Option<String> = None;
+                let mut self_pk_span: Option<proc_macro2::Span> = None;
                 meta.parse_nested_meta(|inner| {
                     if inner.path.is_ident("name") {
                         let s: LitStr = inner.value()?.parse()?;
@@ -9786,6 +9343,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                             ));
                         }
                         self_pk_column = Some(trimmed);
+                        self_pk_span = Some(s.span());
                         return Ok(());
                     }
                     Err(inner.error(
@@ -9823,6 +9381,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     ct_column,
                     pk_column,
                     self_pk_column,
+                    self_pk_span,
                 });
                 return Ok(());
             }
@@ -11058,6 +10617,8 @@ struct FieldAttrs {
     /// Empty by default; fires on every typed INSERT/UPDATE. Each is
     /// spanned on the attribute string, so an unknown name errors there.
     validators: Vec<syn::Ident>,
+    /// `#[rustango(secret)]` / `secret = false`; `None` defers to the name rules.
+    secret: Option<bool>,
 }
 
 /// Keys `parse_field_attrs` accepts, listed in its unknown-key error.
@@ -11081,6 +10642,7 @@ const FIELD_ATTR_KEYS: &[&str] = &[
     "db_comment",
     "verbose_name",
     "editable",
+    "secret",
     "blank",
     "citext",
     "validators",
@@ -11224,6 +10786,7 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
         blank: false,
         case_insensitive: false,
         validators: Vec::new(),
+        secret: None,
     };
     for attr in model_attrs(&field.attrs)? {
         attr.parse_nested_meta(|meta| {
@@ -11395,6 +10958,15 @@ fn parse_field_attrs(field: &syn::Field) -> syn::Result<FieldAttrs> {
             if meta.path.is_ident("verbose_name") {
                 let s: LitStr = meta.value()?.parse()?;
                 out.verbose_name = Some(s.value());
+                return Ok(());
+            }
+            if meta.path.is_ident("secret") {
+                // `#[rustango(secret)]` or `#[rustango(secret = false)]`.
+                out.secret = Some(if let Ok(v) = meta.value() {
+                    v.parse::<syn::LitBool>()?.value
+                } else {
+                    true
+                });
                 return Ok(());
             }
             if meta.path.is_ident("editable") {
@@ -11899,6 +11471,10 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
     let db_comment = optional_str(attrs.db_comment.as_deref());
     let verbose_name = optional_str(attrs.verbose_name.as_deref());
     let editable = attrs.editable;
+    let secret = match attrs.secret {
+        Some(v) => quote!(::core::option::Option::Some(#v)),
+        None => quote!(::core::option::Option::None),
+    };
     let blank = attrs.blank;
     let case_insensitive = attrs.case_insensitive;
     // A path per name: one the runtime does not know fails to resolve.
@@ -11942,7 +11518,18 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
         Some(ty) => quote!(::core::option::Option::Some(<#ty>::FIELD_CAST)),
         None => quote!(::core::option::Option::None),
     };
+    // A sealed cast is always a credential: `secret = false` cannot opt it out.
+    let sealed_guard = match (attrs.secret, cast_type(&field.ty)) {
+        (Some(false), Some(ty)) => quote! {
+            const _: () = ::core::assert!(
+                !::core::matches!(<#ty>::FIELD_CAST, #root::core::FieldCast::Sealed),
+                "`#[rustango(secret = false)]` on a sealed cast: it is always a credential",
+            );
+        },
+        _ => quote!(),
+    };
     let schema = quote! {{
+        #sealed_guard
         #root::core::FieldSchema::from_parts(#root::core::FieldSchemaParts {
             name: #name,
             column: #column_lit,
@@ -11968,6 +11555,7 @@ fn process_field<'a>(field: &'a syn::Field, table: &str) -> syn::Result<FieldInf
             fk_on_delete: #fk_on_delete,
             validators: &[ #( #root::core::__validator_names::#validators ),* ],
             cast: #cast,
+            secret: #secret,
         })
     }};
 
@@ -13426,7 +13014,7 @@ fn expand_viewset(input: &DeriveInput) -> syn::Result<TokenStream2> {
                     #read_only_call
                     #allow_anonymous_call
                     #serializer_call
-                    .router_pool(prefix, pool.into())
+                    .router(prefix, pool.into())
             }
         }
     })
@@ -14525,9 +14113,37 @@ fn expand_serializer(input: &DeriveInput) -> syn::Result<TokenStream2> {
         }
     };
 
+    // The other tables a `nested`, `many` or `slug` field renders rows of.
+    let related_tables = fields_info.iter().filter_map(|fi| {
+        let name = &fi.ser_name;
+        if let Some(inner) = &fi.attrs.many {
+            return Some(quote! {
+                (#name, <<#inner as #root::serializer::ModelSerializer>::Model
+                    as #root::core::Model>::SCHEMA.table)
+            });
+        }
+        if !(fi.attrs.nested || fi.attrs.slug.is_some()) {
+            return None;
+        }
+        let src_name = fi
+            .attrs
+            .source
+            .as_deref()
+            .unwrap_or(&ident_name(&fi.ident))
+            .to_owned();
+        let src_ident = ident_from_name(&src_name, fi.ident.span());
+        Some(quote! {
+            (#name, #root::serializer::relation_table(|__m: &#model_path| &__m.#src_ident))
+        })
+    });
+
     Ok(quote! {
         impl #root::serializer::ModelSerializer for #struct_name {
             type Model = #model_path;
+
+            fn related_tables() -> ::std::vec::Vec<(&'static str, &'static str)> {
+                ::std::vec![ #( #related_tables ),* ]
+            }
 
             fn from_model(model: &Self::Model) -> Self {
                 Self {
@@ -14634,7 +14250,7 @@ mod main_attr_tests {
             .to_string()
     }
 
-    /// Asserts on the expansion rather than on `parse_logging`,
+    /// Asserts on the expansion rather than on `parse_main_args`,
     /// because the defect was a subscriber reaching the output, not
     /// an argument being misread (#1465).
     #[test]
@@ -14677,45 +14293,52 @@ mod main_attr_tests {
 
     #[test]
     fn logging_true_is_the_default_shape() {
-        // `logging = true` is accepted and means the default, so the
-        // match must not fire on the substring `logging`.
-        assert!(parse_logging(&"logging = true".parse().unwrap()));
-        assert!(!parse_logging(&"logging=false".parse().unwrap()));
+        assert!(
+            parse_main_args(&"logging = true".parse().unwrap())
+                .unwrap()
+                .logging
+        );
+        assert!(
+            !parse_main_args(&"logging=false".parse().unwrap())
+                .unwrap()
+                .logging
+        );
     }
 }
 
 #[cfg(test)]
-mod main_arg_warning_tests {
+mod main_arg_tests {
     use super::*;
 
-    fn expand(args: &str) -> String {
+    fn expand(args: &str) -> syn::Result<TokenStream2> {
         let body = quote! { async fn main() { run().await } };
         expand_main(args.parse().unwrap(), body)
-            .expect("expansion failed")
-            .to_string()
     }
 
-    /// A typo or unknown key used to be dropped without a word.
+    /// A typo or unknown key is a compile error, not silently ignored.
     #[test]
-    fn unknown_or_misspelt_args_warn() {
-        for args in ["logging = flase", "multi_thread", "workers = 4"] {
-            let out = expand(args);
-            assert!(out.contains("unknown argument"), "{args}:\n{out}");
+    fn unknown_or_misspelt_args_are_errors() {
+        for args in [
+            "logging = flase",
+            "multi_thread",
+            "workers = 4",
+            r#"flavor = "curent_thread""#,
+            "worker_threads = 4",
+        ] {
+            let err = expand(args).expect_err(args).to_string();
+            assert!(err.contains("#[rustango::main]"), "{args}: {err}");
         }
     }
 
     #[test]
-    fn supported_args_do_not_warn() {
+    fn supported_args_expand() {
         for args in [
             "",
             r#"flavor = "current_thread""#,
             r#"flavor = "multi_thread", logging = false"#,
             "logging = true",
-            "worker_threads = 4, start_paused = true",
-            r#"crate = "tokio", unhandled_panic = "shutdown_runtime""#,
-            r#"flavor = "curent_thread""#,
         ] {
-            assert!(!expand(args).contains("RUSTANGO_WARNING"), "{args}");
+            assert!(expand(args).is_ok(), "{args}");
         }
     }
 }
@@ -14830,9 +14453,10 @@ mod field_attr_tests {
         assert!(expand(&input).is_ok());
     }
 
-    /// An index or `get_latest_by` naming no column warns; it does not fail.
+    /// An index or `get_latest_by` naming no column is a compile error,
+    /// one per name.
     #[test]
-    fn unknown_index_columns_warn() {
+    fn unknown_index_columns_are_errors() {
         let input: DeriveInput = syn::parse_quote! {
             #[rustango(
                 table = "w",
@@ -14843,16 +14467,20 @@ mod field_attr_tests {
             )]
             struct W { #[rustango(primary_key)] id: i64, a: i64, b: i64 }
         };
-        let out = expand(&input).expect("still compiles").to_string();
+        let err = expand(&input).expect_err("must not compile");
+        let all: Vec<String> = err.into_iter().map(|e| e.to_string()).collect();
         for name in ["nope", "b_typo", "missing", "when_typo"] {
-            assert!(out.contains(&format!("`{name}`")), "{name}:\n{out}");
+            assert!(
+                all.iter().any(|m| m.contains(&format!("`{name}`"))),
+                "{name}: {all:?}"
+            );
         }
     }
 
     /// Real columns, field names for `get_latest_by` and expression
-    /// indexes emit nothing new.
+    /// indexes compile.
     #[test]
-    fn known_index_columns_do_not_warn() {
+    fn known_index_columns_compile() {
         let input: DeriveInput = syn::parse_quote! {
             #[rustango(
                 table = "w",
@@ -14866,8 +14494,7 @@ mod field_attr_tests {
                 #[rustango(column = "b_col")] b: i64,
             }
         };
-        let out = expand(&input).expect("compiles").to_string();
-        assert!(!out.contains("RUSTANGO_WARNING"), "{out}");
+        expand(&input).expect("compiles");
     }
 
     /// Two FKs to one parent would emit the same reverse accessor twice.

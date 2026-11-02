@@ -11,8 +11,9 @@
 //! use rustango::cache::ScopedCache;
 //!
 //! // In a handler, from the Org the resolver already produced:
-//! let cache = ScopedCache::for_tenant(shared_cache.clone(), &t.org.slug);
-//! cache.set("stats:monthly", &json, ttl).await?;   // stored as `tenant:acme:stats:monthly`
+//! let tenant = TenantSlug::of(&t.org).expect("a registry org");
+//! let cache = ScopedCache::for_tenant(shared_cache.clone(), &tenant);
+//! cache.set("stats:monthly", &json, ttl).await?;   // stored as `tenant:#org:7:acme:stats:monthly`
 //!
 //! // Invalidate just this tenant:
 //! cache.clear().await?;                            // other tenants keep their entries
@@ -37,8 +38,7 @@ use std::time::Duration;
 
 use super::{BoxedCache, Cache, CacheError};
 
-/// The prefix [`ScopedCache::for_tenant`] uses. Matches the
-/// `tenant:{slug}:…` shape the tenancy layer already uses.
+/// The prefix `ScopedCache::for_tenant` puts before the tenant's namespace.
 pub const TENANT_PREFIX: &str = "tenant";
 
 /// A [`Cache`] view that namespaces every key. Cheap to clone.
@@ -64,10 +64,12 @@ impl ScopedCache {
         }
     }
 
-    /// Namespace `inner` for one tenant slug: `tenant:{slug}:…`.
+    /// Namespace `inner` for one tenant: `tenant:#org:<id>:<slug>:…`. The org id
+    /// keeps a tenant that reuses a purged slug out of the old one's entries.
+    #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn for_tenant(inner: BoxedCache, slug: impl AsRef<str>) -> Self {
-        Self::new(inner, format!("{TENANT_PREFIX}:{}", slug.as_ref()))
+    pub fn for_tenant(inner: BoxedCache, tenant: &crate::tenancy::TenantSlug) -> Self {
+        Self::new(inner, format!("{TENANT_PREFIX}:{}", tenant.namespace()))
     }
 
     /// The prefix every key gets, including its trailing separator.
@@ -208,8 +210,8 @@ mod tests {
     #[tokio::test]
     async fn tenants_do_not_see_each_others_keys() {
         let shared = mem();
-        let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-        let globex = ScopedCache::for_tenant(shared.clone(), "globex");
+        let acme = ScopedCache::new(shared.clone(), "acme");
+        let globex = ScopedCache::new(shared.clone(), "globex");
 
         acme.set("stats", "acme-value", None).await.unwrap();
 
@@ -231,7 +233,7 @@ mod tests {
         let inner: BoxedCache = Arc::new(InMemoryCache::with_default_ttl(
             std::time::Duration::from_millis(1),
         ));
-        let scoped = ScopedCache::for_tenant(inner.clone(), "acme");
+        let scoped = ScopedCache::new(inner.clone(), "acme");
         inner.set_forever("bare", "1").await.unwrap();
         scoped.set_forever("k", "1").await.unwrap();
         inner.set("lapses", "1", None).await.unwrap();
@@ -245,8 +247,8 @@ mod tests {
     #[tokio::test]
     async fn scoped_clear_leaves_other_tenants_intact() {
         let shared = mem();
-        let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-        let globex = ScopedCache::for_tenant(shared.clone(), "globex");
+        let acme = ScopedCache::new(shared.clone(), "acme");
+        let globex = ScopedCache::new(shared.clone(), "globex");
 
         acme.set("a", "1", None).await.unwrap();
         acme.set("b", "2", None).await.unwrap();
@@ -263,12 +265,24 @@ mod tests {
         );
     }
 
-    /// Clearing `tenant:acme:` must not hit `tenant:acme-corp:`.
+    /// A tenant that reuses a purged tenant's slug gets a fresh keyspace.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_reused_slug_does_not_see_the_purged_tenants_keys() {
+        use crate::tenancy::TenantSlug;
+        let shared = mem();
+        let old = ScopedCache::for_tenant(shared.clone(), &TenantSlug::new(1, "acme"));
+        let heir = ScopedCache::for_tenant(shared.clone(), &TenantSlug::new(2, "acme"));
+        old.set("k", "old", None).await.unwrap();
+        assert_eq!(heir.get("k").await.unwrap(), None);
+    }
+
+    /// Clearing `acme:` must not hit `acme-corp:`.
     #[tokio::test]
     async fn prefix_overlap_between_slugs_is_not_a_collision() {
         let shared = mem();
-        let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-        let acme_corp = ScopedCache::for_tenant(shared.clone(), "acme-corp");
+        let acme = ScopedCache::new(shared.clone(), "acme");
+        let acme_corp = ScopedCache::new(shared.clone(), "acme-corp");
 
         acme.set("k", "short", None).await.unwrap();
         acme_corp.set("k", "long", None).await.unwrap();
@@ -286,7 +300,7 @@ mod tests {
     /// `get_many` maps results back to the caller's unprefixed keys.
     #[tokio::test]
     async fn get_many_returns_unprefixed_keys() {
-        let acme = ScopedCache::for_tenant(mem(), "acme");
+        let acme = ScopedCache::new(mem(), "acme");
         acme.set_many(&[("x", "1"), ("y", "2")], None)
             .await
             .unwrap();
@@ -296,7 +310,7 @@ mod tests {
         assert_eq!(got.get("y").map(String::as_str), Some("2"));
         assert!(!got.contains_key("absent"));
         assert!(
-            got.keys().all(|k| !k.contains("tenant:")),
+            got.keys().all(|k| !k.contains("acme:")),
             "the prefix must not leak back to the caller: {got:?}"
         );
     }
@@ -306,8 +320,8 @@ mod tests {
     #[tokio::test]
     async fn counters_are_namespaced() {
         let shared = mem();
-        let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-        let globex = ScopedCache::for_tenant(shared.clone(), "globex");
+        let acme = ScopedCache::new(shared.clone(), "acme");
+        let globex = ScopedCache::new(shared.clone(), "globex");
 
         assert_eq!(acme.incr("hits", 1, None).await.unwrap(), 1);
         assert_eq!(acme.incr("hits", 1, None).await.unwrap(), 2);
@@ -322,8 +336,8 @@ mod tests {
     #[tokio::test]
     async fn deletes_are_namespaced() {
         let shared = mem();
-        let acme = ScopedCache::for_tenant(shared.clone(), "acme");
-        let globex = ScopedCache::for_tenant(shared.clone(), "globex");
+        let acme = ScopedCache::new(shared.clone(), "acme");
+        let globex = ScopedCache::new(shared.clone(), "globex");
 
         acme.set_many(&[("p", "1"), ("q", "2")], None)
             .await
@@ -345,7 +359,7 @@ mod tests {
     #[tokio::test]
     async fn null_cache_prefix_delete_is_a_noop() {
         let null: BoxedCache = Arc::new(crate::cache::NullCache);
-        let scoped = ScopedCache::for_tenant(null, "acme");
+        let scoped = ScopedCache::new(null, "acme");
         scoped.clear().await.unwrap();
         assert_eq!(scoped.get("anything").await.unwrap(), None);
     }

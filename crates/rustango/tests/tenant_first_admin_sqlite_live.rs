@@ -79,7 +79,7 @@ impl Env {
             self.pools.as_ref(),
             &self.url,
             &self.migrations,
-            args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            rustango::testkit::routed_args(args),
             &mut out,
         )
         .await
@@ -289,7 +289,7 @@ async fn operator_cookie(console: &axum::Router, registry: &rustango::sql::Pool)
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(registry).await.expect("seed operator");
+    op.insert(registry).await.expect("seed operator");
     let login = console
         .clone()
         .oneshot(
@@ -769,9 +769,11 @@ async fn a_resumed_run_never_adds_a_second_superuser() {
     let _suite = SUITE.lock().await;
     let env = Env::new().await;
     let slug = unique("resume");
-    let request = |email: &str, username: &str| ProvisionRequest {
-        first_admin: Some(rustango::tenancy::FirstAdmin::new(email, Some(username)).unwrap()),
-        ..ProvisionRequest::database(&slug, env.tenant_url(&slug))
+    let request = |email: &str, username: &str| {
+        rustango::testkit::routed(ProvisionRequest {
+            first_admin: Some(rustango::tenancy::FirstAdmin::new(email, Some(username)).unwrap()),
+            ..ProvisionRequest::database(&slug, env.tenant_url(&slug))
+        })
     };
     let run = |request: ProvisionRequest| {
         let env = &env;
@@ -942,7 +944,7 @@ mod webhook {
         let org = env.org(&slug).await.expect("tenant");
         let id = org.id.get().copied().unwrap();
         assert!(
-            link.contains(&format!("scope=tenant%3A{slug}%3A{id}")),
+            link.contains(&format!("scope=tenant%3A%23org%3A{id}%3A{slug}")),
             "{link}"
         );
         assert!(env.user(&slug, "dee@acme.test").await.unwrap().is_superuser);

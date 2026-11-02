@@ -167,15 +167,27 @@ inventory::submit! {
     }
 }
 
-fn superuser_only(parts: &Parts, _: Option<&serde_json::Value>) -> bool {
-    crate::admin::session::is_superuser(parts)
-}
-
 // A shared row decides sign-in for every tenant.
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "add", superuser_only);
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "change", superuser_only);
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "delete", superuser_only);
-crate::register_admin_object_permission!("rustango_shared_sso_providers", "view", superuser_only);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "add",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "change",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "delete",
+    crate::object_permissions::superuser_only
+);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_shared_sso_providers",
+    "view",
+    crate::object_permissions::superuser_only
+);
 
 /// Enabled providers for this tenant's login page: the tenant's own
 /// [`SsoProvider`] rows merged with the registry-wide [`SharedSsoProvider`]
@@ -432,10 +444,13 @@ pub(super) async fn tenant_sso_begin(
             return login_error(routes, "config");
         }
     };
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return login_error(routes, "config");
+    };
     let (url, flow) = provider.begin();
     let sealed = seal_flow(
         &flow,
-        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        FlowScope::for_tenant(FlowPurpose::TenantAdmin, &tenant, slug),
         secret.key(),
     );
     let mut resp = Redirect::to(&url).into_response();
@@ -466,9 +481,12 @@ pub(super) async fn tenant_sso_callback(
     let Some(sealed) = flow_cookie(cookie_path).read(&parts.headers) else {
         return login_error(routes, "expired");
     };
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return login_error(routes, "config");
+    };
     let flow = match open_flow(
         sealed,
-        FlowScope::new(FlowPurpose::TenantAdmin, &org.slug, slug),
+        FlowScope::for_tenant(FlowPurpose::TenantAdmin, &tenant, slug),
         secret.key(),
     ) {
         Ok(f) => f,
@@ -562,7 +580,7 @@ pub(super) async fn tenant_sso_callback(
     let ttl = policy.session_ttl(route_ttl, user.is_superuser);
     let mut payload = TenantSessionPayload::new(
         uid,
-        &org.slug,
+        &tenant,
         ttl,
         super::session::PasswordFingerprint::of(secret, &user.password_hash),
     );

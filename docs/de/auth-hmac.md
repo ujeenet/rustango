@@ -161,7 +161,7 @@ umschreibt (Neukomprimierung, JSON-Neuserialisierung), bricht die Verifizierung.
 Der Tenant-Header und der Port werden standardmäßig nicht signiert, und der
 Layer kennt keinen Tenant. In einer App mit Tenant-Auflösung:
 
-- `.bind_tenants(tenant_of)` ordnet jeder Key-Id den Tenant-Slug zu, für den
+- `.bind_tenants(tenant_of)` ordnet jeder Key-Id den Tenant (`TenantSlug`: Slug und Org-Id) zu, für den
   sie handeln darf (ein `KeyTenantResolver`; `None` heißt, der Schlüssel darf
   für jeden Tenant handeln). Der Layer löst den Tenant der Anfrage über den
   eingehängten Tenant-Kontext auf und antwortet mit `403`, wenn er abweicht

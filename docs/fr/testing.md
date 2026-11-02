@@ -126,7 +126,7 @@ raccourci `GET`.
   puis envoie les champs. Le cookie de session reste dans le jar.
 - `client.logout(Some(path))` poste vers la route de déconnexion ;
   `logout(None)` vide seulement le jar.
-- Avec `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)` et
+- Avec `tenancy`, `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)` et
   `force_login_operator(&secret, &operator, ttl_secs)` mettent un cookie de
   session dans le jar sans le formulaire. La ligne doit être enregistrée.
 
@@ -225,9 +225,9 @@ couverture.
 
 | Variable | Suites | Ce dont elles ont besoin |
 |---|---:|---|
-| *(aucune)* | 228 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
-| `DATABASE_URL` | 183 | Un serveur PostgreSQL joignable. |
-| `MYSQL_TEST_URL` | 115 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
+| *(aucune)* | 229 | Rien — une SQLite en mémoire ou en fichier temporaire. Tournent toujours. |
+| `DATABASE_URL` | 186 | Un serveur PostgreSQL joignable. |
+| `MYSQL_TEST_URL` | 117 | Un serveur MySQL 8+ joignable. **Pas** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | Un Redis joignable. |
 
 Une suite qui lit deux variables est comptée sous les deux ; la colonne ne

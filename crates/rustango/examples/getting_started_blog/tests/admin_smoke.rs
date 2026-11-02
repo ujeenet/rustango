@@ -32,7 +32,7 @@ async fn signed_in() -> TestClient {
             .as_nanos()
     );
     let mut user = AdminUser::new_with_password(&name, "smoke-pass-123", true).unwrap();
-    user.insert_pool(&pool).await.unwrap();
+    user.insert(&pool).await.unwrap();
     let client = TestClient::new(admin_app(pool));
     let r = client
         .login(

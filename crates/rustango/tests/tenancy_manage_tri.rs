@@ -160,7 +160,7 @@ impl Env {
         slug: &str,
         opts: CreateTenantOpts,
     ) -> Result<Org, TenancyError> {
-        typed!(self.registry, p => create_tenant(&p, &self.url, dir, slug, opts).await)
+        typed!(self.registry, p => create_tenant(&p, &self.url, dir, slug, rustango::testkit::routed_opts(slug, opts)).await)
     }
 
     async fn create_if_missing(
@@ -169,7 +169,7 @@ impl Env {
         slug: &str,
         opts: CreateTenantOpts,
     ) -> Result<Org, TenancyError> {
-        typed!(self.registry, p => create_tenant_if_missing(&p, &self.url, dir, slug, opts).await)
+        typed!(self.registry, p => create_tenant_if_missing(&p, &self.url, dir, slug, rustango::testkit::routed_opts(slug, opts)).await)
     }
 
     /// Apply `dir` to `org` alone.
@@ -231,10 +231,10 @@ impl Env {
     }
 
     fn db_request(&self, slug: &str, url: &str) -> ProvisionRequest {
-        ProvisionRequest {
+        rustango::testkit::routed(ProvisionRequest {
             backend: Some(self.backend()),
             ..ProvisionRequest::database(slug, url)
-        }
+        })
     }
 
     async fn provision(
@@ -242,7 +242,7 @@ impl Env {
         request: &ProvisionRequest,
     ) -> Result<ProvisionOutcome, TenancyError> {
         let dir = self.dir("migrations");
-        typed!(self.registry, p => provision_tenant(&p, &self.url, &dir, request, None).await)
+        typed!(self.registry, p => provision_tenant(&p, &self.url, &dir, &rustango::testkit::routed(request.clone()), None).await)
     }
 
     async fn run(&self, dir: &Path, args: &[&str]) -> Result<(), TenancyError> {
@@ -250,7 +250,7 @@ impl Env {
     }
 
     async fn run_out(&self, dir: &Path, args: &[&str]) -> Result<String, TenancyError> {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let mut out = Vec::new();
         typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await)?;
         Ok(String::from_utf8_lossy(&out).into_owned())
@@ -258,7 +258,7 @@ impl Env {
 
     /// The verb's result and its output, also on an error.
     async fn run_both(&self, dir: &Path, args: &[&str]) -> (Result<(), TenancyError>, String) {
-        let args: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+        let args = rustango::testkit::routed_args(args);
         let mut out = Vec::new();
         let res = typed!(self.registry, p => rustango::tenancy::manage::run_with_writer(&p, &self.url, dir, args, &mut out).await);
         (res, String::from_utf8_lossy(&out).into_owned())
@@ -348,7 +348,7 @@ async fn create_tenant_if_missing_leaves_a_suspended_tenant(pool: &Pool) {
         active: false,
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let got = env
         .create_if_missing(
             &env.dir("migrations"),
@@ -375,7 +375,7 @@ async fn create_tenant_activates_after_migrating(pool: &Pool) {
 async fn create_tenant_migrates_only_the_new_tenant(pool: &Pool) {
     let mut env = Env::new(pool).await;
     let mut other = env.own_tenant("other").await;
-    other.save_pool(&env.registry).await.expect("other org");
+    other.save(&env.registry).await.expect("other org");
     let first = env.dir("first");
     migration(&first, "0000_first", "SELECT 1");
     env.migrate(&other, &first).await;
@@ -398,7 +398,7 @@ async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
         active: false,
         ..env.own_tenant("fp").await
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
     env.migrate(&org, &dir).await;
@@ -427,7 +427,7 @@ async fn downgrade_rolls_back_tenant_migrations(pool: &Pool) {
     let mut orgs = Vec::new();
     for tag in ["dga", "dgb"] {
         let mut org = env.own_tenant(tag).await;
-        org.save_pool(&env.registry).await.expect("insert org");
+        org.save(&env.registry).await.expect("insert org");
         env.migrate(&org, &dir).await;
         orgs.push(org);
     }
@@ -467,7 +467,7 @@ async fn downgrade_all_tenants_plans_to_a_target(pool: &Pool) {
     let mut orgs = Vec::new();
     for tag in ["dpa", "dpb"] {
         let mut org = env.own_tenant(tag).await;
-        org.save_pool(&env.registry).await.expect("insert org");
+        org.save(&env.registry).await.expect("insert org");
         env.migrate(&org, &dir).await;
         orgs.push(org);
     }
@@ -520,22 +520,22 @@ async fn tenant_migrate_sends_migrate_signals(pool: &Pool) {
     let _g = signals_lock().lock().await;
     let mut env = Env::new(pool).await;
     let mut org = env.own_tenant("sig").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     migration(&dir, "0001_sig", "SELECT 1");
 
     let seen: Arc<Mutex<Vec<(&'static str, Option<String>)>>> = Arc::default();
     let pre = {
         let seen = seen.clone();
-        sig::connect_pre_migrate_with_target(move |_, t| {
+        sig::connect_pre_migrate(move |t| {
             seen.lock().unwrap().push(("pre", t.tenant));
             async {}
         })
     };
     let post = {
         let seen = seen.clone();
-        sig::connect_post_migrate_with_target(move |ctx, t| {
-            if ctx.applied.iter().any(|m| m == "0001_sig") {
+        sig::connect_post_migrate(move |t| {
+            if t.applied.iter().any(|m| m == "0001_sig") {
                 seen.lock().unwrap().push(("post", t.tenant));
             }
             async {}
@@ -567,7 +567,7 @@ async fn forget_pending_refuses_an_unreadable_tenant(pool: &Pool) {
         database_url: Some(format!("sqlite://{}?mode=rwc", missing.display())),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
 
@@ -614,7 +614,7 @@ fn schema_opts(backend: BackendKind, schema: &str) -> CreateTenantOpts {
 fn schema_request(slug: &str, schema: &str, host: Option<String>) -> ProvisionRequest {
     ProvisionRequest {
         backend: Some(BackendKind::Postgres),
-        host_pattern: host,
+        host_pattern: host.or_else(|| Some(format!("{slug}.localhost"))),
         run_migrations: false,
         ..ProvisionRequest::new(
             slug,
@@ -704,7 +704,8 @@ async fn a_schema_named_after_a_role_is_refused(pool: &Pool) {
     }
 }
 
-/// A tenant that already lives in a role-named schema is named by `check --deploy`.
+/// A tenant that already lives in a role-named schema is named by `check --deploy`
+/// and its pools refuse to open.
 async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
     let env = Env::new(pool).await;
     if env.backend() != BackendKind::Postgres {
@@ -724,7 +725,7 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
         schema_name: Some(role[0].0.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let mut out = Vec::new();
     let args = vec!["check".to_owned(), "--deploy".to_owned()];
@@ -734,6 +735,12 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
         out.contains("`rolehome`") && out.contains("database role"),
         "{out}"
     );
+    // Its pools refuse to open, so migrating it fails.
+    let mut out = Vec::new();
+    let args = vec!["migrate-tenants".to_owned()];
+    let res = typed!(env.registry, p => rustango::tenancy::manage::run_with_writer(&p, &env.url, &dir, args, &mut out).await);
+    let all = format!("{res:?} {}", String::from_utf8_lossy(&out));
+    assert!(all.contains("is the name of a database role"), "{all}");
 }
 
 /// Run `create` while an uncommitted extra-host row holds `host`; commit it
@@ -750,7 +757,7 @@ where
         database_url: Some(env.url.clone()),
         ..rustango::testkit::org()
     };
-    owner.save_pool(&env.registry).await.expect("owner");
+    owner.save(&env.registry).await.expect("owner");
     let mut tx = rustango::sql::transaction_pool(&env.registry)
         .await
         .expect("begin");
@@ -1100,7 +1107,7 @@ async fn a_url_of_another_backend_is_refused(pool: &Pool) {
         database_url: Some(url.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let err = env
         .run(&dir, &["edit-tenant", "edited", "--database-url", &foreign])
@@ -1193,7 +1200,7 @@ async fn a_resolved_secret_is_never_echoed(pool: &Pool) {
         database_url: Some(env.unreachable_url()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let err = env
         .run(
             &dir,
@@ -1239,9 +1246,9 @@ async fn migrate_storage_checks_the_target_url(pool: &Pool) {
 }
 
 /// The registry under another host name passes the endpoint check; the
-/// connection check names it (a warning for now). SQLite: a hard link to
-/// the open registry does not even connect.
-async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
+/// connection check refuses it, at create and at edit. SQLite: a hard
+/// link to the open registry does not even connect.
+async fn the_registry_under_an_alias_is_refused(pool: &Pool) {
     let env = Env::new(pool).await;
     let alias = match env.backend() {
         BackendKind::Sqlite => return,
@@ -1257,24 +1264,13 @@ async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
         ..env.db_request("alias", &alias)
     };
     let dir = env.dir("migrations");
-    let (run, _) =
-        typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
+    let err = typed!(env.registry, p => rustango::tenancy::provision::provision_tenant_recorded(
         &p, &env.url, &dir, &request, None, None, None,
     )
     .await)
-        .expect("only warned in this release");
-    let events =
-        rustango::tenancy::provision_store::events_since(&env.registry, *run.id.get().unwrap(), 0)
-            .await
-            .unwrap();
-    assert!(
-        events
-            .iter()
-            .any(|e| e.message.contains("registry's own database")),
-        "{:?}",
-        events.iter().map(|e| &e.message).collect::<Vec<_>>()
-    );
-    // An edit to the alias is saved and says so.
+    .expect_err("the registry under an alias is refused");
+    assert!(err.to_string().contains("registry's own database"), "{err}");
+    // An edit to the alias is refused too.
     let mut other = Org {
         slug: "aliased".into(),
         display_name: "aliased".into(),
@@ -1282,12 +1278,12 @@ async fn the_registry_under_an_alias_is_flagged(pool: &Pool) {
         database_url: Some("unused".into()),
         ..rustango::testkit::org()
     };
-    other.save_pool(&env.registry).await.expect("insert org");
-    let out = env
+    other.save(&env.registry).await.expect("insert org");
+    let err = env
         .run_out(&dir, &["edit-tenant", "aliased", "--database-url", &alias])
         .await
-        .expect("only warned in this release");
-    assert!(out.contains("registry's own database"), "{out}");
+        .expect_err("refused");
+    assert!(err.to_string().contains("registry's own database"), "{err}");
 }
 
 /// `reseal-tenant-secrets` lists, then seals, a plain password URL.
@@ -1300,9 +1296,10 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
         display_name: "plain".into(),
         backend_kind: env.backend().as_str().into(),
         database_url: Some(url.clone()),
+        host_pattern: Some("plain.localhost".into()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let out = env
         .run_out(&dir, &["reseal-tenant-secrets"])
@@ -1377,7 +1374,7 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
         id: Auto::default(),
         ssn: Cast::new("123-45-6789".into()),
     };
-    patient.insert_pool(&tenant).await.expect("insert patient");
+    patient.insert(&tenant).await.expect("insert patient");
     let id = *patient.id.get().expect("pk");
     // More rows than one page, then one sealed under a key nobody has.
     let sealed = |key: &str, text: &str| {
@@ -1410,10 +1407,7 @@ async fn reseal_covers_sealed_casts(pool: &Pool) {
         name: "main".into(),
         token: Some(Cast::new("tok".into())),
     };
-    vault
-        .insert_pool(&env.registry)
-        .await
-        .expect("insert vault");
+    vault.insert(&env.registry).await.expect("insert vault");
 
     std::env::set_var("RUSTANGO_SECRET_KEY_PREVIOUS", OLD);
     std::env::set_var("RUSTANGO_SECRET_KEY", NEW);
@@ -1495,7 +1489,14 @@ async fn reseal_leaves_a_schema_mode_url_alone(pool: &Pool) {
         database_url: Some(url.into()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
+    // The tenant passes open its pool, which refuses a schema that was never migrated.
+    #[cfg(feature = "postgres")]
+    if let Pool::Postgres(pg) = &env.registry {
+        rustango::testkit::migrate_schema_tenant(&TenantPools::new(pg.clone()), &org, &env.url)
+            .await
+            .expect("migrate tenant");
+    }
     let dir = env.dir("migrations");
     let (res, out) = env
         .run_both(&dir, &["reseal-tenant-secrets", "--apply"])
@@ -1529,7 +1530,7 @@ async fn reseal_creates_no_missing_tenant_file(pool: &Pool) {
         database_url: Some(format!("sqlite://{}?mode=rwc", path.display())),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let (_, out) = env
         .run_both(&dir, &["reseal-tenant-secrets", "--apply"])
@@ -1554,7 +1555,7 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
         database_url: Some(sealed.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let out = env
         .run_out(&dir, &["reseal-tenant-secrets", "--apply"])
@@ -1595,12 +1596,12 @@ async fn check_names_tenants_behind_on_tenant_migrations(pool: &Pool) {
     let app = env.dir("proj/blog/migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
     let mut behind = env.own_tenant("ckb").await;
-    behind.save_pool(&env.registry).await.expect("insert org");
+    behind.save(&env.registry).await.expect("insert org");
     env.migrate(&behind, &dir).await;
     // Migrating the project's dir applies its app folders too.
     migration(&app, "0002_blog", "SELECT 1");
     let mut ahead = env.own_tenant("cka").await;
-    ahead.save_pool(&env.registry).await.expect("insert org");
+    ahead.save(&env.registry).await.expect("insert org");
     env.migrate(&ahead, &dir).await;
 
     let out = check_out(&env, &dir).await;
@@ -1647,7 +1648,7 @@ async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
         database_url: Some(url),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("proj/migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
     let started = std::time::Instant::now();
@@ -1667,7 +1668,7 @@ async fn check_names_tenants_behind_on_system_steps(pool: &Pool) {
     let dir = env.dir("proj/migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
     let mut org = env.own_tenant("cks").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     env.migrate(&org, &dir).await;
     let system = env.dir("proj/system/migrations");
     migration(&system, "0099_late_step", "SELECT 1");
@@ -1690,7 +1691,7 @@ async fn migrate_applies_app_folders(pool: &Pool) {
     migration(&app, "0002_blog", "SELECT 1");
     scoped_migration(&app, "0003_blog_registry", "SELECT 1", Registry);
     let mut org = env.own_tenant("mapp").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
 
     let out = env.run_out(&dir, &["migrate"]).await.expect("migrate");
     let applied = env.applied(&org).await;
@@ -1757,7 +1758,7 @@ async fn migrate_leaves_a_read_only_app_folder_alone(pool: &Pool) {
     migration(&dir, "0001_tenant", "SELECT 1");
     migration(&app, "0002_blog", "SELECT 1");
     let mut org = env.own_tenant("mro").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let read_only = std::fs::Permissions::from_mode(0o555);
     for d in [&app, &blog] {
         std::fs::set_permissions(d, read_only.clone()).unwrap();
@@ -1948,7 +1949,7 @@ async fn downgrade_covers_app_folders(pool: &Pool) {
     migration(&app, "0002_blog", "SELECT 1");
     migration(&app, "0003_blog", "SELECT 1");
     let mut org = env.own_tenant("dgapp").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     env.run(&dir, &["migrate"]).await.expect("migrate");
 
     let out = env.run_out(&dir, &["downgrade"]).await.expect("downgrade");
@@ -1991,7 +1992,7 @@ async fn downgrade_follows_apply_order(pool: &Pool) {
     migration(&app, "0002_blog", "SELECT 1");
     migration(&app, "0003_blog", "SELECT 1");
     let mut org = env.own_tenant("dgorder").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     env.run(&dir, &["migrate"]).await.expect("migrate");
     // Applied later, yet sorting before app files or the target.
     scoped_migration(&dir, "0005_registry", "SELECT 1", Registry);
@@ -2047,7 +2048,7 @@ async fn the_system_chain_runs_once_per_database(pool: &Pool) {
     migration(&env.dir("proj/blog/migrations"), "0002_blog", "SELECT 1");
     migration(&env.dir("proj/shop/migrations"), "0003_shop", "SELECT 1");
     let mut org = env.own_tenant("once").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
 
     let out = env.run_out(&dir, &["migrate"]).await.expect("migrate");
     let started = format!("] {}\n", org.slug);
@@ -2070,7 +2071,7 @@ async fn a_failing_app_folder_is_named(pool: &Pool) {
     migration(&dir, "0001_tenant", "SELECT 1");
     migration(&app, "0002_blog", BROKEN);
     let mut org = env.own_tenant("fail").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
 
     let (res, out) = env.run_both(&dir, &["migrate"]).await;
     assert!(res.is_err(), "{out}");
@@ -2144,7 +2145,7 @@ async fn check_keeps_no_tenant_pool_open(pool: &Pool) {
     let dir = env.dir("proj/migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
     let mut org = env.own_tenant("ckp").await;
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     env.migrate(&org, &dir).await;
     let held = typed!(env.registry, p => {
         let mut out = Vec::new();
@@ -2193,7 +2194,7 @@ async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
         backend_kind: env.backend().as_str().into(),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let err = env
         .run(&dir, &["edit-tenant", "schemy", "--database-url", &url])
         .await
@@ -2259,7 +2260,7 @@ tri_dialect_test! {
         provision_releases_its_schema_on_a_failed_insert,
         concurrent_creates_never_share_a_schema,
         a_duplicate_slug_leaves_no_run,
-        the_registry_under_an_alias_is_flagged,
+        the_registry_under_an_alias_is_refused,
         check_deploy_names_a_role_named_schema,
         check_names_tenants_behind_on_tenant_migrations,
         check_bounds_an_unreachable_tenant,

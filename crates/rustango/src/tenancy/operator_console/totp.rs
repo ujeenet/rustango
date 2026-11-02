@@ -27,7 +27,7 @@ use crate::totp::TotpSecret;
 
 const PENDING_COOKIE: &str = "rustango_op_totp";
 /// Domain tag: a pending cookie is never a valid MAC of a session.
-const TAG: &[u8] = b"rustango-op-totp-v1.";
+const TAG: &[u8] = b"rustango-op-totp-v1";
 /// `1`, `true`, `yes` or `on`: every operator needs a second factor.
 const REQUIRE_VAR: &str = "RUSTANGO_OPERATOR_REQUIRE_TOTP";
 const LOG: &str = "rustango::tenancy::operator_console";

@@ -244,11 +244,9 @@ impl Callbacks {
     /// `{ pattern, example?, example_tenant? }` for `slug`.
     fn view(&self, slug: &str) -> serde_json::Value {
         let path = callback_path(&self.login_url, slug);
-        let example = self.example.as_ref().map(|(org, host, apex)| {
-            (
-                org.slug.clone(),
-                tenant_link(org, &path, host.as_deref(), apex),
-            )
+        let example = self.example.as_ref().and_then(|(org, host, apex)| {
+            let link = tenant_link(org, &path, host.as_deref(), apex).ok()?;
+            Some((org.slug.clone(), link))
         });
         serde_json::json!({
             "pattern": format!("https://<tenant host>{path}"),
@@ -410,7 +408,7 @@ pub(super) async fn create(
         if matches!(exists, Ok(true)) {
             return Err(taken);
         }
-        match row.insert_pool(&state.registry).await {
+        match row.insert(&state.registry).await {
             Err(e) if e.is_unique_violation() => Err(taken),
             other => Ok(other),
         }
@@ -558,7 +556,7 @@ pub(super) async fn edit_submit(
             Some(&msg),
         );
     }
-    if let Err(e) = row.save_pool(&state.registry).await {
+    if let Err(e) = row.save(&state.registry).await {
         return server_error("update failed", &e);
     }
     let d = detail(&row, Some(!form.client_secret.is_empty()));
@@ -642,7 +640,7 @@ pub(super) async fn delete(
         Ok(None) => return (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
         Err(resp) => return resp,
     };
-    if let Err(e) = r.delete_pool(&state.registry).await {
+    if let Err(e) = r.delete(&state.registry).await {
         return server_error("delete failed", &e);
     }
     let mut detail = serde_json::Map::new();

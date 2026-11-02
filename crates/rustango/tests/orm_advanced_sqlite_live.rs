@@ -84,13 +84,13 @@ async fn seed_basic(pool: &Pool) -> (i64, i64) {
         id: Auto::default(),
         name: "Alice".to_owned(),
     };
-    alice.save_pool(pool).await.expect("save alice");
+    alice.save(pool).await.expect("save alice");
     let alice_id = alice.id.get().copied().unwrap();
     let mut bob = Author {
         id: Auto::default(),
         name: "Bob".to_owned(),
     };
-    bob.save_pool(pool).await.expect("save bob");
+    bob.save(pool).await.expect("save bob");
     let bob_id = bob.id.get().copied().unwrap();
     (alice_id, bob_id)
 }
@@ -103,7 +103,7 @@ async fn seed_posts(pool: &Pool, author_id: i64, titles: &[(&str, bool)]) {
             author: ForeignKey::from(author_id),
             published: *published,
         };
-        p.save_pool(pool).await.expect("save post");
+        p.save(pool).await.expect("save post");
     }
 }
 
@@ -342,7 +342,7 @@ async fn save_pool_updates_existing_row_on_sqlite() {
         .expect("row");
     row.published = true;
     row.title = "published".into();
-    row.save_pool(&pool).await.expect("save update");
+    row.save(&pool).await.expect("save update");
     let again: Post = Post::objects()
         .fetch(&pool)
         .await
@@ -372,7 +372,7 @@ async fn select_related_on_renamed_fk_column_loads_parent_on_sqlite() {
         id: Auto::default(),
         author: ForeignKey::from(alice),
     };
-    p.save_pool(&pool).await.expect("save rpost");
+    p.save(&pool).await.expect("save rpost");
     let rows: Vec<RenamedFkPost> = RenamedFkPost::objects()
         .select_related("author")
         .fetch(&pool)

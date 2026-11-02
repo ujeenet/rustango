@@ -54,7 +54,7 @@ async fn assert_num_queries_counts_single_select() {
             id: Auto::default(),
             title: format!("seed-{i}"),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
 
     assert_num_queries(1, async {
@@ -73,7 +73,7 @@ async fn assert_num_queries_counts_insert_then_select() {
             id: Auto::default(),
             title: "hello".into(),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
 
         let rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
         assert_eq!(rows.len(), 1);
@@ -90,7 +90,7 @@ async fn assert_num_queries_counts_update_delete() {
         id: Auto::default(),
         title: "before".into(),
     };
-    p.insert_pool(&pool).await.unwrap();
+    p.insert(&pool).await.unwrap();
     let id: i64 = *p.id.get().expect("PK assigned");
 
     assert_num_queries(2, async {
@@ -124,7 +124,7 @@ async fn outside_scope_bumps_are_silently_dropped() {
             id: Auto::default(),
             title: format!("untracked-{i}"),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
 
     // Now open a scope and run exactly 1 query — count must be 1, not 6.
@@ -146,7 +146,7 @@ async fn scope_take_resets_mid_block() {
                 id: Auto::default(),
                 title: format!("a-{i}"),
             };
-            p.insert_pool(&pool).await.unwrap();
+            p.insert(&pool).await.unwrap();
         }
         assert_eq!(QueryCounter::take(), 2);
 
@@ -169,7 +169,7 @@ async fn fails_loudly_when_count_diverges() {
             id: Auto::default(),
             title: "x".into(),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
         let _rows: Vec<Post> = Post::objects().fetch(&pool).await.unwrap();
     })
     .await;
@@ -201,7 +201,7 @@ async fn a_raw_read_is_counted() {
         id: Auto::default(),
         title: "raw".into(),
     };
-    p.insert_pool(&pool).await.unwrap();
+    p.insert(&pool).await.unwrap();
 
     assert_num_queries(1, async {
         let rows: Vec<(i64, String)> = rustango::sql::raw_query_pool(
@@ -228,7 +228,7 @@ async fn a_raw_read_per_row_is_visible_as_an_n_plus_1() {
             id: Auto::default(),
             title: format!("n-{i}"),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
 
     assert_num_queries(1, async {
@@ -258,7 +258,7 @@ async fn a_count_is_counted() {
         id: Auto::default(),
         title: "c".into(),
     };
-    p.insert_pool(&pool).await.unwrap();
+    p.insert(&pool).await.unwrap();
 
     assert_num_queries(2, async {
         assert_eq!(Post::objects().count(&pool).await.unwrap(), 1);
@@ -278,7 +278,7 @@ async fn a_paginated_fetch_is_counted_once() {
             id: Auto::default(),
             title: format!("p-{i}"),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
 
     assert_num_queries(1, async {
@@ -302,7 +302,7 @@ async fn an_aggregate_is_counted() {
             id: Auto::default(),
             title: format!("a-{i}"),
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
 
     assert_num_queries(2, async {
@@ -322,7 +322,7 @@ async fn a_plain_typed_read_is_counted() {
         id: Auto::default(),
         title: "plain".into(),
     };
-    p.insert_pool(&pool).await.unwrap();
+    p.insert(&pool).await.unwrap();
 
     assert_num_queries(1, async {
         let select = Post::objects().compile().unwrap();

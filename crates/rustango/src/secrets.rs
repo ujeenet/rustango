@@ -46,6 +46,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SecretsError {
     #[error("backend error: {0}")]
     Backend(String),

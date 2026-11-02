@@ -580,7 +580,7 @@ pub(crate) async fn insert_org(
 ) -> Result<(), super::TenancyError> {
     let keys = routing_keys(org);
     if keys.is_empty() {
-        org.insert_pool(registry).await?;
+        org.insert(registry).await?;
         return Ok(());
     }
     let tx = claim_routing(registry, &keys, Claimant::NewOrg(org))
@@ -691,7 +691,7 @@ pub async fn remove_host(registry: &Pool, org_slug: &str, hostname: &str) -> Res
     else {
         return Err(HostError::NotFound);
     };
-    row.delete_pool(registry).await?;
+    row.delete(registry).await?;
     super::invalidate_host_cache();
     Ok(())
 }
@@ -727,7 +727,7 @@ pub async fn set_host_enabled(
         return Err(HostError::NotFound);
     };
     row.enabled = enabled;
-    row.save_pool(registry).await?;
+    row.save(registry).await?;
     super::invalidate_host_cache();
     Ok(())
 }

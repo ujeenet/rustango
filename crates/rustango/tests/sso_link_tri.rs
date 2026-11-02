@@ -152,7 +152,7 @@ async fn provider(pool: &Pool, slug: &str, allow_email_link: bool) {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     };
-    p.insert_pool(pool).await.expect("insert provider");
+    p.insert(pool).await.expect("insert provider");
 }
 
 async fn user(pool: &Pool, name: &str, email: &str) -> i64 {
@@ -161,7 +161,7 @@ async fn user(pool: &Pool, name: &str, email: &str) -> i64 {
         email: Some(email.into()),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("insert user");
+    u.insert(pool).await.expect("insert user");
     u.id.get().copied().unwrap()
 }
 
@@ -298,7 +298,7 @@ async fn a_hand_made_link_gets_its_key(pool: &Pool) {
         provisioned: false,
         last_used_at: None,
     };
-    row.insert_pool(pool).await.unwrap();
+    row.insert(pool).await.unwrap();
     let ok = One(Some(Account::new(8, false, true)));
     let p = profile("sub-hand", "h@example.com");
     assert_eq!(sign_in(pool, &key, false, &p, &ok).await.unwrap(), 8);
@@ -530,7 +530,7 @@ async fn provider_changes_drop_links(pool: &Pool) {
         .unwrap()
         .remove(0);
     row.issuer_url = Some("https://other.example".into());
-    row.save_pool(pool).await.unwrap();
+    row.save(pool).await.unwrap();
     assert!(linked_user(pool, &key_of("one").await, "sub-x")
         .await
         .unwrap()
@@ -575,7 +575,7 @@ async fn a_table_without_the_flag_still_serves_logins(pool: &Pool) {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     };
-    p.insert_pool(pool).await.unwrap();
+    p.insert(pool).await.unwrap();
     assert_eq!(list_enabled(pool, "/login").await.len(), 1);
     let p = resolve_by_slug(pool, "old", "https://x/cb".into())
         .await
@@ -633,7 +633,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
         .unwrap()
         .remove(0);
     off.enabled = false;
-    off.save_pool(pool).await.unwrap();
+    off.save(pool).await.unwrap();
     let corp = resolve_by_slug(pool, "corp", String::new())
         .await
         .unwrap()
@@ -655,7 +655,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
         let mut root =
             rustango::admin::AdminUser::new_with_password(&format!("chk{n}"), "pw-123456789", true)
                 .unwrap();
-        root.insert_pool(pool).await.unwrap();
+        root.insert(pool).await.unwrap();
         let mut got = check::admin_providers(pool).await.unwrap();
         got.sort();
         assert_eq!(got, ["corp", "open"]);
@@ -710,7 +710,7 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
                 created_at: Auto::default(),
                 updated_at: Auto::default(),
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .unwrap();
         }
@@ -737,12 +737,12 @@ async fn check_finds_providers_that_refuse_every_user(pool: &Pool) {
         };
         // Sign-in matches the issuer exactly, so a case variant is no link (MySQL `_ci`).
         link("oidc|https://SHARED.example")
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .unwrap();
         assert_eq!(shared_stranded(pool, pool).await, ["off", "team"]);
         link("oidc|https://shared.example")
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .unwrap();
         assert_eq!(shared_stranded(pool, pool).await, ["off"]);
@@ -763,7 +763,7 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
             .unwrap()
             .remove(0);
         f(&mut p);
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     };
     for slug in [
         "safe", "linky", "staffy", "plain", "local", "loose", "lax", "preset", "off",
@@ -876,7 +876,7 @@ async fn check_warns_about_risky_settings(pool: &Pool) {
                 created_at: Auto::default(),
                 updated_at: Auto::default(),
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .unwrap();
         }

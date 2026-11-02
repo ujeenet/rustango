@@ -132,7 +132,6 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::email_jobs` | Deux files sur une table de jobs avec des mailers différents |
 | `rustango::error` | La cause d'une 5xx, que le corps de la réponse ne divulgue pas |
 | `rustango::errors` | Un template de page d'erreur dont le rendu a échoué, ou un répertoire de templates non chargé |
-| `rustango::forms` | Valeurs `DynamicForm` acceptées pour l'instant mais refusées dans une version future |
 | `rustango::auth` | Vérifications de permission échouées sur une erreur de base de données |
 | `rustango::auth_flows` | Liens d'authentification à usage unique refusés par le cache |
 | `rustango::aead` | Une clé secrète précédente vide, ou une clé de dev impossible à enregistrer |
@@ -145,13 +144,13 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::media::auth` | Refus d'autorisation du routeur média |
 | `rustango::messages` | Messages flash |
 | `rustango::migrate` | Exécuteur de migrations |
+| `rustango::object_permissions` | Limite de scan du hook `"view"` atteinte sur une liste |
 | `rustango::outbound` | Appels sortants vérifiés (SSO, Slack, webhooks) |
 | `rustango::passkey` | Défis passkey refusés par le cache |
 | `rustango::passwords` | Mise à niveau des hachages de mot de passe à la connexion |
 | `rustango::rate_limit` | Limitation de débit |
 | `rustango::request_timeout` | Délai par requête |
 | `rustango::scheduler` | Cron / tâches planifiées |
-| `rustango::security_headers` | Réglages des en-têtes de sécurité (HSTS) |
 | `rustango::server` | Démarrage et arrêt du serveur |
 | `rustango::shutdown` | Gestion des signaux et hooks d'arrêt |
 | `rustango::sql` | Exécution des requêtes |
@@ -397,6 +396,7 @@ AccessLogLayer::default()
     .slow_threshold_ms(250)      // ce qui compte comme lent
     .without_ip()                // omettre l'IP du client
     .use_real_ip(true)           // TrustedRealIp de RealIpLayer, jamais les en-têtes bruts
+    .skip_paths(["/health", "/ready"]) // aucune ligne pour les sondes ; segments entiers
 ```
 
 `RealIpLayer` doit s'exécuter avant le journal d'accès. Avec `server::Builder`,
@@ -409,8 +409,9 @@ donc. Les mots incluent `password`, `pass`, `pwd`, `token`, `jwt`, `secret`,
 `key`, `signature`, `auth`, `credential`, `cookie`, `session`, `otp`, plus les
 noms OAuth `code`, `state` et `assertion`. Étendez avec
 `.redact_additional("ref")`, ou remplacez toute la liste avec
-`.redact(vec![...])` ; `token`, `signature` et `code` restent masqués dans
-tous les cas. Le `url.query` du span de requête est masqué de la même façon.
+`.redact(vec![...])` ; les mots d'identifiants (`password`, `token`,
+`secret`, `api_key`, ...), `signature` et `code` restent masqués dans tous les cas,
+y compris dans une clé collée (`secretary` contient `secret`) ; une liste personnalisée ne l'annule pas. Le `url.query` du span de requête est masqué de la même façon.
 Cela ne couvre **que les chaînes de requête** ; pour
 le reste, voir
 [security.md](security.md#garder-les-secrets-hors-de-vos-journaux).

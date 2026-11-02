@@ -38,7 +38,7 @@ async fn seed_user(pool: &Pool, username: &str, plaintext_password: &str, active
         active,
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed user");
+    u.insert(pool).await.expect("seed user");
 }
 
 #[tokio::test]

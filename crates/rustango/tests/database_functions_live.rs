@@ -69,7 +69,7 @@ async fn lower_upper_length_update_round_trip() {
         name: "Mixed Case Name".into(),
         score: 0.0,
     };
-    row.insert(&pool).await.unwrap();
+    row.insert(&pool.clone().into()).await.unwrap();
     let id = row.id.get().copied().unwrap();
 
     // SET name = LOWER(name)
@@ -107,7 +107,7 @@ async fn concat_with_literal_separator_actually_concatenates() {
         name: "prefix".into(),
         score: 0.0,
     };
-    row.insert(&pool).await.unwrap();
+    row.insert(&pool.clone().into()).await.unwrap();
     let id = row.id.get().copied().unwrap();
 
     // SET name = CONCAT(name, '-suffix')

@@ -1,7 +1,7 @@
-//! Issue #361 — `register_admin_object_permission!` adds
+//! `register_object_permission!` adds
 //! per-row enforcement to the admin's `add` / `change` / `delete`
 //! / `view` write paths. Each registered hook is consulted at
-//! request time; a `false` return yields 403.
+//! request time; a `false` return yields 403, or 404 when `view` hides the row.
 
 #![cfg(all(feature = "sqlite", feature = "admin", feature = "tenancy"))]
 
@@ -25,8 +25,12 @@ pub struct OpPost {
 
 // Per-object hooks. The "owner_id == 42" rule deliberately denies
 // the seeded row (which has owner_id = 7) for every action.
+/// Owner 8 is visible but, like everyone but 42, may not change or delete.
 fn only_owner_42_view(_parts: &axum::http::request::Parts, row: Option<&Value>) -> bool {
-    row.and_then(|r| r.get("owner_id").and_then(Value::as_i64)) == Some(42)
+    matches!(
+        row.and_then(|r| r.get("owner_id").and_then(Value::as_i64)),
+        Some(42 | 8)
+    )
 }
 fn only_owner_42_change(_parts: &axum::http::request::Parts, row: Option<&Value>) -> bool {
     row.and_then(|r| r.get("owner_id").and_then(Value::as_i64)) == Some(42)
@@ -38,10 +42,10 @@ fn deny_add(_parts: &axum::http::request::Parts, _row: Option<&Value>) -> bool {
     false
 }
 
-rustango::register_admin_object_permission!("op_post", "view", only_owner_42_view);
-rustango::register_admin_object_permission!("op_post", "change", only_owner_42_change);
-rustango::register_admin_object_permission!("op_post", "delete", only_owner_42_delete);
-rustango::register_admin_object_permission!("op_post", "add", deny_add);
+rustango::register_object_permission!("op_post", "view", only_owner_42_view);
+rustango::register_object_permission!("op_post", "change", only_owner_42_change);
+rustango::register_object_permission!("op_post", "delete", only_owner_42_delete);
+rustango::register_object_permission!("op_post", "add", deny_add);
 
 fn build_app(pool: Pool) -> axum::Router {
     rustango::admin::Builder::new(pool).admin_prefix("").build()
@@ -62,7 +66,7 @@ async fn fresh_pool() -> Pool {
     .expect("create");
     rustango::sql::raw_execute_pool(
         &pool,
-        "INSERT INTO op_post (id, title, owner_id) VALUES (1, 'Hi', 7)",
+        "INSERT INTO op_post (id, title, owner_id) VALUES (1, 'Hi', 7), (2, 'Seen', 8)",
         Vec::new(),
     )
     .await
@@ -82,15 +86,23 @@ async fn status_of(method: Method, uri: &str, body: Body) -> StatusCode {
     resp.status()
 }
 
+/// A row the `view` hook hides is absent on every item page: a 403 would confirm it.
 #[tokio::test]
-async fn view_hook_blocks_detail_view_with_403() {
-    let status = status_of(Method::GET, "/op_post/1", Body::empty()).await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
+async fn view_hook_hides_item_pages_with_404() {
+    for (method, uri, body) in [
+        (Method::GET, "/op_post/1", ""),
+        (Method::GET, "/op_post/1/edit", ""),
+        (Method::POST, "/op_post/1", "title=Edited&owner_id=7"),
+        (Method::POST, "/op_post/1/delete", ""),
+    ] {
+        let status = status_of(method.clone(), uri, Body::from(body)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+    }
 }
 
 #[tokio::test]
 async fn change_hook_blocks_edit_form_with_403() {
-    let status = status_of(Method::GET, "/op_post/1/edit", Body::empty()).await;
+    let status = status_of(Method::GET, "/op_post/2/edit", Body::empty()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -98,8 +110,8 @@ async fn change_hook_blocks_edit_form_with_403() {
 async fn change_hook_blocks_update_submit_with_403() {
     let status = status_of(
         Method::POST,
-        "/op_post/1",
-        Body::from("title=Edited&owner_id=7"),
+        "/op_post/2",
+        Body::from("title=Edited&owner_id=8"),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -107,7 +119,7 @@ async fn change_hook_blocks_update_submit_with_403() {
 
 #[tokio::test]
 async fn delete_hook_blocks_delete_submit_with_403() {
-    let status = status_of(Method::POST, "/op_post/1/delete", Body::empty()).await;
+    let status = status_of(Method::POST, "/op_post/2/delete", Body::empty()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
@@ -146,13 +158,13 @@ pub struct OpBulk {
 fn owner_42(_parts: &axum::http::request::Parts, row: Option<&Value>) -> bool {
     row.and_then(|r| r.get("owner_id").and_then(Value::as_i64)) == Some(42)
 }
-rustango::register_admin_object_permission!("op_bulk", "delete", owner_42);
-rustango::register_admin_object_permission!("op_bulk", "change", owner_42);
+rustango::register_object_permission!("op_bulk", "delete", owner_42);
+rustango::register_object_permission!("op_bulk", "change", owner_42);
 
 fn deny(_parts: &axum::http::request::Parts, _row: Option<&Value>) -> bool {
     false
 }
-rustango::register_admin_object_permission!("op_bulk", "stamp_selected", deny);
+rustango::register_object_permission!("op_bulk", "stamp_selected", deny);
 
 /// Row 1 belongs to owner 42, row 2 to owner 7; both deleted when `deleted`.
 async fn bulk_pool(deleted: bool) -> Pool {
@@ -239,7 +251,7 @@ async fn restore_selected_refuses_when_a_row_hook_denies() {
 static TOUCHED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
 
 fn record<'a>(
-    _: &'a Pool,
+    _: &'a mut rustango::sql::PoolTx<'static>,
     pks: &'a [rustango::core::SqlValue],
 ) -> rustango::admin::AdminActionFuture<'a> {
     TOUCHED.lock().unwrap().extend_from_slice(pks);
@@ -249,8 +261,8 @@ fn record<'a>(
 async fn run_custom(pool: &Pool, form: &'static str) -> StatusCode {
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
-        .register_action("op_bulk", "touch_selected", record)
-        .register_action("op_bulk", "stamp_selected", record)
+        .register_tx_action("op_bulk", "touch_selected", record)
+        .register_tx_action("op_bulk", "stamp_selected", record)
         .build();
     let req = Request::builder()
         .method(Method::POST)
@@ -363,12 +375,12 @@ pub struct OpPurge {
     #[rustango(primary_key)]
     pub id: rustango::Auto<i64>,
 }
-rustango::register_admin_object_permission!("op_purge", "delete", deny);
+rustango::register_object_permission!("op_purge", "delete", deny);
 
 static PURGED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
 
 fn purge<'a>(
-    _: &'a Pool,
+    _: &'a mut rustango::sql::PoolTx<'static>,
     pks: &'a [rustango::core::SqlValue],
 ) -> rustango::admin::AdminActionFuture<'a> {
     PURGED.lock().unwrap().extend_from_slice(pks);
@@ -393,8 +405,8 @@ async fn run_purge(perms: Option<&[&str]>, form: &'static str) -> StatusCode {
         .expect("audit table");
     let mut b = rustango::admin::Builder::new(pool)
         .admin_prefix("")
-        .register_action_with_perm("op_purge", "purge_selected", ActionPerm::Delete, purge)
-        .register_action("op_purge", "tidy_selected", purge);
+        .register_tx_action_with_perm("op_purge", "purge_selected", ActionPerm::Delete, purge)
+        .register_tx_action("op_purge", "tidy_selected", purge);
     if let Some(p) = perms {
         b = b.with_user_perms(p.iter().map(|s| (*s).to_owned()));
     }

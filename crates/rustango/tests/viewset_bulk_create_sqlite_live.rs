@@ -43,7 +43,7 @@ async fn fresh_pool() -> Pool {
 }
 
 fn build_app(pool: Pool) -> axum::Router {
-    ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"]).router_pool("/widgets", pool)
+    ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"]).router("/widgets", pool)
 }
 
 async fn post_json(app: axum::Router, body: &str) -> (StatusCode, String) {
@@ -165,7 +165,7 @@ async fn bulk_over_the_row_cap_is_413() {
     let pool = fresh_pool().await;
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"])
         .max_bulk_create(2)
-        .router_pool("/widgets", pool.clone());
+        .router("/widgets", pool.clone());
     let three =
         r#"[{"label":"a","priority":1},{"label":"b","priority":2},{"label":"c","priority":3}]"#;
     let (status, body) = post_json(app.clone(), three).await;
@@ -194,7 +194,7 @@ async fn a_rejected_bulk_does_not_lock_the_client_out() {
     let pool = fresh_pool().await;
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label", "priority"])
         .throttle_all(4, 60)
-        .router_pool("/widgets", pool.clone());
+        .router("/widgets", pool.clone());
     let (status, body) = post_json(app.clone(), &bulk(5)).await;
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
     assert!(body.contains("create throttle of 4"), "{body}");

@@ -158,8 +158,8 @@ vérification.
 L'en-tête du tenant et le port ne sont pas signés par défaut, et la couche ne
 connaît aucun tenant. Sur une application résolue par tenant :
 
-- `.bind_tenants(tenant_of)` associe chaque identifiant de clé au slug du
-  tenant pour lequel il peut agir (un `KeyTenantResolver` ; `None` veut dire
+- `.bind_tenants(tenant_of)` associe chaque identifiant de clé au tenant
+  (`TenantSlug` : slug et id d'org) pour lequel il peut agir (un `KeyTenantResolver` ; `None` veut dire
   que la clé peut agir pour tout tenant). La couche résout le tenant de la
   requête avec le contexte de tenant monté et répond `403` quand il diffère, ou
   quand il n'y en a aucun. Cela s'exécute après la vérification de signature.

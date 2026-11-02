@@ -199,7 +199,7 @@ async fn edit_form_prefills_existing_row() {
         views: 5,
         is_published: false,
     }
-    .insert_pool(&pool)
+    .insert(&pool)
     .await
     .unwrap();
 
@@ -238,7 +238,7 @@ async fn update_submit_persists_change() {
         views: 0,
         is_published: false,
     }
-    .insert_pool(&pool)
+    .insert(&pool)
     .await
     .unwrap();
 
@@ -291,7 +291,7 @@ async fn delete_submit_removes_row() {
         views: 0,
         is_published: false,
     }
-    .insert_pool(&pool)
+    .insert(&pool)
     .await
     .unwrap();
 
@@ -338,7 +338,7 @@ async fn list_view_search_filters_results() {
             views: 0,
             is_published: false,
         }
-        .insert_pool(&pool)
+        .insert(&pool)
         .await
         .unwrap();
     }

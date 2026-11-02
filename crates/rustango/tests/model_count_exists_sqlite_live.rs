@@ -42,7 +42,7 @@ async fn count_returns_row_count() {
             id: Auto::default(),
             title: t.into(),
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     assert_eq!(Post::count(&pool).await.unwrap(), 3);
 }
@@ -60,6 +60,6 @@ async fn exists_returns_true_after_insert() {
         id: Auto::default(),
         title: "x".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     assert!(Post::exists(&pool).await.unwrap());
 }

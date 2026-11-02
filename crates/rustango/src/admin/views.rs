@@ -25,7 +25,7 @@ use super::object_permissions::AdminWrite;
 use super::queryset_hooks::{LinkedWrite, RowScope};
 use super::render;
 use super::templates::render_with_chrome;
-use super::urls::{ActionHandler, ActionPerm, AppState, CREATE_SEGMENT};
+use super::urls::{ActionPerm, AppState, CREATE_SEGMENT};
 
 /// Render a `data.<key>` cell: read a JSON column at the given key
 /// path and emit an HTML-escaped scalar.
@@ -739,7 +739,7 @@ pub(crate) async fn table_view(
                 .enumerate()
                 .map(|(idx, item)| {
                     let inner = match item {
-                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f.name) => {
+                        DisplayItem::Field(f) if is_secret_field(&admin_cfg, f) => {
                             render_secret_cell(row, f)
                         }
                         DisplayItem::Field(f) => {
@@ -987,7 +987,7 @@ async fn compute_facets(
         // A secret's facet would list its values.
         let Some(field) = model
             .field(filter_name)
-            .filter(|f| !is_secret_field(admin_cfg, f.name))
+            .filter(|f| !is_secret_field(admin_cfg, f))
         else {
             continue;
         };
@@ -1149,20 +1149,10 @@ async fn compute_facets(
     Ok(out)
 }
 
-/// The rows a "view" hook admits, as a filter SQL can apply.
-enum ViewHookRows {
-    /// No hook, or it denies nothing.
-    All,
-    /// The admitted rows, by PK.
-    Only(Filter),
-    /// Too many rows to scan: counts, facets and dates are withheld.
-    TooMany,
-}
+use crate::object_permissions::ViewHookRows;
 
-/// Run the table's "view" hook over every row matching `filters` and
-/// `search`, and fold the answer into one PK filter: the shorter of `IN`
-/// admitted or `NOT IN` denied. The hook takes the whole row, so all
-/// scalar columns are read.
+/// The table's "view" hook over every row matching `filters` and `search`,
+/// as one PK filter; see [`crate::object_permissions::view_hook_rows`].
 async fn view_hook_rows(
     state: &AppState,
     parts: &axum::http::request::Parts,
@@ -1170,75 +1160,19 @@ async fn view_hook_rows(
     filters: &[Filter],
     search: Option<&SearchClause>,
 ) -> Result<ViewHookRows, AdminError> {
-    if !crate::admin::object_permissions::has_hook(model.table, "view") {
-        return Ok(ViewHookRows::All);
-    }
-    let Some(pk_field) = model.primary_key() else {
-        return Ok(ViewHookRows::TooMany);
-    };
-    let cap = state.view_hook_scan_cap();
-    let fields: Vec<&'static FieldSchema> = model.scalar_fields().collect();
-    let rows = crate::sql::select_rows_as_json(
-        &state.pool,
-        &SelectQuery {
-            where_clause: WhereExpr::and_predicates(filters.to_vec()),
-            search: search.cloned(),
-            limit: Some(i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1)),
-            ..SelectQuery::new(model)
-        },
-        &fields,
-    )
-    .await?;
-    if rows.len() > cap {
-        warn_scan_cap(model.table, cap);
-        return Ok(ViewHookRows::TooMany);
-    }
-    let (mut admitted, mut denied) = (Vec::new(), Vec::new());
-    for row in &rows {
-        let pk = render::read_value_as_string_json(row, pk_field)
-            .and_then(|raw| forms::parse_pk_string(pk_field, &raw).ok());
-        let Some(pk) = pk else {
-            return Ok(ViewHookRows::TooMany);
-        };
-        if crate::admin::object_permissions::is_allowed(model.table, "view", parts, Some(row)) {
-            admitted.push(pk);
-        } else {
-            denied.push(pk);
-        }
-    }
-    let filter = |op, value| Filter {
-        column: pk_field.column,
-        op,
-        value,
-    };
-    Ok(if denied.is_empty() {
-        ViewHookRows::All
-    } else if admitted.is_empty() {
-        // A PK is never NULL: no row.
-        ViewHookRows::Only(filter(Op::IsNull, SqlValue::Bool(true)))
-    } else if denied.len() <= admitted.len() {
-        ViewHookRows::Only(filter(Op::NotIn, SqlValue::List(denied)))
-    } else {
-        ViewHookRows::Only(filter(Op::In, SqlValue::List(admitted)))
-    })
-}
-
-/// Log once per table that the scan cap hid its counts.
-fn warn_scan_cap(table: &'static str, cap: usize) {
-    static WARNED: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let mut warned = WARNED
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if !warned.contains(&table) {
-        warned.push(table);
-        tracing::warn!(
-            target: "rustango::admin",
-            table,
-            cap,
-            "the \"view\" hook matches more rows than the scan cap: total, facets and \
-             dates are hidden. Use register_admin_queryset! or raise view_hook_scan_cap"
-        );
-    }
+    let hooks = (parts, crate::object_permissions::Hooks::All);
+    let query = (WhereExpr::and_predicates(filters.to_vec()), search.cloned());
+    // The PK list shares the bind budget with the filters' own lists.
+    let budget = crate::list_params::in_values_budget(state.pool.dialect().max_bind_params());
+    let used: usize = filters
+        .iter()
+        .map(|f| match &f.value {
+            SqlValue::List(items) => items.len(),
+            _ => 1,
+        })
+        .sum();
+    let limits = (state.view_hook_scan_cap(), budget.saturating_sub(used));
+    Ok(crate::object_permissions::view_hook_rows(&state.pool, hooks, model, query, limits).await?)
 }
 
 /// One facet value: the stored key, its URL form, the FK display name and the count.
@@ -1891,14 +1825,9 @@ pub(crate) async fn detail_view(
         pk: pk_raw.clone(),
     })?;
 
-    // Object-level `has_view_permission(request, obj)`. If any
-    // registered `view` hook returns false, answer 403 before the
-    // detail HTML is rendered.
+    // A row the `view` hook hides reads as absent: a 403 would confirm it exists.
     if !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(&row)) {
-        return Err(AdminError::Forbidden {
-            table: model.table.to_owned(),
-            action: "view",
-        });
+        return Err(AdminError::RowNotFound { table, pk: pk_raw });
     }
 
     let fk_map = fk_map_for_rows(&state, &parts, model, std::slice::from_ref(&row)).await?;
@@ -1907,7 +1836,7 @@ pub(crate) async fn detail_view(
     let mut cells_ctx: Vec<serde_json::Value> = model
         .scalar_fields()
         .map(|f| {
-            let value = if is_secret_field(&detail_cfg, f.name) {
+            let value = if is_secret_field(&detail_cfg, f) {
                 render_secret_cell(&row, f)
             } else {
                 render_cell_json(&row, f, &fk_map, &state.config.admin_prefix)
@@ -2257,7 +2186,7 @@ pub(crate) async fn create_submit(
     #[cfg(feature = "tenancy")]
     let mut retry = claims.retries();
     let (mut tx, pk, deferred) = loop {
-        let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
+        let mut tx = match crate::sql::write_transaction(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
@@ -2535,8 +2464,10 @@ pub(crate) async fn edit_form(
         pk: pk_raw.clone(),
     })?;
 
-    // `has_change_permission(request, obj)` hook. Block the edit
-    // form before any inline panel loads.
+    // Hidden is a 404, then the `change` hook a 403, before any inline panel loads.
+    if !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(&row)) {
+        return Err(AdminError::RowNotFound { table, pk: pk_raw });
+    }
     if !crate::admin::object_permissions::is_allowed(model.table, "change", &parts, Some(&row)) {
         return Err(AdminError::Forbidden {
             table: model.table.to_owned(),
@@ -2674,8 +2605,11 @@ pub(crate) async fn update_submit(
         &pre_update_fields,
     )
     .await?;
-    // Missing, or outside the queryset hooks' scope.
-    if pre_update_row.is_none() {
+    // Missing, outside the queryset hooks' scope, or hidden by the `view` hook.
+    let hidden = |row: &serde_json::Value| {
+        !crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    };
+    if pre_update_row.as_ref().is_none_or(hidden) {
         return Err(AdminError::RowNotFound { table, pk: pk_raw });
     }
     if !crate::admin::object_permissions::is_allowed(
@@ -2703,7 +2637,7 @@ pub(crate) async fn update_submit(
     skip.extend(
         model
             .scalar_fields()
-            .filter(|f| is_secret_field(&admin_cfg, f.name))
+            .filter(|f| is_secret_field(&admin_cfg, f))
             .filter(|f| form.get(f.name).is_none_or(String::is_empty))
             .map(|f| f.name),
     );
@@ -2817,11 +2751,11 @@ pub(crate) async fn update_submit(
             .begin_holding(&state.pool, &pk_value, &inline_hosts)
             .await
         {
-            Ok(tx) => crate::audit::PoolBoundTx::opened_on(&state.pool, tx),
+            Ok(tx) => tx,
             Err(e) => return Ok(refused(claim_refusal(model, e)).await),
         };
         #[cfg(not(feature = "tenancy"))]
-        let mut tx = match crate::audit::PoolBoundTx::begin_write(&state.pool).await {
+        let mut tx = match crate::sql::write_transaction(&state.pool).await {
             Ok(tx) => tx,
             Err(e) => return Ok(refused(write_error(model, &e)).await),
         };
@@ -3010,7 +2944,7 @@ pub(super) async fn hidden_fk_refusal(
 
 /// A failed ROLLBACK must not replace the refusal with a 500; dropping
 /// the connection discards the tx anyway.
-async fn rollback_quietly(tx: crate::audit::PoolBoundTx<'_>, table: &str) {
+async fn rollback_quietly(tx: crate::sql::PoolTx<'static>, table: &str) {
     if let Err(e) = tx.rollback().await {
         tracing::warn!(target: "rustango::admin", error = %e, table, "admin edit rollback failed");
     }
@@ -3043,7 +2977,9 @@ pub(crate) async fn delete_submit(
         &delete_fields,
     )
     .await?;
-    let Some(before_row) = before_row else {
+    let Some(before_row) = before_row.filter(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    }) else {
         return Err(AdminError::RowNotFound { table, pk: pk_raw });
     };
 
@@ -3080,7 +3016,7 @@ pub(crate) async fn delete_submit(
     let emit = crate::audit::DiffEmit::for_model(model);
     #[cfg(feature = "sso")]
     let links = user_links(&state, model).await?;
-    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+    let mut tx = crate::sql::write_transaction(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,
@@ -3212,14 +3148,14 @@ fn refused_delete(
         );
         return Ok((axum::http::StatusCode::CONFLICT, Html(html)).into_response());
     }
-    let body =
-        crate::api_errors::ApiError::conflict(message.clone()).with_details(serde_json::json!({
+    Err(AdminError::Conflict {
+        message,
+        details: serde_json::json!({
             "table": model.table,
             "referenced_by": tables,
             "correlation_id": id,
-        }));
-    // The words let the error-pages layer dress it for htmx.
-    Ok((crate::errors::Message::new(message), body).into_response())
+        }),
+    })
 }
 
 /// Tables whose FK onto `table` refuses a parent delete.
@@ -3264,7 +3200,7 @@ pub(crate) async fn action_submit(
     // collapse the duplicate `_selected` keys into one, so read the
     // raw body into a `Vec` of pairs instead.
     let pairs: Vec<(String, String)> = serde_urlencoded::from_bytes(&body)
-        .map_err(|e| bad_action_form("body", "form", String::new(), e.to_string()))?;
+        .map_err(|e| AdminError::BadRequest(format!("unreadable action form: {e}")))?;
 
     // The bottom action bar posts `action_bottom` so it does not
     // clash with the top bar's empty default. The first non-empty
@@ -3307,12 +3243,10 @@ pub(crate) async fn action_submit(
     let admin_cfg = admin_config_or_default(model);
     if !admin_cfg.actions.iter().any(|a| *a == action) {
         // A client error (#2346): the allowlist is the model's own.
-        return Err(bad_action_form(
-            "action",
-            "action",
-            action,
-            format!("not an action of `{}`", model.name),
-        ));
+        return Err(AdminError::BadRequest(format!(
+            "`{action}` is not an action of `{}`",
+            model.name
+        )));
     }
     // Pick and permission-check the write before any row signal (#1928).
     let Some(write) = BulkWrite::plan(&state, model, &action)? else {
@@ -3352,6 +3286,11 @@ pub(crate) async fn action_submit(
     )
     .await?;
 
+    // A row the `view` hook hides is dropped like one outside the scope:
+    // acting on it, or refusing because of it, would confirm it exists.
+    before_rows.retain(|row| {
+        crate::admin::object_permissions::is_allowed(model.table, "view", &parts, Some(row))
+    });
     // Every action runs the per-row hooks, as the single-row pages do. One
     // refused row refuses the whole action.
     let (perm, named) = row_perms(&write, &action);
@@ -3401,30 +3340,23 @@ pub(crate) async fn action_submit(
     let builtin = match &write {
         BulkWrite::Custom(a) => {
             let entries = entries_for(&before_rows, &row_pks);
-            match &a.handler {
-                // A pool handler writes on its own connection, so its audit follows it.
-                ActionHandler::Pool(handler) => {
-                    handler(&state.pool, &pk_values).await?;
-                    super::audit::emit_many_best_effort(&state, &entries, &action).await;
+            // The handler writes in the action's transaction; an audited
+            // model's entries commit with it.
+            let emit = crate::audit::DiffEmit::for_model(model);
+            let mut tx = crate::sql::write_transaction(&state.pool).await?;
+            if let Err(e) = (a.handler)(&mut tx, &pk_values).await {
+                rollback_quietly(tx, model.table).await;
+                return Err(e);
+            }
+            if emit == crate::audit::DiffEmit::InTx {
+                if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
+                    rollback_quietly(tx, model.table).await;
+                    return Err(e.into());
                 }
-                ActionHandler::Tx(handler) => {
-                    let emit = crate::audit::DiffEmit::for_model(model);
-                    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
-                    if let Err(e) = handler(&mut tx, &pk_values).await {
-                        rollback_quietly(tx, model.table).await;
-                        return Err(e);
-                    }
-                    if emit == crate::audit::DiffEmit::InTx {
-                        if let Err(e) = crate::audit::emit_in_tx(&mut tx, &entries).await {
-                            rollback_quietly(tx, model.table).await;
-                            return Err(e.into());
-                        }
-                    }
-                    tx.commit().await.map_err(crate::sql::ExecError::from)?;
-                    if emit == crate::audit::DiffEmit::Deferred {
-                        super::audit::emit_many_best_effort(&state, &entries, &action).await;
-                    }
-                }
+            }
+            tx.commit().await.map_err(crate::sql::ExecError::from)?;
+            if emit == crate::audit::DiffEmit::Deferred {
+                super::audit::emit_many_best_effort(&state, &entries, &action).await;
             }
             send_row_signals(&state, model.table, &row_pks, is_delete, false).await;
             return back();
@@ -3444,7 +3376,7 @@ pub(crate) async fn action_submit(
         BuiltinWrite::HardDelete => user_links(&state, model).await?,
         BuiltinWrite::Mark(..) => None,
     };
-    let mut tx = crate::audit::PoolBoundTx::begin_write(&state.pool).await?;
+    let mut tx = crate::sql::write_transaction(&state.pool).await?;
     #[cfg(feature = "tenancy")]
     let operators = match crate::tenancy::operators::AdminOperatorWrite::lock(
         &mut tx,
@@ -3507,18 +3439,8 @@ pub(crate) async fn action_submit(
 fn operator_refusal(e: crate::tenancy::operators::OperatorError, pk: String) -> AdminError {
     match e {
         crate::tenancy::operators::OperatorError::Driver(e) => e.into(),
-        e => bad_action_form("active", "operator", pk, e.to_string()),
+        e => AdminError::BadRequest(format!("operator {pk}: {e}")),
     }
-}
-
-/// A malformed action POST: a 400, not a 500 (#2346).
-fn bad_action_form(field: &str, ty: &'static str, value: String, detail: String) -> AdminError {
-    AdminError::Form(forms::FormError::Parse {
-        field: field.to_owned(),
-        ty,
-        value,
-        detail,
-    })
 }
 
 /// The write a bulk action makes, chosen and permission-checked before
@@ -3554,7 +3476,7 @@ impl BulkWrite {
                 None => Err(AdminError::Internal(format!(
                     "action `{action}` is in `admin.actions` but no handler is registered \
                      on the admin builder; register it via \
-                     `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
+                     `admin::Builder::register_tx_action(\"{}\", \"{action}\", ...)` (built-ins: \
                      delete_selected, restore_selected)",
                     model.table
                 ))),

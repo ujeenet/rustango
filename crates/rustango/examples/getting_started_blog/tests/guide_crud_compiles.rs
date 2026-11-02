@@ -27,7 +27,7 @@ async fn guide_crud_step(pool: &Pool) -> Result<(), Box<dyn std::error::Error>> 
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save_pool(pool).await?;
+    p.save(pool).await?;
 
     // READ
     let posts = Post::objects().fetch(pool).await?;

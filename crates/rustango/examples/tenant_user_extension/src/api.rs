@@ -49,7 +49,7 @@ async fn lookup(
     }
     let rows: Vec<AppUser> = AppUser::objects()
         .where_(AppUser::username.eq(username.clone()))
-        .fetch_on(tenant.conn())
+        .fetch_on(tenant.conn().await.map_err(rustango::server_error)?)
         .await
         .map_err(rustango::server_error)?;
     rows.into_iter()

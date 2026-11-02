@@ -133,14 +133,14 @@ async fn list_view_renders_gfk_pair_as_single_clickable_cell() {
         id: Auto::Unset,
         title: "Post target".into(),
     };
-    post.save_pool(&p).await.unwrap();
+    post.save(&p).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     let mut article = Article {
         id: Auto::Unset,
         title: "Article target".into(),
     };
-    article.save_pool(&p).await.unwrap();
+    article.save(&p).await.unwrap();
     let article_pk = *article.id.get().unwrap();
 
     // Comment 1 → Post, Comment 2 → Article. Uses the typed setter
@@ -154,7 +154,7 @@ async fn list_view_renders_gfk_pair_as_single_clickable_cell() {
     c1.set_content_object_for::<Post>(&p, post_pk)
         .await
         .unwrap();
-    c1.save_pool(&p).await.unwrap();
+    c1.save(&p).await.unwrap();
 
     let mut c2 = Comment {
         id: Auto::Unset,
@@ -165,7 +165,7 @@ async fn list_view_renders_gfk_pair_as_single_clickable_cell() {
     c2.set_content_object_for::<Article>(&p, article_pk)
         .await
         .unwrap();
-    c2.save_pool(&p).await.unwrap();
+    c2.save(&p).await.unwrap();
 
     // GET the comment list view.
     let app = rustango::admin::router(pool.clone());
@@ -247,7 +247,7 @@ async fn list_view_falls_back_to_placeholder_on_stale_content_type() {
     let html = String::from_utf8(body.to_vec()).unwrap();
 
     // Stale CT renders as `(ct=N, pk=M)` placeholder, same shape as
-    // contenttypes::render_generic_fk_link's fallback.
+    // the admin GFK renderer's fallback.
     assert!(
         html.contains("(ct=999999, pk=42)"),
         "stale-CT fallback missing: {html}"
@@ -268,7 +268,7 @@ async fn seed_comment_on_post(p: &rustango::sql::Pool) -> (i64, i64) {
         id: Auto::Unset,
         title: "Post target".into(),
     };
-    post.save_pool(p).await.unwrap();
+    post.save(p).await.unwrap();
     let post_pk = *post.id.get().unwrap();
     let mut c = Comment {
         id: Auto::Unset,
@@ -277,7 +277,7 @@ async fn seed_comment_on_post(p: &rustango::sql::Pool) -> (i64, i64) {
         body: "comment on post".into(),
     };
     c.set_content_object_for::<Post>(p, post_pk).await.unwrap();
-    c.save_pool(p).await.unwrap();
+    c.save(p).await.unwrap();
     (*c.id.get().unwrap(), post_pk)
 }
 

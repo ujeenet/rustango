@@ -137,7 +137,7 @@ fn record_owner_read(_: &axum::http::request::Parts, row: Option<&serde_json::Va
     }
     true
 }
-rustango::register_admin_object_permission!("adminls_owner", "view", record_owner_read);
+rustango::register_object_permission!("adminls_owner", "view", record_owner_read);
 
 async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
     let s = Slugged {
@@ -146,7 +146,7 @@ async fn seed_slug(pool: &Pool, slug: &str, token: &str, rank: Option<i64>) {
         token: token.into(),
         rank,
     };
-    s.insert_pool(pool).await.expect("insert slug");
+    s.insert(pool).await.expect("insert slug");
 }
 
 /// No searchable column: only a number.
@@ -225,7 +225,7 @@ async fn seed_item(pool: &Pool, title: &str, flag: bool) -> Item {
         made_on: chrono::NaiveDate::from_ymd_opt(2024, 3, 9).unwrap(),
         deleted_at: None,
     };
-    item.insert_pool(pool).await.expect("insert");
+    item.insert(pool).await.expect("insert");
     item
 }
 
@@ -254,7 +254,7 @@ async fn equal_sort_keys_page_in_pk_order(pool: &Pool) {
     for t in ["row-b", "row-c", "row-d"] {
         seed(pool, t, false).await;
     }
-    first.save_pool(pool).await.expect("touch row one");
+    first.save(pool).await.expect("touch row one");
     let page1 = get(pool, "/adminls_item").await;
     assert!(
         page1.contains("row-a") && page1.contains("row-b"),
@@ -334,7 +334,7 @@ async fn facet_show_all_keeps_the_filter_state(pool: &Pool) {
     for rank in 0..17 {
         let mut item = seed_item(pool, &format!("it-{rank}"), true).await;
         item.rank = rank;
-        item.save_pool(pool).await.expect("set rank");
+        item.save(pool).await.expect("set rank");
     }
     let body = get(pool, "/adminls_item?flag=true&year=2024&count=skip&q=it").await;
     assert!(!body.contains("rank=16"), "not truncated: {body}");
@@ -498,7 +498,7 @@ async fn facet_and_date_counts_follow_the_filters(pool: &Pool) {
         let mut item = seed_item(pool, title, flag).await;
         item.rank = rank;
         item.made_on = chrono::NaiveDate::from_ymd_opt(y, 3, 9).unwrap();
-        item.save_pool(pool).await.expect("set row");
+        item.save(pool).await.expect("set row");
     }
     let body = get(pool, "/adminls_item?flag=true").await;
     let count_after = |link: &str| {
@@ -587,7 +587,7 @@ async fn reserved_name_facets_filter(pool: &Pool) {
             year,
             page,
         };
-        c.insert_pool(pool).await.expect("insert car");
+        c.insert(pool).await.expect("insert car");
     }
     let body = get(pool, "/adminls_car").await;
     for link in [
@@ -618,7 +618,7 @@ async fn empty_facet_lists_the_empty_rows(pool: &Pool) {
             name: name.into(),
             tag: tag.into(),
         };
-        t.insert_pool(pool).await.expect("insert tag");
+        t.insert(pool).await.expect("insert tag");
     }
     let body = get(pool, "/adminls_tag").await;
     assert!(body.contains("/adminls_tag?tag__isempty=1"), "{body}");
@@ -641,14 +641,14 @@ async fn facet_reads_only_the_values_it_shows(pool: &Pool) {
             id: Auto::default(),
             name: format!("owner-{i:02}"),
         };
-        o.insert_pool(pool).await.expect("insert owner");
+        o.insert(pool).await.expect("insert owner");
         let id = *o.id.get().expect("pk");
         let mut p = Pet {
             id: Auto::default(),
             name: format!("pet-{i:02}"),
             owner_id: id,
         };
-        p.insert_pool(pool).await.expect("insert pet");
+        p.insert(pool).await.expect("insert pet");
         owners.push(id);
     }
     // Equal counts tie-break by key, so the last owner is past the cut.
@@ -677,13 +677,13 @@ async fn fk_facet_past_the_cut_is_reachable(pool: &Pool) {
             id: Auto::default(),
             name: format!("owner-{i:02}"),
         };
-        o.insert_pool(pool).await.expect("insert owner");
+        o.insert(pool).await.expect("insert owner");
         let mut p = Pet {
             id: Auto::default(),
             name: format!("pet-{i:02}"),
             owner_id: *o.id.get().expect("pk"),
         };
-        p.insert_pool(pool).await.expect("insert pet");
+        p.insert(pool).await.expect("insert pet");
     }
     let body = get(pool, "/adminls_pet").await;
     assert!(!body.contains("owner-19"), "not truncated: {body}");
@@ -717,7 +717,7 @@ async fn noncanonical_active_value_is_listed_once(pool: &Pool) {
             id: Auto::default(),
             name: format!("owner-{i:02}"),
         };
-        o.insert_pool(pool).await.expect("insert owner");
+        o.insert(pool).await.expect("insert owner");
         let id = *o.id.get().expect("pk");
         first.get_or_insert(id);
         let mut p = Pet {
@@ -725,7 +725,7 @@ async fn noncanonical_active_value_is_listed_once(pool: &Pool) {
             name: format!("pet-{i:02}"),
             owner_id: id,
         };
-        p.insert_pool(pool).await.expect("insert pet");
+        p.insert(pool).await.expect("insert pet");
     }
     let first = first.unwrap();
     let canonical = get(pool, &format!("/adminls_pet?owner_id={first}")).await;
@@ -760,7 +760,7 @@ async fn autocomplete_without_search_columns_is_empty(pool: &Pool) {
         id: Auto::default(),
         qty: 7,
     };
-    c.insert_pool(pool).await.expect("insert");
+    c.insert(pool).await.expect("insert");
     let results = |body: String| {
         let json: serde_json::Value = serde_json::from_str(&body).expect("json");
         json["results"].as_array().expect("results").len()

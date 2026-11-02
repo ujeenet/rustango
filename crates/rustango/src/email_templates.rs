@@ -51,6 +51,7 @@ use tera::{Context, Tera};
 use crate::email::Email;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum EmailRenderError {
     #[error("template error: {0}")]
     Tera(String),

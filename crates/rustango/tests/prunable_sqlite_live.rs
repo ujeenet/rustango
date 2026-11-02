@@ -95,7 +95,7 @@ async fn seed(pool: &Pool) {
             label: label.into(),
             created_unix: t,
         };
-        e.save_pool(pool).await.unwrap();
+        e.save(pool).await.unwrap();
     }
     // 1 stale session + 2 alive
     for (token, e) in [("expired-1", 100), ("alive-1", 1000), ("alive-2", 5000)] {
@@ -104,7 +104,7 @@ async fn seed(pool: &Pool) {
             token: token.into(),
             expires_unix: e,
         };
-        s.save_pool(pool).await.unwrap();
+        s.save(pool).await.unwrap();
     }
 }
 

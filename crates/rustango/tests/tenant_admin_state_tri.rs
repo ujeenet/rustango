@@ -100,7 +100,7 @@ async fn tenant(pool: &Pool, session: bool) -> Tenant {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&db).await.expect("seed org");
+    org.insert(&db).await.expect("seed org");
     let admin = match &db {
         #[cfg(feature = "postgres")]
         Pool::Postgres(p) => wire(
@@ -178,7 +178,7 @@ impl Tenant {
             password_hash: rustango::tenancy::password::hash(PASSWORD).unwrap(),
             ..rustango::testkit::user()
         };
-        user.insert_pool(&self.db).await.expect("seed user");
+        user.insert(&self.db).await.expect("seed user");
         user
     }
 

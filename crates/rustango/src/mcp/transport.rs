@@ -135,7 +135,10 @@ async fn sse_in(
     // `auth::authenticate_bearer` for why this stream must not be
     // stricter than the endpoint next to it.
     let ip = crate::login_throttle::ClientIp::from_parts(&extensions, &headers);
-    let authed = super::auth::authenticate_bearer_until(&jwt, t.pool(), &t.org.slug, token, &ip);
+    let Some(tenant) = crate::tenancy::TenantSlug::of(&t.org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
+    let authed = super::auth::authenticate_bearer_until(&jwt, t.pool(), &tenant, token, &ip);
     let (agent, exp) = match authed.await {
         Ok(v) => v,
         Err(e) => return e.into_response(&headers, &extensions, &uri),
@@ -381,16 +384,28 @@ mod tests {
         let bearer = if raw_key {
             bot.token
         } else {
-            let Ok(minted) =
-                super::super::auth::mint_agent_jwt(&jwt, &pool, "acme", "bot", &bot.token, &ip)
-                    .await
+            let Ok(minted) = super::super::auth::mint_agent_jwt(
+                &jwt,
+                &pool,
+                &crate::tenancy::TenantSlug::new(1, "acme"),
+                "bot",
+                &bot.token,
+                &ip,
+            )
+            .await
             else {
                 panic!("mint");
             };
             minted.token
         };
-        let Ok((agent, exp)) =
-            super::super::auth::authenticate_bearer_until(&jwt, &pool, "acme", &bearer, &ip).await
+        let Ok((agent, exp)) = super::super::auth::authenticate_bearer_until(
+            &jwt,
+            &pool,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            &bearer,
+            &ip,
+        )
+        .await
         else {
             panic!("authenticate");
         };

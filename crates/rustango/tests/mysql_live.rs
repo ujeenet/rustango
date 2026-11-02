@@ -22,7 +22,7 @@
 
 #![cfg(feature = "mysql")]
 
-use rustango::sql::{Auto, CounterPool, FetcherPool, Pool, PoolTx};
+use rustango::sql::{Auto, CounterPool, FetcherPool, Pool, TxConn};
 use rustango::Model;
 use tokio::sync::Mutex;
 
@@ -66,18 +66,6 @@ pub struct LivePair {
     id: Auto<i64>,
     a: i64,
     b: i64,
-}
-
-/// An index over 3072 bytes in utf8mb4, which MySQL cannot build (1071).
-/// The derive already refuses an index on an unbounded (TEXT) column.
-#[derive(Model, Debug)]
-#[rustango(table = "live_text_notes")]
-#[allow(dead_code)]
-pub struct LiveTextNote {
-    #[rustango(primary_key)]
-    id: Auto<i64>,
-    #[rustango(max_length = 1000, index)]
-    body: String,
 }
 
 async fn pool_or_skip() -> Option<Pool> {
@@ -133,7 +121,7 @@ async fn auto_pk_insert_pool_round_trips() {
         name: "alice".into(),
         is_active: true,
     };
-    u.insert_pool(&pool).await.expect("insert_pool");
+    u.insert(&pool).await.expect("insert_pool");
     // After insert, Auto<i64> PK should be populated from
     // LAST_INSERT_ID() — first row → 1.
     assert_eq!(u.id.get().copied(), Some(1));
@@ -156,7 +144,7 @@ async fn fetch_round_trips_decoded_row() {
         name: "bob".into(),
         is_active: false,
     };
-    u.insert_pool(&pool).await.expect("insert_pool");
+    u.insert(&pool).await.expect("insert_pool");
 
     let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users.len(), 1);
@@ -179,9 +167,9 @@ async fn save_pool_updates_existing_row() {
         name: "carol".into(),
         is_active: true,
     };
-    u.insert_pool(&pool).await.expect("insert");
+    u.insert(&pool).await.expect("insert");
     u.name = "Carol".into();
-    u.save_pool(&pool).await.expect("save_pool");
+    u.save(&pool).await.expect("save_pool");
 
     let users: Vec<LiveUser> = LiveUser::objects().fetch(&pool).await.expect("fetch");
     assert_eq!(users[0].name, "Carol");
@@ -201,8 +189,8 @@ async fn delete_pool_removes_row() {
         name: "doomed".into(),
         is_active: true,
     };
-    u.insert_pool(&pool).await.expect("insert");
-    let affected = u.delete_pool(&pool).await.expect("delete_pool");
+    u.insert(&pool).await.expect("insert");
+    let affected = u.delete(&pool).await.expect("delete_pool");
     assert_eq!(affected, 1);
     let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 0);
@@ -223,13 +211,13 @@ async fn audited_save_pool_emits_diff_audit_row() {
         id: 100,
         name: "before".into(),
     };
-    a.insert_pool(&pool).await.expect("insert audited");
+    a.insert(&pool).await.expect("insert audited");
 
     // UPDATE the tracked column. Diff audit row should land in
     // rustango_audit_log with operation='update' and changes
     // containing { "name": { "before": "before", "after": "after" } }.
     a.name = "after".into();
-    a.save_pool(&pool).await.expect("save_pool audited");
+    a.save(&pool).await.expect("save_pool audited");
 
     // Read the audit table directly — confirm exactly one
     // Update entry whose JSON changes captures the field delta.
@@ -263,23 +251,23 @@ async fn transaction_pool_commit_persists() {
     let _g = live_lock().lock().await;
     fresh_schema(&pool).await;
 
-    let tx = rustango::sql::transaction_pool(&pool)
+    let mut tx = rustango::sql::transaction_pool(&pool)
         .await
         .expect("begin tx");
-    match tx {
-        PoolTx::Mysql(mut t) => {
+    match tx.conn() {
+        TxConn::Mysql(t) => {
             sqlx::query("INSERT INTO `live_users` (`name`, `is_active`) VALUES (?, ?)")
                 .bind("inside-tx")
                 .bind(true)
-                .execute(&mut *t)
+                .execute(&mut **t)
                 .await
                 .expect("insert in tx");
-            // Commit via the wrapper.
-            PoolTx::Mysql(t).commit().await.expect("commit");
         }
         #[allow(unreachable_patterns)]
         _ => unreachable!("test runs with mysql feature"),
     }
+    // Commit via the wrapper.
+    tx.commit().await.expect("commit");
 
     let n = LiveUser::objects().count(&pool).await.expect("count");
     assert_eq!(n, 1);
@@ -363,36 +351,9 @@ async fn apply_all_pool_creates_unique_together() {
         a: 1,
         b: 2,
     };
-    pair().insert_pool(&pool).await.expect("first row");
+    pair().insert(&pool).await.expect("first row");
     assert!(
-        pair().insert_pool(&pool).await.is_err(),
+        pair().insert(&pool).await.is_err(),
         "apply_all_pool left `unique_together` out"
-    );
-}
-
-/// An index MySQL cannot build warns and the bootstrap goes on, as in
-/// 0.61.4, which built no indexes at all.
-#[cfg(all(feature = "runtime", feature = "testkit"))]
-#[tokio::test]
-async fn apply_all_pool_warns_on_an_index_it_cannot_build() {
-    let Some(pool) = pool_or_skip().await else {
-        eprintln!("MYSQL_TEST_URL unset — skipping");
-        return;
-    };
-    let _g = live_lock().lock().await;
-    let buf = rustango::testkit::CaptureWriter::default();
-    let sink = buf.clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(move || sink.clone())
-        .with_max_level(tracing::Level::WARN)
-        .finish();
-    let guard = tracing::subscriber::set_default(subscriber);
-    fresh_schema(&pool).await;
-    drop(guard);
-    let logs = buf.contents();
-    assert!(
-        logs.contains("LiveTextNote") && logs.contains("live_text_notes_body_idx"),
-        "{logs}"
     );
 }

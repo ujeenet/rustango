@@ -20,7 +20,7 @@
 //!
 //! * **Schema mode** — the runner spins up an *ephemeral* PgPool
 //!   bound to the registry URL with an `after_connect` hook that
-//!   issues `SET search_path TO <schema>, public` on every fresh
+//!   issues `SET search_path TO <schema>, <extension schemas>, public` on every fresh
 //!   connection. The migration runner from `rustango-migrate` runs
 //!   unchanged against this pool; its ledger queries
 //!   (`__rustango_migrations__`) resolve to `<schema>.__rustango_migrations__`
@@ -984,7 +984,8 @@ async fn run_for_one_tenant(
     match mode {
         StorageMode::Schema => {
             let schema = org.effective_schema().to_owned();
-            let pool = build_schema_scoped_pool(registry_url, &schema).await?;
+            let timeout = pools.pool_config().database_pool_acquire_timeout;
+            let pool = build_schema_scoped_pool(registry_url, &schema, timeout).await?;
             // Framework tenant tables (rustango_users/roles/permissions/…)
             // come from the system-app migrations and MUST be applied
             // BEFORE the tenant's user migrations, which may FK into them
@@ -1010,9 +1011,9 @@ async fn run_for_one_tenant(
                         let observer = project_progress
                             .as_ref()
                             .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                        let pool = &pool;
+                        let pool = &dbpool;
                         each_dir(project, move |d| {
-                            crate::migrate::migrate_locked(held, pool, d, observer)
+                            crate::migrate::migrate_pool_locked(held, pool, d, observer)
                         })
                     },
                 )
@@ -1029,6 +1030,20 @@ async fn run_for_one_tenant(
                 warn_hidden_public_passkeys(&pools.registry_pool(), &org.slug, &schema).await;
             }
             let applied = run?;
+            // Checked after the run: a fresh tenant's tables only exist once it has migrated.
+            let check = super::pools::FallThrough::Refuse;
+            if let Err(e) = super::pools::probe_path(registry_url, &schema, check, timeout).await {
+                pool.close().await;
+                let e = match e {
+                    TenancyError::Validation(why) => why,
+                    other => other.to_string(),
+                };
+                return Err(TenancyError::Validation(format!(
+                    "tenant `{}`: {} migration(s) were applied, but its pool will not open: {e}",
+                    org.slug,
+                    applied.len()
+                )));
+            }
             // Data seeders (rows, not DDL — kept): CRUD permission
             // codenames for every registered model (#61) + the
             // content-type catalog (#89). Idempotent.
@@ -1064,9 +1079,9 @@ async fn run_for_one_tenant(
                     let observer = project_progress
                         .as_ref()
                         .map(|o| o as &dyn crate::migrate::MigrationObserver);
-                    let pool = tenant_pool.pool();
+                    let pool = &dbpool;
                     each_dir(project, move |d| {
-                        crate::migrate::migrate_locked(held, pool, d, observer)
+                        crate::migrate::migrate_pool_locked(held, pool, d, observer)
                     })
                 },
             )
@@ -1088,7 +1103,7 @@ async fn run_for_one_tenant(
 }
 
 /// Build a short-lived `PgPool` whose every connection has its
-/// `search_path` pre-set to `<schema>, public` via an
+/// `search_path` pre-set to the tenant's plus `public` via an
 /// `after_connect` hook. Used only for schema-mode migrations —
 /// runtime requests use the shared registry pool with per-checkout
 /// `SET`.
@@ -1101,23 +1116,28 @@ async fn run_for_one_tenant(
 async fn build_schema_scoped_pool(
     registry_url: &str,
     schema: &str,
+    acquire_timeout: std::time::Duration,
 ) -> Result<PgPool, TenancyError> {
     // Ensure the schema exists. Use a one-shot connection so we don't
     // pollute the migration pool's connections.
     let bootstrap = PgPool::connect(registry_url).await?;
-    let origin = ensure_schema(&bootstrap, schema).await;
+    let origin = ensure_schema(&bootstrap, schema, acquire_timeout).await;
     bootstrap.close().await;
     if origin? == SchemaOrigin::Foreign {
-        warn!(
-            target: "rustango::tenancy",
-            schema,
-            "the tenant's schema already holds tables but no rustango ledger, so another app \
-             may own it; migrating adopts it. Move the tenant to a schema of its own: a later \
-             release refuses this"
-        );
+        return Err(TenancyError::Validation(format!(
+            "schema `{schema}` already holds tables but no rustango ledger, so another app \
+             may own it; move the tenant to a schema of its own"
+        )));
     }
 
-    super::pools::connect_schema_scoped(registry_url, schema, 2).await
+    super::pools::connect_schema_scoped(
+        registry_url,
+        schema,
+        2,
+        super::pools::FallThrough::CheckAfterMigrate,
+        acquire_timeout,
+    )
+    .await
 }
 
 /// Where a tenant's schema came from, by [`ensure_schema`].
@@ -1134,17 +1154,14 @@ enum SchemaOrigin {
 /// `CREATE SCHEMA`, and on a clash, whether the existing one looks like
 /// the tenant's. Catalog SQL: schema mode is Postgres-only.
 #[cfg(feature = "postgres")]
-async fn ensure_schema(pg: &PgPool, schema: &str) -> Result<SchemaOrigin, sqlx::Error> {
+async fn ensure_schema(
+    pg: &PgPool,
+    schema: &str,
+    timeout: std::time::Duration,
+) -> Result<SchemaOrigin, TenancyError> {
     use crate::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
-    let create = format!("CREATE SCHEMA {}", crate::sql::quote_with(schema, '"'));
-    match rustango::sql::sqlx::query(&create).execute(pg).await {
-        Ok(_) => return Ok(SchemaOrigin::Created),
-        // duplicate_schema, or a concurrent create's unique_violation.
-        Err(sqlx::Error::Database(e))
-            if e.code().as_deref() == Some("42P06")
-                || (e.code().as_deref() == Some("23505")
-                    && e.constraint() == Some("pg_namespace_nspname_index")) => {}
-        Err(e) => return Err(e),
+    if super::pools::create_tenant_schema(pg, schema, timeout).await? {
+        return Ok(SchemaOrigin::Created);
     }
     let (tables, ledgers): (i64, i64) = rustango::sql::sqlx::query_as(
         "SELECT count(*), count(*) FILTER (WHERE c.relname IN ($2, $3)) \
@@ -1239,8 +1256,16 @@ mod schema_pool_tests {
         let pid = std::process::id();
         let (a, b) = (format!("scope \"a\" {pid}"), format!("scope_b_{pid}"));
         let registry = crate::sql::Pool::connect(&url).await.expect("registry");
-        let pa = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &a).await.expect("a"));
-        let pb = crate::sql::Pool::Postgres(build_schema_scoped_pool(&url, &b).await.expect("b"));
+        let pa = crate::sql::Pool::Postgres(
+            build_schema_scoped_pool(&url, &a, std::time::Duration::from_secs(30))
+                .await
+                .expect("a"),
+        );
+        let pb = crate::sql::Pool::Postgres(
+            build_schema_scoped_pool(&url, &b, std::time::Duration::from_secs(30))
+                .await
+                .expect("b"),
+        );
         let current: (String,) = sqlx::query_as("SELECT current_schema()::text")
             .fetch_one(pa.as_postgres().expect("pg"))
             .await
@@ -1279,19 +1304,46 @@ mod schema_pool_tests {
         let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE"))
             .execute(&pg)
             .await;
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Created);
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Created
+        );
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Kept
+        );
         sqlx::query(&format!("CREATE TABLE {q}.app_data (id INT)"))
             .execute(&pg)
             .await
             .unwrap();
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Foreign);
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Foreign
+        );
+        // Migrating into it is refused, not adopted.
+        let refused =
+            super::build_schema_scoped_pool(&url, &s, std::time::Duration::from_secs(30)).await;
+        assert!(
+            matches!(refused, Err(crate::tenancy::TenancyError::Validation(_))),
+            "{refused:?}"
+        );
         let ledger = crate::migrate::LEDGER_TABLE;
         sqlx::query(&format!("CREATE TABLE {q}.\"{ledger}\" (name TEXT)"))
             .execute(&pg)
             .await
             .unwrap();
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Kept
+        );
         let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
             .execute(&pg)
             .await;

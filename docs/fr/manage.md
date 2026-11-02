@@ -828,7 +828,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.61.16
+rustango 0.62.0
 ```
 
 ### `about`
@@ -841,7 +841,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.61.16
+  version:        0.62.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1196,8 +1196,9 @@ que quoi que ce soit ne change. Voir
 
 Avec plusieurs serveurs, désactivez d'abord (`drop-tenant`) et attendez 30 s.
 Un serveur dont le cache contient encore un tenant en mode schema garde
-`search_path = <schema>, public` ; une fois le schema supprimé, ses requêtes
-retombent sur `public` jusqu'au rafraîchissement du cache.
+son pool jusqu'au rafraîchissement du cache ; une fois le schema supprimé, ses
+requêtes échouent, ou lisent `public` quand une extension (citext, par exemple)
+garde `public` dans son `search_path`.
 
 ### `rotate-tenant-password <slug>`
 
@@ -1433,8 +1434,11 @@ cargo run -- create-api-key acme alice --label "ci-bot"
 Élague les anciennes entrées du journal d'audit (`rustango_audit_log`)
 pour l'empêcher de grossir indéfiniment. Réduisez par âge (`--days`) ou
 par nombre (`--keep-last`), et limitez éventuellement à un seul tenant.
+Sans aucun des deux drapeaux, il supprime les entrées plus anciennes que
+`[audit] retention_days`, et échoue si ce réglage est absent.
 
 ```bash
+cargo run -- audit-cleanup                                 # plus anciennes que [audit] retention_days
 cargo run -- audit-cleanup --days 90                       # delete > 90 days old
 cargo run -- audit-cleanup --keep-last 50                  # keep most recent 50 per row
 cargo run -- audit-cleanup --keep-last 50 --tenant acme    # scoped

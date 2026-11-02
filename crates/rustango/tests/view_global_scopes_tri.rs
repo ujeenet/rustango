@@ -137,7 +137,7 @@ async fn seed(pool: &Pool) -> (Vec<i64>, Vec<i64>) {
             tag: tag.into(),
             visible,
         };
-        row.insert_pool(pool).await.expect("seed row");
+        row.insert(pool).await.expect("seed row");
         let pk = *row.id.get().expect("pk");
         if visible {
             shown.push(pk)
@@ -181,11 +181,11 @@ fn app(pool: &Pool) -> axum::Router {
     ViewSet::for_model(Note::SCHEMA, &["id", "tag", "visible"])
         .filter_fields(&["tag"])
         .search_fields(&["tag"])
-        .router_pool("/api/notes", pool.clone())
+        .router("/api/notes", pool.clone())
         .merge(
             ViewSet::for_model(Note::SCHEMA, &["id", "tag", "visible"])
                 .cursor_pagination("id")
-                .router_pool("/api/cursor", pool.clone()),
+                .router("/api/cursor", pool.clone()),
         )
         .merge(
             ListView::for_model(Note::SCHEMA)
@@ -206,15 +206,15 @@ fn app(pool: &Pool) -> axum::Router {
         .merge(
             ViewSet::for_model(Owner::SCHEMA, &["id", "name", "visible"])
                 .search_fields(&["name"])
-                .router_pool("/api/owners", pool.clone()),
+                .router("/api/owners", pool.clone()),
         )
         .merge(
             ViewSet::for_model(Memo::SCHEMA, &["id", "tag", "deleted_at"])
-                .router_pool("/api/memos", pool.clone()),
+                .router("/api/memos", pool.clone()),
         )
         .merge(
             ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
-                .router_pool("/api/pets", pool.clone()),
+                .router("/api/pets", pool.clone()),
         )
         .merge(
             ViewSet::for_model(Pet::SCHEMA, &["id", "tag", "owner_id"])
@@ -228,7 +228,7 @@ fn app(pool: &Pool) -> axum::Router {
                         ))]
                     },
                 )
-                .router_pool("/api/ann-pets", pool.clone()),
+                .router("/api/ann-pets", pool.clone()),
         )
         .merge(
             ListView::for_model(Memo::SCHEMA)
@@ -254,8 +254,7 @@ fn app(pool: &Pool) -> axum::Router {
                 .router("/memos", t.clone(), pool.clone()),
         )
         .merge(
-            ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"])
-                .router_pool("/api/ranked", pool.clone()),
+            ViewSet::for_model(Ranked::SCHEMA, &["id", "rank"]).router("/api/ranked", pool.clone()),
         )
         .merge(
             DetailView::for_model(Note::SCHEMA)
@@ -570,7 +569,7 @@ async fn seed_owners(pool: &Pool) -> Vec<i64> {
             name: name.into(),
             visible,
         };
-        o.insert_pool(pool).await.expect("seed owner");
+        o.insert(pool).await.expect("seed owner");
         pks.push(*o.id.get().expect("pk"));
     }
     pks
@@ -584,7 +583,7 @@ async fn fk_display_skips_scoped_out_targets(pool: &Pool) {
             tag: tag.into(),
             owner_id: ForeignKey::unloaded(owner),
         };
-        p.insert_pool(pool).await.expect("seed pet");
+        p.insert(pool).await.expect("seed pet");
     }
     let (status, body) = get(pool, "/pets").await;
     assert_eq!(status, StatusCode::OK, "{body}");
@@ -655,14 +654,14 @@ async fn viewset_update_keeps_an_unchanged_hidden_fk(pool: &Pool) {
         name: "cid".into(),
         visible: false,
     };
-    cid.insert_pool(pool).await.expect("hidden owner");
+    cid.insert(pool).await.expect("hidden owner");
     let cid = *cid.id.get().expect("pk");
     let mut pet = Pet {
         id: Auto::default(),
         tag: "old".into(),
         owner_id: ForeignKey::unloaded(bob),
     };
-    pet.insert_pool(pool).await.expect("pet of a hidden owner");
+    pet.insert(pool).await.expect("pet of a hidden owner");
     let pk = *pet.id.get().expect("pk");
     let patch = |body: String| async move {
         send(pool, Method::PATCH, &format!("/api/pets/{pk}"), JSON, &body).await
@@ -717,7 +716,7 @@ async fn viewset_soft_deletes_and_hides_deleted_rows(pool: &Pool) {
             tag: tag.into(),
             deleted_at: None,
         };
-        m.insert_pool(pool).await.expect("seed memo");
+        m.insert(pool).await.expect("seed memo");
         pks.push(*m.id.get().expect("pk"));
     }
     let gone = format!("/api/memos/{}", pks[0]);
@@ -758,7 +757,7 @@ async fn seed_memos(pool: &Pool, tags: &[&str]) -> Vec<i64> {
             tag: (*tag).into(),
             deleted_at: None,
         };
-        m.insert_pool(pool).await.expect("seed memo");
+        m.insert(pool).await.expect("seed memo");
         pks.push(*m.id.get().expect("pk"));
     }
     pks
@@ -874,7 +873,7 @@ async fn viewset_lists_in_default_order(pool: &Pool) {
             id: Auto::Set(id),
             rank,
         };
-        r.insert_pool(pool).await.expect("seed ranked");
+        r.insert(pool).await.expect("seed ranked");
     }
     let (status, body) = get(pool, "/api/ranked").await;
     assert_eq!(status, StatusCode::OK, "{body}");

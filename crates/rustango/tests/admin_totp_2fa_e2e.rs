@@ -44,7 +44,7 @@ async fn seed() -> (Pool, TotpSecret) {
     // Two users: "alice" (2FA-enrolled, confirmed) and "bob" (no 2FA).
     for (name, su) in [("alice", true), ("bob", false)] {
         let mut u = AdminUser::new_with_password(name, "correct horse", su).unwrap();
-        u.insert_pool(&pool).await.unwrap();
+        u.insert(&pool).await.unwrap();
     }
     let alice_id = AdminUser::objects()
         .filter("username", "alice")
@@ -207,7 +207,7 @@ async fn the_enroll_page_is_never_cached() {
     let (pool, _secret) = seed().await;
     AdminUser::new_with_password("dave", "correct horse", true)
         .unwrap()
-        .insert_pool(&pool)
+        .insert(&pool)
         .await
         .unwrap();
     let app = router(pool.clone());
@@ -245,7 +245,7 @@ async fn the_enrollment_code_cannot_sign_in() {
     // A superuser without 2FA: only superusers reach the admin.
     AdminUser::new_with_password("carol", "correct horse", true)
         .unwrap()
-        .insert_pool(&pool)
+        .insert(&pool)
         .await
         .unwrap();
     let app = router(pool.clone());
@@ -313,7 +313,7 @@ async fn the_enrollment_code_cannot_sign_in() {
 /// lock is process-global.
 async fn enrolled_user(pool: &Pool, name: &str) -> (i64, TotpSecret) {
     let mut u = AdminUser::new_with_password(name, "correct horse", true).unwrap();
-    u.insert_pool(pool).await.unwrap();
+    u.insert(pool).await.unwrap();
     let id = *u.id.get().unwrap();
     let secret = TotpSecret::generate();
     totp_store::start_enrollment(pool, id, &secret)
@@ -612,7 +612,7 @@ async fn fresh_install_login_works_without_the_enroll_page() {
     .await
     .expect("migrate");
     let mut u = AdminUser::new_with_password("dora", "correct horse", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let id = *u.id.get().unwrap();
 
     let app = router(pool.clone());
@@ -652,7 +652,7 @@ async fn wrong_codes_at_login_and_enroll_are_audited() {
     assert_eq!(failed_rows(&pool, id).await, 1, "login");
 
     let mut gina = AdminUser::new_with_password("gina1715", "correct horse", true).unwrap();
-    gina.insert_pool(&pool).await.unwrap();
+    gina.insert(&pool).await.unwrap();
     let gina_id = *gina.id.get().unwrap();
     let session = session_cookie(&app, &csrf, "gina1715", "").await;
     let cookies = format!("rustango_csrf={csrf}; {session}");

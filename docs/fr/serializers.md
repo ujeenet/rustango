@@ -110,7 +110,7 @@ fixes ; une méthode inhérente du même nom ne change que les appels directs, p
 ce qu'exécute un ViewSet.
 
 Il n'y a délibérément **aucun** `create` / `update` / `save` sur le trait — les
-écritures passent par l'ORM (`model.save_pool(&pool)`). Quand un serializer est câblé
+écritures passent par l'ORM (`model.save(&pool)`). Quand un serializer est câblé
 dans un [ViewSet](viewsets.md), le chemin create/update utilise
 `from_writable_json()` + `validate()` + `writable_source_fields()` pour valider et
 filtrer la requête avant l'enregistrement.
@@ -153,7 +153,7 @@ n'est pas accessible en écriture, on le renseigne donc à la main après
 > **`write_only` ne transforme pas la valeur.** Un champ `write_only` est accepté
 > en écriture et persisté **tel quel** — le serializer ne le hache ni ne le
 > chiffre jamais. Pour un mot de passe, le hacher soi-même (voir
-> [Mots de passe](auth-passwords.md)) avant `save_pool()` ; les champs `read_only`, à
+> [Mots de passe](auth-passwords.md)) avant `save()` ; les champs `read_only`, à
 > l'inverse, sont silencieusement ignorés à l'écriture plutôt que rejetés.
 
 ---
@@ -237,7 +237,7 @@ pub struct PostWithTags {
 }
 
 // usage
-let tag_ids = post.tags_m2m().all(&pool).await?;   // ids, not rows
+let tag_ids: Vec<i64> = post.tags_m2m().all(&pool).await?;   // ids, not rows
 let tags = Tag::find_many(tag_ids, &pool).await?;
 let mut s = PostWithTags::from_model(&post);
 s.set_tags(&tags);                       // generated setter, named set_<field>
@@ -478,7 +478,7 @@ let body = PostSerializer::from_model(&post).to_value();   // shaped JSON
 
 Hors d'un ViewSet, le serializer dérive `serde::Deserialize`, on peut donc parser
 un corps de requête vers lui, exécuter `.validate()`, et — en cas de succès —
-mettre les données en correspondance avec un modèle et `save_pool(&pool)`.
+mettre les données en correspondance avec un modèle et `save(&pool)`.
 `from_writable_json()` construit une instance à partir des seules clés accessibles
 en écriture (les champs read-only / calculés prennent leur valeur par défaut), et
 `writable_fields()` / `writable_source_fields()` indiquent quelles clés sont

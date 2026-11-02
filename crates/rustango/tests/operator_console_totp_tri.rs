@@ -80,7 +80,7 @@ async fn operator(pool: &Pool) -> Operator {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(pool).await.expect("seed operator");
+    op.insert(pool).await.expect("seed operator");
     op
 }
 

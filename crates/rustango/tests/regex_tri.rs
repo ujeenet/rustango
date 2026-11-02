@@ -49,7 +49,7 @@ async fn seeded(pool: &Pool) {
             id: Auto::default(),
             name: name.into(),
         };
-        u.insert_pool(pool).await.expect("seed row");
+        u.insert(pool).await.expect("seed row");
     }
 }
 

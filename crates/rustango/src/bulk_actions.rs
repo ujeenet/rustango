@@ -21,6 +21,7 @@ use crate::core::{
 use crate::sql::Pool;
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum BulkActionError {
     #[error("unknown action: {0}")]
     UnknownAction(String),

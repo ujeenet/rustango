@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.61"                                        # Postgres (the default backend)
+//! rustango = "0.62"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.61", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.61", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.62", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.62", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -437,6 +437,10 @@ pub mod soft_delete;
 #[cfg(feature = "admin")]
 pub mod admin;
 
+/// Per-row permission hooks and queryset scopes, run by the admin and ViewSets.
+#[cfg(feature = "admin")]
+pub mod object_permissions;
+
 #[cfg(feature = "config")]
 pub mod config;
 
@@ -539,8 +543,13 @@ pub mod jsonapi;
     feature = "csrf",
     feature = "totp",
     feature = "tenancy",
+    feature = "passkey",
 ))]
 pub(crate) mod crypto;
+
+/// The one codec for signed, expiring cookies and tokens (`SealedToken`).
+#[cfg(any(feature = "csrf", feature = "passkey", feature = "oauth2"))]
+pub mod sealed;
 
 /// AEAD sealing shared by `EncryptedString` and sealed tenant secrets.
 #[cfg(feature = "_aead")]
@@ -556,8 +565,7 @@ pub mod casts;
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
 
-/// Word-based secret-key matcher for log and audit redaction.
-#[cfg(any(feature = "mcp", feature = "_http_layers"))]
+/// The credential word list, and its matcher for log and audit redaction.
 pub(crate) mod secret_keys;
 
 /// URL / IRI / URI helpers — `url_encode`, `uri_to_iri`, `iri_to_uri`,
@@ -1429,6 +1437,50 @@ pub use axum as __axum;
 /// pub struct Note {
 ///     #[rgo(primary_key)]
 ///     pub id: rustango::Auto<i64>,
+/// }
+/// # fn main() {}
+/// ```
+///
+/// A `reverse_has` / `generic_has` `self_pk_column` names a column of the model:
+///
+/// ```
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post", reverse_has(name = "notes", child = "PostNote",
+///     child_fk_column = "post_slug", self_pk_column = "slug"))]
+/// pub struct Post {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50, unique)]
+///     pub slug: String,
+/// }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post_note")]
+/// pub struct PostNote {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50)]
+///     pub post_slug: String,
+/// }
+/// # fn main() {}
+/// ```
+///
+/// ```compile_fail
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post", reverse_has(name = "notes", child = "PostNote",
+///     child_fk_column = "post_slug", self_pk_column = "slgu"))]
+/// pub struct Post {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50, unique)]
+///     pub slug: String,
+/// }
+/// #[derive(rustango::Model)]
+/// #[rustango(table = "doc_post_note")]
+/// pub struct PostNote {
+///     #[rustango(primary_key)]
+///     pub id: rustango::Auto<i64>,
+///     #[rustango(max_length = 50)]
+///     pub post_slug: String,
 /// }
 /// # fn main() {}
 /// ```

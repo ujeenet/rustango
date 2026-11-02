@@ -42,7 +42,7 @@ pub struct Agent {
     #[rustango(max_length = 16, unique)]
     pub secret_prefix: String,
     /// argon2id hash of the 32-char secret half. Never returned.
-    #[rustango(max_length = 255)]
+    #[rustango(secret, max_length = 255)]
     pub secret_hash: String,
     /// Soft-disable — `false` rejects auth without dropping the row.
     pub active: bool,
@@ -80,7 +80,11 @@ impl Agent {
 // An agent is minted by `create_agent_pool`, which shows the secret once;
 // an admin form could only store a row nobody can use (#1763).
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_agents", "add", |_, _| false);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_agents",
+    "add",
+    |_, _| false
+);
 // The owner decides who the credential signs in as (#2520).
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(Agent, Add, [user_id]);
@@ -100,6 +104,7 @@ pub struct AgentSecret {
 
 /// Errors from the agent operations.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AgentError {
     #[error("agent `{0}` already exists in this tenant")]
     Duplicate(String),
@@ -169,7 +174,7 @@ pub async fn create_agent_pool(pool: &Pool, name: &str) -> Result<AgentSecret, A
         user_id: None,
         data: serde_json::json!({}),
     };
-    agent.insert_pool(pool).await?;
+    agent.insert(pool).await?;
     Ok(AgentSecret { agent, token })
 }
 
@@ -418,7 +423,7 @@ pub async fn create_skill_pool(
         instructions: instructions.to_owned(),
         data: serde_json::json!({}),
     };
-    skill.insert_pool(pool).await?;
+    skill.insert(pool).await?;
     let skill_id = skill.id.get().copied().unwrap_or_default();
 
     for tool in tools {
@@ -427,7 +432,7 @@ pub async fn create_skill_pool(
             skill_id,
             tool_name: tool.clone(),
         };
-        row.insert_pool(pool).await?;
+        row.insert(pool).await?;
     }
     Ok(skill)
 }
@@ -538,7 +543,7 @@ pub async fn revoke_skill_pool(
         pin_user_key(pool, agent_id).await?;
     }
     for grant in grants {
-        grant.delete_pool(pool).await?;
+        grant.delete(pool).await?;
     }
     if had_grant {
         notify_grants_changed(slug, agent_id);
@@ -779,7 +784,7 @@ pub async fn unmap_skill_from_permission_pool(
         .fetch(pool)
         .await?;
     for row in rows {
-        row.delete_pool(pool).await?;
+        row.delete(pool).await?;
     }
     Ok(())
 }
@@ -1012,7 +1017,7 @@ pub async fn create_user_key_pool(
             "scoped": !skill_ids.is_empty(),
         }),
     };
-    agent.insert_pool(pool).await?;
+    agent.insert(pool).await?;
     let agent_id = agent.id.get().copied().unwrap_or_default();
 
     // Pin the scoped skills as grants (the per-key scope).
@@ -1023,7 +1028,7 @@ pub async fn create_user_key_pool(
             skill_id: sid,
             data: serde_json::json!({}),
         };
-        grant.insert_pool(pool).await?;
+        grant.insert(pool).await?;
     }
     Ok(AgentSecret { agent, token })
 }
@@ -1071,9 +1076,9 @@ pub async fn revoke_user_key_pool(
         .fetch(pool)
         .await?;
     for g in grants {
-        g.delete_pool(pool).await?;
+        g.delete(pool).await?;
     }
-    agent.delete_pool(pool).await?;
+    agent.delete(pool).await?;
     Ok(())
 }
 
@@ -1101,9 +1106,9 @@ pub async fn delete_user_keys_pool(pool: &Pool, user_id: i64) -> Result<(), Agen
             .fetch(pool)
             .await?;
         for g in grants {
-            g.delete_pool(pool).await?;
+            g.delete(pool).await?;
         }
-        agent.delete_pool(pool).await?;
+        agent.delete(pool).await?;
     }
     Ok(())
 }
@@ -1309,7 +1314,7 @@ pub async fn add_skill_resource_pool(
         mime: mime.to_owned(),
         data: serde_json::json!({ "text": body }),
     };
-    res.insert_pool(pool).await?;
+    res.insert(pool).await?;
     Ok(res)
 }
 

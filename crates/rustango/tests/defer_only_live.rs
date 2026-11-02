@@ -65,7 +65,7 @@ async fn fresh_pool() -> Option<Pool> {
             body: body.into(),
             view_count: vc,
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
     Some(pool)
 }

@@ -120,7 +120,7 @@ async fn create_post(
         published: input.published,
         created_at: Auto::Unset,
     };
-    p.insert_pool(&pool)
+    p.insert(&pool)
         .await
         .map_err(rustango::server_error)?;
 

@@ -648,9 +648,9 @@ pub(crate) async fn select_rows_as_json_tx(
 ) -> Result<Vec<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = tx.dialect().compile_select(query)?;
-    match tx {
+    match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::PoolTx::Postgres(t) => {
+        crate::sql::TxConn::Postgres(t) => {
             let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
             for v in stmt.params {
                 q = bind_query(q, v);
@@ -666,7 +666,7 @@ pub(crate) async fn select_rows_as_json_tx(
                 .collect())
         }
         #[cfg(feature = "mysql")]
-        crate::sql::PoolTx::Mysql(t) => {
+        crate::sql::TxConn::Mysql(t) => {
             let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                 sqlx::query(&stmt.sql);
             for v in stmt.params {
@@ -683,7 +683,7 @@ pub(crate) async fn select_rows_as_json_tx(
                 .collect())
         }
         #[cfg(feature = "sqlite")]
-        crate::sql::PoolTx::Sqlite(t) => {
+        crate::sql::TxConn::Sqlite(t) => {
             let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(&stmt.sql);
             for v in stmt.params {

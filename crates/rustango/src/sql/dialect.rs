@@ -476,6 +476,20 @@ pub trait Dialect: Send + Sync {
         None
     }
 
+    /// Query for the FKs on one table, binding `(table)`: one `(name, column,
+    /// referenced table)` row per key column, by name then key order. A table
+    /// rename keeps the names, so drops match on these. `None` where FKs drop
+    /// by rebuild.
+    fn foreign_key_columns_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Whether [`Self::drop_foreign_key_sql`] passes over a missing FK
+    /// (`IF EXISTS`) rather than failing.
+    fn drops_missing_foreign_key(&self) -> bool {
+        false
+    }
+
     /// Query for an index's first column when no other index starts with it,
     /// binding `(table, index)`, where an FK refuses to lose the only index
     /// it can use (MySQL, 1553; #2244).
@@ -531,6 +545,35 @@ pub trait Dialect: Send + Sync {
                     .map(|t| format!("DELETE FROM {}", self.quote_ident(t))),
             )
             .collect()
+    }
+
+    /// Query for the tables with an FK to one table, binding `(table)`, for a
+    /// cascading truncate. `None` where `TRUNCATE … CASCADE` finds them (PG).
+    fn referencing_tables_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT DISTINCT m.name FROM sqlite_master m, pragma_foreign_key_list(m.name) f \
+             WHERE m.type = 'table' AND f.\"table\" = ? COLLATE NOCASE",
+        )
+    }
+
+    /// Statements that truncate `table`. `Plain` is a `DELETE`, so each FK's
+    /// `ON DELETE` applies; `Cascade` also empties `referencing`, in any order.
+    fn truncate_sql(
+        &self,
+        table: &str,
+        mode: crate::sql::TruncateMode,
+        referencing: &[String],
+    ) -> Vec<String> {
+        match mode {
+            crate::sql::TruncateMode::Plain => {
+                vec![format!("DELETE FROM {}", self.quote_ident(table))]
+            }
+            crate::sql::TruncateMode::Cascade => {
+                let mut tables = vec![table];
+                tables.extend(referencing.iter().map(String::as_str));
+                self.clear_tables_sql(&tables)
+            }
+        }
     }
 
     /// Add a named UNIQUE on one column of an existing table. PG and MySQL
@@ -1059,6 +1102,13 @@ pub trait Dialect: Send + Sync {
     /// [`Self::column_comment_statement`] for the whole table.
     fn table_comment_statement(&self, _table: &str, _comment: &str) -> Option<String> {
         None
+    }
+
+    /// Set the comment on an existing table; `""` drops it. Defaults to
+    /// [`Self::table_comment_statement`]; MySQL alters the table instead.
+    /// A dialect that writes the comment inline must override it, or a change is a no-op.
+    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+        self.table_comment_statement(table, comment)
     }
 
     // ---- Server administration: tenant databases and logins ----

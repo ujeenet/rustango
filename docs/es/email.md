@@ -179,7 +179,7 @@ async fn run(&self) -> Result<(), JobError> {
 `email_jobs` (características `email` + `jobs`) cablea esto por ti: llama a
 `register_email_job(&queue, EmailJobConfig::new(mailer))` una vez al arrancar, y luego
 `dispatch_email(&queue, &email)` en el handler. Valida antes de encolar,
-y solo un fallo `Transport` se reintenta.
+y solo un fallo `Transport` se reintenta. Los adjuntos se encolan en base64.
 
 ---
 

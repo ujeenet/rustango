@@ -327,6 +327,14 @@ impl Dialect for MySql {
         Some(format!(" COMMENT={}", self.quote_literal(comment)))
     }
 
+    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+        Some(format!(
+            "ALTER TABLE {}{}",
+            self.quote_ident(table),
+            self.write_inline_table_comment(comment)?
+        ))
+    }
+
     // `?` placeholders are the trait default.
 
     fn serial_type(&self, field_type: FieldType) -> &'static str {
@@ -620,6 +628,14 @@ impl Dialect for MySql {
             .collect()
     }
 
+    fn referencing_tables_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT DISTINCT CAST(TABLE_NAME AS CHAR) FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = DATABASE() AND REFERENCED_TABLE_SCHEMA = DATABASE() \
+             AND REFERENCED_TABLE_NAME = ?",
+        )
+    }
+
     /// `CAST AS CHAR`: information_schema columns decode as binary otherwise.
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         Some(
@@ -664,6 +680,17 @@ impl Dialect for MySql {
              WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
              AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1) \
              ORDER BY k.TABLE_NAME, k.CONSTRAINT_NAME, k.ORDINAL_POSITION",
+        )
+    }
+
+    fn foreign_key_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(CONSTRAINT_NAME AS CHAR), CAST(COLUMN_NAME AS CHAR), \
+             CAST(REFERENCED_TABLE_NAME AS CHAR) \
+             FROM information_schema.KEY_COLUMN_USAGE \
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? \
+             AND REFERENCED_TABLE_NAME IS NOT NULL \
+             ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION",
         )
     }
 
@@ -2102,6 +2129,7 @@ mod tests {
                 fk_on_delete: None,
                 validators: &[],
                 cast: None,
+                secret: None,
             })
             .collect();
         let leaked: &'static [crate::core::FieldSchema] = Box::leak(field_vec.into_boxed_slice());

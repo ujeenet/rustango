@@ -124,11 +124,19 @@ async fn full_agent_loop() {
     let jwt = Arc::new(JwtLifecycle::new(
         b"e2e-secret-at-least-32-bytes-long!!".to_vec(),
     ));
-    let token = issue_agent_token(&jwt, agent_id, "acme", &skills, &tools, None, "abcd1234")
-        .expect("issue");
+    let token = issue_agent_token(
+        &jwt,
+        agent_id,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        &skills,
+        &tools,
+        None,
+        "abcd1234",
+    )
+    .expect("issue");
 
     // 6. Verify the token (what the guarded endpoint does each request).
-    let agent = verify_agent_token(&jwt, &token, "acme")
+    let agent = verify_agent_token(&jwt, &token, &rustango::tenancy::TenantSlug::new(1, "acme"))
         .await
         .expect("verify");
     assert_eq!(agent.tools, vec!["echo"]);

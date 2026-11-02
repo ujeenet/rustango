@@ -682,6 +682,7 @@ pub enum PageMark {
 /// Errors from [`Paginator::page`], [`Page::next_page_number`] and
 /// [`Page::previous_page_number`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PaginatorError {
     #[error("page number must be a positive integer (got 0)")]
     PageNotAnInteger,
@@ -1026,6 +1027,7 @@ pub enum CursorDirection {
 
 /// Errors from [`Cursor::decode`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CursorError {
     /// The cursor string had a non-hex byte or an odd length.
     #[error("invalid cursor encoding: {0}")]

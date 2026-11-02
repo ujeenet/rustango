@@ -64,6 +64,7 @@ pub struct AuthUser {
 /// Error returned by a backend that hard-fails (as opposed to `Ok(None)`
 /// which means "I can't handle this request, try the next backend").
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum AuthError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -101,7 +102,7 @@ fn client_ip(parts: &Parts) -> ClientIp {
 
 fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
     match parts.extensions.get::<super::TenantSlug>() {
-        Some(slug) => Ok(&slug.0),
+        Some(t) => Ok(&t.slug),
         None => {
             tracing::error!(
                 "auth backend ran without a TenantSlug; use require_auth / optional_auth"
@@ -374,7 +375,7 @@ pub struct ApiKey {
     /// `hmac-sha256$` (the secret itself) still verifies; argon2id rows are
     /// rewritten on first use.
     /// Never returned to callers.
-    #[rustango(max_length = 255)]
+    #[rustango(secret, max_length = 255)]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
     #[rustango(max_length = 100)]
@@ -391,28 +392,16 @@ redacted_debug!(ApiKey { id, user_id, key_prefix, label, expires_at, created_at;
 // A key is minted by `create-api-key`, which shows the secret once; an admin
 // form could only store a row nobody can use (#1763).
 #[cfg(feature = "admin")]
-crate::register_admin_object_permission!("rustango_api_keys", "add", |_, _| false);
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_api_keys",
+    "add",
+    |_, _| false
+);
 // The owner decides who the credential signs in as (#2520).
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Add, [user_id]);
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Change, [user_id]);
-
-/// Create the `rustango_api_keys` table if it doesn't exist.
-///
-/// PG-typed back-compat for legacy callers; new code should use
-/// [`ensure_api_keys_table_pool`] which picks the right per-dialect
-/// DDL constant via `pool.dialect().name()`.
-///
-/// #562 — delegates to [`ensure_api_keys_table_pool`] so the
-/// statement-splitting loop lives in one place.
-///
-/// # Errors
-/// Driver failures.
-#[cfg(feature = "postgres")]
-pub async fn ensure_api_keys_table(pool: &crate::sql::sqlx::PgPool) -> Result<(), sqlx::Error> {
-    ensure_api_keys_table_pool(&crate::sql::Pool::from(pool.clone())).await
-}
 
 /// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
 /// Picks the per-dialect DDL constant based on `pool.dialect().name()`
@@ -700,7 +689,7 @@ pub(crate) async fn create_api_key_signed(
         expires_at,
         created_at: Auto::default(),
     };
-    key.save_pool(pool).await?;
+    key.save(pool).await?;
 
     Ok(format!("{prefix}.{secret}"))
 }
@@ -830,11 +819,11 @@ impl JwtBackend {
         self.sign_payload(&self.claims(user_id, None))
     }
 
-    /// [`Self::issue`] bound to tenant `slug`, for `require_auth` routes (#1848).
+    /// [`Self::issue`] bound to `tenant`'s slug and org id, for `require_auth` routes.
     /// Right after a logout-all, use [`Self::issue_for_tenant_user`].
     #[must_use]
-    pub fn issue_for_tenant(&self, user_id: i64, slug: &str) -> String {
-        self.sign_payload(&self.claims(user_id, Some(slug)))
+    pub fn issue_for_tenant(&self, user_id: i64, tenant: &super::TenantSlug) -> String {
+        self.sign_payload(&self.claims(user_id, Some(tenant)))
     }
 
     /// [`Self::issue`] for `user`, also ended when its password hash changes.
@@ -846,24 +835,32 @@ impl JwtBackend {
 
     /// [`Self::issue_for_tenant`] for `user`, also ended when its password hash changes.
     #[must_use]
-    pub fn issue_for_tenant_user(&self, user: &super::auth::User, slug: &str) -> String {
-        self.sign_payload(&self.user_claims(user, Some(slug)))
+    pub fn issue_for_tenant_user(
+        &self,
+        user: &super::auth::User,
+        tenant: &super::TenantSlug,
+    ) -> String {
+        self.sign_payload(&self.user_claims(user, Some(tenant)))
     }
 
-    fn claims(&self, user_id: i64, tenant: Option<&str>) -> serde_json::Value {
+    fn claims(&self, user_id: i64, tenant: Option<&super::TenantSlug>) -> serde_json::Value {
         let now = chrono::Utc::now().timestamp();
         let mut payload = serde_json::json!({"sub": user_id, "exp": self.exp(), "iat": now});
         // Only a store can revoke a jti; without one it would only warn.
         if self.jti_store.is_some() {
             payload["jti"] = super::jwt_lifecycle::random_jti().into();
         }
-        if let Some(slug) = tenant {
-            payload[super::jwt_lifecycle::CLAIM_TENANT] = slug.into();
+        if let (Some(t), Some(claims)) = (tenant, payload.as_object_mut()) {
+            super::jwt_lifecycle::write_tenant_claims(claims, t);
         }
         payload
     }
 
-    fn user_claims(&self, user: &super::auth::User, tenant: Option<&str>) -> serde_json::Value {
+    fn user_claims(
+        &self,
+        user: &super::auth::User,
+        tenant: Option<&super::TenantSlug>,
+    ) -> serde_json::Value {
         let mut payload = self.claims(user.id.get().copied().unwrap_or(0), tenant);
         // Past the logout stamp, like the session claims below.
         payload["iat"] = crate::session::issued_at(user.sessions_revoked_at).into();
@@ -878,33 +875,20 @@ impl JwtBackend {
     }
 
     fn sign_payload(&self, payload: &serde_json::Value) -> String {
-        use base64::Engine;
-        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(serde_json::to_vec(payload).unwrap_or_default());
-        let sig = hmac_sha256(&self.secret, payload_b64.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-        format!("{payload_b64}.{sig_b64}")
+        let claims = crate::jwt::Claims::from_map(payload.as_object().cloned().unwrap_or_default());
+        // The one HS256 codec; the key length is asserted in `new`.
+        crate::jwt::encode(&claims, &self.secret).expect("JwtBackend key is >= 32 bytes")
     }
 
-    /// Verify and return `(sub, jti, login session)`.
-    ///
-    /// Accepts both token shapes. Three segments is what `JwtLifecycle`
-    /// issues since #1397 and what any standard JWT looks like; two is
-    /// what `JwtBackend::issue` still emits and what `JwtLifecycle` emitted
-    /// before it. Signing input differs — `header.payload` for the former,
-    /// `payload` alone for the latter — so each is checked against its own.
-    ///
-    /// Handling both is not politeness: `docs/auth-jwt-api.md` tells you to
-    /// pair this backend with `JwtLifecycle`, and between #1397 and this
-    /// change that pairing silently stopped authenticating anyone, because
-    /// the caller below required exactly one dot.
+    /// Verify and return `(sub, jti, login session)`: a three-segment HS256
+    /// token from [`crate::jwt`], the shape `JwtLifecycle` and [`Self::issue`] mint.
     ///
     /// **Refresh tokens are refused.** They carry `typ: "refresh"` and are
     /// wire-identical to access tokens, so without this check one
     /// authenticates as a bearer credential with the refresh token's much
     /// longer life — seven days by default (#1402).
     ///
-    /// The tenant binding and `kind` go through [`UserTokenScope`] (#1848).
+    /// The tenant binding and `kind` go through [`UserTokenScope`].
     ///
     /// [`UserTokenScope`]: super::jwt_lifecycle::UserTokenScope
     fn verify_claims(
@@ -912,35 +896,8 @@ impl JwtBackend {
         token: &str,
         scope: super::jwt_lifecycle::UserTokenScope<'_>,
     ) -> Option<VerifiedClaims> {
-        use base64::Engine;
-        use subtle::ConstantTimeEq;
-        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-
-        let parts: Vec<&str> = token.split('.').collect();
-        let (signing_input, payload_b64, sig_b64) = match parts.as_slice() {
-            [header, payload, sig] => {
-                // Pin the algorithm. The HMAC below catches a swapped one
-                // anyway, but refusing here makes `alg: none` fail as
-                // itself rather than as a signature mismatch.
-                let h: serde_json::Value =
-                    serde_json::from_slice(&b64.decode(header).ok()?).ok()?;
-                if h.get("alg").and_then(serde_json::Value::as_str) != Some("HS256") {
-                    return None;
-                }
-                (format!("{header}.{payload}"), *payload, *sig)
-            }
-            [payload, sig] => ((*payload).to_owned(), *payload, *sig),
-            _ => return None,
-        };
-
-        let expected = hmac_sha256(&self.secret, signing_input.as_bytes());
-        let provided = b64.decode(sig_b64).ok()?;
-        if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-            return None;
-        }
-
-        let payload: serde_json::Value =
-            serde_json::from_slice(&b64.decode(payload_b64).ok()?).ok()?;
+        let payload =
+            serde_json::Value::Object(crate::jwt::verify(token, &self.secret).ok()?.into_map());
         let exp = payload.get("exp")?.as_i64()?;
         if chrono::Utc::now().timestamp() >= exp {
             return None; // expired
@@ -977,20 +934,6 @@ struct VerifiedClaims {
     session: Option<super::auth_routes::RefreshSession>,
 }
 
-/// v0.38 — inline HMAC-SHA256(secret, msg) so JwtBackend signs
-/// without depending on the PG-gated `operator_console::session::sign`.
-/// Equivalent to the shared primitive — same `hmac` + `sha2` crates.
-fn hmac_sha256(secret: &[u8], msg: &[u8]) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key length");
-    mac.update(msg);
-    let bytes = mac.finalize().into_bytes();
-    let mut out = [0u8; 32];
-    out.copy_from_slice(&bytes[..32]);
-    out
-}
-
 #[async_trait]
 impl AuthBackend for JwtBackend {
     async fn authenticate(
@@ -1006,16 +949,10 @@ impl AuthBackend for JwtBackend {
             return Ok(None);
         };
 
-        // A JWT is two dots (`header.payload.sig`) since #1397, or one for
-        // the legacy shape `JwtBackend::issue` still emits. An API key is
-        // also one dot (`prefix.secret`), distinguished by its 8-char hex
-        // prefix — a base64 JWT payload is never 8 characters.
-        //
-        // This used to require *exactly* one dot, which meant a real JWT
-        // was handed back as "not mine" before verification ran. Between
-        // #1397 and #1402 that silently stopped `JwtLifecycle` tokens
-        // authenticating through the backend chain the docs tell you to
-        // pair them with.
+        // A JWT is two dots (`header.payload.sig`). An API key is one dot
+        // (`prefix.secret`) with an 8-char hex prefix and is left to its
+        // backend; any other one-dot token, such as the old two-part JWT
+        // shape, fails verification and is refused.
         let dots = token.chars().filter(|&c| c == '.').count();
         if dots != 1 && dots != 2 {
             return Ok(None);
@@ -1025,9 +962,9 @@ impl AuthBackend for JwtBackend {
         }
 
         // All tenants share one key, so a resolved tenant must match the
-        // token's `tenant` claim (#1848).
+        // token's `tenant` and `org_id` claims.
         let scope = match parts.extensions.get::<super::TenantSlug>() {
-            Some(slug) => super::jwt_lifecycle::UserTokenScope::Tenant(&slug.0),
+            Some(t) => super::jwt_lifecycle::UserTokenScope::Tenant(t),
             None => super::jwt_lifecycle::UserTokenScope::Unscoped,
         };
         let Some(VerifiedClaims {
@@ -1270,7 +1207,7 @@ mod tests {
         let creds = base64::engine::general_purpose::STANDARD.encode("locked-user:pw");
         let (parts, ()) = axum::http::Request::builder()
             .header("authorization", format!("Basic {creds}"))
-            .extension(super::super::TenantSlug("t-prelock".into()))
+            .extension(super::super::TenantSlug::new(1, "t-prelock"))
             .body(())
             .unwrap()
             .into_parts();
@@ -1322,7 +1259,7 @@ mod tests {
                         [10, 64, 0, 2],
                         1,
                     ))))
-                    .extension(super::super::TenantSlug("t-burst-key".into()))
+                    .extension(super::super::TenantSlug::new(1, "t-burst-key"))
                     .body(())
                     .unwrap()
                     .into_parts();
@@ -1387,7 +1324,7 @@ mod tests {
         }
         let (pool, mut user) = jwt_user("basic_burst_gate").await;
         user.password_hash = password::hash("s3cret-basic").unwrap();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let call = |pass: String| {
             let pool = pool.clone();
             tokio::spawn(async move {
@@ -1399,7 +1336,7 @@ mod tests {
                         [10, 66, 0, 1],
                         1,
                     ))))
-                    .extension(super::super::TenantSlug("t-burst-basic".into()))
+                    .extension(super::super::TenantSlug::new(1, "t-burst-basic"))
                     .body(())
                     .unwrap()
                     .into_parts();
@@ -1481,7 +1418,7 @@ mod tests {
                         [10, 64, 0, 1],
                         1,
                     ))))
-                    .extension(super::super::TenantSlug("t-quiet-key".into()))
+                    .extension(super::super::TenantSlug::new(1, "t-quiet-key"))
                     .body(())
                     .unwrap()
                     .into_parts();
@@ -1510,7 +1447,7 @@ mod tests {
             .await
             .unwrap();
         let mut user = crate::testkit::user();
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         (pool, user)
     }
 
@@ -1523,10 +1460,52 @@ mod tests {
         let mut req =
             axum::http::Request::builder().header("authorization", format!("Bearer {token}"));
         if let Some(slug) = tenant {
-            req = req.extension(super::super::TenantSlug(slug.into()));
+            req = req.extension(super::super::TenantSlug::new(1, slug));
         }
         let (parts, ()) = req.body(()).unwrap().into_parts();
         backend.authenticate(&parts, pool).await
+    }
+
+    /// The tenant `bearer` binds a slug to: org 1.
+    fn acme() -> super::super::TenantSlug {
+        super::super::TenantSlug::new(1, "acme")
+    }
+
+    /// A tenant that reuses a purged tenant's slug has a new org id: the old
+    /// tenant's token, or one with no `org_id`, is refused there.
+    #[tokio::test]
+    async fn a_token_of_a_purged_tenant_is_refused_by_its_slug_heir() {
+        let (pool, user) = jwt_user("jwt_slug_heir").await;
+        let id = *user.id.get().unwrap();
+        let backend = JwtBackend::new(vec![7u8; 32]);
+        let heir = super::super::TenantSlug::new(2, "acme");
+        let auth = |token: String| {
+            let (backend, pool, heir) = (&backend, &pool, heir.clone());
+            async move {
+                let (mut parts, ()) = axum::http::Request::builder()
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(())
+                    .unwrap()
+                    .into_parts();
+                parts.extensions.insert(heir);
+                backend.authenticate(&parts, pool).await
+            }
+        };
+        assert!(matches!(
+            auth(backend.issue_for_tenant(id, &heir)).await,
+            Ok(Some(_))
+        ));
+        for token in [
+            backend.issue_for_tenant(id, &acme()),
+            backend.issue_for_tenant_user(&user, &acme()),
+            backend.sign_payload(&serde_json::json!({
+                "sub": id, "exp": backend.exp(), "iat": chrono::Utc::now().timestamp(),
+                "tenant": "acme",
+            })),
+        ] {
+            let r = auth(token).await;
+            assert!(matches!(r, Err(AuthError::InvalidToken)), "{r:?}");
+        }
     }
 
     /// `issue` / `issue_for_tenant` tokens end on logout-all and on a password change.
@@ -1536,7 +1515,7 @@ mod tests {
         let id = *user.id.get().unwrap();
         let backend = JwtBackend::new(vec![7u8; 32]);
         let plain = backend.issue(id);
-        let bound = backend.issue_for_tenant(id, "acme");
+        let bound = backend.issue_for_tenant(id, &acme());
         assert!(bearer(&backend, &plain, None, &pool)
             .await
             .unwrap()
@@ -1549,7 +1528,7 @@ mod tests {
         for stamp in ["sessions_revoked_at", "password_changed_at"] {
             user.sessions_revoked_at = (stamp == "sessions_revoked_at").then_some(later);
             user.password_changed_at = (stamp == "password_changed_at").then_some(later);
-            user.save_pool(&pool).await.unwrap();
+            user.save(&pool).await.unwrap();
             let r = bearer(&backend, &plain, None, &pool).await;
             assert!(matches!(r, Err(AuthError::InvalidToken)), "{stamp}: {r:?}");
             let r = bearer(&backend, &bound, Some("acme"), &pool).await;
@@ -1563,11 +1542,11 @@ mod tests {
         let (pool, mut user) = jwt_user("jwt_after_logout_all").await;
         let cutoff = crate::session::logout_cutoff_at(None, chrono::Utc::now().timestamp());
         user.sessions_revoked_at = Some(cutoff);
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let backend = JwtBackend::new(vec![7u8; 32]);
         for (token, tenant) in [
             (backend.issue_for_user(&user), None),
-            (backend.issue_for_tenant_user(&user, "acme"), Some("acme")),
+            (backend.issue_for_tenant_user(&user, &acme()), Some("acme")),
         ] {
             let r = bearer(&backend, &token, tenant, &pool).await;
             assert!(matches!(r, Ok(Some(_))), "{tenant:?}: {r:?}");
@@ -1579,13 +1558,13 @@ mod tests {
     async fn user_bound_tokens_end_with_the_password_hash() {
         let (pool, mut user) = jwt_user("jwt_user_bound_pwf").await;
         let backend = JwtBackend::new(vec![7u8; 32]);
-        let token = backend.issue_for_tenant_user(&user, "acme");
+        let token = backend.issue_for_tenant_user(&user, &acme());
         assert!(bearer(&backend, &token, Some("acme"), &pool)
             .await
             .unwrap()
             .is_some());
         user.password_hash = "$argon2id$v=19$m=19456,t=2,p=1$new$hash".into();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let r = bearer(&backend, &token, Some("acme"), &pool).await;
         assert!(matches!(r, Err(AuthError::InvalidToken)), "{r:?}");
     }

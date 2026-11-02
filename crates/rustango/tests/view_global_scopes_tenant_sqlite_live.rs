@@ -127,7 +127,7 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
             tag: tag.into(),
             visible,
         };
-        row.insert_pool(&pool).await.expect("seed row");
+        row.insert(&pool).await.expect("seed row");
         let pk = *row.id.get().expect("pk");
         if visible {
             shown.push(pk);
@@ -371,7 +371,7 @@ async fn tenant_views_soft_delete_and_hide_deleted_rows() {
             tag: tag.into(),
             deleted_at: None,
         };
-        m.insert_pool(&pool).await.expect("seed memo");
+        m.insert(&pool).await.expect("seed memo");
         pks.push(*m.id.get().expect("pk"));
     }
     let (status, _) = send(

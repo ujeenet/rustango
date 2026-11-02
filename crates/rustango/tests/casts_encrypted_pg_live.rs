@@ -60,7 +60,7 @@ async fn encrypted_cast_round_trips_on_pg() {
         id: Auto::default(),
         ssn: Cast::new(plaintext.to_owned()),
     };
-    patient.save_pool(&pool).await.unwrap();
+    patient.save(&pool).await.unwrap();
     let id = *patient.id.get().unwrap();
 
     let fetched = Patient::objects()

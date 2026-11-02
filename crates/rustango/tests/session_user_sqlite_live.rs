@@ -55,7 +55,7 @@ impl OrgResolver for FixedResolver {
 
 fn fake_sqlite_org() -> Org {
     Org {
-        id: rustango::sql::Auto::default(),
+        id: rustango::sql::Auto::Set(1),
         slug: "acme".into(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),
@@ -140,7 +140,7 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&tenant).await.expect("seed user");
+    user.insert(&tenant).await.expect("seed user");
     let uid = user.id.get().copied().unwrap();
 
     let secret = rustango::tenancy::session::SessionSecret::from_bytes(
@@ -190,7 +190,7 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
 
     let login = TenantSessionPayload::new(
         uid,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );
@@ -200,7 +200,7 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
     // Change the password, stamped in the same second the session was issued.
     user.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
     user.password_changed_at = chrono::DateTime::from_timestamp(login.iat, 999_000_000);
-    user.save_pool(&tenant).await.expect("change password");
+    user.save(&tenant).await.expect("change password");
 
     assert_eq!(
         whoami_with(old_cookie).await,
@@ -210,7 +210,7 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
 
     let relogin = TenantSessionPayload::new(
         uid,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );
@@ -293,7 +293,7 @@ async fn session_operator_ends_on_a_same_second_password_change() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&reg).await.expect("seed operator");
+    op.insert(&reg).await.expect("seed operator");
 
     let op_secret = rustango::tenancy::session::SessionSecret::from_bytes(
         b"test_oper_session_secret____32b!".to_vec(),
@@ -317,7 +317,7 @@ async fn session_operator_ends_on_a_same_second_password_change() {
 
     op.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
     op.password_changed_at = chrono::DateTime::from_timestamp(login.iat, 999_000_000);
-    op.save_pool(&reg).await.expect("change password");
+    op.save(&reg).await.expect("change password");
     assert_eq!(
         whoami_with(&app, &cookie).await,
         "anon",
@@ -345,7 +345,7 @@ async fn current_member_ends_on_a_same_second_password_change() {
         password_hash: rustango::tenancy::password::hash("first-password").unwrap(),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&tenant).await.expect("seed user");
+    user.insert(&tenant).await.expect("seed user");
 
     let secret = rustango::tenancy::session::SessionSecret::from_bytes(
         b"test_tenant_session_secret_32by!".to_vec(),
@@ -362,23 +362,37 @@ async fn current_member_ends_on_a_same_second_password_change() {
             b"test_oper_session_secret____32b!".to_vec(),
         ),
     );
-    let set_cookie = mint_cookie(&secret, &user, "acme", 3600);
+    let set_cookie = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     let cookie = set_cookie.split(';').next().unwrap().to_owned();
     assert_eq!(whoami_with(&app, &cookie).await, "member:alice");
 
-    let iat = decode(&secret, "acme", cookie.split_once('=').unwrap().1)
-        .unwrap()
-        .iat;
+    let iat = decode(
+        &secret,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        cookie.split_once('=').unwrap().1,
+    )
+    .unwrap()
+    .iat;
     user.password_hash = rustango::tenancy::password::hash("second-password").unwrap();
     user.password_changed_at = chrono::DateTime::from_timestamp(iat, 999_000_000);
-    user.save_pool(&tenant).await.expect("change password");
+    user.save(&tenant).await.expect("change password");
     assert_eq!(
         whoami_with(&app, &cookie).await,
         "anon",
         "a member session must not survive a password change"
     );
 
-    let relogin = mint_cookie(&secret, &user, "acme", 3600);
+    let relogin = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     assert_eq!(
         whoami_with(&app, relogin.split(';').next().unwrap()).await,
         "member:alice",
@@ -407,7 +421,7 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
         .await
         .expect("users table");
     let mut user = rustango::testkit::user();
-    user.insert_pool(&tenant).await.expect("seed user");
+    user.insert(&tenant).await.expect("seed user");
     let uid = user.id.get().copied().unwrap();
 
     let secret = rustango::tenancy::session::SessionSecret::from_bytes(
@@ -427,11 +441,16 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
     );
     let tenant_session = TenantSessionPayload::new(
         uid,
-        "acme",
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
         3600,
         PasswordFingerprint::of(&secret, &user.password_hash),
     );
-    let member = mint_cookie(&secret, &user, "acme", 3600);
+    let member = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     let cookies = format!(
         "{COOKIE_NAME}={}; {}",
         encode(&secret, &tenant_session),
@@ -452,7 +471,12 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
         .await
         .unwrap()
         .remove(0);
-    let relogin = mint_cookie(&secret, &user, "acme", 3600);
+    let relogin = mint_cookie(
+        &secret,
+        &user,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        3600,
+    );
     assert_eq!(
         whoami_with(&app, relogin.split(';').next().unwrap()).await,
         "false|true",
@@ -487,7 +511,7 @@ async fn session_operator_ends_at_the_logout_cutoff() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&reg).await.expect("seed operator");
+    op.insert(&reg).await.expect("seed operator");
     let op_secret = rustango::tenancy::session::SessionSecret::from_bytes(
         b"test_oper_session_secret____32b!".to_vec(),
     );
@@ -509,7 +533,7 @@ async fn session_operator_ends_at_the_logout_cutoff() {
     assert_eq!(whoami_with(&app, &cookie).await, "op:root");
 
     op.sessions_revoked_at = chrono::DateTime::from_timestamp(login.iat, 0);
-    op.save_pool(&reg).await.expect("log out");
+    op.save(&reg).await.expect("log out");
     assert_eq!(
         whoami_with(&app, &cookie).await,
         "anon",

@@ -468,7 +468,7 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
         database_url: Some(tenant_url),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let err = env
         .run(&["remove-db-server", "used"])
         .await
@@ -518,7 +518,7 @@ async fn an_unknown_tenant_url_blocks_removal(pool: &Pool) {
             database_url: url,
             ..rustango::testkit::org()
         };
-        org.save_pool(&env.registry).await.expect("insert org");
+        org.save(&env.registry).await.expect("insert org");
     }
     let err = env
         .run(&["remove-db-server", "maybe"])
@@ -731,7 +731,7 @@ async fn seed_operator(env: &Env) {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&env.registry).await.expect("seed operator");
+    op.insert(&env.registry).await.expect("seed operator");
 }
 
 /// A console POST without the CSRF token is refused and writes nothing.

@@ -123,7 +123,7 @@ browser and returns the final response with the `(status, location)` chain.
   then posts the fields. The session cookie stays in the jar.
 - `client.logout(Some(path))` posts to the logout route; `logout(None)` only
   empties the jar.
-- With `tenancy`, `force_login_tenant_user(&secret, slug, &user, ttl_secs)`
+- With `tenancy`, `force_login_tenant_user(&secret, &tenant, &user, ttl_secs)`
   and `force_login_operator(&secret, &operator, ttl_secs)` put a session
   cookie in the jar without the form. The row must be saved.
 
@@ -220,9 +220,9 @@ you read a green result as coverage.
 
 | Variable | Suites | What they need |
 |---|---:|---|
-| *(none)* | 228 | Nothing — an in-memory or temp-file SQLite. Always run. |
-| `DATABASE_URL` | 183 | A reachable PostgreSQL server. |
-| `MYSQL_TEST_URL` | 115 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
+| *(none)* | 229 | Nothing — an in-memory or temp-file SQLite. Always run. |
+| `DATABASE_URL` | 186 | A reachable PostgreSQL server. |
+| `MYSQL_TEST_URL` | 117 | A reachable MySQL 8+ server. **Not** `DATABASE_URL`. |
 | `REDIS_TEST_URL` | 2 | A reachable Redis. |
 
 A suite reading two variables is counted under both, so the column does not sum

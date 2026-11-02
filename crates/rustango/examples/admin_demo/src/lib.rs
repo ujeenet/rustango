@@ -104,13 +104,13 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
             name: name.into(),
             email: format!("{}@example.com", name.split(' ').next().unwrap().to_lowercase()),
         };
-        a.save_pool(pool).await?;
+        a.save(pool).await?;
         author_ids.push(a.id.get().copied().unwrap());
     }
 
     for t in ["rust", "web", "orm", "admin", "async"] {
         let mut tag = Tag { id: Auto::default(), name: t.into(), slug: t.into() };
-        tag.save_pool(pool).await?;
+        tag.save(pool).await?;
     }
 
     let statuses = ["draft", "published", "archived"];
@@ -127,7 +127,7 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
             view_count: (i * 37) % 500,
             published_at: Utc.with_ymd_and_hms(2025, month, day, 12, 0, 0).unwrap(),
         };
-        p.save_pool(pool).await?;
+        p.save(pool).await?;
         let pid = p.id.get().copied().unwrap();
 
         for c in 1..=3u32 {
@@ -138,7 +138,7 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
                 body: format!("Comment {c} on post {i}."),
                 created_at: Utc.with_ymd_and_hms(2025, month, day, 13, c, 0).unwrap(),
             };
-            cm.save_pool(pool).await?;
+            cm.save(pool).await?;
         }
     }
     Ok(())
@@ -157,28 +157,31 @@ pub fn admin_router(pool: Pool) -> axum::Router {
         .subtitle("rustango auto-admin showcase")
         .admin_prefix("/admin")
         .with_session_auth(secret)
-        .register_action("posts", "publish", |pool, pks| {
-            Box::pin(async move { set_status(pool, pks, "published").await })
+        .register_tx_action("posts", "publish", |tx, pks| {
+            Box::pin(async move { set_status(tx, pks, "published").await })
         })
-        .register_action("posts", "archive", |pool, pks| {
-            Box::pin(async move { set_status(pool, pks, "archived").await })
+        .register_tx_action("posts", "archive", |tx, pks| {
+            Box::pin(async move { set_status(tx, pks, "archived").await })
         })
         .build()
 }
 
-/// Bulk action handler — sets `status` on every selected post.
+/// Bulk action handler — sets `status` on every selected post, in the
+/// admin's transaction so its audit rows commit with it.
 async fn set_status(
-    pool: &Pool,
+    tx: &mut rustango::sql::PoolTx<'static>,
     pks: &[rustango::core::SqlValue],
     status: &str,
 ) -> Result<(), rustango::admin::AdminError> {
+    use rustango::admin::AdminError;
     if !pks.is_empty() {
-        Post::objects()
+        let query = Post::objects()
             .filter("id__in", rustango::core::SqlValue::List(pks.to_vec()))
             .update()
             .set("status", status)
-            .execute_pool(pool)
-            .await?;
+            .compile()
+            .map_err(|e| AdminError::Internal(e.to_string()))?;
+        rustango::sql::update_tx(tx, &query).await?;
     }
     Ok(())
 }

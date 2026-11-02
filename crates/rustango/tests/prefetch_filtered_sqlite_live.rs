@@ -66,12 +66,12 @@ async fn seed(pool: &Pool) -> (i64, i64) {
         id: Auto::default(),
         name: "Ada".into(),
     };
-    ada.save_pool(pool).await.unwrap();
+    ada.save(pool).await.unwrap();
     let mut grace = Author {
         id: Auto::default(),
         name: "Grace".into(),
     };
-    grace.save_pool(pool).await.unwrap();
+    grace.save(pool).await.unwrap();
     let ada_pk = ada.id.get().copied().unwrap();
     let grace_pk = grace.id.get().copied().unwrap();
     // Ada: 2 published, 1 draft. Grace: 1 published.
@@ -88,7 +88,7 @@ async fn seed(pool: &Pool) -> (i64, i64) {
             created,
             author: ForeignKey::unloaded(fk),
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
     (ada_pk, grace_pk)
 }

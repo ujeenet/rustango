@@ -83,7 +83,7 @@ async fn save_partial_narrows_update_on_pg() {
         status: "draft".into(),
         views: 0,
     };
-    row.insert_pool(&pool).await.unwrap();
+    row.insert(&pool).await.unwrap();
     let pk = *row.id.get().unwrap();
 
     // Mutate every column in memory; ask save_partial to write
@@ -126,7 +126,7 @@ async fn two_writers_preserve_each_others_changes_on_pg() {
         status: "draft".into(),
         views: 0,
     };
-    a.insert_pool(&pool).await.unwrap();
+    a.insert(&pool).await.unwrap();
     let pk = *a.id.get().unwrap();
 
     let mut b = Post {

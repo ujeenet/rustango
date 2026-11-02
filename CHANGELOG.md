@@ -4,6 +4,78 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.62.0] — 2026-11-02
+
+### Added
+
+- `[cache] redis_connect_timeout_ms` and `redis_command_timeout_ms` bound the Redis cache built by `cache::from_settings_async` (defaults 5000 and 2000).
+- `[server] trusted_proxies` (and `RUSTANGO__SERVER__TRUSTED_PROXIES`) installs the real-IP layer for `Cli` apps; `Cli::with_trusted_proxies` in code wins and an invalid entry stops `run`.
+- `object_permissions::Actor` tells a hook who is asking (admin session, user token, agent, nobody), bound to the routed tenant; `ViewSet::skip_object_permissions` and `view_hook_scan_cap`.
+
+### Changed
+
+- One codec each for HS256 JWTs (`crate::jwt`, now behind `JwtLifecycle` and `JwtBackend`) and for signed cookies (`session::SealedToken`); two-part JWTs are refused.
+- Model writes take a `rustango::sql::Pool` on every backend: `save`, `insert`, `delete`, `upsert` and `bulk_insert` replace the PgPool-only forms, their `_on` forms take any `SqlExecutor` (an audited model refuses them), and the `_pool` names are deprecated. The PgPool-typed functions that had a `Pool` twin are removed.
+- `insert_tx` / `save_tx` / `delete_tx` write the audit row of an audited model in the transaction; an audited bulk insert on MySQL, an audited model without a PK, and a raw-sqlx `delete_on` that cascades into an audited model refuse instead of writing unaudited rows.
+- Auth links: `LinkTarget::audience` and `LinkScope::audience` take a `SingleDb` marker, so a tenant handler cannot confirm or verify an audience link that another tenant could also redeem.
+- `Model::truncate` is a `DELETE` on every backend, so a `RESTRICT` row refuses it with `ExecError::TruncateReferenced`; `Model::truncate_cascade` empties every referencing table on all three.
+- Admin bulk actions run only in the admin's transaction, their audit rows with them: the `&Pool` `register_action*` path is removed (`register_tx_action*` stays), and the SSO unlink and relink actions write in that transaction.
+- `testkit::create_tables` creates the M2M junctions whose two ends it is given, so test setups match a migrated schema.
+- `toml` 1.1 replaces 0.8, so apps on `toml` 1.x no longer build two copies (and the old `toml_edit` / `toml_datetime` duplicates are gone).
+- Public `*Error` enums are `#[non_exhaustive]`; `AdminError::BadRequest` and `AdminError::Conflict` replace a faked form error and an `Ok` 409.
+- Removed: `Tenant::for_test`, `contenttypes::render_generic_fk_link`, `admin::InlineApplyOutcome`, and the racy `Cache::touch` default.
+- `ModelForm` locks superuser-only fields unless `acting_superuser(true)` is called; before, a form that never stated the acting user locked nothing.
+- Operator, tenant and impersonation-handoff tokens sign under their own tag (`session::sign_tagged`), so one kind can never verify as another under the shared `RUSTANGO_SESSION_SECRET`. Existing sessions end once.
+- `M2mChangedContext` is `#[non_exhaustive]` and carries `content_type_id` for generic M2M plus the `added` / `removed` keys of a change (both empty when `set` cannot read the old keys).
+- `M2MManager::all` / `GenericM2MManager::all` return the key type the caller names instead of assuming `i64`; `all_as` and the deprecated `_pool` aliases are removed.
+- An unknown `self_pk_column` on `reverse_has` / `generic_has` is a compile error.
+- UpdateView `object` and the bulk-delete confirm `objects` carry only the view's field list and the primary key; `UpdateView::context_fields` opts read-only columns in. The mount-time warning is gone.
+- ViewSets run the object-permission hooks and queryset scopes the admin runs: `add` on create, `view` (404) then `change` / `delete` (403) on item routes, `view` on lists and FK targets. `admin_add_hooks()` is gone.
+- The hook and scope macros are `register_object_permission!` and `register_queryset_scope!` under `rustango::object_permissions`; the `register_admin_*` names are deprecated.
+- `ViewSet::for_model` refuses `rustango_api_keys`, `rustango_agents` and the tables the admin never serves.
+- ViewSet update and delete judge the row locked in the write's transaction; a write may not leave the queryset scopes, and a credential for another tenant is a 403.
+- `AccessLogLayer` is `#[non_exhaustive]` and gains `skip_paths`, which keeps health and readiness probes out of the log by whole path segment.
+- Queued email attachments are written as base64 text instead of an integer array; both forms still read.
+- `PreMigrateContext` and `PostMigrateContext` carry the run's `pool` and `tenant` and are `#[non_exhaustive]`; the `connect_*_migrate_with_target` receivers and `MigrateTarget` are removed.
+- A schema-mode tenant's `search_path` is its schema plus `public` and other extension-only schemas that hold an extension; `public` leaves it when no extension lives there, and a tenant missing tables those schemas have is refused instead of reading the shared copies.
+- A schema an org names, or one holding its own functions, types or sequences, never joins a tenant's `search_path`; `check --deploy` lists every tenant whose pools would refuse to open.
+
+### Fixed
+
+- Cascade audit rows from `PoolConn::begin()`, `delete_on(&mut conn)` and `delete_on` on a MySQL / SQLite `DatabaseConn` keep a tenant-bound source on that tenant's pool instead of `system`; `PoolConn` is a struct matched through `conn.conn()` (`PooledConn`).
+- Cascade audit rows written in a caller's `PoolTx` (`delete_tx`, `delete_on(&mut tx)`) keep a tenant-bound source on that tenant's pool instead of `system`; `PoolTx` is a struct that remembers its pool, matched through `tx.conn()` (`TxConn`).
+- On SQLite, an admin, ViewSet or template-view delete that a `restrict` reference blocks answers 409 instead of 500.
+- Tenant admin: the sidebar, `<title>` and heading show one name (`Org.brand_name`, then `[admin] title`, then `[brand] name`, then the display name), links take the org's `primary_color`, and the operator console serves `/favicon.ico`.
+- A schema-mode tenant whose schema has a database role's name no longer opens: its pools and `migrate-tenants` refuse it, and `check --deploy` reports it as an error.
+- The server and the tenancy CLI refuse to start on Postgres when a schema named after the database role holds a registry table: `search_path` reads it first, so the real registry was silently hidden.
+- Tenancy: a tenant that reuses a purged tenant's slug no longer accepts its JWTs or serves its cached pages and idempotent replays; tokens carry an `org_id` claim and those keys hold the org id.
+- Tenancy: tenant session and impersonation cookies, handoff tokens, MCP agent tokens and bound HMAC keys also check the org id, and cache keys hold `#org:<id>:<slug>`.
+- Tenancy: member cookies, SSO flows, `ScopedCache::for_tenant` and `DistributedLock::for_tenant` bind to the org id too; a cookie or token without `org` no longer reads as org 0, and an org with no id verifies no password link.
+- `[security] hsts_max_age_secs` no longer adds `includeSubDomains; preload` to a preset that sends neither.
+- Admin detail, edit, update and delete answer 404, not 403, for a row the `view` hook hides.
+- Admin bulk actions skip rows the `view` hook hides instead of acting on them; ViewSet page and offset lists past the `view` hook scan cap answer 400 instead of windows that reveal hidden rows.
+- ViewSets refuse at mount a serializer `nested`/`many`/`slug` field onto a table with a `view` hook or queryset scope, and scan 2 000 rows for a `view` hook by default (the admin keeps 10 000).
+- Tenancy: a tenant URL that reaches the registry's database under another name, a resume onto the registry, and migrating into a schema another app owns are refused instead of warned.
+- A Postgres `Tenant` no longer holds a pool connection for the whole request: it takes one on the first `conn()`, so handlers that only use `t.pool()` cannot exhaust the held pool.
+- Media: replacing a row's tags could create new tag rows with only the media `change` permission; a new slug now also needs `Add(NewTag)`.
+- SSL-redirect exempt prefixes no longer match inside a segment (`/health` exempted `/healthz`).
+- On the prod tier an unset mail backend no longer falls back to the console mailer, which printed reset links to the log.
+- A bad `[cache].backend` no longer silently becomes a per-process cache.
+- Migrations: two tables with a composite FK of the same name no longer fail on MySQL (1826); a composite FK drop finds the live constraint by its columns.
+- `DynamicForm` refuses non-http(s) URLs and undeliverable emails; admin custom views that shadow built-in routes are skipped; a nullable cursor column, unknown index columns and unknown `#[rustango::main]` arguments are refused.
+- File migrations write `db_table_comment` (PG `COMMENT ON TABLE`, MySQL `COMMENT=`; SQLite has none); `makemigrations` no longer warns about it.
+- PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
+- `#[rustango(secret)]` marks a credential column, as do sealed casts and names like `token`, `api_key`, `*_secret`, `*_token`: template views show it only when listed, the admin always masks it, and `secret = false` opts a name out.
+- Template views (list, detail, create, update, delete) refuse API key, agent, SSO, TOTP, passkey and database-server tables, as `ViewSet` does; one table policy serves all three surfaces.
+- `ViewSet` and template views refuse operator, admin-user and agent-grant tables, which could otherwise set a password hash or raise an agent's rights.
+- One credential word list drives the admin, template views, the access log and the MCP audit, so `passwd` or `encryption_key` is secret everywhere.
+- A tenant with no host, path prefix or port is refused at provisioning and edit, and gets no link, instead of being created unreachable with a warning.
+- Jobs: dispatching a type with no registered handler is refused instead of dead-lettered or left locked; `PgJobQueue::allow_unregistered_dispatch` opts a producer out.
+- MCP agent tokens no longer sign with a passphrase `RUSTANGO_SESSION_SECRET`'s raw text.
+- `apply_all` fails on an index it cannot create instead of skipping it.
+- `TestClient` panics on a response body that fails or passes 16 MiB, instead of returning it empty.
+- Settings that reached nothing are removed and refused at load instead of warned about; `audit-cleanup` reads `[audit] retention_days` when given no flag.
+
 ## [0.61.16] — 2026-10-31
 
 ### Added

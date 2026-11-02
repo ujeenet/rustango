@@ -16,8 +16,6 @@ use std::path::Path;
 
 use crate::core::{inventory, ModelEntry, ModelSchema};
 use crate::sql::sqlx;
-#[cfg(feature = "postgres")]
-use crate::sql::sqlx::Row;
 // PG-typed shims below import these; sqlite/mysql-only builds get
 // just the `_pool` entry points.
 #[cfg(feature = "postgres")]
@@ -99,116 +97,111 @@ impl Builder {
         self.ledger
     }
 
-    /// As [`migrate`], with this builder's ledger.
-    ///
-    /// PG-typed back-compat. For non-PG migrations, call
-    /// [`migrate_pool`] directly.
+    /// As [`migrate_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate`].
-    #[cfg(feature = "postgres")]
-    pub async fn migrate(&self, pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-        migrate_with_ledger(pool, dir, self.ledger, None).await
+    /// As [`migrate_pool`].
+    pub async fn migrate(
+        &self,
+        pool: &crate::sql::Pool,
+        dir: &Path,
+    ) -> Result<Vec<Migration>, MigrateError> {
+        migrate_pool_with_ledger(pool, dir, self.ledger).await
     }
 
-    /// As [`migrate_to`], with this builder's ledger.
+    /// As [`migrate_to_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate_to`].
-    #[cfg(feature = "postgres")]
+    /// As [`migrate_to_pool`].
     pub async fn migrate_to(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         target: &str,
     ) -> Result<Vec<Migration>, MigrateError> {
-        migrate_to_with_ledger(pool, dir, target, self.ledger).await
+        migrate_to_pool_with_ledger(pool, dir, target, self.ledger).await
     }
 
-    /// As [`migrate_embedded`], with this builder's ledger.
+    /// As [`migrate_embedded_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate_embedded`].
-    #[cfg(feature = "postgres")]
+    /// As [`migrate_embedded_pool`].
     pub async fn migrate_embedded(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         embedded: &[(&str, &str)],
     ) -> Result<Vec<Migration>, MigrateError> {
-        migrate_embedded_with_ledger(pool, embedded, self.ledger).await
+        migrate_embedded_pool_with_ledger(pool, embedded, self.ledger).await
     }
 
-    /// As [`migrate_dry_run`], with this builder's ledger.
+    /// As [`migrate_dry_run_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`migrate_dry_run`].
-    #[cfg(feature = "postgres")]
+    /// As [`migrate_dry_run_pool`].
     pub async fn migrate_dry_run(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
     ) -> Result<Vec<MigrationPreview>, MigrateError> {
-        migrate_dry_run_with_ledger(pool, dir, self.ledger).await
+        migrate_dry_run_pool_with_ledger(pool, dir, self.ledger).await
     }
 
-    /// As [`downgrade`], with this builder's ledger.
+    /// As [`downgrade_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`downgrade`].
-    #[cfg(feature = "postgres")]
+    /// As [`downgrade_pool`].
     pub async fn downgrade(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         steps: usize,
     ) -> Result<Vec<Migration>, MigrateError> {
-        downgrade_with_ledger(pool, dir, steps, self.ledger).await
+        downgrade_pool_with_ledger(pool, dir, steps, self.ledger).await
     }
 
-    /// As [`unapply`], with this builder's ledger.
+    /// As [`unapply_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`unapply`].
-    #[cfg(feature = "postgres")]
+    /// As [`unapply_pool`].
     pub async fn unapply(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         name: &str,
     ) -> Result<Migration, MigrateError> {
-        unapply_with_ledger(pool, dir, name, self.ledger).await
+        unapply_pool_with_ledger(pool, dir, name, self.ledger).await
     }
 
-    /// As [`unapply_force`], with this builder's ledger.
+    /// As [`unapply_force_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`unapply_force`].
-    #[cfg(feature = "postgres")]
+    /// As [`unapply_force_pool`].
     pub async fn unapply_force(
         &self,
-        pool: &PgPool,
+        pool: &crate::sql::Pool,
         dir: &Path,
         name: &str,
     ) -> Result<Migration, MigrateError> {
-        unapply_force_with_ledger(pool, dir, name, self.ledger).await
+        unapply_force_pool_with_ledger(pool, dir, name, self.ledger).await
     }
 
-    /// As [`applied_set`], with this builder's ledger.
+    /// As [`applied_set_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`applied_set`].
-    #[cfg(feature = "postgres")]
-    pub async fn applied_set(&self, pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
-        applied_set_for(pool, self.ledger).await
+    /// As [`applied_set_pool`].
+    pub async fn applied_set(
+        &self,
+        pool: &crate::sql::Pool,
+    ) -> Result<HashSet<String>, MigrateError> {
+        applied_set_pool_with_ledger(pool, self.ledger).await
     }
 
-    /// As [`ensure_ledger`], with this builder's ledger.
+    /// As [`ensure_ledger_pool`], with this builder's ledger.
     ///
     /// # Errors
-    /// As [`ensure_ledger`].
-    #[cfg(feature = "postgres")]
-    pub async fn ensure_ledger(&self, pool: &PgPool) -> Result<(), MigrateError> {
-        ensure_ledger_for(pool, self.ledger).await
+    /// As [`ensure_ledger_pool`].
+    pub async fn ensure_ledger(&self, pool: &crate::sql::Pool) -> Result<(), MigrateError> {
+        ensure_ledger_pool_with_ledger(pool, self.ledger).await
     }
 }
 
@@ -291,9 +284,12 @@ fn bootstrap_models() -> Vec<&'static ModelSchema> {
 }
 
 /// `CREATE INDEX` for the declared indexes of `models`, `unique_together`
-/// included, as the migration writer renders them. One that fails only
-/// warns: 0.61.4 created none, so bootstrap must not newly fail on one.
-async fn create_bootstrap_indexes(pool: &crate::sql::Pool, models: &[&'static ModelSchema]) {
+/// included, as the migration writer renders them. One that cannot be built
+/// fails the run, as `migrate` does: a skipped unique index enforces nothing.
+async fn create_bootstrap_indexes(
+    pool: &crate::sql::Pool,
+    models: &[&'static ModelSchema],
+) -> Result<(), MigrateError> {
     let dialect = pool.dialect();
     let snapshot = SchemaSnapshot::from_models(models);
     for idx in &snapshot.indexes {
@@ -312,82 +308,11 @@ async fn create_bootstrap_indexes(pool: &crate::sql::Pool, models: &[&'static Mo
         };
         if let Err(error) = ran {
             let model = snapshot.table(&idx.table).map_or("?", |t| t.model.as_str());
-            tracing::warn!(
-                target: "rustango::migrate",
-                model,
-                index = %idx.name,
-                %error,
-                "apply_all skipped index `{}` of `{model}`: {error}; a later release refuses it",
-                idx.name,
-            );
+            return Err(MigrateError::Validation(format!(
+                "apply_all could not create index `{}` of `{model}`: {error}",
+                idx.name
+            )));
         }
-    }
-}
-
-/// Run `CREATE TABLE` for every registered model, then its declared
-/// indexes, then every model's FK `ALTER TABLE` constraints. FKs last so
-/// create order doesn't matter.
-/// PG-typed back-compat; for non-PG use [`apply_all_pool`].
-///
-/// # Errors
-/// Returns [`MigrateError`] for any sqlx failure (connection, syntax,
-/// constraint violation).
-#[cfg(feature = "postgres")]
-pub async fn apply_all(pool: &PgPool) -> Result<(), MigrateError> {
-    // `signals` is optional, so the pre/post_migrate emissions are gated
-    // (#1208) — they were unconditional while the module is not.
-    #[cfg(feature = "signals")]
-    use crate::signals::migrate::{
-        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
-        PostMigrateContext, PreMigrateContext,
-    };
-    #[cfg(feature = "signals")]
-    let target = MigrateTarget::new(crate::sql::Pool::Postgres(pool.clone()), None);
-    #[cfg(feature = "signals")]
-    send_pre_migrate_with_target(
-        PreMigrateContext {
-            source: "apply_all",
-        },
-        target.clone(),
-    )
-    .await;
-    let models = bootstrap_models();
-
-    for model in &models {
-        let sql = ddl::create_table_sql(model);
-        sqlx::query(&sql).execute(pool).await?;
-    }
-    create_bootstrap_indexes(&crate::sql::Pool::Postgres(pool.clone()), &models).await;
-    for model in &models {
-        for sql in ddl::create_constraints_sql(model) {
-            sqlx::query(&sql).execute(pool).await?;
-        }
-    }
-    // #411 — post_migrate fires once after the bootstrap walk
-    // completes successfully.
-    #[cfg(feature = "signals")]
-    send_post_migrate_with_target(
-        PostMigrateContext {
-            source: "apply_all",
-            applied: Vec::new(),
-        },
-        target,
-    )
-    .await;
-    Ok(())
-}
-
-/// `DROP TABLE IF EXISTS … CASCADE` for every registered model. CASCADE
-/// makes order irrelevant — FKs go away with the parent table.
-/// PG-typed back-compat; for non-PG use [`drop_all_pool`].
-///
-/// # Errors
-/// Returns [`MigrateError`] for any sqlx failure.
-#[cfg(feature = "postgres")]
-pub async fn drop_all(pool: &PgPool) -> Result<(), MigrateError> {
-    for model in bootstrap_models() {
-        let sql = ddl::drop_table_sql(model, /* if_exists */ true, /* cascade */ true);
-        sqlx::query(&sql).execute(pool).await?;
     }
     Ok(())
 }
@@ -412,17 +337,10 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     }
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
-        PostMigrateContext, PreMigrateContext,
+        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    send_pre_migrate_with_target(
-        PreMigrateContext {
-            source: "apply_all_pool",
-        },
-        MigrateTarget::new(pool.clone(), None),
-    )
-    .await;
+    send_pre_migrate(PreMigrateContext::new("apply_all_pool", pool.clone(), None)).await;
     let dialect = pool.dialect();
     let models = bootstrap_models();
     if let Some(sql) = ddl::ci_text_extension_sql(dialect, &models) {
@@ -432,7 +350,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
         let sql = ddl::create_table_sql_with_dialect(dialect, model);
         crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
     }
-    create_bootstrap_indexes(pool, &models).await;
+    create_bootstrap_indexes(pool, &models).await?;
     for model in &models {
         for sql in ddl::create_constraints_sql_with_dialect(dialect, model) {
             crate::sql::raw_execute_pool(pool, &sql, ::std::vec::Vec::new()).await?;
@@ -458,13 +376,12 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     // completes. `applied` is empty because apply_all_pool doesn't
     // carry per-migration names — it walks the model inventory.
     #[cfg(feature = "signals")]
-    send_post_migrate_with_target(
-        PostMigrateContext {
-            source: "apply_all_pool",
-            applied: Vec::new(),
-        },
-        MigrateTarget::new(pool.clone(), None),
-    )
+    send_post_migrate(PostMigrateContext::new(
+        "apply_all_pool",
+        Vec::new(),
+        pool.clone(),
+        None,
+    ))
     .await;
     Ok(())
 }
@@ -504,83 +421,6 @@ pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> 
     Ok(())
 }
 
-/// Ensure the ledger table exists, then apply every pending migration
-/// in `dir` (lex-sorted by name) to `pool`. Already-applied migrations
-/// are skipped.
-///
-/// Each migration runs in its own transaction unless its `atomic`
-/// field is `false` (e.g. for `CREATE INDEX CONCURRENTLY`). On
-/// failure within an atomic migration the file's changes roll back
-/// cleanly; **prior** files stay applied (their commits already
-/// happened), so re-running `migrate` after fixing the offender will
-/// pick up where it left off.
-///
-/// Returns the migrations that were newly applied (could be empty).
-///
-/// # Errors
-/// Returns [`MigrateError::Io`]/[`MigrateError::Json`]/[`MigrateError::Validation`]
-/// for file problems, [`MigrateError::Driver`] for SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn migrate(pool: &PgPool, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().migrate(pool, dir).await
-}
-
-/// [`migrate`], reporting each migration to `observer` as it starts and
-/// finishes.
-///
-/// The PG-typed sibling of [`migrate_pool_with_progress`]. Kept separate
-/// rather than routed through it because this path is not the same code:
-/// it fires the `pre_migrate` / `post_migrate` signals and uses the
-/// PG-typed ledger helpers.
-///
-/// **The observer is called with the migrate lock held**, so it must not
-/// block; see [the module docs](super::progress#observers-must-not-block).
-///
-/// # Errors
-/// As [`migrate`].
-#[cfg(feature = "postgres")]
-pub async fn migrate_with_progress(
-    pool: &PgPool,
-    dir: &Path,
-    observer: &dyn MigrationObserver,
-) -> Result<Vec<Migration>, MigrateError> {
-    migrate_with_ledger(pool, dir, LEDGER_TABLE, Some(observer)).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    ledger: &str,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Vec<Migration>, MigrateError> {
-    with_migrate_signals(
-        async {
-            ensure_ledger_for(pool, ledger).await?;
-            with_migrate_lock(pool, migrate_with_ledger_body(pool, dir, ledger, observer)).await
-        },
-        |newly| newly.iter().map(|m| m.name.clone()).collect(),
-        &crate::sql::Pool::Postgres(pool.clone()),
-        None,
-    )
-    .await
-}
-
-/// [`migrate_with_progress`] for a caller that holds the migrate lock. Fires
-/// no signals: they would run under the lock, so [`Signals::Fire`] does.
-#[cfg(feature = "postgres")]
-#[cfg_attr(not(any(feature = "manage", feature = "tenancy")), allow(dead_code))]
-pub(crate) async fn migrate_locked(
-    _: LockHeld,
-    pool: &PgPool,
-    dir: &Path,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Vec<Migration>, MigrateError> {
-    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-    create_ledger_locked(&enum_pool, LEDGER_TABLE).await?;
-    migrate_with_ledger_body(pool, dir, LEDGER_TABLE, observer).await
-}
-
 /// Whether a run fires `pre_migrate` / `post_migrate`. They fire outside
 /// the migrate lock, so a handler may migrate again.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -602,116 +442,34 @@ pub(crate) async fn with_migrate_signals<T>(
 ) -> Result<T, MigrateError> {
     #[cfg(feature = "signals")]
     use crate::signals::migrate::{
-        send_post_migrate_with_target, send_pre_migrate_with_target, MigrateTarget,
-        PostMigrateContext, PreMigrateContext,
+        send_post_migrate, send_pre_migrate, PostMigrateContext, PreMigrateContext,
     };
     #[cfg(feature = "signals")]
-    let target = MigrateTarget::new(pool.clone(), tenant.map(str::to_owned));
+    let tenant = tenant.map(str::to_owned);
     #[cfg(not(feature = "signals"))]
     let _ = (pool, tenant);
     #[cfg(feature = "signals")]
-    send_pre_migrate_with_target(PreMigrateContext { source: "migrate" }, target.clone()).await;
+    send_pre_migrate(PreMigrateContext::new(
+        "migrate",
+        pool.clone(),
+        tenant.clone(),
+    ))
+    .await;
     let out = run.await?;
     // #411 — post_migrate fires once after the file-based migrate
     // session completes. `applied` lists newly-applied migration
     // names (empty when everything was already applied).
     #[cfg(feature = "signals")]
-    send_post_migrate_with_target(
-        PostMigrateContext {
-            source: "migrate",
-            applied: applied(&out),
-        },
-        target,
-    )
+    send_post_migrate(PostMigrateContext::new(
+        "migrate",
+        applied(&out),
+        pool.clone(),
+        tenant,
+    ))
     .await;
     #[cfg(not(feature = "signals"))]
     let _ = applied;
     Ok(out)
-}
-
-/// The legacy PG run; the caller holds the migrate lock.
-#[cfg(feature = "postgres")]
-async fn migrate_with_ledger_body(
-    pool: &PgPool,
-    dir: &Path,
-    ledger: &str,
-    observer: Option<&dyn MigrationObserver>,
-) -> Result<Vec<Migration>, MigrateError> {
-    let all = file::list_dir(dir)?;
-    let applied = applied_set_for(pool, ledger).await?;
-    let pending = pending_migrations(&all, &applied);
-    let mut done = applied.clone();
-
-    let total = pending.len();
-    emit(observer, || MigrationEvent::Planned { total });
-
-    let mut newly = Vec::with_capacity(total);
-    for (i, mig) in pending.into_iter().enumerate() {
-        let index = i + 1;
-        emit(observer, || MigrationEvent::Started {
-            name: mig.name.clone(),
-            index,
-            total,
-        });
-        let began = std::time::Instant::now();
-
-        let step = reconcile_and_apply_pg(pool, &all, &done, &mig, &applied, ledger).await;
-
-        let outcome = match step {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                emit(observer, || MigrationEvent::Failed {
-                    name: mig.name.clone(),
-                    index,
-                    total,
-                    error: e.to_string(),
-                });
-                return Err(e);
-            }
-        };
-
-        emit(observer, || MigrationEvent::Finished {
-            name: mig.name.clone(),
-            index,
-            total,
-            outcome,
-            elapsed: began.elapsed(),
-        });
-        done.insert(mig.name.clone());
-        newly.push(mig);
-    }
-    Ok(newly)
-}
-
-/// [`reconcile_and_apply`] for the legacy PgPool runner, which applies
-/// through [`apply_one`]. `fake_initial` stays off: only the system chain
-/// opts into table-existence faking.
-#[cfg(feature = "postgres")]
-async fn reconcile_and_apply_pg(
-    pool: &PgPool,
-    all: &[Migration],
-    done: &HashSet<String>,
-    mig: &Migration,
-    applied: &HashSet<String>,
-    ledger: &str,
-) -> Result<Outcome, MigrateError> {
-    let enum_pool = crate::sql::Pool::Postgres(pool.clone());
-    Ok(match reconcile(&enum_pool, mig, applied, false).await? {
-        ReconcileAction::Fake => {
-            fake_apply_pool(&enum_pool, mig, ledger).await?;
-            Outcome::Faked
-        }
-        // Unreachable with `fake_initial` off; a plain run for totality.
-        ReconcileAction::Run | ReconcileAction::RunPartial(_) => {
-            apply_one(pool, &on_live_branches(all, done, mig), ledger).await?;
-            Outcome::Ran
-        }
-        ReconcileAction::RunOutside(existing) => {
-            let run = outside_tables(mig, &existing);
-            apply_one(pool, &on_live_branches(all, done, &run), ledger).await?;
-            Outcome::RanPartial { skipped: existing }
-        }
-    })
 }
 
 /// What `migrate <target>` unapplies first: every applied file after
@@ -733,94 +491,6 @@ fn forward_to(all: &[Migration], applied: &HashSet<String>, target: &str) -> Vec
         .collect()
 }
 
-/// Hold the migrate advisory lock for the duration of `body`, then
-/// release it (best-effort) before returning. Peers calling any
-/// migrate-shaped operation block until the holder releases.
-///
-/// The lock is **session-scoped**, held on a connection outside the pool
-/// for the whole body and closed after.
-#[cfg(feature = "postgres")]
-async fn with_migrate_lock<F, R>(pool: &PgPool, body: F) -> Result<R, MigrateError>
-where
-    F: std::future::Future<Output = Result<R, MigrateError>>,
-{
-    hold_migrate_lock(&crate::sql::Pool::Postgres(pool.clone()), Box::pin(body)).await
-}
-
-/// The creation schema of `pool`'s sessions, for FK targets (#1718).
-#[cfg(feature = "postgres")]
-async fn pg_creation_schema(pool: &PgPool) -> Result<Option<String>, MigrateError> {
-    let pool = crate::sql::Pool::Postgres(pool.clone());
-    Ok(super::ensure::creation_schema(&pool).await?)
-}
-
-/// Set of migration names already recorded in the default ledger
-/// table (`__rustango_migrations__`). For a custom ledger, build a
-/// [`Builder`] with `.ledger("…")` and call its `applied_set` method.
-///
-/// # Errors
-/// Returns [`MigrateError::Driver`] for any sqlx failure (including a
-/// missing ledger table — call [`ensure_ledger`] first).
-#[cfg(feature = "postgres")]
-pub async fn applied_set(pool: &PgPool) -> Result<HashSet<String>, MigrateError> {
-    applied_set_for(pool, LEDGER_TABLE).await
-}
-
-#[cfg(feature = "postgres")]
-async fn applied_set_for(pool: &PgPool, ledger: &str) -> Result<HashSet<String>, MigrateError> {
-    let rows = sqlx::query(&format!("SELECT name FROM {ledger}"))
-        .fetch_all(pool)
-        .await?;
-    let mut out = HashSet::with_capacity(rows.len());
-    for row in rows {
-        out.insert(row.try_get::<String, _>("name")?);
-    }
-    Ok(out)
-}
-
-/// Bootstrap the default ledger table (`__rustango_migrations__`)
-/// if it doesn't exist. Idempotent and safe to run from concurrent
-/// processes — Postgres' `CREATE TABLE IF NOT EXISTS` is *not*
-/// race-free against concurrent creators (they can both pass the
-/// existence check and then collide on the catalog), so the
-/// bootstrap is serialized via a transaction-scoped advisory lock.
-///
-/// For a custom ledger, build a [`Builder`] with `.ledger("…")` and
-/// call its `ensure_ledger` method.
-///
-/// # Errors
-/// Returns [`MigrateError::Driver`] for any sqlx failure.
-#[cfg(feature = "postgres")]
-pub async fn ensure_ledger(pool: &PgPool) -> Result<(), MigrateError> {
-    ensure_ledger_for(pool, LEDGER_TABLE).await
-}
-
-#[cfg(feature = "postgres")]
-async fn ensure_ledger_for(pool: &PgPool, ledger: &str) -> Result<(), MigrateError> {
-    use crate::sql::{Dialect as _, Postgres};
-    let dialect = Postgres;
-    let key = pg_migrate_lock_key(pool).await?;
-    let mut tx = pool.begin().await?;
-    // Postgres returns `pg_advisory_xact_lock(...)`. SQLite returns
-    // `None` (its `BEGIN` already gates concurrent CREATE TABLE).
-    if let Some(xact_lock_sql) = dialect.acquire_xact_lock_sql() {
-        // The pool runners' key, so both bootstraps serialize (#1844).
-        sqlx::query(&xact_lock_sql)
-            .bind(key)
-            .execute(&mut *tx)
-            .await?;
-    }
-    let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {ledger} (\
-         name TEXT PRIMARY KEY, \
-         applied_at {})",
-        dialect.timestamp_now_column()
-    );
-    sqlx::query(&create_sql).execute(&mut *tx).await?;
-    tx.commit().await?;
-    Ok(())
-}
-
 /// One pending migration the dry-run would apply.
 ///
 /// `statements` is the literal SQL the runner would execute, in
@@ -839,34 +509,6 @@ pub struct MigrationPreview {
     /// `atomic` flag on the file).
     pub atomic: bool,
     pub statements: Vec<String>,
-}
-
-/// Compute the SQL `migrate(pool, dir)` would execute, without
-/// running any of it. Reads the ledger to know what's pending; never
-/// writes. Output is one [`MigrationPreview`] per pending migration,
-/// in apply order.
-///
-/// Used by `manage migrate --dry-run`.
-///
-/// # Errors
-/// As [`migrate`] minus the SQL execution — file I/O, JSON parse,
-/// chain validation, plus the `applied_set` read.
-#[cfg(feature = "postgres")]
-pub async fn migrate_dry_run(
-    pool: &PgPool,
-    dir: &Path,
-) -> Result<Vec<MigrationPreview>, MigrateError> {
-    Builder::default().migrate_dry_run(pool, dir).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_dry_run_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    ledger: &str,
-) -> Result<Vec<MigrationPreview>, MigrateError> {
-    let pool = crate::sql::Pool::Postgres(pool.clone());
-    migrate_dry_run_pool_with_ledger(&pool, dir, ledger).await
 }
 
 /// `sqlmigrate <name>` — compute the SQL the named
@@ -945,19 +587,33 @@ fn prev_snapshot(
     mig: &Migration,
     dir: &Path,
 ) -> Result<SchemaSnapshot, MigrateError> {
+    snapshot_before(all, mig).map_err(|_| {
+        MigrateError::Validation(format!(
+            "migration `{}` declares prev=`{}` but that file is missing in {}",
+            mig.name,
+            mig.prev.as_deref().unwrap_or_default(),
+            dir.display()
+        ))
+    })
+}
+
+/// The schema before `mig`, with its parent's hand-written renames as
+/// makemigrations reads it.
+///
+/// # Errors
+/// Its `prev` is missing from `all`.
+fn snapshot_before(all: &[Migration], mig: &Migration) -> Result<SchemaSnapshot, MigrateError> {
     let Some(prev_name) = &mig.prev else {
         return Ok(SchemaSnapshot::default());
     };
-    // With the parent's hand-written renames, as makemigrations reads it.
     let chain: Vec<&Migration> = all.iter().collect();
     all.iter()
         .find(|m| &m.name == prev_name)
         .map(|m| super::make::effective_snapshot(&chain, m))
         .ok_or_else(|| {
             MigrateError::Validation(format!(
-                "migration `{}` declares prev=`{prev_name}` but that file is missing in {}",
-                mig.name,
-                dir.display()
+                "migration `{}` declares prev=`{prev_name}` but that migration is missing",
+                mig.name
             ))
         })
 }
@@ -1033,7 +689,15 @@ fn preview_schema_op(
     live: &mut LiveFks,
     statements: &mut Vec<String>,
 ) -> Result<Vec<String>, MigrateError> {
-    let step = render_step(change, ops, after, dialect, None, &EmptyTables::default())?;
+    let step = render_step(
+        change,
+        ops,
+        before,
+        after,
+        dialect,
+        None,
+        &EmptyTables::default(),
+    )?;
     // The runner looks these names up live; this is the name it has then.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
         if let Some(name) = live.take(&fk.table, &fk.column) {
@@ -1107,10 +771,10 @@ fn preview_schema_op(
             Some((drops, readd.into_iter().collect::<Vec<_>>()))
         })
         .unwrap_or_default();
-    // The composite FKs only this index serves, as apply finds them (#2326).
+    // The composite FKs only this index serves, as apply finds them.
     if let Some((ix, index)) = dropped {
         let covers = |cols: &[String], fk: &[String]| cols.starts_with(fk);
-        let names: Vec<String> = before
+        let names: Vec<(String, Vec<String>)> = before
             .table(&ix.table)
             .map_or(&[][..], |t| t.composite_fks.as_slice())
             .iter()
@@ -1120,13 +784,22 @@ fn preview_schema_op(
                     .iter()
                     .any(|(n, cols)| *n != ix.index && covers(cols, &cf.from))
             })
-            .map(|cf| cf.name.clone())
+            .map(|cf| {
+                let columns = super::rebuild::columns_at_end(&ix.table, &cf.from, earlier);
+                (ddl::fk_constraint_name(&ix.table, &cf.name), columns)
+            })
             .collect();
         let (d, r) = ix.plan_composites(&names, dialect);
         drops.extend(d);
         readd.extend(r);
     }
     statements.extend(drops);
+    // Apply finds these by their columns; this is the usual name.
+    statements.extend(
+        step.drop_composite_fks
+            .iter()
+            .filter_map(|fk| dialect.drop_foreign_key_sql(&fk.table, &fk.usual_name())),
+    );
     statements.extend(step.batch.immediate);
     if let Some(retry) = &step.retry {
         statements.extend(retry.preview().map(|l| format!("-- {l}")));
@@ -1231,7 +904,7 @@ impl LiveFks {
 }
 
 /// The DDL that moves `before` to `after` by `changes` on `dialect`, as
-/// `sqlmigrate` prints it: a MySQL column drop drops its FK first (#2026).
+/// `sqlmigrate` prints it: a MySQL column drop drops its FK first.
 ///
 /// # Errors
 /// A change the dialect cannot render.
@@ -1259,544 +932,6 @@ pub fn render_changes_between(
     }
     statements.extend(deferred);
     Ok(statements)
-}
-
-#[cfg(feature = "postgres")]
-async fn apply_atomic(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
-    tracing::info!(migration = %mig.name, "applying (atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
-    let mut tx = pool.begin().await?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in &mig.forward {
-        match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    &mig.forward,
-                    &mig.snapshot,
-                    &crate::sql::Postgres,
-                    schema.as_deref(),
-                    &empty,
-                )?;
-                for stmt in pg_statements(&mut tx, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *tx).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => return Err(callback_in_atomic(&mig.name, c)),
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(&mut *tx).await?;
-    }
-    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
-        .bind(&mig.name)
-        .bind(chrono::Utc::now())
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-/// Move the database to a specific migration target — forward or back.
-///
-/// Compares `target` to the current head (lex-greatest applied
-/// migration name in `dir`) and walks the right direction:
-///
-/// * `target > head` → apply pending migrations whose name lies in
-///   `(head, target]`, in lex order.
-/// * `target == head` → no-op.
-/// * `target < head` → unapply migrations whose name lies in
-///   `(target, head]`, in **reverse** lex order.
-/// * `target == "zero"` → unapply every applied migration. Special-
-///   cased so users have a stable way to wipe the schema's migration
-///   state without having to think about which file is "earliest".
-///
-/// Returns the migrations that were applied or unapplied (the caller
-/// can compare against [`applied_set`] before/after to infer
-/// direction). Returns an empty `Vec` if the target was already the
-/// current head.
-///
-/// # Errors
-/// * [`MigrateError::Validation`] if `target` doesn't match any file
-///   in `dir` (and isn't `"zero"`).
-/// * Any error [`migrate`] or [`unapply`] would raise.
-#[cfg(feature = "postgres")]
-pub async fn migrate_to(
-    pool: &PgPool,
-    dir: &Path,
-    target: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().migrate_to(pool, dir, target).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_to_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    target: &str,
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        let all = file::list_dir(dir)?;
-        let applied = applied_set_for(pool, ledger).await?;
-
-        if target == "zero" {
-            return unapply_all_in_order(pool, dir, &all, &applied, ledger).await;
-        }
-
-        if !all.iter().any(|m| m.name == target) {
-            return Err(MigrateError::Validation(format!(
-                "target migration `{target}` not found in {}",
-                dir.display()
-            )));
-        }
-
-        let mut applied = applied;
-        let mut touched = Vec::new();
-        for mig in backward_from(&all, &applied, target) {
-            unapply_locked(pool, dir, &mig.name, ledger).await?;
-            applied.remove(&mig.name);
-            touched.push(mig);
-        }
-        let mut done = applied.clone();
-        for mig in forward_to(&all, &applied, target) {
-            reconcile_and_apply_pg(pool, &all, &done, &mig, &applied, ledger).await?;
-            done.insert(mig.name.clone());
-            touched.push(mig);
-        }
-        Ok(touched)
-    })
-    .await
-}
-
-/// Apply pending migrations from an in-memory `&[(name, json)]` slice.
-///
-/// Built for deployments where shipping a `migrations/` folder
-/// alongside the binary is awkward (Docker images, single-binary
-/// distribution). Pair with the [`embed_migrations!`] proc-macro from
-/// `rustango-macros` (re-exported as `rustango::embed_migrations!`),
-/// which scans a directory at compile time and emits the slice via
-/// `include_str!` per file. The macro emits content in lex-sorted
-/// order, but this function re-sorts defensively.
-///
-/// Each entry's first item must equal the migration's `name` field
-/// — a divergence would mean the slice was hand-built incorrectly.
-///
-/// [`embed_migrations!`]: https://docs.rs/rustango/0.1/rustango/macro.embed_migrations.html
-///
-/// # Errors
-/// As [`migrate`], plus [`MigrateError::Validation`] when an entry
-/// key doesn't match the migration's own name.
-#[cfg(feature = "postgres")]
-pub async fn migrate_embedded(
-    pool: &PgPool,
-    embedded: &[(&str, &str)],
-) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().migrate_embedded(pool, embedded).await
-}
-
-#[cfg(feature = "postgres")]
-async fn migrate_embedded_with_ledger(
-    pool: &PgPool,
-    embedded: &[(&str, &str)],
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        let mut all: Vec<Migration> = Vec::with_capacity(embedded.len());
-        for (name, json) in embedded {
-            let mig = file::parse(json)?;
-            if mig.name != *name {
-                return Err(MigrateError::Validation(format!(
-                    "embedded entry key `{name}` doesn't match migration `name` field `{}`",
-                    mig.name,
-                )));
-            }
-            all.push(mig);
-        }
-        all.sort_by(|a, b| a.name.cmp(&b.name));
-        file::validate_chain(&all, "embedded slice")?;
-
-        let applied = applied_set_for(pool, ledger).await?;
-        let pending: Vec<Migration> = all
-            .into_iter()
-            .filter(|m| !applied.contains(&m.name))
-            .collect();
-
-        let mut newly = Vec::with_capacity(pending.len());
-        for mig in pending {
-            apply_one(pool, &mig, ledger).await?;
-            newly.push(mig);
-        }
-        Ok(newly)
-    })
-    .await
-}
-
-/// Step back `steps` applied migrations (Alembic's `downgrade -N`).
-///
-/// `downgrade(pool, dir, 1)` rolls back the most recently applied
-/// migration. `downgrade(pool, dir, n)` rolls back the `n` most
-/// recent. If `n` exceeds the number of applied migrations, every
-/// applied migration is rolled back. `n == 0` is a no-op.
-///
-/// # Errors
-/// As [`unapply`] for each step.
-#[cfg(feature = "postgres")]
-pub async fn downgrade(
-    pool: &PgPool,
-    dir: &Path,
-    steps: usize,
-) -> Result<Vec<Migration>, MigrateError> {
-    Builder::default().downgrade(pool, dir, steps).await
-}
-
-#[cfg(feature = "postgres")]
-async fn downgrade_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    steps: usize,
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    if steps == 0 {
-        return Ok(Vec::new());
-    }
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        let order = ApplyOrder::read(&crate::sql::Pool::Postgres(pool.clone()), ledger).await?;
-        let plan = Rollback::Steps(steps).plan(&[dir.to_path_buf()], &order)?;
-
-        let mut touched = Vec::with_capacity(plan.unapply.len());
-        for (_, mig) in plan.unapply {
-            unapply_locked(pool, dir, &mig.name, ledger).await?;
-            touched.push(mig);
-        }
-        Ok(touched)
-    })
-    .await
-}
-
-#[cfg(feature = "postgres")]
-async fn apply_one(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
-    refuse_duplicate_keys(&pool.clone().into(), mig).await?;
-    if mig.atomic {
-        apply_atomic(pool, mig, ledger).await
-    } else {
-        apply_loose(pool, mig, ledger).await
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_all_in_order(
-    pool: &PgPool,
-    dir: &Path,
-    all: &[Migration],
-    applied: &HashSet<String>,
-    ledger: &str,
-) -> Result<Vec<Migration>, MigrateError> {
-    let mut to_unapply: Vec<Migration> = all
-        .iter()
-        .filter(|m| applied.contains(&m.name))
-        .cloned()
-        .collect();
-    to_unapply.reverse();
-    let mut touched = Vec::with_capacity(to_unapply.len());
-    for mig in to_unapply {
-        // Caller already holds the migrate lock; use `unapply_locked`
-        // to avoid re-acquiring (which would deadlock on a different
-        // pooled connection / session).
-        unapply_locked(pool, dir, &mig.name, ledger).await?;
-        touched.push(mig);
-    }
-    Ok(touched)
-}
-
-/// Roll back a single applied migration.
-///
-/// Loads `dir/{name}.json`, looks up its predecessor (or empty for
-/// the first migration) for snapshot context, computes the inverse
-/// op list via [`super::invert::invert`], and executes it in a
-/// transaction (or loose if the original `atomic: false`). Removes
-/// the entry from `__rustango_migrations__` on success.
-///
-/// **Refuses to unapply a non-head migration** — leaving an applied
-/// migration newer than the rolled-back one would put the schema in
-/// an inconsistent state (the newer one still thinks its predecessor
-/// is in place). Use [`downgrade`] or [`migrate_to`] for ordered
-/// rollback, or [`unapply_force`] to bypass.
-///
-/// **What "roll back" means here:** schema reversal restores shape,
-/// not data — `DropColumn` then `unapply` does NOT bring back the
-/// column's row values. Data reversal is only as good as the
-/// `reverse_sql` you wrote in the migration file; if you wrote
-/// `reverse_sql: "DELETE FROM x"`, that's what runs.
-///
-/// **Irreversible migrations** (`reversible: false` on any data op)
-/// fail fast before any DB write, with an error that names the op.
-///
-/// # Errors
-/// * [`MigrateError::Validation`] — non-head target, irreversible
-///   op, missing migration file, missing predecessor.
-/// * [`MigrateError::Driver`] — SQL failure during rollback.
-#[cfg(feature = "postgres")]
-pub async fn unapply(pool: &PgPool, dir: &Path, name: &str) -> Result<Migration, MigrateError> {
-    Builder::default().unapply(pool, dir, name).await
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<Migration, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, async {
-        check_is_head(pool, dir, name, ledger).await?;
-        unapply_locked(pool, dir, name, ledger).await
-    })
-    .await
-}
-
-/// Roll back any applied migration, even out of order.
-///
-/// Same body as [`unapply`] but skips the head check — the caller
-/// accepts responsibility for the resulting schema state. Use only
-/// when you genuinely need to drop an arbitrary applied migration
-/// (e.g. surgical correction of a bad migration mid-history); in
-/// most cases [`downgrade`] or [`migrate_to`] is what you want.
-///
-/// # Errors
-/// As [`unapply`], minus the head-mismatch check.
-#[cfg(feature = "postgres")]
-pub async fn unapply_force(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-) -> Result<Migration, MigrateError> {
-    Builder::default().unapply_force(pool, dir, name).await
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_force_with_ledger(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<Migration, MigrateError> {
-    ensure_ledger_for(pool, ledger).await?;
-    with_migrate_lock(pool, unapply_locked(pool, dir, name, ledger)).await
-}
-
-/// Verify `name` is the lex-greatest currently-applied migration.
-/// Silent pass-through if the migration isn't applied at all — that
-/// case will surface as a clearer error from `unapply_locked`
-/// ("migration not found in dir" or similar).
-#[cfg(feature = "postgres")]
-async fn check_is_head(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    let applied = applied_set_for(pool, ledger).await?;
-    if !applied.contains(name) {
-        return Ok(());
-    }
-    let all = file::list_dir(dir)?;
-    let head = all
-        .iter()
-        .rev()
-        .find(|m| applied.contains(&m.name))
-        .map(|m| m.name.as_str());
-    match head {
-        Some(h) if h == name => Ok(()),
-        Some(h) => Err(MigrateError::Validation(format!(
-            "refusing to unapply `{name}` out of order: current head is `{h}`. \
-             Use `downgrade(pool, dir, n)` / `migrate_to(pool, dir, target)` for \
-             ordered rollback, or `unapply_force` to bypass.",
-        ))),
-        None => Ok(()),
-    }
-}
-
-/// Body of [`unapply`] without acquiring the migrate lock — for
-/// reuse by `migrate_to` and `downgrade`, which already hold the
-/// lock for the whole operation. Acquiring the lock recursively on
-/// a different pooled connection would block forever (each
-/// `pool.acquire()` is a fresh session).
-#[cfg(feature = "postgres")]
-async fn unapply_locked(
-    pool: &PgPool,
-    dir: &Path,
-    name: &str,
-    ledger: &str,
-) -> Result<Migration, MigrateError> {
-    let all = file::list_dir(dir)?;
-    let target = all
-        .iter()
-        .find(|m| m.name == name)
-        .cloned()
-        .ok_or_else(|| {
-            MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
-        })?;
-
-    let prev_snapshot = prev_snapshot(&all, &target, dir)?;
-
-    let inverted = invert_migration(&target, &prev_snapshot)?;
-    let applied = applied_set_for(pool, ledger).await?;
-    let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
-
-    if target.atomic {
-        unapply_atomic(pool, &target, &inverted, &after, ledger).await?;
-    } else {
-        unapply_loose(pool, &target, &inverted, &after, ledger).await?;
-    }
-
-    Ok(target)
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_atomic(
-    pool: &PgPool,
-    target: &Migration,
-    inverted: &[Operation],
-    snapshot: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    tracing::info!(migration = %target.name, "unapplying (atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
-    let mut tx = pool.begin().await?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in inverted {
-        match op {
-            Operation::Schema(change) => {
-                let step = render_step(
-                    change,
-                    inverted,
-                    snapshot,
-                    &crate::sql::Postgres,
-                    schema.as_deref(),
-                    &empty,
-                )?;
-                for stmt in pg_statements(&mut tx, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *tx).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(&mut *tx, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => return Err(callback_in_atomic(&target.name, c)),
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(&mut *tx).await?;
-    }
-    sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
-        .bind(&target.name)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    Ok(())
-}
-
-#[cfg(feature = "postgres")]
-async fn unapply_loose(
-    pool: &PgPool,
-    target: &Migration,
-    inverted: &[Operation],
-    snapshot: &SchemaSnapshot,
-    ledger: &str,
-) -> Result<(), MigrateError> {
-    let callbacks = Callbacks::resolve(inverted)?;
-    tracing::info!(migration = %target.name, "unapplying (non-atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), inverted, snapshot).await;
-    let mut steps = render_steps(
-        inverted,
-        snapshot,
-        &crate::sql::Postgres,
-        schema.as_deref(),
-        &empty,
-    )?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in inverted {
-        match op {
-            Operation::Schema(_) => {
-                let step = steps.next_step();
-                let mut conn = pool.acquire().await?;
-                for stmt in pg_statements(&mut conn, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *conn).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(pool, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => {
-                callbacks.run(c, pool.clone().into()).await?;
-            }
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(pool).await?;
-    }
-    sqlx::query(&format!("DELETE FROM {ledger} WHERE name = $1"))
-        .bind(&target.name)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-#[cfg(feature = "postgres")]
-async fn apply_loose(pool: &PgPool, mig: &Migration, ledger: &str) -> Result<(), MigrateError> {
-    let callbacks = Callbacks::resolve(&mig.forward)?;
-    tracing::info!(migration = %mig.name, "applying (non-atomic)");
-    let schema = pg_creation_schema(pool).await?;
-    let empty = EmptyTables::probe(&pool.clone().into(), &mig.forward, &mig.snapshot).await;
-    let mut steps = render_steps(
-        &mig.forward,
-        &mig.snapshot,
-        &crate::sql::Postgres,
-        schema.as_deref(),
-        &empty,
-    )?;
-    let mut deferred_fks: Vec<String> = Vec::new();
-    for op in &mig.forward {
-        match op {
-            Operation::Schema(_) => {
-                let step = steps.next_step();
-                let mut conn = pool.acquire().await?;
-                for stmt in pg_statements(&mut conn, &step).await? {
-                    sqlx::query(&stmt).execute(&mut *conn).await?;
-                }
-                deferred_fks.extend(step.batch.deferred_fks);
-            }
-            Operation::Data(d) => {
-                sqlx::Executor::execute(pool, sqlx::raw_sql(&d.sql)).await?;
-            }
-            Operation::Callback(c) => {
-                callbacks.run(c, pool.clone().into()).await?;
-            }
-        }
-    }
-    for stmt in deferred_fks {
-        sqlx::query(&stmt).execute(pool).await?;
-    }
-    sqlx::query(&ledger_insert_sql(&crate::sql::Postgres, ledger))
-        .bind(&mig.name)
-        .bind(chrono::Utc::now())
-        .execute(pool)
-        .await?;
-    Ok(())
 }
 
 // ====================================================================
@@ -2201,7 +1336,14 @@ async fn reconcile_and_apply(
                 ),
                 _ => (std::borrow::Cow::Borrowed(mig), Outcome::Ran),
             };
-            apply_one_pool(pool, &on_live_branches(all, done, &effective), ledger).await?;
+            let before = snapshot_before(all, mig)?;
+            apply_one_pool(
+                pool,
+                &on_live_branches(all, done, &effective),
+                &before,
+                ledger,
+            )
+            .await?;
             Ok(outcome)
         }
     }
@@ -3315,6 +2457,9 @@ struct Step {
     /// A dropped single-column UNIQUE, found by name in the catalog (#1676).
     #[cfg_attr(not(feature = "mysql"), allow(dead_code))]
     drop_unique: Option<ColumnRef>,
+    /// Composite FKs to drop, found in the catalog by their columns.
+    #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+    drop_composite_fks: Vec<CompositeFkRef>,
     /// A MySQL index drop, which the FKs it serves refuse (1553; #2244, #2326). Boxed: `Step`
     /// sits in every migrate future, near a debug test thread's 2 MiB stack.
     index_fks: Option<Box<IndexFks>>,
@@ -3333,9 +2478,9 @@ struct IndexFks {
     /// missing here goes away later, or an earlier op already defers its
     /// FK's re-add, so its FK just drops; `None` if the whole table goes.
     columns: Option<Vec<(String, Option<String>)>>,
-    /// The table's composite FKs at the op by name, with their re-add; one
-    /// missing here just drops; `None` if the whole table goes (#2326).
-    composites: Option<Vec<(String, String)>>,
+    /// The table's composite FKs at the op as `(name, columns, re-add)`;
+    /// one missing here just drops; `None` if the whole table goes.
+    composites: Option<Vec<(String, Vec<String>, String)>>,
 }
 
 /// The indexes on `table` that start with `column` once `earlier` ran on
@@ -3458,7 +2603,12 @@ impl IndexFks {
             if let Some(cs) = &mut columns {
                 cs.retain(|(c, fk)| fk.is_none() || !fk_deferred_earlier(table, c, earlier));
             }
-            let composites = at.map(|t| super::diff::composite_fks(t, dialect, schema));
+            let composites = at.map(|t| {
+                super::diff::composite_fks(t, dialect, schema)
+                    .into_iter()
+                    .map(|(cf, sql)| (cf.name.clone(), cf.from.clone(), sql))
+                    .collect()
+            });
             (columns, composites)
         };
         Ok(Self {
@@ -3469,21 +2619,30 @@ impl IndexFks {
         })
     }
 
-    /// The drops of the live composite FKs `names` only the index serves,
-    /// then the re-adds of those still declared; an undeclared one stays.
+    /// The drops of the live composite FKs `live` only the index serves, then
+    /// the re-adds of those still declared, found by name, else by columns in
+    /// order; an undeclared one stays.
     fn plan_composites(
         &self,
-        names: &[String],
+        live: &[(String, Vec<String>)],
         dialect: &dyn crate::sql::Dialect,
     ) -> (Vec<String>, Vec<String>) {
         let (mut drops, mut readds) = (Vec::new(), Vec::new());
-        for name in names {
+        for (name, columns) in live {
             let readd = match &self.composites {
                 None => None,
-                Some(cs) => match cs.iter().find(|(n, _)| n == name) {
-                    Some((_, sql)) => Some(sql.clone()),
-                    None => continue,
-                },
+                Some(cs) => {
+                    let named =
+                        |n: &str| *name == n || *name == ddl::fk_constraint_name(&self.table, n);
+                    let found = cs
+                        .iter()
+                        .find(|(n, _, _)| named(n))
+                        .or_else(|| cs.iter().find(|(_, c, _)| c == columns));
+                    match found {
+                        Some((_, _, sql)) => Some(sql.clone()),
+                        None => continue,
+                    }
+                }
             };
             drops.extend(dialect.drop_foreign_key_sql(&self.table, name));
             readds.extend(readd);
@@ -3560,10 +2719,145 @@ struct ColumnRef {
     keep: Vec<String>,
 }
 
-/// Render `change`, one of `ops`, which together move the schema to `after`.
+/// A composite FK a step drops. Apply finds it in the catalog by its columns
+/// and target: an older migration named it bare, and a table rename keeps
+/// its name.
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+struct CompositeFkRef {
+    table: String,
+    name: String,
+    /// Its columns and target at the op; `None` if no snapshot or earlier op has it.
+    declared: Option<DeclaredFk>,
+}
+
+/// A composite FK's columns, in key order, and the table it references.
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+struct DeclaredFk {
+    columns: Vec<String>,
+    to: String,
+}
+
+/// One live FK, as the catalog describes it.
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq)]
+struct CatalogFk {
+    name: String,
+    fk: DeclaredFk,
+}
+
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+impl CatalogFk {
+    /// Group the catalog's `(name, column, referenced table)` rows, in key order.
+    fn from_rows(rows: Vec<(String, String, String)>) -> Vec<Self> {
+        let mut out: Vec<Self> = Vec::new();
+        for (name, column, to) in rows {
+            match out.last_mut() {
+                Some(f) if f.name == name => f.fk.columns.push(column),
+                _ => out.push(Self {
+                    name,
+                    fk: DeclaredFk {
+                        columns: vec![column],
+                        to,
+                    },
+                }),
+            }
+        }
+        out
+    }
+}
+
+#[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+impl CompositeFkRef {
+    /// `table.name` as `earlier`, run on `before`, leaves it.
+    fn at(table: &str, name: &str, before: &SchemaSnapshot, earlier: &[Operation]) -> Self {
+        use super::SchemaChange as SC;
+        let added = earlier
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(j, op)| match op {
+                Operation::Schema(SC::AddCompositeFk {
+                    table: t,
+                    name: n,
+                    to,
+                    from,
+                    ..
+                }) if n == name && super::rebuild::name_at_end(t, &earlier[j + 1..]) == table => {
+                    let rest = &earlier[j + 1..];
+                    Some(DeclaredFk {
+                        columns: super::rebuild::columns_at_end(t, from, rest),
+                        to: super::rebuild::name_at_end(to, rest),
+                    })
+                }
+                _ => None,
+            });
+        let start = earlier
+            .iter()
+            .rev()
+            .fold(table.to_owned(), |t, op| match op {
+                Operation::Schema(SC::RenameTable { old_name, new_name }) if *new_name == t => {
+                    old_name.clone()
+                }
+                _ => t,
+            });
+        let declared = added.or_else(|| {
+            let cf = before.table(&start)?.composite_fk(name)?;
+            Some(DeclaredFk {
+                columns: super::rebuild::columns_at_end(&start, &cf.from, earlier),
+                to: super::rebuild::name_at_end(&cf.to, earlier),
+            })
+        });
+        Self {
+            table: table.to_owned(),
+            name: name.to_owned(),
+            declared,
+        }
+    }
+
+    /// The live FKs it is, of those on its table: the ones on its columns and
+    /// target, the one its name gives first.
+    ///
+    /// # Errors
+    /// Several such FKs, none under its name: dropping all could take a declared one.
+    fn live_names(&self, live: Vec<CatalogFk>) -> Result<Vec<String>, String> {
+        let usual = self.usual_name();
+        let named = |f: &CatalogFk| f.name == self.name || f.name == usual;
+        let found: Vec<CatalogFk> = match &self.declared {
+            Some(d) => live.into_iter().filter(|f| f.fk == *d).collect(),
+            None => live.into_iter().filter(|f| named(f)).collect(),
+        };
+        if found.len() > 1 && !found.iter().any(named) {
+            let names: Vec<&str> = found.iter().map(|f| f.name.as_str()).collect();
+            return Err(format!(
+                "cannot drop composite FK `{}.{}`: the live FKs {} all match it and none is \
+                 named `{}` or `{usual}`; drop the right one by hand",
+                self.table,
+                self.name,
+                names.join(", "),
+                self.name,
+            ));
+        }
+        let any_named = found.iter().any(named);
+        Ok(found
+            .into_iter()
+            .filter(|f| !any_named || named(f))
+            .map(|f| f.name)
+            .collect())
+    }
+
+    /// The name apply usually finds, for a preview.
+    fn usual_name(&self) -> String {
+        ddl::fk_constraint_name(&self.table, &self.name)
+    }
+}
+
+/// Render `change`, one of `ops`, which together move the schema from
+/// `before` to `after`.
 fn render_step(
     change: &super::SchemaChange,
     ops: &[Operation],
+    before: &SchemaSnapshot,
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -3575,6 +2869,14 @@ fn render_step(
         .iter()
         .position(|op| matches!(op, Operation::Schema(c) if std::ptr::eq(c, change)));
     let later = at_op.map_or(&[][..], |i| &ops[i + 1..]);
+    let earlier = at_op.map_or(&[][..], |i| &ops[..i]);
+    // Dropped by the name the catalog has, not rendered by its usual one.
+    let mut drop_composite_fks: Vec<CompositeFkRef> = match change {
+        SC::DropCompositeFk { table, name } if dialect.foreign_key_columns_sql().is_some() => {
+            vec![CompositeFkRef::at(table, name, before, earlier)]
+        }
+        _ => Vec::new(),
+    };
     // Its FK is deferred past the later renames, so it takes their names (#2190).
     let ended = match change {
         SC::AddCompositeFk {
@@ -3592,7 +2894,11 @@ fn render_step(
         }),
         _ => None,
     };
-    let changes = std::slice::from_ref(ended.as_ref().unwrap_or(change));
+    let changes = if drop_composite_fks.is_empty() {
+        std::slice::from_ref(ended.as_ref().unwrap_or(change))
+    } else {
+        &[]
+    };
     let render = |snap: &SchemaSnapshot| {
         if empty.holds(change) {
             super::diff::render_changes_split_for_empty(changes, snap, dialect, schema)
@@ -3752,29 +3058,21 @@ fn render_step(
     }
     if let Some(at) = at_op.filter(|_| dialect.sole_leading_column_sql().is_some()) {
         let hoisted = hoisted_composite_drops(ops);
+        // Its drop runs at the index drop instead.
         if hoisted.iter().any(|(_, drop)| *drop == at) {
             batch = super::diff::render_changes_split_in_schema(&[], snap, dialect, schema)
                 .map_err(MigrateError::Validation)?;
+            drop_composite_fks.clear();
         }
         if let SC::DropIndex { table, .. } = change {
-            let drops: Vec<SC> = hoisted
-                .iter()
-                .filter(|(index, _)| *index == at)
-                .filter_map(|(_, drop)| match &ops[*drop] {
+            drop_composite_fks.extend(hoisted.iter().filter(|(index, _)| *index == at).filter_map(
+                |(_, drop)| match &ops[*drop] {
                     Operation::Schema(SC::DropCompositeFk { name, .. }) => {
-                        Some(SC::DropCompositeFk {
-                            table: table.clone(),
-                            name: name.clone(),
-                        })
+                        Some(CompositeFkRef::at(table, name, before, earlier))
                     }
                     _ => None,
-                })
-                .collect();
-            let mut first =
-                super::diff::render_changes_split_in_schema(&drops, snap, dialect, schema)
-                    .map_err(MigrateError::Validation)?;
-            first.immediate.append(&mut batch.immediate);
-            batch.immediate = first.immediate;
+                },
+            ));
         }
     }
     if let Some((true, sql)) = renamed_fk {
@@ -3860,6 +3158,7 @@ fn render_step(
         drop_referencing,
         drop_composites,
         drop_unique,
+        drop_composite_fks,
         index_fks,
         readded_now,
     })
@@ -3923,6 +3222,7 @@ impl Rendered {
 
 fn render_steps(
     ops: &[Operation],
+    before: &SchemaSnapshot,
     after: &SchemaSnapshot,
     dialect: &dyn crate::sql::Dialect,
     schema: Option<&str>,
@@ -3931,9 +3231,9 @@ fn render_steps(
     let steps: Result<Vec<Step>, MigrateError> = ops
         .iter()
         .filter_map(|op| match op {
-            Operation::Schema(change) => {
-                Some(render_step(change, ops, after, dialect, schema, empty))
-            }
+            Operation::Schema(change) => Some(render_step(
+                change, ops, before, after, dialect, schema, empty,
+            )),
             _ => None,
         })
         .collect();
@@ -4258,10 +3558,19 @@ fn rebuilds(
         return Ok(false);
     };
     Ok(
-        render_step(change, ops, after, &crate::sql::Sqlite, None, empty)?
-            .batch
-            .rebuild
-            .is_some(),
+        // SQLite drops a composite FK by rebuild, so needs no `before`.
+        render_step(
+            change,
+            ops,
+            &SchemaSnapshot::default(),
+            after,
+            &crate::sql::Sqlite,
+            None,
+            empty,
+        )?
+        .batch
+        .rebuild
+        .is_some(),
     )
 }
 
@@ -4341,6 +3650,30 @@ macro_rules! step_statements {
                     .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
             );
         }
+        if let Some(sql) = dialect.foreign_key_columns_sql() {
+            for fk in &step.drop_composite_fks {
+                let rows: Vec<(String, String, String)> = sqlx::query_as(sql)
+                    .bind(&fk.table)
+                    .fetch_all(&mut *$conn)
+                    .await?;
+                let names = fk
+                    .live_names(CatalogFk::from_rows(rows))
+                    .map_err(MigrateError::Validation)?;
+                // MySQL would record the drop as applied with the FK still there.
+                if names.is_empty() {
+                    let missing = format!("composite FK `{}.{}` is not in the catalog", fk.table, fk.name);
+                    if !dialect.drops_missing_foreign_key() {
+                        return Err(MigrateError::Validation(missing));
+                    }
+                    tracing::warn!(target: "rustango::migrate", "{missing}; nothing to drop");
+                }
+                out.extend(
+                    names
+                        .iter()
+                        .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                );
+            }
+        }
         out.extend(step.batch.immediate.iter().cloned());
         Ok(out)
     }};
@@ -4353,7 +3686,7 @@ async fn mysql_statements(
     conn: &mut sqlx::MySqlConnection,
     step: &Step,
     dropped: &mut DroppedFks,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<String>, MigrateError> {
     let (mut out, readd) = match &step.index_fks {
         Some(ix) => Box::pin(mysql_index_fks(conn, ix)).await?,
         None => (Vec::new(), Vec::new()),
@@ -4361,7 +3694,7 @@ async fn mysql_statements(
     if let Some(cd) = &step.drop_composites {
         out.extend(Box::pin(mysql_composite_drops(conn, cd, dropped)).await?);
     }
-    let rest: Result<Vec<String>, sqlx::Error> = step_statements!(conn, step, crate::sql::MySql);
+    let rest: Result<Vec<String>, MigrateError> = step_statements!(conn, step, crate::sql::MySql);
     out.extend(rest?);
     out.extend(readd);
     Ok(out)
@@ -4420,10 +3753,11 @@ async fn mysql_index_fks(
 ) -> Result<(Vec<String>, Vec<String>), sqlx::Error> {
     use crate::sql::Dialect as _;
     let dialect = crate::sql::MySql;
-    let (Some(lead_sql), Some(names_sql), Some(composite_sql)) = (
+    let (Some(lead_sql), Some(names_sql), Some(composite_sql), Some(columns_sql)) = (
         dialect.sole_leading_column_sql(),
         dialect.foreign_key_names_sql(),
         dialect.composite_fks_needing_index_sql(),
+        dialect.foreign_key_columns_sql(),
     ) else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -4449,7 +3783,20 @@ async fn mysql_index_fks(
         .bind(&ix.index)
         .fetch_all(&mut *conn)
         .await?;
-    let (d, r) = ix.plan_composites(&names, &dialect);
+    let live: Vec<(String, Vec<String>)> = if names.is_empty() {
+        Vec::new()
+    } else {
+        let rows = sqlx::query_as(columns_sql)
+            .bind(&ix.table)
+            .fetch_all(&mut *conn)
+            .await?;
+        CatalogFk::from_rows(rows)
+            .into_iter()
+            .filter(|f| names.contains(&f.name))
+            .map(|f| (f.name, f.fk.columns))
+            .collect()
+    };
+    let (d, r) = ix.plan_composites(&live, &dialect);
     drops.extend(d);
     readds.extend(r);
     Ok((drops, readds))
@@ -4459,7 +3806,7 @@ async fn mysql_index_fks(
 async fn pg_statements(
     conn: &mut sqlx::PgConnection,
     step: &Step,
-) -> Result<Vec<String>, sqlx::Error> {
+) -> Result<Vec<String>, MigrateError> {
     step_statements!(conn, step, crate::sql::Postgres)
 }
 
@@ -4478,6 +3825,7 @@ async fn atomic_mysql(
     my: &sqlx::MySqlPool,
     name: &str,
     ops: &[Operation],
+    before: &SchemaSnapshot,
     after: &SchemaSnapshot,
     schema: Option<&str>,
     ledger: LedgerWrite<'_>,
@@ -4488,7 +3836,7 @@ async fn atomic_mysql(
         return Err(callback_in_atomic(name, c));
     }
     let empty = EmptyTables::probe(&my.clone().into(), ops, after).await;
-    let mut steps = render_steps(ops, after, &crate::sql::MySql, schema, &empty)?;
+    let mut steps = render_steps(ops, before, after, &crate::sql::MySql, schema, &empty)?;
     let mut tx = my.begin().await?;
     let mut deferred_fks: Vec<String> = Vec::new();
     let mut dropped = DroppedFks::default();
@@ -4522,9 +3870,16 @@ async fn atomic_mysql(
         match op {
             Operation::Schema(_) => {
                 let step = steps.next_step();
+                // A refusal after DDL committed still says what survived it.
                 let stmts = mysql_statements(&mut tx, &step, &mut dropped)
                     .await
-                    .map_err(|e| stuck!(e))?;
+                    .map_err(|e| match e {
+                        MigrateError::Driver(e) => stuck!(e),
+                        other => match stuck!(sqlx::Error::Protocol(other.to_string())) {
+                            MigrateError::Driver(_) => other,
+                            partial => partial,
+                        },
+                    })?;
                 // Counted per *statement*, not per operation:
                 // one operation can render several, and each
                 // auto-commits on its own, so an operation
@@ -4718,7 +4073,17 @@ async fn atomic_sqlite_segment(
         for op in &ops[range] {
             match op {
                 Operation::Schema(change) => {
-                    let step = render_step(change, ops, after, &crate::sql::Sqlite, None, empty)?;
+                    // As in `rebuilds`: SQLite needs no `before`.
+                    let before = SchemaSnapshot::default();
+                    let step = render_step(
+                        change,
+                        ops,
+                        &before,
+                        after,
+                        &crate::sql::Sqlite,
+                        None,
+                        empty,
+                    )?;
                     deferred_fks.extend(run_step_sqlite(&mut tx, step).await?);
                 }
                 Operation::Data(d) => {
@@ -4814,6 +4179,11 @@ async fn run_step_pool(
 async fn apply_atomic_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    #[cfg_attr(
+        not(any(feature = "postgres", feature = "mysql")),
+        allow(unused_variables)
+    )]
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     tracing::info!(migration = %mig.name, "applying (atomic, _pool)");
@@ -4836,6 +4206,7 @@ async fn apply_atomic_pool(
                         let step = render_step(
                             change,
                             &mig.forward,
+                            before,
                             &mig.snapshot,
                             dialect,
                             schema.as_deref(),
@@ -4877,6 +4248,7 @@ async fn apply_atomic_pool(
                 my,
                 &mig.name,
                 &mig.forward,
+                before,
                 &mig.snapshot,
                 schema.as_deref(),
                 LedgerWrite::Insert(ledger),
@@ -4904,6 +4276,7 @@ async fn apply_atomic_pool(
 async fn apply_nonatomic_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     let callbacks = Callbacks::resolve(&mig.forward)?;
@@ -4912,6 +4285,7 @@ async fn apply_nonatomic_pool(
     let empty = EmptyTables::probe(pool, &mig.forward, &mig.snapshot).await;
     let mut steps = render_steps(
         &mig.forward,
+        before,
         &mig.snapshot,
         pool.dialect(),
         schema.as_deref(),
@@ -5309,13 +4683,14 @@ pub async fn migrate_dry_run_pool_with_ledger(
 async fn apply_one_pool(
     pool: &crate::sql::Pool,
     mig: &Migration,
+    before: &SchemaSnapshot,
     ledger: &str,
 ) -> Result<(), MigrateError> {
     refuse_duplicate_keys(pool, mig).await?;
     if mig.atomic {
-        apply_atomic_pool(pool, mig, ledger).await
+        apply_atomic_pool(pool, mig, before, ledger).await
     } else {
-        apply_nonatomic_pool(pool, mig, ledger).await
+        apply_nonatomic_pool(pool, mig, before, ledger).await
     }
 }
 
@@ -5500,6 +4875,7 @@ async fn unapply_atomic_pool(
                         let step = render_step(
                             change,
                             inverted,
+                            &target.snapshot,
                             snapshot,
                             pool.dialect(),
                             schema.as_deref(),
@@ -5538,6 +4914,7 @@ async fn unapply_atomic_pool(
                 my,
                 &target.name,
                 inverted,
+                &target.snapshot,
                 snapshot,
                 schema.as_deref(),
                 LedgerWrite::Delete(ledger),
@@ -5611,7 +4988,8 @@ async fn migrate_embedded_pool_with_ledger(
 
         let mut newly = Vec::with_capacity(pending.len());
         for mig in pending {
-            apply_one_pool(pool, &mig, ledger).await?;
+            let before = snapshot_before(&all, &mig)?;
+            apply_one_pool(pool, &mig, &before, ledger).await?;
             newly.push(mig);
         }
         Ok(newly)
@@ -5632,6 +5010,7 @@ async fn unapply_nonatomic_pool(
     let empty = EmptyTables::probe(pool, inverted, snapshot).await;
     let mut steps = render_steps(
         inverted,
+        &target.snapshot,
         snapshot,
         pool.dialect(),
         schema.as_deref(),
@@ -5803,6 +5182,68 @@ mod tests {
         assert_eq!(out.len(), 4, "{out:?}");
     }
 
+    /// `product.p1` on `(a, b)` to `parent`, as a migration drops it.
+    fn p1_drop() -> super::CompositeFkRef {
+        super::CompositeFkRef {
+            table: "product".into(),
+            name: "p1".into(),
+            declared: Some(super::DeclaredFk {
+                columns: vec!["a".into(), "b".into()],
+                to: "parent".into(),
+            }),
+        }
+    }
+
+    fn live(name: &str, columns: &[&str], to: &str) -> super::CatalogFk {
+        super::CatalogFk {
+            name: name.into(),
+            fk: super::DeclaredFk {
+                columns: columns.iter().map(|c| (*c).to_owned()).collect(),
+                to: to.into(),
+            },
+        }
+    }
+
+    /// Two FKs on its columns and target: only the one its name gives drops.
+    #[test]
+    fn composite_drop_prefers_its_name() {
+        let found = p1_drop()
+            .live_names(vec![
+                live("product_p1_fkey", &["a", "b"], "parent"),
+                live("p2_by_hand", &["a", "b"], "parent"),
+            ])
+            .unwrap();
+        assert_eq!(found, ["product_p1_fkey"]);
+    }
+
+    /// Several unnamed candidates (a renamed table) are refused, not all dropped.
+    #[test]
+    fn composite_drop_refuses_several_unnamed() {
+        let err = p1_drop()
+            .live_names(vec![
+                live("item_p1_fkey", &["a", "b"], "parent"),
+                live("item_p2_fkey", &["a", "b"], "parent"),
+            ])
+            .unwrap_err();
+        assert!(
+            err.contains("item_p1_fkey") && err.contains("item_p2_fkey"),
+            "{err}"
+        );
+    }
+
+    /// Another target, or the columns in another order, is another FK.
+    #[test]
+    fn composite_drop_matches_target_and_column_order() {
+        let found = p1_drop()
+            .live_names(vec![
+                live("item_p1_fkey", &["a", "b"], "parent"),
+                live("item_p2_fkey", &["a", "b"], "other"),
+                live("item_p3_fkey", &["b", "a"], "parent"),
+            ])
+            .unwrap();
+        assert_eq!(found, ["item_p1_fkey"]);
+    }
+
     /// #2326 — a composite FK only the dropped index serves comes off around it,
     /// though another index starts with its first column.
     #[test]
@@ -5852,9 +5293,15 @@ mod tests {
         // `(code, p_id)` has the FK's columns in the wrong order.
         for other in [&[][..], &["code", "p_id"]] {
             let out = render(other);
-            assert!(out[0].contains("DROP FOREIGN KEY `child_pc_fk`"), "{out:?}");
+            assert!(
+                out[0].contains("DROP FOREIGN KEY `child_child_pc_fk_fkey`"),
+                "{out:?}"
+            );
             assert!(out[1].starts_with("DROP INDEX"), "{out:?}");
-            assert!(out[2].contains("ADD CONSTRAINT `child_pc_fk`"), "{out:?}");
+            assert!(
+                out[2].contains("ADD CONSTRAINT `child_child_pc_fk_fkey`"),
+                "{out:?}"
+            );
             assert_eq!(out.len(), 3, "{out:?}");
         }
         let out = render(&["p_id", "code"]);

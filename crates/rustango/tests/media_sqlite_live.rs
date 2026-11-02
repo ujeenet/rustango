@@ -30,7 +30,7 @@ async fn manager() -> MediaManager {
     let registry = StorageRegistry::new()
         .set("default", Arc::new(InMemoryStorage::new()))
         .with_default("default");
-    MediaManager::new_pool(pool_enum, registry)
+    MediaManager::new(pool_enum, registry)
 }
 
 #[tokio::test]
@@ -307,7 +307,7 @@ async fn save_bytes_hands_a_safe_mime_to_storage() {
     let registry = StorageRegistry::new()
         .set("default", disk.clone())
         .with_default("default");
-    let mgr = MediaManager::new_pool(pool, registry);
+    let mgr = MediaManager::new(pool, registry);
     let mimes = [
         "image/png",
         "text/html",
@@ -434,7 +434,7 @@ async fn bucket_manager_with(
     let registry = StorageRegistry::new()
         .set("default", disk.clone())
         .with_default("default");
-    (MediaManager::new_pool(pool, registry), disk, sq)
+    (MediaManager::new(pool, registry), disk, sq)
 }
 
 /// #2057: an active MIME is signed, and reported, as octet-stream.

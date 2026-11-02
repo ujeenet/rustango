@@ -329,6 +329,7 @@ impl std::fmt::Display for Locale {
 // ------------------------------------------------------------------ I18nError
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum I18nError {
     #[error("io error: {0}")]
     Io(String),

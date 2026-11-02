@@ -21,9 +21,7 @@
 //! signature = HMAC-SHA256(secret, payload_base64) [first 32 bytes]
 //! ```
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 // v0.45 (#253) — `SessionSecret` + `sign` were promoted to the
 // crate-root `crate::session` module so the bare `admin` module can
@@ -31,10 +29,10 @@ use subtle::ConstantTimeEq;
 // The re-exports below keep every pre-existing `crate::tenancy::session::SessionSecret`
 // caller working.
 pub use crate::session::{PasswordFingerprint, SessionSecret, SessionSecretError};
-// `sign` re-exported at crate-internal visibility so existing
-// callers (`tenant_console`, `impersonation_handoff`) keep working
-// after the v0.45 move to `crate::session`.
-pub(crate) use crate::session::{session_survives, sign};
+
+/// Signature domain of this token kind: it never verifies as another kind.
+const OPERATOR_DOMAIN_TAG: &[u8] = b"rustango-operator-session-v1";
+pub(crate) use crate::session::session_survives;
 
 /// Default cookie name. Visible in browser devtools — namespaced so
 /// it doesn't collide with tenant cookies.
@@ -74,7 +72,7 @@ impl ServerKeys {
     /// Panics on the prod tier without a valid `RUSTANGO_SESSION_SECRET`.
     pub(crate) fn load() -> Self {
         let tier = crate::session::tier_from_env();
-        let env = std::env::var("RUSTANGO_SESSION_SECRET").ok();
+        let env = std::env::var(crate::session::SESSION_SECRET_ENV).ok();
         if let Some(msg) = per_pod_key_warning(&tier, env.as_deref()) {
             tracing::warn!(target: "rustango::server", "{msg}");
         }
@@ -130,7 +128,9 @@ pub(crate) fn existing_tenant_secret(
 ) -> Result<(SessionSecret, KeySource), super::TenancyError> {
     use crate::session::{is_prod_tier, tier_from_env};
     existing_tenant_secret_at(
-        std::env::var("RUSTANGO_SESSION_SECRET").ok().as_deref(),
+        std::env::var(crate::session::SESSION_SECRET_ENV)
+            .ok()
+            .as_deref(),
         is_prod_tier(&tier_from_env()),
         std::path::Path::new(crate::session::TENANT_SESSION_KEY_PATH),
         dev_key,
@@ -178,7 +178,7 @@ fn existing_tenant_secret_at(
         DevKeyFile::LoadOrCreate => crate::session::load_or_create_key_file(
             dev_file,
             "session secret",
-            "RUSTANGO_SESSION_SECRET",
+            crate::session::SESSION_SECRET_ENV,
         )
         .map(|bytes| (SessionSecret::from_bytes(bytes), KeySource::DevFile))
         .map_err(|e| {
@@ -191,6 +191,7 @@ fn existing_tenant_secret_at(
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SessionError {
     #[error("session cookie is malformed")]
     Malformed,
@@ -238,12 +239,6 @@ impl SessionPayload {
         }
     }
 
-    /// Past the idle deadline `exp`, or [`SESSION_TTL_SECS`] after sign-in.
-    fn is_expired(&self) -> bool {
-        let now = chrono::Utc::now().timestamp();
-        now >= self.exp || now >= self.iat.saturating_add(SESSION_TTL_SECS)
-    }
-
     /// This session with its idle deadline moved to now + [`SESSION_IDLE_SECS`],
     /// capped at the absolute lifetime. `None` while `exp` is still fresh.
     #[must_use]
@@ -258,14 +253,27 @@ impl SessionPayload {
     }
 }
 
+impl crate::session::Expiring for SessionPayload {
+    /// Past the idle deadline `exp`, or [`SESSION_TTL_SECS`] after sign-in.
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp || now >= self.iat.saturating_add(SESSION_TTL_SECS)
+    }
+}
+
+impl From<crate::session::SealError> for SessionError {
+    fn from(e: crate::session::SealError) -> Self {
+        match e {
+            crate::session::SealError::BadSignature => Self::BadSignature,
+            crate::session::SealError::Expired => Self::Expired,
+            _ => Self::Malformed,
+        }
+    }
+}
+
 /// Serialize and sign a payload into a cookie value.
 #[must_use]
 pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
-    let json = serde_json::to_vec(payload).expect("payload serializes");
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = sign(secret, payload_b64.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{payload_b64}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), OPERATOR_DOMAIN_TAG, payload)
 }
 
 /// Verify and deserialize a cookie value.
@@ -276,23 +284,11 @@ pub fn encode(secret: &SessionSecret, payload: &SessionPayload) -> String {
 /// secret rotation + tampering), [`SessionError::Expired`] when the
 /// payload's `exp` is in the past.
 pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, SessionError> {
-    let (payload_b64, sig_b64) = value.split_once('.').ok_or(SessionError::Malformed)?;
-    let expected = sign(secret, payload_b64.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| SessionError::Malformed)?;
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return Err(SessionError::BadSignature);
-    }
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| SessionError::Malformed)?;
-    let payload: SessionPayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| SessionError::Malformed)?;
-    if payload.is_expired() {
-        return Err(SessionError::Expired);
-    }
-    Ok(payload)
+    Ok(crate::session::SealedToken::open(
+        secret.key(),
+        OPERATOR_DOMAIN_TAG,
+        value,
+    )?)
 }
 
 // `sign` moved to `crate::session` in v0.45 (#253) — `use` above.
@@ -300,9 +296,37 @@ pub fn decode(secret: &SessionSecret, value: &str) -> Result<SessionPayload, Ses
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn fp() -> PasswordFingerprint {
         PasswordFingerprint::default()
+    }
+
+    /// A token signed under the same key for another purpose, or with no
+    /// purpose tag, is refused.
+    #[test]
+    fn a_token_of_another_kind_is_refused() {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let secret = SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec());
+        let payload = SessionPayload::new(7, 3600, fp());
+        assert!(decode(&secret, &encode(&secret, &payload)).is_ok());
+        let b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        let tags: [&[u8]; 3] = [
+            b"rustango-tenant-session-v1",
+            b"rustango-impersonation-handoff-v1",
+            b"rustango-member-session-v1",
+        ];
+        let sigs = tags
+            .iter()
+            .map(|t| crate::session::sign_tagged(&secret, t, b64.as_bytes()))
+            .chain([crate::session::sign(&secret, b64.as_bytes())]);
+        for sig in sigs {
+            let cookie = format!("{b64}.{}", URL_SAFE_NO_PAD.encode(sig));
+            assert!(matches!(
+                decode(&secret, &cookie),
+                Err(SessionError::BadSignature)
+            ));
+        }
     }
 
     /// Staging without a usable env key warns; dev, prod and a set key do not.
@@ -349,7 +373,10 @@ mod tests {
         let (cli, _) =
             existing_tenant_secret_at(None, false, &file, DevKeyFile::LoadOrCreate).unwrap();
         let server = ServerKeys::dev_at(None, root.path());
-        let scope = crate::auth_flows::LinkScope::from(&crate::testkit::org());
+        let scope = crate::auth_flows::LinkScope::from(&crate::tenancy::Org {
+            id: crate::sql::Auto::Set(1),
+            ..crate::testkit::org()
+        });
         let link = crate::auth_flows::PasswordReset::issue(
             &scope,
             "/change-password",

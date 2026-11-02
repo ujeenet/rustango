@@ -116,7 +116,7 @@ async fn parent_detail_renders_inline_panel_with_child_rows() {
         id: Auto::default(),
         name: "Test Blog".into(),
     };
-    blog.insert(&pool).await.unwrap();
+    blog.insert(&pool.clone().into()).await.unwrap();
     let blog_id = *blog.id.get().expect("PK assigned");
 
     let mut post_a = BlogPost {
@@ -125,7 +125,7 @@ async fn parent_detail_renders_inline_panel_with_child_rows() {
         title: "First post".into(),
         body: "hello world".into(),
     };
-    post_a.insert(&pool).await.unwrap();
+    post_a.insert(&pool.clone().into()).await.unwrap();
 
     let mut post_b = BlogPost {
         id: Auto::default(),
@@ -133,7 +133,7 @@ async fn parent_detail_renders_inline_panel_with_child_rows() {
         title: "Second post".into(),
         body: "more content".into(),
     };
-    post_b.insert(&pool).await.unwrap();
+    post_b.insert(&pool.clone().into()).await.unwrap();
 
     let app = rustango::admin::router(pool.clone());
     let req = Request::builder()
@@ -184,7 +184,7 @@ async fn parent_detail_renders_empty_state_when_no_children() {
         id: Auto::default(),
         name: "Lonely Blog".into(),
     };
-    blog.insert(&pool).await.unwrap();
+    blog.insert(&pool.clone().into()).await.unwrap();
     let blog_id = *blog.id.get().expect("PK assigned");
 
     let app = rustango::admin::router(pool.clone());

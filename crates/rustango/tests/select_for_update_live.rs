@@ -55,7 +55,7 @@ async fn fresh_pool() -> Option<sqlx::PgPool> {
             status: status.into(),
             priority,
         };
-        j.insert_pool(&(&pool).clone().into()).await.unwrap();
+        j.insert(&(&pool).clone().into()).await.unwrap();
     }
     Some(pool)
 }

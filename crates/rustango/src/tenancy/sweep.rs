@@ -69,6 +69,7 @@ pub struct TenantOutcome<T, E> {
 
 /// Why one tenant's sweep did not produce a value.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SweepError<E> {
     /// The tenant's pool could not be resolved — bad `storage_mode`,
     /// unresolvable `database_url`, pool cache full, upstream down.

@@ -185,7 +185,7 @@ impl Env {
             },
         };
         let dir = self.dir();
-        let org = typed!(self.registry, p => create_tenant(&p, &self.url, &dir, slug, opts).await)
+        let org = typed!(self.registry, p => create_tenant(&p, &self.url, &dir, slug, rustango::testkit::routed_opts(slug, opts)).await)
             .expect("create tenant");
         let pool = typed!(self.registry, p => p.scoped_pool_dyn(&org).await.expect("tenant pool"));
         rustango::sql::raw_execute_pool(&pool, "CREATE TABLE cmd_marker (id INT)", Vec::new())
@@ -515,6 +515,7 @@ async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool
         let schema = cache_table("cc_tenant");
         cache_verb(pool, "createcachetable", &table).await;
         seed_expired(pool, &table).await;
+        // Not a tenant schema: a plain session path, to test the cache-table lookup.
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(pg)
             .await

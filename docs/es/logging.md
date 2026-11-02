@@ -130,7 +130,6 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::email_jobs` | Dos colas en una tabla de jobs con mailers distintos |
 | `rustango::error` | La causa de un 5xx, que el cuerpo de la respuesta omite |
 | `rustango::errors` | Una plantilla de página de error que no se renderizó, o un directorio de plantillas que no cargó |
-| `rustango::forms` | Valores de `DynamicForm` aceptados hoy pero rechazados en una versión futura |
 | `rustango::auth` | Comprobaciones de permisos que fallaron por un error de base de datos |
 | `rustango::auth_flows` | Enlaces de autenticación de un solo uso rechazados por el caché |
 | `rustango::aead` | Una clave secreta anterior vacía, o una clave de desarrollo que no se puede guardar |
@@ -143,13 +142,13 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::media::auth` | Rechazos de autorización del router de medios |
 | `rustango::messages` | Mensajes flash |
 | `rustango::migrate` | Ejecutor de migraciones |
+| `rustango::object_permissions` | Límite de escaneo del hook `"view"` alcanzado en una lista |
 | `rustango::outbound` | Llamadas salientes verificadas (SSO, Slack, webhooks) |
 | `rustango::passkey` | Desafíos de passkey rechazados por el caché |
 | `rustango::passwords` | Actualización de hashes de contraseña al iniciar sesión |
 | `rustango::rate_limit` | Limitación de tasa |
 | `rustango::request_timeout` | Timeout por petición |
 | `rustango::scheduler` | Cron / tareas programadas |
-| `rustango::security_headers` | Ajustes de las cabeceras de seguridad (HSTS) |
 | `rustango::server` | Arranque y apagado del servidor |
 | `rustango::shutdown` | Manejo de señales y hooks de apagado |
 | `rustango::sql` | Ejecución de consultas |
@@ -394,6 +393,7 @@ AccessLogLayer::default()
     .slow_threshold_ms(250)      // qué cuenta como lento
     .without_ip()                // omitir la IP del cliente
     .use_real_ip(true)           // TrustedRealIp de RealIpLayer, nunca cabeceras crudas
+    .skip_paths(["/health", "/ready"]) // sin línea para sondas; segmentos completos
 ```
 
 `RealIpLayer` debe ejecutarse antes del access log. Con `server::Builder`,
@@ -406,8 +406,9 @@ contiene una palabra secreta, comparada palabra a palabra, así que `api_key`,
 `pwd`, `token`, `jwt`, `secret`, `key`, `signature`, `auth`, `credential`,
 `cookie`, `session`, `otp`, más los nombres OAuth `code`, `state` y
 `assertion`. Amplía con `.redact_additional("ref")`, o sustituye la lista
-entera con `.redact(vec![...])`; `token`, `signature` y `code` siguen
-enmascarados en todo caso. El `url.query` del span de la petición se
+entera con `.redact(vec![...])`; las palabras de credenciales (`password`,
+`token`, `secret`, `api_key`, ...), `signature` y `code` siguen enmascaradas en todo caso,
+también dentro de una clave unida (`secretary` contiene `secret`); una lista propia no lo deshace. El `url.query` del span de la petición se
 enmascara igual. Esto cubre **solo las cadenas de consulta**;
 para el resto, ver
 [security.md](security.md#mantener-los-secretos-fuera-de-tus-registros).

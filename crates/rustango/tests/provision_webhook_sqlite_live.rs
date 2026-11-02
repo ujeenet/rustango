@@ -92,6 +92,7 @@ fn body_for(slug: &str, event_id: &str, ts: i64) -> String {
         "event_id": event_id,
         "timestamp": ts,
         "slug": slug,
+        "host_pattern": format!("{slug}.localhost"),
     })
     .to_string()
 }
@@ -710,9 +711,10 @@ async fn half_made_at(b: &Booted, url: &str, slug: &str, key: &str, own: bool) -
         backend_kind: "sqlite".into(),
         database_url: Some(url.to_owned()),
         active: false,
+        host_pattern: Some(format!("{slug}.localhost")),
         ..rustango::testkit::org()
     };
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
     if own {
         store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
             .await
@@ -758,10 +760,11 @@ async fn a_retry_resumes_the_tenant_a_failed_run_left_behind() {
     assert!(orgs[0].active, "the resumed tenant was not activated");
 }
 
-/// A resumed tenant whose URL reaches the registry skips the create-time
-/// check, so the run log must say so.
+/// A resumed tenant whose URL now reaches the registry skips the
+/// create-time check, so the resume refuses it: the run fails, naming
+/// why, and the tenant stays inactive.
 #[tokio::test]
-async fn a_resume_onto_the_registry_database_is_flagged() {
+async fn a_resume_onto_the_registry_database_is_refused() {
     let holder = tempfile::tempdir().expect("tenants dir");
     let b = boot(&holder).await;
     let slug = unique("onreg");
@@ -776,7 +779,8 @@ async fn a_resume_onto_the_registry_database_is_flagged() {
     let resp = b.app.clone().oneshot(post(body, Some(&sig))).await.unwrap();
     assert_eq!(resp.status(), StatusCode::ACCEPTED);
     let run_id = json_of(resp).await["run_id"].as_i64().unwrap();
-    let _ = await_run(&b, run_id).await;
+    let run = await_run(&b, run_id).await;
+    assert_eq!(store::RunState::parse(&run.state), store::RunState::Failed);
     let events = store::events_since(&b.pools.registry_pool(), run_id, 0)
         .await
         .unwrap();
@@ -784,12 +788,17 @@ async fn a_resume_onto_the_registry_database_is_flagged() {
         events
             .iter()
             .any(|e| e.step == "validate" && e.message.contains("registry's own database")),
-        "no registry warning in {:?}",
+        "no registry refusal in {:?}",
         events
             .iter()
             .map(|e| (&e.step, &e.message))
             .collect::<Vec<_>>()
     );
+    let orgs: Vec<Org> = Org::objects()
+        .fetch(&b.pools.registry_pool())
+        .await
+        .unwrap();
+    assert!(orgs.iter().all(|o| o.slug != slug || !o.active));
 }
 
 /// An inactive Org no failed run made is not taken over.
@@ -845,7 +854,7 @@ async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
         active: false,
         ..rustango::testkit::org()
     };
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
 
     let body = body_for(&slug, "evt-reused-2", chrono::Utc::now().timestamp());
     let sig = signed(&body);
@@ -983,7 +992,7 @@ async fn a_reaped_run_does_not_revive_a_deactivated_tenant() {
         active: true,
         ..rustango::testkit::org()
     };
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
     store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
         .await
         .unwrap();

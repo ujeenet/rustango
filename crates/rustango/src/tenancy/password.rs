@@ -222,7 +222,7 @@ mod tests {
             password_hash: "OLD".into(),
             ..crate::testkit::user()
         };
-        u.insert_pool(&pool).await.unwrap();
+        u.insert(&pool).await.unwrap();
         (pool, u)
     }
 

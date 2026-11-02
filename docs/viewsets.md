@@ -491,7 +491,7 @@ let router = ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .search_fields(&["title", "body"])
     .ordering(&[("published_at", true)])    // true = DESC
     .page_size(20)
-    .router_pool("/api/posts", pool);       // tri-dialect Pool
+    .router("/api/posts", pool);       // tri-dialect Pool
 ```
 
 Reach for the builder when you need SQLite/MySQL, multi-tenancy, a runtime-built
@@ -592,9 +592,9 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
 | `filter_backend(closure)` | Add custom `WHERE` predicates beyond `filter_fields`. |
 | `throttle(…)` / `throttle_all(max, secs)` | Per-action fixed-window rate limits; `QUERY` spends the list budget. |
-| `admin_add_hooks()` | Run the admin's `"add"` object-permission hooks on create, on the request and on each written row; a refusal is a `403`. Off by default. |
-| `router(prefix, pgpool)` | Mount (Postgres only, static `PgPool`; `postgres` feature). |
-| `router_pool(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
+| `skip_object_permissions()` | Skip the app's object-permission hooks and queryset scopes, for an API that guards its rows itself. The framework's own hooks still run. |
+| `view_hook_scan_cap(n)` | Most rows a list reads to run the `"view"` hook (default 2 000, the admin's is 10 000; at most 100 000); past it a page or offset list is a `400` (cursor lists keep working). A serializer `nested` / `many` / `slug` field onto a table with a `view` hook or queryset scope panics at mount, unless `skip_object_permissions()`. |
+| `router(prefix, pool)` | Mount tri-dialect (PG / SQLite / MySQL). |
 | `tenant_router(prefix)` | *(tenancy)* mount with per-request tenant resolution. |
 
 ---
@@ -746,7 +746,7 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 An empty action list = no check. Enforcement reads an authenticated user from
@@ -755,16 +755,40 @@ is denied. `.permissions_for_model::<Post>()` auto-fills the standard
 `<table>.view` / `.add` / `.change` / `.delete` codenames (`posts.view`, … for
 the `posts` table).
 
-A ViewSet does not run the admin's `change`, `delete` or `view`
-object-permission hooks yet. When its model has any, mounting it logs a
-warning; 0.62.0 will run them on update, delete and read.
+**Object permissions.** A ViewSet runs the same hooks as the admin
+(`register_object_permission!`, `register_queryset_scope!`):
+
+- `add` on create, on the request and on each written row; a bulk create is all
+  or nothing, and a refusal is a `403` with `{"details": {"index": i}}`;
+- `view` on retrieve, update and delete: a hidden row is a `404`, so its id
+  is not confirmed; then `change` on update and `delete` on delete (soft
+  delete too), a `403`. Hooks see every scalar field of the stored row,
+  read locked in the write's transaction, so a concurrent edit cannot slip
+  between the check and the write;
+- `view` on lists: hidden rows are left out of the page and the count. Past
+  `view_hook_scan_cap` rows a page or offset list is a `400`, since a window
+  counted over hidden rows would reveal them; narrow it with filters, add a
+  queryset scope (which scales) or use cursor pagination;
+- queryset scopes narrow every read and write, and a create or update whose
+  row would land outside them is a `403` that writes nothing; an FK may not
+  name a target row its scopes or `view` hook hide (`422`).
+
+`change` checks the stored row only: a queryset scope, or a pinned column
+(`OwnedBy`, `WritePin`), is what stops a row moving to another owner. A
+credential bound to another tenant than the routed one is a `403`.
+`object_permissions::Actor::of(&parts)` tells a hook who is asking (an admin
+session, a user token, an agent, nobody); `object_permissions::is_superuser`
+is the superuser rule, and an agent token is never a superuser.
+`rustango_api_keys`, `rustango_agents`, `rustango_agent_grants`, `rustango_operators`,
+`rustango_admin_users` and the SSO tables are refused by
+`ViewSet::for_model` and by the five template views.
 
 **Throttling** applies fixed-window per-client limits, per action:
 
 ```rust
 ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
     .throttle_all(60, 60)              // 60 requests / 60s per client, every action
-    .router_pool("/api/posts", pool);
+    .router("/api/posts", pool);
 ```
 
 Over-limit → `429 Too Many Requests` + `Retry-After`. Counters are per-process;
@@ -782,7 +806,7 @@ CRUD routes. For extra endpoints, mount your own handlers alongside it:
 use axum::{Router, routing::{get, post}};
 
 let api = Router::new()
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router_pool("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
     .route("/api/posts/stats", get(post_stats))
     .route("/api/posts/bulk_archive", post(bulk_archive));
 ```
@@ -937,7 +961,7 @@ Compose the ViewSet's router into your app. Single-tenant, static pool:
 ```rust
 let api = urls::api()
     .merge(PostViewSet::router("/api/posts", pool.clone()))                          // macro
-    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router_pool("/api/authors", pool.clone())); // builder
+    .merge(ViewSet::for_model(Author::SCHEMA, &["id", "name"]).router("/api/authors", pool.clone())); // builder
 ```
 
 Multi-tenant (no pool captured — each request resolves its tenant connection):
@@ -956,7 +980,7 @@ let api = urls::api()
 
 ## Backend support
 
-- **Builder + `router_pool` / `tenant_router`** is **tri-dialect** — PostgreSQL,
+- **Builder + `router` / `tenant_router`** is **tri-dialect** — PostgreSQL,
   SQLite and MySQL — and is the recommended path.
 - **The derive macro's `router(prefix, pool)`** takes `impl Into<rustango::sql::Pool>` — a `PgPool`, `MySqlPool`, `SqlitePool` or the `Pool` enum. It is not Postgres-only.
 - **Serializer input + output** now works on **all three backends** (the

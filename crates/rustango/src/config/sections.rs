@@ -68,10 +68,6 @@ pub struct Settings {
 
     /// `[errors]`: HTML error pages. Off unless `enabled = true`.
     pub errors: ErrorsSettings,
-
-    /// `[sso]`: **has no effect**; boot warns for each key set.
-    /// Configure admin SSO in the admin UI instead.
-    pub sso: SsoSettings,
 }
 
 impl Settings {
@@ -196,55 +192,6 @@ impl McpSettings {
     pub fn rate_limit(&self) -> Option<std::num::NonZeroU32> {
         self.rate_limit_per_minute
             .and_then(std::num::NonZeroU32::new)
-    }
-}
-
-/// **Has no effect: nothing in the framework reads this section**, and
-/// boot warns for each key set. Admin SSO providers are rows of the `SsoProvider` model,
-/// set up in the admin UI; multi-tenant apps configure SSO per `Org`.
-/// Do not put a client secret here expecting it to be used.
-///
-/// ```toml
-/// [sso]
-/// # enabled = true
-/// # provider = "google"      # google | microsoft | github | gitlab | discord | oidc
-/// # issuer_url = ""          # required for provider = "oidc" (OIDC discovery base URL)
-/// # client_id = ""
-/// # client_secret = ""       # prefer the RUSTANGO__SSO__CLIENT_SECRET env overlay
-/// # redirect_uri = ""        # must match the mounted /login/sso/{provider}/callback
-/// ```
-#[derive(Clone, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct SsoSettings {
-    /// Shows the "Sign in with …" button on the admin login page.
-    pub enabled: Option<bool>,
-    /// Which provider: `"google"`, `"microsoft"`, `"github"`,
-    /// `"gitlab"`, `"discord"`, or `"oidc"` for any OpenID Connect
-    /// provider named by `issuer_url`.
-    pub provider: Option<String>,
-    /// OIDC issuer base URL, used with `provider = "oidc"`.
-    pub issuer_url: Option<String>,
-    /// OAuth2 client id from the provider.
-    pub client_id: Option<String>,
-    /// OAuth2 client secret. Set it through
-    /// `RUSTANGO__SSO__CLIENT_SECRET` rather than committing it.
-    pub client_secret: Option<String>,
-    /// Redirect URI registered with the provider. It must match the
-    /// mounted callback route. When unset, the admin builds it from
-    /// the request host and the login prefix.
-    pub redirect_uri: Option<String>,
-}
-
-impl SsoSettings {
-    /// Whether SSO login is enabled (default `false`).
-    #[must_use]
-    pub fn enabled(&self) -> bool {
-        self.enabled.unwrap_or(false)
-    }
-    /// Provider key, if configured.
-    #[must_use]
-    pub fn provider(&self) -> Option<&str> {
-        self.provider.as_deref()
     }
 }
 
@@ -398,10 +345,6 @@ pub struct AdminSettings {
     /// Logo URL next to the title. Falls back to
     /// `Settings.brand.logo_url`; with neither, no logo is shown.
     pub logo_url: Option<String>,
-    /// Accent color in hex, such as `"#2c6fb0"`. **No effect yet**
-    /// (#1379): `Builder::from_settings` does not apply it; only
-    /// `manage check --deploy` checks the format.
-    pub primary_color: Option<String>,
     /// `"auto"` (default), `"light"` or `"dark"`. Falls back to
     /// `Settings.brand.theme_mode`.
     pub theme_mode: Option<String>,
@@ -409,16 +352,6 @@ pub struct AdminSettings {
     /// the default, so you can move the admin without changing the
     /// whole route preset.
     pub url_prefix: Option<String>,
-
-    // ---- deploy and session ----------------------------------
-    /// Meant to mark the CSRF cookie `Secure`. **No effect yet**
-    /// (#1379): only `manage check --deploy` reads it. The cookie
-    /// follows `[security] secure_cookies`.
-    pub csrf_cookie_secure: Option<bool>,
-    /// Meant as the admin session idle timeout, in minutes. **No
-    /// effect yet** (#1379): the admin has no idle timeout, and only
-    /// `manage check --deploy` reads this.
-    pub session_timeout_minutes: Option<u32>,
 }
 
 /// Host-wide tenancy settings. Per-tenant resolver config lives on
@@ -436,6 +369,7 @@ pub struct TenancySettings {
 /// cache from it; pass it to [`crate::cache::from_settings_async`].
 #[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct CacheSettings {
     /// One of `"memory"` (the default), `"null"` / `"none"`,
     /// `"file"`, `"redis"`, or `"db"` / `"database"`. Note that the
@@ -445,8 +379,7 @@ pub struct CacheSettings {
     /// and cannot build `"redis"` or `"db"`; it panics rather than
     /// swap in another backend. Use `cache::from_settings_async` for
     /// redis, and build the DB backend where the `Pool` is. Any other
-    /// value, including a mis-cased one, logs an error and uses
-    /// `InMemoryCache`.
+    /// value, including a mis-cased one, is refused.
     pub backend: Option<String>,
     /// Redis connection URL when `backend = "redis"`.
     pub redis_url: Option<String>,
@@ -454,6 +387,10 @@ pub struct CacheSettings {
     /// key. Required when `backend = "file"`; without it the resolvers
     /// treat the backend as unknown.
     pub file_cache_dir: Option<std::path::PathBuf>,
+    /// One Redis connect attempt, in milliseconds. `None` means 5000.
+    pub redis_connect_timeout_ms: Option<u64>,
+    /// One Redis command, send to reply, in milliseconds. `None` means 2000.
+    pub redis_command_timeout_ms: Option<u64>,
 }
 
 /// Background job runner. User-wired: the framework never reads it;
@@ -598,6 +535,7 @@ pub struct DiskSettings {
 /// migrating to check the new path picks the same value.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct ServerSettings {
     /// Listener address. `"127.0.0.1:8080"` in dev and
     /// `"0.0.0.0:8080"` in prod. The prod value is reachable from
@@ -621,6 +559,10 @@ pub struct ServerSettings {
     /// Seconds a booting server waits for another run's migrate lock
     /// before it exits. `None` means 300.
     pub migrate_lock_timeout_secs: Option<u64>,
+    /// Reverse proxies (IPs or CIDRs) whose `X-Forwarded-For` is
+    /// believed, so logs and per-IP limits see the real client. Empty
+    /// trusts none. `Cli::with_trusted_proxies` in code wins.
+    pub trusted_proxies: Vec<String>,
 }
 
 impl ServerSettings {
@@ -686,11 +628,6 @@ pub struct JwtSettings {
     pub access_ttl_secs: Option<u64>,
     /// Refresh-token TTL in seconds. Default `604800` (7 days).
     pub refresh_ttl_secs: Option<u64>,
-    /// JWT issuer claim (`iss`). **No effect yet** (#1379): nothing
-    /// threads it into the tokens.
-    pub issuer: Option<String>,
-    /// JWT audience claim (`aud`). **No effect yet** (#1379).
-    pub audience: Option<String>,
 }
 
 /// Display strings for the operator console, and the plain admin's
@@ -838,9 +775,9 @@ pub struct RoutesSettings {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct AuditSettings {
-    /// Retention in days. **Nothing prunes on it yet** (#1379); only
-    /// `check --deploy` reads it. Schedule `audit-cleanup --days <N>`
-    /// from cron to actually delete rows.
+    /// Retention in days: what `manage audit-cleanup` prunes to when given
+    /// neither `--days` nor `--keep-last`. Schedule that verb; nothing
+    /// prunes on its own.
     pub retention_days: Option<u32>,
     /// More query-parameter names to redact in access logs. The
     /// built-in list already covers `password`, `token`, `secret`,
@@ -970,19 +907,6 @@ fn redacted_url(v: &Option<String>) -> Option<String> {
     v.as_deref().map(crate::sql::connect_diagnosis::redact)
 }
 
-impl std::fmt::Debug for SsoSettings {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SsoSettings")
-            .field("enabled", &self.enabled)
-            .field("provider", &self.provider)
-            .field("issuer_url", &self.issuer_url)
-            .field("client_id", &self.client_id)
-            .field("client_secret", &redacted(&self.client_secret))
-            .field("redirect_uri", &self.redirect_uri)
-            .finish()
-    }
-}
-
 impl std::fmt::Debug for DatabaseSettings {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DatabaseSettings")
@@ -1005,6 +929,8 @@ impl std::fmt::Debug for CacheSettings {
             .field("backend", &self.backend)
             .field("redis_url", &redacted_url(&self.redis_url))
             .field("file_cache_dir", &self.file_cache_dir)
+            .field("redis_connect_timeout_ms", &self.redis_connect_timeout_ms)
+            .field("redis_command_timeout_ms", &self.redis_command_timeout_ms)
             .finish()
     }
 }
@@ -1081,17 +1007,10 @@ mod tests {
     fn settings_debug_redacts_every_secret() {
         let mut s = Settings::default();
         s.database.url = Some("postgres://app:DBSECRET@db/app?password=QSECRET".into());
-        s.sso.client_secret = Some("SSOSECRET".into());
         s.cache.redis_url = Some("redis://:REDISSECRET@cache:6379/0".into());
         s.mail.smtp_password = Some("SMTPSECRET".into());
         let dbg = format!("{s:?} {s:#?}");
-        for secret in [
-            "DBSECRET",
-            "QSECRET",
-            "SSOSECRET",
-            "REDISSECRET",
-            "SMTPSECRET",
-        ] {
+        for secret in ["DBSECRET", "QSECRET", "REDISSECRET", "SMTPSECRET"] {
             assert!(!dbg.contains(secret), "{secret} in {dbg}");
         }
         assert!(
@@ -1155,11 +1074,8 @@ mod tests {
         assert!(s.title.is_none());
         assert!(s.subtitle.is_none());
         assert!(s.logo_url.is_none());
-        assert!(s.primary_color.is_none());
         assert!(s.theme_mode.is_none());
         assert!(s.url_prefix.is_none());
-        assert!(s.csrf_cookie_secure.is_none());
-        assert!(s.session_timeout_minutes.is_none());
         assert!(s.allowed_tables.is_empty());
         assert!(s.read_only_tables.is_empty());
     }
@@ -1170,11 +1086,8 @@ mod tests {
 title = "Acme Admin"
 subtitle = "Tenant management"
 logo_url = "/assets/acme.png"
-primary_color = "#2c6fb0"
 theme_mode = "dark"
 url_prefix = "/admin"
-csrf_cookie_secure = true
-session_timeout_minutes = 30
 allowed_tables = ["post", "author"]
 read_only_tables = ["audit_log"]
 "##;
@@ -1182,11 +1095,8 @@ read_only_tables = ["audit_log"]
         assert_eq!(parsed.title.as_deref(), Some("Acme Admin"));
         assert_eq!(parsed.subtitle.as_deref(), Some("Tenant management"));
         assert_eq!(parsed.logo_url.as_deref(), Some("/assets/acme.png"));
-        assert_eq!(parsed.primary_color.as_deref(), Some("#2c6fb0"));
         assert_eq!(parsed.theme_mode.as_deref(), Some("dark"));
         assert_eq!(parsed.url_prefix.as_deref(), Some("/admin"));
-        assert_eq!(parsed.csrf_cookie_secure, Some(true));
-        assert_eq!(parsed.session_timeout_minutes, Some(30));
         assert_eq!(parsed.allowed_tables, vec!["post", "author"]);
         assert_eq!(parsed.read_only_tables, vec!["audit_log"]);
     }

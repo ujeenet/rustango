@@ -1224,6 +1224,13 @@ pub(crate) mod counting {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for CountingWrites {
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
         async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
             self.read().await;
             self.inner.get(k).await
@@ -1509,6 +1516,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for CountingSets {
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
         async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
             self.inner.get(k).await
         }
@@ -1797,6 +1811,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for Down {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, _: &str) -> Result<Option<String>, crate::cache::CacheError> {
             Err(crate::cache::CacheError::Connection("down".into()))
         }
@@ -2120,6 +2141,13 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::cache::Cache for CountingCalls {
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
         async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
             self.call()?;
             self.inner.get(k).await

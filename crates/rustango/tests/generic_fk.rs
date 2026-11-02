@@ -79,7 +79,7 @@ async fn for_target_builds_gfk_from_model_type() {
         id: Auto::Unset,
         title: "hello".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let pk = *p.id.get().unwrap();
 
     let gfk = GenericForeignKey::for_target::<Post>(&pool, pk)
@@ -139,7 +139,7 @@ async fn get_object_resolves_target_row_to_json() {
         id: Auto::Unset,
         title: "json target".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let pk = *p.id.get().unwrap();
 
     let gfk = GenericForeignKey::for_target::<Post>(&pool, pk)
@@ -194,7 +194,7 @@ async fn comment_with_generic_fk_resolves_post() {
         id: Auto::Unset,
         title: "the post".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     // Build the GFK pointing at the Post.
@@ -209,7 +209,7 @@ async fn comment_with_generic_fk_resolves_post() {
         object_pk: gfk.object_pk,
         body: "great post!".into(),
     };
-    comment.save_pool(&pool).await.unwrap();
+    comment.save(&pool).await.unwrap();
 
     // Re-load the comment, reconstruct the GFK, resolve the object.
     let loaded_gfk = GenericForeignKey::new(comment.content_type_id, comment.object_pk);

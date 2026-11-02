@@ -48,7 +48,7 @@ async fn registry_with(orgs: &[Org]) -> sqlx::SqlitePool {
         .expect("framework tables");
     for org in orgs {
         let mut o = org.clone();
-        o.insert_pool(&erased).await.expect("seed org");
+        o.insert(&erased).await.expect("seed org");
     }
     pool
 }
@@ -186,7 +186,7 @@ mod job_source {
                     id: Auto::default(),
                     title: org.slug.clone(),
                 };
-                note.insert_pool(&pool).await
+                note.insert(&pool).await
             })
             .await
             .map_err(|e| JobError::Fatal(e.to_string()))?;
@@ -260,7 +260,7 @@ mod job_source {
                         id: Auto::default(),
                         title: title.into(),
                     };
-                    note.insert_pool(&pool).await.expect("insert");
+                    note.insert(&pool).await.expect("insert");
                 }
             };
             with_tenant(pools, a, insert("own")).await.expect("pool a");

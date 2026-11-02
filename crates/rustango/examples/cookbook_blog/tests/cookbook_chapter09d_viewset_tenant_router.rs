@@ -99,7 +99,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     // tables now migrate under a dedicated `__rustango_system_migrations__`
     // ledger (separate from the user-app `__rustango_migrations__`), so
     // both must be dropped.
-    let _ = rmig::drop_all(&pool).await;
+    let _ = rmig::drop_all_pool(&pool.clone().into()).await;
     for ledger in [rmig::LEDGER_TABLE, "__rustango_system_migrations__"] {
         let _ = sqlx::query(&format!(r#"DROP TABLE IF EXISTS "{ledger}" CASCADE"#))
             .execute(&pool)
@@ -115,23 +115,17 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
         .await
         .expect("migrate registry");
 
-    fresh_author_table(&pool).await;
-
     let slug = unique("acme");
     // Use the public `create_tenant_if_missing` API so we exercise
     // the same path operators run when provisioning. Schema mode: a
     // database-mode tenant may not use the registry's own database (#2320).
-    // Its `search_path` falls back to `public`, where the Author table is.
     let opts = tenancy::manage::api::CreateTenantOpts {
         host_pattern: Some(format!("{slug}.app.test")),
         mode: tenancy::StorageMode::Schema,
-        // Skip the tenant-migration pass: the Author table is set up
-        // manually via fresh_author_table since the test only needs
-        // that one table on the tenant DB.
-        no_migrate: true,
+        // Migrate the tenant: its pool refuses a schema missing the framework tables.
         ..Default::default()
     };
-    tenancy::manage::api::create_tenant_if_missing(
+    let org = tenancy::manage::api::create_tenant_if_missing(
         &pools_for_init,
         &registry_url,
         &dir,
@@ -140,6 +134,9 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
     )
     .await
     .expect("create_tenant_if_missing");
+    // The Author table lives in the tenant's schema; `public` is off its path.
+    let tenant_pool = pools_for_init.scoped_pool(&org).await.expect("tenant pool");
+    fresh_author_table(&tenant_pool).await;
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(HeaderResolver::default());
@@ -164,7 +161,7 @@ async fn fixture() -> Option<(String, sqlx::PgPool, axum::Router)> {
         .tenant_router("/api/authors");
 
     let app = axum::Router::new().merge(vs_router).layer(Extension(ctx));
-    Some((slug, pool, app))
+    Some((slug, tenant_pool, app))
 }
 
 async fn json_response(

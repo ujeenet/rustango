@@ -1,60 +1,7 @@
-//! A new public `*Error` enum is `#[non_exhaustive]`, so adding a variant
-//! later is not a breaking change. The enums listed in `KNOWN` predate the
-//! rule and get the attribute in 0.62.0; the list may only shrink.
+//! Every public `*Error` enum is `#[non_exhaustive]`, so adding a variant
+//! later is not a breaking change.
 
 use std::path::{Path, PathBuf};
-
-/// `file:EnumName` for each public error enum still without the attribute.
-const KNOWN: &[&str] = &[
-    "admin/errors.rs:AdminError",
-    "auth_backends.rs:AuthError",
-    "base36.rs:Base36Error",
-    "base62.rs:Base62Error",
-    "bulk_actions.rs:BulkActionError",
-    "cache/mod.rs:CacheError",
-    "config/loader.rs:ConfigError",
-    "email_templates.rs:EmailRenderError",
-    "env.rs:EnvError",
-    "fixtures.rs:FixtureError",
-    "forms/mod.rs:FormError",
-    "forms/mod.rs:ModelFormError",
-    "http_client.rs:HttpError",
-    "i18n/mod.rs:I18nError",
-    "ip_filter.rs:IpFilterError",
-    "jobs/mod.rs:JobError",
-    "jwt.rs:JwtError",
-    "mailable.rs:MailableError",
-    "media/mod.rs:MediaError",
-    "notifications/mod.rs:NotificationError",
-    "oauth2/mod.rs:OAuthError",
-    "pagination.rs:CursorError",
-    "pagination.rs:PaginatorError",
-    "passkey/error.rs:PasskeyError",
-    "passwords.rs:PasswordError",
-    "secrets.rs:SecretsError",
-    "session.rs:SessionSecretError",
-    "sessions.rs:SessionError",
-    "shortcuts.rs:ShortcutError",
-    "signed_url.rs:SignedUrlError",
-    "signing.rs:LoadsError",
-    "signing.rs:SignError",
-    "soft_delete.rs:SoftDeleteError",
-    "sql/pool.rs:PoolError",
-    "sso/mod.rs:SsoError",
-    "storage/mod.rs:StorageError",
-    "tenancy/agents.rs:AgentError",
-    "tenancy/auth_backends.rs:AuthError",
-    "tenancy/branding.rs:BrandError",
-    "tenancy/error.rs:TenancyError",
-    "tenancy/impersonation_handoff.rs:HandoffError",
-    "tenancy/jwt_lifecycle.rs:JwtIssueError",
-    "tenancy/member_auth.rs:MemberSessionError",
-    "tenancy/operators.rs:OperatorError",
-    "tenancy/secrets.rs:SecretsError",
-    "tenancy/session.rs:SessionError",
-    "tenancy/sweep.rs:SweepError",
-    "urls.rs:ReverseError",
-];
 
 fn rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read src dir") {
@@ -107,22 +54,10 @@ fn exhaustive_public_errors() -> Vec<String> {
 }
 
 #[test]
-fn new_public_errors_are_non_exhaustive() {
+fn public_errors_are_non_exhaustive() {
     let found = exhaustive_public_errors();
-    let new: Vec<_> = found
-        .iter()
-        .filter(|f| !KNOWN.contains(&f.as_str()))
-        .collect();
     assert!(
-        new.is_empty(),
-        "add #[non_exhaustive] to these public error enums: {new:?}"
-    );
-    let fixed: Vec<_> = KNOWN
-        .iter()
-        .filter(|k| !found.iter().any(|f| f == *k))
-        .collect();
-    assert!(
-        fixed.is_empty(),
-        "these are non_exhaustive now (or gone); drop them from KNOWN: {fixed:?}"
+        found.is_empty(),
+        "add #[non_exhaustive] to these public error enums: {found:?}"
     );
 }

@@ -113,7 +113,7 @@ async fn list_response_uses_serializer_when_set() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
 
     // With serializer wired.
     let (status, body) = json_request(router_with_serializer(pool.clone()), Method::GET, "/api", None).await;
@@ -144,7 +144,7 @@ async fn list_response_uses_field_projection_when_no_serializer() {
         bio: Some("hi".into()),
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
 
     let (status, body) = json_request(router_default(pool.clone()), Method::GET, "/api", None).await;
     assert_eq!(status, StatusCode::OK);
@@ -171,7 +171,7 @@ async fn retrieve_response_uses_serializer_when_set() {
         bio: None,
         joined_at: Auto::Unset,
     };
-    a.save(&pool).await.unwrap();
+    a.save(&pool.clone().into()).await.unwrap();
     let id = match a.id { Auto::Set(v) => v, _ => unreachable!() };
 
     let (status, body) = json_request(

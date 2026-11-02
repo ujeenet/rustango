@@ -33,6 +33,7 @@ const ALPHABET: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 /// Errors from [`base36_to_int`].
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Base36Error {
     /// Empty string.
     #[error("base36_to_int: empty input")]

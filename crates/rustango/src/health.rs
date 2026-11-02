@@ -815,6 +815,13 @@ mod tests {
     #[cfg(feature = "cache")]
     #[async_trait::async_trait]
     impl crate::cache::Cache for Yielding {
+        async fn touch(
+            &self,
+            _: &str,
+            _: Option<std::time::Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            Ok(false)
+        }
         async fn get(&self, key: &str) -> Result<Option<String>, crate::cache::CacheError> {
             tokio::task::yield_now().await;
             self.0.get(key).await

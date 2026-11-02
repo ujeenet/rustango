@@ -222,7 +222,7 @@ async fn seed_order(pool: &Pool) -> i64 {
         id: Auto::default(),
         name: "o".into(),
     };
-    o.insert_pool(pool).await.expect("insert order");
+    o.insert(pool).await.expect("insert order");
     *o.id.get().expect("pk")
 }
 
@@ -233,7 +233,7 @@ async fn seed_line(pool: &Pool, order_id: i64, qty: i32, note: &str) -> i64 {
         qty,
         note: note.into(),
     };
-    l.insert_pool(pool).await.expect("insert line");
+    l.insert(pool).await.expect("insert line");
     *l.id.get().expect("pk")
 }
 
@@ -312,7 +312,7 @@ async fn inline_writes_of_an_unaudited_child_are_logged(pool: &Pool) {
             order_id: o,
             qty,
         };
-        item.insert_pool(pool).await.expect("insert item");
+        item.insert(pool).await.expect("insert item");
         ids.push(item.id.get().expect("pk").to_string());
     }
     AuditLog::delete_where("entity_table", "aaw_item", pool)
@@ -384,7 +384,7 @@ async fn a_rolled_back_inline_save_leaves_no_history(pool: &Pool) {
             order_id: o,
             qty,
         };
-        item.insert_pool(pool).await.expect("insert item");
+        item.insert(pool).await.expect("insert item");
         ids.push(item.id.get().expect("pk").to_string());
     }
     AuditLog::delete_where("entity_table", "aaw_item", pool)
@@ -703,7 +703,7 @@ async fn inline_delete_stamps_a_soft_delete_child(pool: &Pool) {
         note: "s".into(),
         deleted_at: None,
     };
-    step.insert_pool(pool).await.expect("insert step");
+    step.insert(pool).await.expect("insert step");
     let id = *step.id.get().expect("pk");
     AuditLog::delete_where("entity_table", "aaw_step", pool)
         .await

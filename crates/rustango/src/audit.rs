@@ -15,7 +15,7 @@
 //! [`AuditSource`] travels in a tokio task-local, so handlers, seed
 //! scripts and jobs can say who made a write without passing a context
 //! object through every ORM call. The default is [`AuditSource::System`].
-//! Override one call with `Model::save_on_with(conn, source)`.
+//! Override one call with `with_source(source, model.save(&pool))`.
 //!
 //! ## What gets logged
 //!
@@ -24,8 +24,7 @@
 //! insert them in multi-row statements sized to the bind limit.
 //!
 //! Audited rows an FK `ON DELETE CASCADE` removes get a `delete` entry
-//! too. Rows changed by `SET NULL` / `SET DEFAULT`, or emptied by PG's
-//! `truncate` (`CASCADE`), are not audited.
+//! too, rows `SET NULL` / `SET DEFAULT` changes an `update` entry.
 
 use serde_json::{Map, Value};
 
@@ -37,7 +36,7 @@ use crate::sql::sqlx;
 // MySQL go through the `*_pool` helpers further down, which dispatch per
 // backend.
 #[cfg(feature = "postgres")]
-use crate::sql::sqlx::{postgres::PgRow, PgPool, Row};
+use crate::sql::sqlx::{postgres::PgRow, Row};
 
 /// Source of the change recorded in the audit log.
 ///
@@ -83,9 +82,6 @@ tokio::task_local! {
     static SOURCE_TENANT: Option<String>;
     /// Tenant the current writes go to, where the framework knows it.
     static WRITE_TENANT: WriteScope;
-    /// Pool the current audited write goes through, set by the `&Pool`
-    /// write paths that emit from inside a transaction.
-    static WRITE_POOL: crate::sql::PoolId;
 }
 
 /// Where writes go. With `pool` set (a `with_tenant` pass), a source
@@ -99,12 +95,10 @@ struct WriteScope {
 /// How an emitter reached the database, for [`source_token`].
 #[derive(Clone, Copy)]
 enum Via<'a> {
-    /// A caller's executor: its pool is unknown.
-    Unknown,
     /// This pool.
     Pool(&'a crate::sql::Pool),
-    /// The pool the enclosing `&Pool` write path set in `WRITE_POOL`.
-    Scoped,
+    /// A transaction opened on this pool.
+    Tx(&'a crate::sql::PoolId),
 }
 
 /// Read the active audit source. Returns [`AuditSource::System`] when no
@@ -141,20 +135,14 @@ fn source_token(source: &AuditSource, via: Via<'_>) -> String {
             .try_with(|s| s.as_token() == token)
             .unwrap_or(false);
     let through_scope = match via {
-        Via::Unknown => false,
         Via::Pool(pool) => scope.is(pool),
-        Via::Scoped => WRITE_POOL.try_with(|p| p.same(&scope)).unwrap_or(false),
+        Via::Tx(pool) => pool.same(&scope),
     };
     if bound && !through_scope {
         AuditSource::System.as_token()
     } else {
         token
     }
-}
-
-/// Run `fut` with its audited writes going through `pool`.
-async fn writing_via<F: std::future::Future>(pool: &crate::sql::Pool, fut: F) -> F::Output {
-    WRITE_POOL.scope(crate::sql::PoolId::of(pool), fut).await
 }
 
 /// Run `fut` with `source` as the active audit source. Every audit entry
@@ -316,31 +304,6 @@ impl AuditOp {
     }
 }
 
-/// Emit a single entry against a Postgres executor. Used by per-row write
-/// paths on PG. For all backends, see [`emit_one_pool`].
-///
-/// # `occurred_at` is bound, not defaulted
-///
-/// Every emit path binds it — all three dialects, single-row and batch.
-/// The column default is only a backstop for hand-written SQL.
-///
-/// SQLite is the reason. An older database still defaults to
-/// `CURRENT_TIMESTAMP`, whose `YYYY-MM-DD HH:MM:SS` spelling sorts *below*
-/// the canonical `…T…` one, and SQLite cannot `ALTER TABLE` a default
-/// away. A defaulted write there would store a legacy-shaped value, which
-/// inverts `ORDER BY occurred_at DESC` and makes `cleanup_keep_last_n`
-/// delete the newest entries. PG and MySQL bind it too, for uniformity.
-///
-/// # Errors
-/// Driver / SQL failures from the INSERT.
-#[cfg(feature = "postgres")]
-pub async fn emit_one<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Postgres>,
-{
-    emit_one_pg(executor, entry, Via::Unknown).await
-}
-
 #[cfg(feature = "postgres")]
 async fn emit_one_pg<'c, E>(
     executor: E,
@@ -363,47 +326,6 @@ where
     .bind(chrono::Utc::now())
     .execute(executor)
     .await?;
-    Ok(())
-}
-
-/// Emit a batch of entries on Postgres, one multi-row INSERT per
-/// bind-limit-sized chunk. Several chunks run in one transaction (a
-/// savepoint when `conn` is already inside one). For all backends, see
-/// [`emit_many_pool`].
-///
-/// # Errors
-/// As [`emit_one`].
-#[cfg(feature = "postgres")]
-pub async fn emit_many<'c, A>(conn: A, entries: &[PendingEntry]) -> Result<(), sqlx::Error>
-where
-    A: sqlx::Acquire<'c, Database = sqlx::Postgres>,
-{
-    if entries.is_empty() {
-        return Ok(());
-    }
-    let per_insert = audit_rows_per_insert(&crate::sql::Postgres);
-    if entries.len() <= per_insert {
-        let mut c = conn.acquire().await?;
-        return emit_chunk_pg(&mut c, entries).await;
-    }
-    let mut tx = conn.begin().await?;
-    for chunk in entries.chunks(per_insert) {
-        emit_chunk_pg(&mut tx, chunk).await?;
-    }
-    tx.commit().await
-}
-
-#[cfg(feature = "postgres")]
-async fn emit_chunk_pg(
-    conn: &mut sqlx::PgConnection,
-    entries: &[PendingEntry],
-) -> Result<(), sqlx::Error> {
-    let stmt = audit_insert_stmt(&crate::sql::Postgres, entries, Via::Unknown)?;
-    let mut q = sqlx::query(&stmt.sql);
-    for value in stmt.params {
-        q = crate::sql::bind_query(q, value);
-    }
-    q.execute(conn).await?;
     Ok(())
 }
 
@@ -589,28 +511,6 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
     )
 }
 
-/// Read every audit entry for one `(entity_table, entity_pk)` pair,
-/// newest first. Used by the admin's per-row audit trail panel.
-///
-/// Postgres-typed, kept for older call sites; it delegates to
-/// [`fetch_for_entity_pool`], which is the one to use on any backend.
-///
-/// # Errors
-/// Driver / SQL failures.
-#[cfg(feature = "postgres")]
-pub async fn fetch_for_entity(
-    pool: &PgPool,
-    entity_table: &str,
-    entity_pk: &str,
-) -> Result<Vec<AuditEntry>, sqlx::Error> {
-    fetch_for_entity_pool(
-        &crate::sql::Pool::from(pool.clone()),
-        entity_table,
-        entity_pk,
-    )
-    .await
-}
-
 /// Schema-registration model for `rustango_audit_log`, so
 /// `makemigrations` owns the audit-log schema. Reads go through
 /// [`AuditEntry`], which has the per-dialect `changes`-column decoders.
@@ -720,85 +620,6 @@ fn cutoff_before(days: i64) -> chrono::DateTime<chrono::Utc> {
         .map_or(floor, |t| t.max(floor))
 }
 
-/// Delete audit entries older than `cutoff_days` from `pool`'s audit
-/// table. Returns the number of rows removed.
-///
-/// Nothing schedules this for you — wire it into a cron job or a
-/// maintenance task. Each tenant's audit table is its own retention
-/// boundary, so this only touches the tenant `pool` points at.
-///
-/// `cutoff_days = 0` clears the whole table. A negative value clamps to 0;
-/// one reaching before 1970 deletes nothing.
-///
-/// Postgres-typed; [`cleanup_older_than_pool`] works on any backend.
-///
-/// The cutoff comes from Rust, not `NOW()`. Since [`emit_one`] binds
-/// `occurred_at`, a database-side `NOW()` would compare two clocks: if
-/// the app host runs ahead, its rows sit in the database's future and a
-/// zero-day sweep deletes none of them.
-///
-/// # Errors
-/// Driver / SQL failures from the DELETE.
-#[cfg(feature = "postgres")]
-pub async fn cleanup_older_than(pool: &PgPool, cutoff_days: i64) -> Result<u64, sqlx::Error> {
-    let cutoff_ts = cutoff_before(cutoff_days);
-    let result = sqlx::query(r#"DELETE FROM "rustango_audit_log" WHERE "occurred_at" < $1"#)
-        .bind(cutoff_ts)
-        .execute(pool)
-        .await?;
-    Ok(result.rows_affected())
-}
-
-/// Per-row retention: keep the `keep` newest audit entries for each
-/// `(entity_table, entity_pk)` pair and delete the rest. Use it when you
-/// must keep the edit chain of every row but cap how far the table grows.
-///
-/// One window-function DELETE does the work: each entry gets a
-/// `ROW_NUMBER()` ordered by `occurred_at DESC, id DESC`, and rows ranked
-/// above `keep` are dropped. One round-trip, however many pairs the table
-/// holds.
-///
-/// `keep = 0` clears the whole table; negative values clamp to 0. Returns
-/// the number of rows removed.
-///
-/// Postgres-typed; [`cleanup_keep_last_n_pool`] works on any backend.
-///
-/// # Errors
-/// Driver / SQL failures from the DELETE.
-#[cfg(feature = "postgres")]
-pub async fn cleanup_keep_last_n(pool: &PgPool, keep: i64) -> Result<u64, sqlx::Error> {
-    let keep = keep.max(0);
-    let result = sqlx::query(
-        r#"DELETE FROM "rustango_audit_log" WHERE "id" IN (
-              SELECT "id" FROM (
-                SELECT "id",
-                       ROW_NUMBER() OVER (
-                           PARTITION BY "entity_table", "entity_pk"
-                           ORDER BY "occurred_at" DESC, "id" DESC
-                       ) AS _rn
-                FROM "rustango_audit_log"
-              ) ranked
-              WHERE _rn > $1
-           )"#,
-    )
-    .bind(keep)
-    .execute(pool)
-    .await?;
-    Ok(result.rows_affected())
-}
-
-/// Make sure the table exists in `pool`'s database or schema. Does nothing
-/// when it is already there. Handy in tests and ad-hoc setup.
-///
-/// Postgres-typed; [`ensure_table_pool`] works on any backend.
-///
-/// # Errors
-/// Driver / SQL failures from the emitted DDL.
-#[cfg(feature = "postgres")]
-pub async fn ensure_table(pool: &PgPool) -> Result<(), sqlx::Error> {
-    ensure_table_pool(&crate::sql::Pool::Postgres(pool.clone())).await
-}
-
 // ============================================================ all-backend audit
 
 /// Create the audit-log table on any backend, sending the per-dialect DDL
@@ -822,19 +643,6 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
 pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     use crate::core::Model as _;
     crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA])
-}
-
-/// MySQL counterpart of [`emit_one`] — `?` placeholders and backtick
-/// quoting. Used for audited writes over a MySQL transaction.
-///
-/// # Errors
-/// Driver / SQL failures from the INSERT.
-#[cfg(feature = "mysql")]
-pub async fn emit_one_my<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::MySql>,
-{
-    emit_one_my_via(executor, entry, Via::Unknown).await
 }
 
 #[cfg(feature = "mysql")]
@@ -861,19 +669,6 @@ where
     .execute(executor)
     .await?;
     Ok(())
-}
-
-/// SQLite counterpart of [`emit_one`] — double-quoted identifiers and `?`
-/// placeholders. The `changes` JSON goes into a TEXT column.
-///
-/// # Errors
-/// Driver / SQL failures from the INSERT.
-#[cfg(feature = "sqlite")]
-pub async fn emit_one_sqlite<'c, E>(executor: E, entry: &PendingEntry) -> Result<(), sqlx::Error>
-where
-    E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
-{
-    emit_one_sqlite_via(executor, entry, Via::Unknown).await
 }
 
 #[cfg(feature = "sqlite")]
@@ -912,10 +707,7 @@ where
 ///
 /// # Errors
 /// As [`emit_one`].
-pub async fn emit_one_pool(
-    pool: &crate::sql::Pool,
-    entry: &PendingEntry,
-) -> Result<(), sqlx::Error> {
+pub async fn emit_one(pool: &crate::sql::Pool, entry: &PendingEntry) -> Result<(), sqlx::Error> {
     match pool {
         #[cfg(feature = "postgres")]
         crate::sql::Pool::Postgres(pg) => emit_one_pg(pg, entry, Via::Pool(pool)).await,
@@ -1231,7 +1023,7 @@ fn audit_facet_sql(dialect: &dyn crate::sql::Dialect, column: &str) -> String {
 ///
 /// # Errors
 /// Driver / SQL failures from the INSERT(s) or the transaction.
-pub async fn emit_many_pool(
+pub async fn emit_many(
     pool: &crate::sql::Pool,
     entries: &[PendingEntry],
 ) -> Result<(), sqlx::Error> {
@@ -1243,10 +1035,32 @@ pub async fn emit_many_pool(
         other => sqlx::Error::Protocol(format!("{other}")),
     };
     let mut tx = crate::sql::transaction_pool(pool).await.map_err(to_sqlx)?;
-    emit_many_tx(&mut tx, Via::Pool(pool), entries)
-        .await
-        .map_err(to_sqlx)?;
+    emit_many_tx(&mut tx, entries).await.map_err(to_sqlx)?;
     tx.commit().await
+}
+
+/// Old name of [`emit_one`].
+///
+/// # Errors
+/// As [`emit_one`].
+#[deprecated(since = "0.62.0", note = "use `audit::emit_one`")]
+pub async fn emit_one_pool(
+    pool: &crate::sql::Pool,
+    entry: &PendingEntry,
+) -> Result<(), sqlx::Error> {
+    emit_one(pool, entry).await
+}
+
+/// Old name of [`emit_many`].
+///
+/// # Errors
+/// As [`emit_many`].
+#[deprecated(since = "0.62.0", note = "use `audit::emit_many`")]
+pub async fn emit_many_pool(
+    pool: &crate::sql::Pool,
+    entries: &[PendingEntry],
+) -> Result<(), sqlx::Error> {
+    emit_many(pool, entries).await
 }
 
 /// All-backend counterpart of [`fetch_for_entity`]. The `changes` column
@@ -1366,29 +1180,57 @@ pub(crate) enum Retention {
 }
 
 impl Retention {
-    /// Exactly one of `--days` / `--keep-last`; 0 or less deletes everything, so needs `yes`.
+    /// At most one of `--days` / `--keep-last`; with neither, `configured`
+    /// (`[audit] retention_days`) as `--days`. 0 or less deletes everything, so needs `yes`.
     pub(crate) fn from_flags(
         days: Option<i64>,
         keep_last: Option<i64>,
         yes: bool,
+        configured: Option<i64>,
     ) -> Result<Self, String> {
+        let from_settings = days.is_none() && keep_last.is_none();
         let rule = match (days, keep_last) {
             (Some(n), None) => Self::OlderThanDays(n),
             (None, Some(n)) => Self::KeepLast(n),
-            (None, None) => {
-                return Err("audit-cleanup requires --days <N> or --keep-last <N>".into())
-            }
+            (None, None) => match configured {
+                Some(n) => Self::OlderThanDays(n),
+                None => {
+                    return Err("audit-cleanup requires --days <N> or --keep-last <N>, \
+                         or [audit] retention_days in the settings"
+                        .into())
+                }
+            },
             (Some(_), Some(_)) => {
                 return Err("--days and --keep-last are mutually exclusive".into())
             }
         };
         let (Self::OlderThanDays(n) | Self::KeepLast(n)) = rule;
         if n <= 0 && !yes {
-            return Err(
-                "a retention of 0 or less deletes every audit entry; pass --yes to confirm".into(),
-            );
+            let source = if from_settings {
+                "[audit] retention_days"
+            } else {
+                "a retention"
+            };
+            return Err(format!(
+                "{source} of 0 or less deletes every audit entry; pass --yes to confirm"
+            ));
         }
         Ok(rule)
+    }
+
+    /// `[audit] retention_days` from the settings, for an `audit-cleanup`
+    /// given neither flag. No config files means none.
+    pub(crate) fn configured_days() -> Result<Option<i64>, String> {
+        #[cfg(feature = "config")]
+        {
+            match crate::config::Settings::load_from_env() {
+                Ok(s) => Ok(s.audit.retention_days.map(i64::from)),
+                Err(e) if e.is_missing_config() => Ok(None),
+                Err(e) => Err(format!("audit-cleanup: {e}")),
+            }
+        }
+        #[cfg(not(feature = "config"))]
+        Ok(None)
     }
 
     /// Apply the rule to the audit log `pool` points at.
@@ -1414,9 +1256,9 @@ pub async fn delete_one_with_audit(
 ) -> Result<u64, crate::sql::ExecError> {
     // SQLite: the cascade reads before it deletes, so lock at BEGIN.
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let affected = writing_via(pool, crate::sql::delete_tx(&mut tx, query)).await?;
+    let affected = crate::sql::delete_tx(&mut tx, query).await?;
     if affected > 0 {
-        emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
+        emit_one_tx(&mut tx, entry).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -1426,16 +1268,17 @@ pub async fn delete_one_with_audit(
 /// `PoolTx` API instead of unwrapping the backend variant themselves.
 async fn emit_one_tx(
     tx: &mut crate::sql::PoolTx<'_>,
-    via: Via<'_>,
     entry: &PendingEntry,
 ) -> Result<(), sqlx::Error> {
-    match tx {
+    let pool = tx.pool_id().clone();
+    let via = Via::Tx(&pool);
+    match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::PoolTx::Postgres(t) => emit_one_pg(&mut **t, entry, via).await,
+        crate::sql::TxConn::Postgres(t) => emit_one_pg(&mut **t, entry, via).await,
         #[cfg(feature = "mysql")]
-        crate::sql::PoolTx::Mysql(t) => emit_one_my_via(&mut **t, entry, via).await,
+        crate::sql::TxConn::Mysql(t) => emit_one_my_via(&mut **t, entry, via).await,
         #[cfg(feature = "sqlite")]
-        crate::sql::PoolTx::Sqlite(t) => emit_one_sqlite_via(&mut **t, entry, via).await,
+        crate::sql::TxConn::Sqlite(t) => emit_one_sqlite_via(&mut **t, entry, via).await,
     }
 }
 
@@ -1459,7 +1302,7 @@ pub async fn save_one_with_audit(
     let mut tx = crate::sql::write_transaction(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     if affected > 0 {
-        emit_one_tx(&mut tx, Via::Pool(pool), entry).await?;
+        emit_one_tx(&mut tx, entry).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -1488,66 +1331,13 @@ impl DiffEmit {
     }
 }
 
-/// A write transaction tied to the pool it was opened on, so its audit
-/// entries are attributed through that pool and no other.
-#[cfg(feature = "admin")]
-pub(crate) struct PoolBoundTx<'p> {
-    tx: crate::sql::PoolTx<'static>,
-    pool: &'p crate::sql::Pool,
-}
-
-#[cfg(feature = "admin")]
-impl<'p> PoolBoundTx<'p> {
-    /// [`crate::sql::write_transaction`] on `pool`.
-    pub(crate) async fn begin_write(
-        pool: &'p crate::sql::Pool,
-    ) -> Result<Self, crate::sql::ExecError> {
-        let tx = crate::sql::write_transaction(pool).await?;
-        Ok(Self { tx, pool })
-    }
-
-    /// Bind `tx`, which the caller opened on `pool`.
-    #[cfg(feature = "tenancy")]
-    pub(crate) fn opened_on(pool: &'p crate::sql::Pool, tx: crate::sql::PoolTx<'static>) -> Self {
-        Self { tx, pool }
-    }
-
-    fn via(&self) -> Via<'p> {
-        Via::Pool(self.pool)
-    }
-
-    pub(crate) async fn commit(self) -> Result<(), sqlx::Error> {
-        self.tx.commit().await
-    }
-
-    pub(crate) async fn rollback(self) -> Result<(), sqlx::Error> {
-        self.tx.rollback().await
-    }
-}
-
-#[cfg(feature = "admin")]
-impl std::ops::Deref for PoolBoundTx<'_> {
-    type Target = crate::sql::PoolTx<'static>;
-    fn deref(&self) -> &Self::Target {
-        &self.tx
-    }
-}
-
-#[cfg(feature = "admin")]
-impl std::ops::DerefMut for PoolBoundTx<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.tx
-    }
-}
-
 /// Write `entries` in the caller's `tx`: a failed emit fails the write.
 #[cfg(feature = "admin")]
 pub(crate) async fn emit_in_tx(
-    tx: &mut PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
-    let via = tx.via();
-    emit_many_tx(tx, via, entries).await
+    emit_many_tx(tx, entries).await
 }
 
 /// Outcome of [`update_one_with_row_diff_tx`].
@@ -1565,7 +1355,7 @@ pub(crate) enum RowDiffWrite {
 /// the write. The caller commits, so later writes can share the tx.
 #[cfg(feature = "admin")]
 pub(crate) async fn update_one_with_row_diff_tx(
-    tx: &mut PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::UpdateQuery,
     mut before: crate::core::SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
@@ -1593,8 +1383,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
     };
     let entry = entry.filter(|_| affected > 0);
     if let (DiffEmit::InTx, Some(entry)) = (emit, &entry) {
-        let via = tx.via();
-        emit_one_tx(tx, via, entry).await?;
+        emit_one_tx(tx, entry).await?;
     }
     Ok(RowDiffWrite::Written {
         deferred: entry.filter(|_| emit == DiffEmit::Deferred),
@@ -1606,7 +1395,7 @@ pub(crate) async fn update_one_with_row_diff_tx(
 /// otherwise it comes back for the caller's best-effort emit.
 #[cfg(feature = "admin")]
 pub(crate) async fn insert_one_with_entry_tx(
-    tx: &mut PoolBoundTx<'_>,
+    tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
     entry_of: impl FnOnce(&crate::core::SqlValue) -> PendingEntry,
@@ -1616,8 +1405,7 @@ pub(crate) async fn insert_one_with_entry_tx(
     let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
     let entry = entry_of(&pk);
     if emit == DiffEmit::InTx {
-        let via = tx.via();
-        emit_one_tx(tx, via, &entry).await?;
+        emit_one_tx(tx, &entry).await?;
     }
     Ok((pk, (emit == DiffEmit::Deferred).then_some(entry)))
 }
@@ -1637,27 +1425,69 @@ pub async fn insert_one_with_audit<M>(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
     model: &mut M,
-    entry: impl FnOnce(&M) -> PendingEntry,
+    entry: impl FnOnce(&M, AuditOp) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
     M: crate::sql::AssignAutoPkPool,
 {
-    // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
+    let (returning, op) = insert_or_upsert_tx(&mut tx, query).await?;
     crate::sql::apply_auto_pk(returning, model)?;
-    emit_one_tx(&mut tx, Via::Pool(pool), &entry(model)).await?;
+    emit_one_tx(&mut tx, &entry(model, op)).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Run `query` in `tx`, with whether it inserted (`Create`) or updated
+/// (`Update`): a `DoUpdate` upsert runs a `DoNothing` pass first and
+/// upserts only when that skipped.
+async fn insert_or_upsert_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+) -> Result<(crate::sql::InsertReturningPool, AuditOp), crate::sql::ExecError> {
+    if !matches!(
+        query.on_conflict,
+        Some(crate::core::ConflictClause::DoUpdate { .. })
+    ) {
+        return Ok((
+            crate::sql::insert_returning_tx(tx, query).await?,
+            AuditOp::Create,
+        ));
+    }
+    if !tx.dialect().supports_returning() {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "without RETURNING an audited upsert cannot tell an insert from an update",
+        });
+    }
+    let mut probe = query.clone();
+    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
+    match crate::sql::insert_returning_tx(tx, &probe).await {
+        Ok(row) => Ok((row, AuditOp::Create)),
+        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
+            crate::sql::insert_returning_tx(tx, query).await?,
+            AuditOp::Update,
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write `entries` in the caller's `tx`, for the derive's audited bulk insert.
+#[doc(hidden)]
+pub async fn __emit_many_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    entries: &[PendingEntry],
+) -> Result<(), crate::sql::ExecError> {
+    emit_many_tx(tx, entries).await
 }
 
 /// Emit a batch of entries inside an open `PoolTx`, in bind-limit-sized
 /// multi-row INSERTs.
 async fn emit_many_tx(
     tx: &mut crate::sql::PoolTx<'_>,
-    via: Via<'_>,
     entries: &[PendingEntry],
 ) -> Result<(), crate::sql::ExecError> {
+    let via = Via::Tx(tx.pool_id());
     let stmts = entries
         .chunks(audit_rows_per_insert(tx.dialect()))
         .map(|chunk| audit_insert_stmt(tx.dialect(), chunk, via))
@@ -1867,9 +1697,9 @@ where
                 model: query.model,
                 where_clause: pk_in(query.model, pks)?,
             };
-            affected += writing_via(pool, crate::sql::delete_tx(&mut tx, &delete)).await?;
+            affected += crate::sql::delete_tx(&mut tx, &delete).await?;
             let entries: Vec<PendingEntry> = chunk.iter().map(&entry).collect();
-            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+            emit_many_tx(&mut tx, &entries).await?;
         }
     }
     tx.commit().await?;
@@ -1930,7 +1760,7 @@ where
         let after: Vec<M> =
             rows_in_tx(&mut tx, query.model, pk_in(query.model, pks)?, false).await?;
         let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
-        emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+        emit_many_tx(&mut tx, &entries).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -2050,21 +1880,78 @@ impl TxUpdate {
     pub(crate) async fn run(
         self,
         tx: &mut crate::sql::PoolTx<'_>,
-        pool: &crate::sql::Pool,
         query: &crate::core::UpdateQuery,
         pk: crate::core::SqlValue,
     ) -> Result<u64, crate::sql::ExecError> {
         let n = crate::sql::update_tx(tx, query).await?;
         if let (true, Some(record)) = (n > 0, self.0) {
-            writing_via(pool, record(tx, pk)).await.map_err(|e| {
-                crate::sql::ExecError::AuditWrite {
+            record(tx, pk)
+                .await
+                .map_err(|e| crate::sql::ExecError::AuditWrite {
                     table: query.model.table,
                     source: Box::new(e),
-                }
-            })?;
+                })?;
         }
         Ok(n)
     }
+}
+
+/// Delete, or soft delete by `stamp`, the row `row` selects in the caller's
+/// `tx`, audited as [`delete`] and [`update_as`] audit it.
+/// `by_pk` re-reads the row after a soft delete, which leaves its scope.
+///
+/// # Errors
+/// As the write and the emit; an audited model with no in-transaction
+/// reader is [`crate::sql::ExecError::AuditUnsupported`].
+#[cfg(feature = "admin")]
+pub(crate) async fn remove_one_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    model: &'static crate::core::ModelSchema,
+    (row, by_pk): (crate::core::WhereExpr, crate::core::WhereExpr),
+    stamp: Option<&crate::core::UpdateQuery>,
+) -> Result<u64, crate::sql::ExecError> {
+    let entry = crate::core::ModelEntry::for_schema(model);
+    let audited =
+        entry.is_some_and(|e| e.audited_delete().is_some() || e.audited_update().is_some());
+    let reader = match entry.and_then(|e| e.audited_cascade()) {
+        Some(r) => Some(r).filter(|_| audited),
+        None if audited => {
+            return Err(crate::sql::ExecError::AuditUnsupported {
+                table: model.table,
+                reason: "an audited delete in a transaction needs the derived reader",
+            })
+        }
+        None => None,
+    };
+    let (n, entries) = match stamp {
+        None => {
+            let entries = match reader {
+                Some(read) => read(tx, row.clone()).await?,
+                None => Vec::new(),
+            };
+            let q = crate::core::DeleteQuery {
+                model,
+                where_clause: row,
+            };
+            (crate::sql::delete_tx(tx, &q).await?, entries)
+        }
+        Some(stamp) => {
+            let n = crate::sql::update_tx(tx, stamp).await?;
+            let mut entries = match reader {
+                Some(read) if n > 0 => read(tx, by_pk).await?,
+                _ => Vec::new(),
+            };
+            for (_, e) in &mut entries {
+                e.operation = AuditOp::SoftDelete;
+            }
+            (n, entries)
+        }
+    };
+    if n > 0 && !entries.is_empty() {
+        let entries: Vec<PendingEntry> = entries.into_iter().map(|(_, e)| e).collect();
+        emit_many_tx(tx, &entries).await?;
+    }
+    Ok(n)
 }
 
 /// Emit a `Create` entry for the row with primary key `pk`, read in `tx`.
@@ -2154,7 +2041,7 @@ where
         });
     }
     let entries: Vec<PendingEntry> = rows.iter().map(&entry).collect();
-    emit_many_tx(tx, Via::Scoped, &entries).await
+    emit_many_tx(tx, &entries).await
 }
 
 #[cfg_attr(
@@ -2211,25 +2098,22 @@ pub(crate) async fn insert_returning(
     }
     let mut tx = crate::sql::write_transaction(pool).await?;
     // The create recorder only has the transaction.
-    let inserted = writing_via(pool, insert_returning_tx(&mut tx, query, pk_field)).await?;
+    let inserted = insert_returning_tx(&mut tx, query, pk_field).await?;
     tx.commit().await?;
     Ok(inserted)
 }
 
-/// [`insert`] inside a transaction opened on `pool`, attributed as [`insert`] is.
+/// [`insert`] inside the caller's transaction, attributed as [`insert`] is.
 ///
 /// # Errors
 /// As [`crate::sql::insert_returning_tx`], plus the audit write.
 #[cfg_attr(not(any(feature = "admin", feature = "tenancy")), allow(dead_code))]
 pub(crate) async fn insert_tx_on(
-    pool: &crate::sql::Pool,
     tx: &mut crate::sql::PoolTx<'_>,
     query: &crate::core::InsertQuery,
     pk_field: &crate::core::FieldSchema,
 ) -> Result<crate::core::SqlValue, crate::sql::ExecError> {
-    Ok(writing_via(pool, insert_returning_tx(tx, query, pk_field))
-        .await?
-        .0)
+    Ok(insert_returning_tx(tx, query, pk_field).await?.0)
 }
 
 #[cfg_attr(
@@ -2337,7 +2221,7 @@ where
         )
         .await?;
         let entries: Vec<PendingEntry> = after.iter().map(&entry).collect();
-        emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+        emit_many_tx(&mut tx, &entries).await?;
     }
     tx.commit().await?;
     Ok(affected)
@@ -2422,72 +2306,38 @@ where
             )
             .await?;
             let entries: Vec<PendingEntry> = rows.iter().map(|r| entry(r, op)).collect();
-            emit_many_tx(&mut tx, Via::Pool(pool), &entries).await?;
+            emit_many_tx(&mut tx, &entries).await?;
         }
     }
     tx.commit().await?;
     Ok(())
 }
 
-/// A single-row `INSERT … ON CONFLICT` on PG, with whether it inserted
-/// (`Create`) or updated (`Update`) the row: a `DoUpdate` runs a
-/// `DoNothing` pass first and upserts only when that skipped (#1795).
-/// A row another transaction deletes between the passes is recorded as `Update`.
+/// Truncate an audited model's table (`Model::truncate` /
+/// `truncate_cascade`) and write one bulk `Delete` entry naming it, in one
+/// transaction. No per-row PK is known here.
 ///
 /// # Errors
-/// As [`crate::sql::insert_returning_pool`].
-#[cfg(feature = "postgres")]
-pub async fn upsert_returning_on(
-    conn: &mut sqlx::PgConnection,
-    query: &crate::core::InsertQuery,
-) -> Result<(sqlx::postgres::PgRow, AuditOp), crate::sql::ExecError> {
-    use crate::sql::insert_returning_on;
-    if !matches!(
-        query.on_conflict,
-        Some(crate::core::ConflictClause::DoUpdate { .. })
-    ) {
-        return Ok((
-            insert_returning_on(&mut *conn, query).await?,
-            AuditOp::Create,
-        ));
-    }
-    let mut probe = query.clone();
-    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
-    match insert_returning_on(&mut *conn, &probe).await {
-        Ok(row) => Ok((row, AuditOp::Create)),
-        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
-            insert_returning_on(&mut *conn, query).await?,
-            AuditOp::Update,
-        )),
-        Err(e) => Err(e),
-    }
-}
-
-/// Run a table-wide statement (`Model::truncate`) and one bulk `Delete`
-/// entry naming it, in one transaction. No per-row PK is known here.
-///
-/// # Errors
-/// As [`crate::sql::raw_execute_tx`], plus the audit emit.
+/// As [`crate::sql::truncate`], plus the audit emit.
 pub async fn truncate_with_audit(
     pool: &crate::sql::Pool,
     entity_table: &'static str,
-    sql: &str,
+    mode: crate::sql::TruncateMode,
 ) -> Result<u64, crate::sql::ExecError> {
-    writing_via(pool, async {
-        let mut tx = crate::sql::write_transaction(pool).await?;
-        let affected = crate::sql::truncate_tx(&mut tx, entity_table, sql).await?;
-        let entry = PendingEntry {
-            entity_table,
-            entity_pk: String::new(),
-            operation: AuditOp::Delete,
-            source: current_source(),
-            changes: serde_json::json!({ "bulk": "truncate" }),
-        };
-        emit_one_tx(&mut tx, Via::Pool(pool), &entry).await?;
-        tx.commit().await?;
-        Ok(affected)
-    })
-    .await
+    let mut tx = crate::sql::write_transaction(pool).await?;
+    let affected = crate::sql::truncate_tx(&mut tx, entity_table, mode).await?;
+    let entry = PendingEntry {
+        entity_table,
+        entity_pk: String::new(),
+        operation: AuditOp::Delete,
+        source: current_source(),
+        changes: serde_json::json!({ "bulk": "truncate" }),
+    };
+    emit_one_tx(&mut tx, &entry).await?;
+    tx.commit()
+        .await
+        .map_err(|e| crate::sql::truncate_refusal(entity_table, mode, e.into()))?;
+    Ok(affected)
 }
 
 /// Postgres bind helper, exposed so generated bodies on the audited
@@ -2583,9 +2433,9 @@ where
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own `decode_before_*`.
     // A failed pre-read must not let the UPDATE commit unaudited.
-    let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match &mut tx {
+    let before_pairs: Option<Vec<(&'static str, serde_json::Value)>> = match &mut tx.conn {
         #[cfg(feature = "postgres")]
-        crate::sql::PoolTx::Postgres(t) => before
+        crate::sql::TxConn::Postgres(t) => before
             .params
             .iter()
             .cloned()
@@ -2594,7 +2444,7 @@ where
             .await?
             .map(|row| decode_before_pg(&row)),
         #[cfg(feature = "mysql")]
-        crate::sql::PoolTx::Mysql(t) => before
+        crate::sql::TxConn::Mysql(t) => before
             .params
             .iter()
             .cloned()
@@ -2603,7 +2453,7 @@ where
             .await?
             .map(|row| decode_before_my(&row)),
         #[cfg(feature = "sqlite")]
-        crate::sql::PoolTx::Sqlite(t) => before
+        crate::sql::TxConn::Sqlite(t) => before
             .params
             .iter()
             .cloned()
@@ -2614,7 +2464,6 @@ where
     };
     let affected = finish_update_with_audit_diff(
         &mut tx,
-        Via::Pool(pool),
         &stmt,
         before_pairs,
         &after_pairs,
@@ -2630,7 +2479,6 @@ where
 /// UPDATE, then emit the audit row if a BEFORE snapshot was captured.
 async fn finish_update_with_audit_diff(
     tx: &mut crate::sql::PoolTx<'_>,
-    via: Via<'_>,
     stmt: &crate::sql::CompiledStatement,
     before_pairs: Option<Vec<(&'static str, serde_json::Value)>>,
     after_pairs: &[(&'static str, serde_json::Value)],
@@ -2643,7 +2491,7 @@ async fn finish_update_with_audit_diff(
         PendingEntry::update_diff(entity_table, entity_pk.to_owned(), &before, after_pairs)
     });
     if let Some(entry) = entry {
-        emit_one_tx(tx, via, &entry).await?;
+        emit_one_tx(tx, &entry).await?;
     }
     Ok(_affected)
 }
@@ -2677,7 +2525,7 @@ mod tx_update_tests {
 }
 
 #[cfg(all(test, feature = "admin", feature = "tenancy", feature = "sqlite"))]
-mod pool_bound_tx_tests {
+mod tx_pool_tests {
     use super::*;
 
     async fn audited_pool() -> crate::sql::Pool {
@@ -2718,7 +2566,7 @@ mod pool_bound_tx_tests {
         with_tenant_source(user, "a".into(), async {
             writing_to_tenant("a".into(), Some(&a), async {
                 for pool in [&a, &b] {
-                    let mut tx = PoolBoundTx::begin_write(pool).await.unwrap();
+                    let mut tx = crate::sql::write_transaction(pool).await.unwrap();
                     emit_in_tx(&mut tx, std::slice::from_ref(&entry))
                         .await
                         .unwrap();
@@ -2730,5 +2578,34 @@ mod pool_bound_tx_tests {
         .await;
         assert_eq!(source_of(&a).await, "user:7");
         assert_eq!(source_of(&b).await, "system");
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::Retention;
+
+    /// With neither flag, `[audit] retention_days` is the `--days`; a flag wins.
+    #[test]
+    fn audit_cleanup_falls_back_to_the_configured_retention() {
+        assert_eq!(
+            Retention::from_flags(None, None, false, Some(90)),
+            Ok(Retention::OlderThanDays(90))
+        );
+        assert_eq!(
+            Retention::from_flags(Some(7), None, false, Some(90)),
+            Ok(Retention::OlderThanDays(7))
+        );
+        assert_eq!(
+            Retention::from_flags(None, Some(5), false, Some(90)),
+            Ok(Retention::KeepLast(5))
+        );
+        let err = Retention::from_flags(None, None, false, None).unwrap_err();
+        assert!(err.contains("retention_days"), "{err}");
+        // A configured 0 deletes everything too, so it still needs --yes, and says where the 0 came from.
+        let err = Retention::from_flags(None, None, false, Some(0)).unwrap_err();
+        assert!(err.contains("[audit] retention_days"), "{err}");
+        let err = Retention::from_flags(Some(0), None, false, Some(90)).unwrap_err();
+        assert!(!err.contains("retention_days"), "{err}");
     }
 }

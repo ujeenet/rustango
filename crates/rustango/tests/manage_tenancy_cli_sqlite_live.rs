@@ -73,7 +73,7 @@ impl Booted {
             &self.pools,
             &self.url,
             self.migrations.path(),
-            args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(),
+            rustango::testkit::routed_args(args),
             &mut buf,
         )
         .await
@@ -411,7 +411,7 @@ async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&b.pools.registry_pool())
+    org.insert(&b.pools.registry_pool())
         .await
         .expect("seed org");
     for args in [&["prewarm-pools"][..], &["audit-cleanup", "--days", "30"]] {

@@ -206,7 +206,7 @@ async fn api_app(url: &str, backend: &str) -> axum::Router {
     use rustango::tenancy::{ChainResolver, DefaultTenantDb, Org, TenantPools};
 
     let org = Org {
-        id: rustango::sql::Auto::Unset,
+        id: rustango::sql::Auto::Set(1),
         slug: "acme".into(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),
@@ -369,7 +369,7 @@ async fn order_writes_need_the_change_codename() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    user.insert_pool(&pool).await.expect("user");
+    user.insert(&pool).await.expect("user");
     let uid = *user.id.get().expect("user id");
 
     let app = api_app(&url, backend).await;

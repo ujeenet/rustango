@@ -41,7 +41,7 @@
 
 use crate::core::Column as _;
 #[cfg(feature = "postgres")]
-use crate::sql::sqlx::{PgConnection, PgPool};
+use crate::sql::sqlx::PgConnection;
 #[allow(unused_imports)]
 use crate::sql::Auto;
 use crate::Model;
@@ -242,7 +242,7 @@ impl NewUser<'_> {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        user.save_pool(pool).await?;
+        user.save(pool).await?;
         Ok(user)
     }
 }
@@ -334,35 +334,6 @@ impl PasswordVerified<Operator> {
         }
         row
     }
-}
-
-/// Look up an operator by username and verify the password.
-///
-/// Returns `Ok(Some(_))` on success — call [`PasswordVerified::complete`]
-/// once any second factor passes — and `Ok(None)` for an unknown
-/// username, a wrong password, OR an inactive (`active = false`)
-/// operator — always the same `Ok(None)`. The unknown-username path
-/// runs a dummy Argon2 verify ([`password::verify_dummy_async`]) and the
-/// active check happens *after* the real verify, so response timing
-/// doesn't reveal whether the account exists (audit H1).
-///
-/// # Errors
-/// Returns [`TenancyError::Driver`]/[`TenancyError::Exec`] for SQL
-/// failures, [`TenancyError::Validation`] for malformed stored
-/// hashes (corrupt row), or [`TenancyError::Busy`] for a known and an
-/// unknown username alike when no hashing slot frees up.
-#[cfg(feature = "postgres")]
-pub async fn authenticate_operator(
-    registry: &PgPool,
-    username: &str,
-    password: &str,
-) -> Result<Option<PasswordVerified<Operator>>, TenancyError> {
-    authenticate_operator_pool(
-        &crate::sql::Pool::Postgres(registry.clone()),
-        username,
-        password,
-    )
-    .await
 }
 
 /// Backend-agnostic counterpart of [`authenticate_operator`]. Routes

@@ -9,7 +9,7 @@ use crate::query::{QuerySet, UpdateBuilder};
 // PG-typed helpers below import these. Sqlite/MySQL-only builds only
 // see the bi/tri-dialect `_pool` entry points from this module.
 #[cfg(feature = "postgres")]
-use sqlx::postgres::{PgArguments, PgPool, PgRow};
+use sqlx::postgres::{PgArguments, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::query::{Query, QueryAs};
 
@@ -309,31 +309,7 @@ where
 }
 
 #[cfg(feature = "postgres")]
-impl<T> QuerySet<T>
-where
-    T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    /// [`Self::fetch_paginated_on`] against a pool, for non-tenant code.
-    ///
-    /// # Errors
-    /// As [`Self::fetch_paginated_on`].
-    pub async fn fetch_paginated(self, pool: &PgPool) -> Result<Page<T>, ExecError> {
-        let select = self.compile()?;
-        let stmt = paginated_statement(&Postgres, &select)?;
-        // Its own decode only for the looser `FromRow<PgRow>` bound.
-        let rows = run_on(pool, &stmt.sql, stmt.params, |row| match row {
-            RowRef::Postgres(r) => paged::<T, _>(r),
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("a PgPool yields Postgres rows"),
-        })
-        .await?;
-        let total = match total_statement(&Postgres, &select)?.filter(|_| rows.is_empty()) {
-            Some(count) => Some(count_stmt_on(pool, count).await?),
-            None => None,
-        };
-        Ok(into_page(rows, total))
-    }
-}
+impl<T> QuerySet<T> where T: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin {}
 
 /// One `fetch_paginated` row and its window total.
 fn paged<T, R>(row: &R) -> Result<(T, i64), sqlx::Error>
@@ -462,14 +438,15 @@ mod page;
 pub use page::Page;
 use page::{paginated_statement, total_statement};
 
-// PG `_on` CRUD family — see pg_on.rs.
+// The PG INSERT … RETURNING on a raw executor — see pg_on.rs.
 #[cfg(feature = "postgres")]
 mod pg_on;
 #[cfg(feature = "postgres")]
-pub use pg_on::{
-    bulk_insert_on, bulk_insert_rows_per_statement, delete_on, insert_on, insert_returning_on,
-    select_rows_on, update_on,
-};
+pub(crate) use pg_on::pg_insert_returning;
+
+// Writes on any `SqlExecutor` — see write_on.rs.
+mod write_on;
+pub use write_on::{bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on};
 
 mod row_to_json;
 #[cfg(feature = "postgres")]
@@ -482,45 +459,6 @@ pub(crate) use row_to_json::select_rows_as_json_with;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 #[cfg(feature = "admin")]
 pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
-
-/// Annotate each parent row with the COUNT of its children, from a
-/// single query, so a list page costs one round trip instead of
-/// N + 1:
-///
-/// ```text
-///   SELECT parent.<every-column>,
-///     (SELECT COUNT(*) FROM child WHERE child.<fk_column> = parent.<pk>)
-///       AS __annotated_count
-///   FROM parent [WHERE / ORDER BY / LIMIT from `parent_qs`]
-/// ```
-///
-/// Handles one Count over one reverse-FK relation. For `Sum`, `Avg`
-/// and friends use the aggregate query builder.
-///
-/// `child_table` is the child model's table; `child_fk_column` is the
-/// column on it that holds the parent's PK.
-///
-/// # Errors
-/// SQL-writing or driver failures from the single SELECT.
-#[cfg(feature = "postgres")]
-pub async fn annotate_count_children<P>(
-    parent_qs: crate::query::QuerySet<P>,
-    child_table: &'static str,
-    child_fk_column: &'static str,
-    pool: &PgPool,
-) -> Result<Vec<(P, i64)>, ExecError>
-where
-    P: Model + for<'r> sqlx::FromRow<'r, PgRow> + Send + Unpin,
-{
-    let stmt = annotate_count_statement(&Postgres, parent_qs, child_table, child_fk_column)?;
-    // Its own decode only for the looser `FromRow<PgRow>` bound.
-    run_on(pool, &stmt.sql, stmt.params, |row| match row {
-        RowRef::Postgres(r) => counted::<P, _>(r),
-        #[allow(unreachable_patterns)]
-        _ => unreachable!("a PgPool yields Postgres rows"),
-    })
-    .await
-}
 
 /// [`annotate_count_children`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
 /// whose connection holds the tenant's `search_path`.
@@ -585,58 +523,6 @@ fn annotate_count_statement<P: Model>(
     )?)
 }
 
-/// Prefetch children: fetch parents and, for each one,
-/// the children whose foreign key points at it. Two queries in total,
-/// however many parents there are:
-///
-/// ```text
-///   SELECT * FROM <parent>;
-///   SELECT * FROM <child> WHERE <fk_column> IN ($1, $2, ...);
-/// ```
-///
-/// Each parent is paired with its children; a parent with no children
-/// gets an empty `Vec`. Parents keep the queryset's order, children
-/// keep the second query's order.
-///
-/// `child_fk_column` is the column on the child table that holds the
-/// parent's PK — for `Post { author: ForeignKey<Author> }` that is
-/// `"author"`. Children are grouped by reading the same column back
-/// through [`FkPkAccess`].
-///
-/// # Errors
-/// Anything either of the underlying `fetch` calls returns.
-#[cfg(feature = "postgres")]
-pub async fn fetch_with_prefetch<P, C>(
-    parent_qs: crate::query::QuerySet<P>,
-    child_fk_column: &'static str,
-    pool: &PgPool,
-) -> Result<Vec<(P, Vec<C>)>, ExecError>
-where
-    P: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + Send
-        + Unpin
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + HasPkValue,
-    C: Model
-        + for<'r> sqlx::FromRow<'r, PgRow>
-        + MaybeMyFromRow
-        + MaybeSqliteFromRow
-        + Send
-        + Unpin
-        + LoadRelated
-        + MaybeMyLoadRelated
-        + MaybeSqliteLoadRelated
-        + FkPkAccess,
-{
-    // The pool path batches the `IN` list past the bind cap.
-    fetch_with_prefetch_pool(parent_qs, child_fk_column, &Pool::Postgres(pool.clone())).await
-}
-
 /// Read a model's PK as a [`crate::core::SqlValue`] through
 /// [`HasPkValue`].
 pub(super) fn extract_pk_value<P: HasPkValue>(parent: &P) -> crate::core::SqlValue {
@@ -658,27 +544,7 @@ pub trait HasPkValue {
 }
 
 #[cfg(feature = "postgres")]
-impl<T: Model + Send> QuerySet<T> {
-    /// Run `EXPLAIN` on this queryset and return the plan, one line
-    /// per `Vec` entry. Runs against a pool with the default options:
-    /// plain `EXPLAIN`, no `ANALYZE`, so the query itself is not run.
-    /// Use [`Self::explain_on`] to pick the executor and options.
-    ///
-    /// ```ignore
-    /// use rustango::sql::ExplainOptions;
-    /// let plan = Post::objects()
-    ///     .where_(Post::author_id.eq(7_i64))
-    ///     .explain(&pool)
-    ///     .await?;
-    /// for line in plan { println!("{line}"); }
-    /// ```
-    ///
-    /// # Errors
-    /// SQL-writing or driver failures from the EXPLAIN.
-    pub async fn explain(self, pool: &PgPool) -> Result<Vec<String>, ExecError> {
-        self.explain_on(pool, ExplainOptions::default()).await
-    }
-}
+impl<T: Model + Send> QuerySet<T> {}
 
 impl<T: Model + Send> QuerySet<T> {
     /// [`Self::explain`] with your own [`SqlExecutor`] and [`ExplainOptions`],
@@ -709,17 +575,7 @@ impl<T: Model + Send> QuerySet<T> {
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
     pub async fn delete_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
-        let query = self.compile_delete()?;
-        let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
-        // A raw sqlx executor runs one statement: delete as before, unaudited cascade.
-        let single = plan.links.is_empty() && !executor.runs_plans();
-        if plan.is_one_statement() || single {
-            if plan.cascade.is_some() {
-                crate::audit::cascade::warn_unaudited(query.model.table);
-            }
-            return write_on(executor, &plan.owner.sql, plan.owner.params).await;
-        }
-        executor.run_delete_plan(plan).await
+        delete_on(executor, &self.compile_delete()?).await
     }
 }
 
@@ -766,7 +622,8 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
 }
 
 /// Refuse a write that cannot audit on an audited model.
-fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
+#[doc(hidden)]
+pub fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
     if T::SCHEMA.audit_track.is_some() {
         return Err(ExecError::AuditUnsupported {
             table: T::SCHEMA.table,
@@ -1018,17 +875,6 @@ pub(crate) fn bind_query(
     bind_match!(q, value)
 }
 
-/// The bound query of a PG `_on` read. The one place that family is
-/// counted for `assert_num_queries` (#1561).
-#[cfg(feature = "postgres")]
-pub(super) fn pg_on_query(
-    sql: &str,
-    params: Vec<SqlValue>,
-) -> Query<'_, sqlx::Postgres, PgArguments> {
-    crate::test_assertions::query_counter::bump();
-    params.into_iter().fold(sqlx::query(sql), bind_query)
-}
-
 /// Like [`fetch_aggregate_dict`] but on any [`SqlExecutor`].
 ///
 /// # Errors
@@ -1047,12 +893,12 @@ where
 mod decode;
 
 mod tx;
-pub use tx::{transaction_pool, write_transaction, PoolTx};
+pub use tx::{transaction_pool, write_transaction, PoolTx, TxConn};
 
 // One executor for every `_on` method.
 mod on;
 use on::RowRef;
-pub use on::{PoolConn, SqlExecutor};
+pub use on::{PoolConn, PooledConn, SqlExecutor};
 
 mod atomic;
 #[cfg(feature = "jobs")]
@@ -1148,7 +994,7 @@ pub(crate) async fn insert_or_ignore_tx(
     #[allow(irrefutable_let_patterns)]
     {
         let gate = atomic::gate(tx)?;
-        if let PoolTx::Mysql(t) = tx {
+        if let TxConn::Mysql(t) = &mut tx.conn {
             // A skip reports one affected row too: read the insert id instead.
             crate::test_assertions::query_counter::bump();
             let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
@@ -1193,7 +1039,7 @@ pub async fn insert_returning_pool(
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let row = insert_returning_on(pg, query).await?;
+            let row = pg_insert_returning(pg, query).await?;
             Ok(InsertReturningPool::PgRow(row))
         }
         #[cfg(feature = "mysql")]
@@ -1503,7 +1349,7 @@ pub async fn __rustango_delete_all_or_none(
         .iter()
         .map(|q| crate::sql::compile_delete_plan(pool.dialect(), q))
         .collect::<Result<Vec<_>, _>>()?;
-    let run = atomic(pool, move |tx| {
+    atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             let mut deleted = 0;
@@ -1512,8 +1358,8 @@ pub async fn __rustango_delete_all_or_none(
             }
             Ok(deleted)
         })
-    });
-    crate::audit::cascade::via_pool(pool, run).await
+    })
+    .await
 }
 
 /// Run a [`DeletePlan`](crate::sql::DeletePlan) on `pool`, in one
@@ -1525,13 +1371,13 @@ pub(crate) async fn delete_plan_pool(
     if plan.is_one_statement() {
         return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
     }
-    let run = atomic(pool, move |tx| {
+    atomic(pool, move |tx| {
         Box::pin(async move {
             let mut guard = tx.lock().await?;
             run_delete_plan_tx(&mut guard, plan).await
         })
-    });
-    crate::audit::cascade::via_pool(pool, run).await
+    })
+    .await
 }
 
 /// Run a [`DeletePlan`](crate::sql::DeletePlan) in `tx`: links, then the
@@ -1732,9 +1578,9 @@ pub async fn raw_execute_tx(
         async {
             // Counts toward `assert_num_queries`; a no-op outside tests.
             crate::test_assertions::query_counter::bump();
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                tx::PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
                     for v in binds {
                         q = bind_query(q, v);
@@ -1742,7 +1588,7 @@ pub async fn raw_execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "mysql")]
-                tx::PoolTx::Mysql(t) => {
+                TxConn::Mysql(t) => {
                     let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                         sqlx::query(sql);
                     for v in binds {
@@ -1751,7 +1597,7 @@ pub async fn raw_execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "sqlite")]
-                tx::PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let mut q: sqlx::query::Query<
                         '_,
                         sqlx::Sqlite,
@@ -1874,9 +1720,9 @@ async fn execute_tx(
     gate.check(
         async {
             crate::test_assertions::query_counter::bump();
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(sql);
                     for v in binds {
                         q = bind_query(q, v);
@@ -1884,7 +1730,7 @@ async fn execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "mysql")]
-                PoolTx::Mysql(t) => {
+                TxConn::Mysql(t) => {
                     let mut q: sqlx::query::Query<'_, sqlx::MySql, sqlx::mysql::MySqlArguments> =
                         sqlx::query(sql);
                     for v in binds {
@@ -1893,7 +1739,7 @@ async fn execute_tx(
                     Ok(q.execute(&mut **t).await?.rows_affected())
                 }
                 #[cfg(feature = "sqlite")]
-                PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let mut q: sqlx::query::Query<
                         '_,
                         sqlx::Sqlite,
@@ -1938,16 +1784,16 @@ pub async fn insert_returning_tx(
             if query.returning.is_empty() {
                 return Err(ExecError::EmptyReturning);
             }
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                PoolTx::Postgres(t) => {
-                    let row = insert_returning_on(&mut **t, query).await?;
+                TxConn::Postgres(t) => {
+                    let row = pg_insert_returning(&mut **t, query).await?;
                     Ok(InsertReturningPool::PgRow(row))
                 }
                 #[cfg(feature = "mysql")]
-                PoolTx::Mysql(t) => insert_mysql_auto_id(&mut **t, query).await,
+                TxConn::Mysql(t) => insert_mysql_auto_id(&mut **t, query).await,
                 #[cfg(feature = "sqlite")]
-                PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let stmt = super::sqlite::DIALECT.compile_insert(query)?;
                     let mut q: sqlx::query::Query<
                         '_,
@@ -1981,55 +1827,71 @@ pub(crate) async fn bulk_insert_pks_tx(
         .ok_or(ExecError::MissingPrimaryKey {
             table: query.model.table,
         })?;
-    #[cfg(feature = "mysql")]
-    let no_returning = || ExecError::AuditUnsupported {
-        table: query.model.table,
-        reason: "MySQL has no RETURNING to read the written rows",
-    };
-    // Before compiling: the MySQL writer refuses RETURNING itself.
-    #[cfg(feature = "mysql")]
-    if matches!(tx, PoolTx::Mysql(_)) && !query.rows.is_empty() {
-        return Err(no_returning());
-    }
     let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), query.rows.clone())
         .returning(vec![pk.column]);
     batch.on_conflict.clone_from(&query.on_conflict);
-    let stmts = compile_bulk_insert_batches(tx.dialect(), &batch)?;
-    let mut pks = Vec::with_capacity(query.rows.len());
+    let rows = bulk_insert_rows_tx(tx, &batch).await?;
+    rows.iter()
+        .map(|row| generated_pk(row, pk, query.model.table))
+        .collect()
+}
+
+/// Run `query` in `tx` in bind-sized batches and give back its `RETURNING`
+/// rows in row order; none when it returns nothing. MySQL cannot return rows.
+///
+/// # Errors
+/// As [`bulk_insert_pool`]; [`ExecError::AuditUnsupported`] for rows on MySQL.
+// A MySQL-only build has no backend that returns rows.
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "sqlite")),
+    allow(unused_mut, unused_variables)
+)]
+pub(crate) async fn bulk_insert_rows_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<Vec<InsertReturningPool>, ExecError> {
+    if query.returning.is_empty() {
+        bulk_insert_tx(tx, query).await?;
+        return Ok(Vec::new());
+    }
+    // Before compiling: the MySQL writer refuses RETURNING itself.
+    #[cfg(feature = "mysql")]
+    if matches!(tx.conn, TxConn::Mysql(_)) && !query.rows.is_empty() {
+        return Err(ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "MySQL has no RETURNING to read the written rows",
+        });
+    }
+    let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
+    let mut out = Vec::with_capacity(query.rows.len());
     for stmt in stmts {
         crate::test_assertions::query_counter::bump();
-        let rows: Result<Vec<InsertReturningPool>, ExecError> = match tx {
+        match &mut tx.conn {
             #[cfg(feature = "postgres")]
-            PoolTx::Postgres(t) => Ok(stmt
-                .params
-                .into_iter()
-                .fold(sqlx::query(&stmt.sql), bind_query)
-                .fetch_all(&mut **t)
-                .await?
-                .into_iter()
-                .map(InsertReturningPool::PgRow)
-                .collect()),
+            TxConn::Postgres(t) => out.extend(
+                stmt.params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::PgRow),
+            ),
             #[cfg(feature = "mysql")]
-            PoolTx::Mysql(_) => {
-                drop(stmt);
-                Err(no_returning())
-            }
+            TxConn::Mysql(_) => unreachable!("refused above"),
             #[cfg(feature = "sqlite")]
-            PoolTx::Sqlite(t) => Ok(stmt
-                .params
-                .into_iter()
-                .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
-                .fetch_all(&mut **t)
-                .await?
-                .into_iter()
-                .map(InsertReturningPool::SqliteRow)
-                .collect()),
-        };
-        for row in &rows? {
-            pks.push(generated_pk(row, pk, query.model.table)?);
+            TxConn::Sqlite(t) => out.extend(
+                stmt.params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::SqliteRow),
+            ),
         }
     }
-    Ok(pks)
+    Ok(out)
 }
 
 /// `UPDATE` inside an open transaction; returns rows affected.
@@ -2051,63 +1913,132 @@ pub async fn delete_tx(tx: &mut PoolTx<'_>, query: &DeleteQuery) -> Result<u64, 
     run_delete_plan_tx(tx, plan).await
 }
 
-/// `Model::truncate`'s statement: `TRUNCATE … RESTART IDENTITY CASCADE`
-/// on Postgres, `DELETE FROM` elsewhere. Not part of the public API.
-#[doc(hidden)]
-#[must_use]
-pub fn truncate_sql(d: &dyn crate::sql::Dialect, table: &str) -> String {
-    let quoted = d.quote_ident(table);
-    if truncate_cascades_every_fk(d) {
-        format!("TRUNCATE TABLE {quoted} RESTART IDENTITY CASCADE")
-    } else {
-        format!("DELETE FROM {quoted}")
+/// How far a truncate reaches past its own table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TruncateMode {
+    /// Delete every row; each FK's `ON DELETE` applies, so a row that
+    /// restricts the delete refuses the truncate.
+    Plain,
+    /// Also empty every table that references it, transitively, whatever
+    /// its `ON DELETE`.
+    Cascade,
+}
+
+/// The tables with an FK to `table`, transitively, from the catalog.
+async fn referencing_tables(tx: &mut PoolTx<'_>, table: &str) -> Result<Vec<String>, ExecError> {
+    let Some(sql) = tx.dialect().referencing_tables_sql() else {
+        return Ok(Vec::new());
+    };
+    let mut seen = vec![table.to_owned()];
+    let mut frontier = vec![table.to_owned()];
+    while let Some(parent) = frontier.pop() {
+        let rows: Vec<(String,)> = raw_query_tx(tx, sql, vec![SqlValue::String(parent)]).await?;
+        for (child,) in rows {
+            if !seen.iter().any(|t| t.eq_ignore_ascii_case(&child)) {
+                seen.push(child.clone());
+                frontier.push(child);
+            }
+        }
+    }
+    seen.remove(0);
+    Ok(seen)
+}
+
+/// An FK refusal. SQLite reports a `RESTRICT` one as a trigger failure (1811).
+pub(crate) fn is_fk_refusal(db: &dyn sqlx::error::DatabaseError) -> bool {
+    db.is_foreign_key_violation()
+        || (db.code().as_deref() == Some("1811") && db.message() == "FOREIGN KEY constraint failed")
+}
+
+/// A plain truncate's FK refusal, named for the table.
+pub(crate) fn truncate_refusal(table: &'static str, mode: TruncateMode, e: ExecError) -> ExecError {
+    match e {
+        ExecError::Driver(sqlx::Error::Database(db))
+            if mode == TruncateMode::Plain && is_fk_refusal(db.as_ref()) =>
+        {
+            ExecError::TruncateReferenced {
+                table,
+                source: sqlx::Error::Database(db),
+            }
+        }
+        other => other,
     }
 }
 
-/// Whether [`truncate_sql`] is PG's `TRUNCATE … CASCADE`, which empties
-/// every table with an FK to it, whatever its `ON DELETE`.
-pub(crate) fn truncate_cascades_every_fk(d: &dyn crate::sql::Dialect) -> bool {
-    d.name() == "postgres"
-}
-
-/// Run `sql` (a [`truncate_sql`]) in `tx` after clearing the table's
-/// generic M2M junction rows, so a reused id inherits no links. The
-/// audited tables it takes rows from through FKs get a bulk `delete` entry.
+/// Truncate `table` in `tx` after clearing its generic M2M junction rows,
+/// so a reused id inherits no links. The audited tables it takes rows from
+/// through FKs get a bulk entry. Returns a plain truncate's deleted rows.
 pub(crate) async fn truncate_tx(
     tx: &mut PoolTx<'_>,
-    table: &str,
-    sql: &str,
+    table: &'static str,
+    mode: TruncateMode,
 ) -> Result<u64, ExecError> {
     for link in crate::sql::m2m::generic_m2m_truncate_links(table) {
         let stmt = tx.dialect().compile_delete(&link)?;
         execute_tx(tx, &stmt.sql, stmt.params).await?;
     }
-    let before = crate::audit::cascade::truncate_counts(tx, table).await?;
-    let affected = execute_tx(tx, sql, Vec::new()).await?;
+    let referencing = match mode {
+        TruncateMode::Plain => Vec::new(),
+        TruncateMode::Cascade => referencing_tables(tx, table).await?,
+    };
+    let before = crate::audit::cascade::truncate_counts(tx, table, mode).await?;
+    let mut affected = 0;
+    for sql in tx.dialect().truncate_sql(table, mode, &referencing) {
+        affected = execute_tx(tx, &sql, Vec::new())
+            .await
+            .map_err(|e| truncate_refusal(table, mode, e))?;
+    }
     crate::audit::cascade::emit_truncated(tx, table, before).await?;
-    Ok(affected)
+    // A plain truncate is one `DELETE`; `TRUNCATE` reports no count.
+    Ok(if mode == TruncateMode::Plain {
+        affected
+    } else {
+        0
+    })
 }
 
-/// Empty `model`'s table and its generic M2M junction rows in one
-/// transaction. Backs the derived `Model::truncate`.
+/// `DELETE` every row of `model`'s table, and its generic M2M junction
+/// rows, in one transaction. Backs the derived `Model::truncate`.
 ///
-/// On Postgres `CASCADE` also empties every table with an FK to it, even
-/// `ON DELETE RESTRICT`; MySQL / SQLite follow each FK's `ON DELETE`.
+/// Each FK's `ON DELETE` applies on every backend: a `RESTRICT` / `NO ACTION`
+/// row still pointing here refuses the whole truncate. Ids keep counting.
 ///
 /// # Errors
-/// As [`raw_execute_tx`].
+/// [`ExecError::TruncateReferenced`] while such a row exists; driver errors.
 pub async fn truncate(
     pool: &Pool,
     model: &'static crate::core::ModelSchema,
 ) -> Result<u64, ExecError> {
-    crate::audit::cascade::via_pool(pool, async {
-        let mut tx = tx::write_transaction(pool).await?;
-        let sql = truncate_sql(tx.dialect(), model.table);
-        let affected = truncate_tx(&mut tx, model.table, &sql).await?;
-        tx.commit().await?;
-        Ok(affected)
-    })
-    .await
+    run_truncate(pool, model.table, TruncateMode::Plain).await
+}
+
+/// [`truncate`], also emptying every table that references `model`'s,
+/// transitively and whatever its `ON DELETE`. `TRUNCATE … CASCADE` on
+/// Postgres; on MySQL / SQLite a `DELETE` per table, FK checks off / deferred.
+///
+/// # Errors
+/// Driver errors; nothing is emptied then.
+pub async fn truncate_cascade(
+    pool: &Pool,
+    model: &'static crate::core::ModelSchema,
+) -> Result<(), ExecError> {
+    run_truncate(pool, model.table, TruncateMode::Cascade)
+        .await
+        .map(drop)
+}
+
+async fn run_truncate(
+    pool: &Pool,
+    table: &'static str,
+    mode: TruncateMode,
+) -> Result<u64, ExecError> {
+    let mut tx = tx::write_transaction(pool).await?;
+    let affected = truncate_tx(&mut tx, table, mode).await?;
+    tx.commit()
+        .await
+        .map_err(|e| truncate_refusal(table, mode, e.into()))?;
+    Ok(affected)
 }
 
 /// [`bulk_insert_pool`] inside an open transaction, split to fit the
@@ -2484,9 +2415,9 @@ where
         async {
             // Counts toward `assert_num_queries`; a no-op outside tests.
             crate::test_assertions::query_counter::bump();
-            match tx {
+            match &mut tx.conn {
                 #[cfg(feature = "postgres")]
-                tx::PoolTx::Postgres(t) => {
+                TxConn::Postgres(t) => {
                     let mut q: QueryAs<'_, sqlx::Postgres, T, PgArguments> =
                         sqlx::query_as::<_, T>(sql);
                     for v in binds {
@@ -2495,7 +2426,7 @@ where
                     Ok(q.fetch_all(&mut **t).await?)
                 }
                 #[cfg(feature = "mysql")]
-                tx::PoolTx::Mysql(t) => {
+                TxConn::Mysql(t) => {
                     let mut q: sqlx::query::QueryAs<
                         '_,
                         sqlx::MySql,
@@ -2508,7 +2439,7 @@ where
                     Ok(q.fetch_all(&mut **t).await?)
                 }
                 #[cfg(feature = "sqlite")]
-                tx::PoolTx::Sqlite(t) => {
+                TxConn::Sqlite(t) => {
                     let mut q: sqlx::query::QueryAs<
                         '_,
                         sqlx::Sqlite,
@@ -3183,7 +3114,7 @@ where
     /// delete can shift a row into the next chunk and return it
     /// twice. The chunker only takes a `&Pool`, never a transaction.
     /// On a table other writers touch, write the LIMIT/OFFSET loop
-    /// yourself against [`select_rows_on`] inside a repeatable-read
+    /// yourself with `fetch_on` on a `PoolTx` inside a repeatable-read
     /// transaction. Read-only or append-only tables are fine.
     ///
     /// **`select_for_update()` is lost.** Each chunk runs in its own

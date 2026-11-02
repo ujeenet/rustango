@@ -66,7 +66,7 @@ async fn field_types_round_trip() {
             .with_timezone(&Utc),
         meta: serde_json::json!({ "color": "red", "tags": [1, 2, 3] }),
     };
-    g.save_pool(&pool).await.unwrap();
+    g.save(&pool).await.unwrap();
 
     // The PK was populated by the database on insert.
     let id = g.id.get().copied().expect("id assigned");
@@ -109,7 +109,7 @@ async fn custom_string_primary_key() {
     };
     // An application-assigned PK has no `Auto::Unset` state, so `save_pool`
     // would UPDATE. Use `insert_pool` to insert a brand-new row.
-    c.insert_pool(&pool).await.unwrap();
+    c.insert(&pool).await.unwrap();
 
     // Look up by the string PK.
     let back = Coupon::find_or_fail("SAVE10".to_string(), &pool)
@@ -194,7 +194,7 @@ async fn auto_now_add_and_soft_delete() {
         created_at: Auto::default(), // auto_now_add → server fills it
         deleted_at: None,
     };
-    a.save_pool(&pool).await.unwrap();
+    a.save(&pool).await.unwrap();
     let id = a.id.get().copied().unwrap();
 
     let row = Article::find_or_fail(id, &pool).await.unwrap();

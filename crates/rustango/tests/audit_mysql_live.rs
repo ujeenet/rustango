@@ -21,7 +21,7 @@
 use std::sync::OnceLock;
 
 use rustango::audit::{
-    self, cleanup_keep_last_n_pool, cleanup_older_than_pool, emit_many_pool, emit_one_pool,
+    self, cleanup_keep_last_n_pool, cleanup_older_than_pool, emit_many, emit_one,
     ensure_table_pool, fetch_for_entity_pool, AuditOp, AuditSource, PendingEntry,
 };
 use rustango::sql::Pool;
@@ -69,7 +69,7 @@ async fn ensure_table_then_emit_one_then_fetch_round_trips_on_mysql() {
         AuditOp::Create,
         json!({"title": {"after": "Hello"}}),
     );
-    emit_one_pool(&pool, &e).await.expect("emit_one");
+    emit_one(&pool, &e).await.expect("emit_one");
 
     let rows = fetch_for_entity_pool(&pool, "post", "1")
         .await
@@ -93,7 +93,7 @@ async fn emit_many_writes_all_entries_in_one_tx_on_mysql() {
         entry("post", "10", AuditOp::Update, json!({"v": 2})),
         entry("post", "10", AuditOp::SoftDelete, json!({"v": 3})),
     ];
-    emit_many_pool(&pool, &entries).await.expect("emit_many");
+    emit_many(&pool, &entries).await.expect("emit_many");
 
     let rows = fetch_for_entity_pool(&pool, "post", "10").await.unwrap();
     assert_eq!(rows.len(), 3);
@@ -109,7 +109,7 @@ async fn cleanup_older_than_clears_when_cutoff_zero_on_mysql() {
         return;
     };
     for i in 0..5 {
-        emit_one_pool(
+        emit_one(
             &pool,
             &entry("post", &format!("{i}"), AuditOp::Create, json!({"i": i})),
         )
@@ -126,7 +126,7 @@ async fn cleanup_older_than_keeps_recent_rows_on_mysql() {
     let Some(pool) = mysql_pool().await else {
         return;
     };
-    emit_one_pool(
+    emit_one(
         &pool,
         &entry("post", "1", AuditOp::Create, json!({"hello": "world"})),
     )
@@ -145,12 +145,12 @@ async fn cleanup_keep_last_n_prunes_per_entity_history_on_mysql() {
         return;
     };
     for v in 1..=4 {
-        emit_one_pool(&pool, &entry("post", "1", AuditOp::Update, json!({"v": v})))
+        emit_one(&pool, &entry("post", "1", AuditOp::Update, json!({"v": v})))
             .await
             .unwrap();
     }
     for v in 1..=2 {
-        emit_one_pool(&pool, &entry("post", "2", AuditOp::Update, json!({"v": v})))
+        emit_one(&pool, &entry("post", "2", AuditOp::Update, json!({"v": v})))
             .await
             .unwrap();
     }
@@ -170,7 +170,7 @@ async fn list_pool_filters_and_paginates_on_mysql() {
         return;
     };
     for (table, pk) in [("post", "1"), ("post", "2"), ("author", "5")] {
-        emit_one_pool(&pool, &entry(table, pk, AuditOp::Create, json!({"x": 1})))
+        emit_one(&pool, &entry(table, pk, AuditOp::Create, json!({"x": 1})))
             .await
             .unwrap();
     }
@@ -197,7 +197,7 @@ async fn facet_counts_returns_groupby_on_mysql() {
         ("post", AuditOp::Update),
         ("author", AuditOp::Create),
     ] {
-        emit_one_pool(&pool, &entry(table, "1", op, json!({})))
+        emit_one(&pool, &entry(table, "1", op, json!({})))
             .await
             .unwrap();
     }
@@ -223,7 +223,7 @@ async fn cleanup_older_than_huge_days_keeps_rows_on_mysql() {
     let Some(pool) = mysql_pool().await else {
         return;
     };
-    emit_one_pool(&pool, &entry("post", "1", AuditOp::Create, json!({})))
+    emit_one(&pool, &entry("post", "1", AuditOp::Create, json!({})))
         .await
         .unwrap();
     for days in [1_000_000, 200_000_000, i64::MAX] {

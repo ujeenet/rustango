@@ -108,6 +108,8 @@ async fn tenancy_manage_run_dispatches_init_then_create_then_list_on_sqlite() {
         vec![
             "create-tenant".to_owned(),
             "acme".to_owned(),
+            "--host-pattern".to_owned(),
+            "acme.localhost".to_owned(),
             "--display-name".to_owned(),
             "Acme Corp".to_owned(),
             "--mode".to_owned(),

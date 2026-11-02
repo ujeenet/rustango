@@ -47,7 +47,7 @@ async fn insert_with_unset_pk_generates_uuid_v7() {
         id: Auto::default(),
         title: "First".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let id = post.id.get().copied().expect("PK populated");
     // UUIDv7's version nibble is 7.
     assert_eq!(id.get_version_num(), 7, "expected UUIDv7, got {id}");
@@ -68,14 +68,14 @@ async fn consecutive_inserts_are_time_sortable() {
         id: Auto::default(),
         title: "A".into(),
     };
-    a.save_pool(&pool).await.unwrap();
+    a.save(&pool).await.unwrap();
     // A 2ms gap is enough — UUIDv7 carries a unix_ts_ms prefix.
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     let mut b = Post {
         id: Auto::default(),
         title: "B".into(),
     };
-    b.save_pool(&pool).await.unwrap();
+    b.save(&pool).await.unwrap();
 
     let a_id = a.id.get().copied().unwrap();
     let b_id = b.id.get().copied().unwrap();
@@ -96,7 +96,7 @@ async fn user_supplied_uuid_is_not_overwritten() {
         id: Auto::Set(custom),
         title: "Pre-supplied".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     assert_eq!(
         post.id.get().copied(),
         Some(custom),
@@ -111,11 +111,11 @@ async fn save_pool_after_insert_does_an_update() {
         id: Auto::default(),
         title: "Original".into(),
     };
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
     let pk = post.id.get().copied().unwrap();
 
     post.title = "Renamed".into();
-    post.save_pool(&pool).await.unwrap();
+    post.save(&pool).await.unwrap();
 
     let rows: Vec<Post> = rustango::query::QuerySet::<Post>::default()
         .fetch(&pool)

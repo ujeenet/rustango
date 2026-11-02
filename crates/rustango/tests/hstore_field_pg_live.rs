@@ -65,7 +65,7 @@ async fn insert(pool: &Pool, name: &str, attrs: HStore) -> i64 {
         name: name.to_owned(),
         attrs,
     };
-    p.save_pool(pool).await.unwrap();
+    p.save(pool).await.unwrap();
     *p.id.get().unwrap()
 }
 

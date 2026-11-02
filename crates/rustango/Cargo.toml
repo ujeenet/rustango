@@ -432,7 +432,7 @@ admin = [
 # (the OIDC/OAuth2 handshake) with `admin` (the session + user model).
 # Access is *link-to-existing* — the verified IdP email must match an
 # admin user; SSO never auto-provisions. Works for the bare admin
-# (global `[sso]` config) and, with `tenancy`, per-Org.
+# (providers added in the admin) and, with `tenancy`, per-Org.
 #
 # Composes the admin-independent `sso` core (below) with `admin` (the
 # session + user model). `admin-sso` = `admin` + `sso`; `sso` transitively
@@ -490,6 +490,8 @@ tenancy = [
     # it pulls in; widening one while introducing them would defeat that.
     "dep:hmac",
     "dep:sha2",
+    # Tenant access tokens go through the one HS256 codec in `crate::jwt`.
+    "jwt",
     "dep:password-hash",
     "_rand",
     # Sealed (`enc:`) tenant database URLs.
@@ -528,7 +530,7 @@ runserver = ["_axum"]
 
 [dependencies]
 # Proc-macros — separate by Rust language requirement.
-rustango-macros = { version = "=0.61.16", path = "../rustango-macros" }
+rustango-macros = { version = "=0.62.0", path = "../rustango-macros" }
 
 # Always-on: core ORM + query layer + SQL writer + migration runner.
 chrono       = { workspace = true }
@@ -653,7 +655,8 @@ libc = { workspace = true, optional = true }
 # every selective-feature test build failed on a missing module.
 # `default-features = false` matters: without it this would quietly
 # re-enable postgres and make `--no-default-features` meaningless.
-rustango       = { path = ".", default-features = false, features = ["testkit"] }
+# `test_utils` lets tests build a `Tenant` without a server.
+rustango       = { path = ".", default-features = false, features = ["testkit", "test_utils"] }
 # `test-util` pauses the clock for timeout tests.
 tokio          = { workspace = true, features = ["test-util"] }
 chrono         = { workspace = true }

@@ -48,7 +48,7 @@ fn parts(token: &str) -> Parts {
 fn parts_at(token: &str, addr: std::net::SocketAddr) -> Parts {
     Request::builder()
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
-        .extension(TenantSlug("api-key-hmac".into()))
+        .extension(TenantSlug::new(1, "api-key-hmac"))
         .extension(axum::extract::ConnectInfo(addr))
         .body(())
         .unwrap()
@@ -61,7 +61,7 @@ async fn seed_user(pool: &Pool, name: &str) -> i64 {
         username: name.to_owned(),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed user");
+    u.insert(pool).await.expect("seed user");
     *u.id.get().unwrap()
 }
 
@@ -120,7 +120,7 @@ async fn a_legacy_argon2_key_is_upgraded_on_use(pool: &Pool) {
         expires_at: None,
         created_at: Default::default(),
     };
-    key.save_pool(pool).await.unwrap();
+    key.save(pool).await.unwrap();
     let token = format!("{prefix}.{secret}");
 
     assert!(!ok(pool, &format!("{prefix}.wrong")).await);
@@ -172,7 +172,7 @@ async fn a_key_maced_with_the_raw_secret_still_verifies(pool: &Pool) {
         expires_at: None,
         created_at: Default::default(),
     };
-    key.save_pool(pool).await.unwrap();
+    key.save(pool).await.unwrap();
 
     assert!(!ok(pool, &format!("{prefix}.{}", "0".repeat(32))).await);
     let token = format!("{prefix}.{secret}");

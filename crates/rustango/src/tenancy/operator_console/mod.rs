@@ -799,6 +799,11 @@ fn router_unlogged(
     // shared cache stores a `Set-Cookie` with them.
     let mut assets = Router::new()
         .route(at("/__static__/rustango.png"), get(static_rustango_png))
+        // Browsers ask for it whatever the page links; the admin's icon.
+        .route(
+            at("/favicon.ico"),
+            get(|| async { crate::welcome::icon_png_response() }),
+        )
         .route(
             at(&format!(
                 "{}/{{slug}}/{{filename}}",
@@ -1042,6 +1047,7 @@ pub(crate) const CONSOLE_SEGMENTS: &[&str] = &[
     "logout",
     "__static__",
     "__brand__",
+    "favicon.ico",
     "operators",
     "orgs",
     "audit",
@@ -2202,7 +2208,7 @@ async fn org_edit_submit(
     }
     emit_op_audit(&state.registry, &slug, operator_id, "edit", detail).await;
 
-    let mut notice = if database_url_changed {
+    let notice = if database_url_changed {
         format!(
             "updated `{slug}` (this server switched now; others within {} s)",
             crate::tenancy::resolver::CACHE_TTL.as_secs()
@@ -2210,10 +2216,6 @@ async fn org_edit_submit(
     } else {
         format!("updated `{slug}`")
     };
-    if let Some(warning) = applied.warning {
-        notice.push_str(" — ");
-        notice.push_str(warning);
-    }
     flash::redirect(
         &format!("/orgs/{}/edit", urlencoding_lite(&slug)),
         flash::Flash::Notice(&notice),
@@ -2289,7 +2291,7 @@ async fn emit_registry_audit(
         source: crate::audit::AuditSource::Custom(format!("operator:{operator_id}:{verb}")),
         changes: serde_json::Value::Object(changes),
     };
-    if let Err(e) = crate::audit::emit_one_pool(registry, &entry).await {
+    if let Err(e) = crate::audit::emit_one(registry, &entry).await {
         // The action happened but was not recorded. Loud on purpose: a
         // trail with a silent hole in it is worse than a short one.
         tracing::error!(
@@ -2553,15 +2555,32 @@ async fn org_impersonate(
     // Mint the short-lived URL handoff token. Includes a random
     // single-use `jti` and the slug, both checked at redemption.
     use super::impersonation_handoff as handoff;
+    let Some(tenant) = crate::tenancy::TenantSlug::of(&org) else {
+        return redirect_with_error(&slug, "the tenant row has no id");
+    };
     let mut payload = handoff::HandoffPayload::new(
         operator_id,
-        slug.clone(),
+        &tenant,
         handoff::HANDOFF_TTL_SECS,
         handoff::PasswordFingerprint::of(&tenant_secret, &op.password_hash),
     );
     payload.iat = crate::session::issued_at(op.sessions_revoked_at);
     let token = handoff::mint(&tenant_secret, &payload);
 
+    // Build the redirect: tenant host, the handoff path, and the token.
+    // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
+    // every character is already URL-safe, so no escaping needed.
+    let handoff = match crate::tenancy::server::tenant_link(
+        &org,
+        &state.tenant_handoff_url,
+        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
+        &apex.map(|Extension(a)| a).unwrap_or_default(),
+    ) {
+        Ok(link) => link,
+        Err(e) => {
+            return redirect_with_error(&slug, &e.user_facing().unwrap_or_default());
+        }
+    };
     // Audit row on the operator side. The tenant admin writes its own
     // when an impersonated session first makes a change.
     let mut detail = serde_json::Map::new();
@@ -2571,15 +2590,6 @@ async fn org_impersonate(
     );
     emit_op_audit(&state.registry, &slug, operator_id, "impersonating", detail).await;
 
-    // Build the redirect: tenant host, the handoff path, and the token.
-    // The token is base64url (`URL_SAFE_NO_PAD`) + a single `.` —
-    // every character is already URL-safe, so no escaping needed.
-    let handoff = crate::tenancy::server::tenant_link(
-        &org,
-        &state.tenant_handoff_url,
-        headers.get(header::HOST).and_then(|v| v.to_str().ok()),
-        &apex.map(|Extension(a)| a).unwrap_or_default(),
-    );
     let redirect_to = format!("{handoff}?token={token}");
 
     let mut resp = Redirect::to(&redirect_to).into_response();

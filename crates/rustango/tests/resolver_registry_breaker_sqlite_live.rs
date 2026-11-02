@@ -67,7 +67,7 @@ async fn registry() -> (Pool, tempfile::TempDir) {
         host_pattern: Some("acme.app.test".into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&pool).await.expect("insert org");
+    org.insert(&pool).await.expect("insert org");
     (pool, dir)
 }
 

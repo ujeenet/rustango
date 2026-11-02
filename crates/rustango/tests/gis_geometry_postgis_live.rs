@@ -57,7 +57,7 @@ async fn point_column_round_trips_through_postgis() {
         name: "CN Tower".to_owned(),
         location: cn_tower,
     };
-    p.save_pool(&pool).await.expect("insert Point");
+    p.save(&pool).await.expect("insert Point");
 
     // Typed decode — the stored geometry round-trips back to a `Point`.
     let rows: Vec<Place> = Place::objects().fetch(&pool).await.unwrap();

@@ -67,7 +67,7 @@ async fn fresh_pool() -> Option<sqlx::PgPool> {
             age,
             active,
         };
-        p.insert(&pool).await.unwrap();
+        p.insert(&pool.clone().into()).await.unwrap();
     }
     Some(pool)
 }

@@ -86,7 +86,7 @@ let backends: Vec<Arc<dyn AuthBackend>> = vec![
 ];
 ```
 
-Auf einer Tenant-Route muss der `tenant`-Claim des Tokens zum aufgelösten Tenant passen,
+Auf einer Tenant-Route müssen die Claims `tenant` und `org_id` des Tokens zum aufgelösten Tenant passen,
 und MCP-Agent-Token (`kind`-Claim) werden abgewiesen. Prägen Sie mit dem `JwtAuth`-Login
 oder `JwtBackend::issue_for_tenant`; `issue`-Token gelten nur ohne aufgelösten Tenant.
 Direkt nach einem Logout-all prägen Sie mit `issue_for_user` / `issue_for_tenant_user`:

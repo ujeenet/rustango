@@ -21,7 +21,7 @@
 #![cfg(feature = "sqlite")]
 
 use rustango::audit::{
-    self, cleanup_keep_last_n_pool, cleanup_older_than_pool, emit_many_pool, emit_one_pool,
+    self, cleanup_keep_last_n_pool, cleanup_older_than_pool, emit_many, emit_one,
     ensure_table_pool, fetch_for_entity_pool, AuditOp, AuditSource, PendingEntry,
 };
 use rustango::sql::Pool;
@@ -54,7 +54,7 @@ async fn ensure_table_then_emit_one_then_fetch_round_trips() {
         AuditOp::Create,
         json!({"title": {"after": "Hello"}}),
     );
-    emit_one_pool(&pool, &e).await.expect("emit_one");
+    emit_one(&pool, &e).await.expect("emit_one");
 
     let rows = fetch_for_entity_pool(&pool, "post", "1")
         .await
@@ -79,7 +79,7 @@ async fn emit_many_writes_all_entries_in_one_tx() {
         entry("post", "10", AuditOp::Update, json!({"v": 2})),
         entry("post", "10", AuditOp::SoftDelete, json!({"v": 3})),
     ];
-    emit_many_pool(&pool, &entries).await.expect("emit_many");
+    emit_many(&pool, &entries).await.expect("emit_many");
 
     let rows = fetch_for_entity_pool(&pool, "post", "10").await.unwrap();
     assert_eq!(rows.len(), 3);
@@ -217,7 +217,7 @@ async fn cleanup_older_than_compares_apples_to_apples_on_sqlite() {
 async fn cleanup_older_than_keeps_recent_rows() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
-    emit_one_pool(
+    emit_one(
         &pool,
         &entry("post", "1", AuditOp::Create, json!({"hello": "world"})),
     )
@@ -237,12 +237,12 @@ async fn cleanup_keep_last_n_prunes_per_entity_history() {
     ensure_table_pool(&pool).await.unwrap();
     // 4 revisions of post:1, 2 of post:2.
     for v in 1..=4 {
-        emit_one_pool(&pool, &entry("post", "1", AuditOp::Update, json!({"v": v})))
+        emit_one(&pool, &entry("post", "1", AuditOp::Update, json!({"v": v})))
             .await
             .unwrap();
     }
     for v in 1..=2 {
-        emit_one_pool(&pool, &entry("post", "2", AuditOp::Update, json!({"v": v})))
+        emit_one(&pool, &entry("post", "2", AuditOp::Update, json!({"v": v})))
             .await
             .unwrap();
     }
@@ -261,7 +261,7 @@ async fn cleanup_keep_last_n_prunes_per_entity_history() {
 async fn cleanup_keep_last_n_zero_clears_table() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
-    emit_one_pool(&pool, &entry("post", "1", AuditOp::Create, json!({"v": 1})))
+    emit_one(&pool, &entry("post", "1", AuditOp::Create, json!({"v": 1})))
         .await
         .unwrap();
     let removed = cleanup_keep_last_n_pool(&pool, 0).await.unwrap();
@@ -276,7 +276,7 @@ async fn audit_log_table_quotes_identifiers_per_dialect() {
     ensure_table_pool(&pool).await.unwrap();
     // Empty-input emit_many is a no-op and shouldn't even talk to
     // the database.
-    let _ = audit::emit_many_pool(&pool, &[]).await.unwrap();
+    let _ = audit::emit_many(&pool, &[]).await.unwrap();
 }
 
 // v0.37 slice 2 — the activity-feed list/count/facet helpers used
@@ -289,7 +289,7 @@ async fn list_pool_filters_by_entity_table() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
     for (table, pk) in [("post", "1"), ("post", "2"), ("author", "5")] {
-        emit_one_pool(
+        emit_one(
             &pool,
             &entry(table, pk, AuditOp::Create, serde_json::json!({"x": 1})),
         )
@@ -311,19 +311,19 @@ async fn list_pool_filters_by_entity_table() {
 async fn list_pool_combines_multiple_filters() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
-    emit_one_pool(
+    emit_one(
         &pool,
         &entry("post", "1", AuditOp::Create, serde_json::json!({"v": 1})),
     )
     .await
     .unwrap();
-    emit_one_pool(
+    emit_one(
         &pool,
         &entry("post", "1", AuditOp::Update, serde_json::json!({"v": 2})),
     )
     .await
     .unwrap();
-    emit_one_pool(
+    emit_one(
         &pool,
         &entry("post", "2", AuditOp::Update, serde_json::json!({"v": 3})),
     )
@@ -347,7 +347,7 @@ async fn list_pool_paginates() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
     for i in 0..5 {
-        emit_one_pool(
+        emit_one(
             &pool,
             &entry("post", "1", AuditOp::Update, serde_json::json!({"i": i})),
         )
@@ -376,7 +376,7 @@ async fn facet_counts_returns_groupby() {
         ("post", AuditOp::Update),
         ("author", AuditOp::Create),
     ] {
-        emit_one_pool(&pool, &entry(table, "1", op, serde_json::json!({})))
+        emit_one(&pool, &entry(table, "1", op, serde_json::json!({})))
             .await
             .unwrap();
     }
@@ -511,7 +511,7 @@ async fn a_fractional_legacy_row_after_the_cutoff_survives() {
 async fn cleanup_older_than_huge_days_keeps_rows() {
     let pool = pool().await;
     ensure_table_pool(&pool).await.unwrap();
-    emit_one_pool(&pool, &entry("post", "1", AuditOp::Create, json!({})))
+    emit_one(&pool, &entry("post", "1", AuditOp::Create, json!({})))
         .await
         .unwrap();
     for days in [1_000_000, 200_000_000, i64::MAX] {

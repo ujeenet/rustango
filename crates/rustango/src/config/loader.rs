@@ -20,6 +20,7 @@ use crate::env::SettingSource;
 
 /// Errors the layered loader can raise.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum ConfigError {
     /// `config/default.toml` could not be read. The per-env file is
     /// optional and is skipped when missing; this one is required.
@@ -166,6 +167,19 @@ where
     let Loaded {
         settings, ignored, ..
     } = load_report(root, env, env_vars)?;
+    // A removed key did nothing for releases; refuse it, strict or not.
+    let removed: Vec<String> = ignored
+        .iter()
+        .filter_map(|k| super::registry::removed(k))
+        .map(|(key, instead)| format!("`{key}` was removed: {instead}"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !removed.is_empty() {
+        return Err(ConfigError::Shape(
+            <toml::de::Error as serde::de::Error>::custom(removed.join("; ")),
+        ));
+    }
     if !ignored.is_empty() {
         if strict {
             return Err(ConfigError::Shape(
@@ -394,11 +408,12 @@ fn leaves(
 fn read_toml(path: &Path, required: bool) -> Result<Option<toml::Value>, ConfigError> {
     match std::fs::read_to_string(path) {
         Ok(s) => {
-            let value = s.parse::<toml::Value>().map_err(|e| ConfigError::Parse {
+            // A whole document: `toml::Value` parses a single value.
+            let table = s.parse::<toml::Table>().map_err(|e| ConfigError::Parse {
                 path: path.display().to_string(),
                 source: TomlSyntaxError::new(&e, &s),
             })?;
-            Ok(Some(value))
+            Ok(Some(toml::Value::Table(table)))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && !required => Ok(None),
         Err(e) => Err(ConfigError::Io {
@@ -483,9 +498,10 @@ fn mistyped_override(var: &str) -> Option<String> {
 /// the parser sees a valid pair, then the value side is taken.
 fn parse_env_value(_var: &str, raw: &str) -> Result<toml::Value, ConfigError> {
     let probe = format!("__rustango_envvar = {raw}");
-    if let Ok(parsed) = probe.parse::<toml::Value>() {
-        if let toml::Value::Table(t) = parsed {
-            if let Some(v) = t.into_iter().next().map(|(_, v)| v) {
+    // Only the probe key: a raw value with a newline could add others.
+    if let Ok(mut t) = probe.parse::<toml::Table>() {
+        if t.len() == 1 {
+            if let Some(v) = t.remove("__rustango_envvar") {
                 return Ok(v);
             }
         }
@@ -613,6 +629,19 @@ mod tests {
         ] {
             assert_eq!(mistyped_override(ok), None, "{ok}");
         }
+    }
+
+    /// A raw value that smuggles in a second key is taken as a string,
+    /// never as the other key's value.
+    #[test]
+    fn env_value_with_a_second_key_stays_a_string() {
+        let raw = "\"x\"\nA = \"y\"";
+        let v = super::parse_env_value("RUSTANGO__X", raw).unwrap();
+        assert_eq!(v, toml::Value::String(raw.to_owned()));
+        assert_eq!(
+            super::parse_env_value("RUSTANGO__X", "12").unwrap(),
+            toml::Value::Integer(12)
+        );
     }
 
     #[test]
@@ -823,7 +852,6 @@ login_field = "username"
 [auth.jwt]
 access_ttl_secs = 900
 refresh_ttl_secs = 604800
-issuer = "myapp"
 
 [brand]
 name = "Acme Operator"
@@ -856,7 +884,6 @@ retention_days = 90
             Some(crate::login_field::LoginField::Username)
         );
         assert_eq!(cfg.auth.jwt.access_ttl_secs, Some(900));
-        assert_eq!(cfg.auth.jwt.issuer.as_deref(), Some("myapp"));
         assert_eq!(cfg.brand.name.as_deref(), Some("Acme Operator"));
         assert_eq!(cfg.brand.primary_color.as_deref(), Some("#2c6fb0"));
         assert_eq!(cfg.security.headers_preset.as_deref(), Some("strict"));
@@ -1016,6 +1043,35 @@ retention_days = 90
         assert!(err.to_string().contains("security.allowed_host"), "{err}");
         // Without strict mode the same file loads.
         assert!(load_with_root_and_env(&root, "any", Vec::new()).is_ok());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A removed key fails the load without strict mode, from a file or an
+    /// env override, and names what to use instead.
+    #[test]
+    fn a_removed_key_is_refused() {
+        let root = fresh_root("removed_keys");
+        write(
+            &root,
+            "default.toml",
+            "[sso]\nclient_secret = \"x\"\n\n[admin]\nprimary_color = \"#000000\"\n",
+        );
+        let err = load_with_root_and_env(&root, "any", Vec::new()).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ConfigError::Shape(_)), "{err:?}");
+        assert!(
+            msg.contains("`sso` was removed") && msg.contains("SSO provider"),
+            "{msg}"
+        );
+        assert!(msg.contains("`admin.primary_color` was removed"), "{msg}");
+        assert!(!msg.contains("#000000"), "a value leaked: {msg}");
+        write(&root, "default.toml", "");
+        let env = vec![("RUSTANGO__AUTH__JWT__ISSUER".to_owned(), "myapp".to_owned())];
+        let err = load_with_root_and_env(&root, "any", env).unwrap_err();
+        assert!(
+            err.to_string().contains("`auth.jwt.issuer` was removed"),
+            "{err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -83,7 +83,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     // A tenant with a base host, which is the row the page must render
     // as undeletable.
@@ -108,7 +108,7 @@ async fn boot() -> Booted {
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&registry).await.expect("seed org");
+    org.insert(&registry).await.expect("seed org");
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
     let app = router_with_provisioning(
@@ -475,7 +475,7 @@ async fn a_host_belonging_to_another_tenant_cannot_be_touched() {
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&b.registry).await.expect("seed other org");
+    org.insert(&b.registry).await.expect("seed other org");
     let victim = format!("owned.{other}.example.com");
     rustango::tenancy::add_host(&b.registry, &other, &victim, "apex.invalid")
         .await

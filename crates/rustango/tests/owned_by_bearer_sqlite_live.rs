@@ -91,7 +91,15 @@ fn db_url(name: &str) -> String {
 }
 
 fn org(slug: &str, name: &str) -> Org {
+    // Tokens bind to the org id, so each tenant needs its own.
+    let id = slug
+        .bytes()
+        .fold(7_i64, |h, b| h.wrapping_mul(31).wrapping_add(i64::from(b)))
+        .abs()
+        % 1_000_000
+        + 1;
     Org {
+        id: rustango::sql::Auto::Set(id),
         slug: slug.to_owned(),
         display_name: "Acme".into(),
         storage_mode: "database".into(),
@@ -108,7 +116,7 @@ async fn seed_member(pool: &Pool, username: &str, active: bool) -> i64 {
         active,
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed user");
+    u.insert(pool).await.expect("seed user");
     u.id.get().copied().expect("user id")
 }
 
@@ -141,7 +149,7 @@ async fn app(slug: &str, name: &str) -> (Router, i64, i64, i64) {
             member_id,
             body: body.into(),
         };
-        n.insert_pool(&pool).await.expect("seed note");
+        n.insert(&pool).await.expect("seed note");
     }
 
     let registry = sqlx::SqlitePool::connect("sqlite::memory:")
@@ -356,7 +364,7 @@ async fn a_token_from_another_tenant_is_refused() {
     let acme_pool = tenant_pool("cross_tenant").await;
     let mut ours = fetch(acme_pool.clone(), alice).await;
     ours.password_hash = theirs.password_hash;
-    ours.save_pool(&acme_pool).await.expect("same hash");
+    ours.save(&acme_pool).await.expect("same hash");
     let resp = acme
         .oneshot(req(
             Method::GET,
@@ -391,7 +399,7 @@ async fn a_deactivated_account_stops_working_immediately() {
         .expect("fetch")
         .remove(0);
     user.active = false;
-    user.save_pool(&pool).await.expect("deactivate");
+    user.save(&pool).await.expect("deactivate");
     let resp = app
         .oneshot(req(Method::GET, "/notes", Some(&token)))
         .await

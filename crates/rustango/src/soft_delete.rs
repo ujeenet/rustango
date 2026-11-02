@@ -86,6 +86,7 @@ pub fn compose_with_trashed(model: &'static ModelSchema, existing: WhereExpr) ->
 }
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SoftDeleteError {
     #[error("model `{0}` is not soft-delete-enabled (missing #[rustango(soft_delete)])")]
     NotSoftDeleteEnabled(&'static str),
@@ -261,6 +262,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         },
         FieldSchema {
             name: "title",
@@ -287,6 +289,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         },
         FieldSchema {
             name: "deleted_at",
@@ -313,6 +316,7 @@ mod tests {
             fk_on_delete: None,
             validators: &[],
             cast: None,
+            secret: None,
         },
     ];
 

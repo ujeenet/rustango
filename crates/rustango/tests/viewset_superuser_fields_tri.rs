@@ -28,7 +28,7 @@ pub struct Hooked {
 fn add_hook(parts: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
     !parts.headers.contains_key("x-deny") && row.is_none_or(|r| r["label"] != "blocked")
 }
-rustango::register_admin_object_permission!("vsf_hooked", "add", add_hook);
+rustango::register_object_permission!("vsf_hooked", "add", add_hook);
 
 async fn setup(pool: &Pool) {
     // Shared with other suites: create what is missing, never drop.
@@ -69,7 +69,7 @@ fn anonymous(pool: &Pool) -> axum::Router {
     ];
     ViewSet::for_model(User::SCHEMA, fields)
         .allow_anonymous()
-        .router_pool("/users", pool.clone())
+        .router("/users", pool.clone())
 }
 
 /// A full user body that asks for superuser and a new hash.
@@ -120,7 +120,7 @@ async fn seed(pool: &Pool) -> (i64, String) {
         password_hash: "old-hash".into(),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed");
+    u.insert(pool).await.expect("seed");
     (*u.id.get().expect("pk"), u.username)
 }
 
@@ -209,13 +209,14 @@ async fn a_superuser_writes_them(pool: &Pool) {
     assert_eq!(u.password_hash, "new-hash");
 }
 
-/// Opted in, a create runs the admin's `add` hooks: on the request, then on
-/// each written row, single or bulk; a denied row writes nothing. By
-/// default it does not.
-async fn create_runs_the_admin_add_hooks(pool: &Pool) {
+/// A create runs the `add` hooks: on the request, then on each written row,
+/// single or bulk; a denied row writes nothing. `skip_object_permissions` skips them.
+async fn create_runs_the_add_hooks(pool: &Pool) {
     let vs = || ViewSet::for_model(Hooked::SCHEMA, &["id", "label"]).allow_anonymous();
-    let default_app = vs().router_pool("/hooked", pool.clone());
-    let app = vs().admin_add_hooks().router_pool("/hooked", pool.clone());
+    let skipped_app = vs()
+        .skip_object_permissions()
+        .router("/hooked", pool.clone());
+    let app = vs().router("/hooked", pool.clone());
     let post_to = |app: &axum::Router, body: serde_json::Value, deny: bool| {
         let mut req = Request::builder()
             .method("POST")
@@ -238,6 +239,11 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
     let bulk = serde_json::json!([{ "label": "first" }, { "label": "blocked" }]);
     let res = post(bulk, false).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["details"]["index"], 1, "{body}");
     let labels = || async {
         Hooked::objects()
             .fetch(pool)
@@ -253,9 +259,9 @@ async fn create_runs_the_admin_add_hooks(pool: &Pool) {
     let res = post(ok, false).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
     assert_eq!(labels().await, ["ok"]);
-    // Not opted in: the hooks do not apply.
+    // Skipped: the app's hooks do not apply.
     let blocked = serde_json::json!({ "label": "blocked" });
-    let res = post_to(&default_app, blocked, true).await.unwrap();
+    let res = post_to(&skipped_app, blocked, true).await.unwrap();
     assert_eq!(res.status(), StatusCode::CREATED);
     assert_eq!(labels().await, ["blocked", "ok"]);
 }
@@ -281,7 +287,7 @@ async fn a_write_echoes_only_with_the_view_perm(pool: &Pool) {
                 update: cn("change"),
                 destroy: cn("delete"),
             })
-            .router_pool("/hooked", pool.clone())
+            .router("/hooked", pool.clone())
             .layer(axum::Extension(AuthenticatedUser {
                 id: uid,
                 username: "member".into(),
@@ -342,7 +348,7 @@ tri_dialect_test!(
     setup: setup,
     scenarios: [
         a_write_echoes_only_with_the_view_perm,
-        create_runs_the_admin_add_hooks,
+        create_runs_the_add_hooks,
         a_member_cannot_grant_superuser_or_set_a_hash,
         a_member_cannot_create_a_superuser,
         a_member_put_keeps_them,

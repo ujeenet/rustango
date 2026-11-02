@@ -31,6 +31,7 @@
 #![allow(clippy::disallowed_methods)]
 
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PasswordError {
     #[error("hashing failed: {0}")]
     Hash(String),

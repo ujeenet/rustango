@@ -61,7 +61,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     // A stored logo, so the edit page renders a `/__brand__/` preview.
     let slug = unique("acme");
@@ -85,7 +85,7 @@ async fn boot() -> Booted {
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&registry).await.expect("seed org");
+    org.insert(&registry).await.expect("seed org");
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
     let storage: rustango::storage::BoxedStorage = Arc::new(rustango::storage::LocalStorage::new(

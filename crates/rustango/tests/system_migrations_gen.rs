@@ -353,7 +353,7 @@ async fn tenants_after_the_registry_restore_the_schema() {
         .expect("registry tables");
     for slug in ["t1", "t2", "t3"] {
         let mut org = sqlite_org(tmp.path(), slug);
-        org.insert_pool(&registry).await.unwrap();
+        org.insert(&registry).await.unwrap();
     }
     deploy(&registry, &pools, &tmp.path().join("deploy1/migrations")).await;
     let t2 = Pool::connect(&sqlite_org(tmp.path(), "t2").database_url.unwrap())
@@ -509,7 +509,7 @@ async fn mixed_scope_tenants_use_the_committed_system_chain() {
         .await
         .expect("registry");
     let mut org = sqlite_org(tmp.path(), "t1");
-    org.insert_pool(&registry).await.unwrap();
+    org.insert(&registry).await.unwrap();
     let report = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")
         .await
         .unwrap();
@@ -596,7 +596,7 @@ async fn migrate_tenants_fails_when_the_system_chain_cannot_be_generated() {
         .await
         .expect("registry");
     sqlite_org(tmp.path(), "t1")
-        .insert_pool(&registry)
+        .insert(&registry)
         .await
         .unwrap();
     let report = rustango::tenancy::migrate_tenants_db(&pools, &dir, "")

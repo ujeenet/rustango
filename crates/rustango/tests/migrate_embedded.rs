@@ -67,7 +67,9 @@ async fn drop_table(pool: &PgPool, table: &str) {
 
 async fn delete_ledger_entry(pool: &PgPool, name: &str) {
     // A fresh database has no ledger until the first migrate.
-    migrate::ensure_ledger(pool).await.unwrap();
+    migrate::ensure_ledger_pool(&pool.clone().into())
+        .await
+        .unwrap();
     sqlx::query("DELETE FROM __rustango_migrations__ WHERE name = $1")
         .bind(name)
         .execute(pool)
@@ -108,11 +110,15 @@ async fn migrate_embedded_applies_pending_then_is_noop_on_rerun() {
     delete_ledger_entry(&pool, &mig_name).await;
 
     let embedded: &[(&str, &str)] = &[(&mig_name, &json)];
-    let applied = migrate::migrate_embedded(&pool, embedded).await.unwrap();
+    let applied = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 1);
 
     // Re-run is a no-op (same logic as `migrate`).
-    let applied2 = migrate::migrate_embedded(&pool, embedded).await.unwrap();
+    let applied2 = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
+        .await
+        .unwrap();
     assert!(applied2.is_empty());
 
     let exists: bool = sqlx::query(
@@ -141,7 +147,7 @@ async fn migrate_embedded_rejects_key_name_mismatch() {
     let json = make_migration_json(&table, &real_name);
 
     let embedded: &[(&str, &str)] = &[("0042_wrong_key", &json)];
-    let err = migrate::migrate_embedded(&pool, embedded)
+    let err = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
         .await
         .unwrap_err();
     let msg = format!("{err}");
@@ -156,7 +162,7 @@ async fn migrate_embedded_propagates_parse_errors() {
         return;
     };
     let embedded: &[(&str, &str)] = &[("0001_busted", "{not json")];
-    let err = migrate::migrate_embedded(&pool, embedded)
+    let err = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
         .await
         .unwrap_err();
     matches!(err, MigrateError::Json(_));
@@ -178,7 +184,7 @@ async fn migrate_embedded_validates_inconsistent_data_op() {
     })
     .to_string();
     let embedded: &[(&str, &str)] = &[("0001_bad_data", &raw)];
-    let err = migrate::migrate_embedded(&pool, embedded)
+    let err = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
         .await
         .unwrap_err();
     matches!(err, MigrateError::Validation(_));
@@ -208,7 +214,9 @@ async fn migrate_embedded_sorts_entries_lexicographically() {
 
     // Slice in B-then-A order; migrate_embedded must still apply A first.
     let embedded: &[(&str, &str)] = &[(&mig_b, &json_b), (&mig_a, &json_a)];
-    let applied = migrate::migrate_embedded(&pool, embedded).await.unwrap();
+    let applied = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
+        .await
+        .unwrap();
     assert_eq!(applied.len(), 2);
     assert_eq!(applied[0].name, mig_a);
     assert_eq!(applied[1].name, mig_b);
@@ -247,7 +255,7 @@ async fn migrate_embedded_rejects_broken_prev_chain() {
     let json = serde_json::to_string(&mig).unwrap();
 
     let embedded: &[(&str, &str)] = &[(&orphan, &json)];
-    let err = migrate::migrate_embedded(&pool, embedded)
+    let err = migrate::migrate_embedded_pool(&pool.clone().into(), embedded)
         .await
         .unwrap_err();
     let msg = format!("{err}");
@@ -262,7 +270,9 @@ async fn migrate_embedded_empty_slice_is_safe_noop() {
     let Some(pool) = pool().await else {
         return;
     };
-    let applied = migrate::migrate_embedded(&pool, &[]).await.unwrap();
+    let applied = migrate::migrate_embedded_pool(&pool.clone().into(), &[])
+        .await
+        .unwrap();
     assert!(applied.is_empty());
 }
 
