@@ -785,12 +785,6 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         unreachable!()
     };
     let shared = format!("purge_shared_{}", std::process::id());
-    rustango::sql::sqlx::raw_sql(&format!(
-        "CREATE SCHEMA IF NOT EXISTS \"{shared}\"; CREATE TABLE IF NOT EXISTS \"{shared}\".marker (id INT)"
-    ))
-    .execute(pg)
-    .await
-    .unwrap();
     // A legacy pair: one by slug default, one by explicit name.
     let mut owner = Org {
         slug: shared.replace('_', "-"),
@@ -800,6 +794,17 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         ..rustango::testkit::org()
     };
     owner.save_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_schema_tenant(
+        &TenantPools::new(pg.clone()),
+        &owner,
+        &registry_url(),
+    )
+    .await
+    .expect("migrate tenant");
+    rustango::sql::sqlx::query(&format!("CREATE TABLE \"{shared}\".marker (id INT)"))
+        .execute(pg)
+        .await
+        .unwrap();
     let mut legacy = Org {
         slug: format!("{}-legacy", owner.slug),
         display_name: "legacy".into(),
@@ -933,14 +938,8 @@ where
     let registry = Pool::from(private.clone());
     setup(&registry).await;
     let [a, b] = schemas;
-    rustango::sql::sqlx::raw_sql(&format!(r#"CREATE SCHEMA "{a}"; CREATE SCHEMA "{b}""#))
-        .execute(&private)
-        .await
-        .unwrap();
-    rustango::sql::sqlx::raw_sql(sql)
-        .execute(&private)
-        .await
-        .unwrap();
+    let private_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
+    let pools = TenantPools::new(private.clone());
     for (slug, name) in [("ext-a", a), ("ext-b", b)] {
         let mut org = Org {
             slug: slug.into(),
@@ -950,7 +949,15 @@ where
             ..rustango::testkit::org()
         };
         org.save_pool(&registry).await.unwrap();
+        rustango::testkit::migrate_schema_tenant(&pools, &org, &private_url)
+            .await
+            .expect("migrate tenant");
     }
+    drop(pools);
+    rustango::sql::sqlx::raw_sql(sql)
+        .execute(&private)
+        .await
+        .unwrap();
 
     check(purge_on(&registry, "ext-a").await, registry).await;
 

@@ -711,14 +711,13 @@ async fn purge_tenant_drops_a_legacy_schema_name() {
     .1
     .unwrap();
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{legacy}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
     sqlx::query("UPDATE rustango_orgs SET schema_name = $1 WHERE slug = $2")
         .bind(&legacy)
         .bind(&slug)
         .execute(&pool)
+        .await
+        .unwrap();
+    rustango::testkit::migrate_schema(&pools, &legacy, &url)
         .await
         .unwrap();
 
@@ -1691,10 +1690,6 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
 
     let slug = unique("ssoschema");
     drop_schema(&pool, &slug).await;
-    sqlx::query(&format!(r#"CREATE SCHEMA "{slug}""#))
-        .execute(&pool)
-        .await
-        .unwrap();
     let mut org = Org {
         slug: slug.clone(),
         display_name: slug.clone(),
@@ -1706,6 +1701,9 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         .await
         .unwrap();
     let pools = TenantPools::new(pool.clone());
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &url)
+        .await
+        .unwrap();
     let tenant = pools.scoped_pool_dyn(&org).await.unwrap();
     rustango::testkit::create_tables_for::<rustango::tenancy::User>(&tenant)
         .await
@@ -1805,12 +1803,12 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
     let pools = TenantPools::new(pool.clone());
     let dir = fresh_dir("sso_ghost");
     let (out, _) = run(&pools, &url, &dir, &["check", "--deploy"]).await;
-    assert!(
-        out.contains(&format!(
-            "[sso] tenant `{ghost}`: could not check SSO providers: schema `{ghost}` is missing"
-        )),
-        "{out}"
+    // An extension in `public` keeps it on the path, and then the pool itself refuses.
+    let missing = format!(
+        "[sso] tenant `{ghost}`: could not check SSO providers: schema `{ghost}` is missing"
     );
+    let refused = format!("tenant `{ghost}`: its pools refuse to open");
+    assert!(out.contains(&missing) || out.contains(&refused), "{out}");
     rmig::drop_all(&pool).await.unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

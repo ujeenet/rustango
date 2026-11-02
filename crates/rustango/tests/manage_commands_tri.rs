@@ -515,6 +515,7 @@ async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool
         let schema = cache_table("cc_tenant");
         cache_verb(pool, "createcachetable", &table).await;
         seed_expired(pool, &table).await;
+        // Not a tenant schema: a plain session path, to test the cache-table lookup.
         sqlx::query(&format!("CREATE SCHEMA {schema}"))
             .execute(pg)
             .await

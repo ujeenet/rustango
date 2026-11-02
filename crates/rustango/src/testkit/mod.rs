@@ -256,6 +256,25 @@ pub async fn migrate_schema_tenant(
     Ok(())
 }
 
+/// [`migrate_schema_tenant`] for a bare schema, through an unsaved org named after it.
+///
+/// # Errors
+/// As [`migrate_schema_tenant`].
+#[cfg(all(feature = "tenancy", feature = "postgres"))]
+pub async fn migrate_schema(
+    pools: &crate::tenancy::TenantPools,
+    schema: &str,
+    registry_url: &str,
+) -> Result<(), crate::tenancy::TenancyError> {
+    let org = crate::tenancy::Org {
+        slug: schema.to_owned(),
+        storage_mode: crate::tenancy::StorageMode::Schema.as_str().to_owned(),
+        schema_name: Some(schema.to_owned()),
+        ..org()
+    };
+    migrate_schema_tenant(pools, &org, registry_url).await
+}
+
 /// Add the columns `M`'s table lacks, so a table created by a build
 /// with fewer features (an optional `email`, say) fits this one.
 ///
