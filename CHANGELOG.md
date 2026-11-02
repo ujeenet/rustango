@@ -66,6 +66,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - PostgreSQL `bulk_insert_on` writes past the 65 535 bind cap in chunks inside one transaction (a savepoint inside an open one), keeping key read-back order.
 - `#[rustango(secret)]` marks a credential column, as do sealed casts and names like `token`, `api_key`, `*_secret`, `*_token`: template views show it only when listed, the admin always masks it, and `secret = false` opts a name out.
 - Template views (list, detail, create, update, delete) refuse API key, agent, SSO, TOTP, passkey and database-server tables, as `ViewSet` does; one table policy serves all three surfaces.
+- `ViewSet` and template views refuse operator, admin-user and agent-grant tables, which could otherwise set a password hash or raise an agent's rights.
 - One credential word list drives the admin, template views, the access log and the MCP audit, so `passwd` or `encryption_key` is secret everywhere.
 - A tenant with no host, path prefix or port is refused at provisioning and edit, and gets no link, instead of being created unreachable with a warning.
 - Jobs: dispatching a type with no registered handler is refused instead of dead-lettered or left locked; `PgJobQueue::allow_unregistered_dispatch` opts a producer out.

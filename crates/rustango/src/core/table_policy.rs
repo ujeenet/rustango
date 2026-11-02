@@ -9,22 +9,37 @@ use super::ModelSchema;
 pub(crate) enum TableAccess {
     /// Any generic surface.
     Open,
-    /// Only the admin: SSO configuration, and credentials minted once with their secret.
+    /// Only the admin: SSO configuration, credentials, agent grants, operator and admin users.
     AdminOnly,
     /// No generic surface, the admin included: only their own flows write them.
     Never,
 }
 
-/// Tables only the admin or their own flows write.
+/// Tables only the admin (or the operator console's) or their own flows write:
+/// credentials, SSO configuration, agent grants, operator and admin users.
 const ADMIN_ONLY_TABLES: &[&str] = &[
-    "rustango_api_keys",
-    "rustango_agents",
-    "rustango_sso_providers",
-    "rustango_shared_sso_providers",
-    "rustango_sso_links",
-    "rustango_sso_invites",
-    "rustango_sso_shared_overrides",
-    "rustango_sso_tenant_policy",
+    #[cfg(feature = "admin")]
+    <crate::admin::user::AdminUser as super::Model>::SCHEMA.table,
+    #[cfg(feature = "tenancy")]
+    <crate::tenancy::Operator as super::Model>::SCHEMA.table,
+    #[cfg(feature = "tenancy")]
+    <crate::tenancy::auth_backends::ApiKey as super::Model>::SCHEMA.table,
+    #[cfg(all(feature = "tenancy", feature = "mcp"))]
+    <crate::tenancy::Agent as super::Model>::SCHEMA.table,
+    #[cfg(all(feature = "tenancy", feature = "mcp"))]
+    <crate::tenancy::AgentGrant as super::Model>::SCHEMA.table,
+    #[cfg(feature = "sso")]
+    <crate::sso::SsoProvider as super::Model>::SCHEMA.table,
+    #[cfg(feature = "sso")]
+    <crate::sso::SsoLink as super::Model>::SCHEMA.table,
+    #[cfg(feature = "sso")]
+    <crate::sso::policy::SsoInvite as super::Model>::SCHEMA.table,
+    #[cfg(feature = "sso")]
+    <crate::sso::policy::SsoSharedOverride as super::Model>::SCHEMA.table,
+    #[cfg(feature = "sso")]
+    <crate::sso::policy::SsoTenantPolicy as super::Model>::SCHEMA.table,
+    #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
+    <crate::tenancy::sso::SharedSsoProvider as super::Model>::SCHEMA.table,
 ];
 
 /// The policy for `table`.
@@ -72,4 +87,25 @@ fn is_never_served(table: &str) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(all(test, feature = "tenancy"))]
+mod tests {
+    use super::{table_access, TableAccess};
+
+    /// A generic view over these would mint a password hash or raise an agent's rights.
+    #[test]
+    fn identity_and_grant_tables_are_admin_only() {
+        for t in [
+            "rustango_operators",
+            "rustango_admin_users",
+            "rustango_api_keys",
+            #[cfg(feature = "mcp")]
+            "rustango_agent_grants",
+            #[cfg(feature = "mcp")]
+            "rustango_agents",
+        ] {
+            assert_eq!(table_access(t), TableAccess::AdminOnly, "{t}");
+        }
+    }
 }
