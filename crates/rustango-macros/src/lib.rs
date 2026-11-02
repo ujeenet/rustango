@@ -3763,6 +3763,28 @@ fn inherent_impl_tokens(
                     })
                     .unwrap_or_default()
             };
+            // A failed COMMIT rolls the row back: put the read-back values back too.
+            let assigned: Vec<syn::Ident> = fields
+                .auto_field_idents
+                .iter()
+                .map(|(ident, _, _)| ident.clone())
+                .collect();
+            let body = restore_auto_now_unless(
+                &assigned,
+                &quote!(::core::result::Result<(), #root::sql::ExecError>),
+                &quote!(_saved.is_ok()),
+                &quote! {
+                    let mut _query = self.__rustango_insert_query();
+                    // The audit row needs the PK even when Rust filled it.
+                    if _query.returning.is_empty() {
+                        _query.returning = ::std::vec![ #( #returning_cols ),* ];
+                    }
+                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self, _op| {
+                        _m.__rustango_audit_entry(_op)
+                    })
+                    .await
+                },
+            );
             quote! {
                 /// Insert this row on any backend, with its audit row in the
                 /// same transaction.
@@ -3775,15 +3797,7 @@ fn inherent_impl_tokens(
                     &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                    let mut _query = self.__rustango_insert_query();
-                    // The audit row needs the PK even when Rust filled it.
-                    if _query.returning.is_empty() {
-                        _query.returning = ::std::vec![ #( #returning_cols ),* ];
-                    }
-                    #root::audit::insert_one_with_audit(pool, &_query, self, |_m: &Self, _op| {
-                        _m.__rustango_audit_entry(_op)
-                    })
-                    .await
+                    #body
                 }
             }
         } else {

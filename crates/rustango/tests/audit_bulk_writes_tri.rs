@@ -855,25 +855,20 @@ mod cascade {
 
     /// A raw PG executor runs one statement: the delete still works (as in
     /// 0.61.1), the cascade just goes unaudited.
-    async fn single_statement_pg_paths_still_delete(pool: &Pool) {
+    async fn raw_pg_cascade_delete_is_refused(pool: &Pool) {
         let _ = pool;
         #[cfg(feature = "postgres")]
         {
             let Some(pg) = pool.as_postgres() else {
                 return;
             };
-            Shelf { id: 1 }
-                .delete(&pg.clone().into())
-                .await
-                .expect("Model::delete(&PgPool)");
-            let n = Shelf::objects()
-                .filter("id", 2_i64)
-                .delete_on(pg)
-                .await
-                .expect("QuerySet::delete_on(&PgPool)");
-            assert_eq!(n, 1);
-            assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
-            assert_eq!(deletes(pool, 1).await, 0);
+            // A raw executor cannot audit the cascade, so it refuses.
+            let res = Shelf::objects().filter("id", 2_i64).delete_on(pg).await;
+            assert!(
+                matches!(res, Err(rustango::sql::ExecError::AuditUnsupported { .. })),
+                "{res:?}"
+            );
+            assert_eq!(Shelf::objects().count(pool).await.unwrap(), 2);
         }
     }
 
@@ -883,7 +878,7 @@ mod cascade {
             fk_cascade_audits_each_removed_child,
             audited_delete_audits_each_row_once,
             cascade_audit_follows_the_atomic_block,
-            single_statement_pg_paths_still_delete,
+            raw_pg_cascade_delete_is_refused,
             fk_set_null_audits_each_changed_child,
             truncate_audits_the_tables_its_delete_empties,
             truncate_cascade_audits_the_tables_it_empties,
