@@ -160,12 +160,14 @@ impl Claims {
 
     /// Claims from a raw JSON object, as the token payload holds them.
     #[must_use]
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     pub(crate) fn from_map(inner: Map<String, Value>) -> Self {
         Self { inner }
     }
 
     /// The raw JSON object.
     #[must_use]
+    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
     pub(crate) fn into_map(self) -> Map<String, Value> {
         self.inner
     }
