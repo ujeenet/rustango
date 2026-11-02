@@ -44,7 +44,7 @@ async fn seed(pool: &Pool) -> i64 {
         views: 10,
         likes: 5,
     };
-    p.save_pool(pool).await.unwrap();
+    p.save(pool).await.unwrap();
     p.id.get().copied().unwrap()
 }
 

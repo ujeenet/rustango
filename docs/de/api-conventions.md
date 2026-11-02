@@ -122,7 +122,7 @@ Die Faustregel: Wenn eine Methode auf etwas wartet (die Datenbank, das Netzwerk 
 Jeder ORM-Aufruf nimmt einen Pool oder Executor (das Datenbank-Handle) als **letztes** Argument entgegen. Sie übergeben die Verbindung jedes Mal, anstatt sich auf einen versteckten globalen Zustand zu verlassen:
 
 ```rust
-post.save_pool(&pool).await?
+post.save(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```

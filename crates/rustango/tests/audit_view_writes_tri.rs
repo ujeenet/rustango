@@ -62,7 +62,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
             title: title.into(),
             deleted_at: None,
         };
-        doc.insert_pool(pool).await.expect("insert");
+        doc.insert(pool).await.expect("insert");
         pks.push(*doc.id.get().expect("pk"));
     }
     pks
@@ -399,7 +399,7 @@ mod bulk {
                     id: Auto::default(),
                     deleted_at: None,
                 };
-                row.insert_pool(&pool).await.expect("insert");
+                row.insert(&pool).await.expect("insert");
             }
             let keys = TextKey::objects()
                 .values_list_flat("id")
@@ -454,7 +454,7 @@ mod bulk {
                     code: code.into(),
                     deleted_at: None,
                 };
-                row.insert_pool(pool).await.expect("insert");
+                row.insert(pool).await.expect("insert");
             }
             assert!(PkSet::new(Code::SCHEMA, [0_i64]).is_err());
             let column = "deleted_at";
@@ -570,7 +570,7 @@ mod admin_views {
                 title: title.into(),
                 deleted_at: None,
             };
-            doc.insert_pool(pool).await.expect("insert");
+            doc.insert(pool).await.expect("insert");
             pks.push(*doc.id.get().expect("pk"));
         }
         pks

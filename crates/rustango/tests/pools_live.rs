@@ -52,7 +52,7 @@ async fn seed_org(
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     org
 }
 

@@ -1528,7 +1528,7 @@ pub(crate) mod resolver_tests {
             backend_kind: "sqlite".into(),
             ..crate::testkit::org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
         (tmp, sq, url)
     }
 
@@ -1571,7 +1571,7 @@ pub(crate) mod resolver_tests {
                 host_pattern: Some("acme.localhost".into()),
                 ..crate::testkit::org()
             };
-            org.insert_pool(&pool).await.expect("insert org");
+            org.insert(&pool).await.expect("insert org");
         }
         (tmp, sq, url)
     }
@@ -1678,7 +1678,7 @@ pub(crate) mod resolver_tests {
             enabled: true,
             created_at: crate::sql::Auto::Unset,
         };
-        row.insert_pool(&pool).await.expect("apex row");
+        row.insert(&pool).await.expect("apex row");
         let app = app_with(sq, url, true).await;
         assert_eq!(
             get(&app, "localhost", "/setup").await,

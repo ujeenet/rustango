@@ -80,7 +80,7 @@ async fn change_password_anonymous_redirects_to_login() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new().push(SubdomainResolver::new("app.test"));
@@ -138,7 +138,7 @@ async fn change_password_authenticated_get_renders_form() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     // Seed a user so validate_session can look it up.
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
     let user_id: i64 = sqlx::query_scalar(
@@ -226,7 +226,7 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
@@ -317,7 +317,7 @@ async fn change_password_post_rejects_wrong_current() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("real-current").unwrap();
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \
@@ -420,7 +420,7 @@ async fn session_minted_before_password_rotation_is_rejected() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("starting-pw").unwrap();
     let user_id: i64 = sqlx::query_scalar(
         "INSERT INTO rustango_users (username, password_hash, is_superuser, active, created_at) \

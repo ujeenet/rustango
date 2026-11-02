@@ -122,7 +122,7 @@ La regla general: si un método espera algo (la base de datos, la red o el disco
 Cada llamada al ORM recibe un pool o executor (el handle de base de datos) como **último** argumento. Pasas la conexión cada vez, en lugar de depender de un estado global oculto:
 
 ```rust
-post.save_pool(&pool).await?
+post.save(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```

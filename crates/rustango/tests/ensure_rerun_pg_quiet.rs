@@ -117,7 +117,7 @@ async fn a_real_add_constraint_failure_still_surfaces() {
         id: 1,
         parent_id: 999,
     }
-    .insert_pool(&pool)
+    .insert(&pool)
     .await
     .expect("orphan row");
     let err = rustango::testkit::create_tables(&pool, &models).await;

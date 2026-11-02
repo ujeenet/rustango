@@ -146,9 +146,7 @@ async fn tenant_at(prefixed: bool) -> Tenant {
         primary_color: None,
         theme_mode: None,
     };
-    org.insert_pool(&pools.registry_pool())
-        .await
-        .expect("seed org");
+    org.insert(&pools.registry_pool()).await.expect("seed org");
     Tenant {
         url,
         slug,

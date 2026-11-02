@@ -89,7 +89,7 @@ async fn boot_wrapped(provisioner_url: Option<&str>, wrap: Wrap) -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     let told = provisioner_url.map_or_else(|| url.clone(), ToOwned::to_owned);
     let provisioner = wrap(Provisioner::new(pools.clone(), told, migrations.path()).erased());
@@ -254,7 +254,7 @@ async fn the_org_list_hides_the_link_without_a_provisioner() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     let app = rustango::tenancy::operator_console::router_with_pools(
         registry.clone(),

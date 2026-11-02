@@ -36,7 +36,7 @@ async fn seed(pool: &Pool) {
             id: Auto::default(),
             status: if i % 3 == 0 { "draft" } else { "published" }.into(),
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

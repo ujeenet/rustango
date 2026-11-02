@@ -5,7 +5,7 @@
 //!
 //! What this test demonstrates and what's still missing:
 //!
-//! ✅ `Org::insert_pool(&Pool::Sqlite(...))` round-trips through
+//! ✅ `Org::insert(&Pool::Sqlite(...))` round-trips through
 //!    SQLite's `INSERT ... RETURNING id` (SQLite ≥ 3.35).
 //! ✅ `Org::objects().fetch(&Pool::Sqlite(...))` reads rows back.
 //! ✅ The new `Org.backend_kind` column persists via SQLite TEXT.
@@ -62,11 +62,11 @@ async fn org_insert_and_fetch_against_sqlite_registry() {
     // INSERT through Model derive — emits the SQLite-compatible path
     // (no PG-specific syntax leaks into the query).
     let mut acme = fake_sqlite_org("acme");
-    acme.insert_pool(&pool).await.expect("insert acme");
+    acme.insert(&pool).await.expect("insert acme");
     assert!(matches!(acme.id, Auto::Set(_)));
 
     let mut beta = fake_sqlite_org("beta");
-    beta.insert_pool(&pool).await.expect("insert beta");
+    beta.insert(&pool).await.expect("insert beta");
 
     // FETCH through the QuerySet API.
     let rows: Vec<Org> = Org::objects()
@@ -95,12 +95,12 @@ async fn org_save_against_sqlite_registry() {
     let pool = sqlite_registry().await;
 
     let mut org = fake_sqlite_org("acme");
-    org.insert_pool(&pool).await.expect("insert");
+    org.insert(&pool).await.expect("insert");
     let original_id = *org.id.get().expect("id set");
 
     // Mutate + save — this exercises the UPDATE path on SQLite.
     org.display_name = "Acme Corp Ltd".into();
-    org.save_pool(&pool).await.expect("save");
+    org.save(&pool).await.expect("save");
 
     let after: Vec<Org> = Org::objects()
         .where_(Org::slug.eq("acme".to_owned()))

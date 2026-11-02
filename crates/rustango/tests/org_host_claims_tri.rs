@@ -64,7 +64,7 @@ async fn org(pool: &Pool, slug: &str) -> i64 {
         database_url: Some("sqlite::memory:".into()),
         ..rustango::testkit::org()
     };
-    org.save_pool(pool).await.expect("insert org");
+    org.save(pool).await.expect("insert org");
     *org.id.get().expect("org id")
 }
 

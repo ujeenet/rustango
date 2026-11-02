@@ -153,7 +153,7 @@ async fn seed_parent(pool: &Pool, name: &str) -> i64 {
         id: Auto::default(),
         name: name.into(),
     };
-    p.insert_pool(pool).await.expect("insert parent");
+    p.insert(pool).await.expect("insert parent");
     *p.id.get().expect("pk")
 }
 
@@ -228,7 +228,7 @@ async fn seed_child(pool: &Pool, parent_id: i64, note: &str) {
         qty: 1,
         note: note.into(),
     };
-    c.insert_pool(pool).await.expect("insert child");
+    c.insert(pool).await.expect("insert child");
 }
 
 async fn parent_count(pool: &Pool) -> usize {
@@ -424,7 +424,7 @@ async fn rolled_back_edit_leaves_no_audit_row(pool: &Pool) {
         id: Auto::default(),
         name: "p".into(),
     };
-    a.insert_pool(pool).await.expect("insert aparent");
+    a.insert(pool).await.expect("insert aparent");
     let a = *a.id.get().expect("pk");
     let mut c = AChild {
         id: Auto::default(),
@@ -432,7 +432,7 @@ async fn rolled_back_edit_leaves_no_audit_row(pool: &Pool) {
         qty: 1,
         note: "taken".into(),
     };
-    c.insert_pool(pool).await.expect("insert achild");
+    c.insert(pool).await.expect("insert achild");
     for (parent, child, pk) in [
         ("wrerr_aparent", "wrerr_achild", a),
         ("wrerr_parent", "wrerr_child", p),

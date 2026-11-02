@@ -255,7 +255,7 @@ mod tests {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(pool).await.unwrap();
+        op.insert(pool).await.unwrap();
         op
     }
 

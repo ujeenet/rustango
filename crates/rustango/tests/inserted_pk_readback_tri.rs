@@ -262,7 +262,7 @@ async fn integer_pk_inserts_beside_non_integer_returning_columns(pool: &Pool) {
         price: 1.5,
         doubled: 0.0,
     };
-    line.insert_pool(pool).await.expect("insert");
+    line.insert(pool).await.expect("insert");
     assert!(
         matches!(line.id, rustango::sql::Auto::Set(_)),
         "{:?}",
@@ -322,7 +322,7 @@ async fn inline_row_fills_a_v7_pk(pool: &Pool) {
         id: rustango::sql::Auto::Unset,
         name: "A".into(),
     };
-    doc.insert_pool(pool).await.expect("parent");
+    doc.insert(pool).await.expect("parent");
     let doc = *doc.id.get().expect("parent pk");
     let body = format!(
         "name=A&pk1725_line-TOTAL_FORMS=1&pk1725_line-INITIAL_FORMS=0\

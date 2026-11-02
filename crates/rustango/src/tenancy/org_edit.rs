@@ -396,7 +396,7 @@ mod tests {
             host_pattern: Some("cas.localhost".into()),
             ..crate::testkit::org()
         };
-        org.save_pool(&pool).await.unwrap();
+        org.save(&pool).await.unwrap();
         let secrets = TenantSecrets::standard();
         let tmp = tempfile::tempdir().unwrap();
         let next = format!("sqlite://{}?mode=rwc", tmp.path().join("b.db").display());

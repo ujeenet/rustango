@@ -15,7 +15,7 @@
 //! [`AuditSource`] travels in a tokio task-local, so handlers, seed
 //! scripts and jobs can say who made a write without passing a context
 //! object through every ORM call. The default is [`AuditSource::System`].
-//! Override one call with `Model::save_on_with(conn, source)`.
+//! Override one call with `with_source(source, model.save(&pool))`.
 //!
 //! ## What gets logged
 //!
@@ -1499,18 +1499,60 @@ pub async fn insert_one_with_audit<M>(
     pool: &crate::sql::Pool,
     query: &crate::core::InsertQuery,
     model: &mut M,
-    entry: impl FnOnce(&M) -> PendingEntry,
+    entry: impl FnOnce(&M, AuditOp) -> PendingEntry,
 ) -> Result<(), crate::sql::ExecError>
 where
     M: crate::sql::AssignAutoPkPool,
 {
-    // `insert_returning_tx` already handles each backend's return shape.
     let mut tx = crate::sql::write_transaction(pool).await?;
-    let returning = crate::sql::insert_returning_tx(&mut tx, query).await?;
+    let (returning, op) = insert_or_upsert_tx(&mut tx, query).await?;
     crate::sql::apply_auto_pk(returning, model)?;
-    emit_one_tx(&mut tx, &entry(model)).await?;
+    emit_one_tx(&mut tx, &entry(model, op)).await?;
     tx.commit().await?;
     Ok(())
+}
+
+/// Run `query` in `tx`, with whether it inserted (`Create`) or updated
+/// (`Update`): a `DoUpdate` upsert runs a `DoNothing` pass first and
+/// upserts only when that skipped (#1795).
+async fn insert_or_upsert_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    query: &crate::core::InsertQuery,
+) -> Result<(crate::sql::InsertReturningPool, AuditOp), crate::sql::ExecError> {
+    if !matches!(
+        query.on_conflict,
+        Some(crate::core::ConflictClause::DoUpdate { .. })
+    ) {
+        return Ok((
+            crate::sql::insert_returning_tx(tx, query).await?,
+            AuditOp::Create,
+        ));
+    }
+    if !tx.dialect().supports_returning() {
+        return Err(crate::sql::ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "without RETURNING an audited upsert cannot tell an insert from an update",
+        });
+    }
+    let mut probe = query.clone();
+    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
+    match crate::sql::insert_returning_tx(tx, &probe).await {
+        Ok(row) => Ok((row, AuditOp::Create)),
+        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
+            crate::sql::insert_returning_tx(tx, query).await?,
+            AuditOp::Update,
+        )),
+        Err(e) => Err(e),
+    }
+}
+
+/// Write `entries` in the caller's `tx`, for the derive's audited bulk insert.
+#[doc(hidden)]
+pub async fn __emit_many_tx(
+    tx: &mut crate::sql::PoolTx<'_>,
+    entries: &[PendingEntry],
+) -> Result<(), crate::sql::ExecError> {
+    emit_many_tx(tx, entries).await
 }
 
 /// Emit a batch of entries inside an open `PoolTx`, in bind-limit-sized
@@ -2343,40 +2385,6 @@ where
     }
     tx.commit().await?;
     Ok(())
-}
-
-/// A single-row `INSERT … ON CONFLICT` on PG, with whether it inserted
-/// (`Create`) or updated (`Update`) the row: a `DoUpdate` runs a
-/// `DoNothing` pass first and upserts only when that skipped (#1795).
-/// A row another transaction deletes between the passes is recorded as `Update`.
-///
-/// # Errors
-/// As [`crate::sql::insert_returning_pool`].
-#[cfg(feature = "postgres")]
-pub async fn upsert_returning_on(
-    conn: &mut sqlx::PgConnection,
-    query: &crate::core::InsertQuery,
-) -> Result<(sqlx::postgres::PgRow, AuditOp), crate::sql::ExecError> {
-    use crate::sql::insert_returning_on;
-    if !matches!(
-        query.on_conflict,
-        Some(crate::core::ConflictClause::DoUpdate { .. })
-    ) {
-        return Ok((
-            insert_returning_on(&mut *conn, query).await?,
-            AuditOp::Create,
-        ));
-    }
-    let mut probe = query.clone();
-    probe.on_conflict = Some(crate::core::ConflictClause::DoNothing);
-    match insert_returning_on(&mut *conn, &probe).await {
-        Ok(row) => Ok((row, AuditOp::Create)),
-        Err(crate::sql::ExecError::Driver(sqlx::Error::RowNotFound)) => Ok((
-            insert_returning_on(&mut *conn, query).await?,
-            AuditOp::Update,
-        )),
-        Err(e) => Err(e),
-    }
 }
 
 /// Truncate an audited model's table (`Model::truncate` /

@@ -81,7 +81,7 @@ async fn user_detail_page_renders_roles_and_effective_perms() {
         // The rest from testkit, so a feature-gated field cannot break the literal.
         ..rustango::testkit::user()
     };
-    user.insert(&pool).await.unwrap();
+    user.insert(&pool.clone().into()).await.unwrap();
     let user_id = *user.id.get().expect("PK assigned");
 
     let role_id = get_or_create_role_pool("editor_panel", "Edits content", &pool.clone().into())

@@ -33,7 +33,7 @@ async fn inactive_user_with_grants(pool: &Pool) -> i64 {
         active: false,
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("user");
+    u.insert(pool).await.expect("user");
     let uid = *u.id.get().expect("pk");
     let role = create_role_pool(&unique("r"), "", pool)
         .await
@@ -93,7 +93,7 @@ async fn active_user_holds_its_grants(pool: &Pool) {
         .pop()
         .expect("user");
     u.active = true;
-    u.save_pool(pool).await.expect("activate");
+    u.save(pool).await.expect("activate");
     let mut perms = user_permissions_pool(uid, pool).await.expect("perms");
     perms.sort();
     assert_eq!(perms, ["pit_post.export", "pit_post.view"]);

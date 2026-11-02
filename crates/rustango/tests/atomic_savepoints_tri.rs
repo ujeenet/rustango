@@ -776,7 +776,7 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
         id: 5,
         label: "n5".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let p = one_conn(pool).await;
@@ -985,7 +985,7 @@ async fn put_pool(pool: &Pool, id: i64) {
         id,
         label: format!("n{id}"),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
 }

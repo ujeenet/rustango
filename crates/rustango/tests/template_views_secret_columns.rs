@@ -122,7 +122,7 @@ async fn credential_columns_stay_out_of_the_context() {
         reset_token: "TOKEN-SECRET".into(),
         share_token: "SHARE-PUBLIC".into(),
     };
-    row.insert_pool(&pool).await.expect("seed");
+    row.insert(&pool).await.expect("seed");
     let pk = *row.id.get().unwrap();
 
     let edit = send(&pool, Method::GET, &format!("/acc/{pk}/edit"), "").await;

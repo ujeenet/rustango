@@ -53,7 +53,7 @@ async fn seed(pool: &Pool) {
             status: s.into(),
             views: v,
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

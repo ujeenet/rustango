@@ -103,13 +103,13 @@ async fn setup(pool: &Pool) {
 /// Deleting the parent nulls or resets each child's key on the server.
 async fn parent_delete_runs_the_declared_action(pool: &Pool) {
     for id in [0, 1] {
-        Author { id }.insert_pool(pool).await.expect("author");
+        Author { id }.insert(pool).await.expect("author");
     }
     PostSetNull {
         id: 10,
         author_id: Some(1),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("set null child");
     if set_default_runs(pool) {
@@ -117,7 +117,7 @@ async fn parent_delete_runs_the_declared_action(pool: &Pool) {
             id: 20,
             author_id: 1,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("set default child");
     }
@@ -143,26 +143,26 @@ async fn parent_delete_runs_the_declared_action(pool: &Pool) {
 
 /// An author with a `SET NULL` post, a `RESTRICT` post and a reply to it.
 async fn seed_referenced_author(pool: &Pool) {
-    Author { id: 1 }.insert_pool(pool).await.expect("author");
+    Author { id: 1 }.insert(pool).await.expect("author");
     PostSetNull {
         id: 10,
         author_id: Some(1),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("set null child");
     PostRestrict {
         id: 30,
         author_id: 1,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("restrict child");
     Reply {
         id: 40,
         post_id: 30,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("grandchild");
 }
@@ -213,7 +213,7 @@ async fn truncate_cascade_empties_every_referencing_table(pool: &Pool) {
         id: 41,
         post_id: 99,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await;
     assert!(orphan.is_err(), "an orphan insert passed after the cascade");
 }

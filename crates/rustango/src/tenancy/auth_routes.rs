@@ -1380,7 +1380,7 @@ mod tests {
             .await
             .unwrap();
         let mut user = crate::testkit::user();
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
             ..Config::default()
@@ -1440,7 +1440,7 @@ mod tests {
         let token = login_access(&auth, &user);
         assert_eq!(auth.verify_for_tenant(&token, &t).await, Ok(id));
         user.password_hash = "$argon2id$changed".into();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         assert!(
             auth.verify_for_tenant(&token, &t).await.is_err(),
             "password change"
@@ -1463,7 +1463,7 @@ mod tests {
         let token = login_access(&auth, &user);
         assert!(auth.verify_for_tenant(&token, &t).await.is_ok());
         user.active = false;
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         assert_eq!(
             auth.verify_for_tenant(&token, &t).await,
             Err("invalid or expired token")
@@ -1489,7 +1489,7 @@ mod tests {
             password_hash: "$argon2id$old".into(),
             ..crate::testkit::user()
         };
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
             refresh_absolute_ttl_secs: cap,
@@ -1526,7 +1526,7 @@ mod tests {
         let second = rotate(&auth, &pool, &first).await.expect("rotates before");
 
         user.password_hash = "$argon2id$new".into();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
 
         assert_eq!(rotate(&auth, &pool, &second).await, None);
     }
@@ -1636,7 +1636,7 @@ mod tests {
             .await
             .unwrap();
         let mut user = crate::testkit::user();
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         let id = *user.id.get().unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
@@ -1675,7 +1675,7 @@ mod tests {
 
         let access = pair(&user).access;
         user.password_hash = "$argon2id$changed".into();
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         assert!(
             matches!(check(access).await, Err(AuthError::InvalidToken)),
             "password"
@@ -1732,7 +1732,7 @@ mod tests {
             is_superuser: true,
             ..crate::testkit::user()
         };
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
             extra_claims: Some(hook),
@@ -1741,7 +1741,7 @@ mod tests {
         let first = login(&auth, &user);
 
         user.is_superuser = false;
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let scope = TenantScope::for_test(org(), pool.clone());
         let Json(pair) = refresh_in(auth.clone(), scope, RefreshInput { refresh: first })
             .await
@@ -1779,7 +1779,7 @@ mod tests {
             is_superuser: true,
             ..crate::testkit::user()
         };
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
             extra_claims: Some(hook),
@@ -1789,14 +1789,14 @@ mod tests {
         let scope = || TenantScope::for_test(org(), pool.clone());
 
         user.is_superuser = false;
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let input = RefreshInput {
             refresh: first.clone(),
         };
         assert!(refresh_in(auth.clone(), scope(), input).await.is_err());
 
         user.is_superuser = true;
-        user.save_pool(&pool).await.unwrap();
+        user.save(&pool).await.unwrap();
         let input = RefreshInput { refresh: first };
         assert!(
             refresh_in(auth.clone(), scope(), input).await.is_ok(),

@@ -465,7 +465,7 @@ async fn own_extra_hosts_are_not_a_clash_and_case_is_ignored() {
         enabled: true,
         created_at: rustango::sql::Auto::Unset,
     };
-    legacy.insert_pool(&b.registry).await.expect("legacy row");
+    legacy.insert(&b.registry).await.expect("legacy row");
     let err = b
         .run(&[
             "edit-tenant",

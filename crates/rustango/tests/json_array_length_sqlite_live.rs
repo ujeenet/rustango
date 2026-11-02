@@ -48,7 +48,7 @@ async fn seed(pool: &Pool) {
             id: Auto::default(),
             data: payload,
         };
-        d.save_pool(pool).await.unwrap();
+        d.save(pool).await.unwrap();
     }
 }
 

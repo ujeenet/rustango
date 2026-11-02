@@ -97,7 +97,7 @@ mod scenarios {
             data: serde_json::json!({"first-name": 1, "2fa": 2, "a": {"b": 3}, "q\"x": 4}),
             created: chrono::Utc::now(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed");
         use rustango::core::Column as _;

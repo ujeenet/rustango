@@ -242,7 +242,7 @@ impl NewUser<'_> {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        user.save_pool(pool).await?;
+        user.save(pool).await?;
         Ok(user)
     }
 }

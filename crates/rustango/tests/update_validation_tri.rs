@@ -73,7 +73,7 @@ async fn seed(pool: &Pool) -> Post {
         title: "ok".into(),
         status: "draft".into(),
     };
-    p.save_pool(pool).await.expect("seed");
+    p.save(pool).await.expect("seed");
     p
 }
 
@@ -116,7 +116,7 @@ async fn update_pool_and_tx_check_choices(pool: &Pool) {
 async fn save_pool_update_checks_fields(pool: &Pool) {
     let mut p = seed(pool).await;
     p.status = "bogus".into();
-    let err = p.save_pool(pool).await.expect_err("save_pool");
+    let err = p.save(pool).await.expect_err("save_pool");
     assert!(is_choice_error(&err), "{err:?}");
     assert_eq!(stored_status(pool).await, "draft");
 
@@ -124,9 +124,9 @@ async fn save_pool_update_checks_fields(pool: &Pool) {
         id: Auto::Unset,
         status: "draft".into(),
     };
-    n.save_pool(pool).await.expect("seed note");
+    n.save(pool).await.expect("seed note");
     n.status = "bogus".into();
-    let err = n.save_pool(pool).await.expect_err("audited save_pool");
+    let err = n.save(pool).await.expect_err("audited save_pool");
     assert!(is_choice_error(&err), "{err:?}");
 }
 
@@ -154,14 +154,11 @@ async fn legacy_email_blocks_save_until_trimmed(pool: &Pool) {
         email: " a@b.com".into(),
         name: "old".into(),
     };
-    legacy.save_pool(pool).await.expect("seed legacy row");
+    legacy.save(pool).await.expect("seed legacy row");
 
     let mut c = Contact::objects().fetch(pool).await.expect("fetch")[0].clone();
     c.name = "new".into();
-    let err = c
-        .save_pool(pool)
-        .await
-        .expect_err("untrimmed email blocks save");
+    let err = c.save(pool).await.expect_err("untrimmed email blocks save");
     assert!(
         matches!(err, ExecError::Query(QueryError::ValidatorFailed { .. })),
         "{err:?}"
@@ -177,7 +174,7 @@ async fn legacy_email_blocks_save_until_trimmed(pool: &Pool) {
 
     let mut c = Contact::objects().fetch(pool).await.expect("fetch")[0].clone();
     c.email = c.email.trim().to_owned();
-    c.save_pool(pool).await.expect("trimmed row saves");
+    c.save(pool).await.expect("trimmed row saves");
     let stored = Contact::objects().fetch(pool).await.expect("fetch");
     assert_eq!(stored[0].email, "a@b.com");
     assert_eq!(stored[0].name, "renamed");

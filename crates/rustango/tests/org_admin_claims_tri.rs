@@ -92,7 +92,7 @@ async fn org(pool: &Pool, slug: &str) -> i64 {
         database_url: Some("sqlite::memory:".into()),
         ..rustango::testkit::org()
     };
-    org.save_pool(pool).await.expect("insert org");
+    org.save(pool).await.expect("insert org");
     *org.id.get().expect("org id")
 }
 
@@ -232,7 +232,7 @@ async fn legacy_prefix_org(pool: &Pool, tag: &str, prefix: &str) -> (i64, String
     let id = org(pool, &slug).await;
     let mut row = org_named(pool, &slug).await.unwrap();
     row.path_prefix = Some(prefix.to_owned());
-    row.save_pool(pool).await.expect("legacy prefix");
+    row.save(pool).await.expect("legacy prefix");
     (id, slug)
 }
 
@@ -456,7 +456,7 @@ async fn admin_writes_clear_the_org_cache(pool: &Pool) {
         enabled: true,
         created_at: rustango::sql::Auto::Unset,
     };
-    row.save_pool(pool).await.unwrap();
+    row.save(pool).await.unwrap();
     assert_eq!(resolve(pool, &host).await.as_deref(), Some(slug.as_str()));
     let hid = row.id.get().unwrap();
     let uri = format!("/rustango_org_hosts/{hid}/delete");
@@ -481,7 +481,7 @@ async fn viewset_writes_clear_the_host_cache(pool: &Pool) {
         enabled: true,
         created_at: rustango::sql::Auto::Unset,
     };
-    row.save_pool(pool).await.unwrap();
+    row.save(pool).await.unwrap();
     assert_eq!(resolve(pool, &host).await.as_deref(), Some(slug.as_str()));
     use rustango::core::Model as _;
     let app = rustango::viewset::ViewSet::for_model(OrgHost::SCHEMA, &["id", "hostname"])

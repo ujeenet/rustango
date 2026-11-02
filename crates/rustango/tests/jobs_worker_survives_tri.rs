@@ -987,7 +987,7 @@ impl Job for WriteNote {
             id: rustango::sql::Auto::default(),
             title: self.token.clone(),
         };
-        note.insert_pool(&pool)
+        note.insert(&pool)
             .await
             .map_err(|e| JobError::Fatal(e.to_string()))
     }

@@ -46,7 +46,7 @@ async fn seed(pool: &Pool) {
             views: v,
             published: pub_,
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

@@ -105,7 +105,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
             name: name.into(),
             score,
         };
-        item.insert_pool(pool).await.expect("insert");
+        item.insert(pool).await.expect("insert");
         pks.push(*item.id.get().expect("pk assigned"));
     }
     assert_eq!(ops(pool, ITEM, "create").await, 3);
@@ -195,7 +195,7 @@ async fn failed_bulk_write_writes_no_audit_row(pool: &Pool) {
             slug: slug.into(),
             label: slug.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("insert");
     }
@@ -283,7 +283,7 @@ async fn conflict_bulk_inserts_audit_each_written_row(pool: &Pool) {
     if pool.dialect().name() == "mysql" {
         return;
     }
-    tag("a", "one").insert_pool(pool).await.expect("seed");
+    tag("a", "one").insert(pool).await.expect("seed");
     let rows = [tag("a", "uno"), tag("b", "two")];
     Tag::bulk_upsert_pool(&rows, &["slug"], &["label"], pool)
         .await
@@ -339,11 +339,17 @@ async fn upsert_on_unique_target_records_its_op(pool: &Pool) {
             qty,
         };
         let mut first = sku(1);
-        first.upsert(pg).await.expect("upsert insert");
+        first
+            .upsert(&pg.clone().into())
+            .await
+            .expect("upsert insert");
         let pk = first.id.get().expect("pk assigned").to_string();
         assert_eq!(latest(pool, SKU, &pk).await.operation, "create");
         let mut second = sku(5);
-        second.upsert(pg).await.expect("upsert update");
+        second
+            .upsert(&pg.clone().into())
+            .await
+            .expect("upsert update");
         assert_eq!(second.id.get().map(ToString::to_string), Some(pk.clone()));
         let entry = latest(pool, SKU, &pk).await;
         assert_eq!(entry.operation, "update");
@@ -384,7 +390,9 @@ async fn bulk_insert_and_upsert_audit_on_postgres(pool: &Pool) {
                 label: "two".into(),
             },
         ];
-        Tag::bulk_insert(&tags, pg).await.expect("bulk insert");
+        Tag::bulk_insert(&tags, &pg.clone().into())
+            .await
+            .expect("bulk insert");
         assert_eq!(ops(pool, TAG, "create").await, 2);
         assert_eq!(latest(pool, TAG, "q").await.changes["label"], "two");
 
@@ -393,11 +401,15 @@ async fn bulk_insert_and_upsert_audit_on_postgres(pool: &Pool) {
             name: "u".into(),
             score: 1,
         };
-        item.upsert(pg).await.expect("upsert insert");
+        item.upsert(&pg.clone().into())
+            .await
+            .expect("upsert insert");
         let pk = item.id.get().expect("pk assigned").to_string();
         assert_eq!(latest(pool, ITEM, &pk).await.operation, "create");
         item.score = 9;
-        item.upsert(pg).await.expect("upsert update");
+        item.upsert(&pg.clone().into())
+            .await
+            .expect("upsert update");
         let entry = latest(pool, ITEM, &pk).await;
         assert_eq!(entry.operation, "update");
         assert_eq!(entry.changes["score"], 9);
@@ -500,7 +512,9 @@ async fn large_bulk_insert_audits_on_postgres(pool: &Pool) {
                 label: format!("l{i}"),
             })
             .collect();
-        Tag::bulk_insert(&tags, pg).await.expect("bulk insert");
+        Tag::bulk_insert(&tags, &pg.clone().into())
+            .await
+            .expect("bulk insert");
         assert_eq!(ops(pool, TAG, "create").await, OVER_BIND_CAP as i64);
     }
 }
@@ -606,12 +620,12 @@ mod cascade {
                 .expect("clear audit rows");
         }
         for id in [1, 2] {
-            Shelf { id }.insert_pool(pool).await.expect("shelf");
+            Shelf { id }.insert(pool).await.expect("shelf");
             Rack {
                 id: id * 10,
                 shelf_id: id,
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("rack");
         }
@@ -628,7 +642,7 @@ mod cascade {
                 rack_id,
                 parent_id,
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("crate");
         }
@@ -654,7 +668,7 @@ mod cascade {
                 body: format!("n{id}"),
                 shelf_id,
             }
-            .insert_pool(pool)
+            .insert(pool)
             .await
             .expect("note");
         }
@@ -678,7 +692,7 @@ mod cascade {
             body: "n".into(),
             shelf_id: Some(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
         Shelf::truncate(pool).await.expect("truncate");
@@ -695,7 +709,7 @@ mod cascade {
             body: "n".into(),
             shelf_id: Some(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
         Shelf::truncate_cascade(pool).await.expect("truncate");
@@ -714,7 +728,7 @@ mod cascade {
             body: "n".into(),
             shelf_id: None,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
         Crate::truncate(pool).await.expect("empty crates");
@@ -726,7 +740,7 @@ mod cascade {
             body: "n".into(),
             shelf_id: Some(1),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("note");
         Shelf::truncate(pool).await.expect("truncate");
@@ -765,7 +779,7 @@ mod cascade {
         assert_eq!(deletes(pool, 4).await, 0);
         let entry = latest(pool, CRATE, "3").await;
         assert_eq!(entry.changes["label"], "y");
-        Shelf { id: 2 }.delete_pool(pool).await.unwrap();
+        Shelf { id: 2 }.delete(pool).await.unwrap();
         assert_eq!(deletes(pool, 4).await, 1);
         assert_eq!(Crate::objects().count(pool).await.unwrap(), 0);
     }
@@ -815,7 +829,7 @@ mod cascade {
                 return;
             };
             Shelf { id: 1 }
-                .delete(pg)
+                .delete(&pg.clone().into())
                 .await
                 .expect("Model::delete(&PgPool)");
             let n = Shelf::objects()

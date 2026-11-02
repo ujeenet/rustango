@@ -121,14 +121,14 @@ async fn seed(pool: &Pool) -> (i64, i64) {
         id: Auto::default(),
         name: "a".into(),
     };
-    a.insert_pool(pool).await.expect("author");
+    a.insert(pool).await.expect("author");
     let a = *a.id.get().expect("pk");
     let mut p = Post {
         id: Auto::default(),
         author_id: a,
         title: "t".into(),
     };
-    p.insert_pool(pool).await.expect("post");
+    p.insert(pool).await.expect("post");
     (a, *p.id.get().expect("pk"))
 }
 

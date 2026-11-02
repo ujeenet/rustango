@@ -209,7 +209,7 @@ async fn boot_with(permissions: bool) -> Env {
             host_pattern: Some(host.clone()),
             ..rustango::testkit::org()
         };
-        org.insert_pool(&registry).await.unwrap();
+        org.insert(&registry).await.unwrap();
         let pool = Pool::connect(&url).await.unwrap();
         rustango::testkit::create_tables_for::<User>(&pool)
             .await
@@ -263,7 +263,7 @@ async fn boot_with(permissions: bool) -> Env {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.unwrap();
+    op.insert(&registry).await.unwrap();
 
     let [a, b]: [Tenant; 2] = tenants.try_into().ok().unwrap();
     Env {
@@ -459,7 +459,7 @@ impl Env {
             is_superuser: superuser,
             ..rustango::testkit::user()
         };
-        u.insert_pool(&self.tenants[t].pool).await.unwrap();
+        u.insert(&self.tenants[t].pool).await.unwrap();
         u.id.get().copied().unwrap()
     }
 
@@ -475,12 +475,12 @@ impl Env {
             .unwrap()
             .remove(0);
         u.active = false;
-        u.save_pool(self.pool()).await.unwrap();
+        u.save(self.pool()).await.unwrap();
     }
 
     async fn provider_in(&self, t: usize, slug: &str, allow_email_link: bool) {
         provider_row(&self.idp.issuer, slug, allow_email_link)
-            .insert_pool(&self.tenants[t].pool)
+            .insert(&self.tenants[t].pool)
             .await
             .unwrap();
     }
@@ -718,7 +718,7 @@ async fn the_client_hook_reaches_tenant_providers_on_host_and_prefix() {
         .unwrap()
         .remove(0);
     org.path_prefix = Some("/acme".into());
-    org.save_pool(&env._pools.registry_pool()).await.unwrap();
+    org.save(&env._pools.registry_pool()).await.unwrap();
     rustango::tenancy::invalidate_org_cache();
 
     let calls = Arc::new(AtomicUsize::new(0));
@@ -776,7 +776,7 @@ async fn a_tenant_sso_login_lands_after_the_logout_cutoff() {
         .unwrap()
         .remove(0);
     row.sessions_revoked_at = Some(cut);
-    row.save_pool(env.pool()).await.unwrap();
+    row.save(env.pool()).await.unwrap();
 
     env.idp.assert("sub-ann", "ann@example.com");
     let resp = handshake(&env.admin, &env.tenants[0].host, "/__login", "corp").await;
@@ -851,7 +851,7 @@ async fn a_failing_user_read_keeps_the_link() {
         .unwrap()
         .remove(0);
     p.allow_email_link = false;
-    p.save_pool(env.pool()).await.unwrap();
+    p.save(env.pool()).await.unwrap();
     // Test-only DDL: the user table goes away, like a broken read.
     let rename = |from: &str, to: &str| format!("ALTER TABLE {from} RENAME TO {to}");
     raw_execute_pool(
@@ -1054,7 +1054,7 @@ async fn check_deploy_lists_every_refused_active_tenant() {
         .unwrap()
         .remove(0);
     globex.active = false;
-    globex.save_pool(&registry).await.unwrap();
+    globex.save(&registry).await.unwrap();
     let out = env.check_deploy().await;
     assert!(
         out.contains("[sso] shared provider `team` (tenant(s) acme) has"),
@@ -1115,7 +1115,7 @@ async fn check_deploy_reports_an_unopenable_tenant_without_its_url() {
         database_url: Some("sqlite:///tmp/acme-hunter2.db".into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&pools.registry_pool()).await.unwrap();
+    org.insert(&pools.registry_pool()).await.unwrap();
     let (_, out) = run("check --deploy").await;
     assert!(
         out.contains(
@@ -1525,7 +1525,7 @@ async fn tenant_domain_rule_refuses_a_linked_user() {
         default_provider: None,
         signups_per_hour: None,
     }
-    .insert_pool(env.pool())
+    .insert(env.pool())
     .await
     .unwrap();
     let ann = env.user("ann", "ann@example.com", false).await;
@@ -1678,7 +1678,7 @@ async fn tenant_console_signs_up_an_invitee_only() {
         link_key: None,
         created_at: Auto::default(),
     }
-    .insert_pool(env.pool())
+    .insert(env.pool())
     .await
     .unwrap();
     let uninvited = callback("sub-y", "y@client.org").await;
@@ -1803,12 +1803,12 @@ async fn bare_admin() -> (Router, Pool, Idp) {
         .unwrap();
     let idp = Idp::start().await;
     provider_row(&idp.issuer, "corp", true)
-        .insert_pool(&pool)
+        .insert(&pool)
         .await
         .unwrap();
     let mut root = AdminUser::new_with_password("root", "pw-123456789", true).unwrap();
     root.email = Some("root@example.com".into());
-    root.insert_pool(&pool).await.unwrap();
+    root.insert(&pool).await.unwrap();
     let app = rustango::admin::Builder::new(pool.clone())
         .with_session_auth(rustango::session::SessionSecret::from_bytes(vec![7u8; 32]))
         .build();
@@ -1852,7 +1852,7 @@ async fn bare_admin_never_links_by_email_and_signs_in_by_link() {
 
     // Deactivated: the link no longer signs in.
     root.active = false;
-    root.save_pool(&pool).await.unwrap();
+    root.save(&pool).await.unwrap();
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
     assert!(!signed_in(&resp), "{}", location(&resp));
 }
@@ -1915,7 +1915,7 @@ async fn a_bare_admin_sso_login_lands_after_the_logout_cutoff() {
         .unwrap();
     let cut = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 60, 0).unwrap();
     root.sessions_revoked_at = Some(cut);
-    root.save_pool(&pool).await.unwrap();
+    root.save(&pool).await.unwrap();
 
     idp.assert("sub-root", "root@example.com");
     let resp = handshake(&app, "admin.test", "/login", "corp").await;
@@ -2196,7 +2196,7 @@ async fn member_sso_under_a_path_prefix_keeps_the_prefix() {
         .unwrap()
         .remove(0);
     org.path_prefix = Some("/acme".into());
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
     let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
         pools: env._pools.clone(),
         resolver: ChainResolver::new().push(PathPrefixResolver),
@@ -2477,7 +2477,7 @@ async fn upgrading_adds_the_framework_column_once() {
     manage("migrate").await.expect("the column is added once");
     let p = provider_row("https://idp.example", "corp", true);
     let mut p = p;
-    p.insert_pool(&pool).await.unwrap();
+    p.insert(&pool).await.unwrap();
     assert!(
         rustango::sso::resolve_by_slug(&pool, "corp", String::new())
             .await
@@ -2657,7 +2657,7 @@ async fn tenant_settings(env: &Env, password_login: &str, default_provider: Opti
         default_provider: default_provider.map(str::to_owned),
         signups_per_hour: None,
     }
-    .insert_pool(env.pool())
+    .insert(env.pool())
     .await
     .unwrap();
 }
@@ -2672,7 +2672,7 @@ impl Env {
             is_superuser: superuser,
             ..rustango::testkit::user()
         };
-        u.insert_pool(self.pool()).await.unwrap();
+        u.insert(self.pool()).await.unwrap();
         u.id.get().copied().unwrap()
     }
 
@@ -3060,7 +3060,7 @@ async fn bare_admin_password_login_honours_sso_only() {
     let _g = SUITE.lock().await;
     let (app, pool, _idp) = bare_admin().await;
     let mut ed = AdminUser::new_with_password("ed", "pw-123456789", false).unwrap();
-    ed.insert_pool(&pool).await.unwrap();
+    ed.insert(&pool).await.unwrap();
     let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
         .await
         .unwrap()
@@ -3145,7 +3145,7 @@ impl Env {
             .unwrap()
             .remove(0);
         org.path_prefix = Some("/acme".into());
-        org.save_pool(&registry).await.unwrap();
+        org.save(&registry).await.unwrap();
         rustango::testkit::reset_org_cache();
         let reg_url = format!(
             "sqlite://{}?mode=rwc",
@@ -3656,7 +3656,7 @@ async fn a_shared_override_row_tightens_the_tenant_console() {
         superuser_session_ttl_secs: None,
         allowed_roles: None,
     }
-    .insert_pool(env.pool())
+    .insert(env.pool())
     .await
     .unwrap();
     assert_eq!(

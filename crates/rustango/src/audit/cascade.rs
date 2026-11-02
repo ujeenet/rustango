@@ -516,13 +516,13 @@ mod tx_source_tests {
         crate::audit::AuditLog::delete_where("entity_table", Book::SCHEMA.table, pool)
             .await
             .unwrap();
-        Shelf { id: 1 }.insert_pool(pool).await.unwrap();
+        Shelf { id: 1 }.insert(pool).await.unwrap();
         let mut book = Book {
             id: 1,
             shelf: crate::sql::ForeignKey::unloaded(1_i64),
             title: "b".into(),
         };
-        book.insert_pool(pool).await.unwrap();
+        book.insert(pool).await.unwrap();
     }
 
     /// How the test deletes the shelf.

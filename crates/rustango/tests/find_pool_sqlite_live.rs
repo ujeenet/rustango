@@ -39,7 +39,7 @@ async fn find_pool_returns_some_for_existing_pk() {
         id: Auto::default(),
         title: "first".into(),
     };
-    p1.save_pool(&pool).await.unwrap();
+    p1.save(&pool).await.unwrap();
     let pk = p1.id.get().copied().unwrap();
 
     let found = Post::find(pk, &pool).await.unwrap();
@@ -62,12 +62,12 @@ async fn find_pool_disambiguates_between_rows() {
         id: Auto::default(),
         title: "a".into(),
     };
-    a.save_pool(&pool).await.unwrap();
+    a.save(&pool).await.unwrap();
     let mut b = Post {
         id: Auto::default(),
         title: "b".into(),
     };
-    b.save_pool(&pool).await.unwrap();
+    b.save(&pool).await.unwrap();
     let pk_b = b.id.get().copied().unwrap();
 
     let found = Post::find(pk_b, &pool).await.unwrap().unwrap();

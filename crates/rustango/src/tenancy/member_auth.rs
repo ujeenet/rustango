@@ -1479,7 +1479,7 @@ mod tests {
             .await
             .unwrap();
         let mut user = crate::testkit::user();
-        user.insert_pool(&pool).await.unwrap();
+        user.insert(&pool).await.unwrap();
         let org = crate::tenancy::Org {
             path_prefix: Some("/acme".into()),
             ..crate::testkit::org()

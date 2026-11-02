@@ -55,7 +55,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: Some("/acme".into()),
         ..rustango::testkit::org()
     };
-    acme.insert(pool).await.unwrap();
+    acme.insert(&pool.clone().into()).await.unwrap();
 
     // Header-only: no host_pattern, just the slug.
     let mut globex = Org {
@@ -71,7 +71,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    globex.insert(pool).await.unwrap();
+    globex.insert(&pool.clone().into()).await.unwrap();
 
     // Port-based: dedicated port 9001, no host or path.
     let mut initech = Org {
@@ -87,7 +87,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    initech.insert(pool).await.unwrap();
+    initech.insert(&pool.clone().into()).await.unwrap();
 
     // Inactive — every resolver should skip.
     let mut frozen = Org {
@@ -104,7 +104,7 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
         active: false,
         ..rustango::testkit::org()
     };
-    frozen.insert(pool).await.unwrap();
+    frozen.insert(&pool.clone().into()).await.unwrap();
 }
 
 fn parts_with_host(host: &str) -> Parts {

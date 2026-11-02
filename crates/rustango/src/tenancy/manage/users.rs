@@ -123,7 +123,7 @@ where
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await?;
+    op.insert(&registry).await?;
     let id = op.id.get().copied().unwrap_or_default();
     if generated {
         writeln!(w, "created operator `{username}` (id {id})")?;

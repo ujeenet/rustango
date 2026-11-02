@@ -167,7 +167,7 @@ async fn non_superuser_with_view_perm_sees_model_in_admin() {
         // The rest from testkit, so a feature-gated field cannot break the literal.
         ..rustango::testkit::user()
     };
-    user.insert(&pool).await.unwrap();
+    user.insert(&pool.clone().into()).await.unwrap();
     let user_id = *user.id.get().expect("PK assigned");
 
     // Role grants `rustango_users.view` only — explicitly NOT

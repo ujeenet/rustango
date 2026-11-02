@@ -67,7 +67,7 @@ async fn boot() -> Booted {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.expect("seed operator");
+    op.insert(&registry).await.expect("seed operator");
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
     let secret = SessionSecret::from_env_or_random();

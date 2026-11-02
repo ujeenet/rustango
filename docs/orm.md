@@ -1628,7 +1628,7 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_pool(&pool).await
+        post.save(&pool).await
     },
 ).await?;
 ```
@@ -1790,7 +1790,7 @@ SQLite and MySQL). Its `t.pool()` is the tenant's own pool, so every pool method
 included, and no connection is held until a query runs. The `DatabaseTenant`
 extractor's `t.conn()` takes the `_on` reads only.
 
-For example `post.insert_pool(t.pool())` and `Post::objects().count(t.pool())`;
+For example `post.insert(t.pool())` and `Post::objects().count(t.pool())`;
 the `sqlite_tenant_demo` example does exactly this.
 
 ## One connection per request

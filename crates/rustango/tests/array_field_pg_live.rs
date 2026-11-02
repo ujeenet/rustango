@@ -66,7 +66,7 @@ async fn insert(pool: &Pool, title: &str, tags: &[&str], scores: &[i32]) -> i64 
         tags: Array(tags.iter().map(|s| (*s).to_owned()).collect()),
         scores: Array(scores.to_vec()),
     };
-    p.save_pool(pool).await.unwrap();
+    p.save(pool).await.unwrap();
     *p.id.get().unwrap()
 }
 

@@ -24,7 +24,7 @@
 //! ```ignore
 //! async fn add_post(t: TenantScope) -> Result<String, (StatusCode, String)> {
 //!     let mut post = Post { id: Auto::default(), title: "hello".into() };
-//!     post.insert_pool(t.pool()).await.map_err(rustango::server_error)?;
+//!     post.insert(t.pool()).await.map_err(rustango::server_error)?;
 //!     let n = Post::objects().count(t.pool()).await.map_err(rustango::server_error)?;
 //!     Ok(format!("{}: {n} post(s)", t.org.slug))
 //! }

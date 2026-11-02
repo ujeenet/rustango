@@ -464,7 +464,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save_pool(&pool).await?;
+    p.save(&pool).await?;
     println!("created post id = {}", p.id.get().copied().unwrap());
 
     // READ
@@ -482,7 +482,7 @@ What's happening here, in plain terms:
 - `pool` is the shared database connection pool. You pass a reference to it (`&pool`) into query calls instead of opening a new connection each time.
 - Database calls are asynchronous, so each one ends in `.await` — that pauses until the result comes back, then continues. The `?` after an `.await` says "if this errored, stop and return the error."
 - `main` returns a `Result`, Rust's success-or-error type, which is why `?` and the closing `Ok(())` work.
-- To save a row, call `.save_pool(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — with no filters, that reads every row.
+- To save a row, call `.save(&pool)` on it. To read rows, build a query with `Post::objects()` and run it with `.fetch(&pool)` — with no filters, that reads every row.
 - `.fetch(…)` comes from the `FetcherPool` trait, which is why the imports bring it in. Without that line the method does not exist and the compiler says so without explaining why.
 - These are the multi-backend calls, and everything above compiles unchanged on all three databases. There is also `.save(&pool)`, which takes a driver-specific `sqlx::PgPool` and exists only when the `postgres` feature is on. Prefer the multi-backend pair unless you deliberately want one database. See the [ORM guide](orm.md).
 

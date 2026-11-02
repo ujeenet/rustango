@@ -115,7 +115,7 @@ async fn auto_now_add_fills_created_at_via_db_default_on_insert() {
         updated_at: rustango::sql::Auto::default(),
         deleted_at: None,
     };
-    row.save(&pool).await.unwrap();
+    row.save(&pool.clone().into()).await.unwrap();
 
     let pk = row.id.get().copied().unwrap();
     let stored: (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
@@ -155,7 +155,7 @@ async fn auto_now_overrides_updated_at_on_every_update() {
         updated_at: rustango::sql::Auto::default(),
         deleted_at: None,
     };
-    row.save(&pool).await.unwrap();
+    row.save(&pool.clone().into()).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
     let initial: chrono::DateTime<chrono::Utc> =
@@ -171,7 +171,7 @@ async fn auto_now_overrides_updated_at_on_every_update() {
     row.title = "second".into();
     // Caller leaves `updated_at` unchanged on the in-memory struct;
     // the macro should rebind it to `chrono::Utc::now()` anyway.
-    row.save(&pool).await.unwrap();
+    row.save(&pool.clone().into()).await.unwrap();
 
     let after: chrono::DateTime<chrono::Utc> =
         sqlx::query_scalar(r#"SELECT "updated_at" FROM "rustango_mixin_post" WHERE "id" = $1"#)
@@ -200,7 +200,7 @@ async fn soft_delete_on_sets_deleted_at_then_restore_on_clears_it() {
         updated_at: rustango::sql::Auto::default(),
         deleted_at: None,
     };
-    row.save(&pool).await.unwrap();
+    row.save(&pool.clone().into()).await.unwrap();
     let pk = row.id.get().copied().unwrap();
 
     let n = row.soft_delete_on(&pool).await.unwrap();
@@ -241,7 +241,7 @@ async fn auto_uuid_skips_pk_on_insert_and_db_fills_it() {
         id: rustango::sql::Auto::default(),
         name: "alpha".into(),
     };
-    row.insert(&pool).await.unwrap();
+    row.insert(&pool.clone().into()).await.unwrap();
     let assigned = row.id.get().copied().expect("PK populated by RETURNING");
     assert_ne!(
         assigned,

@@ -66,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "Alice".into(),
         age: 32,
     };
-    alice.insert_pool(&pool).await?;
+    alice.insert(&pool).await?;
     let alice_id = *alice.id.get().expect("Alice has an id");
     println!("inserted Alice with id = {alice_id}");
 
@@ -75,7 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         name: "Bob".into(),
         age: 47,
     };
-    bob.insert_pool(&pool).await?;
+    bob.insert(&pool).await?;
     let bob_id = *bob.id.get().expect("Bob has an id");
     println!("inserted Bob with id   = {bob_id}");
 
@@ -221,7 +221,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .pop()
         .expect("at least one post");
     first.views = 999;
-    first.save_pool(&pool).await?;
+    first.save(&pool).await?;
     let refetched: Post = QuerySet::<Post>::new()
         .filter_op("id", Op::Eq, *first.id.get().unwrap())
         .fetch(&pool)
@@ -316,7 +316,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?
         .pop()
         .expect("Draft post exists");
-    let removed = doomed.delete_pool(&pool).await?;
+    let removed = doomed.delete(&pool).await?;
     println!("delete_pool removed {removed} row");
     let after = Post::objects().count(&pool).await?;
     println!("Post count after delete: {after}");

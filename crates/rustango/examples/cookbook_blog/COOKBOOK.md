@@ -2771,7 +2771,7 @@ API:         [`crates/rustango/src/sql/backend.rs`](../../src/sql/backend.rs)
 Recipe:
 ```rust,ignore
 let mut alice = Author { id: Auto::Unset, name: "Alice".into(), age: 32 };
-alice.insert_pool(&pool).await?;
+alice.insert(&pool).await?;
 assert!(alice.id.is_set());  // populated from RETURNING
 ```
 Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)

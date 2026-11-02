@@ -132,7 +132,7 @@ async fn create_product(
         stock: input.stock,
         active: input.active,
     };
-    p.insert_pool(&pool)
+    p.insert(&pool)
         .await
         .map_err(rustango::server_error)?;
 

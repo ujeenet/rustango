@@ -437,26 +437,26 @@ async fn macro_emits_audit_update_entry_with_before_after_diff() {
 }
 
 #[tokio::test]
-async fn save_on_with_overrides_audit_source_for_one_call() {
-    // commit 3c: `save_on_with(executor, source)` runs save_on inside
-    // an `audit::with_source(source, ...)` scope so a single call can
-    // override the active source — useful for seed scripts and
-    // background jobs that don't sit inside a request handler.
+async fn with_source_overrides_audit_source_for_one_call() {
+    // `audit::with_source` overrides the active source for one call.
     let _g = lock().lock().await;
     let Some(pool) = pool().await else {
         return;
     };
     setup_post(&pool).await;
 
-    let mut conn = pool.acquire().await.unwrap();
     let mut row = AuditedPost {
         id: rustango::sql::Auto::default(),
         title: "system-default".into(),
         body: "x".into(),
     };
-    row.save_on_with(&mut *conn, AuditSource::Custom("seed-script".into()))
-        .await
-        .unwrap();
+    let any_pool: rustango::sql::Pool = pool.clone().into();
+    audit::with_source(
+        AuditSource::Custom("seed-script".into()),
+        row.save(&any_pool),
+    )
+    .await
+    .unwrap();
     let pk = row.id.get().copied().unwrap();
 
     let entries =

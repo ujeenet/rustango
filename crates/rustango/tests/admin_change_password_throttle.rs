@@ -55,7 +55,7 @@ async fn boot_with_pool(name: &str) -> (axum::Router, String, Pool) {
         .unwrap();
     AdminUser::new_with_password(name, "correct-horse", true)
         .unwrap()
-        .insert_pool(&pool)
+        .insert(&pool)
         .await
         .unwrap();
     let app = Builder::new(pool.clone())

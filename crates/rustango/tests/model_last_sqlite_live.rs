@@ -39,7 +39,7 @@ async fn last_returns_highest_pk_row() {
             id: Auto::default(),
             title: t.into(),
         };
-        p.save_pool(&pool).await.unwrap();
+        p.save(&pool).await.unwrap();
     }
     let last = Post::last(&pool).await.unwrap().unwrap();
     assert_eq!(last.title, "c");

@@ -110,7 +110,7 @@ fixes ; une méthode inhérente du même nom ne change que les appels directs, p
 ce qu'exécute un ViewSet.
 
 Il n'y a délibérément **aucun** `create` / `update` / `save` sur le trait — les
-écritures passent par l'ORM (`model.save_pool(&pool)`). Quand un serializer est câblé
+écritures passent par l'ORM (`model.save(&pool)`). Quand un serializer est câblé
 dans un [ViewSet](viewsets.md), le chemin create/update utilise
 `from_writable_json()` + `validate()` + `writable_source_fields()` pour valider et
 filtrer la requête avant l'enregistrement.

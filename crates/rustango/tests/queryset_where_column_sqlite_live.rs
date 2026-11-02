@@ -45,7 +45,7 @@ async fn insert(pool: &Pool, start: i64, end: i64, label: &str) {
         end_day: end,
         label: label.into(),
     };
-    r.save_pool(pool).await.unwrap();
+    r.save(pool).await.unwrap();
 }
 
 #[tokio::test]

@@ -1629,7 +1629,7 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_pool(&pool).await
+        post.save(&pool).await
     },
 ).await?;
 ```
@@ -1792,7 +1792,7 @@ SQLite et MySQL). Son `t.pool()` est le pool propre au tenant : toutes les méth
 écritures comprises, et aucune connexion n'est tenue avant la première requête.
 Le `t.conn()` de l'extracteur `DatabaseTenant` ne sert qu'aux lectures `_on`.
 
-Par exemple `post.insert_pool(t.pool())` et `Post::objects().count(t.pool())` ;
+Par exemple `post.insert(t.pool())` et `Post::objects().count(t.pool())` ;
 l'exemple `sqlite_tenant_demo` fait exactement cela.
 
 ## Une connexion par requête

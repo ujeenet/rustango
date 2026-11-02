@@ -76,7 +76,7 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -142,7 +142,7 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -195,7 +195,7 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -308,7 +308,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let migrate = |drain: &'static str| {
@@ -512,7 +512,7 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let migrate = |drain: &'static str| {
@@ -823,7 +823,7 @@ async fn a_foreign_owned_extension_on_the_target_is_refused_up_front() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let started = std::time::Instant::now();
     let mut out = Vec::<u8>::new();
@@ -876,14 +876,14 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
         schema_name: None,
         ..rustango::testkit::org()
     };
-    owner.insert(&pool).await.unwrap();
+    owner.insert(&pool.clone().into()).await.unwrap();
     let mut mover = Org {
         slug: "mover".into(),
         display_name: "Mover".into(),
         database_url: Some("postgres://example@db.example.com/mover".into()),
         ..rustango::testkit::org()
     };
-    mover.insert(&pool).await.unwrap();
+    mover.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
     let registry_url = std::env::var("DATABASE_URL").unwrap();
@@ -942,7 +942,7 @@ async fn movable_tenant(pool: &PgPool, slug: &str, src_url: &str) {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 }
 
 async fn move_into_schema(

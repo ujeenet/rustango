@@ -438,13 +438,17 @@ mod page;
 pub use page::Page;
 use page::{paginated_statement, total_statement};
 
-// PG `_on` CRUD family — see pg_on.rs.
+// PG-only raw-executor reads — see pg_on.rs.
 #[cfg(feature = "postgres")]
 mod pg_on;
 #[cfg(feature = "postgres")]
-pub use pg_on::{
-    bulk_insert_on, delete_on, insert_on, insert_returning_on, select_rows_on, update_on,
-};
+pub(crate) use pg_on::pg_insert_returning;
+#[cfg(feature = "postgres")]
+pub use pg_on::select_rows_on;
+
+// Writes on any `SqlExecutor` — see write_on.rs.
+mod write_on;
+pub use write_on::{bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on};
 
 mod row_to_json;
 #[cfg(feature = "postgres")]
@@ -573,17 +577,7 @@ impl<T: Model + Send> QuerySet<T> {
     /// Returns [`ExecError`] for schema, SQL-writing, or driver failures.
     pub async fn delete_on<'c, E: SqlExecutor<'c>>(self, executor: E) -> Result<u64, ExecError> {
         refuse_audited::<T>("`delete_on` cannot audit; use `Model::delete_where`")?;
-        let query = self.compile_delete()?;
-        let plan = crate::sql::compile_delete_plan(executor.dialect(), &query)?;
-        // A raw sqlx executor runs one statement: delete as before, unaudited cascade.
-        let single = plan.links.is_empty() && !executor.runs_plans();
-        if plan.is_one_statement() || single {
-            if plan.cascade.is_some() {
-                crate::audit::cascade::warn_unaudited(query.model.table);
-            }
-            return write_on(executor, &plan.owner.sql, plan.owner.params).await;
-        }
-        executor.run_delete_plan(plan).await
+        delete_on(executor, &self.compile_delete()?).await
     }
 }
 
@@ -630,7 +624,8 @@ impl<T: Model + Send> UpdaterPool<T> for UpdateBuilder<T> {
 }
 
 /// Refuse a write that cannot audit on an audited model.
-fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
+#[doc(hidden)]
+pub fn refuse_audited<T: Model>(reason: &'static str) -> Result<(), ExecError> {
     if T::SCHEMA.audit_track.is_some() {
         return Err(ExecError::AuditUnsupported {
             table: T::SCHEMA.table,
@@ -1057,7 +1052,7 @@ pub async fn insert_returning_pool(
     match pool {
         #[cfg(feature = "postgres")]
         Pool::Postgres(pg) => {
-            let row = insert_returning_on(pg, query).await?;
+            let row = pg_insert_returning(pg, query).await?;
             Ok(InsertReturningPool::PgRow(row))
         }
         #[cfg(feature = "mysql")]
@@ -1805,7 +1800,7 @@ pub async fn insert_returning_tx(
             match &mut tx.conn {
                 #[cfg(feature = "postgres")]
                 TxConn::Postgres(t) => {
-                    let row = insert_returning_on(&mut **t, query).await?;
+                    let row = pg_insert_returning(&mut **t, query).await?;
                     Ok(InsertReturningPool::PgRow(row))
                 }
                 #[cfg(feature = "mysql")]
@@ -1845,55 +1840,71 @@ pub(crate) async fn bulk_insert_pks_tx(
         .ok_or(ExecError::MissingPrimaryKey {
             table: query.model.table,
         })?;
-    #[cfg(feature = "mysql")]
-    let no_returning = || ExecError::AuditUnsupported {
-        table: query.model.table,
-        reason: "MySQL has no RETURNING to read the written rows",
-    };
-    // Before compiling: the MySQL writer refuses RETURNING itself.
-    #[cfg(feature = "mysql")]
-    if matches!(tx.conn, TxConn::Mysql(_)) && !query.rows.is_empty() {
-        return Err(no_returning());
-    }
     let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), query.rows.clone())
         .returning(vec![pk.column]);
     batch.on_conflict.clone_from(&query.on_conflict);
-    let stmts = compile_bulk_insert_batches(tx.dialect(), &batch)?;
-    let mut pks = Vec::with_capacity(query.rows.len());
+    let rows = bulk_insert_rows_tx(tx, &batch).await?;
+    rows.iter()
+        .map(|row| generated_pk(row, pk, query.model.table))
+        .collect()
+}
+
+/// Run `query` in `tx` in bind-sized batches and give back its `RETURNING`
+/// rows in row order; none when it returns nothing. MySQL cannot return rows.
+///
+/// # Errors
+/// As [`bulk_insert_pool`]; [`ExecError::AuditUnsupported`] for rows on MySQL.
+// A MySQL-only build has no backend that returns rows.
+#[cfg_attr(
+    not(any(feature = "postgres", feature = "sqlite")),
+    allow(unused_mut, unused_variables)
+)]
+pub(crate) async fn bulk_insert_rows_tx(
+    tx: &mut PoolTx<'_>,
+    query: &BulkInsertQuery,
+) -> Result<Vec<InsertReturningPool>, ExecError> {
+    if query.returning.is_empty() {
+        bulk_insert_tx(tx, query).await?;
+        return Ok(Vec::new());
+    }
+    // Before compiling: the MySQL writer refuses RETURNING itself.
+    #[cfg(feature = "mysql")]
+    if matches!(tx.conn, TxConn::Mysql(_)) && !query.rows.is_empty() {
+        return Err(ExecError::AuditUnsupported {
+            table: query.model.table,
+            reason: "MySQL has no RETURNING to read the written rows",
+        });
+    }
+    let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
+    let mut out = Vec::with_capacity(query.rows.len());
     for stmt in stmts {
         crate::test_assertions::query_counter::bump();
-        let rows: Result<Vec<InsertReturningPool>, ExecError> = match &mut tx.conn {
+        match &mut tx.conn {
             #[cfg(feature = "postgres")]
-            TxConn::Postgres(t) => Ok(stmt
-                .params
-                .into_iter()
-                .fold(sqlx::query(&stmt.sql), bind_query)
-                .fetch_all(&mut **t)
-                .await?
-                .into_iter()
-                .map(InsertReturningPool::PgRow)
-                .collect()),
+            TxConn::Postgres(t) => out.extend(
+                stmt.params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::PgRow),
+            ),
             #[cfg(feature = "mysql")]
-            TxConn::Mysql(_) => {
-                drop(stmt);
-                Err(no_returning())
-            }
+            TxConn::Mysql(_) => unreachable!("refused above"),
             #[cfg(feature = "sqlite")]
-            TxConn::Sqlite(t) => Ok(stmt
-                .params
-                .into_iter()
-                .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
-                .fetch_all(&mut **t)
-                .await?
-                .into_iter()
-                .map(InsertReturningPool::SqliteRow)
-                .collect()),
-        };
-        for row in &rows? {
-            pks.push(generated_pk(row, pk, query.model.table)?);
+            TxConn::Sqlite(t) => out.extend(
+                stmt.params
+                    .into_iter()
+                    .fold(sqlx::query(&stmt.sql), bind_query_sqlite)
+                    .fetch_all(&mut **t)
+                    .await?
+                    .into_iter()
+                    .map(InsertReturningPool::SqliteRow),
+            ),
         }
     }
-    Ok(pks)
+    Ok(out)
 }
 
 /// `UPDATE` inside an open transaction; returns rows affected.

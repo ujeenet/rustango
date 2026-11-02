@@ -40,7 +40,7 @@ async fn seed(pool: &Pool) -> Vec<i64> {
             id: Auto::default(),
             title: t.into(),
         };
-        row.save_pool(pool).await.unwrap();
+        row.save(pool).await.unwrap();
         ids.push(*row.id.get().unwrap());
     }
     ids

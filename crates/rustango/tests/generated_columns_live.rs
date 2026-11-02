@@ -73,7 +73,7 @@ async fn generated_column_is_computed_on_insert() {
         quantity: 4,
         total: 0.0,
     };
-    inv.insert(&pool).await.unwrap();
+    inv.insert(&pool.clone().into()).await.unwrap();
     let id = *inv.id.get().expect("PK assigned by RETURNING");
 
     // Read back through the ORM — the FromRow path decodes the
@@ -102,7 +102,7 @@ async fn generated_column_is_computed_on_insert() {
         quantity: 10,
         total: 99_999.0, // bogus
     };
-    wrong.insert(&pool).await.unwrap();
+    wrong.insert(&pool.clone().into()).await.unwrap();
     let wrong_id = *wrong.id.get().unwrap();
     let rows: Vec<Invoice> = Invoice::objects()
         .where_(Invoice::id.eq(wrong_id))
@@ -137,7 +137,7 @@ async fn generated_column_is_recomputed_on_update() {
         quantity: 2,
         total: 0.0,
     };
-    inv.insert(&pool).await.unwrap();
+    inv.insert(&pool.clone().into()).await.unwrap();
     let id = *inv.id.get().unwrap();
 
     // Mutate price + quantity, save. The generated column should
@@ -146,7 +146,7 @@ async fn generated_column_is_recomputed_on_update() {
     inv.price = 7.5;
     inv.quantity = 4;
     inv.total = 12345.0; // bogus again
-    inv.save(&pool).await.unwrap();
+    inv.save(&pool.clone().into()).await.unwrap();
 
     let rows: Vec<Invoice> = Invoice::objects()
         .where_(Invoice::id.eq(id))

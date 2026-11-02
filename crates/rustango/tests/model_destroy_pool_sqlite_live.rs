@@ -39,7 +39,7 @@ async fn seed_five(pool: &Pool) -> Vec<i64> {
             id: Auto::default(),
             title: t.into(),
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
         pks.push(p.id.get().copied().unwrap());
     }
     pks

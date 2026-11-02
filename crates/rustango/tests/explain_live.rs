@@ -63,7 +63,7 @@ async fn fresh(pool: &sqlx::PgPool) {
             id: Auto::default(),
             label: label.into(),
         };
-        d.insert(pool).await.unwrap();
+        d.insert(&pool.clone().into()).await.unwrap();
     }
 }
 

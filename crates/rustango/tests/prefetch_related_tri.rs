@@ -476,7 +476,7 @@ async fn reverse_fk_on_a_unique_column(pool: &Pool) {
             id,
             code: code.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -485,7 +485,7 @@ async fn reverse_fk_on_a_unique_column(pool: &Pool) {
             id,
             shop: ForeignKey::unloaded(shop.to_owned()),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -515,7 +515,7 @@ async fn reverse_over_a_plain_column(pool: &Pool) {
             id,
             parent_id: parent,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .unwrap();
     }
@@ -557,7 +557,7 @@ async fn reverse_split_keys_load_each_child_once(pool: &Pool) {
         id: 1,
         bin_label: "abc".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let rows: Vec<(Bin, Vec<Part>)> =

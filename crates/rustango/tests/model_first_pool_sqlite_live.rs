@@ -39,12 +39,12 @@ async fn first_pool_returns_some_for_populated_table() {
         id: Auto::default(),
         title: "alpha".into(),
     };
-    p1.save_pool(&pool).await.unwrap();
+    p1.save(&pool).await.unwrap();
     let mut p2 = Post {
         id: Auto::default(),
         title: "beta".into(),
     };
-    p2.save_pool(&pool).await.unwrap();
+    p2.save(&pool).await.unwrap();
 
     let row = Post::first(&pool).await.unwrap();
     assert!(row.is_some());

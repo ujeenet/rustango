@@ -60,7 +60,7 @@ async fn fresh_pool() -> Option<Pool> {
             title: title.into(),
             published: pub_,
         };
-        p.insert_pool(&pool).await.unwrap();
+        p.insert(&pool).await.unwrap();
     }
     Some(pool)
 }

@@ -59,7 +59,7 @@ mod scenarios {
                 price,
                 category: cat.into(),
             };
-            p.save_pool(pool).await.expect("seed row");
+            p.save(pool).await.expect("seed row");
         }
     }
 

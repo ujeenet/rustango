@@ -103,7 +103,7 @@ struct Bare {
 
 async fn bare(pool: &Pool) -> Bare {
     let mut admin = AdminUser::new_with_password(&unique("adm"), ADMIN_PASSWORD, true).unwrap();
-    admin.insert_pool(pool).await.expect("seed admin");
+    admin.insert(pool).await.expect("seed admin");
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
         .with_session_auth(SessionSecret::from_bytes(vec![7u8; 32]))
@@ -158,7 +158,7 @@ impl Bare {
     async fn set_cutoff(&self, at: Option<Ts>) {
         let mut row = self.row().await;
         row.sessions_revoked_at = at;
-        row.save_pool(&self.pool).await.expect("stamp cut-off");
+        row.save(&self.pool).await.expect("stamp cut-off");
     }
 }
 
@@ -218,7 +218,7 @@ async fn a_bare_admin_password_edit_applies_the_policy(pool: &Pool) {
     let env = bare(pool).await;
     let editor = env.login().await;
     let mut other = AdminUser::new_with_password(&unique("pw"), ADMIN_PASSWORD, true).unwrap();
-    other.insert_pool(pool).await.expect("seed admin");
+    other.insert(pool).await.expect("seed admin");
     let uri = format!("/rustango_admin_users/{}", other.id.get().copied().unwrap());
     let edit = |pw: &str| {
         format!(
@@ -254,7 +254,7 @@ async fn deactivating_a_bare_admin_ends_their_sessions(pool: &Pool) {
     let env = bare(pool).await;
     let editor = env.login().await;
     let mut other = AdminUser::new_with_password(&unique("off"), ADMIN_PASSWORD, true).unwrap();
-    other.insert_pool(pool).await.expect("seed admin");
+    other.insert(pool).await.expect("seed admin");
     let form = format!(
         "username={}&password={ADMIN_PASSWORD}&_csrf=t",
         other.username
@@ -311,7 +311,7 @@ async fn the_deactivate_helper_ends_sessions(pool: &Pool) {
         "deactivation not stamped"
     );
     row.active = true;
-    row.save_pool(pool).await.unwrap();
+    row.save(pool).await.unwrap();
     assert!(
         env.status(&cookie).await.is_redirection(),
         "a cookie from before the deactivation came back"
@@ -327,7 +327,7 @@ async fn a_stale_bare_admin_cookie_cannot_revoke(pool: &Pool) {
     let cookie = env.login().await;
     let mut row = env.row().await;
     row.password_hash = "$argon2id$changed".into();
-    row.save_pool(&env.pool).await.unwrap();
+    row.save(&env.pool).await.unwrap();
 
     assert!(env.logout(&cookie).await.is_redirection());
     assert_eq!(env.row().await.sessions_revoked_at, None);
@@ -449,7 +449,7 @@ async fn tenancy(pool: &Pool) -> Tenancy {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&db).await.expect("seed org");
+    org.insert(&db).await.expect("seed org");
     let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
     let secret = SessionSecret::from_bytes(b"tenant-admin-session-secret-32b!".to_vec());
@@ -542,7 +542,7 @@ impl Tenancy {
             password_hash: rustango::tenancy::password::hash(TENANT_PASSWORD).unwrap(),
             ..rustango::testkit::user()
         };
-        user.insert_pool(&self.db).await.expect("seed user");
+        user.insert(&self.db).await.expect("seed user");
         user
     }
 
@@ -558,7 +558,7 @@ impl Tenancy {
     async fn set_user_cutoff(&self, user: &User, at: Option<Ts>) {
         let mut row = self.user_row(user).await;
         row.sessions_revoked_at = at;
-        row.save_pool(&self.db).await.expect("stamp cut-off");
+        row.save(&self.db).await.expect("stamp cut-off");
     }
 
     async fn login(&self, user: &User) -> String {
@@ -598,7 +598,7 @@ impl Tenancy {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(&self.db).await.expect("seed operator");
+        op.insert(&self.db).await.expect("seed operator");
         op
     }
 
@@ -614,7 +614,7 @@ impl Tenancy {
     async fn set_op_cutoff(&self, op: &Operator, at: Option<Ts>) {
         let mut row = self.op_row(op).await;
         row.sessions_revoked_at = at;
-        row.save_pool(&self.db).await.expect("stamp cut-off");
+        row.save(&self.db).await.expect("stamp cut-off");
     }
 
     async fn console_login(&self, op: &Operator) -> String {
@@ -716,7 +716,7 @@ async fn a_stale_tenant_admin_cookie_cannot_revoke(pool: &Pool) {
     let cookie = env.login(&user).await;
     let mut row = env.user_row(&user).await;
     row.password_hash = "$argon2id$changed".into();
-    row.save_pool(&env.db).await.unwrap();
+    row.save(&env.db).await.unwrap();
 
     assert!(env.tenant_logout(&cookie).await.is_redirection());
     assert_eq!(env.user_row(&user).await.sessions_revoked_at, None);
@@ -829,7 +829,7 @@ async fn a_stale_console_cookie_cannot_revoke(pool: &Pool) {
     let cookie = env.console_login(&op).await;
     let mut row = env.op_row(&op).await;
     row.password_hash = "$argon2id$changed".into();
-    row.save_pool(&env.db).await.unwrap();
+    row.save(&env.db).await.unwrap();
 
     assert!(env.console_logout(&cookie).await.is_redirection());
     assert_eq!(env.op_row(&op).await.sessions_revoked_at, None);
@@ -965,7 +965,7 @@ async fn a_member_logout_cutoff_round_trips(pool: &Pool) {
         username: unique("m"),
         ..rustango::testkit::user()
     };
-    user.insert_pool(pool).await.expect("seed user");
+    user.insert(pool).await.expect("seed user");
     let reload = || async {
         User::objects()
             .filter("id", user.id.get().copied().unwrap())

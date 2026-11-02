@@ -55,7 +55,7 @@ async fn spatial_distance_dwithin_and_intersects() {
             name: name.to_owned(),
             location: Point::with_srid(lon, 0.0, 4326),
         };
-        place.save_pool(&pool).await.expect("insert place");
+        place.save(&pool).await.expect("insert place");
     }
     let origin = Point::with_srid(0.0, 0.0, 4326);
 

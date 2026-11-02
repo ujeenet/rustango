@@ -113,7 +113,7 @@ async fn seed(pool: &sqlx::PgPool) {
             is_active: false,
         },
     ] {
-        user.insert(pool).await.unwrap();
+        user.insert(&pool.clone().into()).await.unwrap();
     }
 }
 
@@ -256,7 +256,7 @@ async fn html_escapes_user_provided_strings() {
         age: 30,
         is_active: true,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -782,7 +782,7 @@ async fn seed_n(pool: &sqlx::PgPool, n: i64) {
             age: 30,
             is_active: true,
         }
-        .insert(pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -1329,7 +1329,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         age: 30,
         is_active: true,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     AdminUser {
@@ -1338,7 +1338,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         age: 45,
         is_active: false,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     AdminPost {
@@ -1346,7 +1346,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         title: "hello".into(),
         author_id: 1,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     AdminPost {
@@ -1354,7 +1354,7 @@ async fn seed_blog(pool: &sqlx::PgPool) {
         title: "second".into(),
         author_id: 2,
     }
-    .insert(pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 }
@@ -1664,7 +1664,7 @@ async fn search_and_filter_compose() {
         age: 50,
         is_active: false,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -1706,7 +1706,7 @@ async fn pager_links_preserve_search_and_filters() {
             age: 25,
             is_active: true,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -1717,7 +1717,7 @@ async fn pager_links_preserve_search_and_filters() {
             age: 25,
             is_active: false,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -1761,7 +1761,7 @@ async fn seed_admin_showcase(pool: &sqlx::PgPool) {
             color: color.into(),
             notes: notes.into(),
         }
-        .insert(pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2170,7 +2170,7 @@ async fn list_filter_renders_fk_target_display_name() {
             id,
             name: name.into(),
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2180,7 +2180,7 @@ async fn list_filter_renders_fk_target_display_name() {
             label: label.into(),
             parent_id,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2294,7 +2294,7 @@ async fn readonly_fields_render_input_as_readonly_on_edit() {
         title: "first".into(),
         created_by: "alice".into(),
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -2333,7 +2333,7 @@ async fn readonly_fields_are_skipped_on_update_submit() {
         title: "first".into(),
         created_by: "alice".into(),
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -2398,7 +2398,7 @@ async fn user_defined_action_runs_via_register_tx_action() {
             title: title.into(),
             is_published: false,
         }
-        .insert(&pool)
+        .insert(&pool.clone().into())
         .await
         .unwrap();
     }
@@ -2457,7 +2457,7 @@ async fn allowlisted_action_without_handler_returns_500() {
         title: "x".into(),
         is_published: false,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 

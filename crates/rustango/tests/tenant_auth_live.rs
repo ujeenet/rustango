@@ -75,7 +75,7 @@ async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org 
         host_pattern: Some(format!("{slug}.app.test")),
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     org
 }
 
@@ -429,7 +429,7 @@ async fn superuser_login_grants_read_write_admin() {
         id: Auto::default(),
         label: "rw_marker".into(),
     };
-    w.insert(&pool).await.unwrap();
+    w.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
@@ -522,7 +522,7 @@ async fn non_superuser_session_forces_read_only_admin() {
         id: Auto::default(),
         label: "ro_marker".into(),
     };
-    w.insert(&pool).await.unwrap();
+    w.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = build_app(pools, url);
@@ -667,7 +667,7 @@ async fn admin_write_records_user_source_via_with_source_install() {
         id: Auto::default(),
         label: "before-edit".into(),
     };
-    w.insert(&pool).await.unwrap();
+    w.insert(&pool.clone().into()).await.unwrap();
     let widget_pk = w.id.get().copied().unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));

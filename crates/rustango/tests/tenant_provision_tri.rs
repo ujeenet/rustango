@@ -514,7 +514,7 @@ impl Console {
             password_changed_at: None,
             sessions_revoked_at: None,
         };
-        op.insert_pool(registry).await.expect("seed operator");
+        op.insert(registry).await.expect("seed operator");
         let dir = migrations.to_owned();
         let app = typed!(registry, p => {
             let pools = std::sync::Arc::new(p);
@@ -1408,7 +1408,7 @@ async fn the_api_creates_on_a_saved_server(pool: &Pool) {
         created: false,
         created_at: rustango::sql::Auto::default(),
     };
-    ghost.insert_pool(&env.registry).await.unwrap();
+    ghost.insert(&env.registry).await.unwrap();
     // Only the record is left to say so.
     let orgs = Org::objects()
         .where_(Org::slug.eq(a.clone()))
@@ -1594,7 +1594,7 @@ async fn an_interrupted_run_is_reclaimed(pool: &Pool) {
         created: true,
         created_at: rustango::sql::Auto::default(),
     };
-    record.insert_pool(&env.registry).await.unwrap();
+    record.insert(&env.registry).await.unwrap();
     let req = ProvisionRequest::on_server(&a, "main");
 
     let err = env

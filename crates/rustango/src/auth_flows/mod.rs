@@ -1166,7 +1166,7 @@ mod tests {
             password_hash: "OLD".into(),
             ..crate::testkit::user()
         };
-        u.insert_pool(&pool).await.unwrap();
+        u.insert(&pool).await.unwrap();
         let id = *u.id.get().unwrap();
         let tenant = crate::extractors::Tenant::for_test_sqlite(org("b", 2), sq);
         let ttl = Duration::from_secs(600);
@@ -1205,7 +1205,7 @@ mod tests {
             password_hash: "OLD".into(),
             ..crate::testkit::user()
         };
-        u.insert_pool(&pool).await.unwrap();
+        u.insert(&pool).await.unwrap();
         let id = *u.id.get().unwrap();
         let scope = crate::extractors::TenantScope::for_test(org("b", 2), pool);
         let ttl = Duration::from_secs(600);

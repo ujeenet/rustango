@@ -341,7 +341,7 @@ pub(crate) fn signals_suppressed() -> bool {
 ///
 /// without_signals(async {
 ///     for row in batch {
-///         row.save_pool(&pool).await?;
+///         row.save(&pool).await?;
 ///     }
 ///     Ok::<_, ExecError>(())
 /// }).await?;
@@ -357,7 +357,7 @@ where
 /// You still make the save call; this only wraps it.
 ///
 /// ```ignore
-/// signals::save_quietly(post.save_pool(&pool)).await?;
+/// signals::save_quietly(post.save(&pool)).await?;
 /// ```
 pub async fn save_quietly<F, R>(fut: F) -> R
 where

@@ -408,7 +408,7 @@ pub(super) async fn create(
         if matches!(exists, Ok(true)) {
             return Err(taken);
         }
-        match row.insert_pool(&state.registry).await {
+        match row.insert(&state.registry).await {
             Err(e) if e.is_unique_violation() => Err(taken),
             other => Ok(other),
         }
@@ -556,7 +556,7 @@ pub(super) async fn edit_submit(
             Some(&msg),
         );
     }
-    if let Err(e) = row.save_pool(&state.registry).await {
+    if let Err(e) = row.save(&state.registry).await {
         return server_error("update failed", &e);
     }
     let d = detail(&row, Some(!form.client_secret.is_empty()));
@@ -640,7 +640,7 @@ pub(super) async fn delete(
         Ok(None) => return (StatusCode::NOT_FOUND, "no such shared provider").into_response(),
         Err(resp) => return resp,
     };
-    if let Err(e) = r.delete_pool(&state.registry).await {
+    if let Err(e) = r.delete(&state.registry).await {
         return server_error("delete failed", &e);
     }
     let mut detail = serde_json::Map::new();

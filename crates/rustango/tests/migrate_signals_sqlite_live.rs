@@ -180,7 +180,7 @@ async fn target_receivers_get_the_migrated_pool() {
                 id: Auto::default(),
                 label: "seeded".into(),
             }
-            .insert_pool(&target.pool)
+            .insert(&target.pool)
             .await
             .is_ok();
             s.lock().await.push((rows, target.tenant));

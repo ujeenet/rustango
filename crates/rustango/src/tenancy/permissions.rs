@@ -443,7 +443,7 @@ pub async fn create_role_pool(
         description: description.to_owned(),
         data: serde_json::Value::Object(serde_json::Map::new()),
     };
-    role.save_pool(pool).await?;
+    role.save(pool).await?;
     Ok(role.id.get().copied().unwrap_or(0))
 }
 

@@ -85,7 +85,7 @@ async fn apply_all_creates_every_registered_table() {
         age: 30,
         is_active: true,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -94,7 +94,7 @@ async fn apply_all_creates_every_registered_table() {
         title: "hello".into(),
         author_id: 1,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
 
@@ -126,7 +126,7 @@ async fn fk_constraint_is_enforced_by_db() {
         title: "orphan".into(),
         author_id: 999, // no such user
     };
-    let err = bad.insert(&pool).await.unwrap_err();
+    let err = bad.insert(&pool.clone().into()).await.unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("foreign key") || msg.contains("violates"),
@@ -210,9 +210,12 @@ async fn apply_all_creates_unique_together() {
         a: 1,
         b: 2,
     };
-    pair().insert(&pool).await.expect("first row");
+    pair()
+        .insert(&pool.clone().into())
+        .await
+        .expect("first row");
     assert!(
-        pair().insert(&pool).await.is_err(),
+        pair().insert(&pool.clone().into()).await.is_err(),
         "apply_all left `unique_together` out"
     );
     migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
@@ -247,7 +250,7 @@ async fn auto_pk_insert_populates_id_from_sequence() {
         name: "alice".into(),
     };
     assert!(alice.id.is_unset());
-    alice.insert(&pool).await.unwrap();
+    alice.insert(&pool.clone().into()).await.unwrap();
     assert!(alice.id.is_set(), "id must be populated after insert");
     let alice_id = *alice.id.get().unwrap();
     assert!(
@@ -259,7 +262,7 @@ async fn auto_pk_insert_populates_id_from_sequence() {
         id: Auto::Unset,
         name: "bob".into(),
     };
-    bob.insert(&pool).await.unwrap();
+    bob.insert(&pool.clone().into()).await.unwrap();
     let bob_id = *bob.id.get().unwrap();
     assert!(
         bob_id > alice_id,
@@ -289,7 +292,7 @@ async fn auto_pk_set_value_is_honored() {
         id: Auto::Set(9999),
         name: "explicit".into(),
     };
-    explicit.insert(&pool).await.unwrap();
+    explicit.insert(&pool.clone().into()).await.unwrap();
     assert_eq!(*explicit.id.get().unwrap(), 9999);
 
     migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
@@ -315,7 +318,9 @@ async fn bulk_insert_non_auto_model_writes_n_rows_one_round_trip() {
         })
         .collect();
 
-    MigUser::bulk_insert(&rows, &pool).await.unwrap();
+    MigUser::bulk_insert(&rows, &pool.clone().into())
+        .await
+        .unwrap();
 
     let fetched: Vec<MigUser> = MigUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 10, "all 10 rows should be present");
@@ -342,7 +347,9 @@ async fn bulk_insert_auto_model_unset_path_populates_each_pk() {
         })
         .collect();
 
-    AutoUser::bulk_insert(&mut rows, &pool).await.unwrap();
+    AutoUser::bulk_insert(&mut rows, &pool.clone().into())
+        .await
+        .unwrap();
 
     // Every row's id is now Set, in strictly-ascending order.
     let mut last: i64 = 0;
@@ -377,7 +384,9 @@ async fn bulk_insert_auto_model_all_set_path_honors_supplied_ids() {
         })
         .collect();
 
-    AutoUser::bulk_insert(&mut rows, &pool).await.unwrap();
+    AutoUser::bulk_insert(&mut rows, &pool.clone().into())
+        .await
+        .unwrap();
 
     for (i, r) in rows.iter().enumerate() {
         assert_eq!(*r.id.get().unwrap(), 100 + i as i64);
@@ -409,7 +418,9 @@ async fn bulk_insert_auto_model_mixed_set_unset_is_rejected() {
         },
     ];
 
-    let err = AutoUser::bulk_insert(&mut rows, &pool).await.unwrap_err();
+    let err = AutoUser::bulk_insert(&mut rows, &pool.clone().into())
+        .await
+        .unwrap_err();
     let msg = format!("{err}");
     assert!(
         msg.contains("mixed Set/Unset") || msg.contains("Auto"),
@@ -434,9 +445,13 @@ async fn bulk_insert_empty_slice_is_noop() {
     migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     let mut empty: Vec<AutoUser> = Vec::new();
-    AutoUser::bulk_insert(&mut empty, &pool).await.unwrap();
+    AutoUser::bulk_insert(&mut empty, &pool.clone().into())
+        .await
+        .unwrap();
     let empty_non_auto: Vec<MigUser> = Vec::new();
-    MigUser::bulk_insert(&empty_non_auto, &pool).await.unwrap();
+    MigUser::bulk_insert(&empty_non_auto, &pool.clone().into())
+        .await
+        .unwrap();
 
     let fetched: Vec<AutoUser> = AutoUser::objects().fetch_on(&pool).await.unwrap();
     assert_eq!(fetched.len(), 0);
@@ -465,7 +480,7 @@ async fn apply_all_is_safe_to_call_after_drop_all() {
         age: 25,
         is_active: true,
     }
-    .insert(&pool)
+    .insert(&pool.clone().into())
     .await
     .unwrap();
     let count = MigUser::objects()

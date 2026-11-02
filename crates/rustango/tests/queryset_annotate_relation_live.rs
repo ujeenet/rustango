@@ -69,7 +69,7 @@ async fn seed_author(pool: &rustango::sql::Pool, name: &str, page_counts: &[i64]
         id: Auto::default(),
         name: name.into(),
     };
-    author.save_pool(pool).await.unwrap();
+    author.save(pool).await.unwrap();
     let id = *author.id.get().unwrap();
     for (i, pages) in page_counts.iter().enumerate() {
         let mut book = Book {
@@ -78,7 +78,7 @@ async fn seed_author(pool: &rustango::sql::Pool, name: &str, page_counts: &[i64]
             author_id: ForeignKey::from(id),
             pages: *pages,
         };
-        book.save_pool(pool).await.unwrap();
+        book.save(pool).await.unwrap();
     }
     id
 }

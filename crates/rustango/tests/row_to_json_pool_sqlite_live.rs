@@ -58,7 +58,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
         active: true,
         weight: 1.5,
     };
-    a.insert_pool(&pool).await.expect("insert alpha");
+    a.insert(&pool).await.expect("insert alpha");
     let mut b = Widget {
         id: Auto::default(),
         name: "beta".into(),
@@ -66,7 +66,7 @@ async fn select_rows_as_json_pool_decodes_sqlite_rows() {
         active: false,
         weight: 2.5,
     };
-    b.insert_pool(&pool).await.expect("insert beta");
+    b.insert(&pool).await.expect("insert beta");
 
     let fields = fields();
     let mut q = SelectQuery::new(Widget::SCHEMA);
@@ -111,7 +111,7 @@ async fn select_one_row_as_json_pool_returns_decoded_row_for_hit() {
         active: true,
         weight: 3.14,
     };
-    w.insert_pool(&pool).await.expect("insert gamma");
+    w.insert(&pool).await.expect("insert gamma");
     let pk = w.id.get().copied().expect("gamma pk");
 
     let fields = fields();

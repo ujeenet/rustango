@@ -298,7 +298,7 @@ where
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await?;
+    op.insert(&registry).await?;
     Ok(op)
 }
 

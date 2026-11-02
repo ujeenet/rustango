@@ -1401,7 +1401,7 @@ async fn create_tenant_refuses_a_schema_another_tenant_uses() {
         schema_name: None,
         ..rustango::testkit::org()
     };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+    org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
     let other = unique("other");
@@ -1467,7 +1467,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
         schema_name: Some(shared.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&registry).await.unwrap();
+    org.save(&registry).await.unwrap();
 
     let username = unique("op");
     let mut op = rustango::tenancy::Operator {
@@ -1479,7 +1479,7 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert_pool(&registry).await.unwrap();
+    op.insert(&registry).await.unwrap();
     let provisioner = Provisioner::new(pools.clone(), url.clone(), &dir).erased();
     let app = router_with_provisioning(
         registry.clone(),
@@ -1568,7 +1568,7 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
         database_url: Some("postgres://example@db.example.com/x".into()),
         ..rustango::testkit::org()
     };
-    db_org.save_pool(&registry).await.unwrap();
+    db_org.save(&registry).await.unwrap();
     let moved = unique("moved");
     let elsewhere = unique("elsewhere");
     let mut schema_org = Org {
@@ -1578,7 +1578,7 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
         schema_name: Some(elsewhere.clone()),
         ..rustango::testkit::org()
     };
-    schema_org.save_pool(&registry).await.unwrap();
+    schema_org.save(&registry).await.unwrap();
 
     for taken_slug in [&db_slug, &moved] {
         let fresh = unique("fresh");
@@ -1640,7 +1640,7 @@ async fn check_deploy_does_not_wait_on_silent_tenants() {
             database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
             ..rustango::testkit::org()
         };
-        org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+        org.save(&rustango::sql::Pool::from(pool.clone()))
             .await
             .unwrap();
     }
@@ -1702,7 +1702,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         schema_name: Some(slug.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+    org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
     let pools = TenantPools::new(pool.clone());
@@ -1719,7 +1719,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         email: Some("ann@example.com".into()),
         ..rustango::testkit::user()
     };
-    user.insert_pool(&tenant).await.unwrap();
+    user.insert(&tenant).await.unwrap();
     SsoProvider {
         id: Auto::default(),
         slug: "corp".into(),
@@ -1753,7 +1753,7 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     }
-    .insert_pool(&tenant)
+    .insert(&tenant)
     .await
     .unwrap();
 
@@ -1799,7 +1799,7 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
         schema_name: Some(ghost.clone()),
         ..rustango::testkit::org()
     };
-    org.save_pool(&rustango::sql::Pool::from(pool.clone()))
+    org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
     let pools = TenantPools::new(pool.clone());

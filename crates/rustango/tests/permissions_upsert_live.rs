@@ -84,7 +84,7 @@ async fn make_user(pool: &sqlx::PgPool, username_prefix: &str) -> i64 {
         // The rest from testkit, so a feature-gated field cannot break the literal.
         ..rustango::testkit::user()
     };
-    user.insert(pool).await.unwrap();
+    user.insert(&pool.clone().into()).await.unwrap();
     *user.id.get().expect("PK assigned by RETURNING")
 }
 

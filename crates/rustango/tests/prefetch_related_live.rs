@@ -91,17 +91,17 @@ async fn prefetch_groups_children_under_parents() {
         id: Auto::default(),
         name: "Ada".into(),
     };
-    ada.save(&pool).await.unwrap();
+    ada.save(&pool.clone().into()).await.unwrap();
     let mut grace = Author {
         id: Auto::default(),
         name: "Grace".into(),
     };
-    grace.save(&pool).await.unwrap();
+    grace.save(&pool.clone().into()).await.unwrap();
     let mut linus = Author {
         id: Auto::default(),
         name: "Linus".into(),
     };
-    linus.save(&pool).await.unwrap(); // no posts — should still appear with empty Vec
+    linus.save(&pool.clone().into()).await.unwrap(); // no posts — should still appear with empty Vec
 
     let ada_pk = ada.id.get().copied().unwrap();
     let grace_pk = grace.id.get().copied().unwrap();
@@ -116,7 +116,7 @@ async fn prefetch_groups_children_under_parents() {
             title: title.into(),
             author: ForeignKey::unloaded(fk),
         };
-        p.save(&pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
 
     let groups: Vec<(Author, Vec<Post>)> =
@@ -171,13 +171,13 @@ async fn on_reads_are_counted_and_stay_flat() {
             id: Auto::default(),
             name: name.into(),
         };
-        a.save(&pool).await.unwrap();
+        a.save(&pool.clone().into()).await.unwrap();
         let mut p = Post {
             id: Auto::default(),
             title: format!("{name} post"),
             author: ForeignKey::unloaded(a.id.get().copied().unwrap()),
         };
-        p.save(&pool).await.unwrap();
+        p.save(&pool.clone().into()).await.unwrap();
     }
     assert_num_queries(1, async {
         let rows = rustango::sql::annotate_count_children_on(

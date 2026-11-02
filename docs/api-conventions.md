@@ -122,7 +122,7 @@ The rule of thumb: if a method waits on something (the database, network, or dis
 Every ORM call takes a pool or executor (the database handle) as its **last** argument. You pass the connection in every time, rather than relying on a hidden global:
 
 ```rust
-post.save_pool(&pool).await?
+post.save(&pool).await?
 Post::objects().filter(...).fetch_on(&pool).await?
 send_post_save(&post, ctx).await                  // ⚠️ no pool — signals are pool-free
 ```

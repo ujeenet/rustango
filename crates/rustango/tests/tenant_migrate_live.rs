@@ -262,7 +262,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    acme.insert(&pool).await.unwrap();
+    acme.insert(&pool.clone().into()).await.unwrap();
 
     let mut globex = Org {
         id: Auto::default(),
@@ -277,7 +277,7 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    globex.insert(&pool).await.unwrap();
+    globex.insert(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("tenant_fanout");
     let mig_name = unique("0001_items");
@@ -416,7 +416,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    active.insert(&pool).await.unwrap();
+    active.insert(&pool.clone().into()).await.unwrap();
 
     let mut inactive = Org {
         id: Auto::default(),
@@ -432,7 +432,7 @@ async fn tenant_migrate_skips_inactive_orgs() {
         active: false,
         ..rustango::testkit::org()
     };
-    inactive.insert(&pool).await.unwrap();
+    inactive.insert(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("inactive_skip");
     let mig_name = unique("0001_thing");
@@ -499,7 +499,7 @@ async fn tenants_after_the_registry_restore_the_schema() {
             path_prefix: None,
             ..rustango::testkit::org()
         };
-        org.insert(&pg).await.unwrap();
+        org.insert(&pg.clone().into()).await.unwrap();
     }
     for label in ["1988_deploy1", "1988_deploy2"] {
         let dir = fresh_dir(label).join("migrations");
@@ -565,7 +565,7 @@ async fn schema_mode_tenants_share_citext() {
             path_prefix: None,
             ..rustango::testkit::org()
         };
-        org.insert(&pool).await.unwrap();
+        org.insert(&pool.clone().into()).await.unwrap();
     }
     let dir = fresh_dir("tenant_citext");
     let table: rmig::TableSnapshot = serde_json::from_value(serde_json::json!({

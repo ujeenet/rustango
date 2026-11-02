@@ -138,7 +138,7 @@ async fn edit_page_round_trips_generic_inline_update_delete_insert() {
         id: Auto::Unset,
         title: "Tagged".into(),
     };
-    post.save_pool(&p).await.unwrap();
+    post.save(&p).await.unwrap();
     let post_pk = *post.id.get().unwrap();
 
     let mut tag_keep = Tag {
@@ -151,7 +151,7 @@ async fn edit_page_round_trips_generic_inline_update_delete_insert() {
         .set_content_object_for::<Post>(&p, post_pk)
         .await
         .unwrap();
-    tag_keep.save_pool(&p).await.unwrap();
+    tag_keep.save(&p).await.unwrap();
     let keep_id = *tag_keep.id.get().unwrap();
 
     let mut tag_drop = Tag {
@@ -164,7 +164,7 @@ async fn edit_page_round_trips_generic_inline_update_delete_insert() {
         .set_content_object_for::<Post>(&p, post_pk)
         .await
         .unwrap();
-    tag_drop.save_pool(&p).await.unwrap();
+    tag_drop.save(&p).await.unwrap();
     let drop_id = *tag_drop.id.get().unwrap();
 
     // GET edit form — assert the generic-inline FormSet renders.
@@ -301,14 +301,14 @@ async fn generic_inline_update_cannot_reparent_via_form_payload() {
         id: Auto::Unset,
         title: "A".into(),
     };
-    post_a.save_pool(&p).await.unwrap();
+    post_a.save(&p).await.unwrap();
     let post_a_pk = *post_a.id.get().unwrap();
 
     let mut post_b = Post {
         id: Auto::Unset,
         title: "B".into(),
     };
-    post_b.save_pool(&p).await.unwrap();
+    post_b.save(&p).await.unwrap();
     let post_b_pk = *post_b.id.get().unwrap();
 
     let mut tag = Tag {
@@ -320,7 +320,7 @@ async fn generic_inline_update_cannot_reparent_via_form_payload() {
     tag.set_content_object_for::<Post>(&p, post_a_pk)
         .await
         .unwrap();
-    tag.save_pool(&p).await.unwrap();
+    tag.save(&p).await.unwrap();
     let tag_id = *tag.id.get().unwrap();
 
     // POST an edit of Post A that tries to reparent the tag to Post B
@@ -383,13 +383,13 @@ async fn generic_inline_cannot_touch_another_parents_row() {
         id: Auto::Unset,
         title: "A".into(),
     };
-    post_a.save_pool(&p).await.unwrap();
+    post_a.save(&p).await.unwrap();
     let post_a_pk = *post_a.id.get().unwrap();
     let mut post_b = Post {
         id: Auto::Unset,
         title: "B".into(),
     };
-    post_b.save_pool(&p).await.unwrap();
+    post_b.save(&p).await.unwrap();
 
     let mut tag = Tag {
         id: Auto::Unset,
@@ -400,7 +400,7 @@ async fn generic_inline_cannot_touch_another_parents_row() {
     tag.set_content_object_for::<Post>(&p, *post_b.id.get().unwrap())
         .await
         .unwrap();
-    tag.save_pool(&p).await.unwrap();
+    tag.save(&p).await.unwrap();
     let tag_id_s = tag.id.get().unwrap().to_string();
 
     for delete in [false, true] {
@@ -511,7 +511,7 @@ async fn generic_inline_past_the_cap_saves_and_links_the_rest() {
             id: Auto::Unset,
             title: title.into(),
         };
-        post.save_pool(&p).await.unwrap();
+        post.save(&p).await.unwrap();
         posts.push(*post.id.get().unwrap());
     }
     let (pk, other) = (posts[0], posts[1]);

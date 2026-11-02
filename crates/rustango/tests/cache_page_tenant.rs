@@ -40,7 +40,7 @@ async fn registry() -> Pool {
             backend_kind: "sqlite".into(),
             ..rustango::testkit::org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
     }
     pool
 }
@@ -267,7 +267,7 @@ async fn server_builder_keys_the_page_on_the_tenant() {
             backend_kind: "sqlite".into(),
             ..rustango::testkit::org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
     }
     let hits = Arc::new(AtomicU32::new(0));
     let api = page(hits.clone()).layer(CachePageLayer::new(Arc::new(InMemoryCache::new())));
@@ -334,14 +334,14 @@ async fn a_reused_slug_does_not_get_the_purged_tenants_page() {
         .await
         .unwrap()
         .remove(0);
-    old.delete_pool(&registry).await.unwrap();
+    old.delete(&registry).await.unwrap();
     let mut heir = Org {
         slug: "acme".into(),
         display_name: "acme".into(),
         backend_kind: "sqlite".into(),
         ..rustango::testkit::org()
     };
-    heir.insert_pool(&registry).await.unwrap();
+    heir.insert(&registry).await.unwrap();
     assert_ne!(heir.id.get(), old.id.get());
     rustango::tenancy::invalidate_org_cache();
 

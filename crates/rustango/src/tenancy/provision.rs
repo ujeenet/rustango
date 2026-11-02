@@ -2524,7 +2524,7 @@ async fn reclaim(
                 login.name()
             )));
         }
-        record.delete_pool(registry).await?;
+        record.delete(registry).await?;
         let text = RunText::about_database(
             "dropped what an interrupted run left",
             name,
@@ -2543,7 +2543,7 @@ async fn reclaim(
              server and retry"
         )));
     }
-    record.delete_pool(registry).await?;
+    record.delete(registry).await?;
     Ok(())
 }
 
@@ -2660,7 +2660,7 @@ impl ServerDatabase {
             created: false,
             created_at: Auto::default(),
         };
-        if let Err(e) = record.insert_pool(registry).await {
+        if let Err(e) = record.insert(registry).await {
             let e = if e.is_unique_violation() {
                 TenancyError::Validation(format!(
                     "another run is creating database `{name}` on server `{}`; try again in a few \
@@ -2704,7 +2704,7 @@ impl ServerDatabase {
             Err(e) => {
                 // Nothing of ours exists: the create made nothing or undid it,
                 // or found someone else's database.
-                if let Err(d) = record.clone().delete_pool(registry).await {
+                if let Err(d) = record.clone().delete(registry).await {
                     tracing::warn!(target: "rustango::tenancy::provision", error = %d, "could not delete the record of a failed create");
                 }
                 return rep.fail(last, e.into()).await;
@@ -2846,7 +2846,7 @@ impl ServerDatabase {
         };
         // The database is gone either way. A record left behind still says
         // `created`, and a retry reclaims it with a no-op drop.
-        let record = self.record.delete_pool(&registry).await.map(drop);
+        let record = self.record.delete(&registry).await.map(drop);
         let rows = tenant_row.and(record.map_err(TenancyError::from));
         match rows {
             Ok(()) => {

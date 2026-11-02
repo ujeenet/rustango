@@ -36,7 +36,7 @@ async fn insert(pool: &Pool, slug: &str) {
         id: Auto::default(),
         slug: slug.into(),
     };
-    row.save_pool(pool).await.unwrap();
+    row.save(pool).await.unwrap();
 }
 
 #[tokio::test]

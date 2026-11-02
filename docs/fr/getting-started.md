@@ -478,7 +478,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         published_at: Auto::default(),
         deleted_at: None,
     };
-    p.save_pool(&pool).await?;
+    p.save(&pool).await?;
     println!("created post id = {}", p.id.get().copied().unwrap());
 
     // READ
@@ -496,7 +496,7 @@ Ce qui se passe ici, en termes simples :
 - `pool` est le pool de connexions à la base de données partagé. Vous passez une référence à celui-ci (`&pool`) dans les appels de requête plutôt que d'ouvrir une nouvelle connexion chaque fois.
 - Les appels à la base de données sont asynchrones, donc chacun se termine par `.await` — cela met en pause jusqu'à ce que le résultat revienne, puis continue. Le `?` après un `.await` signifie « si ceci a échoué, arrête et renvoie l'erreur ».
 - `main` renvoie un `Result`, le type succès-ou-erreur de Rust, ce qui explique pourquoi `?` et le `Ok(())` final fonctionnent.
-- Pour enregistrer une ligne, appelez `.save_pool(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch(&pool)` — sans filtre, cela renvoie toutes les lignes de la table.
+- Pour enregistrer une ligne, appelez `.save(&pool)` sur celle-ci. Pour lire des lignes, construisez une requête avec `Post::objects()` et exécutez-la avec `.fetch(&pool)` — sans filtre, cela renvoie toutes les lignes de la table.
 - `.fetch(…)` provient du trait `FetcherPool`, c'est pourquoi les imports l'incluent. Sans cette ligne, la méthode n'existe pas et le compilateur vous le signale sans expliquer pourquoi.
 - Ce sont là les appels multi-backend, et tout ce qui précède compile sans modification sur les trois bases de données. Il existe aussi `.save(&pool)`, qui prend un `sqlx::PgPool` propre au pilote et n'existe que lorsque la feature `postgres` est activée. Préférez la paire multi-backend, sauf si vous visez délibérément une seule base de données. Voir le [guide de l'ORM](orm.md).
 

@@ -82,7 +82,7 @@ async fn pool_write_inside_a_default_atomic(pool: &Pool) {
             id: 1,
             worker: None,
         }
-        .insert_pool(&p)
+        .insert(&p)
         .await?;
         Ok(())
     })
@@ -109,10 +109,7 @@ async fn race(pool: &Pool, claim: impl for<'a> Fn(&'a Pool, i64) -> Claim<'a>) {
     for round in 0..20 {
         Job::objects().delete_on(pool).await.expect("clear");
         for id in [1, 2] {
-            Job { id, worker: None }
-                .insert_pool(pool)
-                .await
-                .expect("job");
+            Job { id, worker: None }.insert(pool).await.expect("job");
         }
         let barrier = tokio::sync::Barrier::new(2);
         let run = |worker: i64| {

@@ -1672,7 +1672,7 @@ mod tests {
             active: false,
             ..crate::testkit::org()
         };
-        org.insert_pool(&registry).await.unwrap();
+        org.insert(&registry).await.unwrap();
         let id = *org.id.get().unwrap();
         let mut record = TenantDatabase {
             id: Auto::default(),
@@ -1684,7 +1684,7 @@ mod tests {
             created: true,
             created_at: Auto::default(),
         };
-        record.insert_pool(&registry).await.unwrap();
+        record.insert(&registry).await.unwrap();
 
         let pools = TenantPools::new(pg.clone());
         let parsed = parse_args(&s(&["acme", "--to", "schema"])).unwrap();

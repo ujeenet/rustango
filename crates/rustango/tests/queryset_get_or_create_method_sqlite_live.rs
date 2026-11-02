@@ -48,7 +48,7 @@ async fn get_or_create_creates_when_missing() {
                     slug: "hello".into(),
                     title: "Hello!".into(),
                 };
-                p.save_pool(&pool).await?;
+                p.save(&pool).await?;
                 Ok(p)
             },
             &pool,
@@ -67,7 +67,7 @@ async fn get_or_create_returns_existing_row() {
         slug: "hello".into(),
         title: "Original".into(),
     };
-    existing.save_pool(&pool).await.unwrap();
+    existing.save(&pool).await.unwrap();
 
     let (post, created) = Post::objects()
         .filter("slug", "hello".to_string())
@@ -95,7 +95,7 @@ async fn first_or_create_is_alias_for_get_or_create() {
                     slug: "x".into(),
                     title: "Xebra".into(),
                 };
-                p.save_pool(&pool).await?;
+                p.save(&pool).await?;
                 Ok(p)
             },
             &pool,
@@ -114,14 +114,14 @@ async fn update_or_create_updates_existing_row() {
         slug: "hello".into(),
         title: "Old".into(),
     };
-    existing.save_pool(&pool).await.unwrap();
+    existing.save(&pool).await.unwrap();
 
     let (post, created) = Post::objects()
         .filter("slug", "hello".to_string())
         .update_or_create(
             |pool, mut row| async move {
                 row.title = "New".into();
-                row.save_pool(&pool).await?;
+                row.save(&pool).await?;
                 Ok(row)
             },
             |_pool| async move { panic!("should hit update branch") },
@@ -146,7 +146,7 @@ async fn update_or_create_creates_when_missing() {
                     slug: "fresh".into(),
                     title: "Fresh".into(),
                 };
-                p.save_pool(&pool).await?;
+                p.save(&pool).await?;
                 Ok(p)
             },
             &pool,

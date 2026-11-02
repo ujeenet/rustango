@@ -39,7 +39,7 @@ async fn find_or_insert_returns_existing_row() {
         id: Auto::default(),
         title: "existing".into(),
     };
-    p.save_pool(&pool).await.unwrap();
+    p.save(&pool).await.unwrap();
     let pk = p.id.get().copied().unwrap();
 
     let (found, exists) = Post::find_or_insert(pk, &pool, || Post {

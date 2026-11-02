@@ -136,7 +136,7 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
         host_pattern: Some(format!("{slug}.app.test")),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let ctx = tenant_ctx(&pool);
 
@@ -181,7 +181,7 @@ async fn throttle_budgets_are_per_tenant() {
         database_url: Some(std::env::var("DATABASE_URL").unwrap()),
         ..rustango::testkit::org()
     };
-    org_b.insert(&pool).await.unwrap();
+    org_b.insert(&pool.clone().into()).await.unwrap();
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
         .throttle_all(1, 60)
         .tenant_router("/api/widgets")
@@ -212,7 +212,7 @@ async fn throttled_with_dead_tenant() -> Option<(String, axum::Router)> {
         database_url: Some("postgres://nobody:x@127.0.0.1:1/none".into()),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
     let mut ctx = Arc::into_inner(tenant_ctx(&pool)).unwrap();
     ctx.pools = Arc::new(TenantPools::new(pool).config(TenantPoolsConfig {
         database_pool_acquire_timeout: std::time::Duration::from_secs(1),

@@ -120,7 +120,7 @@ async fn seed(pool: &Pool) -> (i64, String) {
         password_hash: "old-hash".into(),
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("seed");
+    u.insert(pool).await.expect("seed");
     (*u.id.get().expect("pk"), u.username)
 }
 

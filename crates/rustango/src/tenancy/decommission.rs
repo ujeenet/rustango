@@ -833,7 +833,7 @@ where
     // server's admin, not the tenant login it already dropped.
     if let DropPlan::Server(s) = plan {
         rep.started(Step::DeleteRecord).await;
-        if let Err(e) = s.tenant.record.clone().delete_pool(registry).await {
+        if let Err(e) = s.tenant.record.clone().delete(registry).await {
             return rep.fail(Step::DeleteRecord, e.into()).await;
         }
         rep.ok(Step::DeleteRecord).await;
@@ -920,7 +920,7 @@ pub(crate) async fn remove_org_row(
         .set("org_id", None::<i64>)
         .execute_pool(registry)
         .await?;
-    let deleted = org.clone().delete_pool(registry).await?;
+    let deleted = org.clone().delete(registry).await?;
     if deleted == 0 {
         return Err(TenancyError::Validation(format!(
             "no Org row deleted for id {id} — race condition?"

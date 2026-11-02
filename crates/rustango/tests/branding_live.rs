@@ -102,7 +102,7 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
         password_changed_at: None,
         sessions_revoked_at: None,
     };
-    op.insert(pool).await.unwrap();
+    op.insert(&pool.clone().into()).await.unwrap();
 
     let slug = format!(
         "brand_acme_{}",
@@ -121,7 +121,7 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    org.insert(pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let secret = SessionSecret::from_env_or_random();
@@ -405,7 +405,7 @@ async fn tenant_admin_renders_brand_overrides() {
         theme_mode: Some("dark".into()),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = HeaderResolver::default();

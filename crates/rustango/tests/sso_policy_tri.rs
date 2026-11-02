@@ -175,7 +175,7 @@ async fn provider(pool: &Pool, slug: &str, allow_email_link: bool) {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("insert provider");
 }
@@ -524,7 +524,7 @@ async fn pre_migration_body(pool: Pool) {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let p = resolve_by_slug(pool, "old", String::new())
@@ -547,7 +547,7 @@ async fn pre_migration_body(pool: Pool) {
         user_id: 9,
         created_at: Auto::default(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let old = One(Some(Account::new(9, false, true)));
@@ -589,7 +589,7 @@ async fn partly_migrated_body(pool: Pool) {
         created_at: Auto::default(),
         updated_at: Auto::default(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     let p = resolve_by_slug(pool, "half", String::new())
@@ -667,7 +667,7 @@ async fn invite(pool: &Pool, target: &str, roles: Option<&str>, max: Option<i32>
         link_key: None,
         created_at: Auto::default(),
     };
-    i.insert_pool(pool).await.unwrap();
+    i.insert(pool).await.unwrap();
     i
 }
 
@@ -686,7 +686,7 @@ async fn relink_invite(pool: &Pool, slug: &str, email: &str, user_id: i64) -> Ss
     let mut inv = invite(pool, email, None, Some(1)).await;
     inv.link_user_id = Some(user_id);
     inv.link_key = Some(key_of(pool, slug).await);
-    inv.save_pool(pool).await.unwrap();
+    inv.save(pool).await.unwrap();
     inv
 }
 
@@ -723,7 +723,7 @@ async fn plain_user(pool: &Pool, name: &str, email: &str, superuser: bool) -> i6
         is_superuser: superuser,
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.unwrap();
+    u.insert(pool).await.unwrap();
     u.id.get().copied().unwrap()
 }
 
@@ -855,7 +855,7 @@ async fn invite_only_signup(pool: &Pool) {
     let erin = format!("erin-{t}@client.org");
     let mut old = invite(pool, &erin, None, None).await;
     old.expires_at = Some(chrono::Utc::now() - chrono::TimeDelta::hours(1));
-    old.save_pool(pool).await.unwrap();
+    old.save(pool).await.unwrap();
     assert_eq!(
         tenant(
             pool,
@@ -868,7 +868,7 @@ async fn invite_only_signup(pool: &Pool) {
     let fred = format!("fred-{t}@client.org");
     let mut gone = invite(pool, &fred, None, Some(1)).await;
     gone.uses = 1;
-    gone.save_pool(pool).await.unwrap();
+    gone.save(pool).await.unwrap();
     assert_eq!(
         tenant(
             pool,
@@ -1432,7 +1432,7 @@ async fn the_settings_row_name_is_exact(pool: &Pool) {
         default_provider: None,
         signups_per_hour: None,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
     assert_eq!(
@@ -1510,7 +1510,7 @@ async fn tenant_settings(pool: &Pool, password_login: &str, sso_only: bool, per_
         default_provider: None,
         signups_per_hour: per_hour,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .unwrap();
 }
@@ -1783,7 +1783,7 @@ async fn shared_roles_need_tenant_approval(pool: &Pool) {
         superuser_session_ttl_secs: None,
         allowed_roles: Some(viewer.clone()),
     };
-    row("sh").insert_pool(pool).await.unwrap();
+    row("sh").insert(pool).await.unwrap();
     // The shared row as a sign-in sees it.
     let shared = p.key(LinkSource::Shared);
     let loaded = SharedOverride::load(pool, &shared, "sh")
@@ -1835,8 +1835,8 @@ async fn shared_roles_need_tenant_approval(pool: &Pool) {
         .key(LinkSource::Shared);
     assert!(SharedOverride::load(pool, &repointed, "sh").await.is_err());
     // Two unbound overrides of one slug are ambiguous.
-    row("sh-new").insert_pool(pool).await.unwrap();
-    row("sh-new").insert_pool(pool).await.unwrap();
+    row("sh-new").insert(pool).await.unwrap();
+    row("sh-new").insert(pool).await.unwrap();
     assert!(SharedOverride::load(pool, &newer, "sh-new").await.is_err());
     rustango::testkit::matrix::drop_table(pool, "rustango_sso_shared_overrides").await;
 }
@@ -1945,7 +1945,7 @@ async fn an_email_link_locks_the_password(pool: &Pool) {
         expires_at: None,
         created_at: Auto::default(),
     };
-    key.insert_pool(pool).await.unwrap();
+    key.insert(pool).await.unwrap();
     // A later cut-off (a logout racing the link) is never moved earlier.
     let later = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() + 3600, 0).unwrap();
     User::objects()

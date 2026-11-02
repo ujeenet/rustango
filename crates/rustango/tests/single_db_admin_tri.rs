@@ -60,7 +60,7 @@ fn unique(prefix: &str) -> String {
 
 async fn seed(pool: &Pool, prefix: &str) -> AdminUser {
     let mut u = AdminUser::new_with_password(unique(prefix), PASSWORD, true).unwrap();
-    u.insert_pool(pool).await.expect("seed admin");
+    u.insert(pool).await.expect("seed admin");
     u
 }
 
@@ -157,7 +157,7 @@ async fn admin_edit_records_the_signed_in_user(pool: &Pool) {
         id: Auto::default(),
         body: "a".into(),
     };
-    note.insert_pool(pool).await.expect("note");
+    note.insert(pool).await.expect("note");
     let pk = note.id.get().expect("pk").to_string();
     AuditLog::delete_where("entity_table", "sdat_note", pool)
         .await
@@ -295,7 +295,7 @@ async fn audit_cleanup_trims_old_entries(pool: &Pool) {
             changes: serde_json::json!({}),
             occurred_at: chrono::Utc::now() - chrono::Duration::days(age_days),
         };
-        row.insert_pool(pool).await.expect("audit row");
+        row.insert(pool).await.expect("audit row");
     }
     let refused = manage(pool, &["audit-cleanup", "--days", "0"]).await;
     assert!(refused.is_err(), "--days 0 ran without --yes");

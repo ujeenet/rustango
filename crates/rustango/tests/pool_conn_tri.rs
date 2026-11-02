@@ -38,7 +38,7 @@ async fn seeded(pool: &Pool) {
             id,
             name: name.into(),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed author");
     }
@@ -49,7 +49,7 @@ async fn seeded(pool: &Pool) {
             title: format!("b{id}"),
             author: ForeignKey::unloaded(author),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed book");
     }
@@ -350,7 +350,7 @@ async fn annotate_count_children_honours_where_and_child_pk(pool: &Pool) {
             review_no,
             author: ForeignKey::unloaded(author),
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed review");
     }
@@ -389,7 +389,7 @@ async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
         id: 3,
         name: "Ada".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("second Ada");
     Book {
@@ -397,7 +397,7 @@ async fn annotate_count_children_on_union_and_distinct_on(pool: &Pool) {
         title: "b4".into(),
         author: ForeignKey::unloaded(3),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("her book");
     let distinct = Author::objects()

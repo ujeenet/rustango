@@ -52,7 +52,7 @@ async fn insert(pool: &Pool, count: i32, first: i32) {
         count,
         first,
     };
-    w.save_pool(pool).await.unwrap();
+    w.save(pool).await.unwrap();
 }
 
 #[tokio::test]

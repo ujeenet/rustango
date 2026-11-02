@@ -167,7 +167,7 @@ PostgreSQL/SQLite, `LAST_INSERT_ID()` on MySQL) and stored on your struct:
 
 ```rust
 let mut g = Gadget { id: Auto::default(), /* … */ };   // Unset
-g.save_pool(&pool).await?;                              // DB assigns the id
+g.save(&pool).await?;                              // DB assigns the id
 let new_id = g.id.get().copied().unwrap();             // now populated
 ```
 
@@ -204,7 +204,7 @@ pub struct Coupon {
 }
 
 let c = Coupon { code: "SAVE10".into(), discount: 10 };
-c.insert_pool(&pool).await?;                       // explicit INSERT
+c.insert(&pool).await?;                       // explicit INSERT
 let back = Coupon::find_or_fail("SAVE10".to_string(), &pool).await?;   // look up by the string PK
 ```
 

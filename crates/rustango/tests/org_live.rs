@@ -57,7 +57,7 @@ async fn org_round_trip_insert_and_fetch() {
         path_prefix: None,
         ..rustango::testkit::org()
     };
-    acme.insert(&pool).await.unwrap();
+    acme.insert(&pool.clone().into()).await.unwrap();
     let acme_id = *acme.id.get().unwrap();
     assert!(acme_id > 0, "BIGSERIAL should assign a positive id");
 
@@ -94,7 +94,7 @@ async fn org_filter_by_slug_returns_single_match() {
             path_prefix: None,
             ..rustango::testkit::org()
         };
-        org.insert(&pool).await.unwrap();
+        org.insert(&pool.clone().into()).await.unwrap();
     }
 
     let matches: Vec<Org> = Org::objects()
@@ -147,7 +147,7 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
         active: false,
         ..rustango::testkit::org()
     };
-    frozen.insert(&pool).await.unwrap();
+    frozen.insert(&pool.clone().into()).await.unwrap();
 
     let fetched: Vec<Org> = Org::objects()
         .where_(Org::active.eq(false))

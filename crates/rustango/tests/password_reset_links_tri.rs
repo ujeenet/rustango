@@ -38,7 +38,7 @@ async fn user(pool: &Pool, changed: Option<chrono::DateTime<chrono::Utc>>) -> i6
         password_changed_at: changed,
         ..rustango::testkit::user()
     };
-    u.insert_pool(pool).await.expect("insert user");
+    u.insert(pool).await.expect("insert user");
     *u.id.get().unwrap()
 }
 

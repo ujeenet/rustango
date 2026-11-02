@@ -587,7 +587,7 @@ async fn a_pinned_user_key_never_widens() {
         .unwrap()
         .remove(0);
     row.data = json!({ "kind": "user_key", "label": "old" });
-    row.save_pool(&pool).await.unwrap();
+    row.save(&pool).await.unwrap();
     revoke_skill_pool(&pool, "", &key.agent.name, "coach")
         .await
         .unwrap();

@@ -94,13 +94,13 @@ async fn database_mode_admin_serves_tenant_data() {
         host_pattern: Some(format!("{org_slug}.app.test")),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let mut widget = Widget {
         id: Auto::default(),
         label: "marker_widget".into(),
     };
-    widget.insert(&pool).await.unwrap();
+    widget.insert(&pool.clone().into()).await.unwrap();
 
     // Build the tenant admin — header-based resolver so the test
     // doesn't need DNS.
@@ -233,7 +233,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
         schema_name: Some(acme_schema.clone()),
         ..rustango::testkit::org()
     };
-    acme_org.insert(&pool).await.unwrap();
+    acme_org.insert(&pool.clone().into()).await.unwrap();
 
     let mut globex_org = Org {
         slug: globex_slug.clone(),
@@ -242,7 +242,7 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
         schema_name: Some(globex_schema.clone()),
         ..rustango::testkit::org()
     };
-    globex_org.insert(&pool).await.unwrap();
+    globex_org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let app = TenantAdminBuilder::new(pools, url.clone(), HeaderResolver::default())
@@ -310,7 +310,7 @@ async fn subdomain_chain_resolves_via_host_header() {
         host_pattern: Some(host.clone()),
         ..rustango::testkit::org()
     };
-    org.insert(&pool).await.unwrap();
+    org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
     let resolver = ChainResolver::new()

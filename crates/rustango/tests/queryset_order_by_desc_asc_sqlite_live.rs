@@ -39,7 +39,7 @@ async fn seed(pool: &Pool, n: i64) {
             id: Auto::default(),
             seq: i,
         };
-        row.save_pool(pool).await.unwrap();
+        row.save(pool).await.unwrap();
     }
 }
 

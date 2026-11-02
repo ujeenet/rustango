@@ -37,7 +37,7 @@ async fn seed(pool: &Pool, name: &str, category_id: Option<i64>, at: &str, price
         created_at: at.parse().expect("instant"),
         price,
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
 }

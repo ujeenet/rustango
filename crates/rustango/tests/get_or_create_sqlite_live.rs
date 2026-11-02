@@ -48,7 +48,7 @@ async fn get_or_create_inserts_when_filter_matches_zero() {
                 slug: "alpha".into(),
                 title: "Alpha".into(),
             };
-            w.insert_pool(&pool).await?;
+            w.insert(&pool).await?;
             Ok(w)
         },
         &pool,
@@ -70,7 +70,7 @@ async fn get_or_create_returns_existing_when_filter_matches_one() {
         slug: "beta".into(),
         title: "Beta original".into(),
     };
-    existing.insert_pool(&pool).await.unwrap();
+    existing.insert(&pool).await.unwrap();
     let existing_id = existing.id;
 
     // Second call should find it instead of inserting.
@@ -100,7 +100,7 @@ async fn get_or_create_errors_when_filter_matches_multiple() {
             slug: slug.into(),
             title: "shared title".into(),
         };
-        w.insert_pool(&pool).await.unwrap();
+        w.insert(&pool).await.unwrap();
     }
     let err = get_or_create(
         Widget::objects().where_(Widget::title.eq("shared title".to_owned())),
@@ -129,13 +129,13 @@ async fn update_or_create_updates_existing() {
         slug: "delta".into(),
         title: "Old".into(),
     };
-    existing.insert_pool(&pool).await.unwrap();
+    existing.insert(&pool).await.unwrap();
 
     let (w, created) = update_or_create(
         Widget::objects().where_(Widget::slug.eq("delta".to_owned())),
         |pool, mut existing| async move {
             existing.title = "New".into();
-            existing.save_pool(&pool).await?;
+            existing.save(&pool).await?;
             Ok(existing)
         },
         |_pool| async move {
@@ -163,7 +163,7 @@ async fn update_or_create_creates_when_filter_misses() {
                 slug: "epsilon".into(),
                 title: "Created".into(),
             };
-            w.insert_pool(&pool).await?;
+            w.insert(&pool).await?;
             Ok(w)
         },
         &pool,

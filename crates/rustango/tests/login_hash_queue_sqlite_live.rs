@@ -64,7 +64,7 @@ async fn a_full_queue_answers_busy_for_known_and_unknown_users() {
         .unwrap();
     // Superuser: only superusers reach the password page.
     let mut u = AdminUser::new_with_password("hq_alice", "right-pass", true).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
     let app = Builder::new(pool)
         .admin_prefix("")
         .with_session_auth(SessionSecret::from_bytes(vec![7u8; 32]))

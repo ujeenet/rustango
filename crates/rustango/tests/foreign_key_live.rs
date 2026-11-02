@@ -97,7 +97,7 @@ async fn fetched_book_has_unloaded_fk_then_get_resolves_parent() {
         id: Auto::default(),
         name: "alice".into(),
     };
-    alice.insert(&pool).await.unwrap();
+    alice.insert(&pool.clone().into()).await.unwrap();
     let alice_pk = match alice.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("alice.id should be populated after insert"),
@@ -108,7 +108,7 @@ async fn fetched_book_has_unloaded_fk_then_get_resolves_parent() {
         title: "Aliceland".into(),
         author: ForeignKey::unloaded(alice_pk),
     };
-    book.insert(&pool).await.unwrap();
+    book.insert(&pool.clone().into()).await.unwrap();
 
     // Round-trip via fetch — confirms FromRow lands in Unloaded.
     let mut fetched: Vec<Book> = Book::objects()
@@ -144,7 +144,7 @@ async fn loaded_constructor_skips_initial_select() {
         id: Auto::default(),
         name: "bob".into(),
     };
-    bob.insert(&pool).await.unwrap();
+    bob.insert(&pool.clone().into()).await.unwrap();
     let bob_pk = match bob.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("bob.id should be populated after insert"),
@@ -249,14 +249,14 @@ async fn string_pk_fk_round_trips_with_lazy_load() {
         user_uuid: alice_uuid.clone(),
         name: "alice".into(),
     };
-    alice.insert(&pool).await.unwrap();
+    alice.insert(&pool.clone().into()).await.unwrap();
 
     let mut post = StrPost {
         id: Auto::default(),
         title: "hello string fk".into(),
         author: ForeignKey::unloaded(alice_uuid.clone()),
     };
-    post.insert(&pool).await.unwrap();
+    post.insert(&pool.clone().into()).await.unwrap();
 
     // Round-trip through fetch — confirms FromRow decodes a String FK.
     let mut rows: Vec<StrPost> = StrPost::objects()
@@ -358,7 +358,7 @@ async fn nullable_fk_round_trip_with_some_and_none() {
         id: Auto::default(),
         name: "alice".into(),
     };
-    alice.insert(&pool).await.unwrap();
+    alice.insert(&pool.clone().into()).await.unwrap();
     let alice_pk = match alice.id {
         Auto::Set(v) => v,
         Auto::Unset => panic!("alice.id should be populated"),
@@ -369,14 +369,14 @@ async fn nullable_fk_round_trip_with_some_and_none() {
         title: "Authored".into(),
         author: Some(ForeignKey::unloaded(alice_pk)),
     };
-    with_author.insert(&pool).await.unwrap();
+    with_author.insert(&pool.clone().into()).await.unwrap();
 
     let mut anon = NlBook {
         id: Auto::default(),
         title: "Anonymous".into(),
         author: None,
     };
-    anon.insert(&pool).await.unwrap();
+    anon.insert(&pool.clone().into()).await.unwrap();
 
     let rows: Vec<NlBook> = NlBook::objects()
         .order_by(&[("id", false)])
@@ -461,7 +461,7 @@ async fn i16_field_round_trips_against_smallint() {
         label: "draft".to_owned(),
         priority: Some(-3),
     };
-    row.insert(&pool).await.unwrap();
+    row.insert(&pool.clone().into()).await.unwrap();
 
     let mut blank = StatusRow {
         id: Auto::default(),
@@ -469,7 +469,7 @@ async fn i16_field_round_trips_against_smallint() {
         label: "max".to_owned(),
         priority: None,
     };
-    blank.insert(&pool).await.unwrap();
+    blank.insert(&pool.clone().into()).await.unwrap();
 
     let mut neg = StatusRow {
         id: Auto::default(),
@@ -477,7 +477,7 @@ async fn i16_field_round_trips_against_smallint() {
         label: "min".to_owned(),
         priority: Some(0),
     };
-    neg.insert(&pool).await.unwrap();
+    neg.insert(&pool.clone().into()).await.unwrap();
 
     let rows: Vec<StatusRow> = StatusRow::objects()
         .order_by(&[("id", false)])

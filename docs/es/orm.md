@@ -1627,7 +1627,7 @@ use rustango::audit::{with_source, AuditSource};
 with_source(
     AuditSource::User { id: user_id.to_string() },
     async {
-        post.save_pool(&pool).await
+        post.save(&pool).await
     },
 ).await?;
 ```
@@ -1791,7 +1791,7 @@ escrituras incluidas, y no se retiene ninguna conexión hasta la primera
 consulta. El `t.conn()` del extractor `DatabaseTenant` solo sirve para las
 lecturas `_on`.
 
-Por ejemplo `post.insert_pool(t.pool())` y `Post::objects().count(t.pool())`;
+Por ejemplo `post.insert(t.pool())` y `Post::objects().count(t.pool())`;
 el ejemplo `sqlite_tenant_demo` hace exactamente eso.
 
 ## Una conexión por petición

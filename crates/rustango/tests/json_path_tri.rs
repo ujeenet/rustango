@@ -52,7 +52,7 @@ async fn seeded(pool: &Pool) {
             "items": [ { "name": "x" } ],
         }),
     };
-    row.insert_pool(pool).await.expect("seed JSON row");
+    row.insert(pool).await.expect("seed JSON row");
 }
 
 /// Compile a predicate around `e` and hand it to the database.
@@ -138,7 +138,7 @@ async fn json_equality_matches(pool: &Pool) {
         id: Auto::Unset,
         data: v.clone(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     assert_eq!(count_json_eq(pool, v.clone()).await, 1);
@@ -160,7 +160,7 @@ async fn json_column_equality_compares_values(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"a": 1, "b": [1, 2]}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     let same = serde_json::json!({"b": [1, 2], "a": 1.0});
@@ -177,7 +177,7 @@ async fn json_column_equality_compares_values(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!(1.0),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     assert_eq!(
@@ -198,7 +198,7 @@ async fn json_as_text_is_text(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"n": 1, "b": true, "f": false, "s": "x", "z": null}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     assert_eq!(count_text_eq(pool, "n", "1").await, 1, "number as text");
@@ -235,7 +235,7 @@ async fn seed_counts(pool: &Pool) {
             id: Auto::Unset,
             data,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed");
     }
@@ -284,7 +284,7 @@ async fn json_path_equals_null_and_reordered_object(pool: &Pool) {
             id: Auto::Unset,
             data,
         }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("seed");
     }
@@ -331,7 +331,7 @@ async fn json_object_numbers_compare_by_value(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"n": {"x": 1, "y": 9007199254740993_i64}}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     let obj = |x: serde_json::Value| {
@@ -354,7 +354,7 @@ async fn a_digit_led_key_matches(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"2fa": "on", "e1": "x"}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     assert_eq!(count_text_eq(pool, "2fa", "on").await, 1);
@@ -370,7 +370,7 @@ async fn json_round_trips_on_every_mysql_flavour(pool: &Pool) {
         id: Auto::Unset,
         data: data.clone(),
     };
-    row.insert_pool(pool).await.expect("insert JSON");
+    row.insert(pool).await.expect("insert JSON");
     let id = row.id.get().copied().expect("id");
     let back: Vec<Demo> = rustango::query::QuerySet::<Demo>::default()
         .filter("id", id)
@@ -408,7 +408,7 @@ async fn json_text_search_agrees_inside_a_value(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"name": "Alice Smith", "tags": ["red"]}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     assert_eq!(count_like(pool, "icontains", "alice").await, 1);
@@ -442,7 +442,7 @@ async fn json_containment_agrees_on_matching_shapes(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"tags": ["a", "b"], "n": 1, "o": {"k": "v"}}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     if pool.dialect().name() == "sqlite" {
@@ -474,7 +474,7 @@ async fn string_contains_lookup_on_a_json_column(pool: &Pool) {
         id: Auto::Unset,
         data: serde_json::json!({"name": "Alice Smith", "tags": ["red"]}),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("seed");
     let count = |key: &'static str, v: SqlValue| async move {

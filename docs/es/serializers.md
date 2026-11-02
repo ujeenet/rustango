@@ -108,7 +108,7 @@ son fijos; un método inherente con el mismo nombre solo cambia las llamadas
 directas, no lo que ejecuta un ViewSet.
 
 Deliberadamente **no** hay `create` / `update` / `save` en el trait — las
-escrituras pasan por el ORM (`model.save_pool(&pool)`). Cuando un serializador se conecta
+escrituras pasan por el ORM (`model.save(&pool)`). Cuando un serializador se conecta
 a un [ViewSet](viewsets.md), la ruta de create/update usa `from_writable_json()` +
 `validate()` + `writable_source_fields()` para validar y filtrar la petición antes
 de guardar.

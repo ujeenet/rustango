@@ -188,14 +188,14 @@ async fn fk_targets_a_renamed_pk_column(pool: &Pool) {
         id: 7,
         name: "seven".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("acct");
     Txn {
         id: 1,
         acct: ForeignKey::unloaded(7),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("txn");
     let rows: Vec<Txn> = Txn::objects()
@@ -208,14 +208,14 @@ async fn fk_targets_a_renamed_pk_column(pool: &Pool) {
 
 async fn seed_city(pool: &Pool) {
     Country { id: 1, num: 100 }
-        .insert_pool(pool)
+        .insert(pool)
         .await
         .expect("country");
     City {
         id: 1,
         country: ForeignKey::unloaded(100),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("city");
 }
@@ -272,14 +272,14 @@ async fn seed_long(pool: &Pool) {
         id: 1,
         an_extremely_long_column_name_for_labels: "deep".into(),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("parent");
     LongChild {
         id: 1,
         a_rather_long_foreign_key_field_name_here: ForeignKey::unloaded(1),
     }
-    .insert_pool(pool)
+    .insert(pool)
     .await
     .expect("child");
 }
@@ -337,14 +337,14 @@ async fn long_join_labels_keep_their_key(pool: &Pool) {
 
 /// Two `set`s racing on one source: the result is one of them, never both.
 async fn concurrent_m2m_sets_keep_one(pool: &Pool) {
-    Album { id: 1 }.insert_pool(pool).await.expect("album");
+    Album { id: 1 }.insert(pool).await.expect("album");
     race_sets(pool, || Album { id: 1 }.tags_m2m()).await;
 }
 
 /// Two sources sharing a junction end: each one's sets still serialize.
 async fn concurrent_sets_on_a_shared_junction(pool: &Pool) {
-    ShareA { id: 1 }.insert_pool(pool).await.expect("a");
-    ShareB { id: 2 }.insert_pool(pool).await.expect("b");
+    ShareA { id: 1 }.insert(pool).await.expect("a");
+    ShareB { id: 2 }.insert(pool).await.expect("b");
     race_sets(pool, || ShareA { id: 1 }.tags_m2m()).await;
     race_sets(pool, || ShareB { id: 2 }.tags_m2m()).await;
 }

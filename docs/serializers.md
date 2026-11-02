@@ -105,7 +105,7 @@ an inherent method with the same name only changes direct calls, not what a
 ViewSet runs.
 
 There is deliberately **no** `create` / `update` / `save` on the trait — writes
-go through the ORM (`model.save_pool(&pool)`). When a serializer is wired into a
+go through the ORM (`model.save(&pool)`). When a serializer is wired into a
 [ViewSet](viewsets.md), the create/update path uses `from_writable_json()` +
 `validate()` + `writable_source_fields()` to validate and filter the request
 before saving.

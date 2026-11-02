@@ -68,7 +68,7 @@ async fn spellings_that_find_one_user_share_its_lock() {
         .await
         .unwrap();
     let mut u = AdminUser::new_with_password("lt_alice", "right-pass", false).unwrap();
-    u.insert_pool(&pool).await.unwrap();
+    u.insert(&pool).await.unwrap();
 
     let spellings = ["lt_alicé", "lt_ａlice", "LT_ALICÉ", "lt_álice", "lt_alíce"];
     // The premise: MySQL finds the row for every spelling.

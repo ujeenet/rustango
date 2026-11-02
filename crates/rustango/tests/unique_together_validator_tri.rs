@@ -58,7 +58,7 @@ async fn seed(pool: &Pool, org_id: i64, user_id: i64) -> i64 {
         org_id,
         user_id,
     };
-    m.save_pool(pool).await.expect("seed");
+    m.save(pool).await.expect("seed");
     *m.id.get().expect("pk")
 }
 
@@ -162,7 +162,7 @@ async fn model_form_skips_a_partial_unique_index(pool: &Pool) {
         org_id: 1,
         user_id: 2,
     };
-    row.save_pool(pool).await.expect("seed");
+    row.save(pool).await.expect("seed");
     form::<UtvPartial>(1, 2)
         .validate_unique_together(pool, None)
         .await
@@ -177,10 +177,7 @@ async fn the_table_itself_rejects_a_duplicate_pair(pool: &Pool) {
         org_id: 1,
         user_id: 2,
     };
-    assert!(
-        dup.save_pool(pool).await.is_err(),
-        "duplicate pair inserted"
-    );
+    assert!(dup.save(pool).await.is_err(), "duplicate pair inserted");
 }
 
 /// `None` now writes `IS NULL` (#2413); a NULL pair must still pass.
@@ -191,7 +188,7 @@ async fn a_null_in_the_pair_never_collides(pool: &Pool) {
         org_id: 1,
         user_id: None,
     };
-    row.save_pool(pool).await.expect("seed");
+    row.save(pool).await.expect("seed");
     let mut pair = HashMap::new();
     pair.insert("org_id", SqlValue::I64(1));
     pair.insert("user_id", SqlValue::Null);

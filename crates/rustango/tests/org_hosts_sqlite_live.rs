@@ -70,7 +70,7 @@ async fn registry_with_org() -> Pool {
         host_pattern: Some("acme.example.com".into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&pool).await.expect("insert org");
+    org.insert(&pool).await.expect("insert org");
     pool
 }
 
@@ -178,7 +178,7 @@ async fn removal_is_scoped_to_the_owning_org() {
         host_pattern: Some("globex.example.com".into()),
         ..rustango::testkit::org()
     };
-    other.insert_pool(&pool).await.expect("insert org");
+    other.insert(&pool).await.expect("insert org");
     add_host(&pool, "acme", "scoped.acme.com", "apex.invalid")
         .await
         .expect("add");
@@ -268,7 +268,7 @@ async fn an_existing_registry_gains_the_table_on_a_plain_migrate() {
         host_pattern: Some("legacy.example.com".into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&pool).await.expect("existing org survives");
+    org.insert(&pool).await.expect("existing org survives");
 
     assert!(
         !table_exists(&pool, "rustango_org_hosts").await,
@@ -342,7 +342,7 @@ async fn a_populated_host_table_survives_a_re_migrate() {
         host_pattern: Some("acme.example.com".into()),
         ..rustango::testkit::org()
     };
-    org.insert_pool(&pool).await.expect("insert org");
+    org.insert(&pool).await.expect("insert org");
 
     // Real operator data in the table before the upgrade runs.
     add_host(&pool, "acme", "kept.acme.com", "apex.invalid")
@@ -694,7 +694,7 @@ async fn insert_host_behind_the_cache(pool: &Pool, org_slug: &str, hostname: &st
         enabled: true,
         created_at: rustango::sql::Auto::Unset,
     };
-    row.insert_pool(pool).await.expect("insert");
+    row.insert(pool).await.expect("insert");
 }
 
 /// The gap local invalidation cannot close: another pod binds a host, and
@@ -761,7 +761,7 @@ async fn a_deactivation_by_another_pod_is_picked_up() {
         .expect("query")
         .expect("row");
     row.enabled = false;
-    row.save_pool(&pool).await.expect("save");
+    row.save(&pool).await.expect("save");
 
     rustango::testkit::expire_host_generation();
     let gone = RegisteredHostResolver::new("apex.invalid")

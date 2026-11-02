@@ -566,17 +566,17 @@ mod tests {
             slug: "acme".into(),
             ..org()
         };
-        org.insert_pool(&pool).await.expect("insert org");
+        org.insert(&pool).await.expect("insert org");
         let mut admin = crate::admin::AdminUser {
             username: "root".into(),
             ..admin_user()
         };
-        admin.insert_pool(&pool).await.expect("insert admin");
+        admin.insert(&pool).await.expect("insert admin");
         let mut user = crate::tenancy::User {
             username: "alice".into(),
             ..user()
         };
-        user.insert_pool(&pool).await.expect("insert user");
+        user.insert(&pool).await.expect("insert user");
 
         // All three inserts succeeding proves the tables exist with the
         // full column set (from SCHEMA) and the factories are

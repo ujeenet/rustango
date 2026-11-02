@@ -46,7 +46,7 @@ async fn seed(pool: &Pool) {
             title: title.into(),
             status: status.into(),
         };
-        p.save_pool(pool).await.unwrap();
+        p.save(pool).await.unwrap();
     }
 }
 

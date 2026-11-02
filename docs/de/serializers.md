@@ -110,7 +110,7 @@ abgeleiteten Serializer fest; eine inhärente Methode gleichen Namens ändert nu
 direkte Aufrufe, nicht das, was ein ViewSet ausführt.
 
 Es gibt bewusst **kein** `create` / `update` / `save` auf dem Trait —
-Schreibvorgänge laufen über das ORM (`model.save_pool(&pool)`). Wenn ein Serializer
+Schreibvorgänge laufen über das ORM (`model.save(&pool)`). Wenn ein Serializer
 in ein [ViewSet](viewsets.md) eingebunden ist, nutzt der Create-/Update-Pfad
 `from_writable_json()` + `validate()` + `writable_source_fields()`, um den
 Request zu validieren und zu filtern, bevor gespeichert wird.

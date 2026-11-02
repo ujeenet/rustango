@@ -93,7 +93,7 @@ async fn f_expression_increment_is_atomic_under_concurrent_load() {
         title: "race-test".into(),
         views: 0,
     };
-    row.insert(&pool).await.unwrap();
+    row.insert(&pool.clone().into()).await.unwrap();
     let id = row.id.get().copied().unwrap();
 
     // Fire N concurrent `UPDATE views = views + 1 WHERE id = ?`.
@@ -158,7 +158,7 @@ async fn f_expression_column_to_column_compare_filters_correctly() {
             title: title.to_owned(),
             views,
         };
-        p.insert(&pool).await.unwrap();
+        p.insert(&pool.clone().into()).await.unwrap();
     }
 
     // `views > 2` — sanity literal compare baseline.

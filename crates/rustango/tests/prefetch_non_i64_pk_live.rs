@@ -88,7 +88,7 @@ async fn fetch_with_prefetch_groups_children_under_string_pk_parents() {
             slug: slug.into(),
             display_name: slug.to_uppercase(),
         };
-        t.insert(&pool).await.unwrap();
+        t.insert(&pool.clone().into()).await.unwrap();
     }
     for (slug, title) in [
         ("acme", "Acme Quickstart"),
@@ -100,7 +100,7 @@ async fn fetch_with_prefetch_groups_children_under_string_pk_parents() {
             tenant: ForeignKey::Unloaded(slug.to_owned()),
             title: title.into(),
         };
-        d.insert(&pool).await.unwrap();
+        d.insert(&pool.clone().into()).await.unwrap();
     }
 
     let bundles = fetch_with_prefetch_pool::<StrTenant, StrDoc>(

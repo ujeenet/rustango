@@ -335,7 +335,7 @@ async fn sso_seed(t: Tenant<DefaultTenantDb>) -> ProbeResult {
             created_at: Auto::default(),
             updated_at: Auto::default(),
         };
-        row.insert_pool(pool).await.map_err(|e| err(&e))?;
+        row.insert(pool).await.map_err(|e| err(&e))?;
     }
     let mut users = serde_json::Map::new();
     for name in ["sso-user", "sso-staff", "sso-super", "sso-other"] {
@@ -348,7 +348,7 @@ async fn sso_seed(t: Tenant<DefaultTenantDb>) -> ProbeResult {
             continue;
         };
         u.email = Some(format!("{name}@{}.example.test", t.org.slug));
-        u.save_pool(pool).await.map_err(|e| err(&e))?;
+        u.save(pool).await.map_err(|e| err(&e))?;
         let id = u.id.get().copied().unwrap_or_default();
         if name == "sso-staff" {
             // Staff: holds permissions, including on the link table itself.
