@@ -2200,7 +2200,9 @@ pub(crate) async fn provision_schema<DB: Database>(
                 )
             })?;
         // Name checks and the clash test live with the other schema checks.
-        if crate::tenancy::pools::create_tenant_schema(pg_pools.registry(), schema).await? {
+        let timeout = pg_pools.pool_config().database_pool_acquire_timeout;
+        if crate::tenancy::pools::create_tenant_schema(pg_pools.registry(), schema, timeout).await?
+        {
             return Ok(());
         }
         Err(TenancyError::Validation(format!(

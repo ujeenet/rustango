@@ -1121,7 +1121,7 @@ async fn build_schema_scoped_pool(
     // Ensure the schema exists. Use a one-shot connection so we don't
     // pollute the migration pool's connections.
     let bootstrap = PgPool::connect(registry_url).await?;
-    let origin = ensure_schema(&bootstrap, schema).await;
+    let origin = ensure_schema(&bootstrap, schema, acquire_timeout).await;
     bootstrap.close().await;
     if origin? == SchemaOrigin::Foreign {
         return Err(TenancyError::Validation(format!(
@@ -1154,9 +1154,13 @@ enum SchemaOrigin {
 /// `CREATE SCHEMA`, and on a clash, whether the existing one looks like
 /// the tenant's. Catalog SQL: schema mode is Postgres-only.
 #[cfg(feature = "postgres")]
-async fn ensure_schema(pg: &PgPool, schema: &str) -> Result<SchemaOrigin, TenancyError> {
+async fn ensure_schema(
+    pg: &PgPool,
+    schema: &str,
+    timeout: std::time::Duration,
+) -> Result<SchemaOrigin, TenancyError> {
     use crate::migrate::{LEDGER_TABLE, SYSTEM_LEDGER_TABLE};
-    if super::pools::create_tenant_schema(pg, schema).await? {
+    if super::pools::create_tenant_schema(pg, schema, timeout).await? {
         return Ok(SchemaOrigin::Created);
     }
     let (tables, ledgers): (i64, i64) = rustango::sql::sqlx::query_as(
@@ -1300,13 +1304,28 @@ mod schema_pool_tests {
         let _ = sqlx::query(&format!("DROP SCHEMA IF EXISTS {q} CASCADE"))
             .execute(&pg)
             .await;
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Created);
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Created
+        );
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Kept
+        );
         sqlx::query(&format!("CREATE TABLE {q}.app_data (id INT)"))
             .execute(&pg)
             .await
             .unwrap();
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Foreign);
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Foreign
+        );
         // Migrating into it is refused, not adopted.
         let refused =
             super::build_schema_scoped_pool(&url, &s, std::time::Duration::from_secs(30)).await;
@@ -1319,7 +1338,12 @@ mod schema_pool_tests {
             .execute(&pg)
             .await
             .unwrap();
-        assert_eq!(ensure_schema(&pg, &s).await.unwrap(), SchemaOrigin::Kept);
+        assert_eq!(
+            ensure_schema(&pg, &s, std::time::Duration::from_secs(30))
+                .await
+                .unwrap(),
+            SchemaOrigin::Kept
+        );
         let _ = sqlx::query(&format!("DROP SCHEMA {q} CASCADE"))
             .execute(&pg)
             .await;

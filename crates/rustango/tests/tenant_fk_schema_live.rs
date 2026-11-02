@@ -664,3 +664,44 @@ async fn uncached_acquire_refuses_a_role_named_schema() {
     registry.close().await;
     drop(db);
 }
+
+/// A user composite type is the schema's own object, like a function.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn a_schema_with_its_own_composite_type_stays_off_the_path() {
+    let Some(path) = b_path_after(
+        "rustango_tedgety",
+        &[
+            "CREATE SCHEMA shared_ty",
+            "CREATE EXTENSION pg_trgm SCHEMA shared_ty",
+            "CREATE TYPE shared_ty.pair AS (a int, b int)",
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(!path.contains("shared_ty"), "shared_ty on B's path: {path}");
+}
+
+/// A schema holding only extensions joins every tenant's path.
+#[cfg(all(feature = "runtime", feature = "testkit"))]
+#[tokio::test]
+async fn an_extension_only_schema_joins_the_path() {
+    let Some(path) = b_path_after(
+        "rustango_tedgeok",
+        &[
+            "CREATE SCHEMA ext_only",
+            "CREATE EXTENSION pg_trgm SCHEMA ext_only",
+            "CREATE EXTENSION hstore SCHEMA ext_only",
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    assert!(
+        path.contains("ext_only"),
+        "ext_only missing from B's path: {path}"
+    );
+}

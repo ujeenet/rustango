@@ -1128,7 +1128,7 @@ async fn role_schema_audit(
         {
             Ok(orgs) => orgs,
             Err(e) => {
-                out.warnings
+                out.errors
                     .push(format!("could not list schema-mode tenants: {e}"));
                 return;
             }
@@ -1139,6 +1139,7 @@ async fn role_schema_audit(
                 pg,
                 org.effective_schema(),
                 crate::tenancy::pools::FallThrough::Refuse,
+                crate::tenancy::TenantPoolsConfig::default().database_pool_acquire_timeout,
             )
             .await;
             match checked {
