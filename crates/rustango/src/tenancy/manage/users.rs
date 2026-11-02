@@ -700,7 +700,8 @@ where
                     registry_url,
                     org.effective_schema(),
                     1,
-                    crate::tenancy::pools::FallThrough::Refuse,
+                    crate::tenancy::pools::FallThrough::OpenPool,
+                    pools.pool_config().database_pool_acquire_timeout,
                 )
                 .await?;
                 Ok(rustango::sql::Pool::Postgres(pg))

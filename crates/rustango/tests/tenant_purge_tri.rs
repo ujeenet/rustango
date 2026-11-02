@@ -15,6 +15,12 @@ async fn setup(pool: &Pool) {
         .expect("framework tables");
 }
 
+/// The registry URL the Postgres matrix pool connects to.
+#[cfg(feature = "postgres")]
+fn registry_url() -> String {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL")
+}
+
 async fn purge_on(pool: &Pool, slug: &str) -> Result<Report, TenancyError> {
     let action = Action::Purge {
         purge_database: true,
@@ -427,12 +433,10 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
 
     // The schema exists and holds the tenant's media.
     let mut org = schema_org("live");
-    let schema = org.schema_name.clone().unwrap();
-    rustango::sql::sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""))
-        .execute(pg)
-        .await
-        .unwrap();
     org.save_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
+        .await
+        .expect("migrate tenant");
     let scoped = Pool::Postgres(pools.scoped_pool(&org).await.unwrap());
     let keys = upload(&scoped, &storage).await;
     drop(scoped);
@@ -519,10 +523,6 @@ async fn schema_purge_evicts_the_scoped_pool() {
         unreachable!()
     };
     let slug = format!("purge-schema-{}", std::process::id());
-    rustango::sql::sqlx::query(&format!("CREATE SCHEMA IF NOT EXISTS \"{slug}\""))
-        .execute(pg)
-        .await
-        .unwrap();
     let mut org = Org {
         slug: slug.clone(),
         display_name: slug.clone(),
@@ -532,6 +532,9 @@ async fn schema_purge_evicts_the_scoped_pool() {
     };
     org.save_pool(&pool).await.expect("insert org");
     let pools = TenantPools::new(pg.clone());
+    rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
+        .await
+        .expect("migrate tenant");
     pools.scoped_pool(&org).await.expect("scoped pool");
     assert_eq!(pools.cached_scoped_pool_count().await, 1);
 
@@ -782,12 +785,6 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         unreachable!()
     };
     let shared = format!("purge_shared_{}", std::process::id());
-    rustango::sql::sqlx::raw_sql(&format!(
-        "CREATE SCHEMA IF NOT EXISTS \"{shared}\"; CREATE TABLE IF NOT EXISTS \"{shared}\".marker (id INT)"
-    ))
-    .execute(pg)
-    .await
-    .unwrap();
     // A legacy pair: one by slug default, one by explicit name.
     let mut owner = Org {
         slug: shared.replace('_', "-"),
@@ -797,6 +794,17 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         ..rustango::testkit::org()
     };
     owner.save_pool(&pool).await.unwrap();
+    rustango::testkit::migrate_schema_tenant(
+        &TenantPools::new(pg.clone()),
+        &owner,
+        &registry_url(),
+    )
+    .await
+    .expect("migrate tenant");
+    rustango::sql::sqlx::query(&format!("CREATE TABLE \"{shared}\".marker (id INT)"))
+        .execute(pg)
+        .await
+        .unwrap();
     let mut legacy = Org {
         slug: format!("{}-legacy", owner.slug),
         display_name: "legacy".into(),
@@ -930,14 +938,8 @@ where
     let registry = Pool::from(private.clone());
     setup(&registry).await;
     let [a, b] = schemas;
-    rustango::sql::sqlx::raw_sql(&format!(r#"CREATE SCHEMA "{a}"; CREATE SCHEMA "{b}""#))
-        .execute(&private)
-        .await
-        .unwrap();
-    rustango::sql::sqlx::raw_sql(sql)
-        .execute(&private)
-        .await
-        .unwrap();
+    let private_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
+    let pools = TenantPools::new(private.clone());
     for (slug, name) in [("ext-a", a), ("ext-b", b)] {
         let mut org = Org {
             slug: slug.into(),
@@ -947,7 +949,15 @@ where
             ..rustango::testkit::org()
         };
         org.save_pool(&registry).await.unwrap();
+        rustango::testkit::migrate_schema_tenant(&pools, &org, &private_url)
+            .await
+            .expect("migrate tenant");
     }
+    drop(pools);
+    rustango::sql::sqlx::raw_sql(sql)
+        .execute(&private)
+        .await
+        .unwrap();
 
     check(purge_on(&registry, "ext-a").await, registry).await;
 

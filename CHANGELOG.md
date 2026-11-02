@@ -33,6 +33,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Queued email attachments are written as base64 text instead of an integer array; both forms still read.
 - `PreMigrateContext` and `PostMigrateContext` carry the run's `pool` and `tenant` and are `#[non_exhaustive]`; the `connect_*_migrate_with_target` receivers and `MigrateTarget` are removed.
 - A schema-mode tenant's `search_path` is its schema plus `public` and other extension-only schemas that hold an extension; `public` leaves it when no extension lives there, and a tenant missing tables those schemas have is refused instead of reading the shared copies.
+- A schema an org names, or one holding its own functions, types or sequences, never joins a tenant's `search_path`; `check --deploy` lists every tenant whose pools would refuse to open.
 
 ### Fixed
 
