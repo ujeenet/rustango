@@ -159,7 +159,7 @@ untouched.
   | `m.insert(&pg)` / `m.insert_pool(&pool)` | `m.insert(&pool)` |
   | `m.delete(&pg)` / `m.delete_pool(&pool)` | `m.delete(&pool)` |
   | `m.upsert(&pg)`, `M::bulk_insert(rows, &pg)` | `m.upsert(&pool)`, `M::bulk_insert(rows, &pool)` |
-  | `m.save_on(&mut *conn)` on an audited model | `m.save(&pool)`, or `save_tx` (writes no audit row) |
+  | `m.save_on(&mut *conn)` on an audited model | `m.save(&pool)`, or `m.save_tx(&mut tx)` |
   | `m.save_on_with(conn, src)` | `audit::with_source(src, m.save(&pool))` |
   | `ViewSet::router_pool(p, pool)`, `MediaManager::new_pool` (deprecated, still compile) | `router(p, pool)`, `MediaManager::new` |
   | `migrate::migrate(&pg, dir)`, `apply_all(&pg)` … | `migrate_pool(&pool, dir)`, `apply_all_pool(&pool)` … |
@@ -167,13 +167,17 @@ untouched.
   | `tenancy::permissions::has_perm(…, &pg)` and friends, their `permissions::` re-exports, `permissions::*_for_model` | the `_pool` forms |
   | `tenancy::authenticate_operator`, `tenancy::ensure_api_keys_table` | `authenticate_operator_pool`, `ensure_api_keys_table_pool` |
   | `audit::upsert_returning_on` | `m.upsert(&pool)` (audited) |
+  | `audit::emit_one(&pg, e)` / `emit_many`, `emit_one_my`, `emit_one_sqlite`, `emit_one_pool` / `emit_many_pool` | `audit::emit_one(&pool, e)` / `emit_many(&pool, es)` |
+  | `tenancy::permissions::has_perm_on(uid, c, &mut *conn)` | `has_perm_pool(uid, c, &pool)` |
+  | `sql::select_rows_on(&pg, &q)` | `select_rows_pool(&pool, &q)` or `QuerySet::fetch_on` |
+  | `parent.child_set(&pg)` / `child_set_pool(&pool)` | `parent.child_set(executor)`, any `SqlExecutor` |
   | `qs.explain(&pg)`, `qs.fetch_paginated(&pg)`, `fk.get(&pg)` | `explain_on` / `explain_pool`, `fetch_paginated_on`, `get_pool` / `get_on` |
   | `sql::fetch_with_prefetch`, `sql::annotate_count_children` | `fetch_with_prefetch_pool`, `annotate_count_children_on` |
   | `Fixture::load_into`, `fixtures::load_all` | `load_into_pool`, `load_all_pool` |
   | `NotificationContext::with_database(pg, t)` | the same, with any `Into<Pool>`; it now works on every backend |
   | `migrate::Builder::migrate(&pg, dir)` … | the same methods, taking `&Pool` |
 
-  `sql::insert_on`, `update_on` and `bulk_insert_on` take any `SqlExecutor` instead of a Postgres executor; `bulk_insert_on` returns `Vec<InsertReturningPool>` and takes any `SqlExecutor`; on a raw sqlx executor a bulk insert past the bind cap is refused, so pass a `PoolTx` or the `Pool`. On MySQL `bulk_insert` leaves `Auto` fields unset. An audited `upsert` on MySQL is refused.
+  `sql::insert_on`, `update_on` and `bulk_insert_on` take any `SqlExecutor` instead of a Postgres executor; `bulk_insert_on` returns `Vec<InsertReturningPool>` and takes any `SqlExecutor`; on a raw sqlx executor a bulk insert past the bind cap is refused, so pass a `PoolTx` or the `Pool`. On MySQL `bulk_insert` leaves `Auto` fields unset. An audited `upsert` and an audited `bulk_insert` are refused on MySQL, and so is `insert` on an audited model without a PK. `delete_on` on a raw sqlx executor refuses a delete that cascades into an audited model; run it on a `Pool`, `PoolConn` or `PoolTx`. `insert_tx` / `save_tx` / `delete_tx` now write the audit row of an audited model.
 - `PoolConn` is a struct: match `conn.conn()` (a `#[non_exhaustive]` `PooledConn`) instead of the connection. Before: `match &mut conn { PoolConn::Mysql(c) => … }`. After: `match conn.conn() { PooledConn::Mysql(c) => …, _ => … }`.
 - Outside code can no longer wrap its own sqlx `Transaction` in a `PoolTx` (`PoolTx::new` is crate-private). Open it with `transaction_pool`, `write_transaction` or `let mut conn = pool.acquire().await?; let tx = conn.begin().await?;`, so the transaction knows its pool.
 - Code generic over `DB: Database` that calls `DatabasePools::acquire` or extracts `DatabaseTenant<DB>` now needs the bound `rustango::sql::Pool: From<sqlx::Pool<DB>>`.
