@@ -1103,7 +1103,8 @@ where
     if facts.provisioning {
         secret_key_audit(crate::aead::key_status(), &mut out);
     }
-    role_schema_audit(&pools.registry_pool(), &mut out).await;
+    let timeout = pools.pool_config().database_pool_acquire_timeout;
+    role_schema_audit(&pools.registry_pool(), timeout, &mut out).await;
     out
 }
 
@@ -1111,6 +1112,7 @@ where
 /// `search_path`; the tenant's pools refuse to open, so name it here too.
 async fn role_schema_audit(
     registry: &crate::sql::Pool,
+    timeout: std::time::Duration,
     out: &mut rustango::migrate::manage::DeployAuditFindings,
 ) {
     #[cfg(feature = "postgres")]
@@ -1139,7 +1141,7 @@ async fn role_schema_audit(
                 pg,
                 org.effective_schema(),
                 crate::tenancy::pools::FallThrough::Refuse,
-                crate::tenancy::TenantPoolsConfig::default().database_pool_acquire_timeout,
+                timeout,
             )
             .await;
             match checked {
@@ -1155,7 +1157,7 @@ async fn role_schema_audit(
         }
     }
     #[cfg(not(feature = "postgres"))]
-    let _ = (registry, out);
+    let _ = (registry, timeout, out);
 }
 
 /// Provisioning seals server passwords and tenant URLs with this key.
