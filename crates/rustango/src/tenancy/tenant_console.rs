@@ -23,9 +23,7 @@
 //! tenant `slug` so a cookie minted for `acme` can't authenticate at
 //! `globex` even if the browser somehow forwards it.
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use subtle::ConstantTimeEq;
 
 use super::session::SessionError;
 pub use super::session::{PasswordFingerprint, SessionSecret};
@@ -146,10 +144,6 @@ impl TenantSessionPayload {
         }
     }
 
-    fn is_expired(&self) -> bool {
-        chrono::Utc::now().timestamp() >= self.exp
-    }
-
     /// `true` for impersonation payloads (operator opened the
     /// tenant admin from the operator console). The middleware
     /// uses this to switch on the auth path. (#78)
@@ -159,14 +153,16 @@ impl TenantSessionPayload {
     }
 }
 
+impl crate::session::Expiring for TenantSessionPayload {
+    fn is_expired_at(&self, now: i64) -> bool {
+        now >= self.exp
+    }
+}
+
 /// Serialize and sign a tenant session payload.
 #[must_use]
 pub fn encode(secret: &SessionSecret, payload: &TenantSessionPayload) -> String {
-    let json = serde_json::to_vec(payload).expect("payload serializes");
-    let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    let sig = crate::session::sign_tagged(secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
-    let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig);
-    format!("{payload_b64}.{sig_b64}")
+    crate::session::SealedToken::seal(secret.key(), TENANT_DOMAIN_TAG, payload)
 }
 
 /// Verify, deserialize, and tenant-bind-check a cookie value.
@@ -185,22 +181,8 @@ pub fn decode(
     tenant: &crate::tenancy::TenantSlug,
     value: &str,
 ) -> Result<TenantSessionPayload, SessionError> {
-    let (payload_b64, sig_b64) = value.split_once('.').ok_or(SessionError::Malformed)?;
-    let expected = crate::session::sign_tagged(secret, TENANT_DOMAIN_TAG, payload_b64.as_bytes());
-    let provided = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(sig_b64)
-        .map_err(|_| SessionError::Malformed)?;
-    if expected.ct_eq(&provided[..]).unwrap_u8() == 0 {
-        return Err(SessionError::BadSignature);
-    }
-    let payload_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload_b64)
-        .map_err(|_| SessionError::Malformed)?;
     let payload: TenantSessionPayload =
-        serde_json::from_slice(&payload_bytes).map_err(|_| SessionError::Malformed)?;
-    if payload.is_expired() {
-        return Err(SessionError::Expired);
-    }
+        crate::session::SealedToken::open(secret.key(), TENANT_DOMAIN_TAG, value)?;
     if !tenant.binds(&payload.slug, payload.org) {
         return Err(SessionError::WrongTenant);
     }
@@ -210,6 +192,7 @@ pub fn decode(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
 
     fn key() -> SessionSecret {
         SessionSecret::from_bytes(b"a-test-secret-thirty-two-bytes-x".to_vec())
