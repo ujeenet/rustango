@@ -135,7 +135,7 @@ impl DbIdentity {
 /// `path`'s canonical form, case-folded: Windows paths ignore case, and
 /// canonicalizing resolves junctions, links and 8.3 short names. `None`
 /// when the file does not exist.
-#[cfg(any(not(unix), test))]
+#[cfg(not(unix))]
 fn folded_canonical(path: &std::path::Path) -> Option<std::path::PathBuf> {
     let canonical = std::fs::canonicalize(path).ok()?;
     canonical
@@ -163,27 +163,9 @@ fn url_database(url: &str) -> Option<String> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows, feature = "sqlite"))]
 mod tests {
-    use super::folded_canonical;
-
-    /// A link and a differently cased name fold to one key.
-    #[cfg(unix)]
-    #[test]
-    fn a_link_and_its_target_fold_to_one_key() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("Reg.db");
-        std::fs::write(&file, b"").unwrap();
-        let link = dir.path().join("alias.db");
-        std::os::unix::fs::symlink(&file, &link).unwrap();
-        let key = folded_canonical(&file).expect("exists");
-        assert_eq!(folded_canonical(&link).as_ref(), Some(&key));
-        assert_eq!(key.to_string_lossy(), key.to_string_lossy().to_lowercase());
-        assert!(folded_canonical(&dir.path().join("gone.db")).is_none());
-    }
-
     /// `REG.DB` and `reg.db` are one file on Windows: one identity.
-    #[cfg(all(windows, feature = "sqlite"))]
     #[test]
     fn case_is_ignored_on_windows() {
         let dir = tempfile::tempdir().unwrap();

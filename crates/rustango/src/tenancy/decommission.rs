@@ -755,7 +755,11 @@ where
     }
     super::invalidate_org_cache();
     // Closed, not just evicted: the database is about to be dropped.
-    pools.close_tenant(slug).await;
+    if !pools.close_tenant(slug).await {
+        report.notes.push(
+            "a tenant connection was still in use; the drop goes on without waiting for it".into(),
+        );
+    }
     rep.ok(Step::Deactivate).await;
 
     // While the rows that name the keys still exist (#2569).

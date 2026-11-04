@@ -6,8 +6,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
-- Decommissioning or rolling back a SQLite tenant closes its pools before deleting the file, and retries briefly, so Windows no longer fails with os error 32.
-- On Windows the check that a tenant's SQLite file is not the registry compares canonical, case-folded paths, so a different case, a junction or an 8.3 name no longer slips through.
+- Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.
+- On Windows the check that a tenant's SQLite file is not the registry compares canonical, case-folded paths, so a different case, a junction, a symlink or an 8.3 name no longer slips through; a hard link still does (Unix compares inodes).
 - A tenant file made beside a SQLite registry at a backslash path (`C:\data\reg.db`) lands in that directory, not in the working directory.
 
 ## [0.62.0] — 2026-11-02
