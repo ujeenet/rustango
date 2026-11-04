@@ -162,9 +162,9 @@ pub enum KeyBy {
     /// One bucket for everything, across every tenant. Coarse, but fine
     /// for "max N requests/sec on this endpoint".
     Global,
-    /// One bucket per tenant, from `tenancy::RequestTenant`.
-    /// Requests whose tenant did not resolve share one fixed bucket; global
-    /// requests share another. Without `tenancy` it is [`Self::Global`].
+    /// One bucket per tenant, from `tenancy::RequestTenant`. Global requests,
+    /// requests no tenant matched and requests whose resolution failed each
+    /// share one fixed bucket. Without `tenancy` it is [`Self::Global`].
     Tenant,
 }
 
@@ -176,8 +176,9 @@ pub(crate) async fn tenant_key(req: Request<Body>) -> (Request<Body>, String) {
         let (req, tenant) = RequestTenant::resolve_request(req).await;
         let key = match tenant {
             RequestTenant::Tenant(t) => t.namespace(),
-            RequestTenant::Unknown => "<unknown-tenant>".to_owned(),
-            _ => "<global>".to_owned(),
+            RequestTenant::Global => "<global>".to_owned(),
+            RequestTenant::Unmatched => "<no-tenant>".to_owned(),
+            _ => "<unknown-tenant>".to_owned(),
         };
         (req, key)
     }

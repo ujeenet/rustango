@@ -529,6 +529,16 @@ impl LoginThrottle {
         tenant: &crate::tenancy::TenantSlug,
     ) -> Result<(), crate::cache::CacheError> {
         let lockout = self.0.lockout();
+        let mut first = Ok(());
+        // Best-effort: one failed delete must not keep the rest.
+        let mut note = |step: &str, r: Result<(), crate::cache::CacheError>| {
+            if let Err(e) = r {
+                tracing::warn!(target: "rustango::login", tenant = %tenant.slug, step, error = %e, "purge: login state not cleared");
+                if first.is_ok() {
+                    first = Err(e);
+                }
+            }
+        };
         for scope in [
             LoginScope::Tenant(tenant.clone()),
             LoginScope::TenantBasic(tenant.clone()),
@@ -536,16 +546,14 @@ impl LoginThrottle {
             LoginScope::TenantAgent(tenant.clone()),
         ] {
             let accounts = account_key_prefix(&scope.key());
-            lockout.clear_accounts_with_prefix(&accounts).await?;
-            self.0
-                .known
-                .delete_prefix(&format!("login-known:{accounts}"))
-                .await?;
+            note("locks", lockout.clear_accounts_with_prefix(&accounts).await);
+            let known = format!("login-known:{accounts}");
+            note("known", self.0.known.delete_prefix(&known).await);
             if let Limit::Cache { shared, .. } = &self.0.global {
-                shared.forget(&scope.key()).await?;
+                note("global", shared.forget(&scope.key()).await);
             }
         }
-        Ok(())
+        first
     }
 
     /// The limits this gate enforces.
@@ -1124,7 +1132,8 @@ impl Held {
 
 /// Forget `tenant`'s login state in the shared gate: account locks, known
 /// clients and global counters of every tenant scope. Keys carry the org id,
-/// so a tenant reusing the slug never reads them; this is cleanup.
+/// so a tenant reusing the slug never reads them; this is cleanup. Every
+/// step runs even when an earlier one fails.
 ///
 /// # Errors
 /// The first cache `delete_prefix` error.
@@ -2347,6 +2356,28 @@ mod tests {
         );
         assert!(t.0.is_known(&heir, &home, "alice").await);
         assert!(t.begin(&heir, &ip("10.8.0.3"), "carol").await.is_err());
+    }
+
+    /// A known-client cache that cannot delete by prefix still lets the
+    /// purge clear every scope's account locks.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn forget_tenant_keeps_going_after_a_failed_step() {
+        let known: BoxedCache = Arc::new(CountingCalls::default());
+        let mut t = LoginThrottle::with_cache(LoginLimits::default(), known);
+        let locks: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let lockout: &'static _ = Box::leak(Box::new(crate::account_lockout::Lockout::new(locks)));
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(lockout);
+        let basic = LoginScope::TenantBasic(ts("partial"));
+        t.begin(&basic, &ip("10.8.1.1"), "bob")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+        let bob = account_key(&basic.key(), "bob");
+        assert!(lockout.attempt_count(&bob).await > 0);
+        assert!(t.forget_tenant(&ts("partial")).await.is_err());
+        assert_eq!(lockout.attempt_count(&bob).await, 0, "later scope skipped");
     }
 
     /// `t` counting account locks in `cache` instead of the shared lockout.

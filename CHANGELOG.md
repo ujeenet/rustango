@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
-- `tenancy::RequestTenant` (`Global`, `Tenant`, `Unknown`): `server::Builder` resolves the tenant once per request and stores it; idempotency, the page cache, rate limits and object-permission hooks read it.
+- `tenancy::RequestTenant` (`Global`, `Tenant`, `Unmatched`, `Unknown`): `server::Builder` resolves the tenant once per request and stores it; idempotency, the page cache, rate limits and object-permission hooks read it.
 - `cache::CacheScope::from_request(&root, &mut parts)` gives the request's tenant-scoped app cache, `sessions()` and `flags()`.
 - `KeyBy::Tenant` counts each tenant in its own bucket; `KeyBy::Global` stays platform-wide.
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
@@ -34,7 +34,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
-- Purging a tenant also deletes its distributed locks, sessions, flag overrides, known login clients and API-key and agent login counters.
+- Purging a tenant also deletes its distributed locks, sessions, flag overrides, known login clients and API-key and agent login counters. Idempotency and page-cache entries stay until they expire; they are bound to the org id, so a tenant reusing the slug cannot read them.
+- Object-permission hooks match a credential to the routed tenant by org id too, so a credential of a purged tenant is nobody under the tenant that reused its slug.
 - Login throttle and account-lock keys carry the org id, so a tenant that reuses a purged slug starts clean.
 - `SessionStore::for_tenant` and `FeatureFlags::for_tenant` bind sessions and per-user flag overrides to the tenant's org id and slug; unscoped, a session or override from one tenant applied in another.
 - A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.

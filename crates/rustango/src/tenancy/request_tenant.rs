@@ -19,8 +19,10 @@ pub enum RequestTenant {
     Global,
     /// The resolved registry org.
     Tenant(TenantSlug),
-    /// A tenant context is mounted but no tenant resolved: no match, a
-    /// resolver error, or an org with no id. Never shares state.
+    /// A tenant context is mounted and no tenant matched: no tenant, but a
+    /// page may still vary on an input the resolver ignored.
+    Unmatched,
+    /// Resolution failed, or the org has no id. Never shares state.
     Unknown,
 }
 
@@ -66,7 +68,8 @@ impl RequestTenant {
     pub(crate) fn from_resolution<E>(found: Result<Option<super::Org>, E>) -> Self {
         match found {
             Ok(Some(org)) => TenantSlug::of(&org).map_or(Self::Unknown, Self::Tenant),
-            Ok(None) | Err(_) => Self::Unknown,
+            Ok(None) => Self::Unmatched,
+            Err(_) => Self::Unknown,
         }
     }
 
@@ -85,7 +88,7 @@ impl RequestTenant {
     pub fn tenant(&self) -> Option<&TenantSlug> {
         match self {
             Self::Tenant(t) => Some(t),
-            Self::Global | Self::Unknown => None,
+            Self::Global | Self::Unmatched | Self::Unknown => None,
         }
     }
 }
@@ -127,6 +130,10 @@ mod tests {
         );
         assert_eq!(
             RequestTenant::from_resolution::<()>(Ok(None)),
+            RequestTenant::Unmatched
+        );
+        assert_eq!(
+            RequestTenant::from_resolution(Err(())),
             RequestTenant::Unknown
         );
     }

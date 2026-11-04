@@ -785,9 +785,9 @@ async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
     let (req, tenant) = RequestTenant::resolve_request(req).await;
     let tenant = match tenant {
         RequestTenant::Tenant(t) => PageTenant::Org(t.namespace()),
-        // The route may still vary on an input the resolver ignored.
-        RequestTenant::Unknown => PageTenant::Unknown,
-        _ => PageTenant::NoTenant,
+        RequestTenant::Global => PageTenant::NoTenant,
+        // No match: the route may still vary on an input the resolver ignored.
+        _ => PageTenant::Unknown,
     };
     (req, tenant)
 }

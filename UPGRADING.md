@@ -158,11 +158,11 @@ untouched.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 - `cargo rustango new --features mcp` needs `--template tenant`; the api and fullstack templates refuse it. A project scaffolded before can drop its `/mcp` mount: it could not authenticate an agent.
 - `FeatureFlags` write methods return `Result<(), CacheError>`; add `?` (or handle the error) where you call `enable`, `disable`, `clear`, `set_percentage`, `enable_for_user` or `disable_for_user`.
-- With a tenant context mounted but no tenant resolved, a request carrying an `Idempotency-Key` gets `503` instead of running unkeyed. With no context mounted it is keyed globally, as before.
+- When tenant resolution fails, a request carrying an `Idempotency-Key` gets `503` instead of running unkeyed. With no context mounted, or when no tenant matched, it is keyed globally, as before.
 - Requests the Builder's unresolved router serves are marked `Global`, so `CachePageLayer` on that router now caches them.
 - `LoginScope::Tenant`, `TenantBasic`, `TenantApiKey` and `TenantAgent` take a `TenantSlug`, not a slug, and exist only with `tenancy`. Tenant login counters and account locks reset once.
 - `KeyBy` is `#[non_exhaustive]` and gains `Tenant`: add a `_` arm to a `match` on it.
-- Object-permission hooks on any tenant route of the Builder now see the routed tenant, so a credential for that tenant resolves to its user, not `Anonymous`.
+- Object-permission hooks on any tenant route of the Builder now see the routed tenant, so a credential for that tenant resolves to its user, not `Anonymous`. The credential must carry the tenant's `TenantSlug` (org id and slug): an app-built `Principal` with only a slug, and no `TenantSlug` next to it, is `Anonymous` there.
 - Under tenancy, scope `SessionStore` and `FeatureFlags` per request with `.for_tenant(&TenantSlug::of(&t.org)?)`. Scoped keys live under `tenant:#org:<id>:<slug>:`, so existing sessions log out and per-user overrides must be set again, once. Global flags, percentages and single-db keys are unchanged.
 
 ## 0.62.0

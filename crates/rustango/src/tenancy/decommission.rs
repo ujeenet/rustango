@@ -39,7 +39,8 @@ static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
     std::sync::RwLock::new(Vec::new());
 
 /// Make every purge delete the tenant's [`crate::cache::ScopedCache::for_tenant`]
-/// keys from `cache`, so a new tenant reusing the slug cannot read them.
+/// keys (sessions and flag overrides included) and its tenant locks from `cache`.
+/// Idempotency and page entries are not deleted; they carry the org id and expire.
 /// Call at boot for each cache holding tenant-scoped entries.
 pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
     PURGE_CACHES

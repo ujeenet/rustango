@@ -18,8 +18,8 @@ pub struct CacheScope {
 }
 
 impl CacheScope {
-    /// The scope of the request's [`RequestTenant`]. `None` when a tenant
-    /// context is mounted but no tenant resolved: nothing may be shared then.
+    /// The scope of the request's [`RequestTenant`]: global when no tenant
+    /// matched. `None` when resolution failed: nothing may be shared then.
     pub async fn from_request(
         root: &BoxedCache,
         parts: &mut axum::http::request::Parts,
