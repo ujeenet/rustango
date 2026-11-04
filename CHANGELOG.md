@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - MCP: notification streams, stream caps and progress are keyed by the tenant's org id, so a tenant that reuses a purged slug never gets the old tenant's frames; a stream ends when its org is deactivated or gone or after repeated failed re-checks, and list cursors and cancellation are bound to the org id too.
 - JWT logout answers 503 instead of 204 when the JTI store did not record the revocation; `JwtLifecycle::revoke` returns `false` then.
+- `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 
 ## [0.62.0] — 2026-11-02
 

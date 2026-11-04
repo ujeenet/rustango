@@ -10,6 +10,9 @@ login propio con contraseña aleatoria, con permisos solo sobre esa base de
 datos. Registra ambos en `rustango_tenant_databases`. rustango solo elimina,
 o cambia la contraseña de, una base de datos registrada.
 
+Cómo encajan los dos modos de almacenamiento, los pools y el enrutado está en
+[Multi-tenancy](tenancy.md).
+
 ## Tabla de contenidos
 
 - [Antes de empezar](#antes-de-empezar)

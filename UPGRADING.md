@@ -151,6 +151,7 @@ untouched.
 ## Unreleased
 
 - MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why. `mcp::cancel` takes a `&TenantSlug`, and `mcp::pagination::paginate` takes the `&McpAgent` instead of its id.
+- A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 
 ## 0.62.0
 
