@@ -11,6 +11,9 @@ The gap worth knowing about: the console can migrate **one** tenant
 (`POST /orgs/{slug}/migrate`), while the CLI's `migrate-tenants` takes no slug
 and runs the whole registry. There is no per-tenant migrate on the command line.
 
+How the registry, tenants, storage modes and routing fit together is on
+[Multi-tenancy](tenancy.md).
+
 [![The operator console's tenant list — every tenant in the registry, with its storage mode, host pattern and active state, plus actions to provision, migrate and pre-warm](img/operator-console.png)](img/operator-console.png)
 
 ## Table of contents

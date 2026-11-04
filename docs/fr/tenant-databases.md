@@ -10,6 +10,9 @@ propre avec un mot de passe aléatoire, autorisé sur cette base seulement. Il
 enregistre les deux dans `rustango_tenant_databases`. rustango ne supprime ou
 ne change le mot de passe que d'une base enregistrée.
 
+Comment les deux modes de stockage, les pools et le routage s'assemblent :
+voir [Multi-tenancy](tenancy.md).
+
 ## Table des matières
 
 - [Avant de commencer](#avant-de-commencer)
