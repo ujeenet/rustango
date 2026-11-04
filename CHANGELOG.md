@@ -7,47 +7,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added
 
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
+
 ### Changed
 
 - Passkey ES256 verification uses `ring`, through the same helper as the SSO JWKS check; `p256` and its second crypto stack (32 crates) are gone. `passkey::verify::cose_es256_key` returns `passkey::Es256Key`.
 - Every framework model field has a label and help text (meaning, an example, defaults, security effect), and the operator console's tenant, host, database-server and operator forms read the same schema text.
 - Framework models show readable labels in admin column headers and forms (e.g. `Display name`, not `display_name`).
-
-### Fixed
-
-- A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
-- Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.
-- On Windows the check that a tenant's SQLite file is not the registry compares canonical, case-folded paths, so a different case, a junction, a symlink or an 8.3 name no longer slips through; a hard link still does (Unix compares inodes).
-- A tenant file made beside a SQLite registry at a backslash path (`C:\data\reg.db`) lands in that directory, not in the working directory.
-- MCP: notification streams, stream caps and progress are keyed by the tenant's org id, so a tenant that reuses a purged slug never gets the old tenant's frames; a stream ends when its org is deactivated or gone or after repeated failed re-checks, and list cursors and cancellation are bound to the org id too.
-- JWT logout answers 503 instead of 204 when the JTI store did not record the revocation; `JwtLifecycle::revoke` returns `false` then.
-- `Cli::try_nest_with` mounts a router whose builder can fail; the error stops `runserver` and `check` with main's `Error:` line. `session::try_load_session_secret_for_tier` is the non-panicking key loader.
-
-### Fixed
-
-- `startapp --with-manage-bin` generates `#[rustango::main]` instead of `#[tokio::main]`, so the manage binary gets the 8 MiB stack instead of overflowing Windows' 1 MiB main thread.
-- A new tenant project's `.env.example` sets `RUSTANGO_TENANT_PORT=8080`, so `create-tenant --admin-email` prints a link with the dev server's port.
-- The `startapp` tests template uses `contains` and passes `clippy::manual_contains`.
-- Fullstack and tenant projects on the prod tier without `RUSTANGO_SESSION_SECRET` exit with `Error:` instead of panicking (`run-server` and `server::Builder` return the error); the prod Dockerfile header names the keys each template needs.
-- `dumpdata --output <file>` (`-o`) writes the fixture as UTF-8, for shells whose `>` writes UTF-16, and replaces an existing file only once the dump is complete.
-
-### Fixed
-
-- `loaddata`, `Fixture::from_file`, migration files (`embed_migrations!` too), i18n catalogs, settings TOML, `DB_PASSWORD_FILE` and the `.env` peek at startup read UTF-16 (BOM-detected) and drop a UTF-8 BOM, so a fixture redirected by Windows PowerShell 5.1 loads. `html_tera_from_glob` drops a template's UTF-8 BOM; a UTF-16 template still fails to load.
-- Static files refuse a name that resolves to a hidden file (a link, or a Windows 8.3 name such as `ENV~1` for `.env`), not only one whose requested path starts with a dot.
-- On Windows the server and `migrate-tenant-storage` also stop gracefully on Ctrl-Break, a closed console window and logoff / shutdown, not only Ctrl-C.
-- `manage docs` opens the browser on Windows instead of starting a stray `cmd`.
-- Ctrl-C inside `dbshell` on Windows reaches the database client and no longer kills rustango, leaving the client orphaned.
-- The docs and the scaffolded tenant README give a PowerShell line next to each bash-only `export` / `openssl` / `mkdir -p` command.
-### Changed
-
 - The `urlencoding` dependency is gone: OAuth URLs and tests use the crate's own `url_codec::url_encode`, which escapes the same characters.
-
-### Fixed
-
-- The internal `_tera` and `_aead` features build alone under `-D warnings`.
-- `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
-- API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
+- **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
 
 ### Deprecated
 
@@ -62,10 +29,29 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A panic while the i18n translator's lock is held no longer makes every later translation panic.
 - `contenttypes::ensure_seeded` retries a deadlocked insert up to three times, so several processes booting at once all start.
 
-### Changed
+### Fixed
 
-- **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
-
+- A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
+- Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.
+- On Windows the check that a tenant's SQLite file is not the registry compares canonical, case-folded paths, so a different case, a junction, a symlink or an 8.3 name no longer slips through; a hard link still does (Unix compares inodes).
+- A tenant file made beside a SQLite registry at a backslash path (`C:\data\reg.db`) lands in that directory, not in the working directory.
+- MCP: notification streams, stream caps and progress are keyed by the tenant's org id, so a tenant that reuses a purged slug never gets the old tenant's frames; a stream ends when its org is deactivated or gone or after repeated failed re-checks, and list cursors and cancellation are bound to the org id too.
+- JWT logout answers 503 instead of 204 when the JTI store did not record the revocation; `JwtLifecycle::revoke` returns `false` then.
+- `Cli::try_nest_with` mounts a router whose builder can fail; the error stops `runserver` and `check` with main's `Error:` line. `session::try_load_session_secret_for_tier` is the non-panicking key loader.
+- `startapp --with-manage-bin` generates `#[rustango::main]` instead of `#[tokio::main]`, so the manage binary gets the 8 MiB stack instead of overflowing Windows' 1 MiB main thread.
+- A new tenant project's `.env.example` sets `RUSTANGO_TENANT_PORT=8080`, so `create-tenant --admin-email` prints a link with the dev server's port.
+- The `startapp` tests template uses `contains` and passes `clippy::manual_contains`.
+- Fullstack and tenant projects on the prod tier without `RUSTANGO_SESSION_SECRET` exit with `Error:` instead of panicking (`run-server` and `server::Builder` return the error); the prod Dockerfile header names the keys each template needs.
+- `dumpdata --output <file>` (`-o`) writes the fixture as UTF-8, for shells whose `>` writes UTF-16, and replaces an existing file only once the dump is complete.
+- `loaddata`, `Fixture::from_file`, migration files (`embed_migrations!` too), i18n catalogs, settings TOML, `DB_PASSWORD_FILE` and the `.env` peek at startup read UTF-16 (BOM-detected) and drop a UTF-8 BOM, so a fixture redirected by Windows PowerShell 5.1 loads. `html_tera_from_glob` drops a template's UTF-8 BOM; a UTF-16 template still fails to load.
+- Static files refuse a name that resolves to a hidden file (a link, or a Windows 8.3 name such as `ENV~1` for `.env`), not only one whose requested path starts with a dot.
+- On Windows the server and `migrate-tenant-storage` also stop gracefully on Ctrl-Break, a closed console window and logoff / shutdown, not only Ctrl-C.
+- `manage docs` opens the browser on Windows instead of starting a stray `cmd`.
+- Ctrl-C inside `dbshell` on Windows reaches the database client and no longer kills rustango, leaving the client orphaned.
+- The docs and the scaffolded tenant README give a PowerShell line next to each bash-only `export` / `openssl` / `mkdir -p` command.
+- The internal `_tera` and `_aead` features build alone under `-D warnings`.
+- `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
+- API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
 ## [0.62.0] — 2026-11-02
 
 ### Added
