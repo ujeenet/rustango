@@ -7,6 +7,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added
 
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
+### Changed
+
+- Passkey ES256 verification uses `ring`, through the same helper as the SSO JWKS check; `p256` and its second crypto stack (32 crates) are gone. `passkey::verify::cose_es256_key` returns `passkey::Es256Key`.
+
 ### Fixed
 
 - A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.

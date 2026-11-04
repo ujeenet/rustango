@@ -153,6 +153,7 @@ untouched.
 - Creating or editing a tenant with a port but no host or path prefix is refused (a create with an apex set gets `<slug>.<apex>` instead). Give it a host, or set `RUSTANGO_TENANT_PORT_ROUTING=1` if your app mounts `PortResolver` on its own listeners.
 - Existing port-only tenants lose their links (first-admin mail, console handoff, SSO example) and `check --deploy` names them: give each a host or a path prefix, or set `RUSTANGO_TENANT_PORT_ROUTING=1`.
 - MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why. `mcp::cancel` takes a `&TenantSlug`, and `mcp::pagination::paginate` takes the `&McpAgent` instead of its id.
+- `passkey::verify::cose_es256_key` returns `passkey::Es256Key` instead of `p256::ecdsa::VerifyingKey`; read the point with `Es256Key::to_sec1()` (65 bytes, `0x04 || x || y`). An off-curve point is now refused when a signature is verified, not when the key is read.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 
 ## 0.62.0

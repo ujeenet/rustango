@@ -108,9 +108,12 @@ impl Key {
             Material::Rsa { n, e } => s::RsaPublicKeyComponents { n, e }
                 .verify(&s::RSA_PKCS1_2048_8192_SHA256, input, sig)
                 .is_ok(),
-            Material::P256(point) => s::UnparsedPublicKey::new(&s::ECDSA_P256_SHA256_FIXED, point)
-                .verify(input, sig)
-                .is_ok(),
+            Material::P256(point) => crate::crypto::es256_verifies(
+                point,
+                input,
+                sig,
+                crate::crypto::Es256Encoding::Fixed,
+            ),
         }
     }
 }
