@@ -219,7 +219,7 @@ de forma visible en lugar de renderizar un enlace roto.
 
 ## Patrones regex y de ruta tipados
 
-**Rustango no tiene `re_path`, y nunca se aplica ningún convertidor de ruta.** Un
+**Rustango no tiene rutas con regex, y nunca se aplica ningún convertidor de ruta.** Un
 segmento de patrón es o bien un literal (`/posts/new`) o un placeholder `{name}`
 que captura exactamente un segmento; `{*name}` captura el resto de la ruta. Ese es
 todo el vocabulario — no hay `r'(?P<year>[0-9]{4})'`, y `{int:id}` **no** restringe

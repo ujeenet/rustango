@@ -254,14 +254,14 @@ Bloquea las filas que seleccionas para que ninguna otra transacción pueda cambi
 // Canonical "claim next available row" pattern. Worker A grabs the
 // lowest-priority pending job; concurrent worker B with SKIP LOCKED
 // skips A's row and grabs the next instead — no blocking.
-let mut tx = pool.begin().await?;
+let mut tx = rustango::sql::write_transaction(&pool).await?;
 let claim: Vec<Job> = Job::objects()
     .where_(Job::status.eq("pending"))
     .order_by(&[("priority", false)])
     .limit(1)
     .select_for_update()
     .skip_locked()
-    .fetch_on(&mut *tx).await?;
+    .fetch_on(&mut tx).await?;
 // ... mark claim[0] as in-progress, do work ...
 tx.commit().await?;
 ```
@@ -284,7 +284,7 @@ Llamar a `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sin un `.sele
 | MySQL 8.0.1+ | Soporta todo excepto `NO KEY` — ese flag recae en `FOR UPDATE` simple (el bloqueo más estricto). |
 | SQLite | Sin sintaxis de bloqueo a nivel de fila; el writer no emite ninguna cláusula. Abre la transacción con `rustango::sql::write_transaction(&pool)`: toma el bloqueo de escritura de la base de datos en el `BEGIN`, así que un segundo worker espera y luego ve la fila reclamada. Una de `transaction_pool` no bloquea nada hasta que escribe, y el segundo escritor falla con `SQLITE_BUSY`. Para un bloque `atomic`, usa `rustango::sql::atomic_immediate(&pool, …)`: su bloque SQLite de nivel superior empieza con `BEGIN IMMEDIATE`; en PG y MySQL es un `atomic` normal. |
 
-**Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. En Postgres combínalo con `pool.begin()` (un `sqlx::PgPool`); para una transacción independiente del backend usa `rustango::sql::write_transaction(&pool)` y `.fetch_on(&mut tx)`.
+**Debe ejecutarse dentro de una transacción.** `FOR UPDATE` fuera de una tx es un no-op en PostgreSQL (la tx implícita de una sola sentencia libera el bloqueo de inmediato) y un error en MySQL. Ábrela con `rustango::sql::write_transaction(&pool)` y lee con `.fetch_on(&mut tx)`; funciona en todos los backends.
 
 ### Combinar consultas (unión, intersección, diferencia)
 
@@ -357,7 +357,7 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 **Establece un `order_by`.** `OFFSET` contra una consulta sin un ordenamiento estable devuelve filas impredecibles entre chunks — típicamente `.order_by(&[("pk", false)])` para que cada chunk se recoja limpiamente. El método no impone el ordenamiento (algunas consultas legítimamente no quieren ordenamiento, p. ej. un vaciado de un solo tiro), pero iterar sin ordenar es un peligro latente.
 
-**Contrapartida frente a los cursores del lado del servidor.** Esto es un simple fragmentador con LIMIT/OFFSET. Sobre una columna de ordenamiento indexada con btree, PostgreSQL escanea las primeras N filas antes de devolver la (N+1)-ésima — así que la paginación profunda es un trabajo total de `O(n²)`. Para un vaciado de 10M filas esto importa; para 100k filas normalmente no. El fragmentador gana en portabilidad (funciona en todos los backends sin sobrecarga de transacciones) y simplicidad (sin gestión del ciclo de vida del cursor). Para lecturas verdaderamente en streaming en PG, baja a `pool.begin()` + la API Stream cruda `sqlx::query(...).fetch(&mut *tx)` directamente — el protocolo extendido hace streaming desde el servidor sin re-búsqueda por offset.
+**Contrapartida frente a los cursores del lado del servidor.** Esto es un simple fragmentador con LIMIT/OFFSET. Sobre una columna de ordenamiento indexada con btree, PostgreSQL escanea las primeras N filas antes de devolver la (N+1)-ésima — así que la paginación profunda es un trabajo total de `O(n²)`. Para un vaciado de 10M filas esto importa; para 100k filas normalmente no. El fragmentador gana en portabilidad (funciona en todos los backends sin sobrecarga de transacciones) y simplicidad (sin gestión del ciclo de vida del cursor). Para lecturas verdaderamente en streaming en PG, baja a sqlx crudo sobre una conexión retenida (`pool.acquire()`, luego `sqlx::query(...).fetch(...)` en la rama Postgres de `conn.conn()`) — el protocolo extendido hace streaming desde el servidor sin re-búsqueda por offset.
 
 **Mezclar `next_chunk` y `next_row` en el mismo iterador es seguro.** El búfer interno `VecDeque` se drena en orden de fila antes de cualquier nuevo fetch de BD, así que `next_chunk` tras un vaciado parcial de `next_row` produce primero las filas restantes en búfer, y luego continúa con chunks nuevos.
 
@@ -366,11 +366,11 @@ Tanto `.rows_seen()` (conteo acumulado) como `.is_exhausted()` (bandera post-vac
 **Peligro de escritura concurrente.** Cada chunk es una consulta separada, así que las filas insertadas/eliminadas entre chunks pueden omitirse o duplicarse (el clásico problema de "ventanas" de la paginación con OFFSET). Para tablas de solo-lectura / solo-append — el caso de uso típico de exportación — esto no es una preocupación. Para tablas que se escriben de forma concurrente necesitas una transacción con aislamiento de snapshot para que cada chunk vea la misma vista. **`ChunkedIter` toma `&Pool`, no un `&mut Transaction`, así que la API del fragmentador no se puede usar dentro de la tx directamente** — en su lugar, haz a mano el SELECT fragmentado contra la tx:
 
 ```rust
-let mut tx = pool.begin().await?;
-sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    .execute(&mut *tx).await?;
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
+rustango::sql::raw_execute_tx(&mut tx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", vec![])
+    .await?;
 
-// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut *tx)`,
+// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut tx)`,
 // so every chunk reads from the same snapshot.
 let chunk_size = 2_000_i64;
 let mut offset = 0_i64;
@@ -379,7 +379,7 @@ loop {
         .order_by(&[("id", false)])
         .limit(chunk_size)
         .offset(offset)
-        .fetch_on(&mut *tx)
+        .fetch_on(&mut tx)
         .await?;
     if rows.is_empty() { break; }
     for post in &rows { /* … */ }
@@ -391,7 +391,7 @@ tx.commit().await?;
 
 **`select_for_update()` no se propaga entre chunks.** Los bloqueos de fila retenidos por `.select_for_update()` se liberan al final de la transacción implícita de cada chunk. No hay un arreglo con forma de fragmentador: el builder `.iterator()` toma `&Pool`, las variantes de bloqueo necesitan un `&mut Transaction`, y los dos no se componen. Para un vaciado con bloqueo tienes dos caminos, cada uno con una contrapartida:
 
-- **`.fetch_on(&mut *tx)` de todo el resultado** — un solo viaje de ida y vuelta, el `Vec<T>` completo en memoria. Está bien cuando el resultado cabe.
+- **`.fetch_on(&mut tx)` de todo el resultado** — un solo viaje de ida y vuelta, el `Vec<T>` completo en memoria. Está bien cuando el resultado cabe.
 - **LIMIT/OFFSET a mano dentro de la tx** — la misma forma que el fragmento de aislamiento de snapshot de arriba; los chunks se mantienen en streaming pero estás fuera de la API `ChunkedIter`.
 
 **`chunk_size` debe ser > 0.** Los valores cero o negativos hacen panic. Elige un valor que quepa en tu presupuesto de tamaño de fila (`2000` es un buen punto de partida para filas estrechas; más bajo para columnas anchas TEXT/JSONB).

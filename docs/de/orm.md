@@ -254,14 +254,14 @@ Sperre die Zeilen, die du auswählst, sodass keine andere Transaktion sie änder
 // Canonical "claim next available row" pattern. Worker A grabs the
 // lowest-priority pending job; concurrent worker B with SKIP LOCKED
 // skips A's row and grabs the next instead — no blocking.
-let mut tx = pool.begin().await?;
+let mut tx = rustango::sql::write_transaction(&pool).await?;
 let claim: Vec<Job> = Job::objects()
     .where_(Job::status.eq("pending"))
     .order_by(&[("priority", false)])
     .limit(1)
     .select_for_update()
     .skip_locked()
-    .fetch_on(&mut *tx).await?;
+    .fetch_on(&mut tx).await?;
 // ... mark claim[0] as in-progress, do work ...
 tx.commit().await?;
 ```
@@ -284,7 +284,7 @@ tx.commit().await?;
 | MySQL 8.0.1+ | Unterstützt alles außer `NO KEY` — dieses Flag fällt auf schlichtes `FOR UPDATE` zurück (die strengere Sperre). |
 | SQLite | Keine Syntax für Sperren auf Zeilenebene; der Writer emittiert keine Klausel. Öffne die Transaktion mit `rustango::sql::write_transaction(&pool)`: Sie nimmt die Schreibsperre der Datenbank beim `BEGIN`, sodass ein zweiter Worker wartet und dann die beanspruchte Zeile sieht. Eine `transaction_pool`-Transaktion sperrt nichts, bis sie schreibt, und der zweite Schreiber scheitert mit `SQLITE_BUSY`. Für einen `atomic`-Block nimm `rustango::sql::atomic_immediate(&pool, …)`: Sein oberster SQLite-Block startet mit `BEGIN IMMEDIATE`; auf PG und MySQL ist es schlichtes `atomic`. |
 
-**Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Auf Postgres kombiniere es mit `pool.begin()` (einem `sqlx::PgPool`); für eine backend-agnostische Transaktion nimm `rustango::sql::write_transaction(&pool)` und `.fetch_on(&mut tx)`.
+**Muss innerhalb einer Transaktion laufen.** `FOR UPDATE` außerhalb einer Transaktion ist auf PostgreSQL eine No-op (die implizite Ein-Statement-Transaktion gibt die Sperre sofort frei) und auf MySQL ein Fehler. Öffne sie mit `rustango::sql::write_transaction(&pool)` und lies mit `.fetch_on(&mut tx)`; das läuft auf jedem Backend.
 
 ### Abfragen kombinieren (Vereinigung, Schnitt, Differenz)
 
@@ -357,7 +357,7 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 **Setze ein `order_by`.** `OFFSET` gegen eine Abfrage ohne stabile Sortierung liefert über Chunks hinweg unvorhersehbare Zeilen — typischerweise `.order_by(&[("pk", false)])`, sodass jeder Chunk sauber weitermacht. Die Methode erzwingt keine Sortierung (manche Abfragen wollen legitimerweise keine Sortierung, z. B. ein einmaliges Leeren), aber unsortierte Iteration ist eine Fußfalle.
 
-**Kompromiss gegenüber serverseitigen Cursorn.** Das ist ein einfacher LIMIT/OFFSET-Chunker. Auf einer btree-indizierten Sortierspalte scannt PostgreSQL die ersten N Zeilen, bevor es die (N+1)-te zurückgibt — tiefe Paginierung ist also `O(n²)` Gesamtarbeit. Für ein 10M-Zeilen-Leeren ist das relevant; für 100k Zeilen meistens nicht. Der Chunker gewinnt bei Portabilität (funktioniert auf allen Backends ohne Transaktions-Overhead) und Einfachheit (kein Verwalten eines Cursor-Lebenszyklus). Für wirklich streamende Reads auf PG steig direkt in `pool.begin()` + rohes `sqlx::query(...).fetch(&mut *tx)` Stream-API ein — das erweiterte Protokoll streamt vom Server ohne Offset-Reseek.
+**Kompromiss gegenüber serverseitigen Cursorn.** Das ist ein einfacher LIMIT/OFFSET-Chunker. Auf einer btree-indizierten Sortierspalte scannt PostgreSQL die ersten N Zeilen, bevor es die (N+1)-te zurückgibt — tiefe Paginierung ist also `O(n²)` Gesamtarbeit. Für ein 10M-Zeilen-Leeren ist das relevant; für 100k Zeilen meistens nicht. Der Chunker gewinnt bei Portabilität (funktioniert auf allen Backends ohne Transaktions-Overhead) und Einfachheit (kein Verwalten eines Cursor-Lebenszyklus). Für wirklich streamende Reads auf PG steig auf rohes sqlx auf einer gehaltenen Verbindung um (`pool.acquire()`, dann `sqlx::query(...).fetch(...)` auf dem Postgres-Zweig von `conn.conn()`) — das erweiterte Protokoll streamt vom Server ohne Offset-Reseek.
 
 **`next_chunk` und `next_row` auf demselben Iterator zu mischen ist sicher.** Der interne `VecDeque`-Puffer leert sich in Zeilenreihenfolge vor jedem neuen DB-Fetch, sodass `next_chunk` nach einem partiellen `next_row`-Leeren zuerst die verbleibenden gepufferten Zeilen liefert und dann mit frischen Chunks fortfährt.
 
@@ -366,11 +366,11 @@ Sowohl `.rows_seen()` (kumulierter Zähler) als auch `.is_exhausted()` (Post-Dra
 **Gefahr bei gleichzeitigem Schreiben.** Jeder Chunk ist eine separate Abfrage, sodass zwischen Chunks eingefügte/gelöschte Zeilen übersprungen oder dupliziert werden können (das klassische "Windowing"-Problem der OFFSET-Paginierung). Für nur-lesbare / nur-anfügende Tabellen — den typischen Export-Anwendungsfall — ist das kein Thema. Für Tabellen, die gleichzeitig beschrieben werden, brauchst du eine Snapshot-Isolation-Transaktion, damit jeder Chunk dieselbe Sicht sieht. **`ChunkedIter` nimmt `&Pool`, nicht `&mut Transaction`, sodass die Chunker-API nicht direkt innerhalb der Transaktion verwendet werden kann** — rolle stattdessen den gechunkten SELECT gegen die Transaktion von Hand aus:
 
 ```rust
-let mut tx = pool.begin().await?;
-sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    .execute(&mut *tx).await?;
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
+rustango::sql::raw_execute_tx(&mut tx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", vec![])
+    .await?;
 
-// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut *tx)`,
+// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut tx)`,
 // so every chunk reads from the same snapshot.
 let chunk_size = 2_000_i64;
 let mut offset = 0_i64;
@@ -379,7 +379,7 @@ loop {
         .order_by(&[("id", false)])
         .limit(chunk_size)
         .offset(offset)
-        .fetch_on(&mut *tx)
+        .fetch_on(&mut tx)
         .await?;
     if rows.is_empty() { break; }
     for post in &rows { /* … */ }
@@ -391,7 +391,7 @@ tx.commit().await?;
 
 **`select_for_update()` propagiert nicht über Chunks hinweg.** Zeilensperren, die von `.select_for_update()` gehalten werden, werden am Ende der impliziten Transaktion jedes Chunks freigegeben. Es gibt keine chunker-förmige Lösung: der `.iterator()`-Builder nimmt `&Pool`, die sperrenden Varianten brauchen ein `&mut Transaction`, und die beiden komponieren nicht. Für ein gesperrtes Leeren hast du zwei Wege, jeder mit einem Kompromiss:
 
-- **Ganzes-Ergebnis `.fetch_on(&mut *tx)`** — ein einziger Roundtrip, volles `Vec<T>` im Speicher. In Ordnung, wenn das Ergebnis passt.
+- **Ganzes-Ergebnis `.fetch_on(&mut tx)`** — ein einziger Roundtrip, volles `Vec<T>` im Speicher. In Ordnung, wenn das Ergebnis passt.
 - **Handgerolltes LIMIT/OFFSET innerhalb der Transaktion** — dieselbe Form wie das Snapshot-Isolation-Snippet oben; Chunks bleiben gestreamt, aber du bist außerhalb der `ChunkedIter`-API.
 
 **`chunk_size` muss > 0 sein.** Null oder negative Werte panicken. Wähle einen Wert, der zu deinem Zeilengrößen-Budget passt (`2000` ist ein guter Ausgangspunkt für schmale Zeilen, niedriger für breite TEXT/JSONB-Spalten).

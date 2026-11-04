@@ -254,14 +254,14 @@ Verrouille les lignes que vous sélectionnez pour qu'aucune autre transaction ne
 // Canonical "claim next available row" pattern. Worker A grabs the
 // lowest-priority pending job; concurrent worker B with SKIP LOCKED
 // skips A's row and grabs the next instead — no blocking.
-let mut tx = pool.begin().await?;
+let mut tx = rustango::sql::write_transaction(&pool).await?;
 let claim: Vec<Job> = Job::objects()
     .where_(Job::status.eq("pending"))
     .order_by(&[("priority", false)])
     .limit(1)
     .select_for_update()
     .skip_locked()
-    .fetch_on(&mut *tx).await?;
+    .fetch_on(&mut tx).await?;
 // ... mark claim[0] as in-progress, do work ...
 tx.commit().await?;
 ```
@@ -284,7 +284,7 @@ Appeler `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sans un `.sele
 | MySQL 8.0.1+ | Prend tout en charge sauf `NO KEY` — cette option retombe sur un simple `FOR UPDATE` (le verrou plus strict). |
 | SQLite | Aucune syntaxe de verrou au niveau ligne ; le writer n'émet aucune clause. Ouvrez la transaction avec `rustango::sql::write_transaction(&pool)` : elle prend le verrou d'écriture de la base dès le `BEGIN`, donc un second worker attend puis voit la ligne réclamée. Une transaction `transaction_pool` ne verrouille rien avant d'écrire, et le second écrivain échoue avec `SQLITE_BUSY`. Pour un bloc `atomic`, utilisez `rustango::sql::atomic_immediate(&pool, …)` : son bloc SQLite de premier niveau démarre par `BEGIN IMMEDIATE` ; sur PG et MySQL c'est un `atomic` ordinaire. |
 
-**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Sur Postgres, associez-le à `pool.begin()` (un `sqlx::PgPool`) ; pour une transaction indépendante du backend, utilisez `rustango::sql::write_transaction(&pool)` et `.fetch_on(&mut tx)`.
+**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Ouvrez-la avec `rustango::sql::write_transaction(&pool)` et lisez avec `.fetch_on(&mut tx)` ; cela fonctionne sur chaque backend.
 
 ### Combinaison de requêtes (union, intersection, différence)
 
@@ -357,7 +357,7 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 **Définissez un `order_by`.** Un `OFFSET` sur une requête sans tri stable renvoie des lignes imprévisibles d'un chunk à l'autre — typiquement `.order_by(&[("pk", false)])` afin que chaque chunk s'enchaîne proprement. La méthode n'impose pas de tri (certaines requêtes veulent légitimement ne pas trier, p. ex. une vidange en une seule passe), mais une itération non triée est un piège.
 
-**Compromis face aux curseurs côté serveur.** Il s'agit d'un simple découpage LIMIT/OFFSET. Sur une colonne de tri indexée par btree, PostgreSQL balaie les N premières lignes avant de renvoyer la (N+1)ᵉ — donc la pagination profonde représente un travail total en `O(n²)`. Pour une vidange de 10 M de lignes, cela compte ; pour 100 k lignes, généralement non. Le découpeur l'emporte sur la portabilité (fonctionne sur tous les backends sans surcoût de transaction) et la simplicité (aucune gestion du cycle de vie d'un curseur). Pour des lectures véritablement en flux sur PG, passez directement à l'API Stream `pool.begin()` + `sqlx::query(...).fetch(&mut *tx)` brut — le protocole étendu diffuse depuis le serveur sans re-recherche par offset.
+**Compromis face aux curseurs côté serveur.** Il s'agit d'un simple découpage LIMIT/OFFSET. Sur une colonne de tri indexée par btree, PostgreSQL balaie les N premières lignes avant de renvoyer la (N+1)ᵉ — donc la pagination profonde représente un travail total en `O(n²)`. Pour une vidange de 10 M de lignes, cela compte ; pour 100 k lignes, généralement non. Le découpeur l'emporte sur la portabilité (fonctionne sur tous les backends sans surcoût de transaction) et la simplicité (aucune gestion du cycle de vie d'un curseur). Pour des lectures véritablement en flux sur PG, passez à sqlx brut sur une connexion tenue (`pool.acquire()`, puis `sqlx::query(...).fetch(...)` sur la branche Postgres de `conn.conn()`) — le protocole étendu diffuse depuis le serveur sans re-recherche par offset.
 
 **Mélanger `next_chunk` et `next_row` sur le même itérateur est sûr.** Le tampon interne `VecDeque` se vide dans l'ordre des lignes avant toute nouvelle récupération en base, donc un `next_chunk` après une vidange partielle par `next_row` renvoie d'abord les lignes restantes en tampon, puis continue avec de nouveaux chunks.
 
@@ -366,11 +366,11 @@ while let Some(post) = iter.next_row(&pool).await? {
 **Risque d'écriture concurrente.** Chaque chunk est une requête distincte, donc les lignes insérées/supprimées entre les chunks peuvent être omises ou dupliquées (le problème classique de « fenêtrage » de la pagination par OFFSET). Pour les tables en lecture seule / en ajout uniquement — le cas d'usage typique d'export — ce n'est pas un souci. Pour les tables écrites en concurrence, vous avez besoin d'une transaction en isolation par instantané afin que chaque chunk voie la même vue. **`ChunkedIter` prend un `&Pool`, pas un `&mut Transaction`, donc l'API du découpeur ne peut pas être utilisée directement à l'intérieur de la transaction** — écrivez plutôt le SELECT découpé à la main contre la transaction :
 
 ```rust
-let mut tx = pool.begin().await?;
-sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    .execute(&mut *tx).await?;
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
+rustango::sql::raw_execute_tx(&mut tx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", vec![])
+    .await?;
 
-// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut *tx)`,
+// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut tx)`,
 // so every chunk reads from the same snapshot.
 let chunk_size = 2_000_i64;
 let mut offset = 0_i64;
@@ -379,7 +379,7 @@ loop {
         .order_by(&[("id", false)])
         .limit(chunk_size)
         .offset(offset)
-        .fetch_on(&mut *tx)
+        .fetch_on(&mut tx)
         .await?;
     if rows.is_empty() { break; }
     for post in &rows { /* … */ }
@@ -391,7 +391,7 @@ tx.commit().await?;
 
 **`select_for_update()` ne se propage pas d'un chunk à l'autre.** Les verrous de ligne détenus par `.select_for_update()` sont libérés à la fin de la transaction implicite de chaque chunk. Il n'existe pas de correctif au niveau du découpeur : le builder `.iterator()` prend un `&Pool`, les variantes de verrouillage ont besoin d'un `&mut Transaction`, et les deux ne se composent pas. Pour une vidange verrouillée, vous avez deux chemins, chacun avec un compromis :
 
-- **`.fetch_on(&mut *tx)` sur tout le résultat** — un seul aller-retour, un `Vec<T>` complet en mémoire. Convient quand le résultat tient.
+- **`.fetch_on(&mut tx)` sur tout le résultat** — un seul aller-retour, un `Vec<T>` complet en mémoire. Convient quand le résultat tient.
 - **LIMIT/OFFSET écrit à la main à l'intérieur de la transaction** — même forme que l'extrait d'isolation par instantané ci-dessus ; les chunks restent en flux mais vous sortez de l'API `ChunkedIter`.
 
 **`chunk_size` doit être > 0.** Les valeurs nulles ou négatives paniquent. Choisissez une valeur adaptée à votre budget de taille de ligne (`2000` est un bon point de départ pour des lignes étroites, à baisser pour des colonnes TEXT/JSONB larges).
