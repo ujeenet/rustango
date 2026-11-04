@@ -1080,8 +1080,12 @@ pattern carrying a port, or a path prefix the resolver could never
 produce, is refused rather than stored to silently never match.
 
 A tenant needs a host or a path prefix. The built-in server does not route
-by port, so a port alone is refused; an app that mounts `PortResolver` on
-listeners of its own sets `RUSTANGO_TENANT_PORT_ROUTING=1`.
+by port, so an edit that leaves only a port is refused, and so is a
+port-only create when no apex is set; with an apex, the create gets the
+default host `<slug>.<apex>`. To route by port, build your own resolver
+chain with `PortResolver` and serve your own router on one listener per
+port (the server builder has no hook for it), then set
+`RUSTANGO_TENANT_PORT_ROUTING=1`.
 
 Rotating `--database-url` changes the stored URL. Every server switches
 within 30 s, when its tenant cache refreshes; other edits leave warm

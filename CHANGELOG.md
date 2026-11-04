@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
-- A tenant routed by port alone is refused at create and edit: the built-in server has no port resolver, so it was never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows it for apps that mount `PortResolver`.
+- A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
 
 ## [0.62.0] — 2026-11-02
 

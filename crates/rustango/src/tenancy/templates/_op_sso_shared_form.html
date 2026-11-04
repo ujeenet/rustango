@@ -149,6 +149,8 @@
         {% if callback.example %}
         <div class="field-helper">For tenant <strong>{{ callback.example_tenant }}</strong>:
           <code class="sso-callback" data-template="{{ callback.example }}">{{ callback.example }}</code></div>
+        {% elif callback.example_error %}
+        <div class="field-helper">No example for tenant <strong>{{ callback.example_tenant }}</strong>: {{ callback.example_error }}</div>
         {% endif %}
         <div class="field-helper">Register this redirect URI at the IdP once for each tenant host that offers the provider.</div>
       </td>

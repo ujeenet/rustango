@@ -183,8 +183,8 @@ pub(crate) fn tenant_origin(host: &str, port_suffix: &str) -> String {
 /// caller's own `Host`, whose port is the last fallback.
 ///
 /// # Errors
-/// [`super::TenancyError::Validation`] for an org with no host, path
-/// prefix or port: no resolver would route the link.
+/// [`super::TenancyError::Validation`] for an org no resolver routes: no
+/// host or path prefix (a port alone counts only with port routing on).
 pub(crate) fn tenant_link(
     org: &super::Org,
     path: &str,
@@ -203,7 +203,7 @@ pub(crate) fn tenant_link(
     let prefix = tenant_path_prefix(org.path_prefix.as_deref());
     let host = match org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         Some(pattern) => pattern.to_owned(),
-        // A path-prefix tenant lives on the apex, a port-only one on `<slug>.<apex>`.
+        // A path-prefix tenant lives on the apex; a port-routed one links to `<slug>.<apex>`.
         None if prefix.is_empty() => format!("{}.{}", org.slug, apex.get()),
         None => apex.get(),
     };
