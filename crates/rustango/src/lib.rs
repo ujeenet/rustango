@@ -407,6 +407,8 @@ macro_rules! __impl_sqlite_load_related {
 }
 
 pub mod audit;
+/// The built-in `manage` verbs and the did-you-mean hint, for both CLIs.
+pub(crate) mod cli_verbs;
 /// ContentType framework — a runtime handle for "any registered model".
 /// Used by permissions, generic foreign keys, soft-FK prefetch and
 /// audit-history admin panels.

@@ -124,6 +124,25 @@ pub async fn run_with_writer<W: Write + Send>(
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
 ) -> Result<(), MigrateError> {
+    run_with_writer_for(
+        pool,
+        dir,
+        args,
+        writer,
+        &[crate::cli_verbs::SINGLE_DB_VERBS],
+    )
+    .await
+}
+
+/// [`run_with_writer`], hinting an unknown verb from `verbs`: the tenancy
+/// CLI falls through here with its own verbs too.
+pub(crate) async fn run_with_writer_for<W: Write + Send>(
+    pool: &Pool,
+    dir: &Path,
+    args: impl IntoIterator<Item = String>,
+    writer: &mut W,
+    verbs: &[&[&str]],
+) -> Result<(), MigrateError> {
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
 
@@ -194,8 +213,8 @@ pub async fn run_with_writer<W: Write + Send>(
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
         "inspectdb" => super::inspectdb::inspectdb_cmd(pool, &args[1..], writer).await,
-        other => Err(MigrateError::Validation(format!(
-            "unknown subcommand: `{other}` (run with --help for usage)"
+        other => Err(MigrateError::Validation(crate::cli_verbs::unknown_verb(
+            other, verbs,
         ))),
     }
 }
@@ -2140,7 +2159,9 @@ fn write_startapp_report<W: Write>(
     }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
-        writeln!(w, "  {}", super::scaffold::STARTAPP_NEXT)?;
+        for cmd in super::scaffold::STARTAPP_NEXT {
+            writeln!(w, "  {cmd}")?;
+        }
     }
     Ok(())
 }
@@ -9144,6 +9165,23 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         .await;
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("[info]    account lockout"), "{s}");
+    }
+
+    /// An unknown verb names the nearest one, through the real dispatch.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_unknown_verb_suggests_the_nearest() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let err = run_with_writer(
+            &pool,
+            Path::new("/nonexistent"),
+            ["migrat".to_owned()],
+            &mut buf,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("did you mean `migrate`?"), "{err}");
     }
 
     /// A misspelt flag fails instead of running the plain check.

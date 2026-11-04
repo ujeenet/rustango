@@ -155,6 +155,7 @@ untouched.
 - MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why. `mcp::cancel` takes a `&TenantSlug`, and `mcp::pagination::paginate` takes the `&McpAgent` instead of its id.
 - `passkey::verify::cose_es256_key` returns `passkey::Es256Key` instead of `p256::ecdsa::VerifyingKey`; read the point with `Es256Key::to_sec1()` (65 bytes, `0x04 || x || y`). An off-curve point is now refused when a signature is verified, not when the key is read.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
+- `cargo rustango new --features mcp` needs `--template tenant`; the api and fullstack templates refuse it. A project scaffolded before can drop its `/mcp` mount: it could not authenticate an agent.
 
 ## 0.62.0
 

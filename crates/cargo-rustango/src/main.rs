@@ -293,11 +293,17 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ),
     ("scheduler", "fixed-interval background tasks"),
     ("email-smtp", "SMTP transport for the email framework"),
-    ("mcp", "Model Context Protocol server for AI agents"),
+    (
+        "mcp",
+        "Model Context Protocol server for AI agents (tenant only)",
+    ),
     ("http2", "serve cleartext HTTP/2 (h2c) next to HTTP/1"),
     ("testkit", "test-only schema builders and model factories"),
     ("test_utils", "test-only constructors for downstream crates"),
 ];
+
+/// The [`OPTIONAL_FEATURES`] only the tenant template can serve.
+const TENANT_ONLY_FEATURES: &[&str] = &["mcp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Template {
@@ -309,6 +315,12 @@ enum Template {
 impl Template {
     /// What `new` picks when `--template` is absent.
     const DEFAULT: Self = Self::Fullstack;
+
+    /// Whether `--features` may name `feature` here. MCP agents and their
+    /// credentials live in tenant databases; elsewhere `/mcp` could only refuse.
+    fn offers(self, feature: &str) -> bool {
+        self == Self::Tenant || !TENANT_ONLY_FEATURES.contains(&feature)
+    }
 
     fn parse(s: &str) -> Result<Self, String> {
         match s {
@@ -430,6 +442,14 @@ fn validate_features(extras: &[String], template: Template) -> Result<(), String
             return Err(format!(
                 "`tenancy` needs the tenant `main.rs` (tenant routing, operator console) — \
                  pass `--template tenant` instead of `--template {}`",
+                template.name()
+            ));
+        }
+        if !template.offers(f) {
+            return Err(format!(
+                "`{f}` needs the tenant template: MCP agents live in tenant databases \
+                 (`create-agent <slug> <name>`) — pass `--template tenant` instead of \
+                 `--template {}`",
                 template.name()
             ));
         }
@@ -924,7 +944,11 @@ fn write_project(root: &Path, args: &NewArgs) -> Result<(), String> {
         "src/models.rs",
         &dep.apply(&templates::models_rs(template)),
     )?;
-    write(root, "src/views.rs", &dep.apply(templates::VIEWS_RS))?;
+    write(
+        root,
+        "src/views.rs",
+        &dep.apply(&templates::views_rs(template)),
+    )?;
     write(
         root,
         "src/urls.rs",
@@ -1953,8 +1977,8 @@ mod tests {
         }
     }
 
-    /// `--features mcp` mounts `/mcp`: settings-aware and authed on the
-    /// tenant template, on the serving pool elsewhere; nothing without it.
+    /// `--features mcp` mounts the settings-aware, agent-authed router on
+    /// the tenant template, inside `urls::api()`.
     #[test]
     fn mcp_feature_mounts_the_router() {
         let mcp = ["mcp".to_owned()];
@@ -1967,28 +1991,60 @@ mod tests {
         assert_eq!(tenant.matches("Router::new()").count(), 1, "{tenant}");
         let main = templates::main_rs_for(Template::Tenant, "myapp", &mcp);
         assert!(!main.contains("mcp"), "{main}");
-        for template in [Template::Api, Template::Fullstack] {
-            let urls = templates::urls_rs_for(template, &mcp);
-            assert!(urls.contains("rustango::mcp::router(pool)"), "{urls}");
-            let main = templates::main_rs_for(template, "myapp", &mcp);
-            assert!(
-                main.contains(".nest_with(\"/mcp\", urls::mcp)"),
-                "{template:?}: {main}"
-            );
-        }
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
             assert!(!templates::urls_rs_for(template, &[]).contains("mcp"));
             assert!(!templates::main_rs_for(template, "myapp", &[]).contains("mcp"));
         }
     }
 
-    /// The models file imports the prelude, so the ORM traits are in scope.
+    /// A single-database `/mcp` could only refuse tool calls: agents live
+    /// in tenant databases. So `mcp` is offered on the tenant template only.
     #[test]
-    fn models_use_the_prelude() {
-        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
-            let models = templates::models_rs(template);
-            assert!(models.contains("use rustango::prelude::*;"), "{models}");
+    fn mcp_is_refused_off_the_tenant_template() {
+        let mcp = ["mcp".to_owned()];
+        for template in [Template::Api, Template::Fullstack] {
+            let err = validate_features(&mcp, template).unwrap_err();
+            assert!(err.contains("--template tenant"), "{err}");
+            assert!(!template.offers("mcp"));
         }
+        validate_features(&mcp, Template::Tenant).unwrap();
+        assert!(Template::Tenant.offers("mcp") && Template::Api.offers("csrf"));
+    }
+
+    /// The index links `/admin` only where an admin is mounted.
+    #[test]
+    fn only_fullstack_links_the_admin() {
+        assert!(templates::views_rs(Template::Fullstack).contains("href=\\\"/admin\\\""));
+        for template in [Template::Api, Template::Tenant] {
+            let views = templates::views_rs(template);
+            assert!(!views.contains("/admin"), "{template:?}: {views}");
+            assert!(
+                views.contains("<h1>Hello from Rustango!</h1>\","),
+                "{views}"
+            );
+        }
+    }
+
+    /// The next steps paste into PowerShell 5.1: no `<placeholder>`, no `&&`.
+    #[test]
+    fn next_steps_are_shell_neutral() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
+                let steps = templates::next_steps("myapp", template, backend);
+                assert!(!steps.contains('<') && !steps.contains("&&"), "{steps}");
+            }
+        }
+    }
+
+    /// The tenant README says where the dev secret key comes from.
+    #[test]
+    fn tenant_readme_names_the_dev_key_file() {
+        let readme = templates::readme("myapp", Template::Tenant, Backend::Sqlite);
+        assert!(readme.contains("var/.rustango_secret.key"), "{readme}");
+        assert!(
+            !readme.contains("needs `RUSTANGO_SECRET_KEY` in `.env`"),
+            "{readme}"
+        );
     }
 
     /// The printed steps run cargo on the host: the URL names `localhost`,
@@ -2060,7 +2116,7 @@ mod tests {
         for backend in [Backend::Postgres, Backend::Sqlite, Backend::Mysql] {
             let steps = templates::next_steps("myapp", Template::Tenant, backend);
             assert!(
-                steps.contains("cargo run -- create-operator <username>"),
+                steps.contains("cargo run -- create-operator ops"),
                 "{steps}"
             );
             let readme = templates::readme("myapp", Template::Tenant, backend);
@@ -2069,7 +2125,7 @@ mod tests {
                 "{readme}"
             );
             assert!(
-                readme.contains("cargo run -- create-operator <username>"),
+                readme.contains("cargo run -- create-operator ops"),
                 "{readme}"
             );
         }

@@ -63,7 +63,8 @@ pub struct StartAppReport {
 
 /// What to run after `startapp`: it registers the module itself, or lists
 /// that edit as a manual step.
-pub(crate) const STARTAPP_NEXT: &str = "cargo run -- makemigrations && cargo run -- migrate";
+/// One command per line: PowerShell 5.1 has no `&&`.
+pub(crate) const STARTAPP_NEXT: &[&str] = &["cargo run -- makemigrations", "cargo run -- migrate"];
 
 /// Write an app module into `project_root/src/<app>/`.
 ///

@@ -109,125 +109,6 @@ impl Command {
     }
 }
 
-/// Every verb the framework dispatches itself, in either mode. A
-/// command may not take one, even a verb this build's features drop.
-const BUILTIN_VERBS: &[&str] = &[
-    // `Cli` itself.
-    "runserver",
-    "run-server",
-    "dbshell",
-    "help",
-    "--help",
-    "-h",
-    // `migrate::manage`.
-    "makemigrations",
-    "migrate",
-    "downgrade",
-    "showmigrations",
-    "status",
-    "sqlmigrate",
-    "forget-pending",
-    "startapp",
-    "add-data-op",
-    "about",
-    "check",
-    "docs",
-    "version",
-    "--version",
-    "db:dump",
-    "db:restore",
-    "db:info",
-    "dumpdata",
-    "loaddata",
-    "showurls",
-    "showmodels",
-    "create-admin",
-    "set-admin-active",
-    "reset-admin-totp",
-    "flush",
-    "prune",
-    "clear-cache",
-    "clearsessions",
-    "createcachetable",
-    "create-cache-table",
-    "sendtestemail",
-    "inspectdb",
-    "make:viewset",
-    "make:api_routes",
-    "make:serializer",
-    "make:form",
-    "make:job",
-    "make:scheduled",
-    "make:worker",
-    "make:notification",
-    "make:middleware",
-    "make:test",
-    // `tenancy::manage`.
-    "create-tenant",
-    "test-tenant-connection",
-    "drop-tenant",
-    "purge-tenant",
-    "rotate-tenant-password",
-    "list-tenants",
-    "edit-tenant",
-    "reseal-tenant-secrets",
-    "list-hosts",
-    "add-host",
-    "remove-host",
-    "set-host-enabled",
-    "add-db-server",
-    "edit-db-server",
-    "list-db-servers",
-    "test-db-server",
-    "remove-db-server",
-    "prewarm-pools",
-    "migrate-tenants",
-    "migrate-registry",
-    "migrate-tenant-storage",
-    "create-operator",
-    "list-operators",
-    "set-operator-active",
-    "reset-operator-totp",
-    "list-runs",
-    "show-run",
-    "audit-log",
-    "create-user",
-    "create-superuser",
-    "set-superuser",
-    "revoke-passkey",
-    "reset-password",
-    "set-password-link",
-    "reset-operator-password",
-    "change-password",
-    "change-operator-password",
-    "init-tenancy",
-    "wizard",
-    "init",
-    "menu",
-    "actions",
-    "audit-cleanup",
-    "create-role",
-    "list-roles",
-    "assign-role",
-    "revoke-role",
-    "grant-perm",
-    "revoke-perm",
-    "create-api-key",
-    "create-agent",
-    "rotate-agent-secret",
-    "list-agents",
-    "create-skill",
-    "grant-skill",
-    "revoke-skill",
-    "list-skills",
-    "create-user-key",
-    "list-user-keys",
-    "revoke-user-key",
-    "map-skill-permission",
-    "unmap-skill-permission",
-    "seed-permissions",
-];
-
 /// The validated commands of one run: unique, and none a built-in verb.
 #[derive(Clone, Default)]
 pub(crate) struct CommandSet {
@@ -260,7 +141,12 @@ impl CommandSet {
                     c.name, c.group
                 ));
             }
-            if BUILTIN_VERBS.contains(&c.name.as_str()) {
+            // Every built-in verb in either mode, even one this build's features drop.
+            if crate::cli_verbs::SINGLE_DB_VERBS
+                .iter()
+                .chain(crate::cli_verbs::TENANCY_VERBS)
+                .any(|v| *v == c.name)
+            {
                 return Err(format!(
                     "manage command `{}` ({}) clashes with a built-in verb; rename it",
                     c.name, c.group

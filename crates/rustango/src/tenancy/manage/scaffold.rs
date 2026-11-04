@@ -149,7 +149,9 @@ fn write_report<W: Write>(
     }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
-        writeln!(w, "  {}", crate::migrate::scaffold::STARTAPP_NEXT)?;
+        for cmd in crate::migrate::scaffold::STARTAPP_NEXT {
+            writeln!(w, "  {cmd}")?;
+        }
     }
     Ok(())
 }

@@ -142,7 +142,7 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `jobs` / `jobs-postgres` | Background job queue, in-process / database-backed so it survives restarts |
 | `scheduler` | Fixed-interval background tasks |
 | `email-smtp` | SMTP transport for the email framework |
-| `mcp` | Model Context Protocol server for AI agents |
+| `mcp` | Model Context Protocol server for AI agents (tenant template only) |
 | `http2` | Serve cleartext HTTP/2 (h2c) next to HTTP/1 |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
@@ -262,7 +262,8 @@ cp .env.example .env                     # then change `postgres` -> `localhost`
 docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
 cargo run -- makemigrations              # generate the framework's (and your) tables
 cargo run -- migrate                     # apply them
-cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run -- create-admin admin --superuser  # fullstack: the admin login (any username)
+cargo run -- create-operator ops              # tenant: the operator console login
 cargo run                                # serve
 cargo run -- --help                      # see every manage verb
 ```

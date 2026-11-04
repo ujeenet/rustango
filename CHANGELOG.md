@@ -50,6 +50,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Deprecated
 
 - `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
+- `cargo rustango new -F mcp` is tenant-only: elsewhere `/mcp` refused every tool call, since agents live in tenant databases.
+- `manage` suggests the nearest verb for a typo, e.g. `createsuperuser` → `create-admin` (`create-superuser` on tenancy).
+- Scaffolded next steps use real usernames, so they paste into PowerShell 5.1.
+- `startapp` prints its next steps one command per line instead of joining them with `&&`.
+- `create-operator` help lists `--password-stdin`.
+- Only the fullstack template's index links `/admin`.
 
 ## [0.62.0] — 2026-11-02
 

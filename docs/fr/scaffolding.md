@@ -142,7 +142,7 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `jobs` / `jobs-postgres` | File de tâches en arrière-plan, en processus / adossée à la base et donc résistante aux redémarrages |
 | `scheduler` | Tâches d'arrière-plan à intervalle fixe |
 | `email-smtp` | Transport SMTP pour le framework e-mail |
-| `mcp` | Serveur Model Context Protocol pour les agents IA |
+| `mcp` | Serveur Model Context Protocol pour les agents IA (modèle tenant uniquement) |
 | `http2` | Servir HTTP/2 en clair (h2c) à côté de HTTP/1 |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
 
@@ -262,7 +262,8 @@ cp .env.example .env                     # then change `postgres` -> `localhost`
 docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
 cargo run -- makemigrations              # generate the framework's (and your) tables
 cargo run -- migrate                     # apply them
-cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run -- create-admin admin --superuser  # fullstack: the admin login (any username)
+cargo run -- create-operator ops              # tenant: the operator console login
 cargo run                                # serve
 cargo run -- --help                      # see every manage verb
 ```

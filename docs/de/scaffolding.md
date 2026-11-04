@@ -146,7 +146,7 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 | `jobs` / `jobs-postgres` | Hintergrund-Job-Queue, prozessintern / datenbankgestützt und damit neustartfest |
 | `scheduler` | Hintergrundaufgaben in festen Intervallen |
 | `email-smtp` | SMTP-Transport für das E-Mail-Framework |
-| `mcp` | Model-Context-Protocol-Server für KI-Agenten |
+| `mcp` | Model-Context-Protocol-Server für KI-Agenten (nur Tenant-Template) |
 | `http2` | Klartext-HTTP/2 (h2c) neben HTTP/1 bereitstellen |
 | `testkit` / `test_utils` | Nur-Test-Schema-Builder, Factories und Konstruktoren |
 
@@ -266,7 +266,8 @@ cp .env.example .env                     # then change `postgres` -> `localhost`
 docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
 cargo run -- makemigrations              # generate the framework's (and your) tables
 cargo run -- migrate                     # apply them
-cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run -- create-admin admin --superuser  # fullstack: the admin login (any username)
+cargo run -- create-operator ops              # tenant: the operator console login
 cargo run                                # serve
 cargo run -- --help                      # see every manage verb
 ```
