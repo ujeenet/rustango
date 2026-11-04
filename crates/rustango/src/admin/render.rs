@@ -122,6 +122,7 @@ pub(crate) fn render_input(field: &FieldSchema, value: &str, pk_locked: bool) ->
 /// - `"password"` (String) — `<input type="password">`
 /// - `"hidden"` (any) — `<input type="hidden">`
 /// - `"textarea"` (String) — force `<textarea>`
+/// - `"text"` (String) — force a one-line `<input type="text">`
 /// - `"color"` (String) — `<input type="color">`
 /// - `"range"` (I16/I32/I64) — `<input type="range">`
 /// - `"email"` (String) — `<input type="email">`
@@ -368,6 +369,16 @@ fn render_named_widget(
                 .unwrap_or_default();
             Some(format!(
                 r#"<textarea name="{name}" id="{name}"{maxlen}{required}{readonly}>{val}</textarea>"#
+            ))
+        }
+        // One line even when `max_length` would pick a `<textarea>`.
+        "text" if matches!(field.ty, FieldType::String) => {
+            let maxlen = field
+                .max_length
+                .map(|n| format!(r#" maxlength="{n}""#))
+                .unwrap_or_default();
+            Some(format!(
+                r#"<input type="text" name="{name}" id="{name}" value="{val}"{maxlen}{required}{readonly}>"#
             ))
         }
         "color" if matches!(field.ty, FieldType::String) => Some(format!(

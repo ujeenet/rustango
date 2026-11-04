@@ -299,14 +299,6 @@ async fn the_form_shows_the_model_help_text(pool: &Pool) {
     let c = console(pool).await;
     let (status, html) = c.html("GET", "/sso-shared", String::new()).await;
     assert_eq!(status, StatusCode::OK);
-    let escape = |s: &str| {
-        s.replace('&', "&amp;")
-            .replace('<', "&lt;")
-            .replace('>', "&gt;")
-            .replace('"', "&quot;")
-            .replace('\'', "&#x27;")
-            .replace('/', "&#x2F;")
-    };
     for name in [
         "slug",
         "label",
@@ -317,7 +309,6 @@ async fn the_form_shows_the_model_help_text(pool: &Pool) {
         "scopes",
         "sort_order",
         "enabled",
-        "allow_email_link",
         "allowed_email_domains",
         "blocked_email_domains",
         "allowed_idp_tenants",
@@ -333,10 +324,13 @@ async fn the_form_shows_the_model_help_text(pool: &Pool) {
             .and_then(|f| f.help_text)
             .unwrap_or_default();
         assert!(
-            !help.is_empty() && html.contains(&escape(help)),
+            !help.is_empty() && html.contains(&rustango::template_extensions::help_html(help)),
             "`{name}` help text missing"
         );
     }
+    // The console's own email-linking text: no staff option, every tenant.
+    assert!(html.contains("Security: in every tenant, link"), "{html}");
+    assert!(html.contains("<code>google</code>"), "no code span");
 }
 
 tri_dialect_test! {

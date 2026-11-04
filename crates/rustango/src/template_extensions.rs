@@ -96,6 +96,40 @@ pub fn html_tera() -> Tera {
     tera
 }
 
+/// Field help text as HTML: escaped, with each `` `…` `` span as `<code>`.
+/// An unpaired backtick stays as text.
+#[must_use]
+pub fn help_html(text: &str) -> String {
+    let parts: Vec<&str> = text.split('`').collect();
+    let mut out = String::with_capacity(text.len() + 16);
+    for (i, part) in parts.iter().enumerate() {
+        let escaped = tera::escape_html(part);
+        if i % 2 == 1 && i + 1 < parts.len() {
+            out.push_str("<code>");
+            out.push_str(&escaped);
+            out.push_str("</code>");
+        } else {
+            if i % 2 == 1 {
+                out.push('`');
+            }
+            out.push_str(&escaped);
+        }
+    }
+    out
+}
+
+/// Register [`help_html`] as the `help_html` filter; its output is safe markup.
+pub fn register_help_filter(tera: &mut Tera) {
+    tera.register_filter(
+        "help_html",
+        |v: &serde_json::Value, _: &std::collections::HashMap<String, serde_json::Value>| {
+            Ok(serde_json::Value::String(help_html(
+                v.as_str().unwrap_or_default(),
+            )))
+        },
+    );
+}
+
 /// [`html_tera`] loaded from `glob`, e.g. `"templates/**/*"`.
 ///
 /// # Errors
@@ -175,6 +209,16 @@ macro_rules! register_template_function {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_html_escapes_and_marks_code_spans() {
+        assert_eq!(
+            help_html("Use `a<b>` & `c`."),
+            "Use <code>a&lt;b&gt;</code> &amp; <code>c</code>."
+        );
+        assert_eq!(help_html("one ` tick"), "one ` tick");
+        assert_eq!(help_html("plain"), "plain");
+    }
 
     #[test]
     fn apply_to_tera_is_a_noop_with_no_registrations() {

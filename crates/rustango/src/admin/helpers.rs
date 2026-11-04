@@ -896,6 +896,7 @@ pub(crate) fn render_form_with_inlines_and_picker(
             }
         }
         serde_json::json!({
+            "name": f.name,
             "label": f.display_label(),
             "extra": extra,
             "input": input_html,

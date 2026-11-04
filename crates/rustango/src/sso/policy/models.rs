@@ -21,35 +21,45 @@ pub struct SsoInvite {
     /// The provider it is good for; empty: any.
     #[rustango(max_length = 64)]
     #[rustango(help_text = "Slug of the provider this invite is for. Empty: any provider.")]
+    #[rustango(verbose_name = "Provider slug")]
     pub provider_slug: Option<String>,
     /// `ann@client.org`, or `@client.org` / `*.client.org` for a domain.
     #[rustango(max_length = 254, index)]
     #[rustango(
         help_text = "Who may sign up: one email (`ann@client.org`) or a domain (`@client.org`, or `*.client.org` for its subdomains). A domain invite needs max uses or an expiry."
     )]
+    #[rustango(verbose_name = "Email or domain")]
     pub target: String,
     /// Roles granted on sign-up, comma separated.
     #[rustango(max_length = 1000)]
     #[rustango(
         help_text = "Roles the new user gets, comma separated. They replace the provider's default roles."
     )]
+    #[rustango(verbose_name = "Roles")]
     pub roles: Option<String>,
     #[rustango(
         help_text = "After this time the invite no longer works. Empty: it does not expire."
     )]
+    #[rustango(verbose_name = "Expires at")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Empty: unlimited.
     #[rustango(help_text = "How many sign-ups may use this invite. Empty: no limit.")]
+    #[rustango(verbose_name = "Max uses")]
     pub max_uses: Option<i32>,
     #[rustango(default = "0")]
+    #[rustango(verbose_name = "Uses")]
     pub uses: i32,
+    #[rustango(verbose_name = "Used at")]
     pub used_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[rustango(verbose_name = "Used by")]
     pub used_by: Option<i64>,
+    #[rustango(verbose_name = "Invited by")]
     pub invited_by: Option<i64>,
     /// Re-link: the next sign-in links this existing user instead of creating one.
     #[rustango(
         help_text = "Re-link only: the existing user the next sign-in links, instead of a new account. Set by the Re-link action."
     )]
+    #[rustango(verbose_name = "Re-link user")]
     pub link_user_id: Option<i64>,
     /// Re-link: [`crate::sso::ProviderKey::fingerprint`] of the old link's
     /// provider; only a sign-in through that provider may use the invite.
@@ -57,8 +67,10 @@ pub struct SsoInvite {
     #[rustango(
         help_text = "Re-link only: the provider the next sign-in must come through. Set by the Re-link action; leave empty."
     )]
+    #[rustango(verbose_name = "Re-link provider")]
     pub link_key: Option<String>,
     #[rustango(auto_now_add)]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -80,6 +92,7 @@ pub struct SsoSharedOverride {
     /// The shared provider's slug when the override was bound, for display.
     #[rustango(max_length = 64, index)]
     #[rustango(help_text = "Slug of the shared provider this row narrows for this tenant.")]
+    #[rustango(verbose_name = "Shared provider slug")]
     pub shared_slug: String,
     /// The shared provider row this override is bound to: set on its first
     /// use, so a renamed row keeps it and a new row with the slug does not.
@@ -87,35 +100,42 @@ pub struct SsoSharedOverride {
     #[rustango(
         help_text = "The shared provider row this override is bound to, set at its first use."
     )]
+    #[rustango(verbose_name = "Shared provider row")]
     pub shared_provider_id: Option<i64>,
     /// That row's issuer when bound: a repointed row refuses until re-bound.
     #[rustango(max_length = 300)]
     #[rustango(
         help_text = "That row's issuer when bound. If the shared row moves to another issuer, sign-in is refused until the override is added again."
     )]
+    #[rustango(verbose_name = "Bound issuer")]
     pub shared_issuer: Option<String>,
     #[rustango(max_length = 2000)]
     #[rustango(
         help_text = "Security: only these email domains may sign in here, on top of the shared rules. Same comma or newline format as on the provider."
     )]
+    #[rustango(verbose_name = "Allowed email domains")]
     pub allowed_email_domains: Option<String>,
     #[rustango(max_length = 2000)]
     #[rustango(help_text = "More email domains that never sign in here.")]
+    #[rustango(verbose_name = "Blocked email domains")]
     pub blocked_email_domains: Option<String>,
     #[rustango(max_length = 1000)]
     #[rustango(
         help_text = "Microsoft directory IDs allowed here, comma separated. Narrows the shared list."
     )]
+    #[rustango(verbose_name = "Allowed Microsoft directories")]
     pub allowed_idp_tenants: Option<String>,
     #[rustango(max_length = 1000)]
     #[rustango(
         help_text = "Google Workspace domains allowed here, comma separated. Narrows the shared list."
     )]
+    #[rustango(verbose_name = "Allowed Google Workspace domains")]
     pub allowed_hosted_domains: Option<String>,
     #[rustango(default = "'{}'")]
     #[rustango(
         help_text = "More claims a sign-in must carry here, as JSON: `{\"roles\": [\"App.User\"]}`."
     )]
+    #[rustango(verbose_name = "Required claims")]
     pub required_claims: serde_json::Value,
     #[rustango(
         max_length = 16,
@@ -124,22 +144,28 @@ pub struct SsoSharedOverride {
     #[rustango(
         help_text = "Security: sign-up here. It can only be stricter than the shared provider's. Empty: the shared value."
     )]
+    #[rustango(verbose_name = "Sign-up mode")]
     pub signup_mode: Option<String>,
     /// Off: no email linking here. On or empty: the shared value.
     #[rustango(help_text = "Off: no email linking here. Empty or on: the shared setting.")]
+    #[rustango(verbose_name = "Allow email linking")]
     pub allow_email_link: Option<bool>,
     /// Off: email linking never links a role holder here.
     #[rustango(
-        help_text = "Off: email linking never links a user with roles here. Empty or on: the shared setting."
+        help_text = "Off: email linking never links a user with any role or permission here. Empty or on: the shared setting."
     )]
+    #[rustango(verbose_name = "Allow email linking for staff")]
     pub allow_email_link_staff: Option<bool>,
     #[rustango(help_text = "On: users of this provider may not sign in with a password here.")]
+    #[rustango(verbose_name = "Sign-in only through SSO")]
     pub sso_only: Option<bool>,
     #[rustango(help_text = "A shorter longest session here, in seconds. Empty: the shared value.")]
+    #[rustango(verbose_name = "Session length (seconds)")]
     pub session_ttl_secs: Option<i64>,
     #[rustango(
         help_text = "A shorter longest superuser session here, in seconds. Empty: the shared value."
     )]
+    #[rustango(verbose_name = "Superuser session length (seconds)")]
     pub superuser_session_ttl_secs: Option<i64>,
     /// Role names the shared provider may grant here, comma separated.
     /// Empty: none.
@@ -147,6 +173,7 @@ pub struct SsoSharedOverride {
     #[rustango(
         help_text = "Roles the shared provider may grant here, comma separated. Empty: none."
     )]
+    #[rustango(verbose_name = "Roles it may grant")]
     pub allowed_roles: Option<String>,
 }
 
@@ -162,12 +189,14 @@ pub struct SsoTenantPolicy {
     pub id: Auto<i64>,
     #[rustango(max_length = 16, unique, default = "'default'")]
     #[rustango(help_text = "Always `default`: the tenant uses this one row.")]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
     /// Shown, escaped, on the login page after a refused SSO sign-in.
     #[rustango(max_length = 500)]
     #[rustango(
         help_text = "Message shown on the sign-in page after a refused SSO sign-in, e.g. who to contact. Shown as plain text."
     )]
+    #[rustango(verbose_name = "Access denied message")]
     pub access_denied_message: Option<String>,
     #[rustango(
         max_length = 16,
@@ -177,17 +206,21 @@ pub struct SsoTenantPolicy {
     #[rustango(
         help_text = "The password form: `on`, `off` (also for superusers), or `superusers_only` (shown only at `?local=1`, for superusers)."
     )]
+    #[rustango(verbose_name = "Password login")]
     pub password_login: String,
     #[rustango(default = "false")]
     #[rustango(help_text = "No one except a superuser may sign in with a password.")]
+    #[rustango(verbose_name = "Sign-in only through SSO")]
     pub sso_only: bool,
     #[rustango(max_length = 64)]
     #[rustango(
         help_text = "Slug of the provider the sign-in page opens straight away, except at `?local=1` or after an error."
     )]
+    #[rustango(verbose_name = "Default provider")]
     pub default_provider: Option<String>,
     /// SSO sign-ups allowed per hour. Empty: 100; `0`: no limit.
     #[rustango(help_text = "Most SSO sign-ups per hour. Empty: 100; `0`: no limit.")]
+    #[rustango(verbose_name = "Sign-ups per hour")]
     pub signups_per_hour: Option<i32>,
 }
 

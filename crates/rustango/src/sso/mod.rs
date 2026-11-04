@@ -236,7 +236,7 @@ impl std::error::Error for SsoError {}
 #[cfg_attr(not(all(feature = "tenancy", feature = "admin-sso")), allow(dead_code))]
 pub(crate) fn check_provider(provider: &str, issuer_url: Option<&str>) -> Result<(), SsoError> {
     match provider {
-        "google" | "microsoft" | "github" | "gitlab" | "discord" => Ok(()),
+        p if PRESETS.contains(&p) => Ok(()),
         "oidc" if issuer_url.is_some_and(|u| !u.trim().is_empty()) => Ok(()),
         "oidc" => Err(SsoError::MissingIssuer),
         other => Err(SsoError::UnknownProvider(other.to_owned())),
@@ -321,6 +321,21 @@ pub(crate) async fn build_provider_for(
     build_provider_with(cfg, source, &policy).await
 }
 
+/// The built-in provider kinds; `SsoProvider::kind` offers these plus `oidc`.
+pub(crate) const PRESETS: &[&str] = &["google", "microsoft", "github", "gitlab", "discord"];
+
+/// The built-in provider for `kind`; `None` for `oidc` and unknown kinds.
+fn preset(kind: &str, id: String, secret: String, redirect: String) -> Option<OAuth2Provider> {
+    Some(match kind {
+        "google" => providers::google(id, secret, redirect),
+        "microsoft" => providers::microsoft(id, secret, redirect),
+        "github" => providers::github(id, secret, redirect),
+        "gitlab" => providers::gitlab(id, secret, redirect),
+        "discord" => providers::discord(id, secret, redirect),
+        _ => return None,
+    })
+}
+
 async fn build_provider_with(
     cfg: &ResolvedSso,
     source: LinkSource,
@@ -340,16 +355,12 @@ async fn build_provider_with(
         cfg.redirect_uri.clone(),
     );
     let provider = match cfg.provider.as_str() {
-        "google" => providers::google(id, secret, redirect),
-        "microsoft" => providers::microsoft(id, secret, redirect),
-        "github" => providers::github(id, secret, redirect),
-        "gitlab" => providers::gitlab(id, secret, redirect),
-        "discord" => providers::discord(id, secret, redirect),
         "oidc" => {
             let issuer = cfg.issuer_url.as_deref().ok_or(SsoError::MissingIssuer)?;
             discovered(issuer, id, secret, redirect, policy, client.clone()).await?
         }
-        other => return Err(SsoError::UnknownProvider(other.to_owned())),
+        other => preset(other, id, secret, redirect)
+            .ok_or_else(|| SsoError::UnknownProvider(other.to_owned()))?,
     };
     // Per-provider scope override (e.g. adding `groups` for an OIDC IdP).
     let provider = match &cfg.scopes {
@@ -568,6 +579,25 @@ pub fn verified_email(user: &NormalizedUser) -> Result<&str, SsoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The admin's `kind` dropdown offers exactly what the code builds.
+    #[test]
+    fn kind_choices_are_the_presets_and_oidc() {
+        use crate::core::Model as _;
+        let choices = SsoProvider::SCHEMA
+            .field("kind")
+            .and_then(|f| f.choices)
+            .expect("kind has choices");
+        let offered: Vec<&str> = choices.iter().map(|(k, _)| *k).collect();
+        let mut want = PRESETS.to_vec();
+        want.push("oidc");
+        assert_eq!(offered, want, "the choices and PRESETS differ");
+        for k in PRESETS {
+            let built = preset(k, "id".into(), "s".into(), "https://x/cb".into());
+            assert!(built.is_some(), "`{k}` is a preset but builds nothing");
+        }
+        assert!(preset("apple", "i".into(), "s".into(), "r".into()).is_none());
+    }
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 

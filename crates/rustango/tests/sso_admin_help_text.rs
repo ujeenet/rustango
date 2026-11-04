@@ -14,16 +14,6 @@ use rustango::core::{Model as _, ModelSchema};
 use rustango::sql::Pool;
 use tower::ServiceExt;
 
-/// Tera's HTML escaping, so a help text can be found in the page.
-fn escaped(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#x27;")
-        .replace('/', "&#x2F;")
-}
-
 /// The fields a form edits: not the key, not read-only, not stamped.
 fn editable(schema: &'static ModelSchema) -> Vec<&'static rustango::core::FieldSchema> {
     let readonly = schema.admin.map_or(&[][..], |a| a.readonly_fields);
@@ -75,9 +65,28 @@ async fn the_provider_form_shows_each_help_text() {
     for f in fields {
         let help = f.help_text.unwrap_or_default();
         assert!(
-            !help.is_empty() && html.contains(&escaped(help)),
+            !help.is_empty() && html.contains(&rustango::template_extensions::help_html(help)),
             "the form does not show the help text of `{}`",
             f.name
+        );
+        assert!(
+            html.contains(&format!(r#"<label for="{}">{}"#, f.name, f.display_label())),
+            "`{}` has no readable label",
+            f.name
+        );
+    }
+    // Backticks render as code, never literally.
+    assert!(html.contains("<code>google</code>"), "no code span");
+    assert!(!html.contains("`google`"), "a literal backtick span");
+    // `kind` is a dropdown of the presets; `label` and `client_id` are one line.
+    assert!(
+        html.contains(r#"<select name="kind""#),
+        "kind is not a dropdown"
+    );
+    for name in ["label", "client_id"] {
+        assert!(
+            html.contains(&format!(r#"<input type="text" name="{name}""#)),
+            "`{name}` is not a one-line input"
         );
     }
 }
