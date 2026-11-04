@@ -4242,7 +4242,7 @@ async fn apply_atomic_pool(
                 migration = %mig.name,
                 "MySQL commits on every DDL statement: the atomic wrapper only covers \
                  data operations before the first DDL. A failure after it leaves the \
-                 migration partially applied and needs manual recovery (#559)."
+                 migration partially applied and needs manual recovery."
             );
             atomic_mysql(
                 my,
@@ -4908,7 +4908,7 @@ async fn unapply_atomic_pool(
                 migration = %target.name,
                 "MySQL commits on every DDL statement: the atomic-unapply wrapper only \
                  covers data operations before the first DDL. A failure after it leaves \
-                 the schema half-reverted and needs manual recovery (#559)."
+                 the schema half-reverted and needs manual recovery."
             );
             atomic_mysql(
                 my,

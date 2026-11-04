@@ -617,11 +617,18 @@ feature list.
 
 /// The verb that makes the first account a template's login accepts, and
 /// what it signs into. The bare admin lets only superusers in; the tenant
-/// console only operators.
+/// console only operators. A real name, not `<username>`: PowerShell
+/// reads `<` as an operator.
 fn first_account(template: Template) -> Option<(&'static str, &'static str)> {
     match template {
-        Template::Fullstack => Some(("create-admin <username> --superuser", "the admin login")),
-        Template::Tenant => Some(("create-operator <username>", "the operator console login")),
+        Template::Fullstack => Some((
+            "create-admin admin --superuser",
+            "the admin login (any username)",
+        )),
+        Template::Tenant => Some((
+            "create-operator ops",
+            "the operator console login (any username)",
+        )),
         Template::Api => None,
     }
 }
@@ -703,8 +710,9 @@ cargo run -- create-tenant <slug> --mode database --server files
 ## Tenants and database servers
 
 The operator console has **New tenant** and **Database servers** pages (see
-`src/main.rs`). Saving a server password needs `RUSTANGO_SECRET_KEY` in `.env`
-(see `.env.example`).
+`src/main.rs`). A saved server password is sealed with `RUSTANGO_SECRET_KEY`.
+In dev, an unset key is generated once into `var/.rustango_secret.key`; any
+other tier needs it set (see `.env.example`).
 
 {server}
 "
@@ -743,10 +751,6 @@ pub fn main_rs_for(template: Template, name: &str, features: &[String]) -> Strin
     if has("csrf") {
         extra
             .push_str("        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n");
-    }
-    // A tenancy app mounts MCP inside `urls::api()`; this one needs the pool.
-    if has("mcp") && template != Template::Tenant {
-        extra.push_str("        .nest_with(\"/mcp\", urls::mcp) // `--features mcp`\n");
     }
     main_rs(template, name).replacen(API_LINE, &format!("{API_LINE}{extra}"), 1)
 }
@@ -982,7 +986,19 @@ pub struct Item {
 
 // ---------------- src/views.rs ----------------
 
-pub const VIEWS_RS: &str = "//! Project views — the request handlers this project mounts.
+/// `src/views.rs`. Only fullstack mounts an admin, so only its index links one.
+pub fn views_rs(template: Template) -> String {
+    match template {
+        Template::Fullstack => VIEWS_RS.to_owned(),
+        Template::Api | Template::Tenant => VIEWS_RS.replacen(ADMIN_LINK, "\",\n", 1),
+    }
+}
+
+/// The index's admin sentence, ending the `Html` literal.
+const ADMIN_LINK: &str =
+    "\\n\\\n         <p>The admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",\n";
+
+const VIEWS_RS: &str = "//! Project views — the request handlers this project mounts.
 
 use axum::response::Html;
 
@@ -991,7 +1007,7 @@ pub async fn index() -> Html<&'static str> {
         \"<!doctype html>\\n\\
          <title>rustango app</title>\\n\\
          <h1>Hello from Rustango!</h1>\\n\\
-         <p>The auto-admin (if enabled) is at <a href=\\\"/admin\\\">/admin</a>.</p>\",
+         <p>The admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",
     )
 }
 
@@ -1005,23 +1021,20 @@ pub async fn healthz() -> &'static str {
 /// `src/urls.rs`, plus the mounts the chosen `--features` need.
 pub fn urls_rs_for(template: Template, features: &[String]) -> String {
     let urls = urls_base(template);
-    if !features.iter().any(|f| f == "mcp") {
+    // `validate_features` keeps `mcp` to the tenant template.
+    if template != Template::Tenant || !features.iter().any(|f| f == "mcp") {
         return urls;
     }
-    match template {
-        Template::Tenant => urls
-            .replacen(
-                "pub fn api() -> Router<()> {\n    Router::new()",
-                "pub fn api() -> Router<()> {\n    let mcp = mcp_settings();\n    Router::new()",
-                1,
-            )
-            .replacen(
-                "        .route(\"/healthz\", get(views::healthz))\n}\n",
-                MCP_TENANT,
-                1,
-            ),
-        Template::Api | Template::Fullstack => format!("{urls}{MCP_SINGLE}"),
-    }
+    urls.replacen(
+        "pub fn api() -> Router<()> {\n    Router::new()",
+        "pub fn api() -> Router<()> {\n    let mcp = mcp_settings();\n    Router::new()",
+        1,
+    )
+    .replacen(
+        "        .route(\"/healthz\", get(views::healthz))\n}\n",
+        MCP_TENANT,
+        1,
+    )
 }
 
 /// `--features mcp` on the tenant template: agent auth, `[mcp]` settings.
@@ -1038,15 +1051,6 @@ fn mcp_settings() -> rustango::config::McpSettings {
     rustango::config::Settings::load_from_env()
         .map(|s| s.mcp)
         .unwrap_or_default()
-}
-";
-
-/// `--features mcp` on a single-database template, nested by `main.rs`.
-const MCP_SINGLE: &str = "
-/// `--features mcp`: the MCP endpoint at `/mcp`, on the serving pool.
-/// Transport only; agent tools need the tenant template's authed router.
-pub fn mcp(pool: rustango::sql::Pool) -> Router {
-    rustango::mcp::router(pool)
 }
 ";
 

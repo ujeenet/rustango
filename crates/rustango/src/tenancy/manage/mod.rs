@@ -520,9 +520,18 @@ where
         // (instead of `&PgPool`), so we route through the tri-dialect
         // `registry_pool()` accessor that returns the backend-agnostic
         // enum form.
-        _ => rustango::migrate::manage::run_with_writer(&pools.registry_pool(), dir, args, writer)
-            .await
-            .map_err(TenancyError::Migrate),
+        _ => crate::migrate::manage::run_with_writer_for(
+            &pools.registry_pool(),
+            dir,
+            args,
+            writer,
+            &[
+                crate::cli_verbs::TENANCY_VERBS,
+                crate::cli_verbs::SINGLE_DB_VERBS,
+            ],
+        )
+        .await
+        .map_err(TenancyError::Migrate),
     }
 }
 
@@ -722,7 +731,7 @@ pub fn write_help<W: Write>(w: &mut W) -> Result<(), TenancyError> {
     writeln!(w, "USER / OPERATOR MANAGEMENT:")?;
     writeln!(
         w,
-        "  create-operator <username> [--password <p> | --generate]"
+        "  create-operator <username> [--password <p> | --password-stdin | --generate]"
     )?;
     writeln!(
         w,

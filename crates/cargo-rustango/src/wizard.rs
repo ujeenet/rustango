@@ -205,7 +205,7 @@ fn ask_features(
     let base = template.base_features();
     let menu: Vec<(&str, &str)> = OPTIONAL_FEATURES
         .iter()
-        .filter(|(n, _)| !base.contains(n))
+        .filter(|(n, _)| !base.contains(n) && template.offers(n))
         .map(|(n, a)| (*n, *a))
         .collect();
     if menu.is_empty() {
@@ -296,7 +296,7 @@ mod tests {
         let cases = [
             (Template::Tenant, Backend::Sqlite, vec!["sso", "cache-page"]),
             (Template::Api, Backend::Mysql, vec![]),
-            (Template::Fullstack, Backend::Postgres, vec!["mcp"]),
+            (Template::Tenant, Backend::Postgres, vec!["mcp"]),
         ];
         for (template, backend, features) in cases {
             let features: Vec<String> = features.iter().map(|s| (*s).to_owned()).collect();
