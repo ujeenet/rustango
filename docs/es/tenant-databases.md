@@ -97,6 +97,19 @@ URL de un tenant se guarda sin sellar con una advertencia (se rechaza con
 datos de la consola y su página **New tenant** muestran un aviso mientras la
 clave falta o es corta.
 
+En los tiers dev y test (`RUSTANGO_ENV` sin definir, `dev` o `test`) una clave
+sin definir recurre a una guardada en `var/.rustango_secret.key`, en cada binario
+que sella o abre. El archivo se busca desde el directorio de trabajo hacia arriba
+hasta la raíz del workspace de Cargo (el directorio más cercano con `Cargo.lock`);
+uno nuevo se crea en esa raíz, o en el directorio de trabajo fuera de un proyecto
+Cargo. Cuando definas `RUSTANGO_SECRET_KEY`, abre los valores que el archivo selló:
+
+```bash
+export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+y luego vuelve a sellarlos como en [rotación](#la-clave-secreta-copia-de-seguridad-y-rotación).
+
 ## 2. Guardar el servidor
 
 Consola: **Organizations → Database servers**. CLI:

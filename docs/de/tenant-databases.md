@@ -97,6 +97,20 @@ eine Tenant-URL unversiegelt mit einer Warnung gespeichert (abgelehnt unter
 und ihre Seite **New tenant** zeigen ein Banner, solange der Schlüssel fehlt
 oder zu kurz ist.
 
+Auf den Tiers dev und test (`RUSTANGO_ENV` nicht gesetzt, `dev` oder `test`)
+fällt ein nicht gesetzter Schlüssel auf einen in `var/.rustango_secret.key`
+gespeicherten zurück, in jedem Binary, das versiegelt oder öffnet. Die Datei wird
+vom Arbeitsverzeichnis aufwärts bis zur Wurzel des Cargo-Workspace gesucht (dem
+nächsten Verzeichnis mit `Cargo.lock`); eine neue entsteht in dieser Wurzel, oder
+außerhalb eines Cargo-Projekts im Arbeitsverzeichnis. Sobald du
+`RUSTANGO_SECRET_KEY` setzt, öffne die Werte, die die Datei versiegelt hat:
+
+```bash
+export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+und versiegle sie dann neu wie unter [Rotation](#der-geheime-schlüssel-backup-und-rotation).
+
 ## 2. Den Server speichern
 
 Konsole: **Organizations → Database servers**. CLI:

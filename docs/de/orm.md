@@ -14,7 +14,7 @@ Muster für das **Rustango**-ORM jenseits der Grundlagen. Wenn du schon einmal m
 > **Neu bei einem Begriff hier?** Das [Glossar](glossary.md) definiert *model*, *queryset*,
 > *pool* und *migration* in einfacher Sprache.
 
-Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Referenz auf einen Datenbank-Verbindungspool — beachte, dass es **zwei** gibt und diese Seite beide verwendet. `rustango::sql::Pool` ist das Mehr-Backend-Enum, das `fetch`, `count` und die `_pool`-Writer nehmen. `sqlx::PgPool` ist der treiberspezifische Postgres-Pool, den die `_on`-Familie und die Transaktionsbeispiele nehmen. `sql::Pool` hat kein `begin()`; seine Transaktions-Einstiegspunkte sind `transaction_pool` und `atomic`. du übergibst sie an die Methoden, die tatsächlich SQL ausführen. `.await` führt einen asynchronen Aufruf aus und wartet auf das Ergebnis. `Option<T>` ist ein Wert, der vorhanden (`Some`) oder abwesend (`None`) sein kann — Rusts Null. `Result` ist Erfolg-oder-Fehler; das nachgestellte `?` an einem Aufruf kehrt bei einem Fehler früh zurück. `Auto<i64>` ist ein automatisch hochzählender Primärschlüssel, der entweder `Set` (aus der DB geladen) oder `Unset` (noch nicht eingefügt) ist.
+Ein paar Rust-Begriffe tauchen durchgehend auf. `&pool` ist eine geteilte Referenz auf einen Datenbank-Verbindungspool — hier ein `rustango::sql::Pool`, das Mehr-Backend-Enum, das `fetch`, `count` und die Writer (`save`, `insert`, `delete`) nehmen. Die `_on`-Methoden nehmen jeden `SqlExecutor`: dieses `&pool`, eine gehaltene Verbindung oder eine offene Transaktion. `sql::Pool` hat kein `begin()`; seine Transaktions-Einstiegspunkte sind `transaction_pool` und `atomic`. `.await` führt einen asynchronen Aufruf aus und wartet auf das Ergebnis. `Option<T>` ist ein Wert, der vorhanden (`Some`) oder abwesend (`None`) sein kann — Rusts Null. `Result` ist Erfolg-oder-Fehler; das nachgestellte `?` an einem Aufruf kehrt bei einem Fehler früh zurück. `Auto<i64>` ist ein automatisch hochzählender Primärschlüssel, der entweder `Set` (aus der DB geladen) oder `Unset` (noch nicht eingefügt) ist.
 
 ## Neuere Ergänzungen
 
@@ -244,7 +244,7 @@ let by_isbn: HashMap<String, Book> = Book::objects()
 
 Komponiert mit vorherigen `.where_()`-Filtern — die `IN`-Liste wird per AND mit dem bestehenden WHERE verknüpft. Ein leeres `ids` schließt kurz mit einer leeren Map (es wird kein SQL abgesetzt). Der Closure behandelt das `Auto<T>` / `ForeignKey<T, K>`-Auspacken explizit und gibt den Aufrufern Kontrolle darüber, wie der Schlüssel materialisiert wird.
 
-Mandantengebundenes Geschwister: `in_bulk_on(column, ids, extract, &executor)` nimmt jeden sqlx-Executor — kombiniere es mit `tenant.conn()` für Schema-Modus-Mandanten.
+Mandantengebundenes Geschwister: `in_bulk_on(column, ids, extract, &executor)` nimmt jeden `SqlExecutor` — kombiniere es mit `tenant.conn().await?` für Schema-Modus-Mandanten.
 
 ### Zeilen zum Aktualisieren sperren
 
@@ -1457,42 +1457,30 @@ Post::bulk_upsert_pool(
 
 ## Transaktionen
 
-> **Diese Beispiele sind Postgres.** `pool.begin()` ist `sqlx::PgPool::begin` —
-> `rustango::sql::Pool` hat überhaupt kein `begin()`. Und die Methoden, die du in
-> einer Transaktion ausführen würdest (`fetch_on`, `save_on`, `delete_on`), sind
-> selbst `#[cfg(feature = "postgres")]`.
->
-> Die Mehr-Backend-Einstiegspunkte sind `rustango::sql::transaction_pool(&pool)`
-> und `rustango::sql::atomic(&pool, …)`. Beide liefern ein `PoolTx`; auf dessen
-> `tx.conn()` (ein `TxConn`) `match`st du pro Backend — statt einer Treiber-Transaktion, sodass eine
-> tri-dialektale Transaktion pro Zweig geschrieben wird und nicht durch Tausch des
-> Pool-Typs.
+> **Mische keine `&pool`-Aufrufe in einer Transaktion.** Jeder Aufruf zwischen
+> `transaction_pool` und `commit` muss die Transaktion (`&mut tx`) anvisieren. Ein
+> verirrtes `&pool` / `fetch()` / `save(&pool)` checkt eine *zweite* Verbindung aus
+> und kann den Pool unter Last deadlocken. Fädle die `tx` durch, oder verwende
+> `rustango::sql::atomic`.
 
-
-> **Fallstrick — mische keine `&pool`-Aufrufe innerhalb einer Transaktion.** Jeder Aufruf
-> zwischen `pool.begin()` und `commit` muss das Transaktions-Handle
-> (`&mut *tx`) anvisieren. Ein verirrtes `&pool` / `fetch()` / `save_on(&pool)` checkt eine
-> *zweite* Verbindung aus und kann den Pool unter Last deadlocken. Fädle die `tx`
-> durch, oder verwende `rustango::sql::atomic`.
-
-Führe mehrere Schreibvorgänge als eine Einheit aus, die entweder alle gelingen oder alle zurückrollen — eine Transaktion. Öffne eine mit `pool.begin()` und führe jedes Statement gegen die Verbindung der Transaktion über die `_on`-Methoden (`fetch_on`, `save_on`) aus, sodass die Arbeit auf der laufenden Transaktion landet statt auf einer frischen gepoolten Verbindung.
+Führe mehrere Schreibvorgänge als eine Einheit aus, die entweder alle gelingen oder alle zurückrollen. Öffne eine mit `rustango::sql::transaction_pool(&pool)`: das läuft auf jedem Backend. Lies mit `fetch_on(&mut tx)` und schreibe mit den `_tx`-Methoden (`save_tx`, `insert_tx`, `delete_tx`), damit die Arbeit in der offenen Transaktion landet und nicht auf einer frischen Pool-Verbindung.
 
 ```rust
-let mut tx = pool.begin().await?;
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
 
 let mut a = Account::objects()
     .where_(Account::id.eq(1))
-    .fetch_on(&mut *tx).await?
+    .fetch_on(&mut tx).await?
     .pop().unwrap();
 let mut b = Account::objects()
     .where_(Account::id.eq(2))
-    .fetch_on(&mut *tx).await?
+    .fetch_on(&mut tx).await?
     .pop().unwrap();
 
 a.balance -= 100;
 b.balance += 100;
-a.save_on(&mut *tx).await?;
-b.save_on(&mut *tx).await?;
+a.save_tx(&mut tx).await?;
+b.save_tx(&mut tx).await?;
 
 tx.commit().await?;
 ```
@@ -1525,7 +1513,7 @@ post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
 
-`all` liefert `i64`-IDs; für `String`- oder `Uuid`-Schlüssel verwende `all_as::<K>(&pool)`.
+`all` liefert `i64`-IDs; für `String`- oder `Uuid`-Schlüssel verwende `all::<K>(&pool)`.
 
 Die Verknüpfungstabelle (`post_tags`) wird von `make_migrations` automatisch erstellt mit zusammengesetztem PK + zwei FKs `ON DELETE CASCADE`. Derzeit hat die Verknüpfungstabelle nur die zwei FK-Spalten — für zusätzliche Spalten (added_by, order, created_at) definierst du ein separates Model und traversierst manuell, bis "custom through model" landet.
 
@@ -1771,7 +1759,7 @@ In einer Multi-Tenant-App führe jede Abfrage gegen die Verbindung des aktuellen
 use rustango::extractors::Tenant;
 
 async fn handler(mut t: Tenant) -> Result<...> {
-    let conn = t.conn();        // &mut PgConnection for this tenant
+    let conn = t.conn().await?; // &mut PgConnection for this tenant
     let posts = Post::objects().fetch_on(&mut *conn).await?;
     Ok(...)
 }
