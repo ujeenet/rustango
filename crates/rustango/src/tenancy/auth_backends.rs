@@ -385,7 +385,7 @@ pub struct ApiKey {
     /// Never returned to callers.
     #[rustango(secret, max_length = 255)]
     #[rustango(
-        help_text = "Keyed MAC of the secret part; the key itself is shown once at creation and never stored."
+        help_text = "One-way hash of the secret part; the key itself is shown once at creation and never stored."
     )]
     #[rustango(verbose_name = "Key hash")]
     pub key_hash: String,

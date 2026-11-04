@@ -21,7 +21,7 @@ pub struct OperatorTotp {
     pub operator_id: i64,
     /// Sealed (`enc:v1:`); private so nothing stores it plain.
     #[rustango(secret, max_length = 255)]
-    #[rustango(help_text = "The shared TOTP secret, sealed.")]
+    #[rustango(help_text = "The shared TOTP secret, encrypted.")]
     #[rustango(verbose_name = "Secret")]
     secret: String,
     #[rustango(default = "false")]
@@ -39,7 +39,7 @@ pub struct OperatorTotp {
     /// A re-enrollment's sealed new secret.
     #[rustango(secret, max_length = 255)]
     #[rustango(
-        help_text = "A new secret being enrolled, sealed; the old one stays until a code confirms it."
+        help_text = "A new secret being enrolled, encrypted; the old one stays until a code confirms it."
     )]
     #[rustango(verbose_name = "Pending secret")]
     pending_secret: Option<String>,

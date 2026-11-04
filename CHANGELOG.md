@@ -8,6 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
 - Every framework model field has a label and help text (meaning, an example, defaults, security effect), and the operator console's tenant, host, database-server and operator forms read the same schema text.
+- Framework models show readable labels in admin column headers and forms (e.g. `Display name`, not `display_name`).
 
 ### Fixed
 

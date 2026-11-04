@@ -56,7 +56,7 @@ pub struct DbServer {
     /// `enc:v1:` only. Private, so no caller can store a plain one.
     #[rustango(secret)]
     #[rustango(
-        help_text = "Password of the admin user. Security: stored sealed with `RUSTANGO_SECRET_KEY` and never shown again."
+        help_text = "Password of the admin user. Security: stored encrypted with `RUSTANGO_SECRET_KEY` and never shown again."
     )]
     #[rustango(verbose_name = "Admin password")]
     admin_password: Option<String>,

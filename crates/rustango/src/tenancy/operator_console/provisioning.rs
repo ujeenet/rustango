@@ -136,6 +136,16 @@ async fn render_form(
         &mut ctx,
         <crate::tenancy::Org as crate::core::Model>::SCHEMA,
     );
+    super::insert_field_text_as(
+        &mut ctx,
+        "tdb",
+        <crate::tenancy::TenantDatabase as crate::core::Model>::SCHEMA,
+    );
+    super::insert_field_text_as(
+        &mut ctx,
+        "user",
+        <crate::tenancy::User as crate::core::Model>::SCHEMA,
+    );
     render(state, "op_orgs_new.html", &ctx)
 }
 
@@ -951,6 +961,11 @@ async fn render_run(
     ctx.insert(
         "first_admin",
         &handover_mode.map(|h| if h.mails() { "mail" } else { "link" }),
+    );
+    super::insert_field_text_as(
+        &mut ctx,
+        "user",
+        <crate::tenancy::User as crate::core::Model>::SCHEMA,
     );
     render(state, "op_provision_run.html", &ctx)
 }

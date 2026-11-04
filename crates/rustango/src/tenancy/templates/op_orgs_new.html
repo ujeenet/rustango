@@ -76,7 +76,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr>
-        <th>backend</th>
+        <th>{{ label.backend_kind }}</th>
         <td>
           <code id="backend">{{ backend }}</code>
           <div class="field-helper">A tenant uses the registry's backend.</div>
@@ -115,7 +115,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr class="mode-database source-server">
-        <th><label for="server">server</label></th>
+        <th><label for="server">{{ tdb_label.server_name }}</label></th>
         <td>
           <select id="server" name="server">
             {% for s in servers %}
@@ -129,7 +129,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr class="mode-database source-registry">
-        <th><label for="database_name">database name</label></th>
+        <th><label for="database_name">{{ tdb_label.database_name }}</label></th>
         <td>
           <input type="text" id="database_name" name="database_name"
                  value="{{ prefill.database_name | default(value='') }}"
@@ -249,7 +249,7 @@ connection check passes.</p>
     <legend>First admin</legend>
     <table>
       <tr>
-        <th><label for="admin_email">email</label></th>
+        <th><label for="admin_email">{{ user_label.email }}</label></th>
         <td>
           <input type="email" id="admin_email" name="admin_email" maxlength="254"
                  value="{{ prefill.admin_email | default(value='') }}"
@@ -260,7 +260,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr>
-        <th><label for="admin_username">username</label></th>
+        <th><label for="admin_username">{{ user_label.username }}</label></th>
         <td>
           <input type="text" id="admin_username" name="admin_username" maxlength="64"
                  value="{{ prefill.admin_username | default(value='') }}"

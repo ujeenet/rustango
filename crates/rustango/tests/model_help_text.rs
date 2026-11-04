@@ -1,4 +1,4 @@
-//! Every editable field of every framework model has help text and a label,
+//! Every non-key field of every framework model has help text and a label,
 //! and the admin form shows them.
 
 #![cfg(all(
@@ -37,10 +37,11 @@ fn framework_models() -> Vec<&'static ModelSchema> {
 }
 
 #[test]
-fn every_editable_framework_field_has_help_text_and_a_label() {
+fn every_framework_field_has_help_text_and_a_label() {
     let mut missing = Vec::new();
     for schema in framework_models() {
-        for f in editable(schema) {
+        // Read-only and stamped fields too: the admin shows them all.
+        for f in schema.fields.iter().filter(|f| !f.primary_key) {
             if !f.help_text.is_some_and(|h| !h.trim().is_empty()) {
                 missing.push(format!("{}.{}: no help_text", schema.table, f.name));
             }
@@ -91,6 +92,7 @@ fn the_walk_covers_every_framework_model() {
         "rustango_admin_totp",
         "rustango_operator_totp",
         "rustango_sso_providers",
+        "rustango_shared_sso_providers",
     ] {
         assert!(seen.contains(&table), "{table} is not registered: {seen:?}");
     }
