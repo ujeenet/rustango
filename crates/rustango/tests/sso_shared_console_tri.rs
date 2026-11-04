@@ -293,9 +293,50 @@ async fn the_error_pages_layer_keeps_the_console_form(pool: &Pool) {
     let _ = pool;
 }
 
+/// The console form shows the provider model's own help text, not a copy.
+async fn the_form_shows_the_model_help_text(pool: &Pool) {
+    use rustango::core::Model as _;
+    let c = console(pool).await;
+    let (status, html) = c.html("GET", "/sso-shared", String::new()).await;
+    assert_eq!(status, StatusCode::OK);
+    for name in [
+        "slug",
+        "label",
+        "kind",
+        "issuer_url",
+        "client_id",
+        "client_secret",
+        "scopes",
+        "sort_order",
+        "enabled",
+        "allowed_email_domains",
+        "blocked_email_domains",
+        "allowed_idp_tenants",
+        "allowed_hosted_domains",
+        "required_claims",
+        "sso_only",
+        "auto_deactivate_after_days",
+        "session_ttl_secs",
+        "superuser_session_ttl_secs",
+    ] {
+        let help = rustango::sso::SsoProvider::SCHEMA
+            .field(name)
+            .and_then(|f| f.help_text)
+            .unwrap_or_default();
+        assert!(
+            !help.is_empty() && html.contains(&rustango::template_extensions::help_html(help)),
+            "`{name}` help text missing"
+        );
+    }
+    // The console's own email-linking text: no staff option, every tenant.
+    assert!(html.contains("Security: in every tenant, link"), "{html}");
+    assert!(html.contains("<code>google</code>"), "no code span");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        the_form_shows_the_model_help_text,
         an_edit_keeps_the_id_and_a_blank_secret,
         a_bad_edit_rerenders_with_the_typed_values,
         a_bad_create_rerenders_with_the_typed_values,

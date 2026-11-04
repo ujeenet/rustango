@@ -1,20 +1,42 @@
 # SSO (OpenID Connect / inicio de sesión social)
 
-Inicia sesión con un proveedor de identidad externo — Google, Microsoft / Azure
-AD, GitHub, GitLab, Discord o **cualquier proveedor OpenID Connect** (Okta,
-Auth0, Keycloak, …) — en lugar de con una contraseña local.
+Inicia sesión con un proveedor de identidad externo (IdP) en vez de una
+contraseña local: Google, Microsoft Entra ID, GitHub, GitLab, Discord o
+**cualquier proveedor OpenID Connect** (Okta, Auth0, Keycloak, …). Cada
+proveedor es una fila que añades en el admin: sin fichero de
+configuración, sin recompilar.
 
-Puedes configurar **múltiples proveedores**, cada uno gestionado desde la interfaz
-de administración como una fila (sin archivo de configuración, sin recompilar). Los
-endpoints de un proveedor se autodescubren a partir de su URL de emisor OIDC al
-iniciar sesión; los proveedores sociales usan presets integrados.
+[![Inicio de sesión SSO: el navegador empieza en <login>/sso/<slug>, el IdP autentica al usuario, el callback comprueba las reglas de acceso, vincula o registra al usuario y crea la misma sesión que un login con contraseña](../img/sso-flow.png)](../img/sso-flow.png)
+
+## Configurar SSO en cuatro pasos
+
+1. **Crea una app en el IdP.** Registra una aplicación web (un «cliente
+   OAuth» o «registro de app»). Copia su **client ID** y su **client
+   secret**. Las [guías por proveedor](#guías-por-proveedor) dicen dónde.
+2. **Registra la URL de callback** en el IdP, para cada host que sirve la
+   página de inicio de sesión. Es `<login>/sso/<slug>/callback` en ese
+   host; ver [URL de callback](#url-de-callback). Elige ahora el `slug`,
+   p. ej. `google`.
+3. **Añade la fila del proveedor.** En el admin del tenant, añade una fila
+   al modelo `rustango_sso_providers`: `slug`, `label`, `kind`,
+   `client_id`, `client_secret` e `issuer_url` cuando `kind` es `oidc`.
+   Solo un superusuario puede añadir o cambiar filas de proveedor. Cada
+   campo tiene un texto de ayuda bajo su entrada; la
+   [referencia de campos](#referencia-de-campos) lista los mismos textos.
+   `RUSTANGO_SECRET_KEY` debe estar definida, o el secreto no se puede
+   guardar.
+4. **Prueba el inicio de sesión.** Abre la página de inicio de sesión en
+   una ventana privada y usa el botón nuevo. Un inicio rechazado muestra
+   un mensaje genérico; el motivo está en el log del servidor
+   (`sso refused`) y en el log de auditoría. `manage check --deploy`
+   detecta un proveedor que rechazaría a todos los usuarios existentes.
 
 El SSO inicia sesión con el usuario **enlazado** a la identidad del IdP: una fila
 `rustango_sso_links` por `(provider, sub)`. El correo que envía el IdP nunca basta
 por sí solo. Un usuario que entra por primera vez se enlaza por su correo verificado
 solo si el proveedor tiene **`allow_email_link`** activado (desactivado por
 defecto), y nunca si la cuenta es superusuario o, sin `allow_email_link_staff`,
-staff (tenant: tiene algún rol; bare-admin: cualquier cuenta). Esas cuentas las enlaza un administrador,
+staff (tenant: tiene algún rol o permiso directo; bare-admin: cualquier cuenta). Esas cuentas las enlaza un administrador,
 que añade la fila `SsoLink` en el admin; la línea de log del rechazo indica el
 subject. (El flujo de miembro, más abajo, también puede crear una cuenta para un
 correo desconocido; está desactivado por defecto.)
@@ -25,6 +47,171 @@ correo desconocido; está desactivado por defecto.)
 > bare-admin `rustango::admin::sso`, el SSO por tenant/consola
 > `rustango::tenancy::sso` (`SharedSsoProvider`) y el SSO de miembro
 > `rustango::tenancy::member_auth`.
+
+## URL de callback
+
+El callback se construye en cada petición con el host y el `slug`:
+`https://<host><login>/sso/<slug>/callback`. En las superficies de admin
+el esquema es `https` salvo que un proxy de confianza envíe
+`X-Forwarded-Proto`; el flujo de miembros también usa `http` en un host
+loopback (ver [SSO de miembro](#sso-de-miembro-usuario-final)). Registra
+una URL por cada host donde se usa el proveedor.
+
+| Superficie de inicio de sesión | Tenant en su propio host | Tenant bajo un prefijo de ruta |
+|---|---|---|
+| Admin del tenant (`<login>` es `/login`) | `https://acme.example.com/login/sso/<slug>/callback` | `https://app.example.com/acme/login/sso/<slug>/callback` |
+| Inicio de sesión de miembros (`member_sso_router`, `login_base` por defecto `/auth`) | `https://acme.example.com/auth/sso/<slug>/callback` | `https://app.example.com/acme/auth/sso/<slug>/callback` |
+| Admin básico (sin tenancy), montado en `/admin` | `https://admin.example.com/admin/login/sso/<slug>/callback` | — |
+
+Con `RouteConfig::legacy()` el `<login>` del admin del tenant es
+`/__login`. Un tenant accesible en su propio host y bajo un prefijo
+necesita las dos URL. Para un proveedor compartido, la consola del
+operador muestra la URL de callback a registrar junto a cada fila.
+
+## Guías por proveedor
+
+### Google
+
+1. En la consola de Google Cloud, abre *APIs & Services → Credentials* y
+   crea un *OAuth client ID* de tipo *Web application*.
+2. Añade la URL de callback en *Authorized redirect URIs*.
+3. Fila del proveedor: `kind = google`, el client ID y el secreto. Deja
+   `issuer_url` vacío. Scopes por defecto: `openid email profile`.
+4. Para permitir solo tu Google Workspace, pon `allowed_hosted_domains`
+   (el claim `hd`), p. ej. `client.org`.
+
+### Microsoft Entra ID
+
+1. En el centro de administración de Entra, abre *App registrations → New
+   registration*. Añade la URL de callback como redirect URI *Web*.
+2. Copia el *Application (client) ID*. En *Certificates & secrets*, crea
+   un client secret y copia su valor.
+3. Fila del proveedor: `kind = microsoft`. Usa el endpoint `common`; con
+   `allowed_idp_tenants` vacío, cualquier directorio de Entra puede entrar.
+   Pon tu *Directory (tenant) ID* para permitir solo tu directorio; así
+   sus emails cuentan como verificados y `role_map` y `required_claims`
+   se aplican. `check --deploy` avisa cuando `role_map` o
+   `required_claims` están puestos y `allowed_idp_tenants` está vacío.
+4. No uses `kind = oidc` con un emisor de Entra de un solo directorio
+   (`…/<tenant-id>/v2.0`): esa fila no se trata como Microsoft, Entra no
+   envía `email_verified`, así que la vinculación por email, el registro y
+   `allowed_email_domains` rechazan a todos.
+
+### GitHub
+
+1. En GitHub, abre *Settings → Developer settings → OAuth Apps → New OAuth
+   App*. Pon la URL de callback en *Authorization callback URL*.
+2. Copia el client ID y genera un client secret.
+3. Fila del proveedor: `kind = github`. Scopes por defecto:
+   `read:user user:email`. El email verificado viene de `/user/emails`.
+   GitHub no envía id_token, así que una regla que lo necesita, como
+   `allowed_idp_tenants`, rechaza.
+
+### OpenID Connect genérico
+
+1. Crea un cliente web (confidential) en tu IdP y añade la URL de callback.
+2. Fila del proveedor: `kind = oidc`, el client ID y el secreto, e
+   `issuer_url`, por ejemplo `https://<org>.okta.com`,
+   `https://<host>/realms/<realm>` (Keycloak) o
+   `https://<tenant>.auth0.com/`.
+3. rustango lee `<issuer>/.well-known/openid-configuration` para encontrar
+   los endpoints, una vez por emisor y hora. Scopes por defecto:
+   `openid email profile`.
+
+`check --deploy` avisa de la vinculación por email en un proveedor `oidc`
+y de un emisor `http://` que no es loopback.
+
+## Referencia de campos
+
+Son los textos de ayuda que el admin muestra bajo cada entrada (allí en
+inglés).
+
+### `SsoProvider` y `SharedSsoProvider`
+
+Los proveedores propios de un tenant son filas `SsoProvider`. Los
+proveedores compartidos de la consola del operador (`SharedSsoProvider`)
+tienen los mismos campos y muestran los mismos textos.
+
+| Campo | Qué poner |
+|---|---|
+| `slug` | Id corto en las URL del proveedor, p. ej. `google`: el IdP devuelve a los usuarios a `<login>/sso/<slug>/callback`. Único; un slug nuevo implica una URL de callback nueva en el IdP. |
+| `label` | Texto del botón de inicio de sesión, p. ej. `Sign in with Google`. |
+| `kind` | `google`, `microsoft`, `github`, `gitlab` o `discord` para un proveedor integrado, u `oidc` para cualquier otro proveedor OpenID Connect (entonces rellena la URL del emisor). |
+| `issuer_url` | Solo para `oidc`: la URL del emisor, p. ej. `https://<org>.okta.com` o `https://<host>/realms/<realm>`. Los endpoints se leen de `<issuer>/.well-known/openid-configuration`; para Microsoft Entra ID usa el tipo `microsoft`. |
+| `client_id` | Client ID (ID de aplicación) del registro de la app en tu proveedor de identidad. |
+| `client_secret` | Client secret del mismo registro de la app. Se guarda cifrado con `RUSTANGO_SECRET_KEY`. |
+| `enabled` | Mostrar el botón de este proveedor en la página de inicio de sesión. |
+| `sort_order` | Orden de los botones en la página de inicio de sesión; los números menores van primero. |
+| `scopes` | Scopes de OAuth separados por espacios, p. ej. `openid email profile`. Vacío: los scopes por defecto del tipo. |
+| `allow_email_link` | Seguridad: vincular un primer inicio de sesión a la cuenta existente con el mismo email verificado; la contraseña de esa cuenta deja de funcionar, sus sesiones terminan, sus claves API se borran y sus claves de agente se desactivan. Nunca un superusuario, y un usuario con cualquier rol o permiso solo con la vinculación por email para staff; el admin básico lo ignora. |
+| `allowed_email_domains` | Seguridad: solo pueden entrar usuarios cuyo email verificado esté en estos dominios. Lista separada por comas o saltos de línea: `client.org` es solo ese dominio, `*.client.org` solo sus subdominios. Vacío: cualquier dominio. |
+| `blocked_email_domains` | Los usuarios con un email en estos dominios nunca entran, aunque la lista permitida los tenga. Mismo formato que la lista permitida. |
+| `allowed_idp_tenants` | IDs de directorio (tenant) de Microsoft Entra que pueden entrar, separados por comas, leídos de un id_token verificado. Vacío: cualquier directorio de Entra puede entrar con un proveedor `microsoft`. |
+| `allowed_hosted_domains` | Dominios de Google Workspace (el claim `hd`) que pueden entrar, separados por comas, p. ej. `client.org`. |
+| `required_claims` | Objeto JSON de claims que debe llevar un inicio de sesión, cada uno con uno de sus valores: `{"roles": ["App.User"]}`. `{}`: no se exige ningún claim. |
+| `signup_mode` | Seguridad: quién obtiene una cuenta nueva en el primer inicio de sesión: `closed` (nadie), `invite_only` (una invitación para el email), `allowlist` (una invitación para el email o su dominio) u `open` (cualquiera que las reglas de acceso admitan). Vacío: el valor por defecto de la página de inicio de sesión. |
+| `default_roles` | Roles del tenant que recibe un usuario nuevo, separados por comas, p. ej. `Viewer`. Una invitación con roles los sustituye. |
+| `role_map` | Objeto JSON de un grupo o rol de app del IdP a roles del tenant: `{"Admins": "Editor"}` o `{"Admins": ["Editor", "Viewer"]}`. |
+| `role_claims` | Claims que lee el mapa de roles, separados por comas. Vacío: `groups,roles`. |
+| `sync_roles_on_login` | Aplicar el mapa de roles en cada inicio de sesión, no solo en el primero. Solo se añaden o quitan los roles del mapa. |
+| `username_from` | De dónde sale el nombre de usuario de un usuario nuevo: la parte local del email, el email completo o el `preferred_username` del IdP (si falta, la parte local). |
+| `username_clash` | Qué pasa si ese nombre de usuario ya existe: añadir un sufijo corto o rechazar el registro. |
+| `sync_profile` | Actualizar el nombre y el email del usuario desde el IdP en cada inicio de sesión. Nunca para un superusuario. |
+| `allow_email_link_staff` | Seguridad: con la vinculación por email activa, vincular también a usuarios con cualquier rol o permiso. Un superusuario nunca se vincula por email. |
+| `sso_only` | Los usuarios vinculados a través de este proveedor no pueden entrar con contraseña, aunque el proveedor esté desactivado. |
+| `auto_deactivate_after_days` | Tras tantos días sin uso, `sso-deactivate-idle` desactiva a los usuarios que registró este proveedor y que no pueden usar contraseña: solo SSO aquí, o el login con contraseña desactivado en el tenant. Vacío: nunca. |
+| `session_ttl_secs` | Sesión más larga, en segundos, tras entrar con este proveedor. Vacío: la duración normal de la sesión. |
+| `superuser_session_ttl_secs` | Sesión más larga, en segundos, para un superusuario que entra con este proveedor. Vacío: la duración normal de la sesión. |
+
+### `SsoTenantPolicy`
+
+Los ajustes de todo el tenant, una fila.
+
+| Campo | Qué poner |
+|---|---|
+| `name` | Siempre `default`: el tenant usa esta única fila. |
+| `access_denied_message` | Mensaje en la página de inicio de sesión tras un inicio SSO rechazado, p. ej. a quién contactar. Se muestra como texto plano. |
+| `password_login` | El formulario de contraseña: `on`, `off` (también para superusuarios) o `superusers_only` (solo en `?local=1`, para superusuarios). |
+| `sso_only` | Nadie salvo un superusuario puede entrar con contraseña. |
+| `default_provider` | Slug del proveedor que la página de inicio de sesión abre directamente, salvo en `?local=1` o tras un error. |
+| `signups_per_hour` | Máximo de registros SSO por hora. Vacío: 100; `0`: sin límite. |
+
+### `SsoSharedOverride`
+
+La restricción de un proveedor compartido por un tenant. Los campos vacíos
+mantienen el valor compartido.
+
+| Campo | Qué poner |
+|---|---|
+| `shared_slug` | Slug del proveedor compartido que esta fila restringe para este tenant. |
+| `shared_provider_id` | La fila del proveedor compartido a la que está ligado este ajuste, fijada en su primer uso. |
+| `shared_issuer` | El emisor de esa fila al ligarse. Si la fila compartida cambia de emisor, se rechaza el inicio de sesión hasta volver a añadir el ajuste. |
+| `allowed_email_domains` | Seguridad: solo estos dominios de email pueden entrar aquí, además de las reglas compartidas. Mismo formato con comas o saltos de línea que en el proveedor. |
+| `blocked_email_domains` | Más dominios de email que nunca entran aquí. |
+| `allowed_idp_tenants` | IDs de directorio de Microsoft permitidos aquí, separados por comas. Restringe la lista compartida. |
+| `allowed_hosted_domains` | Dominios de Google Workspace permitidos aquí, separados por comas. Restringe la lista compartida. |
+| `required_claims` | Más claims que debe llevar un inicio de sesión aquí, en JSON: `{"roles": ["App.User"]}`. |
+| `signup_mode` | Seguridad: el registro aquí. Solo puede ser más estricto que el del proveedor compartido. Vacío: el valor compartido. |
+| `allow_email_link` | Desactivado: aquí no hay vinculación por email. Vacío o activado: el ajuste compartido. |
+| `allow_email_link_staff` | Desactivado: aquí la vinculación por email nunca vincula a un usuario con cualquier rol o permiso. Vacío o activado: el ajuste compartido. |
+| `sso_only` | Activado: los usuarios de este proveedor no pueden entrar aquí con contraseña. |
+| `session_ttl_secs` | Un límite de sesión más corto aquí, en segundos. Vacío: el valor compartido. |
+| `superuser_session_ttl_secs` | Un límite de sesión de superusuario más corto aquí, en segundos. Vacío: el valor compartido. |
+| `allowed_roles` | Roles que el proveedor compartido puede dar aquí, separados por comas. Vacío: ninguno. |
+
+### `SsoInvite`
+
+Una invitación para registrarse por SSO.
+
+| Campo | Qué poner |
+|---|---|
+| `provider_slug` | Slug del proveedor para el que vale la invitación. Vacío: cualquier proveedor. |
+| `target` | Quién puede registrarse: un email (`ann@client.org`) o un dominio (`@client.org`, o `*.client.org` para sus subdominios). Una invitación de dominio necesita un máximo de usos o una caducidad. |
+| `roles` | Roles que recibe el usuario nuevo, separados por comas. Sustituyen los roles por defecto del proveedor. |
+| `expires_at` | Después de este momento la invitación deja de valer. Vacío: no caduca. |
+| `max_uses` | Cuántos registros pueden usar esta invitación. Vacío: sin límite. |
+| `link_user_id` | Solo para revincular: el usuario existente que vincula el siguiente inicio de sesión, en vez de una cuenta nueva. Lo fija la acción Re-link. |
+| `link_key` | Solo para revincular: el proveedor por el que debe llegar el siguiente inicio de sesión. Lo fija la acción Re-link; déjalo vacío. |
 
 ## Funcionalidades y quién las usa
 
@@ -89,29 +276,12 @@ momento del inicio de sesión.
 
 ## Los proveedores son filas, gestionadas en el admin
 
-Cada proveedor es una fila `SsoProvider`. Aparece como un modelo de administración
-corriente — añadir/editar/habilitar desde la interfaz de administración, sin
-redespliegue. Campos:
-
-| Campo | Significado |
-|---|---|
-| `slug` | Clave de ruta estable + id del botón (`<login>/sso/<slug>`). Única. |
-| `label` | Texto del botón, p. ej. «Iniciar sesión con Google». |
-| `kind` | Un preset — `google` / `microsoft` / `github` / `gitlab` / `discord` — o `oidc` para un proveedor OpenID Connect genérico. |
-| `issuer_url` | URL base de descubrimiento OIDC (para `kind = "oidc"`); rustango obtiene `{issuer}/.well-known/openid-configuration`. No se usa en los presets. |
-| `client_id` | El id de cliente OAuth del IdP. |
-| `client_secret` | El secreto de cliente OAuth, **cifrado en reposo** (nunca en texto plano en la BD). |
-| `enabled` | Si el botón aparece en la página de inicio de sesión. |
-| `sort_order` | Orden de los botones (ascendente). |
-| `scopes` | Anulación opcional de scopes separados por espacios (por defecto `openid email profile`). |
-| `allow_email_link` | Enlazar a un usuario que entra por primera vez por su correo verificado (desactivado por defecto). Nunca enlaza a un superusuario, y a quien tiene roles solo con `allow_email_link_staff`; el bare-admin lo ignora. |
-
-Solo un superusuario puede añadir, cambiar o borrar filas `SsoProvider` y
-`SsoLink` en el admin; el resto del staff solo puede listarlas.
-
-Para añadir un proveedor: introduce el `client_id` + `client_secret`, elige un
-`kind` (o `oidc` + un `issuer_url`) y guarda. Los endpoints se descubren al iniciar
-sesión — sin cableado de endpoints por proveedor.
+Cada proveedor es una fila `SsoProvider`, un modelo normal del admin:
+se añade, edita y activa desde la UI del admin, sin redesplegar. Los
+campos están en la [referencia de campos](#referencia-de-campos). Solo un
+superusuario puede añadir, cambiar o borrar filas `SsoProvider` y
+`SsoLink`; el resto del staff las lista con los permisos habituales. Los
+endpoints se descubren al iniciar sesión, sin configuración por proveedor.
 
 ## Dónde gestiona los proveedores cada superficie
 
@@ -139,10 +309,7 @@ En la página de inicio de sesión de un tenant los dos conjuntos se fusionan, y
 un choque de slug **gana el propio proveedor del tenant** sobre el compartido — así
 un tenant puede anular un proveedor compartido para sí mismo.
 
-La URL de callback se deriva por petición a partir del host + slug
-(`https://<host><login>/sso/<slug>/callback`), así que regístrala con el
-IdP. El esquema es `https`, salvo que un proxy de confianza envíe
-`X-Forwarded-Proto`. Un usuario se enlaza mediante el enlace opcional por correo (usuarios de
+Registra la [URL de callback](#url-de-callback) en el IdP. Un usuario se enlaza mediante el enlace opcional por correo (usuarios de
 tenant no privilegiados), o cuando un superusuario añade una fila `SsoLink`:
 `provider_source` (`tenant`, `shared`, `admin`, o `app` para un inicio de sesión nativo), `provider_id` (el id de la fila
 del proveedor), `issuer` (`kind`, o `kind|issuer_url` sin barra final), `subject`
@@ -216,7 +383,7 @@ Diferencias respecto al flujo del admin:
   `X-Forwarded-Host`); si no, `http` en un host loopback
   (`localhost`, `*.localhost`, una IP loopback) y `https` en cualquier otro, así que
   `localhost.example.com` recibe `https`.
-- **Aprovisionamiento automático.** Con `auto_provision = true` (opcional; el valor por
+- **Aprovisionamiento automático.** El `signup_mode` de un proveedor ([Quién puede registrarse](#quién-puede-registrarse)) manda; si no hay ninguno, `auto_provision = true` funciona como `open`. Con `auto_provision = true` (opcional; el valor por
   defecto es `false`), un correo de IdP verificado sin una fila `rustango_users` coincidente
   **crea** una — nombre de usuario a partir de la parte local del correo (deduplicado
   ante un choque), un hash de contraseña aleatorio real pero inutilizable (los
@@ -267,13 +434,14 @@ Cada proveedor (y cada proveedor compartido en la consola del operador)
 tiene reglas de inicio de sesión. Las reglas vacías admiten a cualquiera
 que el IdP autentique.
 
-| Campo | Regla |
-|---|---|
-| `allowed_email_domains` | Solo estos dominios: `client.org` coincide solo consigo mismo, `*.client.org` solo con sus subdominios. Separados por comas o saltos de línea. |
-| `blocked_email_domains` | Nunca estos dominios, aunque estén permitidos arriba. Se comprueba con cualquier email, verificado o no. |
-| `allowed_idp_tenants` | IDs de directorio de Microsoft (`tid`). Solo se leen de un id_token verificado. |
-| `allowed_hosted_domains` | Dominios de Google Workspace (claim `hd`). |
-| `required_claims` | JSON `{"claim": ["valor", ...]}`: el claim (texto o lista) debe contener uno de los valores. `{"iss": [...]}` fija el emisor. Un claim ausente rechaza. |
+[![Quién puede entrar y registrarse: primero las reglas de acceso, luego un vínculo existente o por email, luego signup_mode decide sobre una cuenta nueva; las capas del tenant solo restringen](../img/sso-policy.png)](../img/sso-policy.png)
+
+Los campos de reglas son `allowed_email_domains`, `blocked_email_domains`,
+`allowed_idp_tenants`, `allowed_hosted_domains` y `required_claims`; su
+formato está en la [referencia de campos](#referencia-de-campos). La lista
+bloqueada se comprueba con cualquier email del IdP, verificado o no; la
+permitida, solo con uno verificado. Un claim de `required_claims` puede
+ser una cadena o una lista, y un claim ausente rechaza.
 
 El admin y la consola del operador guardan las listas en una forma canónica
 y rechazan valores que no se pueden interpretar. Un valor inválido escrito
@@ -307,16 +475,18 @@ Un proveedor también puede crear la cuenta en el primer inicio de sesión.
 Solo ocurre si ningún enlace ni ninguna cuenta coincide con el email
 verificado, y solo después de pasar las reglas de inicio de sesión de arriba.
 
-| Campo | Significado |
-|---|---|
-| `signup_mode` | `closed` (solo enlaces), `invite_only` (una `SsoInvite` para este email), `allowlist` (una invitación para el email o su dominio) u `open` (cualquiera que admitan las reglas). Vacío: cerrado en el login del tenant; el flujo de miembros sigue `MemberAuthConfig::auto_provision`. El admin simple nunca crea cuentas. |
-| `default_roles` | Roles del tenant para el usuario nuevo, p. ej. `Viewer`. Una invitación con roles los reemplaza. |
-| `role_map` | JSON `{"<grupo o rol de app>": "Editor"}` (o una lista). Se lee de los claims de `role_claims` (vacío: `groups,roles`); con un proveedor con JWKS, solo de un id_token verificado. |
-| `sync_roles_on_login` | Volver a aplicar `role_map` en cada inicio de sesión. Solo se añaden o quitan roles nombrados en `role_map`; los asignados a mano se quedan. |
-| `username_from` | `email_local` (por defecto), `email` o `preferred_username` (si no, la parte local del email). |
-| `username_clash` | `suffix` (por defecto: `ann-x7k2q9`) o `refuse`. |
-| `sync_profile` | Actualizar nombre visible y email desde el IdP en cada inicio de sesión (nunca para un superusuario; un email de otro usuario no se copia). |
-| `allow_email_link_staff` | Con `allow_email_link`, enlazar también a usuarios con roles. Un superusuario nunca se enlaza por email. |
+Los campos de registro son `signup_mode`, `default_roles`, `role_map`,
+`role_claims`, `sync_roles_on_login`, `username_from`, `username_clash`,
+`sync_profile` y `allow_email_link_staff` (ver la
+[referencia de campos](#referencia-de-campos)). Con `signup_mode` vacío,
+el login del tenant está cerrado y el flujo de miembros sigue
+`MemberAuthConfig::auto_provision`; el admin básico nunca registra a
+nadie. Un usuario nuevo recibe los roles de la invitación o `default_roles`, más
+los roles que da `role_map`. Un proveedor con JWKS (descubrimiento OIDC, Microsoft, Google) toma
+los claims de roles solo de un id_token verificado; uno solo con userinfo,
+de userinfo. `sync_roles_on_login` solo añade o quita roles nombrados en
+`role_map`; los roles dados a mano se quedan, y un inicio de sesión sin
+claims de roles no cambia nada.
 
 Un usuario nuevo nunca es superusuario. Los roles pasan por el motor de
 permisos (`UserRole`); un nombre de rol sin fila `Role` se omite y se anota
@@ -351,24 +521,23 @@ abierto, y avisa de `signup_mode = open` sin `allowed_email_domains`,
 
 ## Contraseñas, sesiones y ciclo de vida
 
-| Dónde | Campo | Significado |
-|---|---|---|
-| Proveedor | `sso_only` | Sus usuarios vinculados no pueden usar contraseña (formulario, login JSON, HTTP Basic, enlace de restablecimiento), aunque el proveedor esté desactivado o borrado. |
-| Proveedor | `session_ttl_secs`, `superuser_session_ttl_secs` | La sesión dura lo más corto de estos valores y el de la ruta. |
-| Proveedor | `auto_deactivate_after_days` | `sso-deactivate-idle` desactiva a los usuarios que registró y llevan ese tiempo sin uso. Nunca un superusuario ni un usuario vinculado por un admin. |
-| `SsoTenantPolicy` | `password_login` | `on`, `off` o `superusers_only`: el formulario solo aparece con `?local=1`, para superusuarios. |
-| `SsoTenantPolicy` | `sso_only` | Solo los superusuarios usan contraseña. |
-| `SsoTenantPolicy` | `default_provider` | La página de login redirige directamente (o al único proveedor si el formulario de contraseña está oculto), salvo con `?local=1` o tras un error. |
-| `SsoTenantPolicy` | `signups_per_hour` | Registros SSO por hora (vacío: 100, `0`: sin límite). |
+Los campos del proveedor `sso_only`, `session_ttl_secs`,
+`superuser_session_ttl_secs` y `auto_deactivate_after_days`, y la fila
+`SsoTenantPolicy`, están en la [referencia de campos](#referencia-de-campos).
+`sso_only` cubre el login con contraseña, el login JSON, HTTP Basic y los
+enlaces de restablecimiento. Una sesión dura lo más corto entre el límite
+del proveedor y la duración de la ruta. `sso-deactivate-idle` nunca
+desactiva a un superusuario ni a un usuario con un vínculo hecho por un
+admin.
 
 Un superusuario solo sigue `password_login`; `sso_only` nunca lo bloquea.
 Una contraseña rechazada parece incorrecta. Una regla ilegible rechaza; una configuración ilegible solo deja entrar a superusuarios. Un proveedor desactivado mantiene a sus usuarios `sso_only`, un vínculo a uno borrado cuenta como `sso_only` hasta que un admin lo quite. `sso_only` cubre los logins con contraseña (tenant y bare admin) y los restablecimientos, no las claves API ni los secretos de agentes MCP. `sso-deactivate-idle` solo desactiva a usuarios que no pueden usar contraseña. Cerrar sesión lleva a `?local=1`, y la redirección automática ocurre como mucho una vez por minuto, para que una sesión perdida no cree un bucle.
 
 **Proveedores compartidos.** El `SsoSharedOverride` de un tenant endurece un proveedor compartido, nunca lo relaja, y nombra en `allowed_roles` los roles que puede otorgar (sin override: ninguno). El override también puede desactivar la vinculación por correo (`allow_email_link`, `allow_email_link_staff`). Se vincula a la fila del proveedor compartido en el primer inicio de sesión: una fila renombrada lo conserva, una fila nueva con el slug antiguo no, y una fila que cambia de issuer rechaza el inicio de sesión hasta que se vuelva a crear el override.
 
-**Microsoft multiinquilino.** Un proveedor `microsoft` (u `oidc` en `/common` u `/organizations`) acepta usuarios de cualquier directorio de Entra. Su `role_map` y sus `required_claims` solo cuentan si `allowed_idp_tenants` fija el `tid` del token; si no, no se conceden roles y las claims obligatorias rechazan. `check --deploy` avisa de estas filas.
+**Microsoft multiinquilino.** Un proveedor `microsoft` (u `oidc` en `/common` u `/organizations`) acepta usuarios de cualquier directorio de Entra. Su `role_map` y sus `required_claims` solo cuentan si `allowed_idp_tenants` fija el `tid` del token; si no, no se conceden roles y las claims obligatorias rechazan. `check --deploy` avisa de una fila que pone `role_map` o `required_claims` sin `allowed_idp_tenants`.
 
-**Límite y auditoría.** Los callbacks SSO tienen su propio límite por IP (429), aparte del de contraseñas. Vínculos, registros, re-vínculos y cambios de roles van al registro de auditoría; los rechazos como mucho cinco veces por sujeto en diez minutos.
+**Límite y auditoría.** Los callbacks SSO tienen su propio límite por IP (429), aparte del de contraseñas. Vínculos, registros, re-vínculos y cambios de roles van al registro de auditoría (`sso_linked`, `sso_signup`, `sso_relinked`, `sso_roles_synced`); los rechazos como mucho cinco veces por sujeto en diez minutos.
 
 **Bloqueo de cuenta.** El bloqueo tras contraseñas fallidas no detiene el SSO. Para detener a un usuario, ponga `active = false`.
 
@@ -459,8 +628,8 @@ con prefijo comparten un origen con la consola del operador y entre sí: el
 están ligados al slug del tenant por su MAC, así que la cookie de un tenant
 nunca abre la de otro. Para un tenant alcanzable de ambas formas, registre las
 dos URL de callback en el IdP:
-`https://acme.example.com/__login/sso/<slug>/callback` y
-`https://app.example.com/acme/__login/sso/<slug>/callback`.
+`https://acme.example.com/login/sso/<slug>/callback` y
+`https://app.example.com/acme/login/sso/<slug>/callback` (`/__login` con `RouteConfig::legacy()`).
 
 ## Véase también
 

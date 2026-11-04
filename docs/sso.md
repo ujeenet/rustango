@@ -1,20 +1,39 @@
 # SSO (OpenID Connect / social login)
 
-Sign in with an external identity provider — Google, Microsoft / Azure
-AD, GitHub, GitLab, Discord, or **any OpenID Connect provider** (Okta,
-Auth0, Keycloak, …) — instead of a local password.
+Sign in with an external identity provider (IdP) instead of a local
+password: Google, Microsoft Entra ID, GitHub, GitLab, Discord, or **any
+OpenID Connect provider** (Okta, Auth0, Keycloak, …). Each provider is a
+row you add in the admin: no config file, no rebuild.
 
-You can configure **multiple providers**, each managed from the admin UI
-as a row (no config file, no rebuild). A provider's endpoints are
-auto-discovered from its OIDC issuer URL at login; social providers use
-built-in presets.
+[![SSO sign-in: the browser starts at <login>/sso/<slug>, the IdP signs the user in, the callback checks the sign-in rules, then links the user or signs them up, and mints the same session a password login makes](img/sso-flow.png)](img/sso-flow.png)
+
+## Set up SSO in four steps
+
+1. **Create an app at the IdP.** Register a web application (an "OAuth
+   client" or "app registration"). Copy its **client ID** and **client
+   secret**. The [provider guides](#provider-guides) below say where.
+2. **Register the callback URL** at the IdP, for every host that serves
+   the sign-in page. It is `<login>/sso/<slug>/callback` on that host; see
+   [Callback URLs](#callback-urls). Pick the `slug` now, e.g. `google`.
+3. **Add the provider row.** In the tenant admin, add a row to the
+   `rustango_sso_providers` model: `slug`, `label`, `kind`,
+   `client_id`, `client_secret`, and `issuer_url` when `kind` is `oidc`.
+   Only a superuser can add or change provider rows. Every field has help
+   text under its input; the [field reference](#field-reference) lists the
+   same texts. `RUSTANGO_SECRET_KEY` must be set, or the secret cannot be
+   saved.
+4. **Test the sign-in.** Open the sign-in page in a private window and use
+   the new button. A refused sign-in shows one generic message; the reason
+   is in the server log (`sso refused`) and the audit log. Run
+   `manage check --deploy` to catch a provider that would refuse every
+   existing user.
 
 SSO signs in the user **linked** to the IdP identity: one
 `rustango_sso_links` row per `(provider, sub)`. The email the IdP sends is
 never enough on its own. A first-time user is linked by verified email
 only when the provider has **`allow_email_link`** on (default off), and
 never when the account is a superuser or, without `allow_email_link_staff`,
-staff (tenant: holds any role; bare admin: every account). Those accounts are linked by an
+staff (tenant: holds any role or any direct permission; bare admin: every account). Those accounts are linked by an
 admin, who adds the `SsoLink` row in the admin; the refusal log line names
 the subject. (The member flow, below, can also create an account for an
 unknown email; that is off by default.)
@@ -25,6 +44,168 @@ unknown email; that is off by default.)
 > bare-admin wiring `rustango::admin::sso`, per-tenant/console SSO
 > `rustango::tenancy::sso` (`SharedSsoProvider`), and member SSO
 > `rustango::tenancy::member_auth`.
+
+## Callback URLs
+
+The callback is built per request from the host and the `slug`:
+`https://<host><login>/sso/<slug>/callback`. On the admin surfaces the
+scheme is `https` unless a trusted proxy sends `X-Forwarded-Proto`; the
+member flow also uses `http` on a loopback host (see
+[Member SSO](#member-end-user-sso)). Register one URL per host the provider
+is used on.
+
+| Sign-in surface | Tenant on its own host | Tenant under a path prefix |
+|---|---|---|
+| Tenant admin (`<login>` is `/login`) | `https://acme.example.com/login/sso/<slug>/callback` | `https://app.example.com/acme/login/sso/<slug>/callback` |
+| Member sign-in (`member_sso_router`, `login_base` default `/auth`) | `https://acme.example.com/auth/sso/<slug>/callback` | `https://app.example.com/acme/auth/sso/<slug>/callback` |
+| Bare admin (no tenancy), mounted at `/admin` | `https://admin.example.com/admin/login/sso/<slug>/callback` | — |
+
+With `RouteConfig::legacy()` the tenant admin's `<login>` is `/__login`. A
+tenant reachable both on its own host and under a prefix needs both URLs.
+For a shared provider, the operator console shows the callback URL to
+register next to each row.
+
+## Provider guides
+
+### Google
+
+1. In the Google Cloud console, open *APIs & Services → Credentials* and
+   create an *OAuth client ID* of type *Web application*.
+2. Add the callback URL under *Authorized redirect URIs*.
+3. Provider row: `kind = google`, the client ID and secret. Leave
+   `issuer_url` empty. Default scopes: `openid email profile`.
+4. To allow only your Google Workspace, set `allowed_hosted_domains`
+   (the `hd` claim), e.g. `client.org`.
+
+### Microsoft Entra ID
+
+1. In the Entra admin center, open *App registrations → New registration*.
+   Add the callback URL as a *Web* redirect URI.
+2. Copy the *Application (client) ID*. Under *Certificates & secrets*,
+   create a client secret and copy its value.
+3. Provider row: `kind = microsoft`. It uses the `common` endpoint, so
+   with `allowed_idp_tenants` empty any Entra directory can sign in. Set
+   it to your *Directory (tenant) ID* to allow only your directory; then
+   its emails count as verified and `role_map` and `required_claims`
+   apply. `check --deploy` warns when `role_map` or `required_claims` is
+   set and `allowed_idp_tenants` is empty.
+4. Do not use `kind = oidc` with a single-directory Entra issuer
+   (`…/<tenant-id>/v2.0`): that row is not treated as Microsoft, Entra
+   sends no `email_verified`, so email linking, sign-up and
+   `allowed_email_domains` refuse everyone.
+
+### GitHub
+
+1. In GitHub, open *Settings → Developer settings → OAuth Apps → New OAuth
+   App*. Set the *Authorization callback URL* to the callback URL.
+2. Copy the client ID and generate a client secret.
+3. Provider row: `kind = github`. Default scopes: `read:user user:email`.
+   The verified email comes from `/user/emails`. GitHub sends no id_token,
+   so a rule that needs one, such as `allowed_idp_tenants`, refuses.
+
+### Generic OpenID Connect
+
+1. Create a web (confidential) client at your IdP and add the callback URL.
+2. Provider row: `kind = oidc`, the client ID and secret, and `issuer_url`,
+   for example `https://<org>.okta.com`, `https://<host>/realms/<realm>`
+   (Keycloak) or `https://<tenant>.auth0.com/`.
+3. rustango reads `<issuer>/.well-known/openid-configuration` to find the
+   endpoints, once per issuer per hour. Default scopes:
+   `openid email profile`.
+
+`check --deploy` warns about email linking on an `oidc` provider and about
+an `http://` issuer that is not loopback.
+
+## Field reference
+
+These are the help texts the admin shows under each input.
+
+### `SsoProvider` and `SharedSsoProvider`
+
+A tenant's own providers are `SsoProvider` rows. The operator console's
+shared providers (`SharedSsoProvider`) have the same fields and show the
+same texts.
+
+| Field | What to enter |
+|---|---|
+| `slug` | Short id in this provider's URLs, e.g. `google`: the IdP sends users back to `<login>/sso/<slug>/callback`. Unique; a new slug means a new callback URL at the IdP. |
+| `label` | Text on the sign-in button, e.g. `Sign in with Google`. |
+| `kind` | `google`, `microsoft`, `github`, `gitlab` or `discord` for a built-in provider, or `oidc` for any other OpenID Connect provider (then fill in the issuer URL). |
+| `issuer_url` | Only for `oidc`: the issuer URL, e.g. `https://<org>.okta.com` or `https://<host>/realms/<realm>`. The endpoints are read from `<issuer>/.well-known/openid-configuration`; for Microsoft Entra ID use the `microsoft` kind. |
+| `client_id` | Client ID (application ID) from your identity provider's app registration. |
+| `client_secret` | Client secret from the same app registration. Stored encrypted with `RUSTANGO_SECRET_KEY`. |
+| `enabled` | Show this provider's button on the sign-in page. |
+| `sort_order` | Button order on the sign-in page; lower numbers come first. |
+| `scopes` | OAuth scopes, space separated, e.g. `openid email profile`. Empty: the kind's default scopes. |
+| `allow_email_link` | Security: link a first-time sign-in to the existing account with the same verified email; that account's password stops working, its sessions end, its API keys are deleted and its agent keys are turned off. Never a superuser, and a user with any role or permission only with email linking for staff; the bare admin ignores it. |
+| `allowed_email_domains` | Security: only users whose verified email is in these domains may sign in. Comma or newline list: `client.org` is that domain only, `*.client.org` its subdomains only. Empty: any domain. |
+| `blocked_email_domains` | Users with an email in these domains never sign in, even if the allowed list has them. Same format as the allowed list. |
+| `allowed_idp_tenants` | Microsoft Entra directory (tenant) IDs allowed to sign in, comma separated, read from a verified id_token. Empty: any Entra directory can sign in through a `microsoft` provider. |
+| `allowed_hosted_domains` | Google Workspace domains (the `hd` claim) allowed to sign in, comma separated, e.g. `client.org`. |
+| `required_claims` | JSON object of claims a sign-in must carry, each holding one of its values: `{"roles": ["App.User"]}`. `{}`: no claim is required. |
+| `signup_mode` | Security: who gets a new account at first sign-in: `closed` (no one), `invite_only` (an invite for the email), `allowlist` (an invite for the email or its domain) or `open` (anyone the sign-in rules let in). Empty: the sign-in page's default. |
+| `default_roles` | Tenant roles a new user gets, comma separated, e.g. `Viewer`. An invite with roles replaces them. |
+| `role_map` | JSON object from an IdP group or app role to tenant roles: `{"Admins": "Editor"}` or `{"Admins": ["Editor", "Viewer"]}`. |
+| `role_claims` | Claims the role map reads, comma separated. Empty: `groups,roles`. |
+| `sync_roles_on_login` | Apply the role map at every sign-in, not only the first. Only roles named in the role map are added or removed. |
+| `username_from` | Where a new user's username comes from: the email's local part, the whole email, or the IdP's `preferred_username` (falls back to the local part). |
+| `username_clash` | What happens when that username is taken: add a short suffix, or refuse the sign-up. |
+| `sync_profile` | Update the user's name and email from the IdP at every sign-in. Never for a superuser. |
+| `allow_email_link_staff` | Security: with email linking on, also link users who hold any role or permission. A superuser is never linked by email. |
+| `sso_only` | Users linked through this provider may not sign in with a password, even while the provider is off. |
+| `auto_deactivate_after_days` | After this many days without use, `sso-deactivate-idle` turns off the users this provider signed up who cannot use a password: SSO only here, or password login off for the tenant. Empty: never. |
+| `session_ttl_secs` | Longest session, in seconds, after a sign-in through this provider. Empty: the normal session length. |
+| `superuser_session_ttl_secs` | Longest session, in seconds, for a superuser who signs in through this provider. Empty: the normal session length. |
+
+### `SsoTenantPolicy`
+
+The tenant-wide settings, one row.
+
+| Field | What to enter |
+|---|---|
+| `name` | Always `default`: the tenant uses this one row. |
+| `access_denied_message` | Message shown on the sign-in page after a refused SSO sign-in, e.g. who to contact. Shown as plain text. |
+| `password_login` | The password form: `on`, `off` (also for superusers), or `superusers_only` (shown only at `?local=1`, for superusers). |
+| `sso_only` | No one except a superuser may sign in with a password. |
+| `default_provider` | Slug of the provider the sign-in page opens straight away, except at `?local=1` or after an error. |
+| `signups_per_hour` | Most SSO sign-ups per hour. Empty: 100; `0`: no limit. |
+
+### `SsoSharedOverride`
+
+A tenant's narrowing of one shared provider. Empty fields keep the shared
+value.
+
+| Field | What to enter |
+|---|---|
+| `shared_slug` | Slug of the shared provider this row narrows for this tenant. |
+| `shared_provider_id` | The shared provider row this override is bound to, set at its first use. |
+| `shared_issuer` | That row's issuer when bound. If the shared row moves to another issuer, sign-in is refused until the override is added again. |
+| `allowed_email_domains` | Security: only these email domains may sign in here, on top of the shared rules. Same comma or newline format as on the provider. |
+| `blocked_email_domains` | More email domains that never sign in here. |
+| `allowed_idp_tenants` | Microsoft directory IDs allowed here, comma separated. Narrows the shared list. |
+| `allowed_hosted_domains` | Google Workspace domains allowed here, comma separated. Narrows the shared list. |
+| `required_claims` | More claims a sign-in must carry here, as JSON: `{"roles": ["App.User"]}`. |
+| `signup_mode` | Security: sign-up here. It can only be stricter than the shared provider's. Empty: the shared value. |
+| `allow_email_link` | Off: no email linking here. Empty or on: the shared setting. |
+| `allow_email_link_staff` | Off: email linking never links a user with any role or permission here. Empty or on: the shared setting. |
+| `sso_only` | On: users of this provider may not sign in with a password here. |
+| `session_ttl_secs` | A shorter longest session here, in seconds. Empty: the shared value. |
+| `superuser_session_ttl_secs` | A shorter longest superuser session here, in seconds. Empty: the shared value. |
+| `allowed_roles` | Roles the shared provider may grant here, comma separated. Empty: none. |
+
+### `SsoInvite`
+
+An invitation to sign up through SSO.
+
+| Field | What to enter |
+|---|---|
+| `provider_slug` | Slug of the provider this invite is for. Empty: any provider. |
+| `target` | Who may sign up: one email (`ann@client.org`) or a domain (`@client.org`, or `*.client.org` for its subdomains). A domain invite needs max uses or an expiry. |
+| `roles` | Roles the new user gets, comma separated. They replace the provider's default roles. |
+| `expires_at` | After this time the invite no longer works. Empty: it does not expire. |
+| `max_uses` | How many sign-ups may use this invite. Empty: no limit. |
+| `link_user_id` | Re-link only: the existing user the next sign-in links, instead of a new account. Set by the Re-link action. |
+| `link_key` | Re-link only: the provider the next sign-in must come through. Set by the Re-link action; leave empty. |
 
 ## Features & who uses them
 
@@ -89,28 +270,12 @@ at login time.
 
 ## Providers are rows, managed in the admin
 
-Each provider is a `SsoProvider` row. It shows up as an ordinary
-admin model — add/edit/enable from the admin UI, no redeploy. Fields:
-
-| Field | Meaning |
-|---|---|
-| `slug` | Stable route key + button id (`<login>/sso/<slug>`). Unique. |
-| `label` | Button text, e.g. "Sign in with Google". |
-| `kind` | A preset — `google` / `microsoft` / `github` / `gitlab` / `discord` — or `oidc` for a generic OpenID Connect provider. |
-| `issuer_url` | OIDC discovery base URL (for `kind = "oidc"`); rustango fetches `{issuer}/.well-known/openid-configuration`. Unused for presets. |
-| `client_id` | The OAuth client id from the IdP. |
-| `client_secret` | The OAuth client secret, **encrypted at rest** (never plaintext in the DB). |
-| `enabled` | Whether the button shows on the login page. |
-| `sort_order` | Button ordering (ascending). |
-| `scopes` | Optional space-separated scope override (default `openid email profile`). |
-| `allow_email_link` | Link a first-time user by verified email (default off). Never links a superuser, and a role holder only with `allow_email_link_staff`; ignored by the bare admin. |
-
-Only a superuser can add, change or delete `SsoProvider` and `SsoLink`
-rows in the admin; other staff can list them with the usual permissions.
-
-To add a provider: enter the `client_id` + `client_secret`, pick a
-`kind` (or `oidc` + an `issuer_url`), and save. The endpoints are
-discovered at login — no per-provider endpoint wiring.
+Each provider is a `SsoProvider` row, an ordinary admin model: add, edit
+and enable it from the admin UI, no redeploy. The fields are in the
+[field reference](#field-reference). Only a superuser can add, change or
+delete `SsoProvider` and `SsoLink` rows; other staff can list them with
+the usual permissions. The endpoints are discovered at sign-in, so there
+is no per-provider endpoint wiring.
 
 ## Where each surface manages providers
 
@@ -136,10 +301,7 @@ On a tenant's login page the two sets merge, and on a slug clash the
 **tenant's own provider wins** over the shared one — so a tenant can
 override a shared provider for itself.
 
-The callback URL is derived per request from the host + slug
-(`https://<host><login>/sso/<slug>/callback`), so register that with the
-IdP. The scheme is `https` unless a trusted proxy sends
-`X-Forwarded-Proto`. A user is linked by opt-in email linking (non-privileged tenant
+Register the [callback URL](#callback-urls) with the IdP. A user is linked by opt-in email linking (non-privileged tenant
 users), or by a superuser adding an `SsoLink` row: `provider_source`
 (`tenant`, `shared`, `admin`, or `app` for a native sign-in), `provider_id` (the provider row id),
 `issuer` (`kind`, or `kind|issuer_url` without a trailing slash),
@@ -260,13 +422,14 @@ async fn dashboard(CurrentMember(member): CurrentMember) -> impl axum::response:
 Each provider (and each shared provider in the operator console) has
 sign-in rules. Every rule left empty admits anyone the IdP signs in.
 
-| Field | Rule |
-|---|---|
-| `allowed_email_domains` | Only these domains: `client.org` matches only itself, `*.client.org` only its subdomains. Comma or newline separated. |
-| `blocked_email_domains` | Never these domains, even if allowed above. Checked against any email, verified or not. |
-| `allowed_idp_tenants` | Microsoft directory ids (`tid`). Read only from a verified id_token. |
-| `allowed_hosted_domains` | Google Workspace domains (the `hd` claim). |
-| `required_claims` | JSON `{"claim": ["value", ...]}`: the claim (a string or a list) must hold one of the values. `{"iss": [...]}` pins the issuer. A missing claim refuses. |
+[![Who may sign in and sign up: the sign-in rules run first, then an existing link or email link, then signup_mode decides about a new account; tenant layers can only narrow](img/sso-policy.png)](img/sso-policy.png)
+
+The rule fields are `allowed_email_domains`, `blocked_email_domains`,
+`allowed_idp_tenants`, `allowed_hosted_domains` and `required_claims`; see
+the [field reference](#field-reference) for their format. The blocked list
+is checked against any email the IdP sends, verified or not; the allowed
+list only against a verified one. A claim in `required_claims` may be a
+string or a list, and a missing claim refuses.
 
 The admin and the operator console store lists in one canonical form and
 refuse a value that does not parse. A value that still does not parse
@@ -301,16 +464,18 @@ A provider can also create the account the first time someone signs in.
 Sign-up runs only when no link and no account match the IdP's verified
 email, and only after the sign-in rules above pass.
 
-| Field | Meaning |
-|---|---|
-| `signup_mode` | `closed` (link only), `invite_only` (an `SsoInvite` for this email), `allowlist` (an invite for this email or its domain) or `open` (anyone the sign-in rules admit). Empty: closed on the tenant login; the member flow follows `MemberAuthConfig::auto_provision`. The bare admin never signs anyone up. |
-| `default_roles` | Tenant roles a new user gets, e.g. `Viewer`. An invite with roles replaces them. |
-| `role_map` | JSON `{"<group or app role>": "Editor"}` (or a list of roles). Read from the claims in `role_claims` (empty: `groups,roles`). A provider with a JWKS (OIDC discovery, Microsoft, Google) takes them only from a verified id_token; a userinfo-only provider takes them from userinfo. |
-| `sync_roles_on_login` | Re-apply `role_map` on every sign-in. Only roles named in `role_map` are added or removed; roles granted by hand stay. A sign-in without any of the role claims changes nothing. |
-| `username_from` | `email_local` (default), `email`, or `preferred_username` (falls back to the email local part). |
-| `username_clash` | `suffix` (default: `ann-x7k2q9`) or `refuse`. |
-| `sync_profile` | Refresh the display name and email from the IdP on every sign-in (never for a superuser; an email another user has is kept). |
-| `allow_email_link_staff` | With `allow_email_link`, also link a user who holds roles. A superuser is never linked by email. |
+The sign-up fields are `signup_mode`, `default_roles`, `role_map`,
+`role_claims`, `sync_roles_on_login`, `username_from`, `username_clash`,
+`sync_profile` and `allow_email_link_staff` (see the
+[field reference](#field-reference)). With `signup_mode` empty, the tenant
+login is closed and the member flow follows
+`MemberAuthConfig::auto_provision`; the bare admin never signs anyone up.
+A new user gets the invite's roles or `default_roles`, plus the roles
+`role_map` gives. A provider with a JWKS (OIDC discovery, Microsoft, Google) takes role
+claims only from a verified id_token; a userinfo-only provider takes them
+from userinfo. `sync_roles_on_login` adds or removes only roles named in
+`role_map`; roles granted by hand stay, and a sign-in without any of the
+role claims changes nothing.
 
 A new user is never a superuser. Roles go through the permission engine
 (`UserRole`); a role name with no `Role` row is skipped and written to the
@@ -343,15 +508,13 @@ as refusing everyone, and warns about `signup_mode = open` with no
 
 ## Passwords, sessions and lifecycle
 
-| Where | Field | Meaning |
-|---|---|---|
-| Provider | `sso_only` | Users linked through it may not use a password (login, JSON login, HTTP Basic, reset link), even while the provider is disabled or after it is deleted. |
-| Provider | `session_ttl_secs`, `superuser_session_ttl_secs` | The session after a sign-in through it lasts the shortest of these and the route's lifetime. |
-| Provider | `auto_deactivate_after_days` | `sso-deactivate-idle` switches off users it signed up whose every link is unused this long. Never a superuser, never a user with a link an admin made. |
-| `SsoTenantPolicy` | `password_login` | `on`, `off`, or `superusers_only`: the password form shows only at `?local=1`, for superusers. |
-| `SsoTenantPolicy` | `sso_only` | No one but a superuser uses a password. |
-| `SsoTenantPolicy` | `default_provider` | The login page goes straight to it (or to the only provider when the password form is hidden), except at `?local=1` or after an error. |
-| `SsoTenantPolicy` | `signups_per_hour` | SSO sign-ups per hour (empty: 100, `0`: no limit). |
+The provider fields `sso_only`, `session_ttl_secs`,
+`superuser_session_ttl_secs` and `auto_deactivate_after_days`, and the
+`SsoTenantPolicy` row, are in the [field reference](#field-reference).
+`sso_only` covers password login, JSON login, HTTP Basic and reset links.
+A session lasts the shortest of the provider's limit and the route's
+lifetime. `sso-deactivate-idle` never switches off a superuser or a user
+with a link an admin made.
 
 A superuser follows only `password_login`; `sso_only` never locks one out.
 A refused password looks like a wrong one. An unreadable rule refuses;
@@ -376,7 +539,8 @@ until the override is re-added.
 `/common` or `/organizations`) accepts users from any Entra directory.
 Its `role_map` and `required_claims` count only when `allowed_idp_tenants`
 pins the token's `tid`; otherwise roles are not granted and required
-claims refuse. `check --deploy` warns about such rows.
+claims refuse. `check --deploy` warns about a row that sets `role_map` or
+`required_claims` without `allowed_idp_tenants`.
 
 **Throttle and audit.** SSO callbacks have their own per-IP limit (a 429
 past it), apart from the password one. Email links, sign-ups, re-links and
@@ -472,8 +636,9 @@ and with each other: a cookie `Path` is not a security boundary there.
 Sessions and flows are bound to the tenant slug by their MAC, so one
 tenant's cookie never opens another's. Register both callback URLs at the
 IdP for a tenant reachable both ways:
-`https://acme.example.com/__login/sso/<slug>/callback` and
-`https://app.example.com/acme/__login/sso/<slug>/callback`.
+`https://acme.example.com/login/sso/<slug>/callback` and
+`https://app.example.com/acme/login/sso/<slug>/callback` (`/__login` with
+`RouteConfig::legacy()`).
 
 ## See also
 

@@ -682,6 +682,7 @@ fn router_unlogged(
     tenant_login_url: String,
 ) -> Router {
     let mut tera = crate::template_extensions::html_tera();
+    crate::template_extensions::register_help_filter(&mut tera);
     tera.add_raw_templates([
         (
             "_theme_tokens.html",
