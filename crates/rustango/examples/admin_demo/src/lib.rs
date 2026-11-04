@@ -3,7 +3,7 @@
 //! shown as an inline on the post edit page.
 
 use chrono::{DateTime, TimeZone, Utc};
-use rustango::sql::{CounterPool as _, Pool, UpdaterPool as _};
+use rustango::sql::{CounterPool as _, Pool};
 use rustango::{Auto, Model};
 
 #[derive(Model, Clone, Debug)]
