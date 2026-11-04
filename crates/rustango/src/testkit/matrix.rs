@@ -132,7 +132,8 @@ impl Backend {
 
     /// The URL [`Self::pool`] connects to, for a suite that needs a second
     /// connection to the same database. `None` when unset, and for SQLite.
-    /// Under nextest that is the slot database, which `pool()` creates.
+    /// Under nextest that is the slot database. This does not create it:
+    /// call [`Self::pool`] first.
     #[must_use]
     pub fn url(self) -> Option<String> {
         let var = self.env_var()?;
@@ -195,13 +196,20 @@ impl SlotDatabase {
                 .unwrap_or_else(|e| panic!("looking up {}: {e}", self.name));
             rows.first().is_some_and(|(n,)| *n > 0)
         };
-        if !exists().await {
-            let sql = d
-                .create_database_sql(&self.name, None)
-                .expect("a server backend");
-            // Another run on the same server may have made it meanwhile.
-            if let Err(e) = crate::sql::raw_execute_pool(&admin, &sql, Vec::new()).await {
-                assert!(exists().await, "creating {}: {e}", self.name);
+        let sql = d
+            .create_database_sql(&self.name, None)
+            .expect("a server backend");
+        // PG refuses a create while another one copies template1; retry that.
+        for attempt in 1..=5 {
+            if exists().await {
+                break;
+            }
+            match crate::sql::raw_execute_pool(&admin, &sql, Vec::new()).await {
+                Ok(_) => break,
+                Err(e) if attempt == 5 => {
+                    assert!(exists().await, "creating {}: {e}", self.name);
+                }
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(200)).await,
             }
         }
         admin.close().await;
