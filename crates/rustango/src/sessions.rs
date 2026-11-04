@@ -14,6 +14,10 @@
 //! a new ID. Reusing the ID across the login boundary leaves the door
 //! open to session fixation.
 //!
+//! Under tenancy, scope the store per request with `SessionStore::for_tenant`:
+//! session ids carry no tenant, and on a shared apex host one cookie reaches
+//! every tenant.
+//!
 //! ## Quick start
 //!
 //! ```ignore
@@ -144,6 +148,15 @@ impl SessionStore {
             cache,
             ttl: Arc::new(Duration::from_secs(DEFAULT_TTL_SECS)),
         }
+    }
+
+    /// Keep sessions to one tenant: `tenant:#org:<id>:<slug>:session:<id>`.
+    /// Unscoped, a session id saved under one tenant loads under every other.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.cache = crate::cache::ScopedCache::for_tenant(self.cache, tenant).boxed();
+        self
     }
 
     /// Set the per-session TTL. Default is 2 weeks.
@@ -453,6 +466,31 @@ mod tests {
         let id = store.save(&s).await.unwrap();
         let loaded = store.load(&id).await.unwrap().unwrap();
         assert_eq!(loaded.get::<serde_json::Value>("ctx"), Some(payload));
+    }
+
+    /// Unscoped keys stay `session:<id>`; a tenant's carry its org id and slug.
+    #[tokio::test]
+    async fn session_keys_are_bare_or_bound_to_the_tenant() {
+        let root: BoxedCache = StdArc::new(InMemoryCache::new());
+        let id = SessionStore::new(root.clone())
+            .save(&Session::new())
+            .await
+            .unwrap();
+        assert!(root.exists(&format!("session:{id}")).await.unwrap());
+        #[cfg(feature = "tenancy")]
+        {
+            use crate::tenancy::TenantSlug;
+            let acme = SessionStore::new(root.clone()).for_tenant(&TenantSlug::new(1, "acme"));
+            let heir = SessionStore::new(root.clone()).for_tenant(&TenantSlug::new(2, "acme"));
+            let id = acme.save(&Session::new()).await.unwrap();
+            let key = format!("tenant:#org:1:acme:session:{id}");
+            assert!(root.exists(&key).await.unwrap());
+            assert!(
+                heir.load(&id).await.unwrap().is_none(),
+                "slug reuse loads it"
+            );
+            assert!(SessionStore::new(root).load(&id).await.unwrap().is_none());
+        }
     }
 
     #[test]

@@ -66,6 +66,10 @@ store.destroy(&sid).await?;
 The id is 192 bits of OS-CSPRNG randomness, base64url-encoded to 32 chars — well
 above the 128-bit floor for session tokens, and unguessable.
 
+Under tenancy, scope the store per request with
+`store.for_tenant(&TenantSlug::of(&t.org)?)`: the id carries no tenant, and with
+apex + path-prefix routing one `Path=/` cookie reaches every tenant.
+
 ---
 
 ## Sessions vs JWT
