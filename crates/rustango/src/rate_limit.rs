@@ -144,6 +144,7 @@ pub(crate) fn ip_bucket(ip: std::net::IpAddr) -> String {
 
 /// Strategy for picking the bucket key per request.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum KeyBy {
     /// Use the connecting client's IP address (`ConnectInfo<SocketAddr>`).
     ///
@@ -158,9 +159,30 @@ pub enum KeyBy {
     /// cache never holds a raw credential. Requests without the header
     /// share one bucket and log a warning, as with `Ip`.
     Header(&'static str),
-    /// One bucket for everything. Coarse, but fine for "max N
-    /// requests/sec on this endpoint".
+    /// One bucket for everything, across every tenant. Coarse, but fine
+    /// for "max N requests/sec on this endpoint".
     Global,
+    /// One bucket per tenant, from `tenancy::RequestTenant`.
+    /// Requests whose tenant did not resolve share one fixed bucket; global
+    /// requests share another. Without `tenancy` it is [`Self::Global`].
+    Tenant,
+}
+
+/// The [`KeyBy::Tenant`] bucket of `req`.
+pub(crate) async fn tenant_key(req: Request<Body>) -> (Request<Body>, String) {
+    #[cfg(feature = "tenancy")]
+    {
+        use crate::tenancy::RequestTenant;
+        let (req, tenant) = RequestTenant::resolve_request(req).await;
+        let key = match tenant {
+            RequestTenant::Tenant(t) => t.namespace(),
+            RequestTenant::Unknown => "<unknown-tenant>".to_owned(),
+            _ => "<global>".to_owned(),
+        };
+        (req, key)
+    }
+    #[cfg(not(feature = "tenancy"))]
+    (req, "<global>".to_owned())
 }
 
 /// Rate-limit configuration.
@@ -366,8 +388,17 @@ impl RateLimitLayer {
                     warn_missing_discriminator(name);
                     "<no-header>".to_owned()
                 }),
-            KeyBy::Global => "<global>".to_owned(),
+            KeyBy::Global | KeyBy::Tenant => "<global>".to_owned(),
         }
+    }
+
+    /// The bucket key; [`KeyBy::Tenant`] may resolve the tenant first.
+    async fn bucket_key(&self, req: Request<Body>) -> (Request<Body>, String) {
+        if matches!(self.key_by, KeyBy::Tenant) {
+            return tenant_key(req).await;
+        }
+        let key = self.extract_key(&req);
+        (req, key)
     }
 }
 
@@ -391,7 +422,7 @@ impl<S: Clone + Send + Sync + 'static> RateLimitRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<RateLimitLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    let key = cfg.extract_key(&req);
+    let (req, key) = cfg.bucket_key(req).await;
     match cfg.take(&key).await {
         Ok((remaining, _)) => {
             let mut response = next.run(req).await;

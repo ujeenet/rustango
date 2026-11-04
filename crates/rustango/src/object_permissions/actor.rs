@@ -3,11 +3,6 @@
 
 use axum::http::request::Parts;
 
-/// The tenant the request was routed to, set by the tenant-mounted admin
-/// and ViewSet. A credential pinned to another tenant counts for nothing.
-#[derive(Clone, Debug)]
-pub(crate) struct RequestTenant(pub(crate) String);
-
 /// The identity behind a request, as a hook sees it.
 ///
 /// Built only from extensions a verifying middleware set: the admin's
@@ -56,10 +51,13 @@ impl Actor {
     /// untenanted route resolves to `Anonymous`.
     #[must_use]
     pub fn of(parts: &Parts) -> Self {
-        let routed = parts
-            .extensions
-            .get::<RequestTenant>()
-            .map(|t| t.0.as_str());
+        // The tenant the request was routed to: a credential pinned to another counts for nothing.
+        #[cfg(feature = "tenancy")]
+        let routed = crate::tenancy::RequestTenant::get(&parts.extensions)
+            .and_then(crate::tenancy::RequestTenant::tenant)
+            .map(|t| t.slug.as_str());
+        #[cfg(not(feature = "tenancy"))]
+        let routed: Option<&str> = None;
         // The admin router marks its requests: only its session counts there.
         if let Some(scoped) = parts.extensions.get::<crate::admin::session::PermsScoped>() {
             return Self::admin(parts, scoped.0, routed);
@@ -183,6 +181,12 @@ mod tests {
         p
     }
 
+    /// The marker the dispatcher, the tenant admin and ViewSets set.
+    #[cfg(feature = "tenancy")]
+    fn routed_to(slug: &str) -> crate::tenancy::RequestTenant {
+        crate::tenancy::RequestTenant::Tenant(crate::tenancy::TenantSlug::new(1, slug))
+    }
+
     #[test]
     fn nothing_is_anonymous_and_never_superuser() {
         assert_eq!(Actor::of(&parts()), Actor::Anonymous);
@@ -211,6 +215,7 @@ mod tests {
     }
 
     /// Impersonation is superuser only in the tenant the request was routed to.
+    #[cfg(feature = "tenancy")]
     #[test]
     fn impersonation_counts_only_for_the_routed_tenant() {
         let imp = |routed: Option<&str>| {
@@ -218,7 +223,7 @@ mod tests {
                 e.insert(PermsScoped(false));
                 e.insert(AdminSession::impersonation(9));
                 if let Some(t) = routed {
-                    e.insert(RequestTenant(t.to_owned()));
+                    e.insert(routed_to(t));
                 }
             })
         };
@@ -238,6 +243,7 @@ mod tests {
         assert_eq!(Actor::of(&api), Actor::Anonymous);
     }
 
+    #[cfg(feature = "tenancy")]
     #[test]
     fn an_admin_session_outside_the_admin_is_its_user() {
         let p = with(|e| {
@@ -247,7 +253,7 @@ mod tests {
         // A tenant route does not take an untenanted session.
         let routed = with(|e| {
             e.insert(AdminSession::new(4, "b", true));
-            e.insert(RequestTenant("acme".into()));
+            e.insert(routed_to("acme"));
         });
         assert_eq!(Actor::of(&routed), Actor::Anonymous);
     }
@@ -264,7 +270,7 @@ mod tests {
                     is_superuser: true,
                 });
                 e.insert(TenantSlug::new(1, slug));
-                e.insert(RequestTenant(routed.to_owned()));
+                e.insert(routed_to(routed));
             })
         };
         assert_eq!(
@@ -312,7 +318,7 @@ mod tests {
                     jti: "j".into(),
                     secret_prefix: "p".into(),
                 });
-                e.insert(RequestTenant("acme".into()));
+                e.insert(routed_to("acme"));
             })
         };
         for owner in [Some(7), None] {

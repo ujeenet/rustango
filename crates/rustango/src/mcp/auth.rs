@@ -194,11 +194,11 @@ pub(crate) enum MintError {
 /// One agent-secret check through the login gate. Failures count per IP
 /// and per tenant, as API keys do; there is no account lock.
 async fn gated<T>(
-    slug: &str,
+    tenant: &TenantSlug,
     ip: &ClientIp,
     check: impl std::future::Future<Output = Result<Option<T>, AgentError>>,
 ) -> Result<Result<Option<T>, AgentError>, LoginRefused> {
-    let scope = LoginScope::TenantAgent(slug.to_owned());
+    let scope = LoginScope::TenantAgent(tenant.clone());
     let attempt = crate::login_throttle::shared()
         .begin(&scope, ip, "")
         .await?;
@@ -224,10 +224,7 @@ pub(crate) async fn mint_agent_jwt(
     ip: &ClientIp,
 ) -> Result<MintedToken, MintError> {
     let check = crate::tenancy::authenticate_agent_pool(pool, name, secret);
-    let agent = match gated(&tenant.slug, ip, check)
-        .await
-        .map_err(MintError::Refused)?
-    {
+    let agent = match gated(tenant, ip, check).await.map_err(MintError::Refused)? {
         Ok(Some(a)) => a,
         Ok(None) => return Err(MintError::Unauthorized),
         Err(AgentError::Tenancy(TenancyError::Busy)) => {
@@ -428,7 +425,7 @@ pub(crate) async fn authenticate_bearer_until(
             // Only a cache miss runs this, so only Argon2 checks count.
             let hash_check = async {
                 let check = crate::tenancy::authenticate_agent_by_prefix_pool(pool, prefix, secret);
-                match gated(&tenant.slug, ip, check).await {
+                match gated(tenant, ip, check).await {
                     Ok(checked) => checked.map_err(BearerRejection::from),
                     Err(refused) => Err(BearerRejection::Refused(refused)),
                 }

@@ -59,6 +59,7 @@ pub(crate) const SINGLE_DB_VERBS: &[&str] = &[
 ];
 
 /// The verbs `tenancy::manage` adds; the rest fall through to [`SINGLE_DB_VERBS`].
+#[cfg(any(feature = "tenancy", feature = "manage", test))]
 pub(crate) const TENANCY_VERBS: &[&str] = &[
     "create-tenant",
     "test-tenant-connection",

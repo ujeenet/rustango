@@ -826,9 +826,10 @@ where
     }
     parts.extensions.insert(admin_state);
     // Hooks bind the session, and an impersonation, to this tenant.
-    parts
-        .extensions
-        .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
+    parts.extensions.insert(
+        super::TenantSlug::of(&org)
+            .map_or(super::RequestTenant::Unknown, super::RequestTenant::Tenant),
+    );
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays
@@ -1268,10 +1269,14 @@ async fn login_submit(
         return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
     }
 
+    // Locks bind to the org id: a registry org always has one.
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     // Rate limits and the account lock, before the lookup (#1609).
     let mut attempt = match crate::login_throttle::shared()
         .begin(
-            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &crate::login_throttle::LoginScope::Tenant(tenant),
             &ip,
             &form.username,
         )
@@ -1788,9 +1793,12 @@ async fn change_password_submit(
             Err(_) => Ok(false),
         }
     };
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     let ok = match crate::login_throttle::shared()
         .verify_current_password(
-            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &crate::login_throttle::LoginScope::Tenant(tenant),
             ip,
             super::login_key(super::login_field(), &user),
             verify,

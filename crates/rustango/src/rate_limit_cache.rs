@@ -144,8 +144,17 @@ impl CacheRateLimitLayer {
                     warn_missing_discriminator(name);
                     "<no-header>".to_owned()
                 }),
-            KeyBy::Global => "<global>".to_owned(),
+            KeyBy::Global | KeyBy::Tenant => "<global>".to_owned(),
         }
+    }
+
+    /// The bucket key; [`KeyBy::Tenant`] may resolve the tenant first.
+    async fn bucket_key(&self, req: Request<Body>) -> (Request<Body>, String) {
+        if matches!(self.key_by, KeyBy::Tenant) {
+            return crate::rate_limit::tenant_key(req).await;
+        }
+        let key = self.extract_key(&req);
+        (req, key)
     }
 
     fn window_secs(&self) -> u64 {
@@ -257,6 +266,14 @@ impl CacheRateLimitLayer {
         }
     }
 
+    /// Delete every window's counter of `key`.
+    #[cfg(all(feature = "admin", feature = "tenancy"))] // only `login_throttle` calls it
+    pub(crate) async fn forget(&self, key: &str) -> Result<(), crate::cache::CacheError> {
+        self.cache
+            .delete_prefix(&format!("{}:{key}:", self.key_prefix.as_str()))
+            .await
+    }
+
     /// The cache the counters live in.
     pub(crate) fn cache(&self) -> &BoxedCache {
         &self.cache
@@ -282,7 +299,7 @@ impl<S: Clone + Send + Sync + 'static> CacheRateLimitRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<CacheRateLimitLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    let key = cfg.extract_key(&req);
+    let (req, key) = cfg.bucket_key(req).await;
     match cfg.take(&key).await {
         Ok((count, reset_at)) => {
             let mut response = next.run(req).await;
@@ -347,6 +364,58 @@ mod tests {
         assert_eq!(h, hash_discriminator(secret));
         // Distinct values → distinct keys.
         assert_ne!(h, hash_discriminator("a-different-key"));
+    }
+
+    /// `KeyBy::Tenant`: a bucket per tenant, one for unresolved tenants,
+    /// and `Global` stays one platform-wide bucket.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn key_by_tenant_counts_each_tenant_apart() {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        use tower::ServiceExt as _;
+        let marked = |key_by: KeyBy| {
+            axum::Router::new()
+                .route("/", axum::routing::get(|| async { "ok" }))
+                .cache_rate_limit(layer(1, 60).key_by(key_by))
+                .layer(axum::middleware::from_fn(
+                    |mut req: Request<Body>, next: Next| async move {
+                        let t = match req.headers().get("x-org").map(|v| v.as_bytes()) {
+                            Some(b"1") => RequestTenant::Tenant(TenantSlug::new(1, "acme")),
+                            Some(b"2") => RequestTenant::Tenant(TenantSlug::new(2, "acme")),
+                            _ => RequestTenant::Unknown,
+                        };
+                        req.extensions_mut().insert(t);
+                        next.run(req).await
+                    },
+                ))
+        };
+        let status = |app: &axum::Router, org: &'static str| {
+            let app = app.clone();
+            async move {
+                let req = axum::http::Request::get("/")
+                    .header("x-org", org)
+                    .body(Body::empty())
+                    .unwrap();
+                app.oneshot(req).await.unwrap().status().as_u16()
+            }
+        };
+        let app = marked(KeyBy::Tenant);
+        assert_eq!(status(&app, "1").await, 200);
+        assert_eq!(status(&app, "1").await, 429);
+        assert_eq!(
+            status(&app, "2").await,
+            200,
+            "a reused slug shares a bucket"
+        );
+        assert_eq!(status(&app, "x").await, 200);
+        assert_eq!(
+            status(&app, "y").await,
+            429,
+            "unknown tenants share one bucket"
+        );
+        let app = marked(KeyBy::Global);
+        assert_eq!(status(&app, "1").await, 200);
+        assert_eq!(status(&app, "2").await, 429, "Global is platform-wide");
     }
 
     #[tokio::test]

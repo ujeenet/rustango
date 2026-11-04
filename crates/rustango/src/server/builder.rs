@@ -1045,7 +1045,7 @@ impl<DB: Database> Builder<DB> {
                     let mut resp = if resolution == Resolution::PrefixTenant {
                         prefixed.as_service().oneshot(req).await?
                     } else if let Some(mut unresolved) = unresolved {
-                        unresolved.as_service().oneshot(req).await?
+                        unresolved.as_service().oneshot(global(req)).await?
                     } else {
                         axum::response::IntoResponse::into_response(
                             axum::http::StatusCode::NOT_FOUND,
@@ -1076,7 +1076,7 @@ impl<DB: Database> Builder<DB> {
                 async move {
                     if crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex) {
                         let path = req.uri().path().to_owned();
-                        let resp = operator.as_service().oneshot(req).await;
+                        let resp = operator.as_service().oneshot(global(req)).await;
                         if let Ok(r) = &resp {
                             if r.extensions().get::<ConsoleUnmatched>().is_none() {
                                 spawn_shadow_check(&shadow_checked, &path, &registry);
@@ -1092,7 +1092,7 @@ impl<DB: Database> Builder<DB> {
                     } else if let (Resolution::None, Some(mut unresolved)) =
                         (resolution, unresolved)
                     {
-                        unresolved.as_service().oneshot(req).await
+                        unresolved.as_service().oneshot(global(req)).await
                     } else {
                         tenants.as_service().oneshot(req).await
                     };
@@ -1342,13 +1342,15 @@ pub(crate) async fn resolve(
     registry: &crate::sql::Pool,
 ) -> (axum::http::Request<axum::body::Body>, Resolution) {
     use crate::tenancy::OrgResolver as _;
-    let (parts, body) = req.into_parts();
-    let resolution = match resolver.resolve(&parts, registry).await {
+    let (mut parts, body) = req.into_parts();
+    let found = resolver.resolve(&parts, registry).await;
+    let resolution = match &found {
         Ok(None) => Resolution::None,
         Ok(Some(org)) => {
             if org
                 .path_prefix
-                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), &p))
+                .as_deref()
+                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), p))
             {
                 Resolution::PrefixTenant
             } else {
@@ -1360,7 +1362,18 @@ pub(crate) async fn resolve(
             Resolution::Failed
         }
     };
+    // Layers further in read this answer instead of resolving again.
+    parts
+        .extensions
+        .insert(crate::tenancy::RequestTenant::from_resolution(found));
     (axum::http::Request::from_parts(parts, body), resolution)
+}
+
+/// Mark a request the console or the unresolved router serves: no tenant.
+fn global(mut req: axum::http::Request<axum::body::Body>) -> axum::http::Request<axum::body::Body> {
+    req.extensions_mut()
+        .insert(crate::tenancy::RequestTenant::Global);
+    req
 }
 
 #[cfg(feature = "_http_layers")]

@@ -817,8 +817,13 @@ async fn purge_tenant_forgets_slug_keyed_state() {
     let theirs = ScopedCache::for_tenant(cache.clone(), &other);
     mine.set_forever("stats", "old").await.unwrap();
     theirs.set_forever("stats", "kept").await.unwrap();
+    let locks = rustango::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(&tenant);
+    let held = locks
+        .try_acquire("job", std::time::Duration::from_secs(60))
+        .await;
+    assert!(held.is_some());
 
-    let scope = LoginScope::Tenant(slug.clone());
+    let scope = LoginScope::Tenant(tenant.clone());
     let ip = ClientIp::from_parts(
         &axum::http::Extensions::new(),
         &axum::http::HeaderMap::new(),
@@ -846,6 +851,13 @@ async fn purge_tenant_forgets_slug_keyed_state() {
         "the purged tenant's account lock survived"
     );
     assert_eq!(mine.get("stats").await.unwrap(), None);
+    assert!(
+        locks
+            .try_acquire("job", std::time::Duration::from_secs(1))
+            .await
+            .is_some(),
+        "the purged tenant's lock survived"
+    );
     assert_eq!(theirs.get("stats").await.unwrap().as_deref(), Some("kept"));
 
     rmig::drop_all_pool(&pool.clone().into()).await.unwrap();

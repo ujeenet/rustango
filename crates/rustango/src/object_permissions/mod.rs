@@ -46,8 +46,6 @@
 mod actor;
 mod scope;
 
-#[cfg(feature = "tenancy")]
-pub(crate) use actor::RequestTenant;
 pub use actor::{is_superuser, Actor};
 pub use scope::{for_table as queryset_scopes_for, QuerySetScope, QuerySetScopeFn};
 pub(crate) use scope::{row_pk, view_hook_rows, warn_scan_cap, ViewHookRows};

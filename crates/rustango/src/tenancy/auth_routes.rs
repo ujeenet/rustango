@@ -625,7 +625,7 @@ async fn login_in(
     // scope as the tenant admin login, which shares the user table.
     let mut attempt = crate::login_throttle::shared()
         .begin(
-            &crate::login_throttle::LoginScope::Tenant(t.org.slug.clone()),
+            &crate::login_throttle::LoginScope::Tenant(tenant.clone()),
             &ip,
             &body.username,
         )
