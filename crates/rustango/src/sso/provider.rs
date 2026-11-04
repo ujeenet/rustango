@@ -352,6 +352,7 @@ const DEFERRED: &[&str] = &[
 ];
 
 /// The password and session columns.
+#[cfg(any(feature = "tenancy", feature = "admin"))]
 const LIFECYCLE_COLUMNS: &[&str] = &[
     "sso_only",
     "auto_deactivate_after_days",
@@ -469,6 +470,7 @@ pub(crate) type Rules = (
 );
 
 /// Row `id`'s password and session rules; see [`read_columns`].
+#[cfg(any(feature = "tenancy", feature = "admin"))]
 pub(crate) async fn read_lifecycle<T: Model>(
     pool: &Pool,
     id: i64,
