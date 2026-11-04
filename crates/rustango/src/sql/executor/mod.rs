@@ -455,10 +455,10 @@ pub use row_to_json::row_to_json;
 pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
-pub(crate) use row_to_json::select_rows_as_json_with;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 #[cfg(feature = "admin")]
 pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
+pub(crate) use row_to_json::{select_rows_as_json_with, CellDecode, OnBadCell};
 
 /// Each parent row with its count of `child_table` rows, on a [`SqlExecutor`],
 /// e.g. `Tenant::conn()` whose connection holds the tenant's `search_path`.

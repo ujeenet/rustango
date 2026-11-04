@@ -77,7 +77,6 @@ pub(crate) use executor::rolled_back;
 pub use executor::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use executor::row_to_json_sqlite;
-pub(crate) use executor::select_rows_as_json_with;
 #[cfg(feature = "template_views")]
 pub(crate) use executor::select_stored_uuids;
 pub use executor::{
@@ -106,6 +105,7 @@ pub(crate) use executor::{
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
+pub(crate) use executor::{select_rows_as_json_with, CellDecode, OnBadCell};
 #[cfg(any(feature = "admin", feature = "tenancy", feature = "template_views"))]
 pub(crate) use executor::{stored_key, stored_keys};
 pub use executor::{truncate, truncate_cascade, TruncateMode};

@@ -401,7 +401,7 @@ fn persist_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<Vec<u
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(format!(".{}.{suffix}.tmp", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
-    let mut file = create_owner_only(&tmp)?;
+    let mut file = crate::private_file::create(&tmp)?;
     let published = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
@@ -454,15 +454,6 @@ fn sync_parent(path: &std::path::Path) {
     }
     #[cfg(not(unix))]
     let _ = path;
-}
-
-/// `O_CREAT | O_EXCL`, mode 0600 on Unix. Windows has no mode bits here.
-fn create_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(path)
 }
 
 /// Make a saved secret other users can read owner-only, and say so. A

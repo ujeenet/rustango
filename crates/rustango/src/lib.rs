@@ -566,6 +566,8 @@ pub mod casts;
 /// [`crate::crypto`] so always-on callers (pagination cursors,
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
+/// Owner-only files created without following a link.
+pub(crate) mod private_file;
 /// UTF-8 / UTF-16 text a user wrote or redirected.
 pub(crate) mod text_file;
 

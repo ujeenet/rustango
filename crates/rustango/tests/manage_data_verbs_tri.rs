@@ -289,6 +289,154 @@ pub struct Measure {
     pub extra: Option<serde_json::Value>,
 }
 
+/// The database computes `twice`; a load must leave it out.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_gen", app = "mdv")]
+pub struct Gen {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub qty: i64,
+    #[rustango(generated_as = "qty * 2")]
+    pub twice: i64,
+}
+
+/// Declared text; the test makes the column an integer, as a hand edit would.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_drift", app = "mdv")]
+pub struct Drift {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 32)]
+    pub label: String,
+}
+
+/// A dump of a generated column loads back; the database recomputes it.
+async fn loaddata_skips_generated_columns(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Gen>(pool).await;
+    let mut g = Gen {
+        id: Auto::default(),
+        qty: 3,
+        twice: 0,
+    };
+    g.insert(pool).await.expect("gen");
+    let dumped = manage(pool, &["dumpdata", "--model", "mdv.Gen"])
+        .await
+        .expect("dumpdata");
+    assert!(dumped.contains("\"twice\": 6"), "{dumped}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("gen.json");
+    std::fs::write(&fixture, &dumped).unwrap();
+    rustango::testkit::matrix::fresh_table::<Gen>(pool).await;
+    let out = manage(
+        pool,
+        &["loaddata", fixture.to_str().unwrap(), "--fail-fast"],
+    )
+    .await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let rows: Vec<(i64, i64)> = Gen::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|g| (g.qty, g.twice))
+        .collect();
+    assert_eq!(rows, [(3, 6)]);
+}
+
+/// A cell dumpdata cannot decode fails the dump instead of turning into
+/// `null`; the lenient reader the admin uses still shows the row.
+async fn dumpdata_refuses_an_undecodable_cell(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, Drift::SCHEMA.table).await;
+    for sql in [
+        "CREATE TABLE mdv_drift (id BIGINT PRIMARY KEY, label BIGINT NOT NULL)",
+        "INSERT INTO mdv_drift (id, label) VALUES (1, 7)",
+    ] {
+        raw_execute_pool(pool, sql, vec![]).await.expect(sql);
+    }
+    let err = manage(pool, &["dumpdata", "--model", "mdv.Drift"])
+        .await
+        .expect_err("an integer in a text field dumped as null");
+    assert!(err.contains("label"), "{err}");
+    let fields: Vec<_> = Drift::SCHEMA.scalar_fields().collect();
+    let rows = rustango::sql::select_rows_as_json(
+        pool,
+        &rustango::core::SelectQuery::new(Drift::SCHEMA),
+        &fields,
+    )
+    .await
+    .expect("the lenient read");
+    rustango::testkit::matrix::drop_table(pool, Drift::SCHEMA.table).await;
+    assert_eq!(rows, [serde_json::json!({"id": 1, "label": null})]);
+}
+
+/// NaN and infinity have no JSON form: dumpdata refuses them, not `null`.
+async fn dumpdata_refuses_a_non_finite_float(pool: &Pool) {
+    // MySQL stores neither.
+    let score = match pool.dialect().name() {
+        "postgres" => f64::NAN,
+        "sqlite" => f64::INFINITY,
+        _ => return,
+    };
+    rustango::testkit::matrix::fresh_table::<Measure>(pool).await;
+    let mut m = Measure {
+        id: Auto::default(),
+        score,
+        meta: serde_json::json!(1),
+        extra: None,
+    };
+    m.insert(pool).await.expect("measure");
+    let err = manage(pool, &["dumpdata", "--model", "mdv.Measure"])
+        .await
+        .expect_err("a non-finite float dumped as null");
+    assert!(
+        err.contains("score") && err.contains("no JSON form"),
+        "{err}"
+    );
+}
+
+/// `dumpdata -o` never writes through a link planted at its old temp
+/// name, and the dump is owner-only.
+async fn dumpdata_output_ignores_a_planted_link(pool: &Pool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut root = Node {
+            id: Auto::default(),
+            parent_id: None,
+        };
+        root.insert(pool).await.expect("root");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("nodes.json");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "KEEP").unwrap();
+        let planted = dir
+            .path()
+            .join(format!(".nodes.json.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let res = manage(
+            pool,
+            &[
+                "dumpdata",
+                "--model",
+                "cli1911.Node",
+                "-o",
+                out.to_str().unwrap(),
+            ],
+        )
+        .await;
+        assert!(res.is_ok(), "dumpdata: {res:?}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "KEEP");
+        let meta = std::fs::symlink_metadata(&out).unwrap();
+        assert!(meta.is_file(), "the output is a link");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("cli1911.Node"));
+    }
+    #[cfg(not(unix))]
+    let _ = pool;
+}
+
 /// A fixture key that is absent takes the column default, pk included.
 async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
@@ -1268,5 +1416,9 @@ tri_dialect_test! {
         loaddata_relinks_cycle_rows_with_a_null_pk,
         loaddata_fail_fast_relinks_the_rows_in,
         loaddata_keeps_an_orderable_fixture_inline,
+        loaddata_skips_generated_columns,
+        dumpdata_refuses_an_undecodable_cell,
+        dumpdata_refuses_a_non_finite_float,
+        dumpdata_output_ignores_a_planted_link,
     ],
 }
