@@ -9,6 +9,9 @@ own with a random password, granted that database only. It records both in
 `rustango_tenant_databases`. Only a recorded database is ever dropped or has
 its password changed by rustango.
 
+How the two storage modes, pools and routing fit together is on
+[Multi-tenancy](tenancy.md).
+
 ## Table of contents
 
 - [Before you start](#before-you-start)
