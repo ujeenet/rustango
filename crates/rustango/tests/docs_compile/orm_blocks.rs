@@ -191,6 +191,37 @@ mod b_1c685ce0 {
     }
 }
 
+// let mut tx = rustango::sql::transaction_pool(&pool).await?;
+mod b_0f8894c6 {
+    use crate::prelude::*;
+    pub async fn run(pool: Pool) -> Result<(), BoxError> {
+        let _ = {
+            let mut tx = rustango::sql::transaction_pool(&pool).await?;
+            rustango::sql::raw_execute_tx(&mut tx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", vec![])
+                .await?;
+
+            // Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut tx)`,
+            // so every chunk reads from the same snapshot.
+            let chunk_size = 2_000_i64;
+            let mut offset = 0_i64;
+            loop {
+                let rows: Vec<Post> = Post::objects()
+                    .order_by(&[("id", false)])
+                    .limit(chunk_size)
+                    .offset(offset)
+                    .fetch_on(&mut tx)
+                    .await?;
+                if rows.is_empty() { break; }
+                for post in &rows { /* … */ }
+                if (rows.len() as i64) < chunk_size { break; }
+                offset += rows.len() as i64;
+            }
+            tx.commit().await?;
+        };
+        Ok(())
+    }
+}
+
 // use rustango::core::SqlValue;
 mod b_c2324b75 {
     use crate::prelude::*;

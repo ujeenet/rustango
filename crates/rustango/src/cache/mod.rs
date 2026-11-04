@@ -1257,14 +1257,7 @@ impl FileCache {
         let tmp = self
             .dir
             .join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
-        let mut opts = std::fs::OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        opts.open(&tmp)
+        crate::private_file::create(&tmp)
             .and_then(|mut f| f.write_all(bytes))
             .map_err(|e| {
                 let _ = std::fs::remove_file(&tmp);

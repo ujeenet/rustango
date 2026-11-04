@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 /// `(page, hash, first line)`: fences that do not compile yet. Lower
 /// [`KNOWN_FAILING_MAX`] with every entry you remove.
 const KNOWN_FAILING: &[(&str, &str, &str)] = &[
+    ("COOKBOOK.md", "03f60b5f", "let cfg = rustango::config::Settings::load_from_env()?;"),
     ("COOKBOOK.md", "04121ecc", "// One-liner that loads via load_from_env() and applies the entire"),
     ("COOKBOOK.md", "1e75dae3", "use rustango::template_views::{ListView, DetailView};"),
     ("COOKBOOK.md", "2a547261", "use rustango::mcp::{McpContext, McpError};"),
@@ -33,7 +34,6 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("COOKBOOK.md", "63044793", "const EMBEDDED: &[rustango::migrate::Migration] ="),
     ("COOKBOOK.md", "656c4d73", "#[rustango("),
     ("COOKBOOK.md", "671529dc", "#[rustango::main]"),
-    ("COOKBOOK.md", "6e51c991", "ensure_seeded(&pool).await?;"),
     ("COOKBOOK.md", "739df98f", "#[rustango("),
     ("COOKBOOK.md", "77582d1d", "let mut tera = rustango::template_extensions::html_tera_from_glob(&templates_glob)?;"),
     ("COOKBOOK.md", "811c5aef", "#[derive(Model)]"),
@@ -42,7 +42,6 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("COOKBOOK.md", "95943ed7", "let api = axum::Router::new()"),
     ("COOKBOOK.md", "9781d831", "#[rustango(table = \"country\", permissions, default_permissions = \"view\")]"),
     ("COOKBOOK.md", "98c57dc3", "#[rustango(table = \"orders\", db_table_comment = \"Customer purchase records — see /docs/orders.md\")]"),
-    ("COOKBOOK.md", "997fff7c", "let cfg = rustango::config::Settings::load_from_env()?;"),
     ("COOKBOOK.md", "9e08df0d", "#[rustango("),
     ("COOKBOOK.md", "b090bc44", "use rustango::core::{Filter, Op, SqlValue, WhereExpr};"),
     ("COOKBOOK.md", "b6abb412", "use rustango::tenancy::RouteConfig;"),
@@ -51,6 +50,7 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("COOKBOOK.md", "c6640b53", "// Find-or-default in one call. Returns (row, exists: bool) so"),
     ("COOKBOOK.md", "cc7e33a1", "#[derive(Model)]"),
     ("COOKBOOK.md", "d13b66a5", "use rustango::tenancy::TenantPoolsConfig;"),
+    ("COOKBOOK.md", "d9300ef9", "ensure_seeded(&pool).await?;"),
     ("COOKBOOK.md", "e184aeeb", "use rustango::template_views::{ListView, DetailView, CreateView, UpdateView, DeleteView};"),
     ("COOKBOOK.md", "e70be996", "#[rustango(table = \"post\", get_latest_by = \"-created_at\")]"),
     ("COOKBOOK.md", "eae5f028", "#[derive(Model)]"),
@@ -60,6 +60,7 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("orm.md", "0a6d5e63", "use axum::Router;"),
     ("orm.md", "15f99a0f", "post.soft_delete(&pool).await?;        // sets deleted_at = NOW()"),
     ("orm.md", "160884cc", "use rustango::core::aggregates::max;"),
+    ("orm.md", "205fa8f4", "let mut tx = rustango::sql::transaction_pool(&pool).await?;"),
     ("orm.md", "26a69b5d", "rustango::audit::cleanup_older_than_pool(&pool, 90).await?;  // delete > 90 days"),
     ("orm.md", "271016ec", "concat([F(\"first\").into(), \" \".into(), F(\"last\").into()])"),
     ("orm.md", "291ebd0a", "use rustango::core::aggregates::{count_all, sum};"),
@@ -69,26 +70,24 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("orm.md", "3b596b1c", "#[derive(Model)]"),
     ("orm.md", "3daac75f", "// Writer A — flips title."),
     ("orm.md", "4a77e5c5", "use rustango::sql::CounterPool as _;"),
+    ("orm.md", "510a8b3d", "// Canonical \"claim next available row\" pattern. Worker A grabs the"),
     ("orm.md", "5517956d", "use rustango::extractors::Tenant;"),
     ("orm.md", "56c98699", "// Upsert on the PK — INSERT, or UPDATE every non-PK column if the"),
     ("orm.md", "5874077e", "#[rustango("),
     ("orm.md", "5d2abf75", "let author_posts = author.post_set(&pool).await?;"),
     ("orm.md", "63ee9b70", "use rustango::core::funcs::{lower, upper, concat, coalesce, trim, abs, round};"),
     ("orm.md", "6de0b562", "// Outer .order_by() / .limit() / .offset() / .select_for_update()"),
-    ("orm.md", "7b2e5d58", "let mut tx = pool.begin().await?;"),
     ("orm.md", "7b36c432", "// ON CONFLICT (external_id) DO UPDATE SET title = EXCLUDED.title"),
     ("orm.md", "7ceb5218", "let tag_ids: Vec<i64> = post.tags_m2m().all(&pool).await?;"),
     ("orm.md", "83077892", "// Bulk INSERT — rows FIRST (a `&mut [Self]`), executor/pool second."),
     ("orm.md", "855509e3", "use rustango::audit::{with_source, AuditSource};"),
     ("orm.md", "861e148c", "use rustango::core::{Expr, Op, SqlValue, WhereExpr};"),
-    ("orm.md", "8a0b4213", "let mut tx = pool.begin().await?;"),
     ("orm.md", "a0231746", "use sqlx::sqlite::SqliteConnectOptions;"),
     ("orm.md", "a1ebe5f5", "use rustango::core::{FrameBoundary, FrameKind, WindowFrame};"),
     ("orm.md", "aee99193", "use rustango::core::{Op, SqlValue};"),
     ("orm.md", "b3141bbc", "use rustango::core::funcs::{"),
     ("orm.md", "c2aca856", "use rustango::core::Column as _;"),
     ("orm.md", "ceb8de63", "post.save_partial_typed((Post::title, Post::slug), &pool).await?;"),
-    ("orm.md", "d3d426f9", "// Canonical \"claim next available row\" pattern. Worker A grabs the"),
     ("orm.md", "d91565ef", "let posts = Post::objects()"),
     ("orm.md", "db8435cb", "use rustango::sql::sqlx;"),
     ("orm.md", "e115b399", "use rustango::core::joins::aliased;"),
@@ -97,7 +96,7 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
 ];
 
 /// The size of [`KNOWN_FAILING`]. It may only go down.
-const KNOWN_FAILING_MAX: usize = 78;
+const KNOWN_FAILING_MAX: usize = 77;
 
 struct Page {
     name: &'static str,

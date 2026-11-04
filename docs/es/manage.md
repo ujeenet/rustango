@@ -1036,7 +1036,7 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--no-migrate` | Omite aplicar las migraciones con scope de tenant tras el aprovisionamiento |
 | `--backend postgres \| mysql \| sqlite` | Debe ser el backend del registro, que es el valor por defecto |
 | `--schema-name <s>` | Sobrescribe el nombre de esquema generado en modo esquema |
-| `--port <n>` | Puerto en el que el tenant es accesible, para el enrutado |
+| `--port <n>` | Puerto en los enlaces del tenant; solo, no enruta nada (ver abajo) |
 | `--path-prefix <s>` | Prefijo de ruta bajo el que el tenant es accesible, para el enrutado |
 | `--admin-email <e>` / `--admin-username <u>` | Crea el primer superusuario del tenant (ver **Primer administrador** arriba) |
 | `--resume` | Termina un tenant que una ejecución anterior dejó inactivo porque fallaron sus migraciones; repite las mismas opciones |
@@ -1085,7 +1085,7 @@ cargo run -- edit-tenant acme --clear host-pattern
 | `--display-name <name>` | Etiqueta legible por humanos |
 | `--host-pattern <host>` | Nombre de host desnudo al que responde el tenant |
 | `--path-prefix <path>` | Un segmento con barra inicial, p. ej. `/acme` |
-| `--port <n>` | Puerto por el que se empareja el tenant |
+| `--port <n>` | Puerto en los enlaces del tenant |
 | `--database-url <url>` | Rota la URL de conexión del tenant |
 | `--activate` / `--deactivate` | Pone el tenant en servicio o fuera de servicio |
 | `--clear <field>` | Vacía `host-pattern`, `path-prefix` o `port` |
@@ -1097,6 +1097,14 @@ instrucciones distintas — para eso está `--clear`, que evita depender de
 Los valores se validan como los valida `create-tenant`: un patrón de host que
 lleve puerto, o un prefijo de ruta que el resolver nunca podría producir, se
 rechaza en lugar de guardarse para luego no emparejar nunca en silencio.
+
+Un tenant necesita un host o un prefijo de ruta. El servidor integrado no
+enruta por puerto, así que se rechaza una edición que deja solo un puerto, y
+también una creación solo con puerto si no hay apex; con apex, la creación
+recibe el host por defecto `<slug>.<apex>`. Para enrutar por puerto, monta tu
+propia cadena de resolvers con `PortResolver` y sirve tu propio router con un
+listener por puerto (el builder del servidor no tiene hook para ello), y luego
+define `RUSTANGO_TENANT_PORT_ROUTING=1`.
 
 Rotar `--database-url` cambia la URL guardada. Cada servidor cambia en 30 s,
 cuando se refresca su caché de tenants; los demás cambios dejan en paz las

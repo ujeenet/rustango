@@ -1049,7 +1049,7 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--no-migrate` | Überspringt das Anwenden tenant-scoped Migrationen nach dem Provisioning |
 | `--backend postgres \| mysql \| sqlite` | Muss das Backend der Registry sein, das auch der Standard ist |
 | `--schema-name <s>` | Überschreibt den generierten Schemanamen im Schema-Modus |
-| `--port <n>` | Port, unter dem der Tenant erreichbar ist, fürs Routing |
+| `--port <n>` | Port in den Links des Tenants; allein routet er nichts (siehe unten) |
 | `--path-prefix <s>` | Pfad-Präfix, unter dem der Tenant erreichbar ist, fürs Routing |
 | `--admin-email <e>` / `--admin-username <u>` | Legt den ersten Superuser des Tenants an (siehe **Erster Admin** oben) |
 | `--resume` | Schließt einen Tenant ab, den ein früherer Lauf wegen fehlgeschlagener Migrationen inaktiv ließ; dieselben Flags erneut angeben |
@@ -1097,7 +1097,7 @@ cargo run -- edit-tenant acme --clear host-pattern
 | `--display-name <name>` | Menschenlesbares Label |
 | `--host-pattern <host>` | Nackter Hostname, unter dem der Tenant antwortet |
 | `--path-prefix <path>` | Ein Segment mit führendem Slash, z. B. `/acme` |
-| `--port <n>` | Port, auf dem der Tenant gematcht wird |
+| `--port <n>` | Port in den Links des Tenants |
 | `--database-url <url>` | Rotiert die Verbindungs-URL des Tenants |
 | `--activate` / `--deactivate` | Tenant in oder außer Betrieb nehmen |
 | `--clear <field>` | Leert `host-pattern`, `path-prefix` oder `port` |
@@ -1110,6 +1110,14 @@ CI-Runner verschlucken.
 Werte werden so validiert, wie `create-tenant` sie validiert: ein Host-Muster
 mit Port oder ein Pfad-Präfix, das der Resolver nie erzeugen könnte, wird
 abgelehnt statt gespeichert, um dann stillschweigend nie zu matchen.
+
+Ein Tenant braucht einen Host oder ein Pfad-Präfix. Der eingebaute Server
+routet nicht nach Port, also wird ein Edit abgelehnt, das nur einen Port
+übrig lässt, ebenso ein Create nur mit Port, wenn kein Apex gesetzt ist; mit
+Apex bekommt das Create den Standard-Host `<slug>.<apex>`. Um nach Port zu
+routen, baue eine eigene Resolver-Kette mit `PortResolver` und serviere einen
+eigenen Router mit einem Listener pro Port (der Server-Builder hat dafür
+keinen Hook), dann setze `RUSTANGO_TENANT_PORT_ROUTING=1`.
 
 Ein Rotieren von `--database-url` ändert die gespeicherte URL. Jeder Server
 wechselt binnen 30 s, wenn sein Tenant-Cache aufgefrischt wird; andere

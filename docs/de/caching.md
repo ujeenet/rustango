@@ -304,7 +304,10 @@ Invalidierung ausgelöst hat.
 Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
 werden. Damit `purge-tenant` die `ScopedCache::for_tenant`-Keys des alten Tenants
 löscht, rufe beim Start `rustango::tenancy::decommission::clear_on_purge(cache)`
-für jeden Cache auf, der sie hält.
+für jeden Cache auf, der sie hält. Der Purge löscht dort auch die Locks, Sessions
+und Flag-Overrides des Tenants. Idempotency- und Page-Cache-Einträge bleiben, bis
+sie ablaufen: sie sind an die Org-ID gebunden, also kann der neue Tenant sie
+nicht lesen.
 
 ---
 

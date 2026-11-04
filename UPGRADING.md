@@ -155,7 +155,7 @@ untouched.
 - `dumpdata` now errors on a cell it cannot decode (a column whose type no longer matches the model) and on NaN or infinite floats; it used to write `null`. Fix the column or `--exclude` the model. A `dumpdata -o` file is now owner-only on Unix.
 - Creating or editing a tenant with a port but no host or path prefix is refused (a create with an apex set gets `<slug>.<apex>` instead). Give it a host, or set `RUSTANGO_TENANT_PORT_ROUTING=1` if your app mounts `PortResolver` on its own listeners.
 - Existing port-only tenants lose their links (first-admin mail, console handoff, SSO example) and `check --deploy` names them: give each a host or a path prefix, or set `RUSTANGO_TENANT_PORT_ROUTING=1`.
-- MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why. `mcp::cancel` takes a `&TenantSlug`, and `mcp::pagination::paginate` takes the `&McpAgent` instead of its id.
+- MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why. `mcp::cancel` takes a `&TenantSlug`.
 - `passkey::verify::cose_es256_key` returns `passkey::Es256Key` instead of `p256::ecdsa::VerifyingKey`; read the point with `Es256Key::to_sec1()` (65 bytes, `0x04 || x || y`). An off-curve point is now refused when a signature is verified, not when the key is read.
 - Under nextest, `testkit::matrix::Backend::pool` connects to `<db>-s<slot>` (created on first use), not to the URL's database. A test that re-reads `DATABASE_URL`/`MYSQL_TEST_URL` to reach the same tables should call `Backend::url()`. The database user needs `CREATE DATABASE` rights.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
@@ -172,8 +172,9 @@ untouched.
 - `mcp::pagination` is private; the MCP `*/list` handlers still paginate. Use `rustango::pagination` in your own endpoints.
 - `Dialect` is sealed: only rustango's PostgreSQL, MySQL and SQLite dialects implement it, so a downstream `impl Dialect` no longer compiles (none could reach a `Pool`). Calling its methods is unchanged.
 - `InsertReturningPool` is hidden from the docs: it is plumbing for the derive and may change without notice.
-- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work and are deprecated.
+- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work, are deprecated and are removed in 0.64.0.
 - `ModelFormError::Database`'s `Display` is now `database error`. Log the error with `{:?}` or its `source()` to keep the driver detail.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay deprecated one more minor and are removed in 0.64.0.
 
 ## 0.62.0
 
@@ -249,7 +250,7 @@ untouched.
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take any `SqlExecutor`: a `&Pool`, a held `PoolConn`, a `PoolTx`, or a Postgres sqlx executor. Past the bind cap they write in chunks inside one transaction; a raw sqlx executor cannot, so it refuses there.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
 - ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
-- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.63.0. `ObjectPermission` gains `origin`: build it with the macro.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.64.0. `ObjectPermission` gains `origin`: build it with the macro.
 - A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
 - `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
 - A ViewSet page or offset list under a `view` hook is a 400 past `view_hook_scan_cap` rows; add a queryset scope or use cursor pagination for big tables.

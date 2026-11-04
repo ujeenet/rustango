@@ -137,6 +137,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::humanize` | Filtros de humanize |
 | `rustango::i18n` | Claves de traducción que no se guardan en la base de datos, recargas del catálogo fallidas |
 | `rustango::jobs` | Colas de trabajos en segundo plano |
+| `rustango::login` | Estado de limitación y bloqueo de login que la purga de un tenant no pudo borrar |
 | `rustango::logging` | Avisos del propio subsistema |
 | `rustango::manage` | Verbos de `manage` |
 | `rustango::media::auth` | Rechazos de autorización del router de medios |

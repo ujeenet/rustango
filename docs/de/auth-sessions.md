@@ -68,6 +68,10 @@ Die ID besteht aus 192 Bit OS-CSPRNG-Zufälligkeit, base64url-kodiert auf 32
 Zeichen — weit über der 128-Bit-Untergrenze für Session-Tokens und nicht
 erratbar.
 
+Unter Tenancy den Store pro Request mit
+`store.for_tenant(&TenantSlug::of(&t.org)?)` scopen: die ID trägt keinen Tenant,
+und mit Apex- und Pfad-Präfix-Routing erreicht ein `Path=/`-Cookie jeden Tenant.
+
 ---
 
 ## Sessions vs. JWT

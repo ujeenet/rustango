@@ -217,6 +217,8 @@ Er zählt in festen Fenstern, also kann ein Burst über eine Fenstergrenze das D
 
 > **Nach einem geheimen Header zu keyen ist teilbar-sicher.** Bei `key_by(KeyBy::Header("authorization"))` oder `"x-api-key"` **hasht** der cache-gestützte Limiter den Header-Wert, bevor er ihn als Schlüssel verwendet — ein geteiltes Redis speichert also nie eine gültige Anmeldeinformation dort, wo jemand mit Schlüssel-Lesezugriff sie abgreifen könnte. `KeyBy::Ip` braucht `ConnectInfo` (oder ein vorgeschaltetes `RealIpLayer` mit `trust_proxies`); fehlt das, warnt der Limiter einmalig und fällt auf einen einzigen geteilten Bucket zurück.
 
+`key_by(KeyBy::Tenant)` gibt jedem Tenant einen eigenen Bucket, nach Org-ID, sodass ein lauter Tenant nicht das Kontingent eines anderen aufbraucht; `KeyBy::Global` bleibt ein Bucket für die ganze Plattform. Auf den Tenant-Routen mounten: außerhalb teilen sich alle Requests einen Bucket.
+
 
 ---
 

@@ -406,7 +406,7 @@ let app = axum::Router::new()
     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 ```
 
-`media_router(manager)` — l'ancien constructeur — est déprécié et répond
+`media_router(manager)` — l'ancien constructeur — est déprécié (supprimé en 0.64.0) et répond
 désormais `403` sur chaque route. C'est un changement de comportement
 délibéré en 0.57.7 : auparavant ces routes ne prenaient aucun extracteur
 d'authentification, d'autorisation ni de tenant, si bien que
