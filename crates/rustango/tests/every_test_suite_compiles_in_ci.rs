@@ -34,7 +34,7 @@
 //!   off will look like an easy saving. This workflow has three ways to
 //!   do that — `needs:`, a job-level `if:` (which is how `gate` itself
 //!   works, and whose header warns that copies drift) and
-//!   `continue-on-error:` (already used by `windows_test`). An earlier
+//!   `continue-on-error:`. An earlier
 //!   version of this guard checked only `needs:`, so the other two
 //!   disabled the job while it still reported `ok`.
 //! - **Narrowing.** The command's cost is advertised in its own ci.yml

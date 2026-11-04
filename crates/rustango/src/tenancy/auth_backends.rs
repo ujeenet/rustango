@@ -403,7 +403,8 @@ crate::register_admin_superuser_fields!(ApiKey, Add, [user_id]);
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Change, [user_id]);
 
-/// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
+/// Create the API keys table if missing, on every backend.
+///
 /// Picks the per-dialect DDL constant based on `pool.dialect().name()`
 /// and runs each statement separately (sqlx's simple-prepare rejects
 /// multi-statement strings).

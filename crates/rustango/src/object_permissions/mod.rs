@@ -41,7 +41,7 @@
 //!
 //! Plain strings, so a new action such as `"approve"` needs no change
 //! here. The built-in handlers use `"add"`, `"change"`, `"delete"` and
-//! `"view"`; a custom view can call [`is_allowed`] with a name of its own.
+//! `"view"`; a custom view can call [`is_allowed`](crate::object_permissions::is_allowed) with a name of its own.
 
 mod actor;
 mod scope;
@@ -69,7 +69,7 @@ pub type ObjectPermissionFn = fn(&Parts, Option<&Value>) -> bool;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum HookOrigin {
-    /// Registered through [`register_object_permission!`].
+    /// Registered through [`register_object_permission!`](crate::register_object_permission!).
     App,
     /// A framework table's own rule; nothing skips it.
     #[doc(hidden)]
@@ -77,7 +77,7 @@ pub enum HookOrigin {
 }
 
 /// One hook registration for a table and action, collected by
-/// inventory via [`register_object_permission!`].
+/// inventory via [`register_object_permission!`](crate::register_object_permission!).
 pub struct ObjectPermission {
     /// Model table. Must equal `ModelSchema::table`.
     pub table: &'static str,
@@ -185,7 +185,7 @@ macro_rules! register_object_permission {
     };
 }
 
-/// The old name of [`register_object_permission!`].
+/// The old name of [`register_object_permission!`](crate::register_object_permission!).
 #[deprecated(since = "0.62.0", note = "use `register_object_permission!`")]
 #[macro_export]
 macro_rules! register_admin_object_permission {

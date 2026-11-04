@@ -1,6 +1,6 @@
 //! One gate in front of every built-in password login.
 //!
-//! [`LoginThrottle::begin`] runs before the user lookup and reserves, in
+//! [`LoginThrottle::begin`](crate::login_throttle::LoginThrottle::begin) runs before the user lookup and reserves, in
 //! order, an account-lock attempt, a per-IP token and a token from the
 //! scope's global limit. Reserving before the password check means a
 //! parallel burst cannot all pass a peek (#2378). A request refused by
@@ -10,14 +10,14 @@
 //!
 //! - **Account lock**: keyed by the normalized *submitted* username, so
 //!   an unknown name is limited exactly like a real one. Once the row is
-//!   found, [`LoginAttempt::resolve`] adds the stored username, so every
+//!   found, [`LoginAttempt::resolve`](crate::login_throttle::LoginAttempt::resolve) adds the stored username, so every
 //!   spelling the database matches to one account shares one lock.
-//! - **Per IP** (IPv6 by /64) and **per scope** ([`LoginScope`]): only
+//! - **Per IP** (IPv6 by /64) and **per scope** ([`LoginScope`](crate::login_throttle::LoginScope)): only
 //!   failed attempts use them up; a successful login gives its token back,
 //!   so credentials sent on every request (HTTP Basic, API keys) only hold
 //!   a token while they are checked. Only failures lock an account.
 //! - **Known clients**: a username that signed in from an IP within
-//!   [`KNOWN_CLIENT_TTL`] skips a spent global limit from that IP, so a
+//!   [`KNOWN_CLIENT_TTL`](crate::login_throttle::KNOWN_CLIENT_TTL) skips a spent global limit from that IP, so a
 //!   spray from many IPs cannot lock every user out. Its per-IP limit and
 //!   account lock still apply.
 //!
@@ -26,7 +26,7 @@
 //! ([`crate::passwords`]).
 //!
 //! State: the per-IP and global buckets are in-process unless built
-//! with [`LoginThrottle::with_cache`]; the account lock uses
+//! with [`LoginThrottle::with_cache`](crate::login_throttle::LoginThrottle::with_cache); the account lock uses
 //! [`crate::account_lockout::shared`]. Back both with a shared cache at
 //! boot when you run more than one replica.
 //!

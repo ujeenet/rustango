@@ -783,7 +783,7 @@ pub struct ModelSchema {
     /// this column to now, instead of a hard delete.
     pub soft_delete_column: Option<&'static str>,
     /// `true` when the model has `#[rustango(permissions)]`, so
-    /// [`rustango::tenancy::permissions::auto_create_permissions`]
+    /// [`rustango::tenancy::permissions::auto_create_permissions_pool`]
     /// seeds the four CRUD codenames (`table.add`, `table.change`,
     /// `table.delete`, `table.view`).
     pub permissions: bool,

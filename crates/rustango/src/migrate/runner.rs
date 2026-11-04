@@ -317,8 +317,7 @@ async fn create_bootstrap_indexes(
     Ok(())
 }
 
-/// `apply_all` against either backend. Equivalent to [`apply_all`] but
-/// takes [`crate::sql::Pool`] and dispatches per backend — uses the
+/// Create every registered model's table on any backend. Uses the
 /// dialect-aware DDL emitters from
 /// [`crate::migrate::ddl::create_table_sql_with_dialect`] +
 /// [`crate::migrate::ddl::create_constraints_sql_with_dialect`], so
@@ -326,11 +325,10 @@ async fn create_bootstrap_indexes(
 ///
 /// Useful for dev bootstrap, ephemeral test databases, and one-shot
 /// CLI tools — for production schema evolution use the file-based
-/// [`migrate`] runner (still PG-only; bi-dialect ledger path lands
-/// in a follow-up batch).
+/// [`migrate_pool`] runner.
 ///
 /// # Errors
-/// As [`apply_all`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
     for model in bootstrap_models() {
         ddl::check_on_delete(pool.dialect(), model).map_err(MigrateError::Validation)?;
@@ -386,8 +384,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
     Ok(())
 }
 
-/// `drop_all` against either backend. Equivalent to [`drop_all`] but
-/// takes [`crate::sql::Pool`].
+/// Drop every registered model's table on any backend.
 ///
 /// MySQL caveat: `DROP TABLE … CASCADE` is rejected by MySQL's parser
 /// (MySQL drops cascade FK constraints automatically and doesn't take
@@ -396,7 +393,7 @@ pub async fn apply_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError>
 /// add `Dialect::supports_drop_cascade()` to gate the keyword cleanly.
 ///
 /// # Errors
-/// As [`drop_all`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn drop_all_pool(pool: &crate::sql::Pool) -> Result<(), MigrateError> {
     let dialect = pool.dialect();
     // Cascade only emitted for PG — MySQL parses it as syntax error.
@@ -1057,7 +1054,7 @@ pub async fn applied_set_pool_with_ledger(
 /// / `GET_LOCK`), ledger bootstrap included; SQLite relies on its file lock.
 ///
 /// # Errors
-/// As [`migrate`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn migrate_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4339,11 +4336,10 @@ async fn apply_nonatomic_pool(
 // emitted — the embed_migrations! macro and its callers are
 // PgPool-bound and migrating them is a separate concern.
 
-/// Move the database to a specific migration target — bi-dialect
-/// counterpart of [`migrate_to`].
+/// Move the database to a specific migration target on any backend.
 ///
 /// # Errors
-/// As [`migrate_to`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn migrate_to_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4434,7 +4430,7 @@ pub(crate) async fn migrate_to_locked(
 /// Step back `steps` applied migrations against either backend.
 ///
 /// # Errors
-/// As [`downgrade`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn downgrade_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4603,7 +4599,7 @@ pub(crate) async fn rollback_pool(
 /// [`unapply_force_pool`] to bypass).
 ///
 /// # Errors
-/// As [`unapply`].
+/// [`MigrateError`]: a driver, ledger or validation error. A target that is not the head is refused.
 pub async fn unapply_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4634,7 +4630,7 @@ pub async fn unapply_pool_with_ledger(
 /// order. Caller accepts responsibility for the resulting schema state.
 ///
 /// # Errors
-/// As [`unapply_force`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn unapply_force_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4653,10 +4649,10 @@ async fn unapply_force_pool_with_ledger(
 }
 
 /// Compute the SQL `migrate_pool(pool, dir)` would execute, without
-/// running any of it. Bi-dialect counterpart of [`migrate_dry_run`].
+/// running any of it.
 ///
 /// # Errors
-/// As [`migrate_dry_run`].
+/// [`MigrateError`]: a driver, ledger or validation error.
 pub async fn migrate_dry_run_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4937,7 +4933,7 @@ async fn unapply_atomic_pool(
 }
 
 /// Apply pending migrations from an in-memory `&[(name, json)]` slice
-/// against either backend. Bi-dialect counterpart of [`migrate_embedded`].
+/// against either backend.
 ///
 /// Built for single-binary deployments where shipping a `migrations/`
 /// folder alongside the binary is awkward (Docker images, scratch
@@ -4950,7 +4946,8 @@ async fn unapply_atomic_pool(
 /// — a divergence would mean the slice was hand-built incorrectly.
 ///
 /// # Errors
-/// As [`migrate_embedded`], plus [`MigrateError::Validation`] when an
+/// [`MigrateError`]: a driver, ledger or validation error, and
+/// [`MigrateError::Validation`] when an
 /// entry key doesn't match the migration's own `name` field.
 pub async fn migrate_embedded_pool(
     pool: &crate::sql::Pool,

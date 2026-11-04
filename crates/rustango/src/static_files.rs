@@ -28,7 +28,7 @@
 //!   resolved path, so a link or a Windows 8.3 name (`ENV~1`) cannot reach
 //!   `.env`. With [`StaticFiles::no_canonicalize`] only the request is
 //!   checked.
-//! - Mount user uploads with [`StaticFiles::user_content`]: HTML, SVG
+//! - Mount user uploads with [`StaticFiles::user_content`](crate::static_files::StaticFiles::user_content): HTML, SVG
 //!   and XML then download instead of running script on your origin, and
 //!   JS, CSS and WASM go out untyped so no page here can load them.
 //!

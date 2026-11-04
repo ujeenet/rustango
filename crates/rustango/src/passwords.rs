@@ -24,8 +24,8 @@
 //! }
 //! ```
 //!
-//! From async code call [`hash_async`] / [`verify_async`] /
-//! [`verify_dummy_async`]; the sync calls block a runtime worker.
+//! From async code call [`hash_async`](crate::passwords::hash_async) / [`verify_async`](crate::passwords::verify_async) /
+//! [`verify_dummy_async`](crate::passwords::verify_dummy_async); the sync calls block a runtime worker.
 
 // This module owns the sync calls the lint bans elsewhere.
 #![allow(clippy::disallowed_methods)]

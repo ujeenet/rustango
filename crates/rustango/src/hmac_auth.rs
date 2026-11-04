@@ -30,11 +30,11 @@
 //!
 //! The host is the `Host` header (or the HTTP/2 authority) without the
 //! port. Unpinned, a replay to another service sharing the key passes
-//! if it keeps the first `Host`; shared keys need [`HmacAuthLayer::host`].
-//! [`HmacAuthLayer::signed_headers`] and [`HmacAuthLayer::sign_port`] append
-//! one `name:value` line each, sorted; sign those with [`RequestToSign`].
+//! if it keeps the first `Host`; shared keys need [`HmacAuthLayer::host`](crate::hmac_auth::HmacAuthLayer::host).
+//! [`HmacAuthLayer::signed_headers`](crate::hmac_auth::HmacAuthLayer::signed_headers) and [`HmacAuthLayer::sign_port`](crate::hmac_auth::HmacAuthLayer::sign_port) append
+//! one `name:value` line each, sorted; sign those with [`RequestToSign`](crate::hmac_auth::RequestToSign).
 //! The tenant header is not signed unless listed (#2492). On a tenant-resolved
-//! app, [`HmacAuthLayer::bind_tenants`] ties each key to its tenant.
+//! app, [`HmacAuthLayer::bind_tenants`](crate::hmac_auth::HmacAuthLayer::bind_tenants) ties each key to its tenant.
 //! The query is sorted, so `?b=2&a=1` and `?a=1&b=2` sign the same.
 //! The body is hashed first, so the verifier hashes it only once.
 //!

@@ -43,7 +43,7 @@
 //!
 //! ## On a saved server
 //!
-//! [`DatabaseSource::Server`] makes storage three steps: create the
+//! [`DatabaseSource::Server`](crate::tenancy::provision::DatabaseSource::Server) makes storage three steps: create the
 //! database named as the slug, create its own login, grant it that
 //! database. The connection check probes the server's admin rights first.
 //! The database is recorded in [`TenantDatabase`](crate::tenancy::TenantDatabase).

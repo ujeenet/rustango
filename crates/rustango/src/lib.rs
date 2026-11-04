@@ -623,7 +623,7 @@ pub(crate) mod panic_guard;
 #[cfg(feature = "auth_flows")]
 pub mod auth_flows;
 /// Typed front end for the `tenancy::permissions` engine —
-/// `has_perm_for_model::<T>` / `grant_role_perm_for_model::<T>` /
+/// `has_perm_for_model_pool::<T>` / `grant_role_perm_for_model_pool::<T>` /
 /// `model_codenames_for::<T>`. Ask for a permission by model type instead
 /// of typing the codename string. Needs `tenancy`, which owns the tables.
 #[cfg(feature = "tenancy")]
@@ -1554,7 +1554,7 @@ pub mod prelude {
 
 /// Bake every migration file in a directory into the binary at
 /// compile time, for shipping a single-binary distribution. Pair
-/// with [`migrate::migrate_embedded`].
+/// with [`migrate::migrate_embedded_pool`].
 ///
 /// A directory that does not exist still builds, with a `deprecated`
 /// warning naming it:

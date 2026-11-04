@@ -171,7 +171,7 @@ impl StorageRegistry {
     /// `[storage] default` as the default disk.
     ///
     /// # Errors
-    /// [`StorageError::Io`] naming the disk when its driver is unknown or
+    /// [`StorageError::Io`](crate::storage::StorageError::Io) naming the disk when its driver is unknown or
     /// not compiled in, a required key is missing, its name is not
     /// `[a-z0-9_]` (env overrides arrive lowercased), or `default` names
     /// no disk.
