@@ -30,7 +30,7 @@ jobs:
       - name: Baseline version
         id: baseline
         run: |
-          v=$(curl -sf -A "rustango-ci (github.com/ujeenet/rustango)" \
+          v=$(curl -sf --retry 3 --retry-delay 5 -A "rustango-ci (github.com/ujeenet/rustango)" \
             https://crates.io/api/v1/crates/rustango | jq -r .crate.max_stable_version)
           test -n "$v" && test "$v" != null
           echo "version=$v" >> "$GITHUB_OUTPUT"
@@ -43,9 +43,10 @@ jobs:
           package: rustango
           feature-group: all-features
           baseline-version: ${{ steps.baseline.outputs.version }}
-          # Release branches and main take the bump from Cargo.toml; a PR
-          # into develop is judged as if it shipped in the next patch.
-          release-type: ${{ env.BLOCKING != 'true' && 'patch' || '' }}
+          # A PR into develop is judged as the next patch; one into a
+          # `release/vX.Y.0` branch as a minor (its bump commit lands last);
+          # main and patch release branches take the bump from Cargo.toml.
+          release-type: ${{ env.BLOCKING != 'true' && 'patch' || (startsWith(github.base_ref, 'release/') && endsWith(github.base_ref, '.0') && 'minor') || '' }}
           rust-toolchain: stable
       - name: Label a breaking PR
         if: steps.check.outcome == 'failure' && env.BLOCKING != 'true'
@@ -53,4 +54,4 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh pr edit "${{ github.event.pull_request.number }}" --repo "${{ github.repository }}" --add-label semver:breaking
+        run: gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" -f 'labels[]=semver:breaking'
