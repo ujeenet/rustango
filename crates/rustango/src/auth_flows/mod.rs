@@ -161,7 +161,10 @@ impl LinkScope {
 #[cfg(feature = "tenancy")]
 impl From<&crate::tenancy::Org> for LinkScope {
     fn from(org: &crate::tenancy::Org) -> Self {
-        Self(crate::tenancy::TenantSlug::of(org).map(|t| format!("tenant:{}", t.namespace())))
+        Self(
+            crate::tenancy::TenantSlug::of(org)
+                .map(|t| format!("{}:{}", crate::cache::TENANT_PREFIX, t.namespace())),
+        )
     }
 }
 

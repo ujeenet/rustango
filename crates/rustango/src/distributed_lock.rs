@@ -111,7 +111,11 @@ impl DistributedLock {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        self.scope = Some(format!("tenant:{}", tenant.namespace()));
+        self.scope = Some(format!(
+            "{}:{}",
+            crate::cache::TENANT_PREFIX,
+            tenant.namespace()
+        ));
         self
     }
 
