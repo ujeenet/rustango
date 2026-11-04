@@ -382,6 +382,74 @@ async fn self_fk_child_before_parent_loads(pool: &Pool) {
     assert_eq!(n.len(), 2);
 }
 
+/// `dumpdata --output` writes UTF-8; a copy PowerShell 5.1's `>` would make
+/// (UTF-16 LE with a BOM) and one with a UTF-8 BOM both load back.
+async fn a_utf16_or_bom_fixture_loads(pool: &Pool) {
+    let mut root = Node {
+        id: Auto::default(),
+        parent_id: None,
+    };
+    root.insert(pool).await.expect("root");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("nodes.json");
+    manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1911.Node",
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    )
+    .await
+    .expect("dumpdata");
+    let text = std::fs::read_to_string(&out).expect("UTF-8 output");
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend(text.bytes());
+    for (name, bytes) in [("utf16.json", utf16), ("bom.json", bom)] {
+        let file = dir.path().join(name);
+        std::fs::write(&file, bytes).unwrap();
+        rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+        let res = manage(pool, &["loaddata", file.to_str().unwrap()]).await;
+        assert!(res.is_ok(), "{name}: {res:?}");
+        let n: Vec<Node> = Node::objects().fetch(pool).await.expect("fetch");
+        assert_eq!(n.len(), 1, "{name}");
+    }
+}
+
+/// A dump that fails part-way leaves an existing `--output` file as it was.
+async fn a_failed_dump_keeps_the_old_output(pool: &Pool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("nodes.json");
+    std::fs::write(&out, "OLD").unwrap();
+    let table = <Node as rustango::core::Model>::SCHEMA.table;
+    rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .expect("drop the table");
+    let res = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1911.Node",
+            "-o",
+            out.to_str().unwrap(),
+        ],
+    )
+    .await;
+    rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+    assert!(res.is_err(), "the select fails: {res:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "OLD");
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "no temp file left"
+    );
+}
+
 async fn manage(pool: &Pool, args: &[&str]) -> Result<String, String> {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut buf: Vec<u8> = Vec::new();
@@ -1184,6 +1252,8 @@ tri_dialect_test! {
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
+        a_utf16_or_bom_fixture_loads,
+        a_failed_dump_keeps_the_old_output,
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
         dumpdata_pages_rows_and_links,

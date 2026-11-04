@@ -24,7 +24,10 @@
 //!   checked against the root. [`StaticFiles::no_canonicalize`] turns
 //!   that check off, so use it only on a directory layout you trust.
 //! - A name starting with `.` gets a 404 unless
-//!   [`StaticFiles::serve_hidden`] is on.
+//!   [`StaticFiles::serve_hidden`] is on, in the request and in the
+//!   resolved path, so a link or a Windows 8.3 name (`ENV~1`) cannot reach
+//!   `.env`. With [`StaticFiles::no_canonicalize`] only the request is
+//!   checked.
 //! - Mount user uploads with [`StaticFiles::user_content`]: HTML, SVG
 //!   and XML then download instead of running script on your origin, and
 //!   JS, CSS and WASM go out untyped so no page here can load them.
@@ -115,7 +118,9 @@ impl StaticFiles {
     }
 
     /// Turn off the check that stops a symlink leading out of `root`.
-    /// Only do this on a directory layout you have checked yourself.
+    /// Only do this on a directory layout you have checked yourself: the
+    /// hidden-file check then sees only the requested name, so on Windows
+    /// an 8.3 name such as `ENV~1` can serve `.env`.
     #[must_use]
     pub fn no_canonicalize(mut self) -> Self {
         self.canonicalize = false;
@@ -453,18 +458,34 @@ fn resolve_path(mount: &Mount, rel: &str) -> Option<PathBuf> {
     if files.canonicalize {
         let canon = std::fs::canonicalize(&joined).ok()?;
         let cached = mount.root.read().ok().and_then(|r| r.clone());
-        if cached.is_some_and(|(root, at)| at.elapsed() < ROOT_TTL && canon.starts_with(root)) {
-            return Some(canon);
+        let root = match cached {
+            Some((root, at)) if at.elapsed() < ROOT_TTL && canon.starts_with(&root) => root,
+            // Stale, missing, or a re-pointed root symlink: resolve it again.
+            // A root that no longer resolves serves nothing.
+            _ => {
+                let root_canon = std::fs::canonicalize(&files.root).ok();
+                if let Ok(mut w) = mount.root.write() {
+                    *w = root_canon.clone().map(|r| (r, std::time::Instant::now()));
+                }
+                root_canon.filter(|r| canon.starts_with(r))?
+            }
+        };
+        // The resolved name, not just the requested one: a link, or a Windows
+        // 8.3 name such as `ENV~1`, can reach `.env`.
+        if !files.serve_hidden && has_hidden_component(&canon, &root) {
+            return None;
         }
-        // Stale, missing, or a re-pointed root symlink: resolve it again.
-        // A root that no longer resolves serves nothing.
-        let root_canon = std::fs::canonicalize(&files.root).ok();
-        if let Ok(mut w) = mount.root.write() {
-            *w = root_canon.clone().map(|r| (r, std::time::Instant::now()));
-        }
-        return canon.starts_with(root_canon?).then_some(canon);
+        return Some(canon);
     }
     Some(joined)
+}
+
+/// Whether a component of `path` below `root` starts with a dot.
+fn has_hidden_component(path: &Path, root: &Path) -> bool {
+    path.strip_prefix(root).map_or(true, |rel| {
+        rel.components()
+            .any(|c| matches!(c, Component::Normal(s) if s.to_string_lossy().starts_with('.')))
+    })
 }
 
 fn not_found() -> Response {
@@ -671,6 +692,66 @@ mod tests {
         write_file(&dir, ".env", b"SECRET=hunter2");
         let resp = server(&dir)
             .oneshot(Request::builder().uri("/.env").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 404);
+    }
+
+    /// A root that is itself a dot directory still serves: only the parts
+    /// below it count.
+    #[tokio::test]
+    async fn a_dot_directory_root_serves() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".assets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.css"), b"body{}").unwrap();
+        let resp = static_router(StaticFiles::new(root))
+            .oneshot(
+                Request::builder()
+                    .uri("/app.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// `serve_hidden(true)` serves a name that resolves to a dot file too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_hidden_serves_an_alias_of_a_hidden_file() {
+        let dir = TempDir::new().unwrap();
+        let secret = write_file(&dir, ".well", b"ok");
+        std::os::unix::fs::symlink(&secret, dir.path().join("WELL~1")).unwrap();
+        let app = static_router(StaticFiles::new(dir.path().to_path_buf()).serve_hidden(true));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/WELL~1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// A name that resolves to `.env` (a link here, an 8.3 alias on
+    /// Windows) is hidden too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_an_alias_of_a_hidden_file() {
+        let dir = TempDir::new().unwrap();
+        let secret = write_file(&dir, ".env", b"SECRET=hunter2");
+        std::os::unix::fs::symlink(&secret, dir.path().join("ENV~1")).unwrap();
+        let resp = server(&dir)
+            .oneshot(
+                Request::builder()
+                    .uri("/ENV~1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);

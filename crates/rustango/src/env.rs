@@ -763,8 +763,9 @@ fn db_password(get: &dyn Fn(&str) -> Option<String>) -> Result<Option<String>, E
         )),
         (Some(pw), None) => Ok(Some(pw)),
         (None, Some(path)) => {
-            let raw =
-                std::fs::read_to_string(&path).map_err(|e| file_err(format!("{path}: {e}")))?;
+            // A BOM must not become part of the password.
+            let raw = crate::text_file::read(std::path::Path::new(&path))
+                .map_err(|e| file_err(format!("{path}: {e}")))?;
             Ok(Some(raw.trim_end_matches(['\n', '\r']).to_owned()))
         }
         (None, None) => Ok(None),
@@ -1201,6 +1202,27 @@ mod tests {
         match resolve_database_url(&get).unwrap_err() {
             EnvError::MissingRequired { name, .. } => assert_eq!(name, "DB_NAME"),
             other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bom_in_the_password_file_is_not_part_of_the_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pw");
+        let mut utf16 = vec![0xFF, 0xFE];
+        utf16.extend("secret\r\n".encode_utf16().flat_map(u16::to_le_bytes));
+        for bytes in [b"\xEF\xBB\xBFsecret\n".to_vec(), utf16] {
+            std::fs::write(&path, bytes).unwrap();
+            let path = path.to_string_lossy().into_owned();
+            let get = vars(&[
+                ("DB_USER", "u"),
+                ("DB_NAME", "d"),
+                ("DB_PASSWORD_FILE", path.as_str()),
+            ]);
+            assert_eq!(
+                resolve_database_url(&get).unwrap(),
+                "postgres://u:secret@localhost:5432/d"
+            );
         }
     }
 

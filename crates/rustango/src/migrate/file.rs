@@ -160,7 +160,7 @@ fn default_reversible() -> bool {
 /// `reversible == true` but `reverse_sql` is missing, and a callback in
 /// an atomic migration (#1626).
 pub fn load(path: &Path) -> Result<Migration, MigrateError> {
-    let raw = std::fs::read_to_string(path)?;
+    let raw = crate::text_file::read(path)?;
     parse(&raw)
 }
 

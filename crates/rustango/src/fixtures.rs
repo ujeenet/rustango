@@ -80,7 +80,7 @@ impl Fixture {
     /// [`FixtureError::Format`] when the JSON isn't an array of objects.
     pub fn from_file(mut self, path: impl AsRef<Path>) -> Result<Self, FixtureError> {
         let path = path.as_ref();
-        let raw = std::fs::read_to_string(path).map_err(|e| FixtureError::Io(e.to_string()))?;
+        let raw = crate::text_file::read(path).map_err(|e| FixtureError::Io(e.to_string()))?;
         let v: Value = serde_json::from_str(&raw).map_err(|e| FixtureError::Format {
             file: path.display().to_string(),
             detail: e.to_string(),
@@ -347,6 +347,24 @@ fn validate_ident(name: &str) -> Result<(), FixtureError> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A fixture redirected by PowerShell 5.1 (UTF-16 LE with a BOM), or
+    /// saved with a UTF-8 BOM, loads like plain UTF-8.
+    #[test]
+    fn a_bom_or_utf16_fixture_file_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = r#"[{"id": 1, "name": "é"}]"#;
+        let mut utf16 = vec![0xFF, 0xFE];
+        utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend(text.bytes());
+        for (name, bytes) in [("utf16.json", utf16), ("bom.json", bom)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let f = Fixture::new("x").from_file(&path).expect(name);
+            assert_eq!(f.row_count(), 1, "{name}");
+        }
+    }
 
     #[allow(dead_code)]
     #[derive(crate::Model, Debug)]
