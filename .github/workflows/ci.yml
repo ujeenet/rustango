@@ -1190,6 +1190,32 @@ jobs:
             cargo run -- add-db-server files --sqlite-dir "$(cygpath -m "$PWD/var/tenants")"
             cargo run -- create-tenant acme --mode database --server files --host-pattern acme.localhost
           )
+      # The same projects driven from Windows PowerShell 5.1, with the docs'
+      # PowerShell snippets: its `>` writes UTF-16, and paths use backslashes.
+      - name: The scaffolded projects work from Windows PowerShell
+        shell: powershell
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/scaffold-target
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Run { & $args[0] $args[1..($args.Count - 1)]; if ($LASTEXITCODE -ne 0) { throw "failed ($LASTEXITCODE): $args" } }
+          Set-Location "$env:RUNNER_TEMP\firstapp"
+          $bytes = New-Object byte[] 32
+          [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $env:RUSTANGO_SESSION_SECRET = [Convert]::ToBase64String($bytes)
+          cargo run -q -- dumpdata > dump.json
+          if ($LASTEXITCODE -ne 0) { throw "dumpdata failed" }
+          $env:DATABASE_URL = "sqlite://./copy_dev.db?mode=rwc"
+          Run cargo run -q -- migrate
+          Run cargo run -q -- loaddata dump.json
+          Set-Location "$env:RUNNER_TEMP\firsttenant"
+          $bytes = New-Object byte[] 48
+          [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+          $env:RUSTANGO_SECRET_KEY_PREVIOUS = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path "var/.rustango_secret.key")))
+          New-Item -ItemType Directory -Force var/tenants2 | Out-Null
+          Run cargo run -q -- add-db-server files2 --sqlite-dir "$PWD\var\tenants2"
+          Run cargo run -q -- create-tenant beta --mode database --server files2 --host-pattern beta.localhost
 
   sqlite_litmus:
     needs: gate
