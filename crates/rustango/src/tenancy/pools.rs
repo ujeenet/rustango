@@ -544,6 +544,10 @@ pub(super) fn evict_to_fit<DB: Database>(
     evicted
 }
 
+/// How long [`TenantPools::close_tenant`] waits for connections in use: a
+/// long query must not stall a decommission.
+pub const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct TenantPools<DB: Database = DefaultTenantDb> {
     registry: sqlx::Pool<DB>,
     config: TenantPoolsConfig,
@@ -864,10 +868,47 @@ impl<DB: Database> TenantPools<DB> {
     /// otherwise keep being served a pool pointing at the old schema —
     /// a cross-tenant read, and the exact failure #1224 was about.
     pub async fn invalidate(&self, slug: &str) {
-        self.cache.write().await.remove(slug);
-        self.scoped_cache.write().await.remove(slug);
-        self.held_cache.write().await.remove(slug);
-        self.held_database_cache.write().await.remove(slug);
+        drop(self.take_cached(slug).await);
+    }
+
+    /// [`Self::invalidate`], then close those pools, waiting up to
+    /// [`CLOSE_WAIT`] for connections in use: before a tenant's database is
+    /// removed, as Windows refuses to delete a file that is still open.
+    /// `false` when one was still in use; it closes once returned.
+    pub async fn close_tenant(&self, slug: &str) -> bool {
+        let mut all = true;
+        for pool in self.take_cached(slug).await {
+            if tokio::time::timeout(CLOSE_WAIT, pool.close())
+                .await
+                .is_err()
+            {
+                all = false;
+                tracing::warn!(
+                    target: "rustango::tenancy::pools",
+                    slug,
+                    "a tenant connection was still in use after {}s; going on without it",
+                    CLOSE_WAIT.as_secs()
+                );
+            }
+        }
+        all
+    }
+
+    /// Remove `slug`'s pools from every cache, handing them back.
+    async fn take_cached(&self, slug: &str) -> Vec<Arc<sqlx::Pool<DB>>> {
+        let caches = [
+            &self.cache,
+            &self.scoped_cache,
+            &self.held_cache,
+            &self.held_database_cache,
+        ];
+        let mut out = Vec::new();
+        for cache in caches {
+            if let Some(entry) = cache.write().await.remove(slug) {
+                out.push(entry.pool);
+            }
+        }
+        out
     }
 }
 

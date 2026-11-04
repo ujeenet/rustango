@@ -331,7 +331,7 @@ async fn purge_media<DB: Database>(
     }
     .await;
     // The listing may have opened a tenant pool; don't keep it past the drop.
-    pools.invalidate(&org.slug).await;
+    pools.close_tenant(&org.slug).await;
     let rows = match rows {
         Ok(rows) => rows,
         Err(e) => {
@@ -754,7 +754,12 @@ where
         return rep.fail(Step::Deactivate, e).await;
     }
     super::invalidate_org_cache();
-    pools.invalidate(slug).await;
+    // Closed, not just evicted: the database is about to be dropped.
+    if !pools.close_tenant(slug).await {
+        report.notes.push(
+            "a tenant connection was still in use; the drop goes on without waiting for it".into(),
+        );
+    }
     rep.ok(Step::Deactivate).await;
 
     // While the rows that name the keys still exist (#2569).
