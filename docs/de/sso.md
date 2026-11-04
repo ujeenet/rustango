@@ -37,7 +37,7 @@ SSO meldet den Benutzer an, der mit der IdP-Identität **verknüpft** ist: eine
 reicht allein nie aus. Ein Erstbenutzer wird nur dann über seine verifizierte
 E-Mail verknüpft, wenn beim Anbieter **`allow_email_link`** eingeschaltet ist
 (Standard: aus), und nie, wenn das Konto ein Superuser oder, ohne
-`allow_email_link_staff`, Staff ist (Tenant: besitzt irgendeine Rolle;
+`allow_email_link_staff`, Staff ist (Tenant: besitzt irgendeine Rolle oder direkte Berechtigung;
 Bare-Admin: jedes Konto). Solche Konten
 verknüpft ein Admin, der die `SsoLink`-Zeile im Admin anlegt; die Log-Zeile der
 Abweisung nennt das Subject. (Der Member-Ablauf, weiter unten, kann für eine
@@ -53,9 +53,11 @@ unbekannte E-Mail auch ein Konto anlegen; das ist standardmäßig aus.)
 ## Callback-URLs
 
 Der Callback wird pro Anfrage aus Host und `slug` gebaut:
-`https://<host><login>/sso/<slug>/callback`. Das Schema ist `https`,
-außer ein vertrauenswürdiger Proxy sendet `X-Forwarded-Proto`. Tragen Sie
-eine URL pro Host ein, auf dem der Anbieter genutzt wird.
+`https://<host><login>/sso/<slug>/callback`. Auf den Admin-Oberflächen
+ist das Schema `https`, außer ein vertrauenswürdiger Proxy sendet
+`X-Forwarded-Proto`; der Member-Ablauf nutzt auf einem Loopback-Host auch
+`http` (siehe [Member-SSO](#member-endbenutzer-sso)). Tragen Sie eine URL
+pro Host ein, auf dem der Anbieter genutzt wird.
 
 | Anmelde-Oberfläche | Tenant auf eigenem Host | Tenant unter einem Pfad-Präfix |
 |---|---|---|
@@ -86,12 +88,17 @@ Operator-Konsole die einzutragende Callback-URL neben jeder Zeile.
    Die Callback-URL als *Web*-Redirect-URI eintragen.
 2. Die *Application (client) ID* kopieren. Unter *Certificates & secrets*
    ein Client-Secret anlegen und seinen Wert kopieren.
-3. Anbieterzeile: `kind = microsoft`. Es nutzt den Endpunkt `common`,
-   also kann sich jedes Entra-Verzeichnis anmelden: `allowed_idp_tenants`
-   auf Ihre *Directory (tenant) ID* setzen. Ohne sie vergibt `role_map`
-   keine Rollen, `required_claims` lehnen ab und `check --deploy` warnt.
-4. Für nur ein Verzeichnis können Sie stattdessen `kind = oidc` mit
-   `issuer_url = https://login.microsoftonline.com/<tenant-id>/v2.0` nutzen.
+3. Anbieterzeile: `kind = microsoft`. Es nutzt den Endpunkt `common`;
+   ist `allowed_idp_tenants` leer, kann sich jedes Entra-Verzeichnis
+   anmelden. Setzen Sie es auf Ihre *Directory (tenant) ID*, um nur Ihr
+   Verzeichnis zuzulassen; dann gelten seine E-Mails als verifiziert, und
+   `role_map` und `required_claims` greifen. `check --deploy` warnt, wenn
+   `role_map` oder `required_claims` gesetzt und `allowed_idp_tenants` leer
+   ist.
+4. Nutzen Sie nicht `kind = oidc` mit einem Entra-Issuer für ein einzelnes
+   Verzeichnis (`…/<tenant-id>/v2.0`): diese Zeile gilt nicht als Microsoft,
+   Entra sendet kein `email_verified`, also lehnen E-Mail-Verknüpfen,
+   Registrierung und `allowed_email_domains` jeden ab.
 
 ### GitHub
 
@@ -133,16 +140,16 @@ und zeigen dieselben Texte.
 | `slug` | Kurze Id in den URLs des Anbieters, z. B. `google`: der IdP schickt Benutzer zu `<login>/sso/<slug>/callback` zurück. Eindeutig; ein neuer Slug bedeutet eine neue Callback-URL beim IdP. |
 | `label` | Text auf dem Anmelde-Button, z. B. `Sign in with Google`. |
 | `kind` | `google`, `microsoft`, `github`, `gitlab` oder `discord` für einen eingebauten Anbieter, oder `oidc` für jeden anderen OpenID-Connect-Anbieter (dann die Issuer-URL ausfüllen). |
-| `issuer_url` | Nur für `oidc`: die Issuer-URL, z. B. `https://login.microsoftonline.com/<tenant-id>/v2.0` oder `https://<org>.okta.com`. Die Endpunkte werden aus `<issuer>/.well-known/openid-configuration` gelesen. |
+| `issuer_url` | Nur für `oidc`: die Issuer-URL, z. B. `https://<org>.okta.com` oder `https://<host>/realms/<realm>`. Die Endpunkte werden aus `<issuer>/.well-known/openid-configuration` gelesen; für Microsoft Entra ID die Art `microsoft` nutzen. |
 | `client_id` | Client-ID (Anwendungs-ID) aus der App-Registrierung bei Ihrem Identity Provider. |
 | `client_secret` | Client-Secret aus derselben App-Registrierung. Verschlüsselt gespeichert mit `RUSTANGO_SECRET_KEY`. |
 | `enabled` | Den Button dieses Anbieters auf der Anmeldeseite zeigen. |
 | `sort_order` | Reihenfolge der Buttons auf der Anmeldeseite; kleinere Zahlen zuerst. |
 | `scopes` | OAuth-Scopes, durch Leerzeichen getrennt, z. B. `openid email profile`. Leer: die Standard-Scopes der Art. |
-| `allow_email_link` | Sicherheit: eine erste Anmeldung mit dem bestehenden Konto mit derselben verifizierten E-Mail verknüpfen. Nie einen Superuser, einen Benutzer mit Rollen nur, wenn auch die Staff-Option an ist; der Bare-Admin ignoriert es. |
+| `allow_email_link` | Sicherheit: eine erste Anmeldung mit dem bestehenden Konto mit derselben verifizierten E-Mail verknüpfen; das Passwort dieses Kontos funktioniert dann nicht mehr, seine Sitzungen enden, seine API-Schlüssel werden gelöscht und seine Agent-Schlüssel abgeschaltet. Nie einen Superuser, einen Benutzer mit irgendeiner Rolle oder Berechtigung nur mit E-Mail-Verknüpfen für Staff; der Bare-Admin ignoriert es. |
 | `allowed_email_domains` | Sicherheit: nur Benutzer, deren verifizierte E-Mail in diesen Domains liegt, dürfen sich anmelden. Liste mit Komma oder Zeilenumbruch: `client.org` nur diese Domain, `*.client.org` nur ihre Subdomains. Leer: jede Domain. |
 | `blocked_email_domains` | Benutzer mit einer E-Mail in diesen Domains melden sich nie an, auch wenn die erlaubte Liste sie enthält. Gleiches Format wie die erlaubte Liste. |
-| `allowed_idp_tenants` | Microsoft-Entra-Verzeichnis-(Tenant-)IDs, die sich anmelden dürfen, durch Komma getrennt. Aus einem verifizierten id_token gelesen; für eine Microsoft-App setzen, die allen Verzeichnissen offen steht. |
+| `allowed_idp_tenants` | Microsoft-Entra-Verzeichnis-(Tenant-)IDs, die sich anmelden dürfen, durch Komma getrennt, aus einem verifizierten id_token gelesen. Leer: jedes Entra-Verzeichnis kann sich über einen `microsoft`-Anbieter anmelden. |
 | `allowed_hosted_domains` | Google-Workspace-Domains (der Claim `hd`), die sich anmelden dürfen, durch Komma getrennt, z. B. `client.org`. |
 | `required_claims` | JSON-Objekt mit Claims, die eine Anmeldung tragen muss, jeder mit einem seiner Werte: `{"roles": ["App.User"]}`. `{}`: kein Claim nötig. |
 | `signup_mode` | Sicherheit: wer bei der ersten Anmeldung ein neues Konto bekommt: `closed` (niemand), `invite_only` (eine Einladung für die E-Mail), `allowlist` (eine Einladung für die E-Mail oder ihre Domain) oder `open` (jeder, den die Anmelderegeln zulassen). Leer: die Vorgabe der Anmeldeseite. |
@@ -153,9 +160,9 @@ und zeigen dieselben Texte.
 | `username_from` | Woher der Benutzername eines neuen Benutzers kommt: der lokale Teil der E-Mail, die ganze E-Mail oder `preferred_username` des IdP (sonst der lokale Teil). |
 | `username_clash` | Was passiert, wenn der Benutzername vergeben ist: ein kurzes Suffix anhängen oder die Registrierung ablehnen. |
 | `sync_profile` | Name und E-Mail bei jeder Anmeldung vom IdP aktualisieren. Nie für einen Superuser. |
-| `allow_email_link_staff` | Sicherheit: bei aktivem E-Mail-Verknüpfen auch Benutzer mit Rollen verknüpfen. Ein Superuser wird nie per E-Mail verknüpft. |
+| `allow_email_link_staff` | Sicherheit: bei aktivem E-Mail-Verknüpfen auch Benutzer mit irgendeiner Rolle oder Berechtigung verknüpfen. Ein Superuser wird nie per E-Mail verknüpft. |
 | `sso_only` | Über diesen Anbieter verknüpfte Benutzer dürfen sich nicht mit Passwort anmelden, auch wenn der Anbieter aus ist. |
-| `auto_deactivate_after_days` | Nach so vielen Tagen ohne Nutzung schaltet `sso-deactivate-idle` die von diesem Anbieter registrierten Benutzer ab. Leer: nie. |
+| `auto_deactivate_after_days` | Nach so vielen Tagen ohne Nutzung schaltet `sso-deactivate-idle` die von diesem Anbieter registrierten Benutzer ab, die kein Passwort nutzen können: hier nur SSO, oder Passwort-Login für den Tenant aus. Leer: nie. |
 | `session_ttl_secs` | Längste Sitzung in Sekunden nach einer Anmeldung über diesen Anbieter. Leer: die normale Sitzungsdauer. |
 | `superuser_session_ttl_secs` | Längste Sitzung in Sekunden für einen Superuser, der sich über diesen Anbieter anmeldet. Leer: die normale Sitzungsdauer. |
 
@@ -189,7 +196,7 @@ Felder behalten den geteilten Wert.
 | `required_claims` | Weitere Claims, die eine Anmeldung hier tragen muss, als JSON: `{"roles": ["App.User"]}`. |
 | `signup_mode` | Sicherheit: Registrierung hier. Nur strenger als beim geteilten Anbieter. Leer: der geteilte Wert. |
 | `allow_email_link` | Aus: hier kein E-Mail-Verknüpfen. Leer oder an: die geteilte Einstellung. |
-| `allow_email_link_staff` | Aus: E-Mail-Verknüpfen verknüpft hier nie einen Benutzer mit Rollen. Leer oder an: die geteilte Einstellung. |
+| `allow_email_link_staff` | Aus: E-Mail-Verknüpfen verknüpft hier nie einen Benutzer mit irgendeiner Rolle oder Berechtigung. Leer oder an: die geteilte Einstellung. |
 | `sso_only` | An: Benutzer dieses Anbieters dürfen sich hier nicht mit Passwort anmelden. |
 | `session_ttl_secs` | Eine kürzere längste Sitzung hier, in Sekunden. Leer: der geteilte Wert. |
 | `superuser_session_ttl_secs` | Eine kürzere längste Superuser-Sitzung hier, in Sekunden. Leer: der geteilte Wert. |
@@ -304,10 +311,7 @@ Auf der Anmeldeseite eines Tenants verschmelzen die beiden Mengen, und bei einer
 Slug-Kollision **gewinnt der eigene Anbieter des Tenants** gegenüber dem geteilten
 — ein Tenant kann also einen geteilten Anbieter für sich selbst überschreiben.
 
-Die Callback-URL wird pro Anfrage aus Host + Slug abgeleitet
-(`https://<host><login>/sso/<slug>/callback`), registrieren Sie diese also beim
-IdP. Das Schema ist `https`, außer ein vertrauenswürdiger Proxy sendet
-`X-Forwarded-Proto`. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
+Tragen Sie die [Callback-URL](#callback-urls) beim IdP ein. Ein Benutzer wird verknüpft durch das optionale Verknüpfen per E-Mail
 (nicht privilegierte Tenant-Benutzer) oder dadurch, dass ein Superuser eine
 `SsoLink`-Zeile anlegt: `provider_source` (`tenant`, `shared`, `admin` oder `app` für eine native Anmeldung),
 `provider_id` (die ID der Anbieter-Zeile), `issuer` (`kind` oder
@@ -385,7 +389,7 @@ Unterschiede zum Admin-Ablauf:
   `X-Forwarded-Host`), sonst `http` auf einem
   Loopback-Host (`localhost`, `*.localhost`, eine Loopback-IP) und überall sonst
   `https`, sodass `localhost.example.com` `https` bekommt.
-- **Auto-Provisionierung.** Mit `auto_provision = true` (optional; Standard ist `false`) **erstellt**
+- **Auto-Provisionierung.** Der `signup_mode` eines Anbieters ([Wer sich registrieren darf](#wer-sich-registrieren-darf)) hat Vorrang; ist keiner gesetzt, wirkt `auto_provision = true` wie `open`. Mit `auto_provision = true` (optional; Standard ist `false`) **erstellt**
   eine verifizierte IdP-E-Mail ohne passende `rustango_users`-Zeile eine solche
   — Benutzername aus dem lokalen Teil der E-Mail (bei Kollision entdupliziert),
   ein echter, aber unbrauchbarer zufälliger Passwort-Hash (SSO-Benutzer können
@@ -482,7 +486,8 @@ Die Registrierungsfelder sind `signup_mode`, `default_roles`, `role_map`,
 [Feldreferenz](#feldreferenz)). Ist `signup_mode` leer, ist der
 Tenant-Login geschlossen und der Member-Ablauf folgt
 `MemberAuthConfig::auto_provision`; der Bare-Admin registriert nie
-jemanden. Ein Anbieter mit JWKS (OIDC-Discovery, Microsoft, Google) nimmt
+jemanden. Ein neuer Benutzer bekommt die Rollen der Einladung oder `default_roles`,
+dazu die Rollen aus `role_map`. Ein Anbieter mit JWKS (OIDC-Discovery, Microsoft, Google) nimmt
 Rollen-Claims nur aus einem verifizierten id_token, ein Anbieter nur mit
 Userinfo aus Userinfo. `sync_roles_on_login` fügt nur in `role_map`
 genannte Rollen hinzu oder entfernt sie; von Hand vergebene Rollen
@@ -535,9 +540,9 @@ Ein abgelehntes Passwort sieht aus wie ein falsches. Eine unlesbare Regel lehnt 
 
 **Gemeinsame Anbieter.** `SsoSharedOverride` eines Mandanten verschärft einen gemeinsamen Anbieter, lockert ihn nie, und nennt in `allowed_roles` die Rollen, die er vergeben darf (ohne Override: keine). Der Override kann auch die Verknüpfung per E-Mail abschalten (`allow_email_link`, `allow_email_link_staff`). Er bindet sich bei der ersten Anmeldung an die Zeile des gemeinsamen Anbieters: eine umbenannte Zeile behält ihn, eine neue Zeile mit dem alten Slug nicht, und eine Zeile mit anderem Issuer verweigert die Anmeldung, bis der Override neu angelegt wird.
 
-**Microsoft mit mehreren Verzeichnissen.** Ein `microsoft`-Anbieter (oder `oidc` auf `/common` bzw. `/organizations`) nimmt Nutzer aus jedem Entra-Verzeichnis an. `role_map` und `required_claims` zählen nur, wenn `allowed_idp_tenants` die `tid` des Tokens festlegt; sonst werden keine Rollen vergeben und Pflicht-Claims verweigern. `check --deploy` warnt bei solchen Zeilen.
+**Microsoft mit mehreren Verzeichnissen.** Ein `microsoft`-Anbieter (oder `oidc` auf `/common` bzw. `/organizations`) nimmt Nutzer aus jedem Entra-Verzeichnis an. `role_map` und `required_claims` zählen nur, wenn `allowed_idp_tenants` die `tid` des Tokens festlegt; sonst werden keine Rollen vergeben und Pflicht-Claims verweigern. `check --deploy` warnt bei einer Zeile, die `role_map` oder `required_claims` ohne `allowed_idp_tenants` setzt.
 
-**Drosselung und Audit.** SSO-Callbacks haben ein eigenes Limit pro IP (429), getrennt vom Passwort-Limit. Verknüpfungen, Registrierungen, Re-Links und Rollenänderungen landen im Audit-Log; Ablehnungen höchstens fünfmal pro Subjekt in zehn Minuten.
+**Drosselung und Audit.** SSO-Callbacks haben ein eigenes Limit pro IP (429), getrennt vom Passwort-Limit. Verknüpfungen, Registrierungen, Re-Links und Rollenänderungen landen im Audit-Log (`sso_linked`, `sso_signup`, `sso_relinked`, `sso_roles_synced`); Ablehnungen höchstens fünfmal pro Subjekt in zehn Minuten.
 
 **Kontosperre.** Die Sperre nach falschen Passwörtern stoppt SSO nicht. Um einen Benutzer zu stoppen, `active = false` setzen.
 

@@ -38,7 +38,7 @@ suffit jamais à lui seul. Un utilisateur qui se connecte pour la première
 fois n'est lié par son email vérifié que si le provider a
 **`allow_email_link`** activé (désactivé par défaut), et jamais si le
 compte est un superutilisateur ou, sans `allow_email_link_staff`, du staff
-(tenant : détient un rôle quelconque ; bare admin : tout compte). Ces comptes sont liés
+(tenant : détient un rôle ou une permission directe quelconque ; bare admin : tout compte). Ces comptes sont liés
 par un admin, qui ajoute la ligne `SsoLink` dans l'admin ; la ligne de
 journal du refus indique le subject. (Le flux membre, ci-dessous,
 peut aussi créer un compte pour un email inconnu ; c'est désactivé par défaut.)
@@ -54,9 +54,11 @@ peut aussi créer un compte pour un email inconnu ; c'est désactivé par défau
 ## URL de callback
 
 Le callback est construit à chaque requête à partir de l'hôte et du
-`slug` : `https://<host><login>/sso/<slug>/callback`. Le schéma est
-`https`, sauf si un proxy de confiance envoie `X-Forwarded-Proto`.
-Enregistrez une URL par hôte où le provider est utilisé.
+`slug` : `https://<host><login>/sso/<slug>/callback`. Sur les surfaces
+d'admin, le schéma est `https`, sauf si un proxy de confiance envoie
+`X-Forwarded-Proto` ; le flux membre utilise aussi `http` sur un hôte
+loopback (voir [SSO membre](#sso-membre-utilisateur-final)). Enregistrez
+une URL par hôte où le provider est utilisé.
 
 | Surface de connexion | Tenant sur son propre hôte | Tenant sous un préfixe de chemin |
 |---|---|---|
@@ -87,13 +89,17 @@ affiche l'URL de callback à enregistrer à côté de chaque ligne.
    registration*. Ajoutez l'URL de callback comme redirect URI *Web*.
 2. Copiez l'*Application (client) ID*. Sous *Certificates & secrets*,
    créez un client secret et copiez sa valeur.
-3. Ligne du provider : `kind = microsoft`. Il utilise l'endpoint `common`,
-   donc tout annuaire Entra peut se connecter : mettez votre
-   *Directory (tenant) ID* dans `allowed_idp_tenants`. Sans lui,
-   `role_map` n'attribue aucun rôle, `required_claims` refusent et
-   `check --deploy` avertit.
-4. Pour un seul annuaire, vous pouvez utiliser à la place `kind = oidc`
-   avec `issuer_url = https://login.microsoftonline.com/<tenant-id>/v2.0`.
+3. Ligne du provider : `kind = microsoft`. Il utilise l'endpoint `common` ;
+   avec `allowed_idp_tenants` vide, tout annuaire Entra peut se connecter.
+   Mettez-y votre *Directory (tenant) ID* pour n'autoriser que votre
+   annuaire ; ses emails comptent alors comme vérifiés, et `role_map` et
+   `required_claims` s'appliquent. `check --deploy` avertit quand
+   `role_map` ou `required_claims` est renseigné et `allowed_idp_tenants`
+   vide.
+4. N'utilisez pas `kind = oidc` avec un émetteur Entra à annuaire unique
+   (`…/<tenant-id>/v2.0`) : cette ligne n'est pas traitée comme Microsoft,
+   Entra n'envoie pas `email_verified`, donc la liaison par email,
+   l'inscription et `allowed_email_domains` refusent tout le monde.
 
 ### GitHub
 
@@ -136,16 +142,16 @@ mêmes champs et affichent les mêmes textes.
 | `slug` | Id court dans les URL du provider, p. ex. `google` : l'IdP renvoie les utilisateurs vers `<login>/sso/<slug>/callback`. Unique ; un nouveau slug implique une nouvelle URL de callback chez l'IdP. |
 | `label` | Texte du bouton de connexion, p. ex. `Sign in with Google`. |
 | `kind` | `google`, `microsoft`, `github`, `gitlab` ou `discord` pour un provider intégré, ou `oidc` pour tout autre provider OpenID Connect (remplissez alors l'URL de l'émetteur). |
-| `issuer_url` | Seulement pour `oidc` : l'URL de l'émetteur, p. ex. `https://login.microsoftonline.com/<tenant-id>/v2.0` ou `https://<org>.okta.com`. Les endpoints sont lus dans `<issuer>/.well-known/openid-configuration`. |
+| `issuer_url` | Seulement pour `oidc` : l'URL de l'émetteur, p. ex. `https://<org>.okta.com` ou `https://<host>/realms/<realm>`. Les endpoints sont lus dans `<issuer>/.well-known/openid-configuration` ; pour Microsoft Entra ID, utilisez le type `microsoft`. |
 | `client_id` | Client ID (ID d'application) de l'enregistrement de l'app chez votre fournisseur d'identité. |
 | `client_secret` | Client secret du même enregistrement d'app. Stocké chiffré avec `RUSTANGO_SECRET_KEY`. |
 | `enabled` | Afficher le bouton de ce provider sur la page de connexion. |
 | `sort_order` | Ordre des boutons sur la page de connexion ; les plus petits nombres d'abord. |
 | `scopes` | Scopes OAuth séparés par des espaces, p. ex. `openid email profile`. Vide : les scopes par défaut du type. |
-| `allow_email_link` | Sécurité : lier une première connexion au compte existant ayant le même email vérifié. Jamais un superutilisateur, et un utilisateur avec des rôles seulement si l'option staff est aussi active ; l'admin nu l'ignore. |
+| `allow_email_link` | Sécurité : lier une première connexion au compte existant ayant le même email vérifié ; le mot de passe de ce compte ne fonctionne plus, ses sessions prennent fin, ses clés API sont supprimées et ses clés d'agent désactivées. Jamais un superutilisateur, et un utilisateur avec un rôle ou une permission quelconque seulement avec la liaison par email pour le staff ; l'admin nu l'ignore. |
 | `allowed_email_domains` | Sécurité : seuls les utilisateurs dont l'email vérifié est dans ces domaines peuvent se connecter. Liste séparée par des virgules ou des retours à la ligne : `client.org` est ce domaine seul, `*.client.org` ses sous-domaines seuls. Vide : tout domaine. |
 | `blocked_email_domains` | Les utilisateurs avec un email dans ces domaines ne se connectent jamais, même si la liste autorisée les contient. Même format que la liste autorisée. |
-| `allowed_idp_tenants` | IDs d'annuaire (tenant) Microsoft Entra autorisés, séparés par des virgules. Lus dans un id_token vérifié ; à renseigner pour une app Microsoft ouverte à tous les annuaires. |
+| `allowed_idp_tenants` | IDs d'annuaire (tenant) Microsoft Entra autorisés, séparés par des virgules, lus dans un id_token vérifié. Vide : tout annuaire Entra peut se connecter par un provider `microsoft`. |
 | `allowed_hosted_domains` | Domaines Google Workspace (le claim `hd`) autorisés, séparés par des virgules, p. ex. `client.org`. |
 | `required_claims` | Objet JSON des claims qu'une connexion doit porter, chacun avec une de ses valeurs : `{"roles": ["App.User"]}`. `{}` : aucun claim exigé. |
 | `signup_mode` | Sécurité : qui obtient un nouveau compte à la première connexion : `closed` (personne), `invite_only` (une invitation pour l'email), `allowlist` (une invitation pour l'email ou son domaine) ou `open` (quiconque les règles de connexion admettent). Vide : le défaut de la page de connexion. |
@@ -156,9 +162,9 @@ mêmes champs et affichent les mêmes textes.
 | `username_from` | D'où vient le nom d'utilisateur d'un nouvel utilisateur : la partie locale de l'email, l'email entier, ou le `preferred_username` de l'IdP (à défaut, la partie locale). |
 | `username_clash` | Que faire si ce nom d'utilisateur est pris : ajouter un court suffixe, ou refuser l'inscription. |
 | `sync_profile` | Mettre à jour le nom et l'email depuis l'IdP à chaque connexion. Jamais pour un superutilisateur. |
-| `allow_email_link_staff` | Sécurité : avec la liaison par email active, lier aussi les utilisateurs qui ont des rôles. Un superutilisateur n'est jamais lié par email. |
+| `allow_email_link_staff` | Sécurité : avec la liaison par email active, lier aussi les utilisateurs qui ont un rôle ou une permission quelconque. Un superutilisateur n'est jamais lié par email. |
 | `sso_only` | Les utilisateurs liés par ce provider ne peuvent pas se connecter avec un mot de passe, même quand le provider est désactivé. |
-| `auto_deactivate_after_days` | Après autant de jours sans usage, `sso-deactivate-idle` désactive les utilisateurs inscrits par ce provider. Vide : jamais. |
+| `auto_deactivate_after_days` | Après autant de jours sans usage, `sso-deactivate-idle` désactive les utilisateurs inscrits par ce provider qui ne peuvent pas utiliser de mot de passe : SSO seul ici, ou connexion par mot de passe désactivée pour le tenant. Vide : jamais. |
 | `session_ttl_secs` | Session la plus longue, en secondes, après une connexion par ce provider. Vide : la durée de session normale. |
 | `superuser_session_ttl_secs` | Session la plus longue, en secondes, pour un superutilisateur connecté par ce provider. Vide : la durée de session normale. |
 
@@ -192,7 +198,7 @@ gardent la valeur partagée.
 | `required_claims` | Claims supplémentaires qu'une connexion doit porter ici, en JSON : `{"roles": ["App.User"]}`. |
 | `signup_mode` | Sécurité : l'inscription ici. Seulement plus stricte que celle du provider partagé. Vide : la valeur partagée. |
 | `allow_email_link` | Désactivé : pas de liaison par email ici. Vide ou activé : le réglage partagé. |
-| `allow_email_link_staff` | Désactivé : la liaison par email ne lie jamais ici un utilisateur avec des rôles. Vide ou activé : le réglage partagé. |
+| `allow_email_link_staff` | Désactivé : la liaison par email ne lie jamais ici un utilisateur avec un rôle ou une permission quelconque. Vide ou activé : le réglage partagé. |
 | `sso_only` | Activé : les utilisateurs de ce provider ne se connectent pas ici avec un mot de passe. |
 | `session_ttl_secs` | Une limite de session plus courte ici, en secondes. Vide : la valeur partagée. |
 | `superuser_session_ttl_secs` | Une limite de session superutilisateur plus courte ici, en secondes. Vide : la valeur partagée. |
@@ -315,10 +321,7 @@ en cas de collision de slug, c'est le **propre provider du tenant qui
 l'emporte** sur le provider partagé — un tenant peut ainsi remplacer un
 provider partagé pour lui-même.
 
-L'URL de callback est dérivée par requête à partir de l'hôte + du slug
-(`https://<host><login>/sso/<slug>/callback`), c'est donc celle-là qu'il
-faut enregistrer auprès de l'IdP. Le schéma est `https`, sauf si un proxy de
-confiance envoie `X-Forwarded-Proto`. Un utilisateur est lié par la liaison
+Enregistrez l'[URL de callback](#url-de-callback) auprès de l'IdP. Un utilisateur est lié par la liaison
 optionnelle par email (utilisateurs tenant non privilégiés), ou par un
 superutilisateur qui ajoute une ligne `SsoLink` : `provider_source`
 (`tenant`, `shared`, `admin`, ou `app` pour une connexion native), `provider_id` (l'id de la ligne du
@@ -397,7 +400,7 @@ Différences avec le flux admin :
   `X-Forwarded-Host`), sinon `http` sur un hôte de
   loopback (`localhost`, `*.localhost`, une IP de loopback) et `https` partout
   ailleurs, donc `localhost.example.com` obtient `https`.
-- **Provisionnement automatique.** Avec `auto_provision = true` (optionnel ; le
+- **Provisionnement automatique.** Le `signup_mode` d'un provider ([Qui peut s'inscrire](#qui-peut-sinscrire)) l'emporte ; sans lui, `auto_provision = true` agit comme `open`. Avec `auto_provision = true` (optionnel ; le
   défaut est `false`), un email IdP vérifié sans ligne `rustango_users`
   correspondante en **crée** une — nom d'utilisateur issu de la partie
   locale de l'email (dédupliqué en cas de collision), avec un hash de mot
@@ -499,7 +502,8 @@ Les champs d'inscription sont `signup_mode`, `default_roles`, `role_map`,
 [référence des champs](#référence-des-champs)). Avec `signup_mode` vide,
 la connexion du tenant est fermée et le flux membre suit
 `MemberAuthConfig::auto_provision` ; l'admin nu n'inscrit jamais personne.
-Un provider avec JWKS (découverte OIDC, Microsoft, Google) prend les
+Un nouvel utilisateur reçoit les rôles de l'invitation ou `default_roles`,
+plus les rôles que donne `role_map`. Un provider avec JWKS (découverte OIDC, Microsoft, Google) prend les
 claims de rôles seulement dans un id_token vérifié ; un provider sans
 id_token, dans userinfo. `sync_roles_on_login` n'ajoute ou ne retire que
 les rôles nommés dans `role_map` ; les rôles donnés à la main restent, et
@@ -552,9 +556,9 @@ Un mot de passe refusé ressemble à un mauvais. Une règle illisible refuse ; d
 
 **Providers partagés.** Le `SsoSharedOverride` d'un tenant resserre un provider partagé, sans jamais l'assouplir, et nomme dans `allowed_roles` les rôles qu'il peut donner (sans override : aucun). L'override peut aussi couper la liaison par e-mail (`allow_email_link`, `allow_email_link_staff`). Il se lie à la ligne du provider partagé à la première connexion : une ligne renommée le garde, une nouvelle ligne avec l'ancien slug non, et une ligne passée à un autre issuer refuse la connexion jusqu'à ce que l'override soit recréé.
 
-**Microsoft multi-annuaires.** Un provider `microsoft` (ou `oidc` sur `/common` ou `/organizations`) accepte les utilisateurs de tout annuaire Entra. Son `role_map` et ses `required_claims` ne comptent que si `allowed_idp_tenants` fixe le `tid` du jeton ; sinon aucun rôle n'est donné et les claims requis refusent. `check --deploy` avertit pour ces lignes.
+**Microsoft multi-annuaires.** Un provider `microsoft` (ou `oidc` sur `/common` ou `/organizations`) accepte les utilisateurs de tout annuaire Entra. Son `role_map` et ses `required_claims` ne comptent que si `allowed_idp_tenants` fixe le `tid` du jeton ; sinon aucun rôle n'est donné et les claims requis refusent. `check --deploy` avertit pour une ligne qui renseigne `role_map` ou `required_claims` sans `allowed_idp_tenants`.
 
-**Limitation et audit.** Les callbacks SSO ont leur propre limite par IP (429), séparée de celle des mots de passe. Liaisons, inscriptions, re-liaisons et changements de rôles vont au journal d'audit ; les refus au plus cinq fois par sujet en dix minutes.
+**Limitation et audit.** Les callbacks SSO ont leur propre limite par IP (429), séparée de celle des mots de passe. Liaisons, inscriptions, re-liaisons et changements de rôles vont au journal d'audit (`sso_linked`, `sso_signup`, `sso_relinked`, `sso_roles_synced`) ; les refus au plus cinq fois par sujet en dix minutes.
 
 **Verrouillage.** Le verrouillage après des mots de passe faux n'arrête pas le SSO. Pour arrêter un utilisateur, mettez `active = false`.
 

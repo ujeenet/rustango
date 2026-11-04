@@ -33,7 +33,7 @@ SSO signs in the user **linked** to the IdP identity: one
 never enough on its own. A first-time user is linked by verified email
 only when the provider has **`allow_email_link`** on (default off), and
 never when the account is a superuser or, without `allow_email_link_staff`,
-staff (tenant: holds any role; bare admin: every account). Those accounts are linked by an
+staff (tenant: holds any role or any direct permission; bare admin: every account). Those accounts are linked by an
 admin, who adds the `SsoLink` row in the admin; the refusal log line names
 the subject. (The member flow, below, can also create an account for an
 unknown email; that is off by default.)
@@ -48,9 +48,11 @@ unknown email; that is off by default.)
 ## Callback URLs
 
 The callback is built per request from the host and the `slug`:
-`https://<host><login>/sso/<slug>/callback`. The scheme is `https` unless
-a trusted proxy sends `X-Forwarded-Proto`. Register one URL per host the
-provider is used on.
+`https://<host><login>/sso/<slug>/callback`. On the admin surfaces the
+scheme is `https` unless a trusted proxy sends `X-Forwarded-Proto`; the
+member flow also uses `http` on a loopback host (see
+[Member SSO](#member-end-user-sso)). Register one URL per host the provider
+is used on.
 
 | Sign-in surface | Tenant on its own host | Tenant under a path prefix |
 |---|---|---|
@@ -81,12 +83,16 @@ register next to each row.
    Add the callback URL as a *Web* redirect URI.
 2. Copy the *Application (client) ID*. Under *Certificates & secrets*,
    create a client secret and copy its value.
-3. Provider row: `kind = microsoft`. It uses the `common` endpoint, so any
-   Entra directory can sign in: set `allowed_idp_tenants` to your
-   *Directory (tenant) ID*. Without it, `role_map` grants no roles,
-   `required_claims` refuse, and `check --deploy` warns.
-4. For one directory only you can instead use `kind = oidc` with
-   `issuer_url = https://login.microsoftonline.com/<tenant-id>/v2.0`.
+3. Provider row: `kind = microsoft`. It uses the `common` endpoint, so
+   with `allowed_idp_tenants` empty any Entra directory can sign in. Set
+   it to your *Directory (tenant) ID* to allow only your directory; then
+   its emails count as verified and `role_map` and `required_claims`
+   apply. `check --deploy` warns when `role_map` or `required_claims` is
+   set and `allowed_idp_tenants` is empty.
+4. Do not use `kind = oidc` with a single-directory Entra issuer
+   (`…/<tenant-id>/v2.0`): that row is not treated as Microsoft, Entra
+   sends no `email_verified`, so email linking, sign-up and
+   `allowed_email_domains` refuse everyone.
 
 ### GitHub
 
@@ -125,16 +131,16 @@ same texts.
 | `slug` | Short id in this provider's URLs, e.g. `google`: the IdP sends users back to `<login>/sso/<slug>/callback`. Unique; a new slug means a new callback URL at the IdP. |
 | `label` | Text on the sign-in button, e.g. `Sign in with Google`. |
 | `kind` | `google`, `microsoft`, `github`, `gitlab` or `discord` for a built-in provider, or `oidc` for any other OpenID Connect provider (then fill in the issuer URL). |
-| `issuer_url` | Only for `oidc`: the issuer URL, e.g. `https://login.microsoftonline.com/<tenant-id>/v2.0` or `https://<org>.okta.com`. The endpoints are read from `<issuer>/.well-known/openid-configuration`. |
+| `issuer_url` | Only for `oidc`: the issuer URL, e.g. `https://<org>.okta.com` or `https://<host>/realms/<realm>`. The endpoints are read from `<issuer>/.well-known/openid-configuration`; for Microsoft Entra ID use the `microsoft` kind. |
 | `client_id` | Client ID (application ID) from your identity provider's app registration. |
 | `client_secret` | Client secret from the same app registration. Stored encrypted with `RUSTANGO_SECRET_KEY`. |
 | `enabled` | Show this provider's button on the sign-in page. |
 | `sort_order` | Button order on the sign-in page; lower numbers come first. |
 | `scopes` | OAuth scopes, space separated, e.g. `openid email profile`. Empty: the kind's default scopes. |
-| `allow_email_link` | Security: link a first-time sign-in to the existing account with the same verified email. Never a superuser, and a user with roles only when the staff option is on too; the bare admin ignores it. |
+| `allow_email_link` | Security: link a first-time sign-in to the existing account with the same verified email; that account's password stops working, its sessions end, its API keys are deleted and its agent keys are turned off. Never a superuser, and a user with any role or permission only with email linking for staff; the bare admin ignores it. |
 | `allowed_email_domains` | Security: only users whose verified email is in these domains may sign in. Comma or newline list: `client.org` is that domain only, `*.client.org` its subdomains only. Empty: any domain. |
 | `blocked_email_domains` | Users with an email in these domains never sign in, even if the allowed list has them. Same format as the allowed list. |
-| `allowed_idp_tenants` | Microsoft Entra directory (tenant) IDs allowed to sign in, comma separated. Read from a verified id_token; set it for a Microsoft app open to all directories. |
+| `allowed_idp_tenants` | Microsoft Entra directory (tenant) IDs allowed to sign in, comma separated, read from a verified id_token. Empty: any Entra directory can sign in through a `microsoft` provider. |
 | `allowed_hosted_domains` | Google Workspace domains (the `hd` claim) allowed to sign in, comma separated, e.g. `client.org`. |
 | `required_claims` | JSON object of claims a sign-in must carry, each holding one of its values: `{"roles": ["App.User"]}`. `{}`: no claim is required. |
 | `signup_mode` | Security: who gets a new account at first sign-in: `closed` (no one), `invite_only` (an invite for the email), `allowlist` (an invite for the email or its domain) or `open` (anyone the sign-in rules let in). Empty: the sign-in page's default. |
@@ -145,9 +151,9 @@ same texts.
 | `username_from` | Where a new user's username comes from: the email's local part, the whole email, or the IdP's `preferred_username` (falls back to the local part). |
 | `username_clash` | What happens when that username is taken: add a short suffix, or refuse the sign-up. |
 | `sync_profile` | Update the user's name and email from the IdP at every sign-in. Never for a superuser. |
-| `allow_email_link_staff` | Security: with email linking on, also link users who hold roles. A superuser is never linked by email. |
+| `allow_email_link_staff` | Security: with email linking on, also link users who hold any role or permission. A superuser is never linked by email. |
 | `sso_only` | Users linked through this provider may not sign in with a password, even while the provider is off. |
-| `auto_deactivate_after_days` | After this many days without use, `sso-deactivate-idle` turns off the users this provider signed up. Empty: never. |
+| `auto_deactivate_after_days` | After this many days without use, `sso-deactivate-idle` turns off the users this provider signed up who cannot use a password: SSO only here, or password login off for the tenant. Empty: never. |
 | `session_ttl_secs` | Longest session, in seconds, after a sign-in through this provider. Empty: the normal session length. |
 | `superuser_session_ttl_secs` | Longest session, in seconds, for a superuser who signs in through this provider. Empty: the normal session length. |
 
@@ -181,7 +187,7 @@ value.
 | `required_claims` | More claims a sign-in must carry here, as JSON: `{"roles": ["App.User"]}`. |
 | `signup_mode` | Security: sign-up here. It can only be stricter than the shared provider's. Empty: the shared value. |
 | `allow_email_link` | Off: no email linking here. Empty or on: the shared setting. |
-| `allow_email_link_staff` | Off: email linking never links a user with roles here. Empty or on: the shared setting. |
+| `allow_email_link_staff` | Off: email linking never links a user with any role or permission here. Empty or on: the shared setting. |
 | `sso_only` | On: users of this provider may not sign in with a password here. |
 | `session_ttl_secs` | A shorter longest session here, in seconds. Empty: the shared value. |
 | `superuser_session_ttl_secs` | A shorter longest superuser session here, in seconds. Empty: the shared value. |
@@ -464,7 +470,8 @@ The sign-up fields are `signup_mode`, `default_roles`, `role_map`,
 [field reference](#field-reference)). With `signup_mode` empty, the tenant
 login is closed and the member flow follows
 `MemberAuthConfig::auto_provision`; the bare admin never signs anyone up.
-A provider with a JWKS (OIDC discovery, Microsoft, Google) takes role
+A new user gets the invite's roles or `default_roles`, plus the roles
+`role_map` gives. A provider with a JWKS (OIDC discovery, Microsoft, Google) takes role
 claims only from a verified id_token; a userinfo-only provider takes them
 from userinfo. `sync_roles_on_login` adds or removes only roles named in
 `role_map`; roles granted by hand stay, and a sign-in without any of the
@@ -532,7 +539,8 @@ until the override is re-added.
 `/common` or `/organizations`) accepts users from any Entra directory.
 Its `role_map` and `required_claims` count only when `allowed_idp_tenants`
 pins the token's `tid`; otherwise roles are not granted and required
-claims refuse. `check --deploy` warns about such rows.
+claims refuse. `check --deploy` warns about a row that sets `role_map` or
+`required_claims` without `allowed_idp_tenants`.
 
 **Throttle and audit.** SSO callbacks have their own per-IP limit (a 429
 past it), apart from the password one. Email links, sign-ups, re-links and
