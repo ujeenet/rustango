@@ -12,6 +12,9 @@ La diferencia que conviene conocer: la consola puede migrar **un** tenant
 recibe slug y recorre todo el registry. En la línea de comandos no hay migración
 por tenant.
 
+Cómo encajan el registry, los tenants, los modos de almacenamiento y el
+enrutado está en [Multi-tenancy](tenancy.md).
+
 [![La lista de tenants de la consola de operador — cada tenant del registry con su modo de almacenamiento, patrón de host y estado activo, más las acciones de aprovisionar, migrar y precalentar](../img/operator-console.png)](../img/operator-console.png)
 
 ## Tabla de contenidos
