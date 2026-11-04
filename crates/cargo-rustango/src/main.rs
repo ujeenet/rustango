@@ -1833,8 +1833,14 @@ mod tests {
     fn the_prod_dockerfile_names_the_required_keys() {
         for template in [Template::Api, Template::Fullstack, Template::Tenant] {
             let docker = templates::dockerfile_prod("app", template);
-            assert!(docker.contains("-e RUSTANGO_SESSION_SECRET="), "{docker}");
-            assert!(docker.contains("RUSTANGO_SECRET_KEY"), "{docker}");
+            // The api template mounts no session.
+            let sessions = template != Template::Api;
+            assert_eq!(
+                docker.contains("RUSTANGO_SESSION_SECRET"),
+                sessions,
+                "{docker}"
+            );
+            assert!(docker.contains("-e RUSTANGO_SECRET_KEY="), "{docker}");
         }
     }
 

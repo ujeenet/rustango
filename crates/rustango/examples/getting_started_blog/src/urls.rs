@@ -8,7 +8,7 @@ use axum::routing::get;
 use axum::Router;
 use rustango::admin;
 use rustango::config::Settings;
-use rustango::session::{load_session_secret_for_tier, tier_from_env};
+use rustango::session::{tier_from_env, try_load_session_secret_for_tier, SessionSecretError};
 use rustango::sql::Pool;
 
 use crate::views;
@@ -31,14 +31,15 @@ pub fn admin_prefix(settings: &Settings) -> String {
 /// `cargo run -- create-admin <username> --superuser`.
 ///
 /// The signing key comes from `RUSTANGO_SESSION_SECRET`, else (off the
-/// prod tier) from `./var/`, so a restart keeps you signed in.
-pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
-    let secret = load_session_secret_for_tier(
+/// prod tier) from `./var/`, so a restart keeps you signed in. On prod a
+/// missing key is an error `main` prints before it exits.
+pub fn admin_router(pool: Pool, settings: &Settings) -> Result<Router, SessionSecretError> {
+    let secret = try_load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),
-    );
-    admin::Builder::from_settings(pool, settings)
+    )?;
+    Ok(admin::Builder::from_settings(pool, settings)
         .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
-        .build()
+        .build())
 }

@@ -4185,8 +4185,6 @@ mod observability_without_admin_tests {
         assert!(!logged("203.0.113.3"), "spoofed header logged: {out}");
     }
 
-    /// `check --deploy` sees an ungated admin mounted by `nest_with`.
-    #[cfg(feature = "admin")]
     /// A failing `try_nest_with` builder is an error the caller reports, not a panic.
     #[tokio::test]
     async fn a_failing_nested_router_is_an_error() {
@@ -4194,16 +4192,16 @@ mod observability_without_admin_tests {
             .await
             .expect("sqlite");
         let err = Cli::new()
-            .try_nest_with("/admin", |_| {
-                Err::<Router, _>(crate::session::SessionSecretError::Missing)
-            })
+            .try_nest_with("/admin", |_| Err::<Router, _>("no session key"))
             .assemble_app(pool.clone())
             .expect_err("the builder failed");
-        assert!(err.to_string().contains("RUSTANGO_SESSION_SECRET"), "{err}");
+        assert_eq!(err.to_string(), "no session key");
         let mut cli = Cli::new().try_nest_with("/x", |_| Err::<Router, _>("nope"));
         assert!(cli.build_nested(&pool).is_err());
     }
 
+    /// `check --deploy` sees an ungated admin mounted by `nest_with`.
+    #[cfg(feature = "admin")]
     #[tokio::test]
     async fn check_builds_the_nested_admin() {
         let _serial = serialized();

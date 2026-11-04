@@ -440,16 +440,27 @@ pub fn dockerfile_prod(name: &str, template: Template) -> String {
     } else {
         ""
     };
+    // Only a template with sessions (the admin, the consoles) needs a session key.
+    let (run_keys, keys_note) = if template == Template::Api {
+        (
+            "-e RUSTANGO_SECRET_KEY=...",
+            "# The image runs on the prod tier, which needs RUSTANGO_SECRET_KEY\n# (`openssl rand -base64 48`).",
+        )
+    } else {
+        (
+            "-e RUSTANGO_SESSION_SECRET=... -e RUSTANGO_SECRET_KEY=...",
+            "# The image runs on the prod tier, which needs RUSTANGO_SESSION_SECRET\n# (`openssl rand -base64 32`) and RUSTANGO_SECRET_KEY (`openssl rand -base64 48`).",
+        )
+    };
     format!(
         r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
 # docker-compose.yml uses; this one is for shipping.
 #
 #   docker build -t {name}:latest .
 #   docker run --rm -p 8080:8080 -e DATABASE_URL=... \
-#     -e RUSTANGO_SESSION_SECRET=... -e RUSTANGO_SECRET_KEY=... {name}:latest
+#     {run_keys} {name}:latest
 #
-# The image runs on the prod tier, which needs RUSTANGO_SESSION_SECRET
-# (`openssl rand -base64 32`) and RUSTANGO_SECRET_KEY (`openssl rand -base64 48`).
+{keys_note}
 #
 # Pick a non-default backend at build time:
 #   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .

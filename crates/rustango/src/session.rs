@@ -175,7 +175,7 @@ impl SessionSecret {
     /// [`Self::try_from_env`], an unset var is
     /// [`SessionSecretError::Missing`] and not a silent random key: a
     /// per-process key breaks multi-instance deployments and hides the
-    /// mistake. [`load_session_secret_for_tier`] uses it on prod.
+    /// mistake. [`try_load_session_secret_for_tier`] uses it on prod.
     ///
     /// # Errors
     /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
@@ -260,6 +260,10 @@ pub fn is_prod_tier(tier: &str) -> bool {
 /// # Panics
 /// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing/invalid.
 #[must_use]
+#[deprecated(
+    since = "0.63.0",
+    note = "use `try_load_session_secret_for_tier` and report the error"
+)]
 pub fn load_session_secret_for_tier(tier: &str, disk_path: &std::path::Path) -> SessionSecret {
     try_load_session_secret_for_tier(tier, disk_path).unwrap_or_else(|e| {
         panic!(
@@ -872,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn dev_tier_loads_without_requiring_env() {
         // The dev tier must never require RUSTANGO_SESSION_SECRET — it
         // falls back to a disk-persisted (or ephemeral) >=32-byte key.

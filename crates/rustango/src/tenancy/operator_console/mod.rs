@@ -2738,7 +2738,7 @@ mod database_url_hint_tests {
 #[cfg(test)]
 mod handoff_port_tests {
     use crate::tenancy::server::{
-        tenant_path_prefix as handoff_prefix, tenant_port_suffix as handoff_port_suffix,
+        port_suffix_from as handoff_port_suffix, tenant_path_prefix as handoff_prefix,
     };
 
     #[test]

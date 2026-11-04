@@ -823,7 +823,7 @@ impl<DB: Database> Builder<DB> {
         // tenant cookie and an operator cookie can't be confused.
         // Audit M2 — prod tier requires a valid RUSTANGO_SESSION_SECRET
         // and fails closed; dev/staging keep the disk-persisted keys.
-        let keys = crate::tenancy::session::ServerKeys::load();
+        let keys = crate::tenancy::session::ServerKeys::load()?;
         let (session_secret_for_tenant, operator_secret) = (keys.tenant, keys.operator);
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),

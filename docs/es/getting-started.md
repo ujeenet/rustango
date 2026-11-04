@@ -515,18 +515,18 @@ El helper pone el admin detrás de un inicio de sesión. Lee sus opciones de la 
 ```rust
 use rustango::admin;
 use rustango::config::Settings;
-use rustango::session::{load_session_secret_for_tier, tier_from_env};
+use rustango::session::{tier_from_env, try_load_session_secret_for_tier, SessionSecretError};
 use rustango::sql::Pool;
 
-pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
-    let secret = load_session_secret_for_tier(
+pub fn admin_router(pool: Pool, settings: &Settings) -> Result<Router, SessionSecretError> {
+    let secret = try_load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),
-    );
-    admin::Builder::from_settings(pool, settings)
+    )?;
+    Ok(admin::Builder::from_settings(pool, settings)
         .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
-        .build()
+        .build())
 }
 ```
 
@@ -547,7 +547,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_settings = settings.clone();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .nest_with(urls::admin_prefix(&settings), move |pool| {
+        .try_nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
         .with_health() // /health + /ready endpoints
@@ -616,7 +616,7 @@ Conecta las rutas del ViewSet a la app. El router del ViewSet necesita el pool d
 ```rust
 rustango::manage::Cli::new()
     .api(urls::api())
-    .nest_with(urls::admin_prefix(&settings), move |pool| {
+    .try_nest_with(urls::admin_prefix(&settings), move |pool| {
         urls::admin_router(pool, &admin_settings)
     })
     .nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool))
