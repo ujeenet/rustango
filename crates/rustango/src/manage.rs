@@ -50,8 +50,10 @@ type SeedFn = Box<dyn for<'a> FnOnce(&'a crate::sql::Pool) -> SeedFut<'a> + Send
 type ShutdownFut = Pin<Box<dyn Future<Output = ()> + Send>>;
 type ShutdownFn = Box<dyn FnOnce() -> ShutdownFut + Send>;
 
-/// A router built from the serving pool. See [`Cli::nest_with`].
-type NestFn = Box<dyn FnOnce(crate::sql::Pool) -> Router + Send>;
+/// A router built from the serving pool. See [`Cli::try_nest_with`].
+type NestFn = Box<
+    dyn FnOnce(crate::sql::Pool) -> Result<Router, Box<dyn std::error::Error + Send + Sync>> + Send,
+>;
 
 /// `help`, `--help`, `-h` or no verb at all.
 fn is_help_verb(args: &[String]) -> bool {
@@ -427,11 +429,27 @@ impl Cli {
     /// Single-database serving only: `runserver` refuses it with
     /// [`Cli::tenancy`], whose pool is the registry's.
     #[must_use]
-    pub fn nest_with<F>(mut self, path: impl Into<String>, router: F) -> Self
+    pub fn nest_with<F>(self, path: impl Into<String>, router: F) -> Self
     where
         F: FnOnce(crate::sql::Pool) -> Router + Send + 'static,
     {
-        self.nested.push((path.into(), Box::new(router)));
+        self.try_nest_with(path, move |pool| {
+            Ok::<_, std::convert::Infallible>(router(pool))
+        })
+    }
+
+    /// [`Cli::nest_with`] for a builder that can fail, such as one that
+    /// loads a session key: the error stops `runserver` and `check`.
+    #[must_use]
+    pub fn try_nest_with<F, E>(mut self, path: impl Into<String>, router: F) -> Self
+    where
+        F: FnOnce(crate::sql::Pool) -> Result<Router, E> + Send + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        self.nested.push((
+            path.into(),
+            Box::new(move |pool| router(pool).map_err(Into::into)),
+        ));
         self
     }
 
@@ -1283,7 +1301,7 @@ impl Cli {
                 .map_err(|e| -> Box<dyn std::error::Error> { e });
         }
         if args.first().map(String::as_str) == Some("check") {
-            self.build_nested(&pool);
+            self.build_nested(&pool)?;
         }
         crate::migrate::manage::run(&pool, &self.migrations_dir, args).await?;
         Ok(())
@@ -1291,10 +1309,11 @@ impl Cli {
 
     /// Build, and drop, every [`Cli::nest_with`] router, so `check --deploy`
     /// audits the admins `runserver` would mount (#1627).
-    fn build_nested(&mut self, pool: &crate::sql::Pool) {
+    fn build_nested(&mut self, pool: &crate::sql::Pool) -> Result<(), Box<dyn std::error::Error>> {
         for (_, build) in std::mem::take(&mut self.nested) {
-            drop(build(pool.clone()));
+            drop(build(pool.clone()).map_err(|e| -> Box<dyn std::error::Error> { e })?);
         }
+        Ok(())
     }
 
     /// `[server] migrate_on_boot` / `migrate_lock_timeout_secs`, under [`Cli::migrate_on_boot`].
@@ -1382,14 +1401,16 @@ impl Cli {
         self.csrf.clone().map(|mount| mount.layer(trusted, &exempt))
     }
 
-    fn assemble_app<P>(&mut self, pool: P) -> Router
+    fn assemble_app<P>(&mut self, pool: P) -> Result<Router, Box<dyn std::error::Error>>
     where
         P: Clone + Send + Sync + 'static,
         P: Into<crate::sql::Pool>,
     {
         let mut api = std::mem::take(&mut self.api);
         for (path, build) in std::mem::take(&mut self.nested) {
-            api = api.nest(&path, build(pool.clone().into()));
+            let router =
+                build(pool.clone().into()).map_err(|e| -> Box<dyn std::error::Error> { e })?;
+            api = api.nest(&path, router);
         }
         // `_http_layers`, not `admin`: the manage-only `api` template calls
         // `.with_welcome()` / `.with_health()` too (#2013).
@@ -1429,7 +1450,7 @@ impl Cli {
             }
             None => api,
         };
-        api.layer(axum::Extension(pool))
+        Ok(api.layer(axum::Extension(pool)))
     }
 
     /// CSRF, the panic guard and the `[server]`/`[security]` layers the api
@@ -1665,7 +1686,7 @@ impl Cli {
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
             let drain = self.drain_timeout();
-            let app = self.assemble_app(pool);
+            let app = self.assemble_app(pool)?;
             let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
             crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
@@ -1699,7 +1720,7 @@ impl Cli {
                         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
                 }
                 let drain = self.drain_timeout();
-                let app = self.assemble_app(pool);
+                let app = self.assemble_app(pool)?;
                 let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
                 crate::shutdown::serve_until_drained(listener, app, drain).await?;
                 run_shutdown_hook(self.on_shutdown).await;
@@ -1723,7 +1744,7 @@ impl Cli {
                     .map_err(|e| -> Box<dyn std::error::Error> { e })?;
             }
             let drain = self.drain_timeout();
-            let app = self.assemble_app(pool);
+            let app = self.assemble_app(pool)?;
             let listener = crate::shutdown::bind_announced(&self.bind, None).await?;
             crate::shutdown::serve_until_drained(listener, app, drain).await?;
             run_shutdown_hook(self.on_shutdown).await;
@@ -3680,7 +3701,8 @@ mod assemble_app_tests {
                     "ok"
                 }),
             ))
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
 
         let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::registry().with(
@@ -3744,7 +3766,7 @@ mod assemble_app_tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
-        let app = Cli::new().with_health().assemble_app(pool);
+        let app = Cli::new().with_health().assemble_app(pool).expect("app");
 
         assert_eq!(
             status(&app, "/health").await,
@@ -3764,7 +3786,7 @@ mod assemble_app_tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
-        let app = Cli::new().assemble_app(pool);
+        let app = Cli::new().assemble_app(pool).expect("app");
 
         assert_eq!(
             status(&app, "/health").await,
@@ -3788,7 +3810,8 @@ mod assemble_app_tests {
         let app = Cli::new()
             .api(Router::new().route("/page", axum::routing::get(|| async { "page" })))
             .with_settings(&s)
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
         let send = |host: &str| {
             let req = Request::builder().uri("/page").header("host", host);
             app.clone().oneshot(req.body(Body::empty()).unwrap())
@@ -3816,7 +3839,8 @@ mod assemble_app_tests {
             .api(Router::new().route("/page", axum::routing::get(|| async { "page" })))
             .with_settings(&s)
             .with_health()
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
         let send = |host: &str, path: &str| {
             let req = Request::builder().uri(path).header("host", host);
             app.clone().oneshot(req.body(Body::empty()).unwrap())
@@ -3846,7 +3870,7 @@ mod assemble_app_tests {
             let mut cli =
                 cli.api(Router::new().route("/p", axum::routing::post(|| async { "ok" })));
             cli.settings_for_layers = Some(s.clone());
-            let app = cli.assemble_app(pool);
+            let app = cli.assemble_app(pool).expect("app");
             let post = |origin: &str| {
                 let req = Request::post("/p")
                     .header("host", "api.example.com")
@@ -3883,7 +3907,7 @@ mod assemble_app_tests {
             s.mcp.prefix = Some(p.into());
             s
         });
-        cli.assemble_app(pool)
+        cli.assemble_app(pool).expect("app")
     }
 
     #[cfg(all(feature = "config", feature = "csrf", feature = "mcp"))]
@@ -3962,7 +3986,8 @@ mod assemble_app_tests {
                     "unreachable"
                 }),
             ))
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
         let req = Request::builder()
             .uri("/boom")
             .header("origin", "https://app.example")
@@ -4003,7 +4028,8 @@ mod assemble_app_tests {
                     axum::response::Html(format!(r#"<script nonce="{n}"></script>"#))
                 }),
             ))
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
         let req = Request::builder().uri("/page").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.expect("request");
         crate::testkit::assert_strict_csp_page(resp, "/page").await;
@@ -4053,7 +4079,7 @@ mod observability_without_admin_tests {
                 "ok"
             }),
         );
-        let app = Cli::new().api(api).assemble_app(pool);
+        let app = Cli::new().api(api).assemble_app(pool).expect("app");
         let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -4116,7 +4142,8 @@ mod observability_without_admin_tests {
             .with_trusted_proxies(["10.0.0.0/8"])
             .expect("valid CIDR")
             .api(api)
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
         let buf = crate::testkit::CaptureWriter::default();
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -4160,6 +4187,23 @@ mod observability_without_admin_tests {
 
     /// `check --deploy` sees an ungated admin mounted by `nest_with`.
     #[cfg(feature = "admin")]
+    /// A failing `try_nest_with` builder is an error the caller reports, not a panic.
+    #[tokio::test]
+    async fn a_failing_nested_router_is_an_error() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite");
+        let err = Cli::new()
+            .try_nest_with("/admin", |_| {
+                Err::<Router, _>(crate::session::SessionSecretError::Missing)
+            })
+            .assemble_app(pool.clone())
+            .expect_err("the builder failed");
+        assert!(err.to_string().contains("RUSTANGO_SESSION_SECRET"), "{err}");
+        let mut cli = Cli::new().try_nest_with("/x", |_| Err::<Router, _>("nope"));
+        assert!(cli.build_nested(&pool).is_err());
+    }
+
     #[tokio::test]
     async fn check_builds_the_nested_admin() {
         let _serial = serialized();
@@ -4170,7 +4214,8 @@ mod observability_without_admin_tests {
             .expect("sqlite");
         Cli::new()
             .nest_with("/admin", |p| crate::admin::router(p))
-            .build_nested(&pool);
+            .build_nested(&pool)
+            .expect("build");
         let flagged = crate::admin::ungated_admin_built();
         crate::admin::reset_ungated_admin_built();
         assert!(flagged, "the nested admin was never built for the audit");
@@ -4183,7 +4228,11 @@ mod observability_without_admin_tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:")
             .await
             .expect("sqlite");
-        let app = Cli::new().with_welcome().with_health().assemble_app(pool);
+        let app = Cli::new()
+            .with_welcome()
+            .with_health()
+            .assemble_app(pool)
+            .expect("app");
         for path in ["/", "/health"] {
             let res = app
                 .clone()
@@ -4227,7 +4276,8 @@ mod observability_without_admin_tests {
                 let name = p.dialect().name();
                 Router::new().route("/x", axum::routing::get(move || async move { name }))
             })
-            .assemble_app(pool);
+            .assemble_app(pool)
+            .expect("app");
         let res = app
             .oneshot(Request::builder().uri("/n/x").body(Body::empty()).unwrap())
             .await

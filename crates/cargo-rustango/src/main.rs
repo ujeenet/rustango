@@ -1279,10 +1279,6 @@ mod tests {
             urls.contains("admin::Builder::settings_prefix(settings)"),
             "{urls}"
         );
-        assert!(
-            main.contains(".nest_with(urls::admin_prefix(&settings)"),
-            "{main}"
-        );
         // One settings load per boot, shared by the server and the admin.
         assert_eq!(
             main.matches("Settings::load_from_env()").count(),
@@ -1294,7 +1290,12 @@ mod tests {
         assert!(!main.contains("load_from_env()?"), "{main}");
         assert!(main.contains(".with_loaded_settings(loaded)"), "{main}");
         // The admin key survives a restart and fails closed on prod.
-        assert!(urls.contains("load_session_secret_for_tier("), "{urls}");
+        // A missing prod key reaches main's `Error:` path, not a panic.
+        assert!(urls.contains("try_load_session_secret_for_tier("), "{urls}");
+        assert!(
+            main.contains(".try_nest_with(urls::admin_prefix(&settings)"),
+            "{main}"
+        );
         assert!(!urls.contains("from_env_or_random"), "{urls}");
         // #1216: no verb may need DATABASE_URL before `Cli::run`.
         assert!(!main.contains("DATABASE_URL"), "{main}");
@@ -1827,6 +1828,16 @@ mod tests {
         );
     }
 
+    /// The prod image's header names the two keys the prod tier needs.
+    #[test]
+    fn the_prod_dockerfile_names_the_required_keys() {
+        for template in [Template::Api, Template::Fullstack, Template::Tenant] {
+            let docker = templates::dockerfile_prod("app", template);
+            assert!(docker.contains("-e RUSTANGO_SESSION_SECRET="), "{docker}");
+            assert!(docker.contains("RUSTANGO_SECRET_KEY"), "{docker}");
+        }
+    }
+
     /// Only a tenant project's `.env.example` names the apex and the reseal command.
     #[test]
     fn only_the_tenant_env_template_carries_tenancy_vars() {
@@ -1835,6 +1846,8 @@ mod tests {
             let tenant = template == Template::Tenant;
             assert_eq!(env.contains("RUSTANGO_APEX_DOMAIN"), tenant, "{env}");
             assert_eq!(env.contains("reseal-tenant-secrets"), tenant, "{env}");
+            // Tenant links name the dev server's port.
+            assert_eq!(env.contains("RUSTANGO_TENANT_PORT=8080"), tenant, "{env}");
         }
     }
 

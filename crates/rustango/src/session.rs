@@ -261,17 +261,28 @@ pub fn is_prod_tier(tier: &str) -> bool {
 /// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing/invalid.
 #[must_use]
 pub fn load_session_secret_for_tier(tier: &str, disk_path: &std::path::Path) -> SessionSecret {
+    try_load_session_secret_for_tier(tier, disk_path).unwrap_or_else(|e| {
+        panic!(
+            "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
+             Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
+             key shared across all instances."
+        )
+    })
+}
+
+/// [`load_session_secret_for_tier`] that returns the prod tier's refusal
+/// instead of panicking, so `main` can report it and exit.
+///
+/// # Errors
+/// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing or invalid.
+pub fn try_load_session_secret_for_tier(
+    tier: &str,
+    disk_path: &std::path::Path,
+) -> Result<SessionSecret, SessionSecretError> {
     if is_prod_tier(tier) {
-        match SessionSecret::require_from_env() {
-            Ok(secret) => secret,
-            Err(e) => panic!(
-                "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
-                 Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
-                 key shared across all instances."
-            ),
-        }
+        SessionSecret::require_from_env()
     } else {
-        SessionSecret::from_env_or_disk(disk_path)
+        Ok(SessionSecret::from_env_or_disk(disk_path))
     }
 }
 
