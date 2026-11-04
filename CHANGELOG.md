@@ -11,9 +11,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - The internal `_tera` and `_aead` features build alone under `-D warnings`.
-
-### Fixed
-
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 
 ## [0.62.0] — 2026-11-02
