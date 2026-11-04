@@ -982,7 +982,14 @@ fn protected_routes(
     // Extra routes a model registers for itself. Each inventory
     // entry is checked against the built-in routes, then mounted
     // on the same protected router.
-    mount_custom_views(routes, mount_view)
+    let routes = mount_custom_views(routes, mount_view);
+    // A fixed pool is shared by every tenant: the host's tenant marks nothing here.
+    #[cfg(feature = "tenancy")]
+    let routes = match &source {
+        StateSource::Fixed(_) => routes.layer(axum::middleware::from_fn(mark_global)),
+        StateSource::PerRequest => routes,
+    };
+    routes
         .layer(axum::middleware::from_fn(
             super::session::scope_request_session,
         ))
@@ -991,6 +998,17 @@ fn protected_routes(
             mark_perms_scoped,
         ))
         .with_state(source)
+}
+
+/// Mark a request to the fixed-pool admin as no tenant's.
+#[cfg(feature = "tenancy")]
+async fn mark_global(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    req.extensions_mut()
+        .insert(crate::tenancy::RequestTenant::Global);
+    next.run(req).await
 }
 
 /// Tag the request with whether its state carries per-user perms.

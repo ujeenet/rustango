@@ -44,8 +44,9 @@
 //! `idem:<sha256>` over the [`IdempotencyLayer::scope`], host, the tenant
 //! the tenancy layer resolves for the request, the caller, method, path
 //! and query, and the client's key. The same key from another caller, tenant
-//! or route is a different entry. When a tenant context is mounted but no
-//! tenant resolves, a keyed request gets `503` instead of running unprotected.
+//! or route is a different entry. When tenant resolution fails, a keyed
+//! request gets `503` instead of running unprotected; a request no tenant
+//! matched is keyed globally.
 //!
 //! The caller is the resolved principal when there is one, else the
 //! `Authorization`, `Cookie` and `X-Api-Key` headers. Add the auth layer

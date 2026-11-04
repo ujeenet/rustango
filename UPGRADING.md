@@ -165,6 +165,8 @@ untouched.
 - Requests the Builder's unresolved router serves are marked `Global`, so `CachePageLayer` on that router now caches them.
 - `LoginScope::Tenant`, `TenantBasic`, `TenantApiKey` and `TenantAgent` take a `TenantSlug`, not a slug, and exist only with `tenancy`. Tenant login counters and account locks reset once.
 - `KeyBy` is `#[non_exhaustive]` and gains `Tenant`: add a `_` arm to a `match` on it.
+- `CacheScope::from_request` returns `None` when no tenant context is mounted: a single-db app uses `SessionStore::new(root)` and `FeatureFlags::new(root)` directly.
+- Tenant SSO login limits are keyed by org id, so they reset once.
 - Object-permission hooks on any tenant route of the Builder now see the routed tenant, so a credential for that tenant resolves to its user, not `Anonymous`. The credential must carry the tenant's `TenantSlug` (org id and slug): an app-built `Principal` with only a slug, and no `TenantSlug` next to it, is `Anonymous` there.
 - Under tenancy, scope `SessionStore` and `FeatureFlags` per request with `.for_tenant(&TenantSlug::of(&t.org)?)`. Scoped keys live under `tenant:#org:<id>:<slug>:`, so existing sessions log out and per-user overrides must be set again, once. Global flags, percentages and single-db keys are unchanged.
 - `rustango::bulk_actions` and `RustangoError::BulkAction` are gone; nothing in the framework ran them. Use the admin's `actions = "..."` or `ListView::bulk_actions(true)` with `tenant_action(...)`.

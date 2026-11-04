@@ -631,7 +631,7 @@ async fn sso_begin_in(
         return StatusCode::NOT_FOUND.into_response();
     };
     let slug = sso.slug.as_str();
-    let scope = crate::sso::policy::throttle_scope(Some(&t.org.slug));
+    let scope = crate::sso::policy::org_throttle_scope(&t.org);
     if let Err(refused) =
         crate::sso::policy::throttle_check(&scope, &parts.extensions, &parts.headers).await
     {
@@ -738,7 +738,7 @@ async fn sso_callback_in(
     };
 
     let pool = t.pool();
-    let scope = crate::sso::policy::throttle_scope(Some(&t.org.slug));
+    let scope = crate::sso::policy::org_throttle_scope(&t.org);
     let attempt =
         match crate::sso::policy::throttle_begin(&scope, &parts.extensions, &parts.headers).await {
             Ok(a) => a,

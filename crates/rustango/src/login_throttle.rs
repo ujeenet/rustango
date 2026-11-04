@@ -134,6 +134,14 @@ pub enum LoginScope {
 }
 
 impl LoginScope {
+    /// The SSO bucket of `tenant` under `kind` (`tenant` or `app`): by org id, so
+    /// a tenant reusing a purged slug starts clean and the purge can clear it.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub(crate) fn sso_tenant(kind: &str, tenant: &crate::tenancy::TenantSlug) -> Self {
+        Self::Sso(format!("{kind}/{}", tenant.namespace()))
+    }
+
     fn key(&self) -> String {
         match self {
             Self::Admin => "admin".to_owned(),
@@ -544,6 +552,8 @@ impl LoginThrottle {
             LoginScope::TenantBasic(tenant.clone()),
             LoginScope::TenantApiKey(tenant.clone()),
             LoginScope::TenantAgent(tenant.clone()),
+            LoginScope::sso_tenant("tenant", tenant),
+            LoginScope::sso_tenant("app", tenant),
         ] {
             let accounts = account_key_prefix(&scope.key());
             note("locks", lockout.clear_accounts_with_prefix(&accounts).await);
@@ -1356,6 +1366,44 @@ mod tests {
     #[cfg(feature = "tenancy")]
     fn tenant(s: &str) -> LoginScope {
         LoginScope::Tenant(ts(s))
+    }
+
+    /// SSO buckets of a tenant carry the org id too.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn sso_tenant_scopes_bind_to_the_org_id() {
+        assert_eq!(
+            LoginScope::sso_tenant("tenant", &ts("acme")).key(),
+            "sso:tenant/#org:1:acme"
+        );
+        assert_ne!(
+            LoginScope::sso_tenant("app", &ts("acme")),
+            LoginScope::sso_tenant("app", &crate::tenancy::TenantSlug::new(2, "acme"))
+        );
+    }
+
+    /// A purge frees the tenant's spent SSO limit.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn forget_tenant_clears_its_sso_limit() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let limits = LoginLimits {
+            global_limit: 1,
+            ..LoginLimits::default()
+        };
+        let t = LoginThrottle::with_cache(limits, cache);
+        let sso = LoginScope::sso_tenant("tenant", &ts("sso-forget"));
+        t.begin(&sso, &ip("10.8.2.1"), "")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+        assert!(t.begin(&sso, &ip("10.8.2.2"), "").await.is_err());
+        t.forget_tenant(&ts("sso-forget")).await.unwrap();
+        assert!(
+            t.begin(&sso, &ip("10.8.2.3"), "").await.is_ok(),
+            "SSO limit kept"
+        );
     }
 
     /// Tenant scopes carry the org id, so a reused slug is a new scope.

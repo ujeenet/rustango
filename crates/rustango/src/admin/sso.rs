@@ -129,7 +129,7 @@ async fn sso_begin(
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
     };
-    let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
+    let scope = sso_scope(&state);
     if let Err(refused) = crate::sso::policy::throttle_check(&scope, &extensions, &headers).await {
         return refused;
     }
@@ -195,7 +195,7 @@ async fn sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(&state, "expired"),
     };
-    let scope = crate::sso::policy::throttle_scope(state.config.tenant.as_deref());
+    let scope = sso_scope(&state);
     let attempt = match crate::sso::policy::throttle_begin(&scope, &extensions, &headers).await {
         Ok(a) => a,
         Err(refused) => return refused,
@@ -609,4 +609,13 @@ mod tests {
         };
         assert_eq!(super::admin_account(&u).unwrap().created_at, Some(at));
     }
+}
+
+/// This admin's SSO throttle scope: its tenant by org id, else its slug, else the bare admin.
+fn sso_scope(state: &AppState) -> crate::login_throttle::LoginScope {
+    #[cfg(feature = "tenancy")]
+    if let Some(org) = &state.config.org {
+        return crate::sso::policy::org_throttle_scope(org);
+    }
+    crate::sso::policy::throttle_scope(state.config.tenant.as_deref())
 }

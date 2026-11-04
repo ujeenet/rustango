@@ -19,11 +19,16 @@ pub struct CacheScope {
 
 impl CacheScope {
     /// The scope of the request's [`RequestTenant`]: global when no tenant
-    /// matched. `None` when resolution failed: nothing may be shared then.
+    /// matched. `None` when resolution failed, or when no tenant context is
+    /// mounted or stored: nothing may be shared then. A single-db app uses
+    /// `SessionStore::new(root)` and `FeatureFlags::new(root)` directly.
     pub async fn from_request(
         root: &BoxedCache,
         parts: &mut axum::http::request::Parts,
     ) -> Option<Self> {
+        if RequestTenant::unmounted(&parts.extensions) {
+            return None;
+        }
         let tenant = match RequestTenant::resolve(parts).await {
             RequestTenant::Tenant(t) => Some(t),
             RequestTenant::Unknown => return None,
@@ -69,5 +74,20 @@ impl CacheScope {
             Some(t) => flags.for_tenant(t),
             None => flags,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No tenant context mounted: no scope, so a session cannot load across hosts.
+    #[tokio::test]
+    async fn no_context_gives_no_scope() {
+        let root: BoxedCache = std::sync::Arc::new(crate::cache::InMemoryCache::new());
+        let mut parts = axum::http::Request::new(()).into_parts().0;
+        assert!(CacheScope::from_request(&root, &mut parts).await.is_none());
+        parts.extensions.insert(RequestTenant::Global);
+        assert!(CacheScope::from_request(&root, &mut parts).await.is_some());
     }
 }

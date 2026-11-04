@@ -173,14 +173,11 @@ impl Liveness {
     /// `Ok(false)` once the agent is revoked, or the org is deactivated or gone.
     async fn check(&self, agent: &super::McpAgent) -> Result<bool, String> {
         if let Some(registry) = &self.registry {
-            use crate::sql::ExistsPool as _;
-            let org = crate::tenancy::Org::objects()
-                .filter("id", agent.org_id)
-                .filter("active", true)
-                .exists(registry)
+            // The resolver's cache: one query per tenant per TTL, not per stream.
+            let org = crate::tenancy::active_org_by_id(registry, agent.org_id)
                 .await
                 .map_err(|e| e.to_string())?;
-            if !org {
+            if org.is_none() {
                 return Ok(false);
             }
         }

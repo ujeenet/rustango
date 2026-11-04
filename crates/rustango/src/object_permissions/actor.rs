@@ -71,7 +71,7 @@ fn bound_to(parts: &Parts, slug: Option<&str>, routed: Option<&Routed>) -> bool 
 
 /// The tenant, with its org id, an auth layer bound the credential to.
 #[cfg(feature = "tenancy")]
-fn credential_tenant(parts: &Parts) -> Option<crate::tenancy::TenantSlug> {
+pub(crate) fn credential_tenant(parts: &Parts) -> Option<crate::tenancy::TenantSlug> {
     if let Some(t) = parts.extensions.get::<crate::tenancy::TenantSlug>() {
         return Some(t.clone());
     }

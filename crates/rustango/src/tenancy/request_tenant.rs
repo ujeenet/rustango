@@ -76,7 +76,6 @@ impl RequestTenant {
     /// `true` when [`Self::resolve`] would answer `Global` only because
     /// nothing is mounted or stored. A layer that must never share across
     /// tenants by mistake treats that as `Unknown`.
-    #[cfg_attr(not(feature = "cache-page"), allow(dead_code))]
     pub(crate) fn unmounted(extensions: &Extensions) -> bool {
         Self::get(extensions).is_none()
             && extensions.get::<TenantSlug>().is_none()
