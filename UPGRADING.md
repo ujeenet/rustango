@@ -152,6 +152,7 @@ untouched.
 
 - Creating or editing a tenant with a port but no host or path prefix is refused (a create with an apex set gets `<slug>.<apex>` instead). Give it a host, or set `RUSTANGO_TENANT_PORT_ROUTING=1` if your app mounts `PortResolver` on its own listeners.
 - Existing port-only tenants lose their links (first-admin mail, console handoff, SSO example) and `check --deploy` names them: give each a host or a path prefix, or set `RUSTANGO_TENANT_PORT_ROUTING=1`.
+- A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 
 ## 0.62.0
 

@@ -12,6 +12,9 @@ Die Lücke, die man kennen sollte: Die Konsole kann **einen** Tenant migrieren
 nimmt und die ganze Registry abarbeitet. Eine Migration pro Tenant gibt es auf
 der Kommandozeile nicht.
 
+Wie Registry, Tenants, Speichermodi und Routing zusammenpassen, steht unter
+[Multi-Tenancy](tenancy.md).
+
 [![Die Tenant-Liste der Operator-Konsole — jeder Tenant der Registry mit Speichermodus, Host-Muster und Aktiv-Status, dazu Aktionen zum Provisionieren, Migrieren und Vorwärmen](../img/operator-console.png)](../img/operator-console.png)
 
 ## Inhaltsverzeichnis

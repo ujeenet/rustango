@@ -1844,8 +1844,8 @@ impl UncheckedPath {
             target: "rustango::tenancy::pools",
             schema = %self.path.schemas[0],
             extensions = %self.skipped.join(", "),
-            "extensions in a tenant's schema, or one with objects of its own, stay off the \
-             tenant's search_path; \
+            "extensions in another tenant's schema, or in a schema with objects of its own, \
+             stay off this tenant's search_path; \
              move them with `ALTER EXTENSION <name> SET SCHEMA public`",
         );
         self
