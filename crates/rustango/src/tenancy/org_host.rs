@@ -910,7 +910,7 @@ pub(crate) fn routing_written(table: &str) {
 
 /// What the generic admin's write of a `rustango_orgs` or
 /// `rustango_org_hosts` row claims, so it cannot take another tenant's
-/// host, path prefix or port.
+/// host, path prefix or link port.
 #[cfg(feature = "admin")]
 pub(crate) enum AdminClaims {
     /// Another table, or no routing value changed.

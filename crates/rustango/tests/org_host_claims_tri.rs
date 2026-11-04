@@ -57,11 +57,17 @@ async fn tenant_db(pool: &Pool) -> (BackendKind, String, Option<Box<dyn std::any
 }
 
 async fn org(pool: &Pool, slug: &str) -> i64 {
+    org_with_host(pool, slug, None).await
+}
+
+/// As [`org`], with an optional base host.
+async fn org_with_host(pool: &Pool, slug: &str, host: Option<String>) -> i64 {
     let mut org = Org {
         slug: slug.to_owned(),
         display_name: slug.to_owned(),
         backend_kind: "sqlite".into(),
         database_url: Some("sqlite::memory:".into()),
+        host_pattern: host,
         ..rustango::testkit::org()
     };
     org.save(pool).await.expect("insert org");
@@ -211,8 +217,10 @@ async fn two_base_claims_at_once_one_wins(pool: &Pool) {
 /// fresh patch each round; exactly one may win every round.
 async fn two_edits_at_once_one_wins(pool: &Pool, tag: &str, patch: impl Fn(usize) -> OrgPatch) {
     let (a, b) = (name(&format!("{tag}-a")), name(&format!("{tag}-b")));
-    org(pool, &a).await;
-    org(pool, &b).await;
+    // A port alone does not route a tenant: give port racers a host.
+    let host = |s: &str| (tag == "port").then(|| format!("{s}.example.test"));
+    org_with_host(pool, &a, host(&a)).await;
+    org_with_host(pool, &b, host(&b)).await;
     for i in 0..10 {
         let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
         let edit = |slug: String| {

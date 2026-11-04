@@ -1105,7 +1105,46 @@ where
     }
     let timeout = pools.pool_config().database_pool_acquire_timeout;
     role_schema_audit(&pools.registry_pool(), timeout, &mut out).await;
+    unroutable_audit(&pools.registry_pool(), &mut out).await;
     out
+}
+
+/// Active tenants no resolver routes (a port alone, say): unreachable, and they get no links.
+async fn unroutable_audit(
+    registry: &crate::sql::Pool,
+    out: &mut rustango::migrate::manage::DeployAuditFindings,
+) {
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let orgs: Vec<crate::tenancy::Org> = match crate::tenancy::Org::objects()
+        .where_(crate::tenancy::Org::active.eq(true))
+        .fetch(registry)
+        .await
+    {
+        Ok(orgs) => orgs,
+        Err(e) => {
+            out.errors.push(format!("could not list tenants: {e}"));
+            return;
+        }
+    };
+    let slugs: Vec<&str> = orgs
+        .iter()
+        .filter(|o| {
+            !crate::tenancy::provision::is_routable(
+                o.host_pattern.as_deref(),
+                o.path_prefix.as_deref(),
+                o.port,
+            )
+        })
+        .map(|o| o.slug.as_str())
+        .collect();
+    if !slugs.is_empty() {
+        out.errors.push(format!(
+            "tenants no resolver reaches, so they get no links: {}; give each a host or a path \
+             prefix (or set RUSTANGO_TENANT_PORT_ROUTING=1 if your app routes ports)",
+            slugs.join(", ")
+        ));
+    }
 }
 
 /// A tenant schema named like a role leads that role's default

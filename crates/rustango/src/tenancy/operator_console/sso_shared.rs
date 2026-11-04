@@ -244,14 +244,19 @@ impl Callbacks {
     /// `{ pattern, example?, example_tenant? }` for `slug`.
     fn view(&self, slug: &str) -> serde_json::Value {
         let path = callback_path(&self.login_url, slug);
-        let example = self.example.as_ref().and_then(|(org, host, apex)| {
-            let link = tenant_link(org, &path, host.as_deref(), apex).ok()?;
-            Some((org.slug.clone(), link))
-        });
+        let (tenant, example, why) = match &self.example {
+            Some((org, host, apex)) => match tenant_link(org, &path, host.as_deref(), apex) {
+                Ok(link) => (Some(&org.slug), Some(link), None),
+                // Say why there is no example rather than drop it.
+                Err(e) => (Some(&org.slug), None, e.user_facing()),
+            },
+            None => (None, None, None),
+        };
         serde_json::json!({
             "pattern": format!("https://<tenant host>{path}"),
-            "example": example.as_ref().map(|e| &e.1),
-            "example_tenant": example.as_ref().map(|e| &e.0),
+            "example": example,
+            "example_tenant": tenant,
+            "example_error": why,
         })
     }
 }

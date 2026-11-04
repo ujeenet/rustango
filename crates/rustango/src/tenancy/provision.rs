@@ -1317,15 +1317,27 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 
 /// Whether a resolver can reach a tenant with these routing keys.
 pub(crate) fn is_routable(host: Option<&str>, prefix: Option<&str>, port: Option<i32>) -> bool {
-    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
-    set(host) || set(prefix) || port.is_some()
+    routable(
+        host,
+        prefix,
+        port,
+        crate::tenancy::server::port_routing_setting(),
+    )
 }
 
-/// Why a tenant with no host, path prefix or port is refused.
+/// A port alone counts only when the app routes ports: the built-in chain has no
+/// `PortResolver`, as its one listener would hand every unmatched request to that tenant.
+fn routable(host: Option<&str>, prefix: Option<&str>, port: Option<i32>, ports: bool) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+    set(host) || set(prefix) || (ports && port.is_some())
+}
+
+/// Why a tenant with no host or path prefix is refused.
 pub(crate) fn unroutable(slug: &str) -> String {
     format!(
-        "tenant `{slug}` needs a host, a path prefix or a port: no resolver routes \
-         `<slug>.<apex>`, so nothing would reach it"
+        "tenant `{slug}` needs a host or a path prefix: no resolver routes `<slug>.<apex>`, \
+         and the built-in server does not route by port (an app that mounts `PortResolver` \
+         on its own listeners sets RUSTANGO_TENANT_PORT_ROUTING=1)"
     )
 }
 
@@ -3234,6 +3246,14 @@ mod validation_tests {
         assert!(routable(&r));
         r.path_prefix = Some("  ".into());
         assert!(!routable(&r), "a blank prefix routes nothing");
+    }
+
+    /// A port alone routes only when the app opted in to port routing.
+    #[test]
+    fn a_port_alone_routes_only_with_port_routing() {
+        assert!(!routable(None, None, Some(8443), false));
+        assert!(routable(None, None, Some(8443), true));
+        assert!(routable(Some("a.example.com"), None, Some(8443), false));
     }
 
     #[test]

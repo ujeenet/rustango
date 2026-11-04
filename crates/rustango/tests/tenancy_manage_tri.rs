@@ -2156,6 +2156,77 @@ async fn check_keeps_no_tenant_pool_open(pool: &Pool) {
     assert_eq!(held, 0, "{:?}", env.backend());
 }
 
+/// Serialises the tests that set `RUSTANGO_TENANT_PORT_ROUTING`.
+fn port_routing_lock() -> &'static tokio::sync::Mutex<()> {
+    static M: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    M.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Create a tenant routed by port alone, with port routing `on` or off.
+async fn create_port_only(pool: &Pool, tag: &str, on: bool) -> (Env, Result<Org, TenancyError>) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let opts = CreateTenantOpts {
+        port: Some(8443),
+        no_migrate: true,
+        ..env.tenant_opts(tag).await
+    };
+    let _g = port_routing_lock().lock().await;
+    if on {
+        std::env::set_var("RUSTANGO_TENANT_PORT_ROUTING", "1");
+    } else {
+        std::env::remove_var("RUSTANGO_TENANT_PORT_ROUTING");
+    }
+    // Not `env.create`: its routing default would add a host.
+    let res = typed!(env.registry, p => create_tenant(&p, &env.url, &dir, tag, opts).await);
+    std::env::remove_var("RUSTANGO_TENANT_PORT_ROUTING");
+    (env, res)
+}
+
+/// The built-in server has no port resolver, so a tenant routed by port
+/// alone would never be reached: creating one is refused.
+async fn a_port_only_tenant_is_refused(pool: &Pool) {
+    let (env, res) = create_port_only(pool, "portonly", false).await;
+    let err = res.expect_err("a port-only tenant routes nowhere");
+    assert!(
+        err.to_string().contains("needs a host or a path prefix"),
+        "{err}"
+    );
+    assert!(env.org("portonly").await.is_none(), "no org row");
+}
+
+/// With `RUSTANGO_TENANT_PORT_ROUTING=1` the app routes ports itself: accepted.
+async fn a_port_only_tenant_is_accepted_with_port_routing(pool: &Pool) {
+    let (env, res) = create_port_only(pool, "portok", true).await;
+    let org = res.expect("port routing is on");
+    assert_eq!(org.port, Some(8443));
+    assert!(org.host_pattern.is_none(), "no host was added");
+    assert!(env.org("portok").await.is_some());
+}
+
+/// `check --deploy` names an existing tenant that only a port routes.
+async fn check_deploy_names_a_port_only_tenant(pool: &Pool) {
+    let env = Env::new(pool).await;
+    let mut org = Org {
+        slug: "portrow".into(),
+        display_name: "portrow".into(),
+        host_pattern: None,
+        path_prefix: None,
+        port: Some(8444),
+        backend_kind: env.backend().as_str().into(),
+        ..rustango::testkit::org()
+    };
+    org.save(&env.registry).await.expect("insert org");
+    let dir = env.dir("migrations");
+    let _g = port_routing_lock().lock().await;
+    std::env::remove_var("RUSTANGO_TENANT_PORT_ROUTING");
+    let (_, out) = env.run_both(&dir, &["check", "--deploy"]).await;
+    assert!(
+        out.contains("tenants no resolver reaches") && out.contains("portrow"),
+        "{out}"
+    );
+}
+
 /// Flags a verb would ignore are refused, and nothing is written.
 async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
     let mut env = Env::new(pool).await;
@@ -2231,6 +2302,9 @@ tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        a_port_only_tenant_is_refused,
+        a_port_only_tenant_is_accepted_with_port_routing,
+        check_deploy_names_a_port_only_tenant,
         reseal_leaves_a_sealed_url_without_a_password,
         a_resolved_secret_is_never_echoed,
         migrate_storage_checks_the_target_url,

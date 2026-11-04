@@ -154,6 +154,12 @@ impl LinkApex {
     }
 }
 
+/// `RUSTANGO_TENANT_PORT_ROUTING=1`: the app routes tenants by listener port itself.
+pub(crate) fn port_routing_setting() -> bool {
+    std::env::var("RUSTANGO_TENANT_PORT_ROUTING")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+}
+
 /// `RUSTANGO_TENANT_SCHEME`, empty counted as unset. The one reader of it.
 pub(crate) fn tenant_scheme_setting() -> Option<String> {
     std::env::var("RUSTANGO_TENANT_SCHEME")
@@ -177,8 +183,8 @@ pub(crate) fn tenant_origin(host: &str, port_suffix: &str) -> String {
 /// caller's own `Host`, whose port is the last fallback.
 ///
 /// # Errors
-/// [`super::TenancyError::Validation`] for an org with no host, path
-/// prefix or port: no resolver would route the link.
+/// [`super::TenancyError::Validation`] for an org no resolver routes: no
+/// host or path prefix (a port alone counts only with port routing on).
 pub(crate) fn tenant_link(
     org: &super::Org,
     path: &str,
@@ -197,7 +203,7 @@ pub(crate) fn tenant_link(
     let prefix = tenant_path_prefix(org.path_prefix.as_deref());
     let host = match org.host_pattern.as_deref().filter(|s| !s.is_empty()) {
         Some(pattern) => pattern.to_owned(),
-        // A path-prefix tenant lives on the apex, a port-only one on `<slug>.<apex>`.
+        // A path-prefix tenant lives on the apex; a port-routed one links to `<slug>.<apex>`.
         None if prefix.is_empty() => format!("{}.{}", org.slug, apex.get()),
         None => apex.get(),
     };
@@ -634,11 +640,12 @@ mod apex_tests {
             ..bare.clone()
         };
         assert!(tenant_link(&prefixed, "/x", None, &apex).is_ok());
+        // The built-in server does not route by port, so a port alone gets no link.
         let ported = crate::tenancy::Org {
             port: Some(8081),
             ..bare
         };
-        assert!(tenant_link(&ported, "/x", None, &apex).is_ok());
+        assert!(tenant_link(&ported, "/x", None, &apex).is_err());
     }
 
     /// #2425 — a handoff link defaults to https where cookies are Secure.
