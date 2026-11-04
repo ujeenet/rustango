@@ -1,0 +1,567 @@
+== index_list_select_related / postgres ==
+SELECT "gold_post"."id", "gold_post"."author", "gold_post"."category", "gold_post"."title", "gold_post"."slug", "gold_post"."body", "gold_post"."views", "gold_post"."published", "gold_post"."created", "gold_post"."data", "author"."id" AS "author__id", "author"."name" AS "author__name", "category"."id" AS "category__id", "category"."slug" AS "category__slug" FROM "gold_post" LEFT JOIN "gold_author" AS "author" ON "gold_post"."author" = "author"."id" LEFT JOIN "gold_category" AS "category" ON "gold_post"."category" = "category"."id" WHERE "gold_post"."published" = $1 ORDER BY "gold_post"."created" DESC LIMIT 20 OFFSET 40
+[Bool(true)]
+== index_list_select_related / mysql ==
+SELECT `gold_post`.`id`, `gold_post`.`author`, `gold_post`.`category`, `gold_post`.`title`, `gold_post`.`slug`, `gold_post`.`body`, `gold_post`.`views`, `gold_post`.`published`, `gold_post`.`created`, `gold_post`.`data`, `author`.`id` AS `author__id`, `author`.`name` AS `author__name`, `category`.`id` AS `category__id`, `category`.`slug` AS `category__slug` FROM `gold_post` LEFT JOIN `gold_author` AS `author` ON `gold_post`.`author` = `author`.`id` LEFT JOIN `gold_category` AS `category` ON `gold_post`.`category` = `category`.`id` WHERE `gold_post`.`published` = ? ORDER BY `gold_post`.`created` DESC LIMIT 20 OFFSET 40
+[Bool(true)]
+== index_list_select_related / sqlite ==
+SELECT "gold_post"."id", "gold_post"."author", "gold_post"."category", "gold_post"."title", "gold_post"."slug", "gold_post"."body", "gold_post"."views", "gold_post"."published", "gold_post"."created", "gold_post"."data", "author"."id" AS "author__id", "author"."name" AS "author__name", "category"."id" AS "category__id", "category"."slug" AS "category__slug" FROM "gold_post" LEFT JOIN "gold_author" AS "author" ON "gold_post"."author" = "author"."id" LEFT JOIN "gold_category" AS "category" ON "gold_post"."category" = "category"."id" WHERE "gold_post"."published" = ? ORDER BY "gold_post"."created" DESC LIMIT 20 OFFSET 40
+[Bool(true)]
+== get_by_slug / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "slug" = $1 LIMIT 2
+[String("post-500")]
+== get_by_slug / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `slug` = ? LIMIT 2
+[String("post-500")]
+== get_by_slug / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "slug" = ? LIMIT 2
+[String("post-500")]
+== values_list / postgres ==
+SELECT "id", "slug", "title" FROM "gold_post" WHERE "published" = $1 ORDER BY "views" DESC
+[Bool(true)]
+== values_list / mysql ==
+SELECT `id`, `slug`, `title` FROM `gold_post` WHERE `published` = ? ORDER BY `views` DESC
+[Bool(true)]
+== values_list / sqlite ==
+SELECT "id", "slug", "title" FROM "gold_post" WHERE "published" = ? ORDER BY "views" DESC
+[Bool(true)]
+== title__iexact / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" ILIKE $1 ESCAPE '!'
+[String("Hi")]
+== title__iexact / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE LOWER(`title`) LIKE LOWER(?) ESCAPE '!'
+[String("Hi")]
+== title__iexact / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE LOWER("title") LIKE LOWER(?) ESCAPE '!'
+[String("Hi")]
+== title__contains / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" LIKE $1 ESCAPE '!'
+[String("%a!%b!_c\\d%")]
+== title__contains / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` LIKE ? COLLATE utf8mb4_bin ESCAPE '!'
+[String("%a!%b!_c\\d%")]
+== title__contains / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" GLOB ?
+[String("*a%b_c\\d*")]
+== title__icontains / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" ILIKE $1 ESCAPE '!'
+[String("%rust%")]
+== title__icontains / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE LOWER(`title`) LIKE LOWER(?) ESCAPE '!'
+[String("%rust%")]
+== title__icontains / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE LOWER("title") LIKE LOWER(?) ESCAPE '!'
+[String("%rust%")]
+== title__startswith / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" LIKE $1 ESCAPE '!'
+[String("r%")]
+== title__startswith / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` LIKE ? COLLATE utf8mb4_bin ESCAPE '!'
+[String("r%")]
+== title__startswith / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" GLOB ?
+[String("r*")]
+== title__istartswith / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" ILIKE $1 ESCAPE '!'
+[String("r%")]
+== title__istartswith / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE LOWER(`title`) LIKE LOWER(?) ESCAPE '!'
+[String("r%")]
+== title__istartswith / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE LOWER("title") LIKE LOWER(?) ESCAPE '!'
+[String("r%")]
+== title__endswith / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" LIKE $1 ESCAPE '!'
+[String("%s")]
+== title__endswith / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` LIKE ? COLLATE utf8mb4_bin ESCAPE '!'
+[String("%s")]
+== title__endswith / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" GLOB ?
+[String("*s")]
+== title__iendswith / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" ILIKE $1 ESCAPE '!'
+[String("%s")]
+== title__iendswith / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE LOWER(`title`) LIKE LOWER(?) ESCAPE '!'
+[String("%s")]
+== title__iendswith / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE LOWER("title") LIKE LOWER(?) ESCAPE '!'
+[String("%s")]
+== title__like / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" LIKE $1
+[String("%x%")]
+== title__like / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` LIKE ? COLLATE utf8mb4_bin
+[String("%x%")]
+== title__like / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" GLOB ?
+[String("*x*")]
+== title__not_ilike / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" NOT ILIKE $1
+[String("%x%")]
+== title__not_ilike / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE LOWER(`title`) NOT LIKE LOWER(?)
+[String("%x%")]
+== title__not_ilike / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE NOT (LOWER("title") LIKE LOWER(?))
+[String("%x%")]
+== views__gt / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" > $1
+[I64(1)]
+== views__gt / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` > ?
+[I64(1)]
+== views__gt / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" > ?
+[I64(1)]
+== views__gte / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" >= $1
+[I64(1)]
+== views__gte / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` >= ?
+[I64(1)]
+== views__gte / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" >= ?
+[I64(1)]
+== views__lt / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" < $1
+[I64(1)]
+== views__lt / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` < ?
+[I64(1)]
+== views__lt / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" < ?
+[I64(1)]
+== views__lte / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" <= $1
+[I64(1)]
+== views__lte / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` <= ?
+[I64(1)]
+== views__lte / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" <= ?
+[I64(1)]
+== views__ne / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" <> $1
+[I64(1)]
+== views__ne / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` <> ?
+[I64(1)]
+== views__ne / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" <> ?
+[I64(1)]
+== views__in / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" = ANY($1)
+[Array([I64(1), I64(2), I64(3)])]
+== views__in / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` IN (?, ?, ?)
+[I64(1), I64(2), I64(3)]
+== views__in / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" IN (?, ?, ?)
+[I64(1), I64(2), I64(3)]
+== views__not_in / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" <> ALL($1)
+[Array([I64(4), I64(5)])]
+== views__not_in / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` NOT IN (?, ?)
+[I64(4), I64(5)]
+== views__not_in / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" NOT IN (?, ?)
+[I64(4), I64(5)]
+== views__in / postgres ==
+ERR empty `IN` list is not supported
+== views__in / mysql ==
+ERR empty `IN` list is not supported
+== views__in / sqlite ==
+ERR empty `IN` list is not supported
+== category__isnull / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NULL
+[]
+== category__isnull / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `category` IS NULL
+[]
+== category__isnull / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NULL
+[]
+== category__isnull / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NOT NULL
+[]
+== category__isnull / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `category` IS NOT NULL
+[]
+== category__isnull / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NOT NULL
+[]
+== views__between / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" BETWEEN $1 AND $2
+[I64(1), I64(9)]
+== views__between / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` BETWEEN ? AND ?
+[I64(1), I64(9)]
+== views__between / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" BETWEEN ? AND ?
+[I64(1), I64(9)]
+== views__not_range / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" NOT BETWEEN $1 AND $2
+[I64(1), I64(9)]
+== views__not_range / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` NOT BETWEEN ? AND ?
+[I64(1), I64(9)]
+== views__not_range / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" NOT BETWEEN ? AND ?
+[I64(1), I64(9)]
+== created__year / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE CAST(EXTRACT(YEAR FROM ("created" AT TIME ZONE 'UTC')) AS INTEGER) = $1
+[I32(2024)]
+== created__year / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE YEAR(`created`) = ?
+[I32(2024)]
+== created__year / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE CAST(strftime('%Y', "created") AS INTEGER) = ?
+[I32(2024)]
+== created__month__gte / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE CAST(EXTRACT(MONTH FROM ("created" AT TIME ZONE 'UTC')) AS INTEGER) >= $1
+[I32(6)]
+== created__month__gte / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE MONTH(`created`) >= ?
+[I32(6)]
+== created__month__gte / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE CAST(strftime('%m', "created") AS INTEGER) >= ?
+[I32(6)]
+== created__date / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE DATE(("created" AT TIME ZONE 'UTC')) = $1
+[Date(2023-11-14)]
+== created__date / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE DATE(`created`) = ?
+[Date(2023-11-14)]
+== created__date / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE DATE("created") = ?
+[Date(2023-11-14)]
+== created__gt / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "created" > $1
+[DateTime(2023-11-14T22:13:20Z)]
+== created__gt / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `created` > ?
+[DateTime(2023-11-14T22:13:20Z)]
+== created__gt / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "created" > ?
+[DateTime(2023-11-14T22:13:20Z)]
+== author__name__icontains / postgres ==
+SELECT "gold_post"."id", "gold_post"."author", "gold_post"."category", "gold_post"."title", "gold_post"."slug", "gold_post"."body", "gold_post"."views", "gold_post"."published", "gold_post"."created", "gold_post"."data" FROM "gold_post" LEFT JOIN "gold_author" AS "author" ON "gold_post"."author" = "author"."id" WHERE "author"."name" ILIKE $1 ESCAPE '!'
+[String("%ann%")]
+== author__name__icontains / mysql ==
+SELECT `gold_post`.`id`, `gold_post`.`author`, `gold_post`.`category`, `gold_post`.`title`, `gold_post`.`slug`, `gold_post`.`body`, `gold_post`.`views`, `gold_post`.`published`, `gold_post`.`created`, `gold_post`.`data` FROM `gold_post` LEFT JOIN `gold_author` AS `author` ON `gold_post`.`author` = `author`.`id` WHERE LOWER(`author`.`name`) LIKE LOWER(?) ESCAPE '!'
+[String("%ann%")]
+== author__name__icontains / sqlite ==
+SELECT "gold_post"."id", "gold_post"."author", "gold_post"."category", "gold_post"."title", "gold_post"."slug", "gold_post"."body", "gold_post"."views", "gold_post"."published", "gold_post"."created", "gold_post"."data" FROM "gold_post" LEFT JOIN "gold_author" AS "author" ON "gold_post"."author" = "author"."id" WHERE LOWER("author"."name") LIKE LOWER(?) ESCAPE '!'
+[String("%ann%")]
+== data__contains / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "data" @> $1::jsonb
+[Json(Object {"k": Number(1)})]
+== data__contains / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE JSON_CONTAINS(`data`, ?)
+[Json(Object {"k": Number(1)})]
+== data__contains / sqlite ==
+ERR operator `@>` is not supported by the `sqlite` dialect
+== data / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "data" = $1
+[Json(Array [Number(1), Number(2)])]
+== data / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE /*!80000 `data` = CAST(? AS JSON) */ /*M! JSON_EQUALS(`data`, ?) = 1 */
+[Json(Array [Number(1), Number(2)])]
+== data / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE (SELECT CASE WHEN rq_json_l IS NULL THEN NULL ELSE NOT EXISTS (SELECT fullkey, CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END, atom FROM json_tree(rq_json_l) EXCEPT SELECT fullkey, CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END, atom FROM json_tree(rq_json_r)) AND NOT EXISTS (SELECT fullkey, CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END, atom FROM json_tree(rq_json_r) EXCEPT SELECT fullkey, CASE WHEN type IN ('integer', 'real') THEN 'number' ELSE type END, atom FROM json_tree(rq_json_l)) END FROM (SELECT "data" AS rq_json_l, ? AS rq_json_r))
+[Json(Array [Number(1), Number(2)])]
+== category / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NULL
+[]
+== category / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `category` IS NULL
+[]
+== category / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NULL
+[]
+== op_json_has_key / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "data" ? $1
+[String("k")]
+== op_json_has_key / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE JSON_CONTAINS_PATH(`data`, 'one', CONCAT('$.', JSON_QUOTE(?)))
+[String("k")]
+== op_json_has_key / sqlite ==
+ERR operator `? (json)` is not supported by the `sqlite` dialect
+== op_json_has_any / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "data" ?| ARRAY[$1, $2]
+[String("a"), String("b")]
+== op_json_has_any / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE JSON_CONTAINS_PATH(`data`, 'one', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))
+[String("a"), String("b")]
+== op_json_has_any / sqlite ==
+ERR operator `?| (json)` is not supported by the `sqlite` dialect
+== op_json_has_all / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "data" ?& ARRAY[$1, $2]
+[String("a"), String("b")]
+== op_json_has_all / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE JSON_CONTAINS_PATH(`data`, 'all', CONCAT('$.', JSON_QUOTE(?)), CONCAT('$.', JSON_QUOTE(?)))
+[String("a"), String("b")]
+== op_json_has_all / sqlite ==
+ERR operator `?& (json)` is not supported by the `sqlite` dialect
+== op_json_contained_by / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "data" <@ $1::jsonb
+[Json(Object {"k": Array [Number(1)]})]
+== op_json_contained_by / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE JSON_CONTAINS(?, `data`)
+[Json(Object {"k": Array [Number(1)]})]
+== op_json_contained_by / sqlite ==
+ERR operator `<@` is not supported by the `sqlite` dialect
+== op_regex / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" ~ $1
+[String("^a")]
+== op_regex / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` REGEXP CONCAT('(?-i)', ?)
+[String("^a")]
+== op_regex / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" REGEXP ?
+[String("^a")]
+== op_not_iregex / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" !~* $1
+[String("^a")]
+== op_not_iregex / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` NOT REGEXP CONCAT('(?i)', ?)
+[String("^a")]
+== op_not_iregex / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" NOT REGEXP ('(?i)' || ?)
+[String("^a")]
+== op_is_distinct_from / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" IS DISTINCT FROM $1
+[I64(3)]
+== op_is_distinct_from / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE NOT (`views` <=> ?)
+[I64(3)]
+== op_is_distinct_from / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" IS NOT ?
+[I64(3)]
+== op_is_not_distinct_from / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NOT DISTINCT FROM $1
+[Null]
+== op_is_not_distinct_from / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `category` <=> ?
+[Null]
+== op_is_not_distinct_from / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS ?
+[Null]
+== op_like_escaped / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" LIKE $1 ESCAPE '!'
+[String("a%")]
+== op_like_escaped / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `title` LIKE ? COLLATE utf8mb4_bin ESCAPE '!'
+[String("a%")]
+== op_like_escaped / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" GLOB ?
+[String("a*")]
+== op_ilike_escaped / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "title" ILIKE $1 ESCAPE '!'
+[String("a_")]
+== op_ilike_escaped / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE LOWER(`title`) LIKE LOWER(?) ESCAPE '!'
+[String("a_")]
+== op_ilike_escaped / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE LOWER("title") LIKE LOWER(?) ESCAPE '!'
+[String("a_")]
+== exclude_and_q_or / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE (NOT ("views" < $1)) AND ("slug" = $2 OR ("views" > $3 AND (NOT ("title" LIKE $4))))
+[I64(10), String("a"), I64(3), String("x%")]
+== exclude_and_q_or / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE (NOT (`views` < ?)) AND (`slug` = ? OR (`views` > ? AND (NOT (`title` LIKE ? COLLATE utf8mb4_bin))))
+[I64(10), String("a"), I64(3), String("x%")]
+== exclude_and_q_or / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE (NOT ("views" < ?)) AND ("slug" = ? OR ("views" > ? AND (NOT ("title" GLOB ?))))
+[I64(10), String("a"), I64(3), String("x*")]
+== xor / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE ((CASE WHEN "slug" = $1 THEN 1 ELSE 0 END) + (CASE WHEN "published" = $2 THEN 1 ELSE 0 END)) % 2 = 1
+[String("a"), Bool(true)]
+== xor / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE ((CASE WHEN `slug` = ? THEN 1 ELSE 0 END) + (CASE WHEN `published` = ? THEN 1 ELSE 0 END)) % 2 = 1
+[String("a"), Bool(true)]
+== xor / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE ((CASE WHEN "slug" = ? THEN 1 ELSE 0 END) + (CASE WHEN "published" = ? THEN 1 ELSE 0 END)) % 2 = 1
+[String("a"), Bool(true)]
+== distinct_order_random / postgres ==
+SELECT DISTINCT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" ORDER BY RANDOM()
+[]
+== distinct_order_random / mysql ==
+SELECT DISTINCT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` ORDER BY RAND()
+[]
+== distinct_order_random / sqlite ==
+SELECT DISTINCT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" ORDER BY RANDOM()
+[]
+== distinct_on / postgres ==
+SELECT DISTINCT ON ("author") "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" ORDER BY "author", "created" DESC
+[]
+== distinct_on / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM (SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data`, `author` AS `__rustango_order0`, `created` AS `__rustango_order1`, ROW_NUMBER() OVER (PARTITION BY `author` ORDER BY `author`, `created` DESC) AS __rn FROM `gold_post`) sub WHERE sub.__rn = 1 ORDER BY `__rustango_order0`, `__rustango_order1` DESC
+[]
+== distinct_on / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM (SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data", "author" AS "__rustango_order0", "created" AS "__rustango_order1", ROW_NUMBER() OVER (PARTITION BY "author" ORDER BY "author", "created" DESC) AS __rn FROM "gold_post") sub WHERE sub.__rn = 1 ORDER BY "__rustango_order0", "__rustango_order1" DESC
+[]
+== offset_only / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" OFFSET 5
+[]
+== offset_only / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` LIMIT 18446744073709551615 OFFSET 5
+[]
+== offset_only / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" LIMIT -1 OFFSET 5
+[]
+== union / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" > $1 UNION SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "slug" = $2
+[I64(1), String("z")]
+== union / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `views` > ? UNION SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `slug` = ?
+[I64(1), String("z")]
+== union / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" > ? UNION SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "slug" = ?
+[I64(1), String("z")]
+== only_defer / postgres ==
+SELECT "id", "author", "category", "title", "slug", "views", "published", "created" FROM "gold_post"
+[]
+== only_defer / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `views`, `published`, `created` FROM `gold_post`
+[]
+== only_defer / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "views", "published", "created" FROM "gold_post"
+[]
+== in_subquery / postgres ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "author" IN (SELECT "id" FROM "gold_author" WHERE "name" LIKE $1 ESCAPE '!')
+[String("A%")]
+== in_subquery / mysql ==
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `author` IN (SELECT `id` FROM `gold_author` WHERE `name` LIKE ? COLLATE utf8mb4_bin ESCAPE '!')
+[String("A%")]
+== in_subquery / sqlite ==
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "author" IN (SELECT "id" FROM "gold_author" WHERE "name" GLOB ?)
+[String("A*")]
+== exists / postgres ==
+SELECT "id", "name" FROM "gold_author" WHERE EXISTS (SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "published" = $1)
+[Bool(true)]
+== exists / mysql ==
+SELECT `id`, `name` FROM `gold_author` WHERE EXISTS (SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `published` = ?)
+[Bool(true)]
+== exists / sqlite ==
+SELECT "id", "name" FROM "gold_author" WHERE EXISTS (SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "published" = ?)
+[Bool(true)]
+== aggregate_having / postgres ==
+SELECT "author", COUNT(*) AS "n", SUM("views")::bigint AS "total" FROM "gold_post" WHERE "published" = $1 GROUP BY "author" HAVING COUNT(*) > $2
+[Bool(true), I64(2)]
+== aggregate_having / mysql ==
+SELECT `author`, COUNT(*) AS `n`, CAST(SUM(`views`) AS SIGNED) AS `total` FROM `gold_post` WHERE `published` = ? GROUP BY `author` HAVING COUNT(*) > ?
+[Bool(true), I64(2)]
+== aggregate_having / sqlite ==
+SELECT "author", COUNT(*) AS "n", CAST(SUM("views") AS INTEGER) AS "total" FROM "gold_post" WHERE "published" = ? GROUP BY "author" HAVING COUNT(*) > ?
+[Bool(true), I64(2)]
+== count / postgres ==
+SELECT COUNT(*) FROM "gold_post" WHERE "views" > $1
+[I64(5)]
+== count / mysql ==
+SELECT COUNT(*) FROM `gold_post` WHERE `views` > ?
+[I64(5)]
+== count / sqlite ==
+SELECT COUNT(*) FROM "gold_post" WHERE "views" > ?
+[I64(5)]
+== count_join_limit / postgres ==
+SELECT COUNT(*) FROM (SELECT "gold_post"."id", "gold_post"."author", "gold_post"."category", "gold_post"."title", "gold_post"."slug", "gold_post"."body", "gold_post"."views", "gold_post"."published", "gold_post"."created", "gold_post"."data", "author"."id" AS "author__id", "author"."name" AS "author__name" FROM "gold_post" LEFT JOIN "gold_author" AS "author" ON "gold_post"."author" = "author"."id" LIMIT 10) AS "gold_post"
+[]
+== count_join_limit / mysql ==
+SELECT COUNT(*) FROM (SELECT `gold_post`.`id`, `gold_post`.`author`, `gold_post`.`category`, `gold_post`.`title`, `gold_post`.`slug`, `gold_post`.`body`, `gold_post`.`views`, `gold_post`.`published`, `gold_post`.`created`, `gold_post`.`data`, `author`.`id` AS `author__id`, `author`.`name` AS `author__name` FROM `gold_post` LEFT JOIN `gold_author` AS `author` ON `gold_post`.`author` = `author`.`id` LIMIT 10) AS `gold_post`
+[]
+== count_join_limit / sqlite ==
+SELECT COUNT(*) FROM (SELECT "gold_post"."id", "gold_post"."author", "gold_post"."category", "gold_post"."title", "gold_post"."slug", "gold_post"."body", "gold_post"."views", "gold_post"."published", "gold_post"."created", "gold_post"."data", "author"."id" AS "author__id", "author"."name" AS "author__name" FROM "gold_post" LEFT JOIN "gold_author" AS "author" ON "gold_post"."author" = "author"."id" LIMIT 10) AS "gold_post"
+[]
+== exists_count / postgres ==
+SELECT COUNT(*) FROM (SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "slug" = $1 LIMIT 1) AS "gold_post"
+[String("x")]
+== exists_count / mysql ==
+SELECT COUNT(*) FROM (SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE `slug` = ? LIMIT 1) AS `gold_post`
+[String("x")]
+== exists_count / sqlite ==
+SELECT COUNT(*) FROM (SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "slug" = ? LIMIT 1) AS "gold_post"
+[String("x")]
+== insert_returning / postgres ==
+INSERT INTO "gold_post" ("author", "title", "slug", "views", "published", "data") VALUES ($1, $2, $3, $4, $5, $6) RETURNING "id"
+[I64(1), String("T"), String("t"), I64(0), Bool(false), Json(Object {"a": Null})]
+== insert_returning / mysql ==
+ERR operator `RETURNING` is not supported by the `mysql` dialect
+== insert_returning / sqlite ==
+INSERT INTO "gold_post" ("author", "title", "slug", "views", "published", "data") VALUES (?, ?, ?, ?, ?, ?) RETURNING "id"
+[I64(1), String("T"), String("t"), I64(0), Bool(false), Json(Object {"a": Null})]
+== insert_upsert / postgres ==
+INSERT INTO "gold_post" ("id", "slug", "views") VALUES ($1, $2, $3) ON CONFLICT ("id") DO UPDATE SET "slug" = EXCLUDED."slug", "views" = EXCLUDED."views"
+[I64(1), String("s"), I64(2)]
+== insert_upsert / mysql ==
+INSERT INTO `gold_post` (`id`, `slug`, `views`) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE `slug` = VALUES(`slug`), `views` = VALUES(`views`)
+[I64(1), String("s"), I64(2)]
+== insert_upsert / sqlite ==
+INSERT INTO "gold_post" ("id", "slug", "views") VALUES (?, ?, ?) ON CONFLICT ("id") DO UPDATE SET "slug" = excluded."slug", "views" = excluded."views"
+[I64(1), String("s"), I64(2)]
+== bulk_insert_ignore / postgres ==
+INSERT INTO "gold_post" ("id", "slug", "category") VALUES ($1, $2, $3::BIGINT), ($4, $5, $6) ON CONFLICT DO NOTHING
+[I64(1), String("a"), Null, I64(2), String("b"), I64(3)]
+== bulk_insert_ignore / mysql ==
+INSERT INTO `gold_post` (`id`, `slug`, `category`) VALUES (?, ?, ?), (?, ?, ?) ON DUPLICATE KEY UPDATE `id` = IF(LAST_INSERT_ID(18446744073709551615), `id`, `id`)
+[I64(1), String("a"), Null, I64(2), String("b"), I64(3)]
+== bulk_insert_ignore / sqlite ==
+INSERT INTO "gold_post" ("id", "slug", "category") VALUES (?, ?, ?), (?, ?, ?) ON CONFLICT DO NOTHING
+[I64(1), String("a"), Null, I64(2), String("b"), I64(3)]
+== bulk_update / postgres ==
+UPDATE "gold_post" SET "slug" = __data."slug", "views" = __data."views" FROM (VALUES ($1, $2, $3), ($4, $5, $6)) AS __data("id", "slug", "views") WHERE "gold_post"."id" = __data."id"
+[I64(1), String("a"), I64(5), I64(2), String("b"), I64(6)]
+== bulk_update / mysql ==
+UPDATE `gold_post` INNER JOIN (/*!80000 VALUES ROW(?, ?, ?), ROW(?, ?, ?)) AS __data(`id`, `slug`, `views`) */ /*M! SELECT ? AS `id`, ? AS `slug`, ? AS `views` UNION ALL SELECT ?, ?, ?) AS __data */ ON `gold_post`.`id` = __data.`id` SET `gold_post`.`slug` = __data.`slug`, `gold_post`.`views` = __data.`views`
+[I64(1), String("a"), I64(5), I64(2), String("b"), I64(6)]
+== bulk_update / sqlite ==
+WITH __data("id", "slug", "views") AS (VALUES (?, ?, ?), (?, ?, ?)) UPDATE "gold_post" SET "slug" = (SELECT "slug" FROM __data WHERE __data."id" = "gold_post"."id"), "views" = (SELECT "views" FROM __data WHERE __data."id" = "gold_post"."id") WHERE "id" IN (SELECT "id" FROM __data)
+[I64(1), String("a"), I64(5), I64(2), String("b"), I64(6)]
+== update_expr_case / postgres ==
+UPDATE "gold_post" SET "views" = ("views" + $1), "title" = CASE WHEN "published" = $2 THEN $3 ELSE $4 END, "category" = $5::BIGINT WHERE "id" = ANY($6)
+[I64(1), Bool(true), String("P"), String("D"), Null, Array([I64(1), I64(2)])]
+== update_expr_case / mysql ==
+UPDATE `gold_post` SET `views` = (`views` + ?), `title` = CASE WHEN `published` = ? THEN ? ELSE ? END, `category` = ? WHERE `id` IN (?, ?)
+[I64(1), Bool(true), String("P"), String("D"), Null, I64(1), I64(2)]
+== update_expr_case / sqlite ==
+UPDATE "gold_post" SET "views" = ("views" + ?), "title" = CASE WHEN "published" = ? THEN ? ELSE ? END, "category" = ? WHERE "id" IN (?, ?)
+[I64(1), Bool(true), String("P"), String("D"), Null, I64(1), I64(2)]
+== update_queryset / postgres ==
+UPDATE "gold_post" SET "published" = $1 WHERE "slug" LIKE $2 ESCAPE '!'
+[Bool(false), String("old%")]
+== update_queryset / mysql ==
+UPDATE `gold_post` SET `published` = ? WHERE `slug` LIKE ? COLLATE utf8mb4_bin ESCAPE '!'
+[Bool(false), String("old%")]
+== update_queryset / sqlite ==
+UPDATE "gold_post" SET "published" = ? WHERE "slug" GLOB ?
+[Bool(false), String("old*")]
+== update_limited / postgres ==
+UPDATE "gold_post" SET "views" = $1 WHERE "id" IN (SELECT "id" FROM "gold_post" AS "__rustango_self" ORDER BY "created", "id" LIMIT 3)
+[I64(0)]
+== update_limited / mysql ==
+UPDATE `gold_post` SET `views` = ? WHERE `id` IN (SELECT * FROM (SELECT `id` FROM `gold_post` AS `__rustango_self` ORDER BY `created`, `id` LIMIT 3) AS `_rustango_in`)
+[I64(0)]
+== update_limited / sqlite ==
+UPDATE "gold_post" SET "views" = ? WHERE "id" IN (SELECT "id" FROM "gold_post" AS "__rustango_self" ORDER BY "created", "id" LIMIT 3)
+[I64(0)]
+== delete / postgres ==
+DELETE FROM "gold_post" WHERE "views" < $1
+[I64(0)]
+== delete / mysql ==
+DELETE FROM `gold_post` WHERE `views` < ?
+[I64(0)]
+== delete / sqlite ==
+DELETE FROM "gold_post" WHERE "views" < ?
+[I64(0)]
+== string_with_quotes / postgres ==
+SELECT "id", "name" FROM "gold_author" WHERE "name" = $1
+[String("q\"`'")]
+== string_with_quotes / mysql ==
+SELECT `id`, `name` FROM `gold_author` WHERE `name` = ?
+[String("q\"`'")]
+== string_with_quotes / sqlite ==
+SELECT "id", "name" FROM "gold_author" WHERE "name" = ?
+[String("q\"`'")]
