@@ -16,10 +16,7 @@ result.
 > **Source:** `rustango::tenancy::auth_backends` (`AuthBackend`, `ModelBackend`,
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) and
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — behind the `tenancy`
-> feature. A portable, DB-agnostic registry also lives at
-> `rustango::auth_backends`, which needs the internal `_async_trait`
-> feature — pulled in by `cache`, `email`, `jobs` and `oauth2`, so most
-> builds have it, but a minimal one does not.
+> feature.
 >
 > **Runnable version:** every snippet is copied from
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -31,7 +28,6 @@ result.
 - [Gating routes: require_auth](#gating-routes-require_auth)
 - [Reading the user: CurrentUser](#reading-the-user-currentuser)
 - [Permissions: require_perm](#permissions-require_perm)
-- [The portable registry](#the-portable-registry)
 - [See also](#see-also)
 
 ---
@@ -234,32 +230,6 @@ is denied even with grants; an explicit per-user override wins over role grants;
 otherwise any role the user holds that grants the codename passes. Grant with
 `set_user_perm_pool` / roles via `create_role_pool` + `assign_role_pool` (the
 permission tables are created by `ensure_tables_pool`).
-
----
-
-## The portable registry
-
-Separately, `rustango::auth_backends` (note: crate root, **not** `tenancy`) is a
-small **framework-agnostic** registry — a `Credentials` → `Principal` chain with
-its own `AuthBackend` trait. It has no HTTP/axum glue; use it when you want
-pluggable auth backends inside your own auth code:
-
-```rust
-use std::sync::Arc;
-use rustango::auth_backends::{
-    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
-};
-
-async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
-    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-    chain.authenticate(&Credentials::remote(remote_user)).await
-}
-```
-
-Same "first success wins / first error stops" semantics as the HTTP chain.
-`chain.get_user(id)` walks the chain the same way to reload a principal, for
-example one held in a session. For
-gating real routes, use the `tenancy` middleware above.
 
 ---
 

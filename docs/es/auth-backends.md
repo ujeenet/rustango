@@ -16,10 +16,7 @@ rutas y el extractor `CurrentUser` para leer el resultado.
 > **Fuente:** `rustango::tenancy::auth_backends` (`AuthBackend`, `ModelBackend`,
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) y
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — detrás de la característica
-> `tenancy`. Un registro portable e independiente de la base de datos también
-> vive en `rustango::auth_backends`, que necesita la feature interna `_async_trait`
-> — la activan `cache`, `email`, `jobs` y `oauth2`, así que la mayoría de los
-> builds la tienen, pero uno mínimo no.
+> `tenancy`.
 >
 > **Versión ejecutable:** cada fragmento está copiado de
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -31,7 +28,6 @@ rutas y el extractor `CurrentUser` para leer el resultado.
 - [Restringir rutas: require_auth](#restringir-rutas-require_auth)
 - [Leer el usuario: CurrentUser](#leer-el-usuario-currentuser)
 - [Permisos: require_perm](#permisos-require_perm)
-- [El registro portable](#el-registro-portable)
 - [Véase también](#véase-también)
 
 ---
@@ -237,32 +233,6 @@ sobre las concesiones de rol; en caso contrario, cualquier rol que el usuario
 posea que conceda el codename pasa. Concede con
 `set_user_perm_pool` / los roles mediante `create_role_pool` + `assign_role_pool`
 (las tablas de permisos las crea `ensure_tables_pool`).
-
----
-
-## El registro portable
-
-Por separado, `rustango::auth_backends` (nota: raíz del crate, **no** `tenancy`)
-es un pequeño registro **independiente del framework** — una cadena
-`Credentials` → `Principal` con su propio trait `AuthBackend`. No tiene ningún
-pegamento HTTP/axum; úsalo cuando quieras backends de autenticación
-intercambiables dentro de tu propio código de autenticación:
-
-```rust
-use std::sync::Arc;
-use rustango::auth_backends::{
-    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
-};
-
-async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
-    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-    chain.authenticate(&Credentials::remote(remote_user)).await
-}
-```
-
-La misma semántica «el primer éxito gana / el primer error detiene» que la cadena
-HTTP. `chain.get_user(id)` recorre la cadena igual para recargar un principal,
-por ejemplo uno guardado en una sesión. Para restringir rutas reales, usa el middleware de `tenancy` de arriba.
 
 ---
 
