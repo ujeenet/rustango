@@ -1,5 +1,5 @@
-# Monthly, one PR per ecosystem, at most two open: each PR runs the full
-# CI matrix. Major bumps are planned by hand (they need code changes and
+# Monthly, one grouped PR per ecosystem (examples apart), at most three
+# open: each PR runs the full CI matrix. Major bumps are planned by hand (they need code changes and
 # must keep the Rust 1.88 floor), so they are ignored here.
 version: 2
 updates:
@@ -14,6 +14,29 @@ updates:
         update-types: ["version-update:semver-major"]
     groups:
       cargo:
+        patterns: ["*"]
+  # The example crates sit outside the workspace, each with its own lock.
+  - package-ecosystem: cargo
+    directories:
+      - /examples/showcase
+      - /crates/rustango/examples/admin_demo
+      - /crates/rustango/examples/auth_demo
+      - /crates/rustango/examples/cookbook_blog
+      - /crates/rustango/examples/getting_started_blog
+      - /crates/rustango/examples/mcp_demo
+      - /crates/rustango/examples/orm_cookbook
+      - /crates/rustango/examples/platform_commerce
+      - /crates/rustango/examples/platform_commerce_saas
+      - /crates/rustango/examples/tenant_user_extension
+    target-branch: develop
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      examples:
         patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /

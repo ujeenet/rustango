@@ -14,12 +14,10 @@ no-default-features = false
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
-# v0.30.22 — RUSTSEC-2023-0071 (Marvin Attack on rsa v0.9.x)
-# is unfixable from our side: the only consumer is sqlx-mysql,
-# and no safe upgrade exists upstream. The mysql backend is
-# opt-in (cargo feature, not default), so projects that don't
-# enable it never link rsa. Track upstream:
-# https://github.com/RustCrypto/RSA/issues/626
+# RUSTSEC-2023-0071 (Marvin, timing leak in `rsa` decryption and signing)
+# needs private-key operations. Our only `rsa` user is sqlx-mysql, which
+# only encrypts the login password with the server's `RsaPublicKey`, so
+# the leaky path is never run. No fixed `rsa` release exists yet.
 ignore = ["RUSTSEC-2023-0071"]
 
 [licenses]
@@ -40,15 +38,60 @@ allow = [
     # `quoted_printable` (v0.5.2), a transitive dep of `lettre`
     # (the SMTP transport added in PR #94 / issue #48).
     "0BSD",
-    "Unicode-DFS-2016",
     "Unicode-3.0",
     "Zlib",
 ]
 confidence-threshold = 0.8
 
+# The example crates are `publish = false` and carry no `license`.
+[licenses.private]
+ignore = true
+
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
 wildcards = "deny"
+# Path deps on the workspace crates (examples) have no version.
+allow-wildcard-paths = true
+# Each skip is a split upstream we cannot close ourselves; drop it when
+# the older side catches up.
+skip = [
+    { crate = "base64:^0.23", reason = "lettre and hyper-util moved to 0.23; sqlx, axum and reqwest are on 0.22" },
+    # RustCrypto 0.10 -> 0.11 split: `p256` (web push) is on the new stack,
+    # sqlx and `rsa` on the old one.
+    { crate = "block-buffer:^0.12", reason = "RustCrypto split: p256 on digest 0.11, sqlx on 0.10" },
+    { crate = "const-oid:^0.10", reason = "RustCrypto split: p256 on der 0.8, rsa on 0.7" },
+    { crate = "cpufeatures:^0.3", reason = "RustCrypto split: sha2 0.11 (p256), sha2 0.10 (sqlx)" },
+    { crate = "crypto-common:^0.2", reason = "RustCrypto split: p256 on digest 0.11, sqlx on 0.10" },
+    { crate = "der:^0.8", reason = "RustCrypto split: p256 on der 0.8, rsa on 0.7" },
+    { crate = "digest:^0.11", reason = "RustCrypto split: p256 on digest 0.11, sqlx on 0.10" },
+    { crate = "hmac:^0.13", reason = "RustCrypto split: rfc6979 (p256) on 0.13, sqlx on 0.12" },
+    { crate = "sha2:^0.11", reason = "RustCrypto split: p256 on 0.11, sqlx on 0.10" },
+    { crate = "signature:^3", reason = "RustCrypto split: ecdsa (p256) on 3, rsa on 2" },
+    { crate = "spki:^0.8", reason = "RustCrypto split: ecdsa (p256) on 0.8, rsa on 0.7" },
+    # rand 0.8 (sqlx, rsa) and 0.9 (tungstenite).
+    { crate = "rand:^0.9", reason = "tungstenite is on 0.9; sqlx and rsa on 0.8" },
+    { crate = "rand_chacha:^0.9", reason = "follows rand 0.9 (tungstenite)" },
+    { crate = "rand_core:^0.9", reason = "follows rand 0.9 (tungstenite)" },
+    { crate = "rand_core:^0.10", reason = "the RustCrypto 0.11 stack (p256) is on 0.10" },
+    { crate = "getrandom:^0.3", reason = "follows rand_core 0.9 (tungstenite)" },
+    { crate = "getrandom:^0.4", reason = "uuid, tempfile and rand_core 0.10 moved; ring and rand_core 0.6 are on 0.2" },
+    { crate = "r-efi:^6", reason = "follows getrandom 0.4" },
+    { crate = "hashbrown:^0.15", reason = "hashlink (sqlx-core) pins 0.15; indexmap is on 0.17" },
+    { crate = "redox_syscall:^0.9", reason = "libredox moved to 0.9; parking_lot_core is on 0.5" },
+    { crate = "syn:^2", reason = "syn 3 is new: tracing-attributes, async-stream, zerocopy and our macros are still on 2" },
+    { crate = "webpki-roots:^0.26", reason = "sqlx-core is on 0.26, a shim over 1.0" },
+    # Windows-only: etcetera (sqlx) on windows-sys 0.48, ring on 0.52, the rest 0.61.
+    { crate = "windows-sys:^0.48", reason = "etcetera (sqlx) is on 0.48" },
+    { crate = "windows-sys:^0.52", reason = "ring is on 0.52" },
+    { crate = "windows-targets:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_aarch64_gnullvm:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_aarch64_msvc:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_i686_gnu:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_i686_msvc:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_x86_64_gnu:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_x86_64_gnullvm:^0.48", reason = "follows windows-sys 0.48" },
+    { crate = "windows_x86_64_msvc:^0.48", reason = "follows windows-sys 0.48" },
+]
 
 [sources]
 unknown-registry = "deny"

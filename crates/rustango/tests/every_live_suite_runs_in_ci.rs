@@ -274,6 +274,51 @@ fn has_a_mysql_arm(stem: &str) -> bool {
     stem.ends_with("mysql_live") || stem.ends_with("_tri")
 }
 
+/// Source lines that are not `//` comments.
+fn code_lines(src: &str) -> impl Iterator<Item = &str> {
+    src.lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with("//"))
+}
+
+/// The suite reaches MySQL through `testkit::matrix::Backend::MySql`, or a
+/// local `Backend::Mysql` enum, whatever its filename. A quoted mention (a
+/// guard's own pattern) is not a call.
+fn calls_the_mysql_backend(src: &str) -> bool {
+    code_lines(src).any(|l| {
+        ["Backend::MySql", "Backend::Mysql"]
+            .iter()
+            .any(|pat| l.match_indices(pat).any(|(i, _)| !l[..i].ends_with('"')))
+    })
+}
+
+/// The suite gates on `testkit::matrix::pg_extension(.., "<name>")`,
+/// whatever its filename. The arguments may span lines.
+fn gates_on_pg_extension(src: &str, name: &str) -> bool {
+    let code: String = code_lines(src).collect::<Vec<_>>().join(" ");
+    code.match_indices("pg_extension(").any(|(i, m)| {
+        let rest = &code[i + m.len()..];
+        // Up to the call's own `)`, past nested ones like `.clone()`.
+        let mut depth = 0usize;
+        let end = rest
+            .char_indices()
+            .find(|&(_, c)| match c {
+                '(' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            })
+            .map_or(rest.len(), |(j, _)| j);
+        rest[..end].contains(&format!("\"{name}\""))
+    })
+}
+
 /// Every integration-test target that has a MySQL arm.
 ///
 /// Only top-level `.rs` files, which is exactly Cargo's auto-target rule.
@@ -283,8 +328,15 @@ fn suites_with_a_mysql_arm() -> BTreeSet<String> {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .map(|e| e.expect("directory entry").path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-        .filter(|stem| has_a_mysql_arm(stem))
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_str()?.to_owned();
+            // This file names the pattern in order to look for it.
+            if stem == "every_live_suite_runs_in_ci" {
+                return None;
+            }
+            let src = std::fs::read_to_string(&p).unwrap_or_default();
+            (has_a_mysql_arm(&stem) || calls_the_mysql_backend(&src)).then_some(stem)
+        })
         .collect()
 }
 
@@ -1023,9 +1075,9 @@ fn the_s3_job_sets_every_variable_its_suites_read() {
 ///
 /// By what it *reads*, not what it is called. A suite that reads
 /// `REDIS_TEST_URL` needs Redis whatever its filename; the naming
-/// convention is a hint, the env var is the requirement. PostGIS is the
-/// exception and is matched on filename, because it gates on
-/// `CREATE EXTENSION postgis` failing rather than on a variable.
+/// convention is a hint, the env var is the requirement. MySQL also counts
+/// a `Backend::MySql` call. PostGIS is matched on filename or a
+/// `pg_extension(.., "postgis")` gate, because it has no variable.
 ///
 /// ## Why omission is silent
 ///
@@ -1047,7 +1099,7 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
     let families: [(&str, Detect, &str); 4] = [
         ("redis_live", Detect::Reads("REDIS_TEST_URL"), "Redis"),
         // Eight suites with a MySQL arm ran nowhere on MySQL (#1678).
-        ("mysql_live", Detect::Reads("MYSQL_TEST_URL"), "MySQL"),
+        ("mysql_live", Detect::MySqlArm, "MySQL"),
         (
             "s3_live",
             Detect::Reads("RUSTANGO_S3_TEST_"),
@@ -1055,7 +1107,7 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
         ),
         (
             "postgis_live",
-            Detect::NamedLike("postgis"),
+            Detect::PgExtension("postgis"),
             "the PostGIS extension",
         ),
     ];
@@ -1099,7 +1151,10 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
                 // variables while a mention in prose or a list does
                 // not.
                 Detect::Reads(var) => src.contains(&format!("env::var(\"{var}")),
-                Detect::NamedLike(frag) => stem.contains(frag),
+                Detect::MySqlArm => {
+                    src.contains("env::var(\"MYSQL_TEST_URL") || calls_the_mysql_backend(&src)
+                }
+                Detect::PgExtension(ext) => stem.contains(ext) || gates_on_pg_extension(&src, ext),
             };
             if needs && !runs(stem) {
                 problems.push(format!(
@@ -1134,12 +1189,12 @@ enum Detect {
     /// variable trains people to add exclusions, which is how a
     /// ratchet stops ratcheting.
     Reads(&'static str),
-    /// Its filename contains this — for services with no env gate.
-    ///
-    /// PostGIS is the only one: its suites skip on
-    /// `CREATE EXTENSION postgis` failing, so there is no variable to
-    /// look for.
-    NamedLike(&'static str),
+    /// It reads `MYSQL_TEST_URL` or calls `testkit::matrix::Backend::MySql`.
+    MySqlArm,
+    /// Its filename contains this extension, or it gates on
+    /// `testkit::matrix::pg_extension(.., "<name>")`: PostGIS suites skip
+    /// on the extension missing, so there is no variable to look for.
+    PgExtension(&'static str),
 }
 
 /// Naming a suite in a job proves nothing if the job skips ordinary PRs.
@@ -1249,4 +1304,29 @@ fn advisories_are_scanned_weekly() {
     );
     assert!(text.contains("check advisories"), "no advisory check");
     assert!(text.contains("examples"), "examples not scanned");
+}
+
+#[test]
+fn a_mysql_or_postgis_suite_is_found_by_what_it_calls() {
+    assert!(calls_the_mysql_backend(
+        "let Some(p) = rustango::testkit::matrix::Backend::MySql.pool().await else {"
+    ));
+    assert!(!calls_the_mysql_backend(
+        "    \"MYSQL_TEST_URL\" => text.contains(\"Backend::MySql.pool()\"),"
+    ));
+    assert!(!calls_the_mysql_backend(
+        "// Backend::MySql is skipped here"
+    ));
+    assert!(gates_on_pg_extension(
+        "if !matrix::pg_extension(&pg.clone().into(), \"postgis\").await {",
+        "postgis"
+    ));
+    assert!(gates_on_pg_extension(
+        "matrix::pg_extension(\n    &pool,\n    \"postgis\",\n)",
+        "postgis"
+    ));
+    assert!(!gates_on_pg_extension(
+        "matrix::pg_extension(&pool, \"hstore\"); let s = \"postgis\";",
+        "postgis"
+    ));
 }

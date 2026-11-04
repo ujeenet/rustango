@@ -304,7 +304,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -348,7 +348,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -530,7 +530,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - name: Install lld
         run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: all-features
           cache-on-failure: true
@@ -564,7 +564,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
       - name: Install lld
         run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -707,7 +707,7 @@ jobs:
       - name: Install lld
         run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       # Reads the `tests_compile` cache: same features, same dependency build.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: all-features
           save-if: false
@@ -732,7 +732,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -748,16 +748,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   # The job above runs at the repo root, so it only ever sees the
   # workspace lockfile — `examples/` sits outside `members = ["crates/*"]`
   # and was invisible to it. That is how the quinn-proto advisory in #1236
   # reached us via a Dependabot alert instead of a failing build (#1237).
   #
-  # Advisories only, deliberately: the example crates are unpublished and
-  # carry no `license` field, so `check licenses` fails them as
-  # `unlicensed` for reasons that have nothing to do with security.
+  # Every check, as at the root: `deny.toml` ignores the licenses of
+  # unpublished crates and allows their path deps.
   deny-examples:
     needs: already_green
     if: needs.already_green.outputs.skip != 'true'
@@ -778,10 +777,9 @@ jobs:
           - crates/rustango/examples/tenant_user_extension/Cargo.toml
     steps:
       - uses: actions/checkout@v7
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           manifest-path: ${{ matrix.manifest }}
-          command: check advisories
 
   # A committed lockfile buys reproducibility only if something actually
   # resolves against it. Nothing passed `--locked`, so every example
@@ -851,7 +849,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: platform-${{ matrix.backend }}
           cache-on-failure: true
@@ -1003,7 +1001,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: scaffolded-projects
           cache-on-failure: true
@@ -1102,7 +1100,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # One cache per backend: the rows of a backend share most of their
           # dependency build, and one per row would not fit the 10 GB limit.
@@ -1143,7 +1141,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -1201,7 +1199,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.88
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -1229,6 +1227,8 @@ jobs:
       # The `rust` fences of `docs/orm.md` and the cookbook, generated by the
       # `docs_compile` guard, must compile without Postgres.
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy --test docs_compile --test docs_compile_orm --test docs_compile_cookbook
+      # Gated `not(postgres)`: only the narrow build compiled it; nothing ran it.
+      - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy --test auth_decorators_non_pg_build
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy --test sqlite_pragmas_live
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy --test macro_fk_no_postgres
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy --test macro_choices
@@ -1348,7 +1348,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
           save-if: ${{ github.ref == 'refs/heads/develop' }}
@@ -1517,7 +1517,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           # Default features plus one or two: one cache for the three jobs.
           shared-key: live-default
@@ -1578,7 +1578,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: live-default
           cache-on-failure: true
@@ -1601,7 +1601,7 @@ jobs:
       #
       # Pulled from the GHCR mirror (#1688), falling back to Bitnami with
       # retries if the mirror copy is missing.
-      - uses: docker/login-action@v4
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1667,15 +1667,19 @@ jobs:
       packages: read
     needs: [gate, tests_compile]
     runs-on: ubuntu-latest
+    # MariaDB has not run green yet: report it without blocking until it does.
+    continue-on-error: ${{ matrix.db == 'mariadb' }}
     strategy:
       fail-fast: false
       matrix:
         # Must be 1..N for the N in `count:…/N` below, or tests go unrun.
         partition: [1, 2, 3]
+        # MariaDB speaks the same protocol, but not the same SQL.
+        db: [mysql, mariadb]
     services:
       mysql:
         # GHCR mirror, see `postgres_test`.
-        image: ghcr.io/ujeenet/ci-mysql:8.0
+        image: ${{ matrix.db == 'mariadb' && 'ghcr.io/ujeenet/ci-mariadb:11.4' || 'ghcr.io/ujeenet/ci-mysql:8.0' }}
         credentials:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -1687,7 +1691,7 @@ jobs:
         ports:
           - 3306:3306
         options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"
+          --health-cmd "${{ matrix.db == 'mariadb' && 'healthcheck.sh --connect --innodb_initialized' || 'mysqladmin ping -h 127.0.0.1 -u rustango -prustango' }}"
           --health-interval 2s
           --health-timeout 2s
           --health-retries 30
@@ -1876,7 +1880,7 @@ jobs:
       # `sqlite`, which `--all-features` turns on.
       # Own target dir, so the cache never picks up the extracted archive.
       - if: matrix.partition == 1
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: ". -> target-narrow"
           cache-on-failure: true
@@ -1925,7 +1929,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: live-default
           cache-on-failure: true
@@ -2018,7 +2022,7 @@ jobs:
           swap-storage: true
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: e2e-${{ matrix.backend }}
           workspaces: examples/showcase
@@ -2030,6 +2034,10 @@ jobs:
       - name: Pre-build showcase server
         working-directory: examples/showcase
         run: cargo build --locked --no-default-features --features ${{ matrix.backend }}
+      # The browser suite drives the server; the crate's own tests run here.
+      - name: Showcase unit tests
+        working-directory: examples/showcase
+        run: cargo test --locked --no-default-features --features ${{ matrix.backend }} --lib --bins
       - name: Install playwright + chromium
         working-directory: examples/showcase/e2e
         run: |
@@ -2125,7 +2133,7 @@ jobs:
           swap-storage: true
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: tenant-e2e-${{ matrix.backend }}
           cache-on-failure: true
@@ -2174,10 +2182,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `other_backends`: also built on SQLite and MySQL, so a PG-only
+          # call fails here. `admin_demo` is PG-only and `mcp_demo` SQLite-only
+          # by design. Not yet: `cookbook_blog`'s rustango dep forces
+          # `postgres`, and `tenant_user_extension` calls PG-only `Tenant::conn`.
           - example: getting_started_blog
             migrate: true
+            other_backends: true
           - example: orm_cookbook
             migrate: false
+            other_backends: true
           # The 16-chapter COOKBOOK.md example. Chapters manage their own
           # DB setup (reset/migrate per test), so migrate: false like
           # orm_cookbook. Gated here so it can't silently bit-rot (#1124).
@@ -2194,6 +2208,7 @@ jobs:
           # migrations create `auth_users`; migrate them so they stay valid.
           - example: auth_demo
             migrate: true
+            other_backends: true
           # These two were compiled by **nothing** until #1592 — they
           # appeared in `ci.yml` only as `deny-examples` and `lockfiles`
           # matrix rows, which read a manifest and never build the crate.
@@ -2212,9 +2227,11 @@ jobs:
           - example: platform_commerce
             migrate: true
             chain_check: true
+            other_backends: true
           - example: platform_commerce_saas
             migrate: false
             chain_check: true
+            other_backends: true
     services:
       # GHCR mirror, see `postgres_test`.
       postgres:
@@ -2238,7 +2255,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: doc-example-${{ matrix.example }}
           workspaces: crates/rustango/examples/${{ matrix.example }}
@@ -2262,6 +2279,12 @@ jobs:
       - name: Test
         working-directory: crates/rustango/examples/${{ matrix.example }}
         run: cargo test --locked ${{ matrix.test_args }}
+      - name: Builds on SQLite and MySQL
+        if: ${{ matrix.other_backends }}
+        working-directory: crates/rustango/examples/${{ matrix.example }}
+        run: |
+          cargo check --locked --no-default-features --features sqlite --all-targets
+          cargo check --locked --no-default-features --features mysql --all-targets
 
   # Records that this tree passed, for `already_green` to find next time.
   #
