@@ -710,6 +710,14 @@ directory. The directory must be absolute and exist:
 mkdir -p var/tenants
 cargo run -- add-db-server files --sqlite-dir \"$PWD/var/tenants\"
 cargo run -- create-tenant <slug> --mode database --server files
+```
+
+In PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force var/tenants | Out-Null
+cargo run -- add-db-server files --sqlite-dir \"$PWD\\var\\tenants\"
+cargo run -- create-tenant <slug> --mode database --server files
 ```"
         }
     };

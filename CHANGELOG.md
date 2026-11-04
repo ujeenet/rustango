@@ -29,6 +29,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `loaddata`, `Fixture::from_file`, migration files (`embed_migrations!` too), i18n catalogs, settings TOML, `DB_PASSWORD_FILE` and the `.env` peek at startup read UTF-16 (BOM-detected) and drop a UTF-8 BOM, so a fixture redirected by Windows PowerShell 5.1 loads. `html_tera_from_glob` drops a template's UTF-8 BOM; a UTF-16 template still fails to load.
 - Static files refuse a name that resolves to a hidden file (a link, or a Windows 8.3 name such as `ENV~1` for `.env`), not only one whose requested path starts with a dot.
+- On Windows the server and `migrate-tenant-storage` also stop gracefully on Ctrl-Break, a closed console window and logoff / shutdown, not only Ctrl-C.
+- `manage docs` opens the browser on Windows instead of starting a stray `cmd`.
+- Ctrl-C inside `dbshell` on Windows reaches the database client and no longer kills rustango, leaving the client orphaned.
+- The docs and the scaffolded tenant README give a PowerShell line next to each bash-only `export` / `openssl` / `mkdir -p` command.
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 
 ### Deprecated

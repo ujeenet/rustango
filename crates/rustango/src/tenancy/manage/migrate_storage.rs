@@ -361,6 +361,8 @@ enum Restore {
 struct Interrupt {
     #[cfg(unix)]
     signals: [tokio::signal::unix::Signal; 2],
+    #[cfg(windows)]
+    stop: crate::shutdown::WindowsStop,
 }
 
 impl Interrupt {
@@ -375,7 +377,13 @@ impl Interrupt {
                 ],
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                stop: crate::shutdown::WindowsStop::listen().map_err(TenancyError::Io)?,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
         Ok(Self {})
     }
 
@@ -388,7 +396,11 @@ impl Interrupt {
                 _ = term.recv() => {}
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            self.stop.recv().await;
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             let _ = tokio::signal::ctrl_c().await;
         }

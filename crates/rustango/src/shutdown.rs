@@ -10,7 +10,8 @@
 //! production, with exit code 0 and nothing in the log.
 
 /// Waits until the process is asked to stop, by Ctrl-C (SIGINT) or
-/// SIGTERM. Off Unix, only Ctrl-C.
+/// SIGTERM; on Windows by Ctrl-C, Ctrl-Break, a closed console or a
+/// logoff / shutdown.
 ///
 /// Pass it to `axum::serve(..).with_graceful_shutdown(..)`. The
 /// server then stops accepting connections and lets the requests
@@ -43,10 +44,60 @@ pub async fn shutdown_signal() {
         tracing::info!(target: "rustango::shutdown", signal = signal_name, "shutting down");
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let signal_name = match WindowsStop::listen() {
+            Ok(mut stop) => stop.recv().await,
+            Err(e) => {
+                tracing::warn!(
+                    target: "rustango::shutdown",
+                    error = %e,
+                    "could not install the console handlers; Ctrl-C only",
+                );
+                let _ = tokio::signal::ctrl_c().await;
+                "CTRL_C"
+            }
+        };
+        tracing::info!(target: "rustango::shutdown", signal = signal_name, "shutting down");
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = tokio::signal::ctrl_c().await;
         tracing::info!(target: "rustango::shutdown", signal = "SIGINT", "shutting down");
+    }
+}
+
+/// The Windows console events that ask a process to stop, installed at once
+/// so one arriving before [`Self::recv`] is not lost.
+#[cfg(windows)]
+pub(crate) struct WindowsStop {
+    c: tokio::signal::windows::CtrlC,
+    brk: tokio::signal::windows::CtrlBreak,
+    close: tokio::signal::windows::CtrlClose,
+    shutdown: tokio::signal::windows::CtrlShutdown,
+}
+
+#[cfg(windows)]
+impl WindowsStop {
+    pub(crate) fn listen() -> std::io::Result<Self> {
+        use tokio::signal::windows as w;
+        Ok(Self {
+            c: w::ctrl_c()?,
+            brk: w::ctrl_break()?,
+            close: w::ctrl_close()?,
+            shutdown: w::ctrl_shutdown()?,
+        })
+    }
+
+    /// The first event's name.
+    pub(crate) async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            _ = self.c.recv() => "CTRL_C",
+            _ = self.brk.recv() => "CTRL_BREAK",
+            _ = self.close.recv() => "CTRL_CLOSE",
+            _ = self.shutdown.recv() => "CTRL_SHUTDOWN",
+        }
     }
 }
 
