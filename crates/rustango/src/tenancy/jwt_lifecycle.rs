@@ -460,8 +460,12 @@ impl JwtLifecycle {
 
     /// The one write of a revocation: `mark_used` is `false` both for "already
     /// there" and for a failed write, so a store that also cannot read the key
-    /// back failed.
+    /// back failed. An `exp` already past needs no entry: the token is dead,
+    /// and a TTL store refuses a TTL of zero or less.
     async fn record_revoked(&self, key: &str, exp: i64) -> Result<(), RevokeFailed> {
+        if exp <= chrono::Utc::now().timestamp() {
+            return Ok(());
+        }
         if self.jti_store.mark_used(key, exp).await || self.jti_store.is_used(key).await {
             Ok(())
         } else {

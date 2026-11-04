@@ -81,8 +81,7 @@ pub(crate) async fn handle_message(
                     .and_then(|p| p.get("requestId"))
                     .map(jsonrpc_id_string),
             ) {
-                let scope = ctx.agent.tenant_binding().namespace();
-                super::progress::cancel(&scope, ctx.agent.agent_id, &rid);
+                super::progress::cancel(&ctx.agent.tenant_binding(), ctx.agent.agent_id, &rid);
             }
         }
         return StatusCode::ACCEPTED.into_response();
@@ -144,12 +143,8 @@ async fn sse_in(
         Ok(v) => v,
         Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
-    let registry = crate::tenancy::middleware::session_keys(&extensions).map(|k| k.registry);
     open_capped(
-        Liveness {
-            pool: t.pool().clone(),
-            registry,
-        },
+        Liveness::of(t.pool(), &extensions),
         agent,
         exp.map(|exp| JwtBound { jwt, exp }),
         StreamCaps::from_env(),
@@ -167,12 +162,21 @@ struct Liveness {
 }
 
 impl Liveness {
-    /// `Ok(false)` once the agent is revoked or the org row is gone.
+    /// `pool`, and the registry of the tenant context mounted in `extensions`.
+    fn of(pool: &crate::sql::Pool, extensions: &axum::http::Extensions) -> Self {
+        Self {
+            pool: pool.clone(),
+            registry: crate::tenancy::middleware::session_keys(extensions).map(|k| k.registry),
+        }
+    }
+
+    /// `Ok(false)` once the agent is revoked, or the org is deactivated or gone.
     async fn check(&self, agent: &super::McpAgent) -> Result<bool, String> {
         if let Some(registry) = &self.registry {
             use crate::sql::ExistsPool as _;
             let org = crate::tenancy::Org::objects()
                 .filter("id", agent.org_id)
+                .filter("active", true)
                 .exists(registry)
                 .await
                 .map_err(|e| e.to_string())?;
@@ -657,18 +661,80 @@ mod tests {
         );
     }
 
-    /// A stream whose org row is gone, as after a purge, ends at the next re-check.
+    /// Org `id`'s registry row in `pool`, `active` or not.
+    async fn seed_org(pool: &crate::sql::Pool, id: i64, active: bool) {
+        let mut org = crate::tenancy::Org {
+            id: crate::sql::Auto::Set(id),
+            slug: format!("live-{id}"),
+            active,
+            ..crate::testkit::org()
+        };
+        org.insert(pool).await.unwrap();
+    }
+
+    /// Re-check `agent`'s stream against `registry` every 300ms; whether it
+    /// ended within one second, before five failed re-checks could end it.
+    async fn ends_within_a_second(
+        pool: crate::sql::Pool,
+        registry: crate::sql::Pool,
+        agent: super::super::McpAgent,
+        token: Option<JwtBound>,
+    ) -> bool {
+        let live = Liveness {
+            pool,
+            registry: Some(registry),
+        };
+        let body = drain(open_with(live, agent, token, Duration::from_millis(300)));
+        tokio::time::timeout(Duration::from_secs(1), body)
+            .await
+            .is_ok()
+    }
+
+    /// A stream whose org row is gone, as after a purge, ends at the next
+    /// re-check, not after the error limit.
     #[tokio::test]
     async fn the_stream_ends_when_the_org_is_gone() {
         let (pool, agent, token, _) = world(jwt(), false).await;
-        // The framework tables include the registry's; org 1 has no row.
-        let live = Liveness {
-            pool: pool.clone(),
-            registry: Some(pool),
-        };
-        let body = drain(open_with(live, agent, token, Duration::from_millis(50)));
-        let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
-        assert!(ended.is_ok(), "the stream outlived its tenant");
+        // The framework tables include the registry's; this org has no row.
+        assert!(ends_within_a_second(pool.clone(), pool, agent, token).await);
+    }
+
+    /// A deactivated org ends its streams too: deactivate keeps the row.
+    #[tokio::test]
+    async fn the_stream_ends_when_the_org_is_deactivated() {
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        seed_org(&pool, agent.org_id, false).await;
+        assert!(ends_within_a_second(pool.clone(), pool, agent, token).await);
+    }
+
+    /// A live, active org keeps its stream open across re-checks.
+    #[tokio::test]
+    async fn a_live_orgs_stream_stays_open() {
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        seed_org(&pool, agent.org_id, true).await;
+        assert!(!ends_within_a_second(pool.clone(), pool, agent, token).await);
+    }
+
+    /// The handler re-checks against the mounted tenant context's registry.
+    #[tokio::test]
+    async fn the_handler_wires_the_registry_from_the_tenant_context() {
+        use crate::extractors::DatabaseTenantContext;
+        use crate::tenancy::{session::SessionSecret, BackendKind, ChainResolver, DatabasePools};
+        let (pool, _, _, _) = world(jwt(), false).await;
+        assert!(Liveness::of(&pool, &axum::http::Extensions::new())
+            .registry
+            .is_none());
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(std::sync::Arc::new(DatabaseTenantContext {
+            pools: std::sync::Arc::new(DatabasePools::<crate::sql::sqlx::Sqlite>::new(
+                BackendKind::Sqlite,
+            )),
+            resolver: ChainResolver::new(),
+            session_secret: SessionSecret::from_bytes(vec![1; 32]),
+            operator_secret: SessionSecret::from_bytes(vec![2; 32]),
+            registry: pool.clone(),
+        }));
+        assert!(Liveness::of(&pool, &ext).registry.is_some());
     }
 
     /// Another tenant's burst, past the buffer, does not drop this tenant's frame.
