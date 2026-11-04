@@ -1345,14 +1345,16 @@ pub mod __private_runtime {
     /// First `key` in `./.env`; none if the file is missing or has a
     /// bad line, so a broken `.env` never stops startup.
     fn dotenv_value(key: &str) -> Option<String> {
-        let iter = match dotenvy::from_path_iter(".env") {
-            Ok(iter) => iter,
-            Err(e) if e.not_found() => return None,
+        // Through the shared reader: dotenvy drops a UTF-8 BOM but not UTF-16.
+        let text = match crate::text_file::read(std::path::Path::new(".env")) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
             Err(e) => {
                 eprintln!("rustango: ignoring {key} in .env: {e}");
                 return None;
             }
         };
+        let iter = dotenvy::from_read_iter(std::io::Cursor::new(text));
         let mut found = None;
         for item in iter {
             match item {

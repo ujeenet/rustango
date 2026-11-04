@@ -6,7 +6,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
-- `dumpdata --output <file>` writes the fixture as UTF-8, for shells whose `>` writes UTF-16.
+- `dumpdata --output <file>` (`-o`) writes the fixture as UTF-8, for shells whose `>` writes UTF-16, and replaces an existing file only once the dump is complete.
 
 ### Fixed
 

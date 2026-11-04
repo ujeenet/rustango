@@ -645,16 +645,20 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
     // a static chain to validate).
     let mut chain_names: Vec<String> = Vec::with_capacity(entries.len());
     let mut prev_refs: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
+    let mut texts: Vec<String> = Vec::with_capacity(entries.len());
     for (stem, path) in &entries {
-        let raw = std::fs::read_to_string(path).map_err(|e| {
-            syn::Error::new(
-                proc_macro2::Span::call_site(),
-                format!(
-                    "embed_migrations!: cannot read {} for chain validation: {e}",
-                    path.display()
-                ),
-            )
-        })?;
+        let raw = std::fs::read(path)
+            .map_err(|e| e.to_string())
+            .and_then(decode_text)
+            .map_err(|e| {
+                syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    format!(
+                        "embed_migrations!: cannot read {} for chain validation: {e}",
+                        path.display()
+                    ),
+                )
+            })?;
         let json: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
             syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -689,6 +693,7 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         let prev = json.get("prev").and_then(|v| v.as_str()).map(str::to_owned);
         chain_names.push(name.clone());
         prev_refs.push((name, prev));
+        texts.push(raw);
     }
 
     let name_set: std::collections::HashSet<&str> =
@@ -708,11 +713,17 @@ fn expand_embed_migrations(input: TokenStream2) -> syn::Result<TokenStream2> {
         }
     }
 
+    // The decoded text, so a BOM or UTF-16 file embeds as UTF-8;
+    // `include_bytes!` keeps the file a rebuild input.
     let pairs: Vec<TokenStream2> = entries
         .iter()
-        .map(|(name, path)| {
+        .zip(&texts)
+        .map(|((name, path), text)| {
             let path_lit = path.display().to_string();
-            quote! { (#name, ::core::include_str!(#path_lit)) }
+            quote! { (#name, {
+                const _: &[u8] = ::core::include_bytes!(#path_lit);
+                #text
+            }) }
         })
         .collect();
 
@@ -14719,5 +14730,51 @@ mod model_attr_name_tests {
             container_error(quote! { #[rustango(table = "t", index_together = "a")] struct S; })
                 .expect("one column must fail");
         assert!(err.contains("#[rustango(index)]"), "{err}");
+    }
+}
+
+/// A migration file's text: a UTF-8 BOM dropped, UTF-16 LE / BE decoded by
+/// its BOM. A copy of `rustango::text_file`'s decoder, which this crate
+/// cannot depend on.
+fn decode_text(bytes: Vec<u8>) -> Result<String, String> {
+    fn utf16(bytes: &[u8], unit: fn([u8; 2]) -> u16) -> Result<String, String> {
+        if bytes.len() % 2 != 0 {
+            return Err("odd-length UTF-16".into());
+        }
+        let units = bytes.chunks_exact(2).map(|c| unit([c[0], c[1]]));
+        char::decode_utf16(units)
+            .collect::<Result<String, _>>()
+            .map_err(|e| e.to_string())
+    }
+    match bytes.as_slice() {
+        [0xFF, 0xFE, rest @ ..] => utf16(rest, u16::from_le_bytes),
+        [0xFE, 0xFF, rest @ ..] => utf16(rest, u16::from_be_bytes),
+        _ => {
+            let mut bytes = bytes;
+            if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                bytes.drain(..3);
+            }
+            String::from_utf8(bytes).map_err(|e| e.to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod decode_text_tests {
+    use super::decode_text;
+
+    #[test]
+    fn a_bom_or_utf16_migration_decodes() {
+        let text = r#"{"name": "0001_é"}"#;
+        let mut bom = vec![0xEF, 0xBB, 0xBF];
+        bom.extend(text.bytes());
+        let mut le = vec![0xFF, 0xFE];
+        le.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        let mut be = vec![0xFE, 0xFF];
+        be.extend(text.encode_utf16().flat_map(u16::to_be_bytes));
+        for bytes in [text.as_bytes().to_vec(), bom, le, be] {
+            assert_eq!(decode_text(bytes).unwrap(), text);
+        }
+        assert!(decode_text(vec![0xFF, 0xFE, 0x41]).is_err());
     }
 }

@@ -543,9 +543,8 @@ mod tests {
     /// A settings file written as UTF-16 (PowerShell 5.1's `>`) still parses.
     #[test]
     fn a_utf16_settings_file_parses() {
-        let dir = std::env::temp_dir().join(format!("rgo-bom-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("default.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("default.toml");
         let mut bytes = vec![0xFF, 0xFE];
         bytes.extend(
             "[server]\nbind = \"0.0.0.0:1\"\n"
@@ -555,7 +554,6 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let v = read_toml(&path, true).unwrap().unwrap();
         assert!(v.get("server").is_some());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     static COUNTER: AtomicU32 = AtomicU32::new(0);

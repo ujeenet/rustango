@@ -13,13 +13,14 @@ pub(crate) fn read(path: &Path) -> std::io::Result<String> {
     decode(std::fs::read(path)?)
 }
 
-fn decode(bytes: Vec<u8>) -> std::io::Result<String> {
+fn decode(mut bytes: Vec<u8>) -> std::io::Result<String> {
     let invalid =
         |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_owned());
+    if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        bytes.drain(..3);
+        return String::from_utf8(bytes).map_err(|_| invalid("not valid UTF-8"));
+    }
     match bytes.as_slice() {
-        [0xEF, 0xBB, 0xBF, rest @ ..] => {
-            String::from_utf8(rest.to_vec()).map_err(|_| invalid("not valid UTF-8"))
-        }
         [0xFF, 0xFE, rest @ ..] => {
             utf16(rest, u16::from_le_bytes).ok_or_else(|| invalid("not valid UTF-16 LE"))
         }

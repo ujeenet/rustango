@@ -4395,8 +4395,9 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         )?;
         writeln!(
             w,
-            "  --output <file>  Write UTF-8 to <file>; PowerShell's `>` writes UTF-16."
+            "  --output, -o <file>  Write UTF-8 to <file>, replaced only once the dump is complete;"
         )?;
+        writeln!(w, "                   PowerShell's `>` writes UTF-16.")?;
         return Ok(());
     }
     let model_filters = &parsed.model_filters;
@@ -4435,7 +4436,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
 
     let mut sink = match &parsed.output {
         Some(path) => Sink::File(
-            std::fs::File::create(path)
+            PendingFile::create(Path::new(path))
                 .map_err(|e| MigrateError::Validation(format!("dumpdata: create `{path}`: {e}")))?,
         ),
         None => Sink::Out(w),
@@ -4544,27 +4545,68 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
             after = pks.last().cloned();
         }
     }
-    out.finish()
+    out.finish()?;
+    if let Sink::File(file) = sink {
+        file.commit()?;
+    }
+    Ok(())
+}
+
+/// A file written beside `dest` and renamed over it only once complete, so
+/// a failed dump leaves the old fixture as it was.
+struct PendingFile {
+    file: std::fs::File,
+    tmp: std::path::PathBuf,
+    dest: std::path::PathBuf,
+    done: bool,
+}
+
+impl PendingFile {
+    fn create(dest: &Path) -> std::io::Result<Self> {
+        let name = dest.file_name().unwrap_or_default().to_string_lossy();
+        let tmp = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+        Ok(Self {
+            file: std::fs::File::create(&tmp)?,
+            tmp,
+            dest: dest.to_owned(),
+            done: false,
+        })
+    }
+
+    fn commit(mut self) -> std::io::Result<()> {
+        self.file.sync_all()?;
+        std::fs::rename(&self.tmp, &self.dest)?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for PendingFile {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
 }
 
 /// Where `dumpdata` writes: the command's writer, or an `--output` file.
 enum Sink<'a, W: Write> {
     Out(&'a mut W),
-    File(std::fs::File),
+    File(PendingFile),
 }
 
 impl<W: Write> Write for Sink<'_, W> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Self::Out(w) => w.write(buf),
-            Self::File(f) => f.write(buf),
+            Self::File(f) => f.file.write(buf),
         }
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
         match self {
             Self::Out(w) => w.flush(),
-            Self::File(f) => f.flush(),
+            Self::File(f) => f.file.flush(),
         }
     }
 }

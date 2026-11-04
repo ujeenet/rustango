@@ -420,6 +420,36 @@ async fn a_utf16_or_bom_fixture_loads(pool: &Pool) {
     }
 }
 
+/// A dump that fails part-way leaves an existing `--output` file as it was.
+async fn a_failed_dump_keeps_the_old_output(pool: &Pool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("nodes.json");
+    std::fs::write(&out, "OLD").unwrap();
+    let table = <Node as rustango::core::Model>::SCHEMA.table;
+    rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .expect("drop the table");
+    let res = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1911.Node",
+            "-o",
+            out.to_str().unwrap(),
+        ],
+    )
+    .await;
+    rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+    assert!(res.is_err(), "the select fails: {res:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "OLD");
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "no temp file left"
+    );
+}
+
 async fn manage(pool: &Pool, args: &[&str]) -> Result<String, String> {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut buf: Vec<u8> = Vec::new();
@@ -1223,6 +1253,7 @@ tri_dialect_test! {
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
         a_utf16_or_bom_fixture_loads,
+        a_failed_dump_keeps_the_old_output,
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
         dumpdata_pages_rows_and_links,

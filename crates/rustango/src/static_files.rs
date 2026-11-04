@@ -24,7 +24,10 @@
 //!   checked against the root. [`StaticFiles::no_canonicalize`] turns
 //!   that check off, so use it only on a directory layout you trust.
 //! - A name starting with `.` gets a 404 unless
-//!   [`StaticFiles::serve_hidden`] is on.
+//!   [`StaticFiles::serve_hidden`] is on, in the request and in the
+//!   resolved path, so a link or a Windows 8.3 name (`ENV~1`) cannot reach
+//!   `.env`. With [`StaticFiles::no_canonicalize`] only the request is
+//!   checked.
 //! - Mount user uploads with [`StaticFiles::user_content`]: HTML, SVG
 //!   and XML then download instead of running script on your origin, and
 //!   JS, CSS and WASM go out untyped so no page here can load them.
@@ -115,7 +118,9 @@ impl StaticFiles {
     }
 
     /// Turn off the check that stops a symlink leading out of `root`.
-    /// Only do this on a directory layout you have checked yourself.
+    /// Only do this on a directory layout you have checked yourself: the
+    /// hidden-file check then sees only the requested name, so on Windows
+    /// an 8.3 name such as `ENV~1` can serve `.env`.
     #[must_use]
     pub fn no_canonicalize(mut self) -> Self {
         self.canonicalize = false;
@@ -690,6 +695,46 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), 404);
+    }
+
+    /// A root that is itself a dot directory still serves: only the parts
+    /// below it count.
+    #[tokio::test]
+    async fn a_dot_directory_root_serves() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join(".assets");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.css"), b"body{}").unwrap();
+        let resp = static_router(StaticFiles::new(root))
+            .oneshot(
+                Request::builder()
+                    .uri("/app.css")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    /// `serve_hidden(true)` serves a name that resolves to a dot file too.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn serve_hidden_serves_an_alias_of_a_hidden_file() {
+        let dir = TempDir::new().unwrap();
+        let secret = write_file(&dir, ".well", b"ok");
+        std::os::unix::fs::symlink(&secret, dir.path().join("WELL~1")).unwrap();
+        let app = static_router(StaticFiles::new(dir.path().to_path_buf()).serve_hidden(true));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/WELL~1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
     }
 
     /// A name that resolves to `.env` (a link here, an 8.3 alias on
