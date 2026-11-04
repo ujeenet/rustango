@@ -48,12 +48,16 @@ pub struct SsoInvite {
     pub max_uses: Option<i32>,
     #[rustango(default = "0")]
     #[rustango(verbose_name = "Uses")]
+    #[rustango(help_text = "How many sign-ups this invite has let in. Counted on each use.")]
     pub uses: i32,
     #[rustango(verbose_name = "Used at")]
+    #[rustango(help_text = "When the invite was last used.")]
     pub used_at: Option<chrono::DateTime<chrono::Utc>>,
     #[rustango(verbose_name = "Used by")]
+    #[rustango(help_text = "Id of the user who last signed up with it.")]
     pub used_by: Option<i64>,
     #[rustango(verbose_name = "Invited by")]
+    #[rustango(help_text = "Id of the admin who created the invite.")]
     pub invited_by: Option<i64>,
     /// Re-link: the next sign-in links this existing user instead of creating one.
     #[rustango(
@@ -71,6 +75,7 @@ pub struct SsoInvite {
     pub link_key: Option<String>,
     #[rustango(auto_now_add)]
     #[rustango(verbose_name = "Created at")]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 

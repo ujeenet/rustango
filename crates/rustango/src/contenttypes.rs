@@ -62,17 +62,23 @@ pub struct ContentType {
     /// after the crate root, or the explicit `#[rustango(app = "...")]`
     /// override from the model's container attr.
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "The app the model belongs to, e.g. `blog`.")]
+    #[rustango(verbose_name = "App")]
     pub app_label: String,
     /// Lowercase Rust-side model name. Conventionally matches the
     /// `#[derive(Model)]` struct ident lowercased (e.g. `User` →
     /// `user`).
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "Lowercase model name, e.g. `post`.")]
+    #[rustango(verbose_name = "Model")]
     pub model_name: String,
     /// SQL table name (`#[rustango(table = "…")]` value or the
     /// auto-derived snake-case fallback). Carried alongside
     /// `model_name` so callers reading the audit log don't have to
     /// reconstruct it from the registry every time.
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "The model's SQL table, e.g. `blog_post`.")]
+    #[rustango(verbose_name = "Table")]
     pub table: String,
 }
 

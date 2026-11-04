@@ -44,13 +44,25 @@ pub struct Org {
     pub id: rustango::Auto<i64>,
 
     #[rustango(max_length = 64, unique)]
+    #[rustango(
+        help_text = "Short unique id of the tenant, e.g. `acme`: lowercase letters, digits and `-`. It names the schema or database and the default host `acme.<apex>`, so it cannot change after creation."
+    )]
+    #[rustango(verbose_name = "Slug")]
     pub slug: String,
 
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "The tenant's name as people read it, e.g. `Acme Inc.`. Shown in the consoles and the tenant admin."
+    )]
+    #[rustango(verbose_name = "Display name")]
     pub display_name: String,
 
     /// `"schema"` or `"database"`. See [`StorageMode`].
     #[rustango(max_length = 16)]
+    #[rustango(
+        help_text = "`database`: the tenant has its own database. `schema`: a Postgres schema in the registry database. Set at creation; changing it does not move data."
+    )]
+    #[rustango(verbose_name = "Storage mode")]
     pub storage_mode: String,
 
     /// Backend driver for this tenant. `"postgres"` (default),
@@ -61,16 +73,28 @@ pub struct Org {
     /// Defaults to `"postgres"` for orgs created before v0.33; the
     /// migration backfills the column with that value.
     #[rustango(max_length = 16, default = "'postgres'")]
+    #[rustango(
+        help_text = "The tenant database's driver: `postgres`, `mysql` or `sqlite`. Always the registry's backend. `schema` mode needs `postgres`."
+    )]
+    #[rustango(verbose_name = "Backend")]
     pub backend_kind: String,
 
     /// Secret reference resolved by `SecretsResolver` at pool-build
     /// time. For `storage_mode = "schema"` this is `None` (the
     /// registry pool is reused). For `"database"` it is the
     /// connection-URL reference (literal, env-var, or vault path).
+    #[rustango(
+        help_text = "Database mode only: how to reach the tenant's database. A connection URL, an `env:` reference or a vault path, resolved when the pool is built. Security: a literal URL holds the password; prefer a reference. Empty in schema mode."
+    )]
+    #[rustango(verbose_name = "Database URL")]
     pub database_url: Option<String>,
 
     /// Schema name in `"schema"` mode. `None` means "use the slug".
     #[rustango(max_length = 64)]
+    #[rustango(
+        help_text = "Schema mode only: the Postgres schema holding the tenant's tables. Empty means the slug."
+    )]
+    #[rustango(verbose_name = "Schema name")]
     pub schema_name: Option<String>,
 
     /// `Host` header pattern (e.g. `"acme.app.com"`). The default
@@ -79,10 +103,18 @@ pub struct Org {
     /// where `<apex>` comes from `RUSTANGO_APEX_DOMAIN`; with
     /// `--path-prefix` and no host it stays empty.
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "The `Host` header that routes to this tenant, e.g. `acme.app.com`: no scheme, no port. `create-tenant` sets `<slug>.<apex>` from `RUSTANGO_APEX_DOMAIN`. Extra hosts live in the tenant's host list."
+    )]
+    #[rustango(verbose_name = "Host")]
     pub host_pattern: Option<String>,
 
     /// Incoming port for port-based resolution. Niche — used for
     /// hard-isolated tenant ports in compliance scenarios.
+    #[rustango(
+        help_text = "Route requests that arrive on this port to the tenant, for a tenant with its own listener. Usually empty."
+    )]
+    #[rustango(verbose_name = "Port")]
     pub port: Option<i32>,
 
     /// URL path prefix (e.g. `"/acme"`). Opt-in, null by default —
@@ -90,12 +122,22 @@ pub struct Org {
     /// per-tenant when they need both modes (subdomain in prod,
     /// path in dev). Indexed: the apex looks it up per new first segment.
     #[rustango(max_length = 255, index)]
+    #[rustango(
+        help_text = "Route `/<prefix>/...` on the apex host to this tenant, e.g. `/acme`. Only the first path segment is matched. Empty by default: tenants are found by host."
+    )]
+    #[rustango(verbose_name = "Path prefix")]
     pub path_prefix: Option<String>,
 
     /// Soft-disable. Inactive orgs return 404 from the resolver
     /// without dropping their data.
+    #[rustango(
+        help_text = "Off: the tenant's hosts answer 404 and its users cannot sign in. Its data stays. A failed create leaves a tenant off until it is resumed."
+    )]
+    #[rustango(verbose_name = "Active")]
     pub active: bool,
 
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
 
     // ----- Branding (v0.26+).
@@ -109,10 +151,16 @@ pub struct Org {
     /// `None`, the admin falls back to `display_name`, then to the
     /// static admin title.
     #[rustango(max_length = 80)]
+    #[rustango(
+        help_text = "Name in the tenant admin's sidebar header. Empty falls back to the display name."
+    )]
+    #[rustango(verbose_name = "Brand name")]
     pub brand_name: Option<String>,
 
     /// Optional tagline shown below the brand name.
     #[rustango(max_length = 200)]
+    #[rustango(help_text = "Short line under the brand name, e.g. `Customer portal`. Optional.")]
+    #[rustango(verbose_name = "Brand tagline")]
     pub brand_tagline: Option<String>,
 
     /// Relative filename of the uploaded logo inside the per-org brand
@@ -120,22 +168,38 @@ pub struct Org {
     /// in the regular config form — uploads happen through the
     /// multipart sub-form.
     #[rustango(max_length = 120)]
+    #[rustango(
+        help_text = "File name of the uploaded logo in the tenant's brand folder. Set by the branding upload, not typed."
+    )]
+    #[rustango(verbose_name = "Logo file")]
     pub logo_path: Option<String>,
 
     /// Relative filename of the uploaded favicon. Same shape as
     /// `logo_path`.
     #[rustango(max_length = 120)]
+    #[rustango(
+        help_text = "File name of the uploaded favicon in the tenant's brand folder. Set by the branding upload, not typed."
+    )]
+    #[rustango(verbose_name = "Favicon file")]
     pub favicon_path: Option<String>,
 
     /// Hex primary color (e.g. `"#b04a2c"`). Maps to the
     /// `--color-accent` CSS variable; the branding module derives
     /// hover + soft-bg shades from it.
     #[rustango(max_length = 7)]
+    #[rustango(
+        help_text = "Accent color as hex, e.g. `#b04a2c`. Hover and soft background shades are derived from it. Empty keeps the default."
+    )]
+    #[rustango(verbose_name = "Primary color")]
     pub primary_color: Option<String>,
 
     /// Theme mode — one of `"light"`, `"dark"`, `"auto"`. `None` is
     /// treated as `"auto"` (follow `prefers-color-scheme`).
     #[rustango(max_length = 8)]
+    #[rustango(
+        help_text = "`light`, `dark` or `auto`. Empty means `auto`, which follows the browser's setting."
+    )]
+    #[rustango(verbose_name = "Theme")]
     pub theme_mode: Option<String>,
     // SSO / OpenID Connect config moved off the `Org` row (v0.47): it now
     // lives in the `SsoProvider` (per-tenant) + `SharedSsoProvider`

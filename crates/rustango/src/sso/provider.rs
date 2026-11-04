@@ -287,11 +287,13 @@ pub struct SsoProvider {
     /// Set on INSERT via `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
     #[rustango(verbose_name = "Created at")]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
 
     /// Bumped to `NOW()` on every save.
     #[rustango(auto_now)]
     #[rustango(verbose_name = "Updated at")]
+    #[rustango(help_text = "When the row last changed. Set on every save.")]
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 

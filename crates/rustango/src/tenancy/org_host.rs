@@ -28,6 +28,8 @@ pub struct OrgHost {
     pub id: crate::sql::Auto<i64>,
 
     #[rustango(fk = "rustango_orgs", on = "id", index)]
+    #[rustango(help_text = "The tenant this hostname routes to.")]
+    #[rustango(verbose_name = "Tenant")]
     pub org_id: i64,
 
     /// The `Host` header to match, lowercased, no port and no scheme.
@@ -36,13 +38,23 @@ pub struct OrgHost {
     /// to exactly one tenant, and letting two orgs claim one host would
     /// make routing depend on row order.
     #[rustango(max_length = 255, unique, index)]
+    #[rustango(
+        help_text = "A `Host` header to match, e.g. `shop.acme.com`: lowercase, no `https://`, no port. Unique across all tenants, so one hostname always reaches one tenant."
+    )]
+    #[rustango(verbose_name = "Hostname")]
     pub hostname: String,
 
     /// Lets an operator park a host without serving it — useful while DNS
     /// propagates, or to retire a domain without losing the record.
+    #[rustango(
+        help_text = "Off: the hostname is kept but not served, e.g. while DNS propagates or to retire a domain."
+    )]
+    #[rustango(verbose_name = "Enabled")]
     pub enabled: bool,
 
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 

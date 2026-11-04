@@ -22,7 +22,7 @@ connection check passes.</p>
     <legend>Identity</legend>
     <table>
       <tr>
-        <th><label for="slug">slug</label></th>
+        <th><label for="slug">{{ label.slug }}</label></th>
         <td>
           {#- The hyphen is escaped on purpose. `[a-z0-9-]` is a syntax
               error under the `v`-flag regex the HTML spec now uses for
@@ -36,16 +36,16 @@ connection check passes.</p>
                  maxlength="63"
                  title="Lowercase letters, digits and hyphens; cannot start or end with a hyphen."
                  placeholder="acme">
-          <div class="field-helper">Globally unique, lowercase. Also the
-          default schema name, display name and subdomain label.</div>
+          <div class="field-helper">{{ help.slug | help_html | safe }}</div>
         </td>
       </tr>
       <tr>
-        <th><label for="display_name">display_name</label></th>
+        <th><label for="display_name">{{ label.display_name }}</label></th>
         <td>
           <input type="text" id="display_name" name="display_name"
                  value="{{ prefill.display_name | default(value='') }}"
                  placeholder="defaults to the slug">
+          <div class="field-helper">{{ help.display_name | help_html | safe }}</div>
         </td>
       </tr>
     </table>
@@ -55,7 +55,7 @@ connection check passes.</p>
     <legend>Storage</legend>
     <table>
       <tr>
-        <th><label for="storage_mode">storage_mode</label></th>
+        <th><label for="storage_mode">{{ label.storage_mode }}</label></th>
         <td>
           <select id="storage_mode" name="storage_mode">
             <option value="database" {% if prefill.storage_mode | default(value="database") != "schema" %}selected{% endif %}>database — its own database</option>
@@ -76,7 +76,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr>
-        <th>backend</th>
+        <th>{{ label.backend_kind }}</th>
         <td>
           <code id="backend">{{ backend }}</code>
           <div class="field-helper">A tenant uses the registry's backend.</div>
@@ -115,7 +115,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr class="mode-database source-server">
-        <th><label for="server">server</label></th>
+        <th><label for="server">{{ tdb_label.server_name }}</label></th>
         <td>
           <select id="server" name="server">
             {% for s in servers %}
@@ -129,7 +129,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr class="mode-database source-registry">
-        <th><label for="database_name">database name</label></th>
+        <th><label for="database_name">{{ tdb_label.database_name }}</label></th>
         <td>
           <input type="text" id="database_name" name="database_name"
                  value="{{ prefill.database_name | default(value='') }}"
@@ -144,7 +144,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr class="mode-database source-url">
-        <th><label for="database_url">database URL</label></th>
+        <th><label for="database_url">{{ label.database_url }}</label></th>
         <td>
           {#- A URL may hold a password: masked, and never sent back. -#}
           <input type="password" id="database_url" name="database_url"
@@ -157,7 +157,7 @@ connection check passes.</p>
 
       {# ---- schema mode: nothing to name but the schema ---- #}
       <tr class="mode-schema" hidden>
-        <th><label for="schema_name">schema</label></th>
+        <th><label for="schema_name">{{ label.schema_name }}</label></th>
         <td>
           {#- Same escaped hyphen as the slug, and for the same reason:
               an unescaped one makes the attribute a syntax error the
@@ -190,7 +190,7 @@ connection check passes.</p>
     <legend>Routing</legend>
     <table>
       <tr>
-        <th><label for="host_pattern">host_pattern</label></th>
+        <th><label for="host_pattern">{{ label.host_pattern }}</label></th>
         <td>
           {#- Uppercase is allowed through and lowercased by the server,
               because that is what the resolver does to the `Host`
@@ -202,29 +202,29 @@ connection check passes.</p>
                  maxlength="253"
                  title="A hostname, matched exactly. No port and no wildcard — put the port in the port field."
                  placeholder="acme.example.com">
-          <div class="field-helper">Matched exactly against the
-          <code>Host</code> header. Blank derives
+          <div class="field-helper">{{ help.host_pattern | help_html | safe }}</div>
+          <div class="field-helper">Blank derives
           <code>&lt;slug&gt;.&lt;RUSTANGO_APEX_DOMAIN&gt;</code> when that
           variable is set.</div>
         </td>
       </tr>
       <tr>
-        <th><label for="path_prefix">path_prefix</label></th>
+        <th><label for="path_prefix">{{ label.path_prefix }}</label></th>
         <td>
           <input type="text" id="path_prefix" name="path_prefix"
                  value="{{ prefill.path_prefix | default(value='') }}"
                  pattern="/[A-Za-z0-9_.~\-]+"
                  title="One path segment, with its leading slash."
                  placeholder="/acme">
-          <div class="field-helper">Only the first path segment is
-          matched, so this is <code>/name</code> — not a deeper path.</div>
+          <div class="field-helper">{{ help.path_prefix | help_html | safe }}</div>
         </td>
       </tr>
       <tr>
-        <th><label for="port">port</label></th>
+        <th><label for="port">{{ label.port }}</label></th>
         <td><input type="number" id="port" name="port" inputmode="numeric"
                    min="1" max="65535"
-                   value="{{ prefill.port | default(value='') }}"></td>
+                   value="{{ prefill.port | default(value='') }}">
+          <div class="field-helper">{{ help.port | help_html | safe }}</div></td>
       </tr>
     </table>
   </fieldset>
@@ -249,7 +249,7 @@ connection check passes.</p>
     <legend>First admin</legend>
     <table>
       <tr>
-        <th><label for="admin_email">email</label></th>
+        <th><label for="admin_email">{{ user_label.email }}</label></th>
         <td>
           <input type="email" id="admin_email" name="admin_email" maxlength="254"
                  value="{{ prefill.admin_email | default(value='') }}"
@@ -260,7 +260,7 @@ connection check passes.</p>
         </td>
       </tr>
       <tr>
-        <th><label for="admin_username">username</label></th>
+        <th><label for="admin_username">{{ user_label.username }}</label></th>
         <td>
           <input type="text" id="admin_username" name="admin_username" maxlength="64"
                  value="{{ prefill.admin_username | default(value='') }}"

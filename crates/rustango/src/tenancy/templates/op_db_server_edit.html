@@ -16,35 +16,41 @@
     <legend>Server</legend>
     <table>
       <tr>
-        <th>backend</th>
+        <th>{{ label.backend }}</th>
         <td><code>{{ server.backend }}</code></td>
       </tr>
       {% if is_sqlite %}
       <tr>
-        <th><label for="sqlite_dir">directory</label></th>
+        <th><label for="sqlite_dir">{{ label.sqlite_dir }}</label></th>
         <td>
           <input type="text" id="sqlite_dir" name="sqlite_dir" required value="{{ f.sqlite_dir | default(value='') }}">
-          <div class="field-helper">Where tenant database files are created.</div>
+          <div class="field-helper">{{ help.sqlite_dir | help_html | safe }}</div>
         </td>
       </tr>
       {% else %}
       <tr>
-        <th><label for="host">host</label></th>
-        <td><input type="text" id="host" name="host" required value="{{ f.host | default(value='') }}"></td>
-      </tr>
-      <tr>
-        <th><label for="port">port</label></th>
+        <th><label for="host">{{ label.host }}</label></th>
         <td>
-          <input type="number" id="port" name="port" min="1" max="65535" value="{{ f.port | default(value='') }}">
-          <div class="field-helper">Blank for the backend's default.</div>
+          <input type="text" id="host" name="host" required value="{{ f.host | default(value='') }}">
+          <div class="field-helper">{{ help.host | help_html | safe }}</div>
         </td>
       </tr>
       <tr>
-        <th><label for="admin_user">admin user</label></th>
-        <td><input type="text" id="admin_user" name="admin_user" required value="{{ f.admin_user | default(value='') }}" autocomplete="off"></td>
+        <th><label for="port">{{ label.port }}</label></th>
+        <td>
+          <input type="number" id="port" name="port" min="1" max="65535" value="{{ f.port | default(value='') }}">
+          <div class="field-helper">{{ help.port | help_html | safe }}</div>
+        </td>
       </tr>
       <tr>
-        <th><label for="admin_password">admin password</label></th>
+        <th><label for="admin_user">{{ label.admin_user }}</label></th>
+        <td>
+          <input type="text" id="admin_user" name="admin_user" required value="{{ f.admin_user | default(value='') }}" autocomplete="off">
+          <div class="field-helper">{{ help.admin_user | help_html | safe }}</div>
+        </td>
+      </tr>
+      <tr>
+        <th><label for="admin_password">{{ label.admin_password }}</label></th>
         <td>
           <input type="password" id="admin_password" name="admin_password" autocomplete="new-password">
           <div class="field-helper">{% if server.has_password %}Saved — leave blank to keep it.{% else %}None saved.{% endif %}</div>
@@ -54,27 +60,31 @@
         </td>
       </tr>
       <tr>
-        <th><label for="tls_mode">TLS</label></th>
+        <th><label for="tls_mode">{{ label.tls_mode }}</label></th>
         <td>
           <select id="tls_mode" name="tls_mode">
             {% if not server.tls_mode %}<option value="">none saved (driver default, may send the password in clear)</option>{% endif %}
             {% for m in tls_modes %}<option value="{{ m }}"{% if f.tls_mode | default(value='') == m %} selected{% endif %}>{{ m }}</option>{% endfor %}
           </select>
+          <div class="field-helper">{{ help.tls_mode | help_html | safe }}</div>
         </td>
       </tr>
       {% if backend == "postgres" %}
       <tr>
-        <th><label for="maintenance_db">maintenance database</label></th>
+        <th><label for="maintenance_db">{{ label.maintenance_db }}</label></th>
         <td>
           <input type="text" id="maintenance_db" name="maintenance_db" value="{{ f.maintenance_db | default(value='') }}">
-          <div class="field-helper">Blank for <code>postgres</code>.</div>
+          <div class="field-helper">{{ help.maintenance_db | help_html | safe }}</div>
         </td>
       </tr>
       {% endif %}
       {% endif %}
       <tr>
-        <th><label for="active">active</label></th>
-        <td><input type="checkbox" id="active" name="active"{% if f.active %} checked{% endif %}></td>
+        <th><label for="active">{{ label.active }}</label></th>
+        <td>
+          <input type="checkbox" id="active" name="active"{% if f.active %} checked{% endif %}>
+          <div class="field-helper">{{ help.active | help_html | safe }}</div>
+        </td>
       </tr>
     </table>
   </fieldset>

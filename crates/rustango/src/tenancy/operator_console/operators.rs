@@ -199,6 +199,10 @@ async fn page(
         ctx.insert("new_password", plain);
     }
 
+    super::insert_field_text(
+        &mut ctx,
+        <crate::tenancy::Operator as crate::core::Model>::SCHEMA,
+    );
     let mut resp = render(state, "op_operators.html", &ctx);
     if secret.is_some() {
         // A page body holding a plaintext password must not sit in a

@@ -10,6 +10,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Changed
 
 - Passkey ES256 verification uses `ring`, through the same helper as the SSO JWKS check; `p256` and its second crypto stack (32 crates) are gone. `passkey::verify::cose_es256_key` returns `passkey::Es256Key`.
+- Every framework model field has a label and help text (meaning, an example, defaults, security effect), and the operator console's tenant, host, database-server and operator forms read the same schema text.
+- Framework models show readable labels in admin column headers and forms (e.g. `Display name`, not `display_name`).
 
 ### Fixed
 

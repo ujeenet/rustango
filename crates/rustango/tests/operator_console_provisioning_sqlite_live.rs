@@ -4,6 +4,9 @@
 //!
 //! SQLite, because the console is tri-dialect and this needs no server.
 
+#[path = "support/field_text.rs"]
+mod field_text;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -170,6 +173,16 @@ async fn the_create_form_renders_for_an_authenticated_operator() {
     let html = body_of(resp).await;
     assert!(html.contains("name=\"slug\""), "no slug field: {html}");
     assert!(html.contains("Test connection"), "no probe button");
+    let org = <Org as rustango::core::Model>::SCHEMA;
+    for field in [
+        "slug",
+        "display_name",
+        "host_pattern",
+        "path_prefix",
+        "port",
+    ] {
+        field_text::assert_shows(&html, org, field, field);
+    }
     // Schema mode is Postgres-only; a SQLite registry must not offer
     // a choice that can only fail.
     assert!(

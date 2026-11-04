@@ -2027,6 +2027,8 @@ async fn org_edit_form(
         if LOCKED_ORG_FIELDS.contains(&field.name) {
             locked_rows.push(serde_json::json!({
                 "name": field.name,
+                "label": field.display_label(),
+                "help": field.help_text,
                 "value": prefill,
             }));
             continue;
@@ -2044,6 +2046,8 @@ async fn org_edit_form(
         };
         editable_rows.push(serde_json::json!({
             "name": field.name,
+            "label": field.display_label(),
+            "help": field.help_text,
             "input": input_html,
             "helper": helper,
         }));
@@ -2493,6 +2497,41 @@ async fn static_rustango_png() -> Response<Body> {
 }
 
 // ----------------------------- helpers
+
+/// A model's field labels and help texts as `label` / `help` maps, so a
+/// console form reads the same schema text as the admin.
+pub(super) fn insert_field_text(ctx: &mut Context, schema: &'static crate::core::ModelSchema) {
+    insert_field_text_as(ctx, "", schema);
+}
+
+/// [`insert_field_text`] under `{prefix}_label` / `{prefix}_help`, for a
+/// form that also shows another model's fields. Every field has a key, so a
+/// field without help renders empty rather than failing the page.
+pub(super) fn insert_field_text_as(
+    ctx: &mut Context,
+    prefix: &str,
+    schema: &'static crate::core::ModelSchema,
+) {
+    let help: std::collections::BTreeMap<&str, &str> = schema
+        .fields
+        .iter()
+        .map(|f| (f.name, f.help_text.unwrap_or_default()))
+        .collect();
+    let label: std::collections::BTreeMap<&str, &str> = schema
+        .fields
+        .iter()
+        .map(|f| (f.name, f.display_label()))
+        .collect();
+    let key = |k: &str| {
+        if prefix.is_empty() {
+            k.to_owned()
+        } else {
+            format!("{prefix}_{k}")
+        }
+    };
+    ctx.insert(key("help"), &help);
+    ctx.insert(key("label"), &label);
+}
 
 // The crate's one query-value encoder; it also escapes `/`.
 use crate::url_codec::url_encode as urlencoding_lite;
