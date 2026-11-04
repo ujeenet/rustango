@@ -6,11 +6,10 @@
 //!
 //! ## Design
 //!
-//! - **All-RustCrypto, no C dep.** The ceremony layer (CBOR attestation
-//!   parsing + ES256 assertion verification) will use pure-Rust
-//!   `ciborium` + `p256`, *not* `webauthn-rs` (which pulls `openssl`).
-//!   This keeps rustango's dependency story C-free, matching `argon2` /
-//!   `sha2` / `hmac`.
+//! - **No OpenSSL.** The ceremony layer (CBOR attestation parsing +
+//!   ES256 assertion verification) uses `ciborium` + `ring`, the same
+//!   ES256 verifier the SSO JWKS check uses, *not* `webauthn-rs` (which
+//!   pulls `openssl`).
 //! - **Operator-managed table** (`#[rustango(managed = false)]`),
 //!   bootstrapped idempotently via [`ensure_table`] (the `audit` /
 //!   `totp_store` pattern), so it never enters the migration graph.
@@ -34,6 +33,7 @@ pub use ceremony::{
 };
 pub use error::PasskeyError;
 pub use session::{open_challenge, seal_challenge, CeremonyPurpose, CHALLENGE_TTL};
+pub use verify::Es256Key;
 
 use crate::sql::{Auto, Pool};
 use crate::Model;

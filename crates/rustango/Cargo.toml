@@ -338,11 +338,9 @@ casts = ["_aead"]
 # for second-factor authentication. SHA-1 (Google Authenticator default).
 # `sha2` because it enables `crypto`, which imports it (#1678).
 totp = ["dep:hmac", "dep:sha1", "dep:sha2", "_rand"]
-# Passkey / WebAuthn (#392). Foundation slice = credential storage only
-# (no extra deps). The ceremony layer adds pure-Rust CBOR (`ciborium`) +
-# ES256 (`p256`) when it lands — keeping the all-RustCrypto, no-C-dep
-# stack (vs `webauthn-rs` → openssl).
-passkey = ["_rand", "cache", "dep:base64", "dep:hmac", "dep:sha2", "dep:ciborium", "dep:p256"]
+# Passkey / WebAuthn: CBOR with `ciborium`, ES256 with `ring`, the one
+# verifier the SSO JWKS check uses too (no `webauthn-rs` → openssl).
+passkey = ["_rand", "cache", "dep:base64", "dep:hmac", "dep:sha2", "dep:ciborium", "dep:ring"]
 
 # Webhook signature verification (`rustango::webhook`) — HMAC-SHA256
 # constant-time verification for inbound webhooks (Stripe, GitHub, etc.).
@@ -558,7 +556,6 @@ async-stream = { workspace = true, optional = true }
 axum           = { workspace = true, optional = true }
 base64         = { workspace = true, optional = true }
 ciborium       = { workspace = true, optional = true }
-p256           = { workspace = true, optional = true }
 http           = { workspace = true, optional = true }
 http-body      = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }

@@ -3,7 +3,7 @@
 //! These orchestrate the [`super::verify`] primitives into the two
 //! server-side verification steps, plus the challenge + options helpers
 //! the browser's `navigator.credentials.create()/get()` need. The crypto
-//! is pure-Rust (`p256` / `ciborium`); see the module docs.
+//! uses `ciborium` and `ring`; see the module docs.
 //!
 //! Scope: **ES256** keys, **`none`/self attestation** (no cert-chain
 //! verification). The caller is responsible for storing the per-ceremony
@@ -228,40 +228,10 @@ fn extract_auth_data(value: &ciborium::value::Value) -> Result<Vec<u8>, PasskeyE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ciborium::value::{Integer, Value};
-    use p256::ecdsa::{signature::Signer as _, Signature};
+    use ciborium::value::Value;
     use sha2::{Digest, Sha256};
 
-    use crate::passkey::verify::tests::random_signing_key;
-
-    fn cose_key_of(vk: &p256::ecdsa::VerifyingKey) -> Vec<u8> {
-        let pt = vk.to_sec1_point(false);
-        let map = Value::Map(vec![
-            (
-                Value::Integer(Integer::from(1)),
-                Value::Integer(Integer::from(2)),
-            ),
-            (
-                Value::Integer(Integer::from(3)),
-                Value::Integer(Integer::from(-7)),
-            ),
-            (
-                Value::Integer(Integer::from(-1)),
-                Value::Integer(Integer::from(1)),
-            ),
-            (
-                Value::Integer(Integer::from(-2)),
-                Value::Bytes(pt.x().unwrap().to_vec()),
-            ),
-            (
-                Value::Integer(Integer::from(-3)),
-                Value::Bytes(pt.y().unwrap().to_vec()),
-            ),
-        ]);
-        let mut out = Vec::new();
-        ciborium::ser::into_writer(&map, &mut out).unwrap();
-        out
-    }
+    use crate::passkey::verify::tests::TestSigner;
 
     fn rp_hash(rp_id: &str) -> [u8; 32] {
         let mut h = Sha256::new();
@@ -310,8 +280,8 @@ mod tests {
     fn full_register_then_authenticate_round_trip() {
         let rp_id = "example.com";
         let origins = vec!["https://example.com".to_owned()];
-        let sk = random_signing_key();
-        let cose = cose_key_of(sk.verifying_key());
+        let sk = TestSigner::new();
+        let cose = sk.cose();
         let cred_id = b"credential-handle-1";
 
         // ---- Registration ----
@@ -341,7 +311,7 @@ mod tests {
         let mut ch = Sha256::new();
         ch.update(&auth_client);
         signed.extend_from_slice(&ch.finalize());
-        let sig: Signature = sk.sign(&signed);
+        let sig = sk.sign(&signed);
 
         let new_count = verify_authentication(
             &auth_challenge,
@@ -351,7 +321,7 @@ mod tests {
             outcome.sign_count,
             &auth_client,
             &auth_ad,
-            sig.to_der().as_bytes(),
+            &sig,
         )
         .unwrap();
         assert_eq!(new_count.sign_count, 2);
@@ -366,8 +336,8 @@ mod tests {
     ) -> Result<AuthenticationOutcome, PasskeyError> {
         let rp_id = "example.com";
         let origins = vec!["https://example.com".to_owned()];
-        let sk = random_signing_key();
-        let cose = cose_key_of(sk.verifying_key());
+        let sk = TestSigner::new();
+        let cose = sk.cose();
 
         let challenge = generate_challenge();
         let mut ad = Vec::new();
@@ -379,17 +349,10 @@ mod tests {
         let mut h = Sha256::new();
         h.update(&client);
         signed.extend_from_slice(&h.finalize());
-        let sig: Signature = sk.sign(&signed);
+        let sig = sk.sign(&signed);
 
         verify_authentication(
-            &challenge,
-            rp_id,
-            &origins,
-            &cose,
-            stored,
-            &client,
-            &ad,
-            sig.to_der().as_bytes(),
+            &challenge, rp_id, &origins, &cose, stored, &client, &ad, &sig,
         )
     }
 
