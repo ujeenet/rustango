@@ -64,9 +64,9 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
-use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE};
+use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE, TRANSFER_ENCODING};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::Router;
@@ -328,6 +328,8 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             headers: parts
                 .headers
                 .iter()
+                // The replay body is in memory; a stored framing header would contradict it.
+                .filter(|(k, _)| *k != CONTENT_LENGTH && *k != TRANSFER_ENCODING)
                 .filter_map(|(k, v)| {
                     let k = k.as_str().to_owned();
                     v.to_str().ok().map(|s| (k, s.to_owned()))
@@ -621,15 +623,7 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
         HeaderName::from_static("idempotent-replayed"),
         HeaderValue::from_static("true"),
     );
-    let _ = headers_align_content_length(resp.headers_mut());
     resp
-}
-
-/// Hook for fixing up `Content-Length` on a replayed response. It does
-/// nothing today: the cached body is already in memory, so axum works
-/// the length out on the way out.
-fn headers_align_content_length(_headers: &mut HeaderMap) -> Result<(), ()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -735,6 +729,39 @@ mod tests {
 
         // Handler ran exactly once.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replay_drops_stored_framing_headers() {
+        let app = Router::new()
+            .route(
+                "/",
+                post(|| async {
+                    (
+                        [("content-length", "999"), ("transfer-encoding", "chunked")],
+                        "ok",
+                    )
+                }),
+            )
+            .idempotency(IdempotencyLayer::new(cache()));
+        let req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .header("idempotency-key", "framing")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let _ = app.clone().oneshot(req()).await.unwrap();
+        let r2 = app.clone().oneshot(req()).await.unwrap();
+        assert!(r2.headers().contains_key("idempotent-replayed"));
+        // axum sets the real length of the replayed body, not the stored 999.
+        assert_ne!(
+            r2.headers().get("content-length").map(|v| v.as_bytes()),
+            Some(&b"999"[..])
+        );
+        assert!(r2.headers().get("transfer-encoding").is_none());
+        assert_eq!(body_string(r2).await, "ok");
     }
 
     #[tokio::test]

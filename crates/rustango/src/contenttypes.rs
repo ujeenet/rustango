@@ -1064,7 +1064,12 @@ pub async fn ensure_seeded(pool: &crate::sql::Pool) -> Result<usize, ExecError> 
             table: table.to_owned(),
         };
         // Another process seeding at the same time may have won the row.
-        if row.insert_or_ignore(pool).await? {
+        // MySQL can break the two inserts with a deadlock; the retry sees the winner.
+        let won = match row.insert_or_ignore(pool).await {
+            Err(e) if e.is_deadlock() => row.insert_or_ignore(pool).await?,
+            r => r?,
+        };
+        if won {
             inserted += 1;
         }
     }

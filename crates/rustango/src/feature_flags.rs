@@ -22,7 +22,7 @@
 //! let flags = FeatureFlags::new(cache);
 //!
 //! // Bootstrap a flag at startup (or via an admin route):
-//! flags.enable("new_checkout").await;
+//! flags.enable("new_checkout").await?;
 //!
 //! // In handlers:
 //! if flags.is_enabled_for("new_checkout", &current_user_id).await {
@@ -46,7 +46,7 @@
 
 use std::time::Duration;
 
-use crate::cache::BoxedCache;
+use crate::cache::{BoxedCache, CacheError};
 
 const KEY_PREFIX: &str = "flag";
 
@@ -84,53 +84,72 @@ impl FeatureFlags {
     }
 
     /// One write; `set_forever` so a backend default TTL cannot expire it.
-    async fn put(&self, key: &str, value: &str) {
-        let _ = match self.ttl {
+    async fn put(&self, key: &str, value: &str) -> Result<(), CacheError> {
+        match self.ttl {
             Some(ttl) => self.cache.set(key, value, Some(ttl)).await,
             None => self.cache.set_forever(key, value).await,
-        };
+        }
     }
 
     /// Globally enable the flag for everyone.
-    pub async fn enable(&self, name: &str) {
-        self.put(&self.global_key(name), "on").await;
+    ///
+    /// # Errors
+    /// The cache write's error: the flag did not change.
+    pub async fn enable(&self, name: &str) -> Result<(), CacheError> {
+        self.put(&self.global_key(name), "on").await
     }
 
     /// Globally disable the flag. This beats any rollout percentage,
     /// but not a per-user override: to kill a flag for a user who has
     /// one, also call [`Self::disable_for_user`].
-    pub async fn disable(&self, name: &str) {
-        self.put(&self.global_key(name), "off").await;
+    ///
+    /// # Errors
+    /// The cache write's error: the flag did not change.
+    pub async fn disable(&self, name: &str) -> Result<(), CacheError> {
+        self.put(&self.global_key(name), "off").await
     }
 
     /// Drop the global state, the percentage and the overrides of the
     /// listed users. The `Cache` trait cannot list keys, so the caller
     /// names the users to clear.
-    pub async fn clear(&self, name: &str, known_user_ids: &[&str]) {
-        let _ = self.cache.delete(&self.global_key(name)).await;
-        let _ = self.cache.delete(&self.pct_key(name)).await;
+    ///
+    /// # Errors
+    /// The first failed cache delete; later keys are not tried.
+    pub async fn clear(&self, name: &str, known_user_ids: &[&str]) -> Result<(), CacheError> {
+        self.cache.delete(&self.global_key(name)).await?;
+        self.cache.delete(&self.pct_key(name)).await?;
         for u in known_user_ids {
-            let _ = self.cache.delete(&self.user_key(name, u)).await;
+            self.cache.delete(&self.user_key(name, u)).await?;
         }
+        Ok(())
     }
 
     /// Set a rollout percentage, 0..=100. Values above 100 are clamped.
     /// The user id is hashed, so the same user gets the same answer on
     /// every check.
-    pub async fn set_percentage(&self, name: &str, percent: u8) {
+    ///
+    /// # Errors
+    /// The cache write's error.
+    pub async fn set_percentage(&self, name: &str, percent: u8) -> Result<(), CacheError> {
         let p = percent.min(100);
-        self.put(&self.pct_key(name), &p.to_string()).await;
+        self.put(&self.pct_key(name), &p.to_string()).await
     }
 
     /// Turn the flag on for one user, whatever the global state says.
     /// Handy for QA and staff testing.
-    pub async fn enable_for_user(&self, name: &str, user_id: &str) {
-        self.put(&self.user_key(name, user_id), "on").await;
+    ///
+    /// # Errors
+    /// The cache write's error.
+    pub async fn enable_for_user(&self, name: &str, user_id: &str) -> Result<(), CacheError> {
+        self.put(&self.user_key(name, user_id), "on").await
     }
 
     /// Turn the flag off for one user.
-    pub async fn disable_for_user(&self, name: &str, user_id: &str) {
-        self.put(&self.user_key(name, user_id), "off").await;
+    ///
+    /// # Errors
+    /// The cache write's error.
+    pub async fn disable_for_user(&self, name: &str, user_id: &str) -> Result<(), CacheError> {
+        self.put(&self.user_key(name, user_id), "off").await
     }
 
     /// Read the global state only. Returns `false` when the flag is off
@@ -235,7 +254,7 @@ mod tests {
     #[tokio::test]
     async fn global_enable_propagates_to_all_users() {
         let f = flags();
-        f.enable("new").await;
+        f.enable("new").await.unwrap();
         assert!(f.is_enabled("new").await);
         assert!(f.is_enabled_for("new", "alice").await);
         assert!(f.is_enabled_for("new", "bob").await);
@@ -244,24 +263,24 @@ mod tests {
     #[tokio::test]
     async fn global_disable_is_a_killswitch_over_per_user_enable() {
         let f = flags();
-        f.enable_for_user("new", "alice").await;
+        f.enable_for_user("new", "alice").await.unwrap();
         assert!(f.is_enabled_for("new", "alice").await);
         // The per-user override is checked first, so it still wins.
-        f.disable("new").await;
+        f.disable("new").await.unwrap();
         assert!(
             f.is_enabled_for("new", "alice").await,
             "per-user override beats global"
         );
         // To kill it fully, clear the per-user override as well.
-        f.disable_for_user("new", "alice").await;
+        f.disable_for_user("new", "alice").await.unwrap();
         assert!(!f.is_enabled_for("new", "alice").await);
     }
 
     #[tokio::test]
     async fn per_user_override_wins_over_global_off() {
         let f = flags();
-        f.disable("new").await;
-        f.enable_for_user("new", "qa-bot").await;
+        f.disable("new").await.unwrap();
+        f.enable_for_user("new", "qa-bot").await.unwrap();
         assert!(f.is_enabled_for("new", "qa-bot").await);
         // Other users still see the global off.
         assert!(!f.is_enabled_for("new", "alice").await);
@@ -270,7 +289,7 @@ mod tests {
     #[tokio::test]
     async fn percentage_rollout_at_zero_means_off() {
         let f = flags();
-        f.set_percentage("new", 0).await;
+        f.set_percentage("new", 0).await.unwrap();
         for u in &["a", "b", "c", "d"] {
             assert!(!f.is_enabled_for("new", u).await);
         }
@@ -279,7 +298,7 @@ mod tests {
     #[tokio::test]
     async fn percentage_rollout_at_100_means_on() {
         let f = flags();
-        f.set_percentage("new", 100).await;
+        f.set_percentage("new", 100).await.unwrap();
         for u in &["a", "b", "c", "d"] {
             assert!(f.is_enabled_for("new", u).await);
         }
@@ -288,7 +307,7 @@ mod tests {
     #[tokio::test]
     async fn percentage_rollout_is_stable_per_user() {
         let f = flags();
-        f.set_percentage("new", 50).await;
+        f.set_percentage("new", 50).await.unwrap();
         for u in &["alice", "bob", "carol", "dave"] {
             let first = f.is_enabled_for("new", u).await;
             let second = f.is_enabled_for("new", u).await;
@@ -301,7 +320,7 @@ mod tests {
     #[tokio::test]
     async fn percentage_rollout_clamps_above_100() {
         let f = flags();
-        f.set_percentage("new", 250).await; // clamped to 100
+        f.set_percentage("new", 250).await.unwrap(); // clamped to 100
         for u in &["a", "b", "c"] {
             assert!(f.is_enabled_for("new", u).await);
         }
@@ -310,7 +329,7 @@ mod tests {
     #[tokio::test]
     async fn percentage_rollout_distributes_roughly_evenly() {
         let f = flags();
-        f.set_percentage("new", 30).await;
+        f.set_percentage("new", 30).await.unwrap();
         let mut on = 0;
         let total = 1000;
         for i in 0..total {
@@ -332,8 +351,8 @@ mod tests {
         // The bucket is keyed on (flag, user), so a user can be inside
         // flag A's 50% and outside flag B's.
         let f = flags();
-        f.set_percentage("alpha", 50).await;
-        f.set_percentage("beta", 50).await;
+        f.set_percentage("alpha", 50).await.unwrap();
+        f.set_percentage("beta", 50).await.unwrap();
         let mut differs = false;
         for i in 0..100 {
             let u = format!("u-{i}");
@@ -351,11 +370,11 @@ mod tests {
     #[tokio::test]
     async fn clear_resets_all_known_state() {
         let f = flags();
-        f.enable("new").await;
-        f.set_percentage("new", 75).await;
-        f.enable_for_user("new", "alice").await;
+        f.enable("new").await.unwrap();
+        f.set_percentage("new", 75).await.unwrap();
+        f.enable_for_user("new", "alice").await.unwrap();
 
-        f.clear("new", &["alice"]).await;
+        f.clear("new", &["alice"]).await.unwrap();
         assert!(!f.is_enabled("new").await);
         assert!(!f.is_enabled_for("new", "alice").await);
         // Bob had no state, so clear had nothing to do for him.
@@ -401,11 +420,11 @@ mod tests {
     }
 
     async fn write_all(f: &FeatureFlags) {
-        f.enable("on").await;
-        f.disable("off").await;
-        f.set_percentage("pct", 100).await;
-        f.enable_for_user("u", "a").await;
-        f.disable_for_user("u", "b").await;
+        f.enable("on").await.unwrap();
+        f.disable("off").await.unwrap();
+        f.set_percentage("pct", 100).await.unwrap();
+        f.enable_for_user("u", "a").await.unwrap();
+        f.disable_for_user("u", "b").await.unwrap();
     }
 
     async fn all_set(f: &FeatureFlags) -> bool {
@@ -440,6 +459,45 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(!f.is_enabled("on").await);
         assert!(!f.is_enabled_for("u", "a").await);
+    }
+
+    /// Every write and delete fails, like a Redis that is down.
+    struct DownCache;
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for DownCache {
+        async fn touch(&self, _: &str, _: Option<Duration>) -> Result<bool, CacheError> {
+            Err(CacheError::Connection("down".into()))
+        }
+        async fn get(&self, _: &str) -> Result<Option<String>, CacheError> {
+            Err(CacheError::Connection("down".into()))
+        }
+        async fn set(&self, _: &str, _: &str, _: Option<Duration>) -> Result<(), CacheError> {
+            Err(CacheError::Connection("down".into()))
+        }
+        async fn delete(&self, _: &str) -> Result<(), CacheError> {
+            Err(CacheError::Connection("down".into()))
+        }
+        async fn exists(&self, _: &str) -> Result<bool, CacheError> {
+            Err(CacheError::Connection("down".into()))
+        }
+        async fn clear(&self) -> Result<(), CacheError> {
+            Err(CacheError::Connection("down".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_write_reaches_the_caller() {
+        // A kill switch that did not land must not look like success.
+        let f = FeatureFlags::new(StdArc::new(DownCache));
+        assert!(f.disable("new").await.is_err());
+        assert!(f.enable("new").await.is_err());
+        assert!(f.set_percentage("new", 5).await.is_err());
+        assert!(f.enable_for_user("new", "a").await.is_err());
+        assert!(f.disable_for_user("new", "a").await.is_err());
+        assert!(f.clear("new", &["a"]).await.is_err());
+        let ttl = FeatureFlags::new(StdArc::new(DownCache)).ttl(Duration::from_secs(1));
+        assert!(ttl.disable("new").await.is_err());
     }
 
     #[test]

@@ -151,6 +151,7 @@ untouched.
 ## Unreleased
 
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
+- `FeatureFlags` write methods return `Result<(), CacheError>`; add `?` (or handle the error) where you call `enable`, `disable`, `clear`, `set_percentage`, `enable_for_user` or `disable_for_user`.
 
 ## 0.62.0
 
