@@ -262,35 +262,20 @@ fn base_ctx(state: &ConsoleState, op: &auth::Operator) -> Context {
     ctx.insert("section", "sso");
     ctx.insert("operator_username", &op.username);
     ctx.insert("edit_enabled", &state.pools.is_some());
-    // Same fields as `SsoProvider`: its schema holds the one copy of the
-    // labels, help texts and kinds.
-    let schema = <crate::sso::SsoProvider as crate::core::Model>::SCHEMA;
-    let kinds: Vec<(&str, &str)> = schema
+    // The kind presets are `SsoProvider`'s; the form's text is the shared model's own.
+    let kinds: Vec<(&str, &str)> = <crate::sso::SsoProvider as crate::core::Model>::SCHEMA
         .field("kind")
         .and_then(|f| f.choices)
         .unwrap_or_default()
         .to_vec();
     ctx.insert("kinds", &kinds);
     ctx.insert("slug_mark", SLUG_MARK);
-    let mut help: std::collections::BTreeMap<&str, &str> = schema
-        .fields
-        .iter()
-        .filter_map(|f| Some((f.name, f.help_text?)))
-        .collect();
-    // Here it applies to every tenant, and the form has no staff option.
-    help.insert("allow_email_link", SHARED_EMAIL_LINK_HELP);
-    ctx.insert("help", &help);
-    let labels: std::collections::BTreeMap<&str, &str> = schema
-        .fields
-        .iter()
-        .map(|f| (f.name, f.display_label()))
-        .collect();
-    ctx.insert("label", &labels);
+    super::insert_field_text(
+        &mut ctx,
+        <crate::tenancy::sso::SharedSsoProvider as crate::core::Model>::SCHEMA,
+    );
     ctx
 }
-
-/// The console's `allow_email_link` text: it links in every tenant.
-const SHARED_EMAIL_LINK_HELP: &str = "Security: in every tenant, link a first-time sign-in to the existing account with the same verified email; that account's password stops working, its sessions end, its API keys are deleted and its agent keys are turned off. Never a superuser or a user with any role or permission.";
 
 /// The `?error=` / `?notice=` a redirect left (the flash layer checks them).
 #[derive(Deserialize)]

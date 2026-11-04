@@ -180,31 +180,57 @@ pub struct Media {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Name of the storage disk holding the file, e.g. `default` or `s3`.")]
+    #[rustango(verbose_name = "Disk")]
     pub disk: String,
     #[rustango(max_length = 512)]
+    #[rustango(help_text = "The file's path on its disk.")]
+    #[rustango(verbose_name = "Storage key")]
     pub storage_key: String,
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Content type of the file, e.g. `image/png`.")]
+    #[rustango(verbose_name = "MIME type")]
     pub mime: String,
+    #[rustango(help_text = "File size in bytes.")]
+    #[rustango(verbose_name = "Size")]
     pub size_bytes: i64,
     #[rustango(max_length = 512)]
+    #[rustango(
+        help_text = "The name the file was uploaded with. Shown to people; never used as a path."
+    )]
+    #[rustango(verbose_name = "Original filename")]
     pub original_filename: String,
     /// MediaStatus serialized as &str (pending/ready/failed).
     #[rustango(max_length = 32, index)]
+    #[rustango(help_text = "`pending` until the upload finishes, then `ready`, or `failed`.")]
+    #[rustango(verbose_name = "Status")]
     pub status: String,
     /// Set on INSERT via the per-dialect `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the upload was recorded. Set by the database.")]
+    #[rustango(verbose_name = "Uploaded at")]
     pub uploaded_at: Auto<DateTime<Utc>>,
     /// Soft FK to your User table.
+    #[rustango(help_text = "Id of the user who uploaded it, if known.")]
+    #[rustango(verbose_name = "Uploaded by")]
     pub uploaded_by_id: Option<i64>,
     /// Self-FK for variants / thumbnails.
+    #[rustango(help_text = "For a variant such as a thumbnail: the original it was made from.")]
+    #[rustango(verbose_name = "Derived from")]
     pub derived_from_id: Option<i64>,
     /// Optional FK to `rustango_media_collections.id` — the
     /// "where it lives" folder. NULL means "loose" (in the root).
     #[rustango(index)]
+    #[rustango(help_text = "The folder it lives in. Empty means the root.")]
+    #[rustango(verbose_name = "Collection")]
     pub collection_id: Option<i64>,
     #[rustango(default = "'{}'")]
+    #[rustango(help_text = "JSON about the file, e.g. `{\"width\": 800}`. Default `{}`.")]
+    #[rustango(verbose_name = "Metadata")]
     pub metadata: Value,
     /// Soft delete.
+    #[rustango(help_text = "Set when the file is soft-deleted; it is hidden until restored.")]
+    #[rustango(verbose_name = "Deleted at")]
     pub deleted_at: Option<DateTime<Utc>>,
 }
 

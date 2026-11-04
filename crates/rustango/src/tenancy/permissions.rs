@@ -109,12 +109,22 @@ pub struct Permission {
     /// existing `table_name` column (the Rust field avoids colliding
     /// with the derived `table_name()` accessor).
     #[rustango(column = "table_name", max_length = 150)]
+    #[rustango(
+        help_text = "Table the permission applies to, e.g. `post`, or `auth` for framework permissions such as `access_admin`."
+    )]
+    #[rustango(verbose_name = "Table")]
     pub perm_table: String,
     /// Permission codename — `{table}.{action}` or a reserved name.
     #[rustango(max_length = 100)]
+    #[rustango(
+        help_text = "What it allows, as `<table>.<action>`, e.g. `post.change`. Roles and users are granted codenames."
+    )]
+    #[rustango(verbose_name = "Codename")]
     pub codename: String,
     /// Human-readable label.
     #[rustango(max_length = 255, default = "''")]
+    #[rustango(help_text = "Readable name, e.g. `Can change post`.")]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
 }
 
@@ -137,12 +147,20 @@ pub struct Role {
     pub id: Auto<i64>,
     /// Human-readable name. Unique within the tenant.
     #[rustango(max_length = 150, unique)]
+    #[rustango(help_text = "Role name, e.g. `editor`. Unique within the tenant.")]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
     #[rustango(max_length = 500)]
+    #[rustango(help_text = "What the role is for. Shown in the admin only.")]
+    #[rustango(verbose_name = "Description")]
     pub description: String,
     /// Flexible role metadata — display config, feature flags, UI
     /// hints. Never read by the permission engine.
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "Free-form JSON for your app, e.g. `{\"theme\": \"dark\"}`. The framework never reads it. Default `{}`."
+    )]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
 }
 
@@ -164,9 +182,15 @@ pub struct RolePermission {
     pub id: Auto<i64>,
     /// The role this permission belongs to.
     #[rustango(fk = "rustango_roles", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The role that gets the permission.")]
+    #[rustango(verbose_name = "Role")]
     pub role_id: i64,
     /// Permission codename — `{table}.{action}`, e.g. `post.change`.
     #[rustango(max_length = 100)]
+    #[rustango(
+        help_text = "The permission granted, e.g. `post.change`. Every member of the role gets it."
+    )]
+    #[rustango(verbose_name = "Codename")]
     pub codename: String,
 }
 
@@ -183,9 +207,13 @@ pub struct UserRole {
     pub id: Auto<i64>,
     /// `rustango_users.id`
     #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The user who belongs to the role.")]
+    #[rustango(verbose_name = "User")]
     pub user_id: i64,
     /// `rustango_roles.id`
     #[rustango(fk = "rustango_roles", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The role. The user gets each of its permissions.")]
+    #[rustango(verbose_name = "Role")]
     pub role_id: i64,
 }
 
@@ -207,16 +235,28 @@ pub struct UserPermission {
     pub id: Auto<i64>,
     /// `rustango_users.id`
     #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The user this override is for.")]
+    #[rustango(verbose_name = "User")]
     pub user_id: i64,
     /// Permission codename — `{table}.{action}`.
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "The permission, e.g. `post.delete`.")]
+    #[rustango(verbose_name = "Codename")]
     pub codename: String,
     /// `true` = explicit grant; `false` = explicit denial.
     #[rustango(default = "true")]
+    #[rustango(
+        help_text = "On: the user has the permission. Off: an explicit denial, which wins over any role that grants it."
+    )]
+    #[rustango(verbose_name = "Granted")]
     pub granted: bool,
     /// Extra context on this override — reason, granted-by, expiry
     /// hints. Never read by `has_perm`.
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "Free-form JSON about the override, e.g. `{\"reason\": \"audit\"}`. Permission checks never read it. Default `{}`."
+    )]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
 }
 

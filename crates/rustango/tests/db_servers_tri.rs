@@ -3,6 +3,9 @@
 
 #![cfg(all(feature = "tenancy", feature = "testkit", feature = "sqlite"))]
 
+#[path = "support/field_text.rs"]
+mod field_text;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -883,6 +886,10 @@ async fn the_console_never_shows_the_password(pool: &Pool) {
     let (status, page) = c.get("/db-servers").await;
     assert_eq!(status, 200, "{page}");
     assert!(page.contains("Add a database server"), "{page}");
+    let server = <rustango::tenancy::DbServer as rustango::core::Model>::SCHEMA;
+    for field in ["name", "active"] {
+        field_text::assert_shows(&page, server, field, field);
+    }
 
     let sqlite = env.backend() == BackendKind::Sqlite;
     let (port, fields) = if sqlite {

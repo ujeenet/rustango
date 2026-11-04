@@ -51,22 +51,34 @@ pub struct WebauthnCredential {
     pub id: Auto<i64>,
     /// The owning user's id.
     #[rustango(index)]
+    #[rustango(help_text = "The user who registered the passkey.")]
+    #[rustango(verbose_name = "User")]
     pub user_id: i64,
     /// Base64url (no padding) of the raw credential id the authenticator
     /// returns — the unique handle used to look the credential up at
     /// assertion time.
     #[rustango(max_length = 255, unique)]
+    #[rustango(help_text = "The authenticator's id for the passkey, base64url.")]
+    #[rustango(verbose_name = "Credential id")]
     pub credential_id: String,
     /// COSE-encoded public key bytes captured at registration.
+    #[rustango(help_text = "The passkey's public key.")]
+    #[rustango(verbose_name = "Public key")]
     pub public_key: Vec<u8>,
     /// Authenticator signature counter (replay / clone detection).
     #[rustango(default = "0")]
+    #[rustango(help_text = "The authenticator's counter, to spot a cloned key.")]
+    #[rustango(verbose_name = "Sign count")]
     pub sign_count: i64,
     /// Optional user-facing label ("MacBook Touch ID", "YubiKey 5").
     #[rustango(max_length = 64, default = "''")]
+    #[rustango(help_text = "Name the user gave it, e.g. `YubiKey 5`.")]
+    #[rustango(verbose_name = "Label")]
     pub label: String,
     /// When the credential was registered.
     #[rustango(default = "now()")]
+    #[rustango(help_text = "When the passkey was registered.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

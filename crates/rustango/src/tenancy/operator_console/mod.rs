@@ -2027,6 +2027,8 @@ async fn org_edit_form(
         if LOCKED_ORG_FIELDS.contains(&field.name) {
             locked_rows.push(serde_json::json!({
                 "name": field.name,
+                "label": field.display_label(),
+                "help": field.help_text,
                 "value": prefill,
             }));
             continue;
@@ -2044,6 +2046,8 @@ async fn org_edit_form(
         };
         editable_rows.push(serde_json::json!({
             "name": field.name,
+            "label": field.display_label(),
+            "help": field.help_text,
             "input": input_html,
             "helper": helper,
         }));
@@ -2493,6 +2497,23 @@ async fn static_rustango_png() -> Response<Body> {
 }
 
 // ----------------------------- helpers
+
+/// A model's field labels and help texts as `label` / `help` maps, so a
+/// console form reads the same schema text as the admin.
+pub(super) fn insert_field_text(ctx: &mut Context, schema: &'static crate::core::ModelSchema) {
+    let help: std::collections::BTreeMap<&str, &str> = schema
+        .fields
+        .iter()
+        .filter_map(|f| Some((f.name, f.help_text?)))
+        .collect();
+    let label: std::collections::BTreeMap<&str, &str> = schema
+        .fields
+        .iter()
+        .map(|f| (f.name, f.display_label()))
+        .collect();
+    ctx.insert("help", &help);
+    ctx.insert("label", &label);
+}
 
 // The crate's one query-value encoder; it also escapes `/`.
 use crate::url_codec::url_encode as urlencoding_lite;

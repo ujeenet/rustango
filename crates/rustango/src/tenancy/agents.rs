@@ -36,20 +36,38 @@ pub struct Agent {
     pub id: Auto<i64>,
     /// Login handle. Unique within this tenant.
     #[rustango(max_length = 150, unique)]
+    #[rustango(
+        help_text = "The agent's login name, e.g. `support-bot`. Unique within the tenant."
+    )]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
     /// 8-char public prefix — the lookup half of the credential, stored
     /// in plaintext by design (mirrors `ApiKey.key_prefix`).
     #[rustango(max_length = 16, unique)]
+    #[rustango(
+        help_text = "First 8 characters of the agent's credential, used to find it. Public by design."
+    )]
+    #[rustango(verbose_name = "Secret prefix")]
     pub secret_prefix: String,
     /// argon2id hash of the 32-char secret half. Never returned.
     #[rustango(secret, max_length = 255)]
+    #[rustango(
+        help_text = "Argon2id hash of the secret part; the secret is shown once at creation and never stored."
+    )]
+    #[rustango(verbose_name = "Secret hash")]
     pub secret_hash: String,
     /// Soft-disable — `false` rejects auth without dropping the row.
+    #[rustango(help_text = "Off: the agent cannot get a token. The row stays.")]
+    #[rustango(verbose_name = "Active")]
     pub active: bool,
     /// Set on INSERT via the per-dialect `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
     /// Timestamp of the last secret rotation. `None` until first rotated.
+    #[rustango(help_text = "When the secret last changed. Empty until the first rotation.")]
+    #[rustango(verbose_name = "Secret rotated at")]
     pub secret_rotated_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Optional owning `rustango_users.id`. `None` for a standalone machine
     /// agent; `Some(uid)` for a **user-owned key** — a personal credential a
@@ -59,10 +77,18 @@ pub struct Agent {
     /// `rustango_users`, but no hard FK is declared — that would couple the
     /// `mcp` feature to `tenancy` and break mcp-without-tenancy builds. Orphan
     /// cleanup on user deletion is explicit via [`delete_user_keys_pool`].
+    #[rustango(
+        help_text = "Empty for a machine agent. Set for a user's personal key: the agent then acts as that user, with their permissions."
+    )]
+    #[rustango(verbose_name = "Owner")]
     pub user_id: Option<i64>,
     /// Flexible per-agent metadata. The framework reads only `"scoped"`
     /// (see [`Agent::is_scoped_key`]).
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "JSON metadata. The framework reads only `scoped`: a key minted with pinned skills, which gets nothing once its last grant goes. Default `{}`."
+    )]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
 }
 
@@ -328,14 +354,28 @@ pub struct AgentSkill {
     pub id: Auto<i64>,
     /// Stable identifier referenced by grants. Unique within the tenant.
     #[rustango(max_length = 100, unique)]
+    #[rustango(
+        help_text = "Stable id that grants name, e.g. `support.read`. Unique within the tenant."
+    )]
+    #[rustango(verbose_name = "Codename")]
     pub codename: String,
     #[rustango(max_length = 150)]
+    #[rustango(help_text = "Readable name of the skill.")]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
     #[rustango(max_length = 500)]
+    #[rustango(help_text = "What the skill lets an agent do.")]
+    #[rustango(verbose_name = "Description")]
     pub description: String,
     /// MCP prompt body surfaced via `prompts/get` (Slice 5).
+    #[rustango(help_text = "Prompt text agents get from `prompts/get` for this skill.")]
+    #[rustango(verbose_name = "Instructions")]
     pub instructions: String,
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "Free-form JSON for your app, e.g. `{\"theme\": \"dark\"}`. The framework never reads it. Default `{}`."
+    )]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
 }
 
@@ -346,8 +386,14 @@ pub struct AgentSkillTool {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(fk = "rustango_agent_skills", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The skill the tool belongs to.")]
+    #[rustango(verbose_name = "Skill")]
     pub skill_id: i64,
     #[rustango(max_length = 150)]
+    #[rustango(
+        help_text = "Name of an MCP tool, e.g. `list_posts`. An agent granted the skill may call it."
+    )]
+    #[rustango(verbose_name = "Tool")]
     pub tool_name: String,
 }
 
@@ -362,10 +408,18 @@ pub struct AgentGrant {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(fk = "rustango_agents", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The agent that gets the skill.")]
+    #[rustango(verbose_name = "Agent")]
     pub agent_id: i64,
     #[rustango(fk = "rustango_agent_skills", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The skill granted. Its tools join the agent's next token.")]
+    #[rustango(verbose_name = "Skill")]
     pub skill_id: i64,
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "Free-form JSON for your app, e.g. `{\"theme\": \"dark\"}`. The framework never reads it. Default `{}`."
+    )]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
 }
 
@@ -384,9 +438,15 @@ pub struct AgentSkillPermission {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(fk = "rustango_agent_skills", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The skill a user's key gets.")]
+    #[rustango(verbose_name = "Skill")]
     pub skill_id: i64,
     /// A `rustango_permissions` codename (e.g. `ib_member_profile.change`).
     #[rustango(max_length = 150)]
+    #[rustango(
+        help_text = "A permission codename, e.g. `post.change`. A user's personal key gets the skill while its owner holds this permission. Machine agents ignore it."
+    )]
+    #[rustango(verbose_name = "Permission")]
     pub permission_codename: String,
 }
 
@@ -1271,12 +1331,20 @@ pub struct AgentSkillResource {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(fk = "rustango_agent_skills", on = "id", on_delete = "cascade")]
+    #[rustango(help_text = "The skill the resource belongs to.")]
+    #[rustango(verbose_name = "Skill")]
     pub skill_id: i64,
     #[rustango(max_length = 500)]
+    #[rustango(help_text = "The resource's MCP URI, e.g. `docs://support/faq`.")]
+    #[rustango(verbose_name = "URI")]
     pub resource_uri: String,
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "The type agents are told, e.g. `text/markdown`.")]
+    #[rustango(verbose_name = "MIME type")]
     pub mime: String,
     #[rustango(default = "'{}'")]
+    #[rustango(help_text = "The resource body in `text`, e.g. `{\"text\": \"...\"}`.")]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
 }
 

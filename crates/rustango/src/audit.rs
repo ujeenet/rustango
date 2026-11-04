@@ -529,15 +529,29 @@ pub struct AuditLog {
     // MUST have a max_length: MySQL cannot index an unbounded TEXT column
     // without a prefix length (error 1170).
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Table of the changed row.")]
+    #[rustango(verbose_name = "Table")]
     pub entity_table: String,
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Primary key of the changed row.")]
+    #[rustango(verbose_name = "Row id")]
     pub entity_pk: String,
     #[rustango(max_length = 32)]
+    #[rustango(help_text = "`create`, `update`, `delete`, `soft_delete`, `restore` or `action`.")]
+    #[rustango(verbose_name = "Operation")]
     pub operation: String,
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Who or what made the change, e.g. `user:42`, `cli` or `webhook:stripe`."
+    )]
+    #[rustango(verbose_name = "Source")]
     pub source: String,
+    #[rustango(help_text = "The changed fields as JSON, with before and after values.")]
+    #[rustango(verbose_name = "Changes")]
     pub changes: serde_json::Value,
     #[rustango(index, default = "now()")]
+    #[rustango(help_text = "When the change happened.")]
+    #[rustango(verbose_name = "Occurred at")]
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 

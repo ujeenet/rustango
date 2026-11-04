@@ -16,6 +16,9 @@
 //!
 //! Reads `DATABASE_URL`. Skips silently when unset.
 
+#[path = "support/field_text.rs"]
+mod field_text;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -180,6 +183,10 @@ async fn get_edit_form_renders_with_prefill_and_no_creds() {
     );
     assert!(html.contains("host_pattern"), "host_pattern field missing");
     assert!(html.contains("active"), "active field missing");
+    let org = <rustango::tenancy::Org as rustango::core::Model>::SCHEMA;
+    for field in ["display_name", "primary_color", "theme_mode"] {
+        field_text::assert_shows(&html, org, field, field);
+    }
 
     // Existing display_name prefilled.
     assert!(

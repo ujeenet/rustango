@@ -1,4 +1,5 @@
-//! Every editable SSO field carries help text, and the admin form shows it.
+//! Every editable field of every framework model has help text and a label,
+//! and the admin form shows them.
 
 #![cfg(all(
     feature = "sqlite",
@@ -24,24 +25,74 @@ fn editable(schema: &'static ModelSchema) -> Vec<&'static rustango::core::FieldS
         .collect()
 }
 
+/// The framework's own models: every `rustango_*` table this build registers.
+fn framework_models() -> Vec<&'static ModelSchema> {
+    let mut models: Vec<_> = rustango::migrate::registered_models()
+        .into_iter()
+        .filter(|s| s.table.starts_with("rustango_"))
+        .collect();
+    models.sort_by_key(|s| s.table);
+    models.dedup_by_key(|s| s.table);
+    models
+}
+
 #[test]
-fn every_editable_sso_field_has_help_text() {
-    use rustango::sso::policy::{SsoInvite, SsoSharedOverride, SsoTenantPolicy};
-    use rustango::sso::SsoProvider;
-    for schema in [
-        SsoProvider::SCHEMA,
-        SsoInvite::SCHEMA,
-        SsoSharedOverride::SCHEMA,
-        SsoTenantPolicy::SCHEMA,
-    ] {
+fn every_editable_framework_field_has_help_text_and_a_label() {
+    let mut missing = Vec::new();
+    for schema in framework_models() {
         for f in editable(schema) {
-            assert!(
-                f.help_text.is_some_and(|h| !h.is_empty()),
-                "{}.{} has no help text",
-                schema.table,
-                f.name
-            );
+            if !f.help_text.is_some_and(|h| !h.trim().is_empty()) {
+                missing.push(format!("{}.{}: no help_text", schema.table, f.name));
+            }
+            if !f.verbose_name.is_some_and(|v| !v.trim().is_empty()) {
+                missing.push(format!("{}.{}: no verbose_name", schema.table, f.name));
+            }
         }
+    }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
+}
+
+/// The walk above sees every framework model, so it cannot pass on an
+/// empty registry.
+#[cfg(all(feature = "media", feature = "passkey", feature = "mcp"))]
+#[test]
+fn the_walk_covers_every_framework_model() {
+    let seen: Vec<&str> = framework_models().iter().map(|s| s.table).collect();
+    for table in [
+        "rustango_orgs",
+        "rustango_org_hosts",
+        "rustango_db_servers",
+        "rustango_tenant_databases",
+        "rustango_operators",
+        "rustango_users",
+        "rustango_roles",
+        "rustango_permissions",
+        "rustango_user_roles",
+        "rustango_role_permissions",
+        "rustango_user_permissions",
+        "rustango_admin_users",
+        "rustango_api_keys",
+        "rustango_agents",
+        "rustango_agent_skills",
+        "rustango_agent_grants",
+        "rustango_agent_skill_tools",
+        "rustango_agent_skill_permissions",
+        "rustango_agent_skill_resources",
+        "rustango_media",
+        "rustango_media_collections",
+        "rustango_media_tags",
+        "rustango_media_tag_links",
+        "rustango_translations",
+        "rustango_content_types",
+        "rustango_audit_log",
+        "rustango_provisioning_runs",
+        "rustango_provisioning_events",
+        "rustango_webauthn_credentials",
+        "rustango_admin_totp",
+        "rustango_operator_totp",
+        "rustango_sso_providers",
+    ] {
+        assert!(seen.contains(&table), "{table} is not registered: {seen:?}");
     }
 }
 

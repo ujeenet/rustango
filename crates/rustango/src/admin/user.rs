@@ -34,9 +34,15 @@ pub struct AdminUser {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(max_length = 150, unique)]
+    #[rustango(help_text = "Login for the admin, e.g. `admin`. Unique.")]
+    #[rustango(verbose_name = "Username")]
     pub username: String,
     /// argon2id PHC string from [`crate::passwords::hash`].
     #[rustango(max_length = 200)]
+    #[rustango(
+        help_text = "Argon2id hash of the password; the password itself is never stored. Set with `create-admin` or the password pages."
+    )]
+    #[rustango(verbose_name = "Password hash")]
     pub password_hash: String,
     /// Email that links an external SSO identity to this account. The
     /// `admin-sso` login matches the IdP's **verified** email against
@@ -47,18 +53,34 @@ pub struct AdminUser {
     /// the feature on or off produces an Add/DropColumn migration.
     #[cfg(feature = "admin-sso")]
     #[rustango(max_length = 254, unique)]
+    #[rustango(
+        help_text = "Address that links an admin SSO sign-in to this account: the IdP's verified email must match. Empty means no SSO. Unique."
+    )]
+    #[rustango(verbose_name = "Email")]
     pub email: Option<String>,
     /// `true` grants full admin access. The bare admin's gate is set
     /// to superuser-only by default, so a `false` session gets a 403.
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Security: full admin access. The admin lets only superusers in by default, so a non-superuser gets a 403."
+    )]
+    #[rustango(verbose_name = "Superuser")]
     pub is_superuser: bool,
     /// Soft-disable flag. Set it to `false` to lock the account out
     /// without deleting it. The login handler rejects inactive users.
     #[rustango(default = "true")]
+    #[rustango(help_text = "Off: the account cannot sign in and its sessions end. The row stays.")]
+    #[rustango(verbose_name = "Active")]
     pub active: bool,
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Stamped on logout: sessions issued at or before it are refused, on
     /// every device (#1855).
+    #[rustango(
+        help_text = "Set on logout. Security: sessions issued at or before it are refused on every device."
+    )]
+    #[rustango(verbose_name = "Sessions revoked at")]
     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 

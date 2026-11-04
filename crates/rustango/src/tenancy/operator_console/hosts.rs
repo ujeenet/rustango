@@ -91,6 +91,10 @@ pub(super) async fn org_hosts_view(
     ctx.insert("error", &q.error);
     ctx.insert("notice", &q.notice);
 
+    super::insert_field_text(
+        &mut ctx,
+        <crate::tenancy::OrgHost as crate::core::Model>::SCHEMA,
+    );
     render(&state, "op_org_hosts.html", &ctx)
 }
 

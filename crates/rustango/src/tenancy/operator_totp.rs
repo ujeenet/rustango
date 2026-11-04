@@ -21,15 +21,27 @@ pub struct OperatorTotp {
     pub operator_id: i64,
     /// Sealed (`enc:v1:`); private so nothing stores it plain.
     #[rustango(secret, max_length = 255)]
+    #[rustango(help_text = "The shared TOTP secret, sealed.")]
+    #[rustango(verbose_name = "Secret")]
     secret: String,
     #[rustango(default = "false")]
+    #[rustango(help_text = "On once a code was verified; then sign-in asks for codes.")]
+    #[rustango(verbose_name = "Confirmed")]
     pub confirmed: bool,
     #[rustango(default = "now()")]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Time step of the last accepted code; each code works once.
+    #[rustango(help_text = "Time step of the last accepted code, so each code works once.")]
+    #[rustango(verbose_name = "Last used step")]
     pub last_used_step: Option<i64>,
     /// A re-enrollment's sealed new secret.
     #[rustango(secret, max_length = 255)]
+    #[rustango(
+        help_text = "A new secret being enrolled, sealed; the old one stays until a code confirms it."
+    )]
+    #[rustango(verbose_name = "Pending secret")]
     pending_secret: Option<String>,
 }
 

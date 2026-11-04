@@ -132,6 +132,10 @@ async fn render_form(
             })
             .map(|u| redact(&u)),
     );
+    super::insert_field_text(
+        &mut ctx,
+        <crate::tenancy::Org as crate::core::Model>::SCHEMA,
+    );
     render(state, "op_orgs_new.html", &ctx)
 }
 

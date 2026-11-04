@@ -25,16 +25,28 @@ pub struct MediaCollection {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Folder name people see, e.g. `Product photos`.")]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
     /// Path-friendly id, unique across the table.
     #[rustango(max_length = 255, unique)]
+    #[rustango(help_text = "Path-friendly id, e.g. `product-photos`. Unique.")]
+    #[rustango(verbose_name = "Slug")]
     pub slug: String,
     #[rustango(index)]
+    #[rustango(help_text = "The folder this one is in. Empty means the root.")]
+    #[rustango(verbose_name = "Parent")]
     pub parent_id: Option<i64>,
     #[rustango(default = "")]
+    #[rustango(help_text = "What the folder holds. Optional.")]
+    #[rustango(verbose_name = "Description")]
     pub description: String,
     /// Set on INSERT via the per-dialect `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
+    #[rustango(help_text = "Set when the folder is soft-deleted.")]
+    #[rustango(verbose_name = "Deleted at")]
     pub deleted_at: Option<chrono::DateTime<chrono::Utc>>,
 }

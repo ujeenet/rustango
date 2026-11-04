@@ -358,6 +358,10 @@ pub struct ApiKey {
     pub id: crate::sql::Auto<i64>,
     /// `rustango_users.id`
     #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
+    #[rustango(
+        help_text = "The user the key signs in as. Security: requests with the key get this user's permissions."
+    )]
+    #[rustango(verbose_name = "User")]
     pub user_id: i64,
     /// 8-char hex prefix — public, used to look up the row. Stored in
     /// plaintext by design (it's the lookup index). Audit L4: this is an
@@ -370,20 +374,34 @@ pub struct ApiKey {
     /// at 100k keys against 0.025 ms indexed, growing with every key
     /// ever issued (#1647).
     #[rustango(max_length = 8, index)]
+    #[rustango(
+        help_text = "First 8 hex characters of the key, used to find it. Public by design: it does not reveal the secret."
+    )]
+    #[rustango(verbose_name = "Key prefix")]
     pub key_prefix: String,
     /// `hmac-sha256v2$<hex>` under a sub-key of the server secret;
     /// `hmac-sha256$` (the secret itself) still verifies; argon2id rows are
     /// rewritten on first use.
     /// Never returned to callers.
     #[rustango(secret, max_length = 255)]
+    #[rustango(
+        help_text = "Keyed MAC of the secret part; the key itself is shown once at creation and never stored."
+    )]
+    #[rustango(verbose_name = "Key hash")]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "What the key is for, e.g. `CI pipeline`.")]
+    #[rustango(verbose_name = "Label")]
     pub label: String,
     /// Optional expiry. `None` = never expires.
+    #[rustango(help_text = "After this time the key is refused. Empty means it never expires.")]
+    #[rustango(verbose_name = "Expires at")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Set on INSERT via `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
