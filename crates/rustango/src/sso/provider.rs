@@ -45,26 +45,39 @@ pub struct SsoProvider {
     /// its callback. Unique within the table (per-tenant in tenancy mode,
     /// since the table is physically per-tenant).
     #[rustango(max_length = 64, unique)]
+    #[rustango(
+        help_text = "Short id in this provider's URLs, e.g. `google`: the IdP sends users back to `<login>/sso/<slug>/callback`. Unique; a new slug means a new callback URL at the IdP."
+    )]
     pub slug: String,
 
     /// Button label, e.g. `"Sign in with Google"`.
     #[rustango(max_length = 150)]
+    #[rustango(help_text = "Text on the sign-in button, e.g. `Sign in with Google`.")]
     pub label: String,
 
     /// Provider kind: a built-in preset key (`"google"`, `"microsoft"`,
     /// `"github"`, `"gitlab"`, `"discord"`) or `"oidc"` for a generic
     /// OpenID Connect provider configured via `issuer_url`.
     #[rustango(max_length = 32)]
+    #[rustango(
+        help_text = "`google`, `microsoft`, `github`, `gitlab` or `discord` for a built-in provider, or `oidc` for any other OpenID Connect provider (then fill in the issuer URL)."
+    )]
     pub kind: String,
 
     /// OIDC issuer base URL (e.g. a Keycloak realm or Okta domain), used
     /// with `kind = "oidc"` to auto-discover endpoints via
     /// `{issuer}/.well-known/openid-configuration`. Unused for presets.
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Only for `oidc`: the issuer URL, e.g. `https://login.microsoftonline.com/<tenant-id>/v2.0` or `https://<org>.okta.com`. The endpoints are read from `<issuer>/.well-known/openid-configuration`."
+    )]
     pub issuer_url: Option<String>,
 
     /// OAuth2 client id issued by the IdP.
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Client ID (application ID) from your identity provider's app registration."
+    )]
     pub client_id: String,
 
     /// The OAuth2 client secret, **encrypted at rest** (XChaCha20-Poly1305,
@@ -73,47 +86,73 @@ pub struct SsoProvider {
     /// IdP's token endpoint. The single home for a provider's secret — no env
     /// var, no plaintext-in-DB.
     #[rustango(max_length = 1024)]
+    #[rustango(
+        help_text = "Client secret from the same app registration. Stored encrypted with `RUSTANGO_SECRET_KEY`."
+    )]
     pub client_secret: Cast<EncryptedString>,
 
     /// Offer this provider on the login page when `true`.
     #[rustango(default = "true")]
+    #[rustango(help_text = "Show this provider's button on the sign-in page.")]
     pub enabled: bool,
 
     /// Button ordering on the login page (ascending).
     #[rustango(default = "0")]
+    #[rustango(help_text = "Button order on the sign-in page; lower numbers come first.")]
     pub sort_order: i32,
 
     /// Optional space-separated OAuth scope override. When set, replaces the
     /// default `openid email profile` scopes for this provider.
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "OAuth scopes, space separated, e.g. `openid email profile`. Empty: the kind's default scopes."
+    )]
     pub scopes: Option<String>,
 
     /// Link a first-time SSO user to the account with the same verified
     /// email. Never links a superuser or staff account; the bare admin ignores it.
     /// Only a superuser can add or change provider rows in the admin.
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Security: link a first-time sign-in to the existing account with the same verified email. Never a superuser, and a user with roles only when the staff option is on too; the bare admin ignores it."
+    )]
     pub allow_email_link: bool,
 
     /// Only emails in these domains sign in: `client.org`, `*.client.org`
     /// (subdomains only), comma or newline separated. Empty: any domain.
     #[rustango(max_length = 2000)]
+    #[rustango(
+        help_text = "Security: only users whose verified email is in these domains may sign in. Comma or newline list: `client.org` is that domain only, `*.client.org` its subdomains only. Empty: any domain."
+    )]
     pub allowed_email_domains: Option<String>,
 
     /// Emails in these domains never sign in; beats the allowed list.
     #[rustango(max_length = 2000)]
+    #[rustango(
+        help_text = "Users with an email in these domains never sign in, even if the allowed list has them. Same format as the allowed list."
+    )]
     pub blocked_email_domains: Option<String>,
 
     /// Microsoft directory ids (`tid`) allowed to sign in. Needs a verified id_token.
     #[rustango(max_length = 1000)]
+    #[rustango(
+        help_text = "Microsoft Entra directory (tenant) IDs allowed to sign in, comma separated. Read from a verified id_token; set it for a Microsoft app open to all directories."
+    )]
     pub allowed_idp_tenants: Option<String>,
 
     /// Google Workspace domains (`hd`) allowed to sign in.
     #[rustango(max_length = 1000)]
+    #[rustango(
+        help_text = "Google Workspace domains (the `hd` claim) allowed to sign in, comma separated, e.g. `client.org`."
+    )]
     pub allowed_hosted_domains: Option<String>,
 
     /// `{"claim": ["value", ...]}`: each claim must hold one of its values.
     /// `{"iss": [...]}` pins the issuer.
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "JSON object of claims a sign-in must carry, each holding one of its values: `{\"roles\": [\"App.User\"]}`. `{}`: no claim is required."
+    )]
     pub required_claims: serde_json::Value,
 
     /// Who may sign up: `closed`, `invite_only`, `allowlist` or `open`.
@@ -122,22 +161,35 @@ pub struct SsoProvider {
         max_length = 16,
         choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
     )]
+    #[rustango(
+        help_text = "Security: who gets a new account at first sign-in: `closed` (no one), `invite_only` (an invite for the email), `allowlist` (an invite for the email or its domain) or `open` (anyone the sign-in rules let in). Empty: the sign-in page's default."
+    )]
     pub signup_mode: Option<String>,
 
     /// Roles granted to a user created through this provider.
     #[rustango(max_length = 1000)]
+    #[rustango(
+        help_text = "Tenant roles a new user gets, comma separated, e.g. `Viewer`. An invite with roles replaces them."
+    )]
     pub default_roles: Option<String>,
 
     /// `{"<IdP group or role>": "<tenant role>"}`.
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "JSON object from an IdP group or app role to tenant roles: `{\"Admins\": \"Editor\"}` or `{\"Admins\": [\"Editor\", \"Viewer\"]}`."
+    )]
     pub role_map: serde_json::Value,
 
     /// Claims [`Self::role_map`] reads. Empty: `groups,roles`.
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Claims the role map reads, comma separated. Empty: `groups,roles`.")]
     pub role_claims: Option<String>,
 
     /// Re-apply [`Self::role_map`] on every sign-in, not just the first.
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Apply the role map at every sign-in, not only the first. Only roles named in the role map are added or removed."
+    )]
     pub sync_roles_on_login: bool,
 
     /// Where a new user's username comes from.
@@ -145,6 +197,9 @@ pub struct SsoProvider {
         max_length = 24,
         default = "'email_local'",
         choices = "email_local:Email local part, email:Email, preferred_username:Preferred username"
+    )]
+    #[rustango(
+        help_text = "Where a new user's username comes from: the email's local part, the whole email, or the IdP's `preferred_username` (falls back to the local part)."
     )]
     pub username_from: String,
 
@@ -154,27 +209,48 @@ pub struct SsoProvider {
         default = "'suffix'",
         choices = "suffix:Add a suffix, refuse:Refuse"
     )]
+    #[rustango(
+        help_text = "What happens when that username is taken: add a short suffix, or refuse the sign-up."
+    )]
     pub username_clash: String,
 
     /// Refresh name and email from the IdP on every sign-in.
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Update the user's name and email from the IdP at every sign-in. Never for a superuser."
+    )]
     pub sync_profile: bool,
 
     /// Email linking may also link role holders (never superusers).
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Security: with email linking on, also link users who hold roles. A superuser is never linked by email."
+    )]
     pub allow_email_link_staff: bool,
 
     /// Users of this provider may not sign in with a password.
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Users linked through this provider may not sign in with a password, even while the provider is off."
+    )]
     pub sso_only: bool,
 
     /// Deactivate users this provider created after this many idle days.
+    #[rustango(
+        help_text = "After this many days without use, `sso-deactivate-idle` turns off the users this provider signed up. Empty: never."
+    )]
     pub auto_deactivate_after_days: Option<i32>,
 
     /// Session lifetime after a sign-in through this provider.
+    #[rustango(
+        help_text = "Longest session, in seconds, after a sign-in through this provider. Empty: the normal session length."
+    )]
     pub session_ttl_secs: Option<i64>,
 
     /// Session lifetime for a superuser.
+    #[rustango(
+        help_text = "Longest session, in seconds, for a superuser who signs in through this provider. Empty: the normal session length."
+    )]
     pub superuser_session_ttl_secs: Option<i64>,
 
     /// Set on INSERT via `DEFAULT NOW()`.

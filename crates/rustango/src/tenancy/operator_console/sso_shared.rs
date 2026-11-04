@@ -267,7 +267,23 @@ fn base_ctx(state: &ConsoleState, op: &auth::Operator) -> Context {
         &["oidc", "google", "microsoft", "github", "gitlab", "discord"],
     );
     ctx.insert("slug_mark", SLUG_MARK);
+    // Same fields as `SsoProvider`: its schema holds the one copy of the help text.
+    ctx.insert(
+        "help",
+        &field_help(<crate::sso::SsoProvider as crate::core::Model>::SCHEMA),
+    );
     ctx
+}
+
+/// `field name -> help text` from a model schema.
+fn field_help(
+    schema: &crate::core::ModelSchema,
+) -> std::collections::BTreeMap<&'static str, &'static str> {
+    schema
+        .fields
+        .iter()
+        .filter_map(|f| Some((f.name, f.help_text?)))
+        .collect()
 }
 
 /// The `?error=` / `?notice=` a redirect left (the flash layer checks them).

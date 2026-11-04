@@ -7,17 +7,18 @@
         {% if creating %}
         <input type="text" id="sso_slug" name="slug" required pattern="[A-Za-z0-9_\-]+" maxlength="64"
                value="{{ f.slug }}" placeholder="acme-google" data-mark="{{ slug_mark }}">
-        <div class="field-helper">Letters, digits, <code>_</code> and <code>-</code>. Part of the callback URL, so it cannot change later.</div>
+        <div class="field-helper">{{ help.slug }} It cannot change later.</div>
         {% else %}
         <code>{{ f.slug }}</code>
-        <div class="field-helper">Part of the callback URL, so it cannot change.</div>
+        <div class="field-helper">{{ help.slug }} It cannot change.</div>
         {% endif %}
       </td>
     </tr>
     <tr>
       <th><label for="sso_label">button label</label></th>
       <td><input type="text" id="sso_label" name="label" required maxlength="150"
-                 value="{{ f.label }}" placeholder="Sign in with Google"></td>
+                 value="{{ f.label }}" placeholder="Sign in with Google">
+        <div class="field-helper">{{ help.label }}</div></td>
     </tr>
     <tr>
       <th><label for="sso_kind">kind</label></th>
@@ -25,6 +26,7 @@
         <select id="sso_kind" name="kind">
           {% for k in kinds %}<option value="{{ k }}"{% if f.kind == k %} selected{% endif %}>{% if k == "oidc" %}oidc (generic OpenID Connect){% else %}{{ k }}{% endif %}</option>{% endfor %}
         </select>
+        <div class="field-helper">{{ help.kind }}</div>
         {% if not creating %}<div class="field-helper">Changing the kind or issuer URL unlinks the users who signed in through this provider.</div>{% endif %}
       </td>
     </tr>
@@ -33,19 +35,20 @@
       <td>
         <input type="url" id="sso_issuer_url" name="issuer_url" maxlength="255"
                value="{{ f.issuer_url }}" placeholder="https://idp.example.com">
-        <div class="field-helper">Only for <code>oidc</code>: the endpoints are discovered from it.</div>
+        <div class="field-helper">{{ help.issuer_url }}</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_client_id">client ID</label></th>
       <td><input type="text" id="sso_client_id" name="client_id" required maxlength="255"
-                 value="{{ f.client_id }}" autocomplete="off"></td>
+                 value="{{ f.client_id }}" autocomplete="off">
+        <div class="field-helper">{{ help.client_id }}</div></td>
     </tr>
     <tr>
       <th><label for="sso_client_secret">client secret</label></th>
       <td>
         <input type="password" id="sso_client_secret" name="client_secret" autocomplete="new-password"{% if creating %} required{% endif %}>
-        <div class="field-helper">Stored encrypted. {% if creating %}Never shown again.{% else %}Saved — leave blank to keep it.{% endif %}</div>
+        <div class="field-helper">{{ help.client_secret }} {% if creating %}Never shown again.{% else %}Saved — leave blank to keep it.{% endif %}</div>
       </td>
     </tr>
     <tr>
@@ -53,25 +56,26 @@
       <td>
         <input type="text" id="sso_scopes" name="scopes" maxlength="255"
                value="{{ f.scopes }}" placeholder="openid email profile">
-        <div class="field-helper">Optional, space-separated. Blank for the kind's default.</div>
+        <div class="field-helper">{{ help.scopes }}</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_sort_order">sort order</label></th>
       <td>
         <input type="number" id="sso_sort_order" name="sort_order" value="{{ f.sort_order }}">
-        <div class="field-helper">Lower numbers come first on the login page.</div>
+        <div class="field-helper">{{ help.sort_order }}</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_enabled">enabled</label></th>
-      <td><input type="checkbox" id="sso_enabled" name="enabled"{% if f.enabled == "on" %} checked{% endif %}></td>
+      <td><input type="checkbox" id="sso_enabled" name="enabled"{% if f.enabled == "on" %} checked{% endif %}>
+        <div class="field-helper">{{ help.enabled }}</div></td>
     </tr>
     <tr>
       <th><label for="sso_allow_email_link">email linking</label></th>
       <td>
         <input type="checkbox" id="sso_allow_email_link" name="allow_email_link"{% if f.allow_email_link == "on" %} checked{% endif %}>
-        <div class="field-helper">Link a first-time user by verified email, in every tenant. Never superusers or staff.</div>
+        <div class="field-helper">{{ help.allow_email_link }} It applies in every tenant.</div>
       </td>
     </tr>
     <tr>
@@ -79,7 +83,7 @@
       <td>
         <textarea id="sso_allowed_email_domains" name="allowed_email_domains" rows="2" maxlength="2000"
                   placeholder="client.org, *.client.org">{{ f.allowed_email_domains }}</textarea>
-        <div class="field-helper">Only these domains sign in. <code>*.client.org</code> means its subdomains only. Blank: any domain.</div>
+        <div class="field-helper">{{ help.allowed_email_domains }}</div>
       </td>
     </tr>
     <tr>
@@ -87,7 +91,7 @@
       <td>
         <textarea id="sso_blocked_email_domains" name="blocked_email_domains" rows="2" maxlength="2000"
                   placeholder="gmail.com">{{ f.blocked_email_domains }}</textarea>
-        <div class="field-helper">Never sign in, even when allowed above.</div>
+        <div class="field-helper">{{ help.blocked_email_domains }}</div>
       </td>
     </tr>
     <tr>
@@ -95,7 +99,7 @@
       <td>
         <input type="text" id="sso_allowed_idp_tenants" name="allowed_idp_tenants" maxlength="1000"
                value="{{ f.allowed_idp_tenants }}">
-        <div class="field-helper">Microsoft directory ids (<code>tid</code>) allowed to sign in.</div>
+        <div class="field-helper">{{ help.allowed_idp_tenants }}</div>
       </td>
     </tr>
     <tr>
@@ -103,7 +107,7 @@
       <td>
         <input type="text" id="sso_allowed_hosted_domains" name="allowed_hosted_domains" maxlength="1000"
                value="{{ f.allowed_hosted_domains }}">
-        <div class="field-helper">Google Workspace domains (<code>hd</code>) allowed to sign in.</div>
+        <div class="field-helper">{{ help.allowed_hosted_domains }}</div>
       </td>
     </tr>
     <tr>
@@ -111,35 +115,35 @@
       <td>
         <textarea id="sso_required_claims" name="required_claims" rows="2"
                   placeholder='{"roles": ["App.User"]}'>{{ f.required_claims }}</textarea>
-        <div class="field-helper">JSON: each claim must hold one of its values.</div>
+        <div class="field-helper">{{ help.required_claims }}</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_sso_only">SSO only</label></th>
       <td>
         <input type="checkbox" id="sso_sso_only" name="sso_only"{% if f.sso_only == "on" %} checked{% endif %}>
-        <div class="field-helper">Its users may not sign in with a password. Superusers are never locked out.</div>
+        <div class="field-helper">{{ help.sso_only }} Superusers are never locked out.</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_auto_deactivate_after_days">deactivate after days</label></th>
       <td>
         <input type="number" min="1" id="sso_auto_deactivate_after_days" name="auto_deactivate_after_days" value="{{ f.auto_deactivate_after_days }}">
-        <div class="field-helper">Switch off users it signed up after this many idle days (<code>sso-deactivate-idle</code>).</div>
+        <div class="field-helper">{{ help.auto_deactivate_after_days }}</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_session_ttl_secs">session seconds</label></th>
       <td>
         <input type="number" min="1" id="sso_session_ttl_secs" name="session_ttl_secs" value="{{ f.session_ttl_secs }}">
-        <div class="field-helper">Longest session after a sign-in through it.</div>
+        <div class="field-helper">{{ help.session_ttl_secs }}</div>
       </td>
     </tr>
     <tr>
       <th><label for="sso_superuser_session_ttl_secs">superuser session seconds</label></th>
       <td>
         <input type="number" min="1" id="sso_superuser_session_ttl_secs" name="superuser_session_ttl_secs" value="{{ f.superuser_session_ttl_secs }}">
-        <div class="field-helper">Longest session for a superuser.</div>
+        <div class="field-helper">{{ help.superuser_session_ttl_secs }}</div>
       </td>
     </tr>
     <tr>
