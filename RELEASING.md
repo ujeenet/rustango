@@ -4,6 +4,13 @@ Four crates ship to crates.io from this workspace, and they have to go
 out in dependency order. Everything else here exists because it has
 gone wrong at least once.
 
+## Semver
+
+Public signature changes ship only in a minor release (`0.X.0`). The
+`Semver` workflow checks `rustango` against the newest crates.io release:
+it blocks a break on `main` and on `release/**` PRs, and labels any other
+PR `semver:breaking` so it waits for the next minor.
+
 ## 1. The bump PR — `release/vX.Y.Z` → `develop`
 
 Use the script — it does every step below and verifies the result:
