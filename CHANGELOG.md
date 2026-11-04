@@ -8,6 +8,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `admin::Builder::register_action` (and `TenantAdminBuilder::register_action`, `server::Builder::admin_register_action`): the handler takes an `ActionCtx` with the transaction, the rows that passed the permission checks, the actor, the tenant, and the request's method, path and client IP.
 - `OrgResolver::resolve_in` takes a `TenantRegistry` and defaults to `resolve`; the framework calls it. `TenantRegistry::new` is public.
+- `tenancy::RequestTenant` (`Global`, `Tenant`, `Unmatched`, `Unknown`): `server::Builder` resolves the tenant once per request and stores it; idempotency, the page cache, rate limits and object-permission hooks read it.
+- `cache::CacheScope::from_request(&root, &mut parts)` gives the request's tenant-scoped app cache, `sessions()` and `flags()`.
+- `KeyBy::Tenant` counts each tenant in its own bucket; `KeyBy::Global` stays platform-wide.
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
 
 ### Changed
@@ -42,6 +45,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `loaddata` leaves generated columns out of its inserts, so a dump of a model with one loads back.
 - `dumpdata -o` creates its temp file with a random name, owner-only (0600 on Unix), and never through an existing file or link.
 - `ModelFormError::Database` displays only `database error`; the driver text, which could name tables and hosts, moved to `source()`.
+- Purging a tenant also deletes its distributed locks, sessions, flag overrides, known login clients and API-key and agent login counters. Idempotency and page-cache entries stay until they expire; they are bound to the org id, so a tenant reusing the slug cannot read them.
+- Object-permission hooks match a credential to the routed tenant by org id too, so a credential of a purged tenant is nobody under the tenant that reused its slug.
+- Login throttle and account-lock keys carry the org id, so a tenant that reuses a purged slug starts clean.
 - `SessionStore::for_tenant` and `FeatureFlags::for_tenant` bind sessions and per-user flag overrides to the tenant's org id and slug; unscoped, a session or override from one tenant applied in another.
 - A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
 - Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.

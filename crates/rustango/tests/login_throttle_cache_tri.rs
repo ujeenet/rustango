@@ -39,7 +39,7 @@ async fn replicas_share_the_limits(pool: &Pool) {
     };
     let a = LoginThrottle::with_cache(limits, cache.clone());
     let b = LoginThrottle::with_cache(limits, cache.clone());
-    let s = LoginScope::Tenant("tri".into());
+    let s = LoginScope::Admin;
     let one = ip("10.7.0.1");
     a.begin(&s, &one, "u").await.unwrap().failed().await;
     b.begin(&s, &one, "v").await.unwrap().failed().await;
@@ -69,7 +69,7 @@ async fn a_known_client_passes_a_spent_global_limit(pool: &Pool) {
     };
     let a = LoginThrottle::with_cache(limits, cache.clone());
     let b = LoginThrottle::with_cache(limits, cache.clone());
-    let s = LoginScope::Tenant("tri-known".into());
+    let s = LoginScope::Operator;
     let home = ip("10.7.1.1");
     a.begin(&s, &home, "alice").await.unwrap().succeeded().await;
     a.begin(&s, &ip("10.7.1.2"), "x")

@@ -62,7 +62,11 @@ pub mod redis_backend;
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub use db_backend::DatabaseCache;
 
+#[cfg(feature = "tenancy")]
+mod scope;
 pub mod scoped;
+#[cfg(feature = "tenancy")]
+pub use scope::CacheScope;
 pub use scoped::{ScopedCache, TENANT_PREFIX};
 
 // ------------------------------------------------------------------ CacheError

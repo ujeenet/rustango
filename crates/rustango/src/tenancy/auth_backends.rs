@@ -100,9 +100,9 @@ fn client_ip(parts: &Parts) -> ClientIp {
         .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers))
 }
 
-fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
+fn request_tenant(parts: &Parts) -> Result<&super::TenantSlug, AuthError> {
     match parts.extensions.get::<super::TenantSlug>() {
-        Some(t) => Ok(&t.slug),
+        Some(t) => Ok(t),
         None => {
             tracing::error!(
                 "auth backend ran without a TenantSlug; use require_auth / optional_auth"
@@ -243,8 +243,9 @@ impl AuthBackend for ModelBackend {
         // Own lock scope, apart from the login forms; only failures count.
         // Sent on every request: admitted before the lookup, so a locked or
         // spent caller is refused first and a burst holds slots, not checks.
-        let slug = tenant_slug(parts)?;
-        let scope = LoginScope::TenantBasic(slug.to_owned());
+        let tenant = request_tenant(parts)?;
+        let slug = tenant.slug.as_str();
+        let scope = LoginScope::TenantBasic(tenant.clone());
         let refused = AuthError::Refused;
         let mut attempt = crate::login_throttle::shared()
             .begin_per_request(&scope, &client_ip(parts), &username)
@@ -473,7 +474,7 @@ impl AuthBackend for ApiKeyBackend {
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         // Sent on every request: admitted before the lookup, only a miss counts.
-        let scope = LoginScope::TenantApiKey(tenant_slug(parts)?.to_owned());
+        let scope = LoginScope::TenantApiKey(request_tenant(parts)?.clone());
         let mut attempt = crate::login_throttle::shared()
             .begin_per_request(&scope, &client_ip(parts), "")
             .await
@@ -1214,7 +1215,7 @@ mod tests {
     async fn a_locked_basic_account_is_refused_before_the_lookup() {
         use crate::login_throttle::LoginRefused;
         use base64::Engine as _;
-        let scope = LoginScope::TenantBasic("t-prelock".into());
+        let scope = LoginScope::TenantBasic(crate::tenancy::TenantSlug::new(1, "t-prelock"));
         for _ in 0..crate::account_lockout::DEFAULT_MAX_ATTEMPTS {
             let a = crate::login_throttle::shared()
                 .begin(&scope, &ClientIp::default(), "locked-user")

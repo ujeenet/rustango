@@ -114,14 +114,19 @@ pub enum LoginScope {
     Admin,
     /// The operator console login form.
     Operator,
-    /// A tenant's admin login form and JWT login (one user table).
-    Tenant(String),
+    /// A tenant's admin login form and JWT login (one user table). Keyed by
+    /// the org id too, so a tenant reusing a purged slug starts clean.
+    #[cfg(feature = "tenancy")]
+    Tenant(crate::tenancy::TenantSlug),
     /// HTTP Basic against a tenant. Only failures keep their token.
-    TenantBasic(String),
+    #[cfg(feature = "tenancy")]
+    TenantBasic(crate::tenancy::TenantSlug),
     /// API keys against a tenant. Only failures keep their token; no account lock.
-    TenantApiKey(String),
+    #[cfg(feature = "tenancy")]
+    TenantApiKey(crate::tenancy::TenantSlug),
     /// MCP agent secrets against a tenant, as for API keys.
-    TenantAgent(String),
+    #[cfg(feature = "tenancy")]
+    TenantAgent(crate::tenancy::TenantSlug),
     /// SSO callbacks: `admin`, `tenant/<slug>` (console and member flow
     /// share it) or `app/<tenant>` (OAuth2 router). Its own per-IP bucket, so refused SSO sign-ins never slow a password login.
     /// No account lock.
@@ -133,25 +138,32 @@ impl LoginScope {
         match self {
             Self::Admin => "admin".to_owned(),
             Self::Operator => "operator".to_owned(),
-            Self::Tenant(slug) => format!("tenant:{slug}"),
-            Self::TenantBasic(slug) => format!("tenant-basic:{slug}"),
-            Self::TenantApiKey(slug) => format!("tenant-apikey:{slug}"),
-            Self::TenantAgent(slug) => format!("tenant-agent:{slug}"),
+            #[cfg(feature = "tenancy")]
+            Self::Tenant(t) => format!("tenant:{}", t.namespace()),
+            #[cfg(feature = "tenancy")]
+            Self::TenantBasic(t) => format!("tenant-basic:{}", t.namespace()),
+            #[cfg(feature = "tenancy")]
+            Self::TenantApiKey(t) => format!("tenant-apikey:{}", t.namespace()),
+            #[cfg(feature = "tenancy")]
+            Self::TenantAgent(t) => format!("tenant-agent:{}", t.namespace()),
             Self::Sso(on) => format!("sso:{on}"),
         }
     }
 
     fn locks_accounts(&self) -> bool {
-        !matches!(
-            self,
-            Self::TenantApiKey(_) | Self::TenantAgent(_) | Self::Sso(_)
-        )
+        match self {
+            #[cfg(feature = "tenancy")]
+            Self::TenantApiKey(_) | Self::TenantAgent(_) => false,
+            Self::Sso(_) => false,
+            _ => true,
+        }
     }
 
     /// The per-IP bucket key. Agent secrets count apart, so a looping
     /// agent cannot spend the IP's human logins.
     fn ip_bucket(&self, ip: &str) -> String {
         match self {
+            #[cfg(feature = "tenancy")]
             Self::TenantAgent(_) => format!("agent/{ip}"),
             Self::Sso(_) => format!("sso/{ip}"),
             _ => ip.to_owned(),
@@ -508,6 +520,40 @@ impl LoginThrottle {
         if let Some(msg) = self.store_warning() {
             WARNED.call_once(|| tracing::warn!(target: "rustango::rate_limit", "{msg}"));
         }
+    }
+
+    /// See [`forget_tenant`].
+    #[cfg(feature = "tenancy")]
+    async fn forget_tenant(
+        &self,
+        tenant: &crate::tenancy::TenantSlug,
+    ) -> Result<(), crate::cache::CacheError> {
+        let lockout = self.0.lockout();
+        let mut first = Ok(());
+        // Best-effort: one failed delete must not keep the rest.
+        let mut note = |step: &str, r: Result<(), crate::cache::CacheError>| {
+            if let Err(e) = r {
+                tracing::warn!(target: "rustango::login", tenant = %tenant.slug, step, error = %e, "purge: login state not cleared");
+                if first.is_ok() {
+                    first = Err(e);
+                }
+            }
+        };
+        for scope in [
+            LoginScope::Tenant(tenant.clone()),
+            LoginScope::TenantBasic(tenant.clone()),
+            LoginScope::TenantApiKey(tenant.clone()),
+            LoginScope::TenantAgent(tenant.clone()),
+        ] {
+            let accounts = account_key_prefix(&scope.key());
+            note("locks", lockout.clear_accounts_with_prefix(&accounts).await);
+            let known = format!("login-known:{accounts}");
+            note("known", self.0.known.delete_prefix(&known).await);
+            if let Limit::Cache { shared, .. } = &self.0.global {
+                note("global", shared.forget(&scope.key()).await);
+            }
+        }
+        first
     }
 
     /// The limits this gate enforces.
@@ -1084,23 +1130,18 @@ impl Held {
     }
 }
 
-/// Forget the account locks of tenant `slug`'s logins, so a new tenant
-/// reusing the slug does not inherit them.
+/// Forget `tenant`'s login state in the shared gate: account locks, known
+/// clients and global counters of every tenant scope. Keys carry the org id,
+/// so a tenant reusing the slug never reads them; this is cleanup. Every
+/// step runs even when an earlier one fails.
 ///
 /// # Errors
-/// The lockout cache's `delete_prefix` error.
+/// The first cache `delete_prefix` error.
 #[cfg(feature = "tenancy")]
-pub(crate) async fn forget_tenant(slug: &str) -> Result<(), crate::cache::CacheError> {
-    let lockout = crate::account_lockout::shared();
-    for scope in [
-        LoginScope::Tenant(slug.to_owned()),
-        LoginScope::TenantBasic(slug.to_owned()),
-    ] {
-        lockout
-            .clear_accounts_with_prefix(&account_key_prefix(&scope.key()))
-            .await?;
-    }
-    Ok(())
+pub(crate) async fn forget_tenant(
+    tenant: &crate::tenancy::TenantSlug,
+) -> Result<(), crate::cache::CacheError> {
+    shared().forget_tenant(tenant).await
 }
 
 /// Every [`account_key`] of `scope_key` starts with this.
@@ -1182,6 +1223,7 @@ pub(crate) fn configure_from_settings(throttle: LoginThrottle) -> bool {
 
 /// A test cache that counts the gate's writes.
 #[cfg(test)]
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 pub(crate) mod counting {
     /// The cache key that counts `username`'s failures in `scope`.
     pub(crate) fn account_key(scope: &super::LoginScope, username: &str) -> String {
@@ -1297,6 +1339,8 @@ pub(crate) mod counting {
 }
 
 #[cfg(test)]
+// Most tests need a tenant scope; without `tenancy` their helpers go unused.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code, unused_imports))]
 mod tests {
     use super::*;
 
@@ -1304,8 +1348,30 @@ mod tests {
         ClientIp(Some(s.to_owned()))
     }
 
+    #[cfg(feature = "tenancy")]
+    fn ts(s: &str) -> crate::tenancy::TenantSlug {
+        crate::tenancy::TenantSlug::new(1, s)
+    }
+
+    #[cfg(feature = "tenancy")]
     fn tenant(s: &str) -> LoginScope {
-        LoginScope::Tenant(s.to_owned())
+        LoginScope::Tenant(ts(s))
+    }
+
+    /// Tenant scopes carry the org id, so a reused slug is a new scope.
+    #[cfg(feature = "tenancy")]
+    #[test]
+    fn tenant_scopes_bind_to_the_org_id() {
+        use crate::tenancy::TenantSlug;
+        assert_eq!(tenant("acme").key(), "tenant:#org:1:acme");
+        assert_ne!(
+            tenant("acme").key(),
+            LoginScope::Tenant(TenantSlug::new(2, "acme")).key()
+        );
+        assert_eq!(
+            LoginScope::TenantAgent(ts("acme")).key(),
+            "tenant-agent:#org:1:acme"
+        );
     }
 
     #[test]
@@ -1318,15 +1384,16 @@ mod tests {
         assert!(!account_key("admin", "alice").contains("alice"));
     }
 
+    #[cfg(feature = "tenancy")]
     #[test]
     fn each_scope_has_its_own_key() {
         let keys = [
             LoginScope::Admin.key(),
             LoginScope::Operator.key(),
             tenant("a").key(),
-            LoginScope::TenantBasic("a".into()).key(),
-            LoginScope::TenantApiKey("a".into()).key(),
-            LoginScope::TenantAgent("a".into()).key(),
+            LoginScope::TenantBasic(ts("a")).key(),
+            LoginScope::TenantApiKey(ts("a")).key(),
+            LoginScope::TenantAgent(ts("a")).key(),
         ];
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {
@@ -1335,6 +1402,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn per_ip_limit_spares_other_ips() {
         let t = LoginThrottle::new(LoginLimits {
@@ -1351,6 +1419,7 @@ mod tests {
         assert!(t.begin(&s, &ip("10.9.0.2"), "u9").await.is_ok());
     }
 
+    #[cfg(feature = "tenancy")]
     /// A busy verify spends no limit token.
     #[tokio::test]
     async fn busy_current_password_check_gives_tokens_back() {
@@ -1369,6 +1438,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn global_ceiling_applies_without_an_ip() {
         let t = LoginThrottle::new(LoginLimits {
@@ -1382,6 +1452,7 @@ mod tests {
         assert!(matches!(r, Err(LoginRefused::Throttled { .. })));
     }
 
+    #[cfg(feature = "tenancy")]
     /// A request the per-IP limit refuses takes nothing from the global
     /// budget, so one IP cannot drain it for everyone.
     #[tokio::test]
@@ -1406,6 +1477,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     /// One scope using up its global limit leaves the others alone.
     #[tokio::test]
     async fn global_limits_are_per_scope() {
@@ -1424,6 +1496,7 @@ mod tests {
         assert!(t.begin(&LoginScope::Operator, &none, "y").await.is_ok());
     }
 
+    #[cfg(feature = "tenancy")]
     /// Successful logins give their tokens back, so users behind one
     /// address are not limited by their own logins.
     #[tokio::test]
@@ -1440,6 +1513,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     /// Many IPs spending a scope's global limit do not lock out a user who
     /// signed in from this IP before; a new IP is still limited.
     async fn known_client_passes_a_spent_global_limit(t: LoginThrottle, slug: &str, net: u8) {
@@ -1465,6 +1539,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn a_known_client_passes_a_spent_global_limit() {
         let limits = LoginLimits {
@@ -1477,6 +1552,7 @@ mod tests {
         known_client_passes_a_spent_global_limit(t, "t-known-c", 31).await;
     }
 
+    #[cfg(feature = "tenancy")]
     /// Agent-secret failures and human logins from one IP spend separate
     /// per-IP buckets, so neither can lock the other out.
     #[tokio::test]
@@ -1485,7 +1561,7 @@ mod tests {
             ip_limit: 2,
             ..LoginLimits::default()
         });
-        let (agent, human) = (LoginScope::TenantAgent("t-split".into()), tenant("t-split"));
+        let (agent, human) = (LoginScope::TenantAgent(ts("t-split")), tenant("t-split"));
         let shared_ip = ip("10.9.40.1");
         for _ in 0..2 {
             t.begin(&agent, &shared_ip, "")
@@ -1511,6 +1587,7 @@ mod tests {
             .await;
     }
 
+    #[cfg(feature = "tenancy")]
     /// A known-client marker is written once, not on every sign-in.
     #[tokio::test]
     async fn a_known_client_marker_is_written_once() {
@@ -1585,6 +1662,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     /// Per-request credentials keep a token only when they fail.
     #[tokio::test]
     async fn per_request_scopes_count_only_failures() {
@@ -1592,7 +1670,7 @@ mod tests {
             ip_limit: 2,
             ..LoginLimits::default()
         });
-        let s = LoginScope::TenantApiKey("t-key".into());
+        let s = LoginScope::TenantApiKey(ts("t-key"));
         for _ in 0..5 {
             t.begin(&s, &ip("10.9.3.1"), "")
                 .await
@@ -1638,6 +1716,7 @@ mod tests {
         futures_util::future::join_all(runs).await.iter().sum()
     }
 
+    #[cfg(feature = "tenancy")]
     /// #2378 — a parallel burst of wrong keys from one IP gets no more
     /// than the per-IP limit checked.
     #[tokio::test]
@@ -1646,11 +1725,12 @@ mod tests {
             ip_limit: 3,
             ..LoginLimits::default()
         });
-        let s = LoginScope::TenantApiKey("t-burst".into());
+        let s = LoginScope::TenantApiKey(ts("t-burst"));
         let n = burst(&t, &s, |_| ip("10.9.3.9"), "", 20, |_| true).await;
         assert_eq!(n, 3, "in-flight attempts must hold their token");
     }
 
+    #[cfg(feature = "tenancy")]
     /// #2378 — a burst of wrong passwords at one Basic account gets
     /// `max_attempts` guesses, then the account is locked.
     #[tokio::test]
@@ -1659,7 +1739,7 @@ mod tests {
             ip_limit: 1000,
             ..LoginLimits::default()
         });
-        let s = LoginScope::TenantBasic("t-burst-lock".into());
+        let s = LoginScope::TenantBasic(ts("t-burst-lock"));
         let at = |n: usize| ip(&format!("10.9.10.{n}"));
         let n = burst(&t, &s, at, "victim", 50, |_| true).await;
         assert_eq!(
@@ -1671,6 +1751,7 @@ mod tests {
         assert!(matches!(r, Err(LoginRefused::Throttled { .. })));
     }
 
+    #[cfg(feature = "tenancy")]
     /// security-002 — parallel right credentials wait for each other;
     /// in-flight successes never refuse one.
     #[tokio::test]
@@ -1679,10 +1760,10 @@ mod tests {
             ip_limit: 3,
             ..LoginLimits::default()
         });
-        let s = LoginScope::TenantBasic("t-par-ok".into());
+        let s = LoginScope::TenantBasic(ts("t-par-ok"));
         let n = burst(&t, &s, |_| ip("10.9.15.1"), "svc", 20, |_| false).await;
         assert_eq!(n, 20);
-        let s = LoginScope::TenantApiKey("t-par-key".into());
+        let s = LoginScope::TenantApiKey(ts("t-par-key"));
         let none = |_| ClientIp::default();
         assert_eq!(
             burst(&t, &s, |_| ip("10.9.15.2"), "", 25, |_| false).await,
@@ -1691,18 +1772,20 @@ mod tests {
         assert_eq!(burst(&t, &s, none, "", 5, |_| false).await, 5);
     }
 
+    #[cfg(feature = "tenancy")]
     /// security-002 — one wrong password among in-flight successes
     /// counts once; it does not lock the account.
     #[tokio::test]
     async fn one_failure_in_a_good_burst_does_not_lock() {
         let t = LoginThrottle::new(LoginLimits::default());
-        let s = LoginScope::TenantBasic("t-one-bad".into());
+        let s = LoginScope::TenantBasic(ts("t-one-bad"));
         let n = burst(&t, &s, |_| ip("10.9.16.1"), "svc2", 5, |i| i == 0).await;
         assert_eq!(n, 5);
         let a = t.begin(&s, &ip("10.9.16.1"), "svc2").await;
         assert!(a.is_ok(), "one failure locked the account");
     }
 
+    #[cfg(feature = "tenancy")]
     /// A wrong burst on the cache-backed limits is capped too, and the
     /// refused retries do not fill the window themselves.
     #[tokio::test]
@@ -1715,7 +1798,7 @@ mod tests {
                 ..LoginLimits::default()
             },
         );
-        let s = LoginScope::TenantApiKey("t-cache-burst".into());
+        let s = LoginScope::TenantApiKey(ts("t-cache-burst"));
         assert_eq!(
             burst(&t, &s, |_| ip("10.9.17.1"), "", 20, |_| false).await,
             20
@@ -1726,6 +1809,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tenancy")]
     /// An attempt dropped unreported (busy, DB error) gives its
     /// reservations back instead of counting toward the lock.
     #[tokio::test]
@@ -1744,6 +1828,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     /// tests-001 — an attempt dropped while its runtime shuts down must
     /// not recurse through `Drop` (stack overflow).
     #[test]
@@ -1765,6 +1850,7 @@ mod tests {
         drop(rt);
     }
 
+    #[cfg(feature = "tenancy")]
     /// Succeeding attempts give the account reservation back.
     #[tokio::test]
     async fn successes_free_the_account_reservation() {
@@ -1783,6 +1869,7 @@ mod tests {
         LoginThrottle::with_cache(limits, cache.clone())
     }
 
+    #[cfg(feature = "tenancy")]
     /// Two replicas on one cache share the per-IP and global limits (#1809).
     #[tokio::test]
     async fn replicas_on_one_cache_share_the_limits() {
@@ -1807,6 +1894,7 @@ mod tests {
         assert!(r.is_err(), "global not shared");
     }
 
+    #[cfg(feature = "tenancy")]
     /// On the cache, successes still give their tokens back.
     #[tokio::test]
     async fn cache_backed_successes_do_not_use_up_the_limits() {
@@ -1872,6 +1960,7 @@ mod tests {
         )
     }
 
+    #[cfg(feature = "tenancy")]
     /// A cache outage keeps the per-IP limit, counted in process.
     #[tokio::test]
     async fn a_cache_outage_keeps_the_per_ip_limit() {
@@ -1886,6 +1975,7 @@ mod tests {
         assert!(t.begin(&s, &ip("10.9.6.2"), "b").await.is_ok());
     }
 
+    #[cfg(feature = "tenancy")]
     /// A cache outage keeps the global limit too: many IPs are still capped.
     #[tokio::test]
     async fn a_cache_outage_keeps_the_global_limit() {
@@ -1899,6 +1989,7 @@ mod tests {
         assert!(t.begin(&s, &ip("10.9.7.2"), "b").await.is_err());
     }
 
+    #[cfg(feature = "tenancy")]
     /// Successes during an outage refund the in-process fallback buckets.
     #[tokio::test]
     async fn a_cache_outage_refunds_the_fallback() {
@@ -1981,15 +2072,13 @@ mod tests {
         compared.load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[cfg(feature = "tenancy")]
     /// A known client's Basic guesses over two replicas: the account lock
     /// bounds every compare, including ones answered 429 after it.
     #[tokio::test]
     async fn per_request_guesses_over_replicas_are_bounded_by_the_lock() {
         let r = replicas(LoginLimits::default());
-        let (s, client) = (
-            LoginScope::TenantBasic("t-repl-lock".into()),
-            ip("10.9.70.1"),
-        );
+        let (s, client) = (LoginScope::TenantBasic(ts("t-repl-lock")), ip("10.9.70.1"));
         let a = r[0].begin(&s, &client, "bob").await.unwrap();
         a.succeeded().await;
         let compared = per_request_burst(&r, &s, &client, "bob", 30).await;
@@ -1997,6 +2086,7 @@ mod tests {
         assert!(compared <= max, "{compared} guesses were compared");
     }
 
+    #[cfg(feature = "tenancy")]
     /// API-key guesses over two replicas: the per-IP limit bounds every compare.
     #[tokio::test]
     async fn per_request_keys_over_replicas_are_bounded_by_the_ip_limit() {
@@ -2007,20 +2097,18 @@ mod tests {
             ip_window: Duration::from_secs(10 * 365 * 24 * 3600),
             ..LoginLimits::default()
         });
-        let s = LoginScope::TenantApiKey("t-repl-ip".into());
+        let s = LoginScope::TenantApiKey(ts("t-repl-ip"));
         let compared = per_request_burst(&r, &s, &ip("10.9.70.2"), "", 30).await;
         assert!(compared <= 3, "{compared} keys were compared");
     }
 
+    #[cfg(feature = "tenancy")]
     /// A wrong guess counted after a quiet right one was admitted stays
     /// counted: a client polling Basic must not wipe a guesser's misses.
     #[tokio::test]
     async fn a_right_per_request_credential_keeps_a_failure_counted_meanwhile() {
         let t = LoginThrottle::new(LoginLimits::default());
-        let (s, client) = (
-            LoginScope::TenantBasic("t-quiet-keep".into()),
-            ip("10.9.70.3"),
-        );
+        let (s, client) = (LoginScope::TenantBasic(ts("t-quiet-keep")), ip("10.9.70.3"));
         let a = t.begin(&s, &client, "carol").await.unwrap();
         a.succeeded().await;
         let right = t.begin_per_request(&s, &client, "carol").await.unwrap();
@@ -2034,13 +2122,14 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tenancy")]
     /// With a failure already counted the credential is reserved like a
     /// login; a right one still leaves the failure.
     #[tokio::test]
     async fn a_right_per_request_credential_keeps_an_earlier_failure() {
         let t = LoginThrottle::new(LoginLimits::default());
         let (s, client) = (
-            LoginScope::TenantBasic("t-reserved-keep".into()),
+            LoginScope::TenantBasic(ts("t-reserved-keep")),
             ip("10.9.70.5"),
         );
         t.begin(&s, &client, "erin").await.unwrap().failed().await;
@@ -2055,6 +2144,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "tenancy")]
     /// A request cancelled while its right credential's slot is refunded
     /// still gives the slot back.
     #[tokio::test]
@@ -2069,7 +2159,7 @@ mod tests {
                 ..LoginLimits::default()
             },
         );
-        let (s, client) = (LoginScope::TenantApiKey("t-cancel".into()), ip("10.9.70.6"));
+        let (s, client) = (LoginScope::TenantApiKey(ts("t-cancel")), ip("10.9.70.6"));
         let a = t.begin_per_request(&s, &client, "").await.unwrap();
         assert!(matches!(a.held, PerRequestHeld::Quiet(_)));
         let _ = tokio::time::timeout(Duration::from_millis(30), a.settle(true)).await;
@@ -2078,6 +2168,7 @@ mod tests {
         assert!(t.0.ip.peek(&bucket).await.is_ok(), "the slot leaked");
     }
 
+    #[cfg(feature = "tenancy")]
     /// A login form request cancelled while a right password's or a second-factor
     /// prompt's tokens are refunded still gives them back.
     #[tokio::test]
@@ -2115,6 +2206,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "tenancy")]
     /// A login form request cancelled while its wrong password is counted
     /// still counts it, so cancelling cannot dodge the account lock.
     #[tokio::test]
@@ -2221,6 +2313,73 @@ mod tests {
         }
     }
 
+    /// Purging a tenant clears its locks, known clients and global counter,
+    /// and leaves the tenant that reused its slug alone.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn forget_tenant_clears_its_login_state_only() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let limits = LoginLimits {
+            global_limit: 1,
+            ..LoginLimits::default()
+        };
+        let mut t = LoginThrottle::with_cache(limits, cache.clone());
+        let lockout: &'static _ = Box::leak(Box::new(crate::account_lockout::Lockout::new(
+            cache.clone(),
+        )));
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(lockout);
+        let acme = tenant("forget");
+        let heir = LoginScope::Tenant(crate::tenancy::TenantSlug::new(2, "forget"));
+        let home = ip("10.8.0.1");
+        for s in [&acme, &heir] {
+            t.begin(s, &home, "alice").await.unwrap().succeeded().await;
+            t.begin(s, &ip("10.8.0.2"), "bob")
+                .await
+                .unwrap()
+                .failed()
+                .await;
+        }
+        let bob = account_key(&acme.key(), "bob");
+        assert!(t.0.is_known(&acme, &home, "alice").await);
+        assert!(lockout.attempt_count(&bob).await > 0);
+        assert!(t.begin(&acme, &ip("10.8.0.3"), "carol").await.is_err());
+
+        t.forget_tenant(&ts("forget")).await.unwrap();
+        assert!(
+            !t.0.is_known(&acme, &home, "alice").await,
+            "known client kept"
+        );
+        assert_eq!(lockout.attempt_count(&bob).await, 0, "account lock kept");
+        assert!(
+            t.begin(&acme, &ip("10.8.0.3"), "carol").await.is_ok(),
+            "global counter kept"
+        );
+        assert!(t.0.is_known(&heir, &home, "alice").await);
+        assert!(t.begin(&heir, &ip("10.8.0.3"), "carol").await.is_err());
+    }
+
+    /// A known-client cache that cannot delete by prefix still lets the
+    /// purge clear every scope's account locks.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn forget_tenant_keeps_going_after_a_failed_step() {
+        let known: BoxedCache = Arc::new(CountingCalls::default());
+        let mut t = LoginThrottle::with_cache(LoginLimits::default(), known);
+        let locks: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let lockout: &'static _ = Box::leak(Box::new(crate::account_lockout::Lockout::new(locks)));
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(lockout);
+        let basic = LoginScope::TenantBasic(ts("partial"));
+        t.begin(&basic, &ip("10.8.1.1"), "bob")
+            .await
+            .unwrap()
+            .failed()
+            .await;
+        let bob = account_key(&basic.key(), "bob");
+        assert!(lockout.attempt_count(&bob).await > 0);
+        assert!(t.forget_tenant(&ts("partial")).await.is_err());
+        assert_eq!(lockout.attempt_count(&bob).await, 0, "later scope skipped");
+    }
+
     /// `t` counting account locks in `cache` instead of the shared lockout.
     fn with_lockout(mut t: LoginThrottle, cache: Arc<CountingCalls>) -> LoginThrottle {
         let lockout = crate::account_lockout::Lockout::new(cache);
@@ -2228,6 +2387,7 @@ mod tests {
         t
     }
 
+    #[cfg(feature = "tenancy")]
     /// A lockout store that errors counts nothing, so a known client's
     /// credential takes the full reservation, per-IP slot included.
     #[tokio::test]
@@ -2243,10 +2403,7 @@ mod tests {
             }),
             down,
         );
-        let (s, client) = (
-            LoginScope::TenantBasic("t-lock-down".into()),
-            ip("10.9.70.7"),
-        );
+        let (s, client) = (LoginScope::TenantBasic(ts("t-lock-down")), ip("10.9.70.7"));
         t.begin(&s, &client, "fay").await.unwrap().succeeded().await;
         let a = t.begin_per_request(&s, &client, "fay").await.unwrap();
         assert!(matches!(a.held, PerRequestHeld::Reserved(_)));
@@ -2255,6 +2412,7 @@ mod tests {
         a.settle(true).await;
     }
 
+    #[cfg(feature = "tenancy")]
     /// A known client's right credential: few cache calls, and the slot
     /// comes back.
     #[tokio::test]
@@ -2262,7 +2420,7 @@ mod tests {
         let calls = Arc::new(CountingCalls::default());
         let cache: BoxedCache = calls.clone();
         let t = with_lockout(on_cache(&cache, LoginLimits::default()), calls.clone());
-        let (s, client) = (LoginScope::TenantBasic("t-six".into()), ip("10.9.70.8"));
+        let (s, client) = (LoginScope::TenantBasic(ts("t-six")), ip("10.9.70.8"));
         t.begin(&s, &client, "gil").await.unwrap().succeeded().await;
         let before = calls.calls();
         let a = t.begin_per_request(&s, &client, "gil").await.unwrap();
@@ -2274,14 +2432,12 @@ mod tests {
         assert_eq!(t.0.lockout().attempt_count(&key).await, 0);
     }
 
+    #[cfg(feature = "tenancy")]
     /// A per-request credential waits at most one `hash_wait` before a 503.
     #[tokio::test]
     async fn a_per_request_credential_waits_one_deadline() {
         let t = Arc::new(LoginThrottle::new(LoginLimits::default()));
-        let (s, client) = (
-            LoginScope::TenantBasic("t-one-wait".into()),
-            ip("10.9.70.4"),
-        );
+        let (s, client) = (LoginScope::TenantBasic(ts("t-one-wait")), ip("10.9.70.4"));
         let a = t.begin(&s, &client, "dan").await.unwrap();
         a.succeeded().await;
         let max = crate::account_lockout::shared().attempt_limit() as usize;

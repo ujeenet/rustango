@@ -2456,7 +2456,10 @@ async fn enter(
         }
         parts
             .extensions
-            .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
+            .insert(crate::tenancy::TenantSlug::of(org).map_or(
+                crate::tenancy::RequestTenant::Unknown,
+                crate::tenancy::RequestTenant::Tenant,
+            ));
     }
     if let Some(resp) = check_throttle(state, action, &parts, &scope) {
         return Err(resp);

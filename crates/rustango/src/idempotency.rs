@@ -44,7 +44,8 @@
 //! `idem:<sha256>` over the [`IdempotencyLayer::scope`], host, the tenant
 //! the tenancy layer resolves for the request, the caller, method, path
 //! and query, and the client's key. The same key from another caller, tenant
-//! or route is a different entry.
+//! or route is a different entry. When a tenant context is mounted but no
+//! tenant resolves, a keyed request gets `503` instead of running unprotected.
 //!
 //! The caller is the resolved principal when there is one, else the
 //! `Authorization`, `Cookie` and `X-Api-Key` headers. Add the auth layer
@@ -217,7 +218,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         // handler, which may answer with its own 4xx.
         return next.run(req).await;
     }
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let declared_len = parts
         .headers
         .get(CONTENT_LENGTH)
@@ -240,11 +241,9 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             .into_response()
         }
     };
-    let Ok(tenant) = request_tenant(&parts).await else {
-        // Unkeyable without a tenant; the handler reports the error.
-        return next
-            .run(Request::from_parts(parts, Body::from(req_bytes)))
-            .await;
+    let Ok(tenant) = request_tenant(&mut parts).await else {
+        // Running it unkeyed could charge twice; the client retries later.
+        return unknown_tenant();
     };
     let cache_key = cache_key(&cfg.scope, &parts, tenant.as_deref(), &key);
     let request_sha256 = hex(&Sha256::digest(&req_bytes));
@@ -507,6 +506,15 @@ fn too_large() -> Response<Body> {
     .into_response()
 }
 
+fn unknown_tenant() -> Response<Body> {
+    let mut resp = ApiError::service_unavailable("tenant could not be resolved").into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
+    resp
+}
+
 /// Cache key for who sent the request, where, and with which client key.
 fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> String {
     let mut h = KeyHasher(Sha256::new());
@@ -557,32 +565,21 @@ fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
 }
 
 /// The request's `#org:<id>:<slug>`, not its slug alone: a tenant that reuses a purged slug
-/// must not replay the old one's responses. `Err` when it cannot be resolved.
+/// must not replay the old one's responses. `Err` when resolution failed; no match is global.
 #[cfg(feature = "tenancy")]
-async fn request_tenant(parts: &Parts) -> Result<Option<String>, ()> {
-    use crate::tenancy::TenantSlug;
-    if let Some(t) = parts.extensions.get::<TenantSlug>() {
-        return Ok(Some(t.namespace()));
-    }
-    match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
-        None => Ok(None),
-        Some(Ok(None)) => Ok(None),
-        Some(Ok(Some(org))) => match TenantSlug::of(&org) {
-            Some(t) => Ok(Some(t.namespace())),
-            None => {
-                tracing::warn!(slug = %org.slug, "idempotency: org has no id, key not used");
-                Err(())
-            }
-        },
-        Some(Err(e)) => {
-            tracing::warn!(error = %e, "idempotency: tenant resolution failed, key not used");
-            Err(())
-        }
+async fn request_tenant(parts: &mut Parts) -> Result<Option<String>, ()> {
+    use crate::tenancy::RequestTenant;
+    match RequestTenant::resolve(parts).await {
+        RequestTenant::Tenant(t) => Ok(Some(t.namespace())),
+        RequestTenant::Unknown => Err(()),
+        // Global, or no tenant matched (an apex webhook): keyed globally, as before.
+        _ => Ok(None),
     }
 }
 
 #[cfg(not(feature = "tenancy"))]
-async fn request_tenant(_parts: &Parts) -> Result<Option<String>, ()> {
+#[allow(clippy::unused_async)]
+async fn request_tenant(_parts: &mut Parts) -> Result<Option<String>, ()> {
     Ok(None)
 }
 
@@ -1784,6 +1781,123 @@ mod tests {
         assert_eq!(body_string(r).await, "call-1:");
         let r = app.oneshot(send("acme")).await.unwrap();
         assert_eq!(body_string(r).await, "call-0:", "own tenant still replays");
+    }
+
+    /// The dispatcher's `RequestTenant` keys the replay; nothing is resolved again.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_marked_tenant_keys_the_replay_without_a_context() {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache())).layer(
+            axum::middleware::from_fn(|mut req: Request<Body>, next: Next| async move {
+                let id: i64 = req.headers()["x-org-id"].to_str().unwrap().parse().unwrap();
+                req.extensions_mut()
+                    .insert(RequestTenant::Tenant(TenantSlug::new(id, "t")));
+                next.run(req).await
+            }),
+        );
+        let send = |id: &'static str| {
+            keyed("/a")
+                .header("x-org-id", id)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(send("1")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let r = app.clone().oneshot(send("2")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-1:", "org 2 replayed org 1");
+        let r = app.oneshot(send("1")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:", "own tenant still replays");
+    }
+
+    /// `x-org: fail` makes the resolver error.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    struct FailOrX;
+
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[async_trait::async_trait]
+    impl crate::tenancy::OrgResolver for FailOrX {
+        async fn resolve(
+            &self,
+            parts: &Parts,
+            registry: &crate::sql::Pool,
+        ) -> Result<Option<crate::tenancy::Org>, crate::tenancy::TenancyError> {
+            if parts.headers.get("x-org").is_some_and(|v| v == "fail") {
+                return Err(crate::tenancy::TenancyError::Validation("down".into()));
+            }
+            XOrgResolver.resolve(parts, registry).await
+        }
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    fn with_failing_context(app: Router) -> Router {
+        use crate::extractors::DatabaseTenantContext;
+        use crate::tenancy::{session::SessionSecret, BackendKind, ChainResolver, DatabasePools};
+        app.layer(axum::Extension(StdArc::new(DatabaseTenantContext {
+            pools: StdArc::new(DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite)),
+            resolver: ChainResolver::new().push(FailOrX),
+            session_secret: SessionSecret::from_bytes(vec![1; 32]),
+            operator_secret: SessionSecret::from_bytes(vec![2; 32]),
+            registry: crate::sql::Pool::Sqlite(
+                sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
+            ),
+        })))
+    }
+
+    /// No tenant matched (an apex webhook on a hand-built stack): keyed
+    /// globally, as before, so it runs and replays.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn no_matched_tenant_keys_the_request_globally() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = with_failing_context(counting_app(
+            counter.clone(),
+            IdempotencyLayer::new(cache()),
+        ));
+        for _ in 0..2 {
+            let r = app
+                .clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            assert_eq!(body_string(r).await, "call-0:");
+        }
+    }
+
+    /// A resolver error: a keyed request gets 503 instead of running
+    /// unprotected; an unkeyed one still runs.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn a_failed_resolution_refuses_a_keyed_request() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = with_failing_context(counting_app(
+            counter.clone(),
+            IdempotencyLayer::new(cache()),
+        ));
+        let r = app
+            .clone()
+            .oneshot(
+                keyed("/a")
+                    .header("x-org", "fail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "ran unprotected");
+        let r = app
+            .oneshot(
+                Request::post("/a")
+                    .header("x-org", "fail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
     }
 
     #[tokio::test]

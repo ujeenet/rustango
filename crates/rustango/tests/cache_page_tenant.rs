@@ -372,3 +372,49 @@ async fn one_org_id_under_two_slugs_does_not_share_a_page() {
     get_with(&globex, None).await;
     assert_eq!(hits.load(Ordering::SeqCst), 2, "globex got acme's page");
 }
+
+/// Stands in for the Builder's dispatcher: marks the request from `x-org`.
+fn marked(app: Router) -> Router {
+    use rustango::tenancy::{RequestTenant, TenantSlug};
+    app.layer(axum::middleware::from_fn(
+        |mut req: Request<Body>, next: axum::middleware::Next| async move {
+            let tenant = match req.headers().get("x-org").and_then(|v| v.to_str().ok()) {
+                Some("global") => RequestTenant::Global,
+                Some("acme") => RequestTenant::Tenant(TenantSlug::new(1, "acme")),
+                Some("globex") => RequestTenant::Tenant(TenantSlug::new(2, "globex")),
+                _ => RequestTenant::Unknown,
+            };
+            req.extensions_mut().insert(tenant);
+            next.run(req).await
+        },
+    ))
+}
+
+/// The dispatcher's answer is read, not resolved again: no context needed.
+#[tokio::test]
+async fn a_marked_tenant_gets_its_own_page_without_a_context() {
+    let hits = Arc::new(AtomicU32::new(0));
+    let app = marked(page(hits.clone()).layer(CachePageLayer::new(Arc::new(InMemoryCache::new()))));
+    assert_eq!(fetch(&app, "acme").await, "acme");
+    assert_eq!(
+        fetch(&app, "globex").await,
+        "globex",
+        "globex got acme's page"
+    );
+    assert_eq!(fetch(&app, "acme").await, "acme");
+    assert_eq!(hits.load(Ordering::SeqCst), 2, "same tenant still hits");
+    // Unknown never shares.
+    fetch(&app, "nobody").await;
+    fetch(&app, "nobody").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+}
+
+/// The console and the unresolved router are marked `Global`: one page for all.
+#[tokio::test]
+async fn a_global_request_is_cached_without_a_context() {
+    let hits = Arc::new(AtomicU32::new(0));
+    let app = marked(page(hits.clone()).layer(CachePageLayer::new(Arc::new(InMemoryCache::new()))));
+    fetch(&app, "global").await;
+    fetch(&app, "global").await;
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}

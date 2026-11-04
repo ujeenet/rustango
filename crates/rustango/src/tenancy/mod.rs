@@ -124,6 +124,7 @@ pub mod provision_store;
 /// to compile signature machinery for it.
 #[cfg(feature = "webhook")]
 pub mod provision_webhook;
+pub mod request_tenant;
 mod resolver;
 mod resolver_cache;
 pub mod routes;
@@ -180,6 +181,7 @@ pub use permissions::{
     user_permissions_pool, user_roles_pool, user_roles_qs_pool,
 };
 pub use principal::{OptionalPrincipal, Principal, PrincipalKind, TenantSlug};
+pub use request_tenant::RequestTenant;
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use db_server::{

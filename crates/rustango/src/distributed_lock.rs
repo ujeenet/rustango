@@ -123,6 +123,12 @@ impl DistributedLock {
         self
     }
 
+    /// The prefix every key of this factory starts with.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn key_prefix(&self) -> String {
+        self.key_for("")
+    }
+
     /// The cache key for `name`, including this factory's scope.
     fn key_for(&self, name: &str) -> String {
         match &self.scope {
