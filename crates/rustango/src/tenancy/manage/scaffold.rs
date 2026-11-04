@@ -27,7 +27,8 @@ pub const TENANCY_MANAGE_BIN: &str =
 //   use my_app as _;
 
 // Errors print with Display, so a multi-line CLI error reads as lines.
-#[tokio::main]
+// `rustango::main` runs on an 8 MiB stack: Windows' main thread has 1 MiB.
+#[rustango::main]
 async fn main() -> std::process::ExitCode {
     if let Err(e) = rustango::manage::Cli::new().tenancy().run().await {
         eprintln!(\"Error: {e}\");
@@ -190,6 +191,9 @@ mod tests {
                 "{bin}"
             );
             assert!(bin.contains("eprintln!(\"Error: {e}\")"), "{bin}");
+            // `tokio::main` runs on the 1 MiB Windows main thread.
+            assert!(bin.contains("#[rustango::main]"), "{bin}");
+            assert!(!bin.contains("tokio::main"), "{bin}");
             assert!(
                 !bin.contains("crate::"),
                 "a bin can't name the library as crate:\n{bin}"

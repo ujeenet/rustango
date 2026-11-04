@@ -1612,11 +1612,7 @@ fn end_impersonation_response(cookie_path: &str, apex: &super::server::LinkApex)
         })
         .collect();
     let apex = apex.get();
-    let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
-        .ok()
-        .filter(|s| !s.is_empty() && s != "80" && s != "443")
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default();
+    let port_suffix = crate::tenancy::server::tenant_port_suffix(None, None);
     let target = format!(
         "{}/orgs",
         crate::tenancy::server::tenant_origin(&apex, &port_suffix)

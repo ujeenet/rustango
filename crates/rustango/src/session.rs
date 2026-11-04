@@ -175,7 +175,7 @@ impl SessionSecret {
     /// [`Self::try_from_env`], an unset var is
     /// [`SessionSecretError::Missing`] and not a silent random key: a
     /// per-process key breaks multi-instance deployments and hides the
-    /// mistake. [`load_session_secret_for_tier`] uses it on prod.
+    /// mistake. [`try_load_session_secret_for_tier`] uses it on prod.
     ///
     /// # Errors
     /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
@@ -260,18 +260,33 @@ pub fn is_prod_tier(tier: &str) -> bool {
 /// # Panics
 /// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing/invalid.
 #[must_use]
+#[deprecated(
+    since = "0.63.0",
+    note = "use `try_load_session_secret_for_tier` and report the error"
+)]
 pub fn load_session_secret_for_tier(tier: &str, disk_path: &std::path::Path) -> SessionSecret {
+    try_load_session_secret_for_tier(tier, disk_path).unwrap_or_else(|e| {
+        panic!(
+            "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
+             Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
+             key shared across all instances."
+        )
+    })
+}
+
+/// [`load_session_secret_for_tier`] that returns the prod tier's refusal
+/// instead of panicking, so `main` can report it and exit.
+///
+/// # Errors
+/// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing or invalid.
+pub fn try_load_session_secret_for_tier(
+    tier: &str,
+    disk_path: &std::path::Path,
+) -> Result<SessionSecret, SessionSecretError> {
     if is_prod_tier(tier) {
-        match SessionSecret::require_from_env() {
-            Ok(secret) => secret,
-            Err(e) => panic!(
-                "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
-                 Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
-                 key shared across all instances."
-            ),
-        }
+        SessionSecret::require_from_env()
     } else {
-        SessionSecret::from_env_or_disk(disk_path)
+        Ok(SessionSecret::from_env_or_disk(disk_path))
     }
 }
 
@@ -861,6 +876,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn dev_tier_loads_without_requiring_env() {
         // The dev tier must never require RUSTANGO_SESSION_SECRET — it
         // falls back to a disk-persisted (or ephemeral) >=32-byte key.

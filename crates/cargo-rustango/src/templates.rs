@@ -146,7 +146,7 @@ pub fn env_example(name: &str, template: Template, backend: Backend) -> String {
     // Only a tenancy project has an operator console and tenant secrets.
     let (apex, reseal) = if template == Template::Tenant {
         (
-            "\n# Apex domain the operator console is served on.\nRUSTANGO_APEX_DOMAIN=localhost\n",
+            "\n# Apex domain the operator console is served on.\nRUSTANGO_APEX_DOMAIN=localhost\n# Port in tenant links (`create-tenant` output, redirects): the dev\n# server's. Unset or 443 behind a proxy that serves the default port.\nRUSTANGO_TENANT_PORT=8080\n",
             "\n# Rotation: old key here, new one above, then\n# `cargo run -- reseal-tenant-secrets --apply`.",
         )
     } else {
@@ -440,12 +440,27 @@ pub fn dockerfile_prod(name: &str, template: Template) -> String {
     } else {
         ""
     };
+    // Only a template with sessions (the admin, the consoles) needs a session key.
+    let (run_keys, keys_note) = if template == Template::Api {
+        (
+            "-e RUSTANGO_SECRET_KEY=...",
+            "# The image runs on the prod tier, which needs RUSTANGO_SECRET_KEY\n# (`openssl rand -base64 48`).",
+        )
+    } else {
+        (
+            "-e RUSTANGO_SESSION_SECRET=... -e RUSTANGO_SECRET_KEY=...",
+            "# The image runs on the prod tier, which needs RUSTANGO_SESSION_SECRET\n# (`openssl rand -base64 32`) and RUSTANGO_SECRET_KEY (`openssl rand -base64 48`).",
+        )
+    };
     format!(
         r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
 # docker-compose.yml uses; this one is for shipping.
 #
 #   docker build -t {name}:latest .
-#   docker run --rm -p 8080:8080 -e DATABASE_URL=... {name}:latest
+#   docker run --rm -p 8080:8080 -e DATABASE_URL=... \
+#     {run_keys} {name}:latest
+#
+{keys_note}
 #
 # Pick a non-default backend at build time:
 #   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
@@ -881,7 +896,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         // Built from the server's own pool, so other verbs need no database.
-        .nest_with(urls::admin_prefix(&settings), move |pool| {
+        .try_nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
         .with_health() // /health + /ready endpoints for load balancers
@@ -1091,7 +1106,7 @@ use axum::routing::get;
 use axum::Router;
 use rustango::admin;
 use rustango::config::Settings;
-use rustango::session::{load_session_secret_for_tier, tier_from_env};
+use rustango::session::{tier_from_env, try_load_session_secret_for_tier, SessionSecretError};
 use rustango::sql::Pool;
 
 use crate::views;
@@ -1113,16 +1128,17 @@ pub fn admin_prefix(settings: &Settings) -> String {
 /// `cargo run -- create-admin <username> --superuser`.
 ///
 /// The signing key comes from `RUSTANGO_SESSION_SECRET`, else (off the
-/// prod tier) from `./var/`, so a restart keeps you signed in.
-pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
-    let secret = load_session_secret_for_tier(
+/// prod tier) from `./var/`, so a restart keeps you signed in. On prod a
+/// missing key is an error `main` prints before it exits.
+pub fn admin_router(pool: Pool, settings: &Settings) -> Result<Router, SessionSecretError> {
+    let secret = try_load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new(\"./var/.rustango_session.key\"),
-    );
-    admin::Builder::from_settings(pool, settings)
+    )?;
+    Ok(admin::Builder::from_settings(pool, settings)
         .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
-        .build()
+        .build())
 }
 "
             .to_owned()

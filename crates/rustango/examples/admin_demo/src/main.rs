@@ -19,7 +19,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::any::type_name::<Comment>(),
     );
 
-    let api = axum::Router::new().nest("/admin", admin_router(pool.clone()));
+    let api = axum::Router::new().nest("/admin", admin_router(pool.clone())?);
 
     let seed_pool = pool.clone();
     rustango::manage::Cli::new()

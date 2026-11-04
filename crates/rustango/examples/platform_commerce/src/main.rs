@@ -150,7 +150,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Arc::clone(&queue),
             fail_ratio_pct(),
             cache,
-        ))
+        )?)
         .with_health()
         // #1409. This is the only correct place for the drain: before
         // 0.57.5 `Cli::run` installed no graceful shutdown at all, so

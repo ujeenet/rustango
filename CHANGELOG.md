@@ -15,7 +15,19 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A tenant file made beside a SQLite registry at a backslash path (`C:\data\reg.db`) lands in that directory, not in the working directory.
 - MCP: notification streams, stream caps and progress are keyed by the tenant's org id, so a tenant that reuses a purged slug never gets the old tenant's frames; a stream ends when its org is deactivated or gone or after repeated failed re-checks, and list cursors and cancellation are bound to the org id too.
 - JWT logout answers 503 instead of 204 when the JTI store did not record the revocation; `JwtLifecycle::revoke` returns `false` then.
+- `Cli::try_nest_with` mounts a router whose builder can fail; the error stops `runserver` and `check` with main's `Error:` line. `session::try_load_session_secret_for_tier` is the non-panicking key loader.
+
+### Fixed
+
+- `startapp --with-manage-bin` generates `#[rustango::main]` instead of `#[tokio::main]`, so the manage binary gets the 8 MiB stack instead of overflowing Windows' 1 MiB main thread.
+- A new tenant project's `.env.example` sets `RUSTANGO_TENANT_PORT=8080`, so `create-tenant --admin-email` prints a link with the dev server's port.
+- The `startapp` tests template uses `contains` and passes `clippy::manual_contains`.
+- Fullstack and tenant projects on the prod tier without `RUSTANGO_SESSION_SECRET` exit with `Error:` instead of panicking (`run-server` and `server::Builder` return the error); the prod Dockerfile header names the keys each template needs.
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
+
+### Deprecated
+
+- `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
 
 ## [0.62.0] — 2026-11-02
 

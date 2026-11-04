@@ -146,13 +146,16 @@ pub async fn seed(pool: &Pool) -> Result<(), Box<dyn std::error::Error + Send + 
 
 /// The admin the server mounts at `/admin`: behind a login, with the two
 /// bulk actions. Create the first account with `cargo run -- create-admin <name>`.
-pub fn admin_router(pool: Pool) -> axum::Router {
-    use rustango::session::{load_session_secret_for_tier, tier_from_env};
-    let secret = load_session_secret_for_tier(
+///
+/// # Errors
+/// On the prod tier without a valid `RUSTANGO_SESSION_SECRET`.
+pub fn admin_router(pool: Pool) -> Result<axum::Router, rustango::session::SessionSecretError> {
+    use rustango::session::{tier_from_env, try_load_session_secret_for_tier};
+    let secret = try_load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),
-    );
-    rustango::admin::Builder::new(pool)
+    )?;
+    Ok(rustango::admin::Builder::new(pool)
         .title("Admin Demo")
         .subtitle("rustango auto-admin showcase")
         .admin_prefix("/admin")
@@ -163,7 +166,7 @@ pub fn admin_router(pool: Pool) -> axum::Router {
         .register_tx_action("posts", "archive", |tx, pks| {
             Box::pin(async move { set_status(tx, pks, "archived").await })
         })
-        .build()
+        .build())
 }
 
 /// Bulk action handler — sets `status` on every selected post, in the
