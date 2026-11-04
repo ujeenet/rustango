@@ -31,6 +31,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- `SessionStore::for_tenant` and `FeatureFlags::for_tenant` bind sessions and per-user flag overrides to the tenant's org id and slug; unscoped, a session or override from one tenant applied in another.
 - A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
 - Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.
 - On Windows the check that a tenant's SQLite file is not the registry compares canonical, case-folded paths, so a different case, a junction, a symlink or an 8.3 name no longer slips through; a hard link still does (Unix compares inodes).

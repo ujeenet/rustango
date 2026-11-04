@@ -38,6 +38,11 @@
 //! - `flag:<name>:user:<user_id>` — per-user override
 //! - `flag:<name>:pct` — rollout percentage, 0..=100
 //!
+//! User ids are per tenant, so under tenancy scope the overrides with
+//! `FeatureFlags::for_tenant`: they move to
+//! `tenant:#org:<id>:<slug>:flag:<name>:user:<user_id>`. The global state and
+//! the percentage stay platform-wide.
+//!
 //! Entries never expire by default: flag state is durable. Opt in to
 //! expiry with [`FeatureFlags::ttl`]. Without a TTL flags are written with
 //! `set_forever`, which `InMemoryCache` never evicts; with one they can be.
@@ -53,6 +58,8 @@ const KEY_PREFIX: &str = "flag";
 #[derive(Clone)]
 pub struct FeatureFlags {
     cache: BoxedCache,
+    /// Holds the per-user overrides: `cache`, or its tenant view.
+    users: BoxedCache,
     /// `None` = never expire; a kill switch must not lapse on its own.
     ttl: Option<Duration>,
 }
@@ -60,7 +67,20 @@ pub struct FeatureFlags {
 impl FeatureFlags {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
-        Self { cache, ttl: None }
+        Self {
+            users: cache.clone(),
+            cache,
+            ttl: None,
+        }
+    }
+
+    /// Keep per-user overrides to one tenant, since user ids repeat across
+    /// tenants. The global state and the percentage stay platform-wide.
+    #[cfg(feature = "tenancy")]
+    #[must_use]
+    pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.users = crate::cache::ScopedCache::for_tenant(self.cache.clone(), tenant).boxed();
+        self
     }
 
     /// Make every write expire after `ttl`; the flag then reads as never
@@ -84,10 +104,10 @@ impl FeatureFlags {
     }
 
     /// One write; `set_forever` so a backend default TTL cannot expire it.
-    async fn put(&self, key: &str, value: &str) -> Result<(), CacheError> {
+    async fn put(&self, cache: &BoxedCache, key: &str, value: &str) -> Result<(), CacheError> {
         match self.ttl {
-            Some(ttl) => self.cache.set(key, value, Some(ttl)).await,
-            None => self.cache.set_forever(key, value).await,
+            Some(ttl) => cache.set(key, value, Some(ttl)).await,
+            None => cache.set_forever(key, value).await,
         }
     }
 
@@ -96,7 +116,7 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error: the flag did not change.
     pub async fn enable(&self, name: &str) -> Result<(), CacheError> {
-        self.put(&self.global_key(name), "on").await
+        self.put(&self.cache, &self.global_key(name), "on").await
     }
 
     /// Globally disable the flag. This beats any rollout percentage,
@@ -106,7 +126,7 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error: the flag did not change.
     pub async fn disable(&self, name: &str) -> Result<(), CacheError> {
-        self.put(&self.global_key(name), "off").await
+        self.put(&self.cache, &self.global_key(name), "off").await
     }
 
     /// Drop the global state, the percentage and the overrides of the
@@ -119,7 +139,7 @@ impl FeatureFlags {
         self.cache.delete(&self.global_key(name)).await?;
         self.cache.delete(&self.pct_key(name)).await?;
         for u in known_user_ids {
-            self.cache.delete(&self.user_key(name, u)).await?;
+            self.users.delete(&self.user_key(name, u)).await?;
         }
         Ok(())
     }
@@ -132,7 +152,8 @@ impl FeatureFlags {
     /// The cache write's error.
     pub async fn set_percentage(&self, name: &str, percent: u8) -> Result<(), CacheError> {
         let p = percent.min(100);
-        self.put(&self.pct_key(name), &p.to_string()).await
+        self.put(&self.cache, &self.pct_key(name), &p.to_string())
+            .await
     }
 
     /// Turn the flag on for one user, whatever the global state says.
@@ -141,7 +162,8 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error.
     pub async fn enable_for_user(&self, name: &str, user_id: &str) -> Result<(), CacheError> {
-        self.put(&self.user_key(name, user_id), "on").await
+        self.put(&self.users, &self.user_key(name, user_id), "on")
+            .await
     }
 
     /// Turn the flag off for one user.
@@ -149,7 +171,8 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error.
     pub async fn disable_for_user(&self, name: &str, user_id: &str) -> Result<(), CacheError> {
-        self.put(&self.user_key(name, user_id), "off").await
+        self.put(&self.users, &self.user_key(name, user_id), "off")
+            .await
     }
 
     /// Read the global state only. Returns `false` when the flag is off
@@ -172,7 +195,7 @@ impl FeatureFlags {
     pub async fn is_enabled_for(&self, name: &str, user_id: &str) -> bool {
         // 1. Per-user override.
         match self
-            .cache
+            .users
             .get(&self.user_key(name, user_id))
             .await
             .ok()
@@ -242,6 +265,41 @@ mod tests {
     fn flags() -> FeatureFlags {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
         FeatureFlags::new(cache)
+    }
+
+    /// Unscoped keys are unchanged; a tenant's overrides carry its org id and slug.
+    #[tokio::test]
+    async fn override_keys_are_bare_or_bound_to_the_tenant() {
+        let root: BoxedCache = StdArc::new(InMemoryCache::new());
+        FeatureFlags::new(root.clone())
+            .enable_for_user("beta", "5")
+            .await
+            .unwrap();
+        assert!(root.exists("flag:beta:user:5").await.unwrap());
+        #[cfg(feature = "tenancy")]
+        {
+            use crate::tenancy::TenantSlug;
+            root.clear().await.unwrap();
+            let acme = FeatureFlags::new(root.clone()).for_tenant(&TenantSlug::new(1, "acme"));
+            let heir = FeatureFlags::new(root.clone()).for_tenant(&TenantSlug::new(2, "acme"));
+            acme.enable_for_user("beta", "5").await.unwrap();
+            assert!(root
+                .exists("tenant:#org:1:acme:flag:beta:user:5")
+                .await
+                .unwrap());
+            assert!(
+                !heir.is_enabled_for("beta", "5").await,
+                "slug reuse sees it"
+            );
+            assert!(
+                !FeatureFlags::new(root.clone())
+                    .is_enabled_for("beta", "5")
+                    .await
+            );
+            // The kill switch stays platform-wide.
+            FeatureFlags::new(root).enable("beta").await.unwrap();
+            assert!(heir.is_enabled_for("beta", "6").await);
+        }
     }
 
     #[tokio::test]
