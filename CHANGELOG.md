@@ -4,6 +4,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `dumpdata --output <file>` writes the fixture as UTF-8, for shells whose `>` writes UTF-16.
+
+### Fixed
+
+- `loaddata`, `Fixture::from_file`, migration files, i18n catalogs and settings TOML read UTF-16 (BOM-detected) and drop a UTF-8 BOM, so a fixture redirected by Windows PowerShell 5.1 loads.
+- Static files refuse a name that resolves to a hidden file (a link, or a Windows 8.3 name such as `ENV~1` for `.env`), not only one whose requested path starts with a dot.
+
 ## [0.62.0] — 2026-11-02
 
 ### Added

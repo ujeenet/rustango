@@ -564,6 +564,8 @@ pub mod casts;
 /// [`crate::crypto`] so always-on callers (pagination cursors,
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
+/// UTF-8 / UTF-16 text a user wrote or redirected.
+pub(crate) mod text_file;
 
 /// The credential word list, and its matcher for log and audit redaction.
 pub(crate) mod secret_keys;

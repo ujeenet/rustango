@@ -439,7 +439,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(
         w,
-        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>]"
+        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>] [--output <file>]"
     )?;
     writeln!(w, "      Export every registered model's rows as a JSON")?;
     writeln!(
@@ -4290,8 +4290,8 @@ fn write_db_info<W: Write>(
 /// name OR bare model name); pass multiple times to limit to a set.
 /// `--indent N` controls JSON formatting (default `2`).
 ///
-/// Output goes to stdout so users can pipe to a file:
-/// `cargo run manage dumpdata > fixtures/seed.json`.
+/// Output goes to stdout, or with `--output <file>` to that file as
+/// UTF-8: PowerShell 5.1's `>` writes UTF-16.
 ///
 /// `loaddata` is the companion verb that re-applies a fixture
 /// export — queued as a follow-up.
@@ -4305,6 +4305,8 @@ struct DumpdataArgs {
     indent: usize,
     /// `true` when the user passed `--help`; cmd short-circuits to help.
     help: bool,
+    /// `--output`: write UTF-8 to this file instead of the writer.
+    output: Option<String>,
 }
 
 fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
@@ -4326,6 +4328,10 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
             "--exclude" => {
                 let v = iter.next().ok_or_else(|| missing_value("--exclude"))?;
                 out.excludes.push(v.clone());
+            }
+            "--output" | "-o" => {
+                let v = iter.next().ok_or_else(|| missing_value("--output"))?;
+                out.output = Some(v.clone());
             }
             "--indent" => {
                 let v = iter.next().ok_or_else(|| missing_value("--indent"))?;
@@ -4355,7 +4361,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     if parsed.help {
         writeln!(
             w,
-            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N]"
+            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N] [--output FILE]"
         )?;
         writeln!(w)?;
         writeln!(
@@ -4386,6 +4392,10 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         writeln!(
             w,
             "  --exclude <name> Leave a model out (repeatable; same forms as --model)."
+        )?;
+        writeln!(
+            w,
+            "  --output <file>  Write UTF-8 to <file>; PowerShell's `>` writes UTF-16."
         )?;
         return Ok(());
     }
@@ -4423,8 +4433,15 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     let schemas: Vec<_> = selected.iter().map(|e| e.schema).collect();
     require_tenant_tables(pool, scope, &schemas, "dumpdata").await?;
 
+    let mut sink = match &parsed.output {
+        Some(path) => Sink::File(
+            std::fs::File::create(path)
+                .map_err(|e| MigrateError::Validation(format!("dumpdata: create `{path}`: {e}")))?,
+        ),
+        None => Sink::Out(w),
+    };
     // Walk every selected model, writing its rows a page at a time.
-    let mut out = FixtureWriter::new(w, indent);
+    let mut out = FixtureWriter::new(&mut sink, indent);
     for entry in selected {
         let schema = entry.schema;
         let dotted_name = dotted_model_name(entry);
@@ -4528,6 +4545,28 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
         }
     }
     out.finish()
+}
+
+/// Where `dumpdata` writes: the command's writer, or an `--output` file.
+enum Sink<'a, W: Write> {
+    Out(&'a mut W),
+    File(std::fs::File),
+}
+
+impl<W: Write> Write for Sink<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Out(w) => w.write(buf),
+            Self::File(f) => f.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Out(w) => w.flush(),
+            Self::File(f) => f.flush(),
+        }
+    }
 }
 
 /// Tags a JSON column value in a fixture, so a JSON `null` stays apart
@@ -4939,7 +4978,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         return Ok(());
     }
 
-    let raw = std::fs::read_to_string(&parsed.file)
+    let raw = crate::text_file::read(Path::new(&parsed.file))
         .map_err(|e| MigrateError::Validation(format!("loaddata: read `{}`: {e}", parsed.file)))?;
     let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
         MigrateError::Validation(format!("loaddata: parse `{}` as JSON: {e}", parsed.file))

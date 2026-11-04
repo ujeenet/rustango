@@ -1110,7 +1110,7 @@ type PluralCatalog = HashMap<String, HashMap<String, String>>;
 
 /// One JSON catalog, split into its flat and plural entries.
 fn read_catalog(path: &Path) -> Result<(HashMap<String, String>, PluralCatalog), I18nError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| I18nError::Io(e.to_string()))?;
+    let raw = crate::text_file::read(path).map_err(|e| I18nError::Io(e.to_string()))?;
     let entries: HashMap<String, CatalogEntry> =
         serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
             file: path.display().to_string(),
