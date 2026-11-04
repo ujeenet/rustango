@@ -130,7 +130,7 @@ struct PendingAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminTxActionFn,
+    handler: crate::admin::ActionFn,
 }
 
 #[cfg(feature = "postgres")]
@@ -601,13 +601,38 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
-    /// Register a user-defined bulk admin action that runs against the
+    /// Register a custom bulk admin action that runs against the
     /// tenant pool of whichever tenant the request resolves to. The
     /// action name must also appear in the model's
     /// `#[rustango(admin(actions = "..."))]` allowlist.
     ///
-    /// Mirrors [`crate::admin::Builder::register_tx_action`]; the
+    /// Mirrors [`crate::admin::Builder::register_action`]; the
     /// transaction is on the tenant-scoped pool.
+    #[must_use]
+    pub fn admin_register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: crate::admin::ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(crate::admin::ActionCtx<'a>) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.admin_actions.push(PendingAction {
+            table: model_table,
+            name: action_name,
+            perm,
+            handler: std::sync::Arc::new(handler),
+        });
+        self
+    }
+
+    /// [`Self::admin_register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
+    #[deprecated(note = "use `admin_register_action(table, name, ActionPerm::Change, handler)`")]
     #[must_use]
     pub fn admin_register_tx_action<F>(
         self,
@@ -624,19 +649,19 @@ impl<DB: Database> Builder<DB> {
             + Sync
             + 'static,
     {
-        self.admin_register_tx_action_with_perm(
+        self.admin_register_action(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
-            handler,
+            crate::admin::from_tx_handler(handler),
         )
     }
 
-    /// [`Self::admin_register_tx_action`] checked against `perm`.
-    /// See [`crate::admin::Builder::register_tx_action_with_perm`].
+    /// [`Self::admin_register_action`] with a `(tx, pks)` handler.
+    #[deprecated(note = "use `admin_register_action`, whose handler takes an `ActionCtx`")]
     #[must_use]
     pub fn admin_register_tx_action_with_perm<F>(
-        mut self,
+        self,
         model_table: &'static str,
         action_name: &'static str,
         perm: crate::admin::ActionPerm,
@@ -651,13 +676,12 @@ impl<DB: Database> Builder<DB> {
             + Sync
             + 'static,
     {
-        self.admin_actions.push(PendingAction {
-            table: model_table,
-            name: action_name,
+        self.admin_register_action(
+            model_table,
+            action_name,
             perm,
-            handler: std::sync::Arc::new(handler),
-        });
-        self
+            crate::admin::from_tx_handler(handler),
+        )
     }
 
     /// Run a first-run hook with full access to pools + registry.
@@ -854,11 +878,11 @@ impl<DB: Database> Builder<DB> {
         }
         for action in self.admin_actions {
             let handler = action.handler;
-            tenant_admin_builder = tenant_admin_builder.register_tx_action_with_perm(
+            tenant_admin_builder = tenant_admin_builder.register_action(
                 action.table,
                 action.name,
                 action.perm,
-                move |tx, pks| handler(tx, pks),
+                move |ctx| handler(ctx),
             );
         }
         let tenant_admin = tenant_admin_builder

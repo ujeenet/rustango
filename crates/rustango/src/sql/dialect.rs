@@ -107,13 +107,20 @@ pub(crate) fn refuse_unbindable_values(
     }
 }
 
+pub(crate) mod sealed {
+    pub trait Sealed {}
+}
+
 /// Turns the dialect-neutral query IR into a parameterized statement,
 /// and supplies the DDL primitives the migration runner needs.
 ///
 /// It is `Send + Sync` because the migration runner holds a
 /// `&'static dyn Dialect` across `await` points. Every implementor is
 /// a unit struct, so this costs nothing.
-pub trait Dialect: Send + Sync {
+///
+/// The trait is sealed: only the built-in dialects implement it, so
+/// adding a method is not a breaking change.
+pub trait Dialect: Send + Sync + sealed::Sealed {
     /// This dialect's short name: `"postgres"`, `"sqlite"` or
     /// `"mysql"`. For logs, errors, and the dialect checks no trait
     /// method covers yet; prefer a method for new SQL shapes.
@@ -438,46 +445,20 @@ pub trait Dialect: Send + Sync {
     /// `ALTER TABLE <table> DROP …` for a named CHECK constraint, or
     /// `None` on a dialect with no such statement, as on SQLite.
     ///
-    /// Every dialect must answer for itself. Postgres spells it
+    /// Required, with no fallback: inheriting the PostgreSQL form once
+    /// shipped SQL that MySQL could not parse. Postgres spells it
     /// `DROP CONSTRAINT IF EXISTS`, which is idempotent. MySQL spells
     /// it `DROP CHECK` (MariaDB `DROP CONSTRAINT`) and takes no `IF EXISTS`,
     /// so it errors when the constraint is already gone.
-    ///
-    /// # Panics
-    /// The default body panics on purpose, naming the dialect. There
-    /// is no safe fallback: handing a new backend the PostgreSQL form
-    /// once shipped SQL that MySQL could not parse, and a panic on
-    /// the first migration is easier to find than a syntax error from
-    /// a live server.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
-        let _ = (table, name);
-        unimplemented!(
-            "Dialect::drop_check_constraint_sql is not implemented for `{}`. \
-             Implement it: return the dialect's own `ALTER TABLE … DROP …` \
-             spelling, or `None` if it has none. There is deliberately no \
-             fallback — inheriting PostgreSQL's form is what shipped invalid \
-             SQL to MySQL in #559.",
-            self.name()
-        )
-    }
+    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String>;
 
     /// `ALTER TABLE <table> DROP …` for a named foreign key, or
-    /// `None` where there is no such statement.
+    /// `None` where there is no such statement. Required, as
+    /// [`Dialect::drop_check_constraint_sql`].
     ///
     /// Postgres uses `DROP CONSTRAINT IF EXISTS`, MySQL the
     /// non-idempotent `DROP FOREIGN KEY`.
-    ///
-    /// # Panics
-    /// As [`Dialect::drop_check_constraint_sql`].
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
-        let _ = (table, name);
-        unimplemented!(
-            "Dialect::drop_foreign_key_sql is not implemented for `{}`. \
-             Implement it: return the dialect's own `ALTER TABLE … DROP …` \
-             spelling, or `None` if it has none.",
-            self.name()
-        )
-    }
+    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String>;
 
     /// Query for the names of the FKs on one column, binding `(table,
     /// column)`. Single-column FKs only: a composite one stays (#1557).
@@ -1416,45 +1397,6 @@ mod refuse_unbindable_values_tests {
             let list = SqlValue::List(vec![SqlValue::Array(vec![])]);
             assert_eq!(refused(d, list), Some(inner), "{}", d.name());
             assert_eq!(refused(d, SqlValue::String("x".into())), None);
-        }
-    }
-}
-
-#[cfg(test)]
-mod every_dialect_overrides_the_drop_constraint_methods {
-    //! Catches a dialect in this crate that forgot to override one of
-    //! `Dialect`'s two panicking defaults.
-    //!
-    //! Those defaults keep a downstream `impl Dialect` compiling, but
-    //! they also mean that dropping one of these methods from a
-    //! dialect here would still build, and fail instead as a panic
-    //! partway through a migration.
-
-    use super::Dialect;
-
-    /// Every dialect answers both, one way or the other. `None` is a
-    /// fine answer; inheriting the default is not.
-    #[test]
-    fn no_dialect_falls_through_to_the_panicking_default() {
-        let dialects: Vec<&dyn Dialect> = vec![
-            #[cfg(feature = "postgres")]
-            &crate::sql::postgres::Postgres,
-            #[cfg(feature = "mysql")]
-            &crate::sql::mysql::MySql,
-            #[cfg(feature = "sqlite")]
-            &crate::sql::sqlite::Sqlite,
-        ];
-
-        assert!(
-            !dialects.is_empty(),
-            "no dialect features are on, so this guard checked nothing"
-        );
-
-        for d in dialects {
-            // The default body panics; any return means the dialect
-            // answered for itself.
-            let _ = d.drop_check_constraint_sql("t", "c");
-            let _ = d.drop_foreign_key_sql("t", "fk");
         }
     }
 }

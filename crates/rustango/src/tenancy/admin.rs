@@ -96,7 +96,7 @@ struct RegisteredAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminTxActionFn,
+    handler: crate::admin::ActionFn,
 }
 
 struct TenantSessionConfig {
@@ -267,10 +267,36 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         self
     }
 
-    /// Register a user-defined bulk action handler. Same semantics as
-    /// [`crate::admin::Builder::register_tx_action`]. The handler writes in
+    /// Register a custom bulk action. Same semantics as
+    /// [`crate::admin::Builder::register_action`]; the handler writes in
     /// a transaction on the resolved tenant's pool, search_path already
-    /// scoped to the tenant's schema.
+    /// scoped to the tenant's schema, and [`ActionCtx::org`](crate::admin::ActionCtx::org)
+    /// is that tenant.
+    #[must_use]
+    pub fn register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: crate::admin::ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(crate::admin::ActionCtx<'a>) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.actions.push(RegisteredAction {
+            table: model_table,
+            name: action_name,
+            perm,
+            handler: Arc::new(handler),
+        });
+        self
+    }
+
+    /// [`Self::register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
+    #[deprecated(note = "use `register_action(table, name, ActionPerm::Change, handler)`")]
     #[must_use]
     pub fn register_tx_action<F>(
         self,
@@ -287,19 +313,19 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             + Sync
             + 'static,
     {
-        self.register_tx_action_with_perm(
+        self.register_action(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
-            handler,
+            crate::admin::from_tx_handler(handler),
         )
     }
 
-    /// [`Self::register_tx_action`] checked against `perm`. Same
-    /// semantics as [`crate::admin::Builder::register_tx_action_with_perm`].
+    /// [`Self::register_action`] with a `(tx, pks)` handler.
+    #[deprecated(note = "use `register_action`, whose handler takes an `ActionCtx`")]
     #[must_use]
     pub fn register_tx_action_with_perm<F>(
-        mut self,
+        self,
         model_table: &'static str,
         action_name: &'static str,
         perm: crate::admin::ActionPerm,
@@ -314,13 +340,12 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             + Sync
             + 'static,
     {
-        self.actions.push(RegisteredAction {
-            table: model_table,
-            name: action_name,
+        self.register_action(
+            model_table,
+            action_name,
             perm,
-            handler: Arc::new(handler),
-        });
-        self
+            crate::admin::from_tx_handler(handler),
+        )
     }
 }
 
@@ -444,7 +469,8 @@ where
     }
 
     let (mut parts, body) = req.into_parts();
-    let org = match resolver.resolve(&parts, &pools.registry_pool()).await {
+    let registry = super::TenantRegistry::new(pools.registry_pool());
+    let org = match resolver.resolve_in(&parts, &registry).await {
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
@@ -2075,7 +2101,7 @@ fn inner_admin_state(
     // admin can't surface cross-tenant data.
     let mut builder = crate::admin::Builder::new(pool)
         .tenant_mode()
-        .tenant(&org.slug)
+        .tenant(org)
         // The tenancy session layer gates every route of this admin.
         .gated_upstream()
         // v0.28.0 (#74) — pass the configurable admin prefix
@@ -2142,12 +2168,11 @@ fn inner_admin_state(
     }
 
     for action in actions {
-        let handler = action.handler.clone();
-        builder = builder.register_tx_action_with_perm(
+        builder = builder.insert_action(
             action.table,
             action.name,
             action.perm,
-            move |tx, pks| handler(tx, pks),
+            action.handler.clone(),
         );
     }
     builder.into_request_state()
@@ -2229,8 +2254,38 @@ mod resolver_error_tests {
         }
     }
 
+    /// Overrides only `resolve_in`, which the tenant admin calls.
+    struct FailingIn;
+
+    #[async_trait::async_trait]
+    impl OrgResolver for FailingIn {
+        async fn resolve(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::sql::Pool,
+        ) -> Result<Option<Org>, TenancyError> {
+            unreachable!("the tenant admin calls resolve_in")
+        }
+
+        async fn resolve_in(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::tenancy::TenantRegistry,
+        ) -> Result<Option<Org>, TenancyError> {
+            Err(TenancyError::Resolution(
+                "could not reach registry-db:5432".into(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn the_500_withholds_the_resolver_text() {
+        for resolver in [&Failing as &dyn OrgResolver, &FailingIn] {
+            the_500_withholds_the_text_of(resolver).await;
+        }
+    }
+
+    async fn the_500_withholds_the_text_of(resolver: &dyn OrgResolver) {
         let _env = crate::error::test_env::lock();
         let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let pools = TenantPools::<sqlx::Sqlite>::new(registry);
@@ -2241,7 +2296,7 @@ mod resolver_error_tests {
             crate::admin::per_request_router("/__audit"),
             &pools,
             "",
-            &Failing,
+            resolver,
             &None,
             &[],
             None,

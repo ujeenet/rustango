@@ -674,7 +674,9 @@ pub(crate) fn stamp_auto_now(model: &'static ModelSchema, set: &mut Vec<(&'stati
 pub enum ModelFormError {
     #[error("form validation failed:\n{0}")]
     Validation(FormErrors),
-    #[error("database error: {0}")]
+    /// Display is opaque, so `to_string()` is safe to show a client; the
+    /// driver error is the `source()`, for logs.
+    #[error("database error")]
     Database(#[from] crate::sql::ExecError),
 }
 
@@ -2474,6 +2476,22 @@ mod model_form_tests {
     }
 
     // ---- #375 — prepare_save / PreparedSave (commit=False) ----
+
+    /// A form's database error shows no driver text; only `source()` has it.
+    #[test]
+    fn database_error_display_withholds_the_driver_text() {
+        use std::error::Error as _;
+        const LEAK: &str = "pg-prod-01.internal:5432 relation \"secret_ledger\"";
+        let err = ModelFormError::from(crate::sql::ExecError::Driver(sqlx::Error::Protocol(
+            LEAK.into(),
+        )));
+        let shown = err.to_string();
+        for marker in ["pg-prod-01", "5432", "secret_ledger"] {
+            assert!(!shown.contains(marker), "{shown}");
+        }
+        let cause = err.source().expect("the driver error is the source");
+        assert!(cause.to_string().contains("secret_ledger"), "{cause}");
+    }
 
     #[test]
     fn prepare_save_returns_validation_error_when_form_invalid() {

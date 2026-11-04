@@ -2381,7 +2381,9 @@ pub struct UaPost {
     is_published: bool,
 }
 
+/// The deprecated `(tx, pks)` wrapper still runs its handler.
 #[tokio::test]
+#[allow(deprecated)]
 async fn user_defined_action_runs_via_register_tx_action() {
     // v0.11.0: register a custom handler on `Builder`. POSTing
     // `action=publish_selected` flips the targeted rows'
@@ -2445,7 +2447,7 @@ async fn user_defined_action_runs_via_register_tx_action() {
 #[tokio::test]
 async fn allowlisted_action_without_handler_returns_500() {
     // Allowlisted in `admin(actions = "...")` but not registered on
-    // the Builder → 500 with a hint pointing at register_tx_action.
+    // the Builder → 500 with a hint pointing at register_action.
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
         return;
@@ -2476,7 +2478,7 @@ async fn allowlisted_action_without_handler_returns_500() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = body_string(resp).await;
-    // The generic `ApiError` envelope; the `register_tx_action` hint is
+    // The generic `ApiError` envelope; the `register_action` hint is
     // logged server-side, not sent (#1193).
     assert!(
         body.contains(r#""error":"internal_error""#) && body.contains("correlation_id"),

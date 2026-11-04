@@ -162,7 +162,10 @@ untouched.
 - `rustango::bulk_actions` and `RustangoError::BulkAction` are gone; nothing in the framework ran them. Use the admin's `actions = "..."` or `ListView::bulk_actions(true)` with `tenant_action(...)`.
 - The crate-root `rustango::auth_backends` (`Credentials`, `Principal`, `AuthBackendChain`, `RemoteUserBackend`) is gone. Implement `tenancy::auth_backends::AuthBackend`, which `require_auth` runs.
 - `mcp::pagination` is private; the MCP `*/list` handlers still paginate. Use `rustango::pagination` in your own endpoints.
-- A custom `Dialect` that overrides `quote_ident` or `placeholder` must override `push_quoted_ident` / `push_placeholder` instead: query compiles call those, and the old methods now wrap them.
+- `Dialect` is sealed: only rustango's PostgreSQL, MySQL and SQLite dialects implement it, so a downstream `impl Dialect` no longer compiles (none could reach a `Pool`). Calling its methods is unchanged.
+- `InsertReturningPool` is hidden from the docs: it is plumbing for the derive and may change without notice.
+- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work and are deprecated.
+- `ModelFormError::Database`'s `Display` is now `database error`. Log the error with `{:?}` or its `source()` to keep the driver detail.
 
 ## 0.62.0
 

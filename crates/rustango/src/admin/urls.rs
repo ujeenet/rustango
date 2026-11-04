@@ -22,46 +22,12 @@ use axum::Router;
 use super::errors::AdminError;
 use super::views;
 
-/// Future returned by an [`AdminTxActionFn`] handler.
+/// Future returned by a custom bulk action handler.
 pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminError>> + Send + 'a>>;
 
-/// Bulk action handler. It writes in the admin's transaction, through the
-/// ORM, on any backend: the action's audit rows commit or roll back with
-/// its writes. It gets the parsed PK list of the selected rows; return
-/// `Ok(())`, or an [`AdminError`] to roll everything back. Register it
-/// with [`Builder::register_tx_action`]:
-///
-/// ```no_run
-/// use rustango::admin::{AdminActionFuture, AdminError, Builder};
-/// use rustango::core::{Op, SqlValue};
-/// use rustango::sql::{Pool, PoolTx};
-///
-/// #[derive(rustango::Model)]
-/// #[rustango(table = "post")]
-/// pub struct Post {
-///     #[rustango(primary_key)]
-///     pub id: i64,
-///     pub published_at: Option<chrono::DateTime<chrono::Utc>>,
-/// }
-///
-/// fn publish<'a>(tx: &'a mut PoolTx<'static>, pks: &'a [SqlValue]) -> AdminActionFuture<'a> {
-///     Box::pin(async move {
-///         let query = Post::objects()
-///             .filter_op("id", Op::In, SqlValue::List(pks.to_vec()))
-///             .update()
-///             .set("published_at", chrono::Utc::now())
-///             .compile()
-///             .map_err(|e| AdminError::Internal(e.to_string()))?;
-///         rustango::sql::update_tx(tx, &query).await?;
-///         Ok(())
-///     })
-/// }
-///
-/// fn admin(pool: Pool) -> Builder {
-///     Builder::new(pool).register_tx_action("post", "publish", publish)
-/// }
-/// # fn main() {}
-/// ```
+/// The `(tx, pks)` bulk action handler of the deprecated
+/// `register_tx_action*` methods.
+#[deprecated(note = "take an `ActionCtx`: see `Builder::register_action`")]
 pub type AdminTxActionFn = Arc<
     dyn for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
         + Send
@@ -85,7 +51,7 @@ pub enum ActionPerm {
 /// A registered custom action: its handler and the permission it needs.
 #[derive(Clone)]
 pub(crate) struct RegisteredAction {
-    pub(crate) handler: AdminTxActionFn,
+    pub(crate) handler: super::ActionFn,
     pub(crate) perm: ActionPerm,
 }
 
@@ -239,6 +205,9 @@ pub(crate) struct Config {
     pub(crate) impersonated_by: Option<i64>,
     /// The tenant's slug, for the admin signals; `None` outside a tenant.
     pub(crate) tenant: Option<String>,
+    /// The tenant, for custom actions; `None` outside a tenant.
+    #[cfg(feature = "tenancy")]
+    pub(crate) org: Option<crate::tenancy::Org>,
     /// URL prefix the admin Router is mounted under, passed to every
     /// template as `{{ admin_prefix }}` so links and form actions
     /// resolve. Default `/__admin`; set another with
@@ -605,11 +574,12 @@ impl Builder {
         self
     }
 
-    /// The tenant this admin serves, named in its signals.
+    /// The tenant this admin serves, named in its signals and handed to actions.
     #[cfg(feature = "tenancy")]
     #[must_use]
-    pub(crate) fn tenant(mut self, slug: &str) -> Self {
-        self.config.tenant = Some(slug.to_owned());
+    pub(crate) fn tenant(mut self, org: &crate::tenancy::Org) -> Self {
+        self.config.tenant = Some(org.slug.clone());
+        self.config.org = Some(org.clone());
         self
     }
 
@@ -721,7 +691,7 @@ impl Builder {
         self
     }
 
-    /// Register a user-defined bulk action handler; see [`AdminTxActionFn`].
+    /// Register a custom bulk action; the handler gets an [`ActionCtx`](super::ActionCtx).
     ///
     /// `model_table` must match the model's `table = "..."`, and
     /// `action_name` **must** also be in that model's
@@ -730,9 +700,26 @@ impl Builder {
     ///
     /// The handler writes in the admin's transaction: the action's audit
     /// rows commit with its writes, and an error from either rolls both
-    /// back. It is gated like an edit: `{table}.change` plus the object
-    /// hook named after the action. An action that deletes should use
-    /// [`Self::register_tx_action_with_perm`] with [`ActionPerm::Delete`].
+    /// back. It needs `{table}.change`, plus `{table}.delete` for
+    /// [`ActionPerm::Delete`], and every selected row must pass the
+    /// `perm` object hook and the hook named after the action.
+    /// A `Delete` action audits and signals as an edit; the handler
+    /// does its own deleting.
+    pub fn register_action<F>(
+        self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(super::ActionCtx<'a>) -> AdminActionFuture<'a> + Send + Sync + 'static,
+    {
+        self.insert_action(model_table, action_name, perm, Arc::new(handler))
+    }
+
+    /// [`Self::register_action`] with [`ActionPerm::Change`] and a `(tx, pks)` handler.
+    #[deprecated(note = "use `register_action(table, name, ActionPerm::Change, handler)`")]
     pub fn register_tx_action<F>(
         self,
         model_table: &'static str,
@@ -745,13 +732,16 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.register_tx_action_with_perm(model_table, action_name, ActionPerm::Change, handler)
+        self.register_action(
+            model_table,
+            action_name,
+            ActionPerm::Change,
+            super::action::from_tx_handler(handler),
+        )
     }
 
-    /// [`Self::register_tx_action`] checked against `perm` instead of
-    /// `change`, plus the object hook named after the action.
-    /// A `Delete` action still needs `{table}.change`, and it audits and
-    /// signals as an edit; the handler does its own deleting.
+    /// [`Self::register_action`] with a `(tx, pks)` handler.
+    #[deprecated(note = "use `register_action`, whose handler takes an `ActionCtx`")]
     pub fn register_tx_action_with_perm<F>(
         self,
         model_table: &'static str,
@@ -765,15 +755,20 @@ impl Builder {
             + Sync
             + 'static,
     {
-        self.insert_action(model_table, action_name, perm, Arc::new(handler))
+        self.register_action(
+            model_table,
+            action_name,
+            perm,
+            super::action::from_tx_handler(handler),
+        )
     }
 
-    fn insert_action(
+    pub(crate) fn insert_action(
         mut self,
         model_table: &'static str,
         action_name: &'static str,
         perm: ActionPerm,
-        handler: AdminTxActionFn,
+        handler: super::ActionFn,
     ) -> Self {
         self.config
             .actions

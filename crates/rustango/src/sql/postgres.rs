@@ -42,6 +42,8 @@ pub struct Postgres;
 #[cfg(feature = "postgres")]
 pub static DIALECT: &Postgres = &Postgres;
 
+impl super::dialect::sealed::Sealed for Postgres {}
+
 impl Dialect for Postgres {
     fn name(&self) -> &'static str {
         "postgres"
