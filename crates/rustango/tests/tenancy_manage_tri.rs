@@ -2216,7 +2216,7 @@ async fn check_deploy_names_a_port_only_tenant(pool: &Pool) {
         backend_kind: env.backend().as_str().into(),
         ..rustango::testkit::org()
     };
-    org.save_pool(&env.registry).await.expect("insert org");
+    org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let _g = port_routing_lock().lock().await;
     std::env::remove_var("RUSTANGO_TENANT_PORT_ROUTING");
