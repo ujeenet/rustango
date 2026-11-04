@@ -127,6 +127,8 @@ pub mod provision_webhook;
 pub mod request_tenant;
 mod resolver;
 mod resolver_cache;
+#[cfg(feature = "mcp")]
+pub(crate) use resolver::active_org_by_id;
 pub mod routes;
 mod secrets;
 pub mod session;

@@ -555,3 +555,53 @@ async fn autocomplete_fills_past_denied_rows() {
     assert!(body.contains("mine-row"), "allowed row not reached: {body}");
     assert!(!body.contains("aaa-"), "a denied row is offered: {body}");
 }
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_shared", display = "title")]
+#[allow(dead_code)]
+pub struct OpShared {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+}
+
+/// Visible only when the request is marked as no tenant's.
+fn only_global(parts: &axum::http::request::Parts, _row: Option<&Value>) -> bool {
+    rustango::tenancy::RequestTenant::get(&parts.extensions)
+        == Some(&rustango::tenancy::RequestTenant::Global)
+}
+rustango::register_object_permission!("op_shared", "view", only_global);
+
+/// The fixed-pool admin serves data every tenant shares: a tenant host's
+/// marker must not reach its hooks, so a tenant credential counts for nothing.
+#[tokio::test]
+async fn the_fixed_pool_admin_is_no_tenants() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TABLE op_shared (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+        Vec::new(),
+    )
+    .await
+    .expect("create");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "INSERT INTO op_shared (id, title) VALUES (1, 'Shared')",
+        Vec::new(),
+    )
+    .await
+    .expect("seed");
+    // Stands in for the Builder's dispatcher on a tenant host.
+    let app = build_app(pool).layer(axum::middleware::from_fn(
+        |mut req: Request<Body>, next: axum::middleware::Next| async move {
+            req.extensions_mut()
+                .insert(rustango::tenancy::RequestTenant::Tenant(
+                    rustango::tenancy::TenantSlug::new(1, "acme"),
+                ));
+            next.run(req).await
+        },
+    ));
+    let req = Request::get("/op_shared/1").body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
+}

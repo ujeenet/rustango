@@ -528,7 +528,7 @@ pub(super) async fn tenant_sso_begin(
     cookie_path: &str,
     parts: &Parts,
 ) -> Response {
-    let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
+    let scope = crate::sso::policy::org_throttle_scope(org);
     if let Err(refused) =
         crate::sso::policy::throttle_check(&scope, &parts.extensions, &parts.headers).await
     {
@@ -600,7 +600,7 @@ pub(super) async fn tenant_sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };
-    let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
+    let scope = crate::sso::policy::org_throttle_scope(org);
     let attempt =
         match crate::sso::policy::throttle_begin(&scope, &parts.extensions, &parts.headers).await {
             Ok(a) => a,

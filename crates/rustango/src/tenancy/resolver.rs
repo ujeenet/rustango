@@ -200,6 +200,9 @@ struct RegistryState {
     slug_cache: HostTtlCache<Org>,
     /// Listener port → [`Org`] by `port` (`None` = known miss).
     port_cache: HostTtlCache<Org>,
+    /// Org id → active [`Org`] (`None` = gone or inactive). Long-lived MCP
+    /// streams re-check their tenant here instead of querying each.
+    id_cache: HostTtlCache<Org>,
     /// Last `rustango_orgs` fingerprint seen, so this pod notices another
     /// pod's writes without a shared cache. See [`sync_org_generation`].
     org_gen: GenerationPoll<super::org::OrgGeneration>,
@@ -223,6 +226,7 @@ impl RegistryState {
             prefix_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             slug_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             port_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
+            id_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             org_gen: GenerationPoll::new(),
             host_gen: GenerationPoll::new(),
             registry_down: Breaker::new(),
@@ -237,6 +241,7 @@ impl RegistryState {
         self.prefix_cache.clear();
         self.slug_cache.clear();
         self.port_cache.clear();
+        self.id_cache.clear();
     }
 }
 
@@ -627,6 +632,24 @@ where
     Ok(found)
 }
 
+/// The active org with `id`, from the resolver's cache: one registry query
+/// per id per TTL, cleared with the other org caches on a write or a
+/// fingerprint change.
+///
+/// # Errors
+/// A registry failure, or the breaker open.
+#[cfg(feature = "mcp")]
+pub(crate) async fn active_org_by_id(
+    registry: &Pool,
+    id: i64,
+) -> Result<Option<Org>, TenancyError> {
+    let st = state(registry);
+    cached_org_by(registry, &st, &st.id_cache, &id.to_string(), || {
+        Org::id.eq(id)
+    })
+    .await
+}
+
 /// Whether `candidate` (`/<segment>`) was looked up and cached, hit or miss.
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) fn prefix_looked_up(registry: &Pool, candidate: &str) -> bool {
@@ -977,6 +1000,35 @@ where
 #[cfg(any(test, feature = "testkit"))]
 pub(crate) fn reset_registry_breaker() {
     each_state(|s| s.registry_down.close());
+}
+
+/// MCP streams re-check their tenant from the cache, not the registry.
+#[cfg(all(test, feature = "sqlite", feature = "mcp"))]
+#[tokio::test]
+async fn active_org_by_id_answers_from_the_cache() {
+    let _g = isolated().await;
+    let pool = Pool::connect("sqlite:file:resolver_id_cache?mode=memory&cache=shared")
+        .await
+        .unwrap();
+    crate::testkit::create_tables_for::<Org>(&pool)
+        .await
+        .unwrap();
+    let mut org = Org {
+        slug: "idc".into(),
+        ..crate::testkit::org()
+    };
+    org.insert(&pool).await.unwrap();
+    let id = *org.id.get().unwrap();
+    assert!(active_org_by_id(&pool, id).await.unwrap().is_some());
+    crate::sql::raw_execute_pool(&pool, "DROP TABLE rustango_orgs", Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        active_org_by_id(&pool, id).await.unwrap().is_some(),
+        "asked the registry again"
+    );
+    invalidate_org_cache();
+    assert!(active_org_by_id(&pool, id).await.is_err());
 }
 
 /// Serializes lib tests that resolve through this module's globals and
