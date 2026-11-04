@@ -84,13 +84,13 @@ test('saves a database server and never shows its password', async ({ page }) =>
   await page.goto('/db-servers');
   await page.getByLabel(/^name$/i).fill(j.server);
   if (sqlite) {
-    await page.getByLabel(/^directory/i).fill(cfg.server.dir);
+    await page.getByLabel(/^sqlite directory/i).fill(cfg.server.dir);
   } else {
     await page.getByLabel(/^host$/i).fill(cfg.server.host);
     await page.getByLabel(/^port$/i).fill(cfg.server.port);
     await page.getByLabel(/^admin user$/i).fill(cfg.server.user);
     await page.getByLabel(/^admin password$/i).fill(cfg.server.password);
-    await page.getByLabel(/^tls$/i).selectOption('disable');
+    await page.getByLabel(/^tls mode$/i).selectOption('disable');
   }
   await page.getByRole('button', { name: /^save server$/i }).click();
   await expect(page.getByText(`saved \`${j.server}\``)).toBeVisible();

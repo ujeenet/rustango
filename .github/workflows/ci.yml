@@ -1210,6 +1210,7 @@ jobs:
           $env:DATABASE_URL = "sqlite://./copy_dev.db?mode=rwc"
           Run cargo run -q -- migrate
           Run cargo run -q -- loaddata dump.json
+          Remove-Item Env:DATABASE_URL
           Set-Location "$env:RUNNER_TEMP\firsttenant"
           $bytes = New-Object byte[] 48
           [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
