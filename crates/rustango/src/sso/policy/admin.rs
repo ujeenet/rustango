@@ -271,26 +271,28 @@ crate::object_permissions::register_framework_object_permission!(
 pub(crate) fn register_link_actions(b: crate::admin::Builder) -> crate::admin::Builder {
     use crate::admin::ActionPerm;
     let pool = b.pool().clone();
-    b.register_tx_action_with_perm(
+    b.register_action(
         "rustango_sso_links",
         "unlink",
         ActionPerm::Delete,
-        |tx, pks| {
+        |mut ctx| {
             Box::pin(async move {
-                unlink(tx, pks)
+                let pks = ctx.pks();
+                unlink(ctx.tx(), pks)
                     .await
                     .map_err(crate::admin::AdminError::Internal)
             })
         },
     )
-    .register_tx_action_with_perm(
+    .register_action(
         "rustango_sso_links",
         "relink",
         ActionPerm::Delete,
-        move |tx, pks| {
+        move |mut ctx| {
             let pool = pool.clone();
             Box::pin(async move {
-                relink(&pool, tx, pks)
+                let pks = ctx.pks();
+                relink(&pool, ctx.tx(), pks)
                     .await
                     .map_err(crate::admin::AdminError::Internal)
             })

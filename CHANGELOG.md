@@ -6,6 +6,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
+- `admin::Builder::register_action` (and `TenantAdminBuilder::register_action`, `server::Builder::admin_register_action`): the handler takes an `ActionCtx` with the transaction, the rows that passed the permission checks, the actor, the tenant, and the request's method, path and client IP.
+- `OrgResolver::resolve_in` takes a `TenantRegistry` and defaults to `resolve`; the framework calls it. `TenantRegistry::new` is public.
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
 
 ### Changed
@@ -14,13 +16,15 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Every framework model field has a label and help text (meaning, an example, defaults, security effect), and the operator console's tenant, host, database-server and operator forms read the same schema text.
 - Framework models show readable labels in admin column headers and forms (e.g. `Display name`, not `display_name`).
 - The `urlencoding` dependency is gone: OAuth URLs and tests use the crate's own `url_codec::url_encode`, which escapes the same characters.
-- The SQL writer quotes identifiers and numbers placeholders straight into one pre-sized buffer: about 60% less time per query compile, same SQL. `Dialect` gains `push_quoted_ident` and `push_placeholder`.
+- The SQL writer quotes identifiers and numbers placeholders straight into one pre-sized buffer: about 60% less time per query compile, same SQL.
+- **Breaking:** `Dialect` is sealed, and `drop_check_constraint_sql` / `drop_foreign_key_sql` are required methods instead of panicking defaults. `InsertReturningPool` is `#[doc(hidden)]`.
 - **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
 - **Breaking:** duplicate implementations removed: `rustango::bulk_actions` (and `RustangoError::BulkAction`), the crate-root `rustango::auth_backends` registry, and the public `mcp::pagination` module; see UPGRADING.md.
 - The in-memory and database job queues decide retry or dead letter through one shared rule.
 
 ### Deprecated
 
+- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`.
 - `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
 - `cargo rustango new -F mcp` is tenant-only: elsewhere `/mcp` refused every tool call, since agents live in tenant databases.
 - `manage` suggests the nearest verb for a typo, e.g. `createsuperuser` → `create-admin` (`create-superuser` on tenancy).
@@ -34,6 +38,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- `ModelFormError::Database` displays only `database error`; the driver text, which could name tables and hosts, moved to `source()`.
 - `SessionStore::for_tenant` and `FeatureFlags::for_tenant` bind sessions and per-user flag overrides to the tenant's org id and slug; unscoped, a session or override from one tenant applied in another.
 - A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
 - Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.

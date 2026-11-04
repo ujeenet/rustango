@@ -77,6 +77,8 @@ impl MySql {
     }
 }
 
+impl super::dialect::sealed::Sealed for MySql {}
+
 impl Dialect for MySql {
     fn name(&self) -> &'static str {
         "mysql"

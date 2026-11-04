@@ -37,6 +37,7 @@ use http::HeaderName;
 use super::error::TenancyError;
 use super::org::Org;
 use super::resolver_cache::{Breaker, Cached, GenerationPoll, HostTtlCache};
+use super::unresolved::TenantRegistry;
 use crate::sql::PoolId;
 use std::sync::{Arc, PoisonError};
 
@@ -60,6 +61,19 @@ pub trait OrgResolver: Send + Sync + 'static {
     /// tenant" with diagnostic context (rare — most no-match cases
     /// return `Ok(None)`).
     async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError>;
+
+    /// [`Self::resolve`] against a [`TenantRegistry`]. The framework
+    /// calls this one; the default passes `registry.pool()` on.
+    ///
+    /// # Errors
+    /// As [`Self::resolve`].
+    async fn resolve_in(
+        &self,
+        parts: &Parts,
+        registry: &TenantRegistry,
+    ) -> Result<Option<Org>, TenancyError> {
+        self.resolve(parts, registry.pool()).await
+    }
 }
 
 // ---------------- SubdomainResolver ----------------
@@ -827,8 +841,17 @@ impl Default for ChainResolver {
 #[async_trait]
 impl OrgResolver for ChainResolver {
     async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
+        self.resolve_in(parts, &TenantRegistry::new(registry.clone()))
+            .await
+    }
+
+    async fn resolve_in(
+        &self,
+        parts: &Parts,
+        registry: &TenantRegistry,
+    ) -> Result<Option<Org>, TenancyError> {
         for resolver in &self.resolvers {
-            match resolver.resolve(parts, registry).await? {
+            match resolver.resolve_in(parts, registry).await? {
                 Some(org) => {
                     // The one funnel every request path goes through —
                     // extractors, tenant admin, operator console. Publish
@@ -1054,6 +1077,45 @@ mod tests {
             .0;
         let r = SubdomainResolver::new("app.test.");
         assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    }
+
+    /// A chain hands its members the registry through `resolve_in`, so a
+    /// resolver that overrides only that one is reached.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_chain_calls_resolve_in_on_its_members() {
+        struct InOnly(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait]
+        impl OrgResolver for InOnly {
+            async fn resolve(&self, _: &Parts, _: &Pool) -> Result<Option<Org>, TenancyError> {
+                unreachable!("the framework calls resolve_in")
+            }
+            async fn resolve_in(
+                &self,
+                _: &Parts,
+                registry: &TenantRegistry,
+            ) -> Result<Option<Org>, TenancyError> {
+                assert_eq!(registry.pool().dialect().name(), "sqlite");
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(None)
+            }
+        }
+        let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let chain = ChainResolver::new().push(InOnly(hit.clone()));
+        let pool =
+            Pool::Sqlite(crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap());
+        let parts = http::Request::builder()
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(chain.resolve(&parts, &pool).await.unwrap().is_none());
+        assert!(hit.load(std::sync::atomic::Ordering::SeqCst));
+        let registry = TenantRegistry::new(pool);
+        hit.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(chain.resolve_in(&parts, &registry).await.unwrap().is_none());
+        assert!(hit.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// An IPv6 `Host` keeps its address, not just `[` (#2043).

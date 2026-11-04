@@ -1062,6 +1062,8 @@ pub async fn insert_returning_pool(
 
 /// What [`insert_returning_pool`] gives back: a full row on Postgres
 /// and SQLite, or just the auto-assigned `i64` PK on MySQL.
+/// Plumbing for the derive, not a stable API.
+#[doc(hidden)]
 pub enum InsertReturningPool {
     #[cfg(feature = "postgres")]
     PgRow(PgRow),

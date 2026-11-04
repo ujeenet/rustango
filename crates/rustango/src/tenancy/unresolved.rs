@@ -1,13 +1,14 @@
-//! What the unresolved-tenant router gets in place of a tenant.
+//! The tenant registry handle: what resolvers look tenants up in, and
+//! what the unresolved-tenant router gets in place of a tenant.
 
 use crate::sql::{ExecError, ExistsPool as _, Pool};
 
 use super::org::Org;
 
-/// The registry, handed to the router set by
-/// [`crate::server::Builder::unresolved_tenant`] as an `Extension`.
-///
-/// It holds no tenant: that router runs only when none resolved.
+/// The tenant registry (orgs, operators). Passed to
+/// [`OrgResolver::resolve_in`](super::OrgResolver::resolve_in), and to
+/// the router set by [`crate::server::Builder::unresolved_tenant`] as an
+/// `Extension`. It holds no tenant.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct TenantRegistry {
@@ -15,7 +16,9 @@ pub struct TenantRegistry {
 }
 
 impl TenantRegistry {
-    pub(crate) fn new(pool: Pool) -> Self {
+    /// Wrap the registry pool, e.g. to call a resolver in a test.
+    #[must_use]
+    pub fn new(pool: Pool) -> Self {
         Self { pool }
     }
 

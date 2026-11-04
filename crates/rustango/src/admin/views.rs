@@ -3344,7 +3344,17 @@ pub(crate) async fn action_submit(
             // model's entries commit with it.
             let emit = crate::audit::DiffEmit::for_model(model);
             let mut tx = crate::sql::write_transaction(&state.pool).await?;
-            if let Err(e) = (a.handler)(&mut tx, &pk_values).await {
+            // The principal the hooks above saw, and only the rows they passed.
+            let actor = crate::object_permissions::Actor::of(&parts);
+            let ctx = super::ActionCtx::new(
+                &mut tx,
+                &pk_values,
+                &actor,
+                #[cfg(feature = "tenancy")]
+                state.config.org.as_ref(),
+                &parts,
+            );
+            if let Err(e) = (a.handler)(ctx).await {
                 rollback_quietly(tx, model.table).await;
                 return Err(e);
             }
@@ -3476,7 +3486,7 @@ impl BulkWrite {
                 None => Err(AdminError::Internal(format!(
                     "action `{action}` is in `admin.actions` but no handler is registered \
                      on the admin builder; register it via \
-                     `admin::Builder::register_tx_action(\"{}\", \"{action}\", ...)` (built-ins: \
+                     `admin::Builder::register_action(\"{}\", \"{action}\", ...)` (built-ins: \
                      delete_selected, restore_selected)",
                     model.table
                 ))),
