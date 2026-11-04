@@ -203,6 +203,11 @@ fn enables_mysql(cmd: &str) -> bool {
     if cmd.contains("--all-features") || is_archive_run(cmd) {
         return true;
     }
+    listed_features(cmd).iter().any(|f| f == "mysql")
+}
+
+/// Every feature the command's `--features` / `-F` lists name.
+fn listed_features(cmd: &str) -> Vec<String> {
     // `--features` and its short form `-F`, and the list may be quoted:
     // `--features "mysql,testkit"` is the same thing as the bare form,
     // and reading the quotes as part of the feature name made a correct
@@ -212,15 +217,18 @@ fn enables_mysql(cmd: &str) -> bool {
     ["--features ", "--features=", "-F ", "-F="]
         .iter()
         .flat_map(|flag| cmd.match_indices(flag).map(|(i, m)| i + m.len()))
-        .any(|start| {
+        .flat_map(|start| {
             cmd[start..]
                 .chars()
                 .take_while(|c| !c.is_whitespace())
                 .filter(|c| !matches!(c, '"' | '\''))
                 .collect::<String>()
                 .split(',')
-                .any(|f| f == "mysql")
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         })
+        .collect()
 }
 
 /// Every `--test <target>` in the block, and whether the command naming
@@ -1329,4 +1337,116 @@ fn a_mysql_or_postgis_suite_is_found_by_what_it_calls() {
         "matrix::pg_extension(&pool, \"hstore\"); let s = \"postgis\";",
         "postgis"
     ));
+}
+
+/// The `[features]` table of this crate's manifest: each feature and the
+/// entries it lists (`dep:` and `crate/feature` entries included).
+fn manifest_features() -> BTreeMap<String, Vec<String>> {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("read Cargo.toml");
+    let body: String = src
+        .lines()
+        .skip_while(|l| l.trim() != "[features]")
+        .skip(1)
+        .take_while(|l| !l.starts_with('['))
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = BTreeMap::new();
+    let mut rest = body.as_str();
+    while let Some(eq) = rest.find('=') {
+        let open = eq + rest[eq..].find('[').expect("a feature's value is an array");
+        let close = open + rest[open..].find(']').expect("the array closes");
+        let entries = rest[open + 1..close]
+            .split(',')
+            .map(|e| e.trim().trim_matches('"'))
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned)
+            .collect();
+        out.insert(rest[..eq].trim().to_owned(), entries);
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
+/// The features `roots` turn on, transitively.
+fn enabled_features(table: &BTreeMap<String, Vec<String>>, roots: &[String]) -> BTreeSet<String> {
+    let mut on = BTreeSet::new();
+    let mut todo: Vec<String> = roots.to_vec();
+    while let Some(f) = todo.pop() {
+        if let Some(entries) = table.get(&f) {
+            if on.insert(f) {
+                todo.extend(entries.iter().cloned());
+            }
+        }
+    }
+    on
+}
+
+/// `sqlite_live` runs every `*_sqlite_live` and `*_tri` suite with
+/// every feature on but `postgres` and `mysql`.
+///
+/// It used to name 118 targets by hand, and 196 suites of those families
+/// never ran without `postgres`: their `not(postgres)` paths ran nowhere.
+/// The globs pick up new suites, and this keeps a new feature in the set.
+#[test]
+fn sqlite_live_globs_every_suite_on_every_non_backend_feature() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "sqlite_live");
+    let tokens = |cmd: &str| -> Vec<String> {
+        cmd.split_whitespace()
+            .map(|t| t.trim_matches(|c| matches!(c, '"' | '\'')).to_owned())
+            .collect()
+    };
+    let globs = |cmd: &str| -> BTreeSet<String> {
+        tokens(cmd)
+            .windows(2)
+            .filter(|w| w[0] == "--test")
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    let commands = run_commands(&block);
+    let cmd = commands
+        .iter()
+        .find(|c| {
+            let g = globs(c);
+            g.contains("*_sqlite_live") && g.contains("*_tri")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no `sqlite_live` step runs `--test '*_sqlite_live' --test '*_tri'`. Without \
+                 the globs every new suite needs a hand-written line there, and most never \
+                 got one."
+            )
+        });
+    assert!(
+        tokens(cmd).iter().any(|t| t == "--no-default-features"),
+        "the `sqlite_live` glob step must pass `--no-default-features`, or `postgres` is on \
+         and the `not(postgres)` paths it exists for compile out"
+    );
+
+    let table = manifest_features();
+    assert!(
+        table.contains_key("sqlite") && table.contains_key("postgres"),
+        "parsed no [features] table from Cargo.toml — this guard is reading the wrong text"
+    );
+    let on = enabled_features(&table, &listed_features(cmd));
+    let backends = ["postgres", "mysql"];
+    let missing: Vec<&String> = table
+        .keys()
+        .filter(|f| !f.starts_with('_') && *f != "default" && !backends.contains(&f.as_str()))
+        .filter(|f| !on.contains(*f))
+        .collect();
+    let leaked: Vec<&str> = backends.into_iter().filter(|b| on.contains(*b)).collect();
+    assert!(
+        missing.is_empty(),
+        "`sqlite_live` builds without feature(s) {missing:?}, so a suite gated on them \
+         compiles to nothing and passes. Add them to its `--features`."
+    );
+    assert!(
+        leaked.is_empty(),
+        "`sqlite_live` turns on {leaked:?}; the job is the run without them."
+    );
 }

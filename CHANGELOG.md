@@ -52,6 +52,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The internal `_tera` and `_aead` features build alone under `-D warnings`.
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 - API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
+- CI's SQLite job runs every `*_sqlite_live` and `*_tri` suite without `postgres` (it named under half), and a guard keeps its feature set and the example `deny`/lockfile lists in step with the tree.
 ## [0.62.0] — 2026-11-02
 
 ### Added

@@ -1328,26 +1328,23 @@ jobs:
       # #1746 — template views' tenant_router copies apply global scopes; `not(postgres)`.
       - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy,template_views --test view_global_scopes_tenant_sqlite_live
 
-  # Per-dialect SQLite live suite — runs every `_sqlite_live.rs` file
-  # explicitly under `--no-default-features --features sqlite,...`. This
-  # is the SQLite parallel to `mysql_live` + `postgres_test`, and it
-  # exercises rustango's tri-dialect surface from the SQLite side
-  # without inheriting the PG/MySQL feature flags that
-  # `postgres_test --all-features` does. SQLite is embedded so no
-  # service container is needed; tests create per-test files / `:memory:`
-  # databases.
-  #
-  # `--test` files are listed explicitly because this job *runs* them,
-  # and only the sqlite-live ones are worth running here. It is no
-  # longer a workaround for test binaries that would not compile: since
-  # #1363 the whole suite compiles under `--no-default-features`, and
-  # `sqlite_litmus` asserts that with `--no-run`.
+  # Per-dialect SQLite live suite: every `*_sqlite_live` and `*_tri`
+  # target, by glob, on every feature but the PG/MySQL backends. That is
+  # what `postgres_test --all-features` cannot run: the `not(postgres)`
+  # code paths. `every_live_suite_runs_in_ci` holds the globs and the
+  # feature set to the tree; the other `--test`s fit neither glob.
   sqlite_live:
     needs: gate
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # Hundreds of test links, as in `tests_compile_narrow`.
+      RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
+      - name: Install lld
+        run: command -v ld.lld || sudo apt-get install -y --no-install-recommends lld
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           cache-on-failure: true
@@ -1360,100 +1357,15 @@ jobs:
       - run: |
           cargo nextest run --profile ci -p rustango \
             --no-default-features \
-            --features sqlite,tenancy,admin,jobs-postgres,media,passwords,serializer,totp,scheduler,testkit,casts \
-            --test access_admin_codename_sqlite_live \
-            --test auth_binds_to_the_request_tenant \
-            --test viewset_object_permissions_tenancy_sqlite_live \
-            --test admin_sqlite_live \
-            --test brand_assets_sqlite_live \
-            --test admin_list_display_links_sqlite_live \
-            --test admin_search_help_text_sqlite_live \
-            --test admin_actions_position_sqlite_live \
-            --test admin_date_hierarchy_sqlite_live \
-            --test admin_docs_sqlite_live \
-            --test admin_prepopulated_sqlite_live \
-            --test admin_raw_id_fields_sqlite_live \
-            --test admin_autocomplete_sqlite_live \
-            --test admin_save_hook_sqlite_live \
-            --test admin_recent_actions_sqlite_live \
-            --test admin_simple_list_filter_sqlite_live \
-            --test admin_list_display_jsonpath_sqlite_live \
-            --test audit_pool_sqlite_live \
-            --test audit_pool_writes_tri \
-            --test audit_bulk_writes_tri \
-            --test atomic_savepoints_tri \
-            --test orm_bounded_dml_tri \
-            --test orm_relations_tri \
-            --test prefetch_related_tri \
-            --test orm_relation_edges_tri \
-            --test orm_query_edges_tri \
-            --test orm_claim_lock_tri \
-            --test orm_core_counts_tri \
-            --test pool_conn_tri \
-            --test manage_data_verbs_tri \
-            --test boot_races_tri \
-            --test test_db_tri \
-            --test orm_dialect_tri \
-            --test bulk_update_api_sqlite_live \
-            --test bulk_upsert_tri \
-            --test count_distinct_sqlite_live \
-            --test database_pools_sqlite_file_live \
-            --test database_pools_sqlite_live \
-            --test database_tenant_sqlite_live \
-            --test explain_pool_tri \
-            --test pool_acquire_ping_tri \
-            --test first_last_sqlite_live \
-            --test fixtures_sqlite_live \
-            --test foreign_key_sqlite_live \
-            --test funcs_batch1_sqlite_live \
-            --test funcs_batch2_sqlite_live \
-            --test get_or_create_sqlite_live \
-            --test i18n_admin_editor_sqlite_live \
-            --test i18n_admin_editor_tri \
-            --test org_host_claims_tri \
-            --test org_admin_claims_tri \
-            --test tenancy_manage_tri \
-            --test db_servers_tri \
-            --test tenant_database_tri \
-            --test tenant_provision_tri \
-            --test server_tenant_tri \
-            --test i18n_db_overrides_sqlite_live \
-            --test inspectdb_sqlite_live \
-            --test inspectdb_views_sqlite_live \
-            --test jobs_sqlite_live \
-            --test json_path_tri \
-            --test lock_sqlite_warning \
-            --test m2m_sqlite_live \
-            --test m2m_non_int_pk_tri \
-            --test m2m_changed_noop_tri \
-            --test update_validation_tri \
-            --test uuid_v7_pk_writes_tri \
-            --test media_sqlite_live \
-            --test migrate_registry_pool_sqlite_live \
-            --test model_shortcut_scopes_tri \
-            --test orm_advanced_sqlite_live \
-            --test permissions_sqlite_live \
-            --test prefetch_filtered_sqlite_live \
-            --test row_to_json_pool_sqlite_live \
+            --features sqlite,batteries,tenancy,mcp,admin-sso,passkey,cache-redis,cache-page,email-smtp,http2,testkit,test_utils \
+            --test '*_sqlite_live' \
+            --test '*_tri' \
             --test sqlite_pragmas_live \
-            --test tenancy_manage_sqlite_live \
-            --test tenant_auth_sqlite_live \
-            --test tenant_extractor_sqlite_live \
+            --test database_pools_sqlite_file_live \
+            --test auth_binds_to_the_request_tenant \
             --test soft_delete_without_postgres \
-            --test tenant_pools_sqlite_live \
-            --test tx_methods_sqlite_live \
-            --test unique_when_sqlite_live \
-            --test viewset_sqlite_live \
-            --test viewset_natural_pk_tri \
-            --test viewset_write_allowlist_tri \
-            --test viewset_json_values_tri \
-            --test viewset_filters_tri \
-            --test viewset_serializer_patch_tri \
-            --test inserted_pk_readback_tri \
-            --test admin_totp_2fa_sqlite_live \
+            --test lock_sqlite_warning \
             --test admin_totp_2fa_e2e \
-            --test admin_totp_replay_tri \
-            --test operator_console_totp_tri \
             --test orm_aggregation \
             --test orm_subquery \
             --test orm_window \
@@ -1462,22 +1374,6 @@ jobs:
             --test orm_json_dates \
             --test orm_writes \
             --test orm_delta
-      - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,admin,template_views,testkit --test view_global_scopes_tri --test template_views_typed_binds_tri
-      - run: >-
-          cargo nextest run --profile ci -p rustango --no-default-features
-          --features sqlite,tenancy,admin-sso,template_views,testkit
-          --test sso_link_tenancy_sqlite_live --test sso_link_tri --test sso_policy_tri
-          --test sso_shared_console_tri
-          --test admin_create_users_tri --test logout_revokes_sessions_tri
-          --test tenant_admin_state_tri
-          --test operator_last_active_tri
-          --test basic_auth_cache_tri
-          --test tenant_login_field_tri
-          --test tenant_sign_in_page_sqlite_live
-          --test api_key_hmac_tri
-          --test system_chain_order_tri
-      - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy,mcp,testkit --test agent_grants_unique_tri
-      - run: cargo nextest run --profile ci -p rustango --no-default-features --features sqlite,tenancy,passwords,auth_flows,testkit --test password_reset_links_tri
 
   # Redis live suite. `cache-redis` is off by default, so until #1280
   # there was no Redis service here at all and nothing exercised
