@@ -399,6 +399,12 @@ fn cases() -> Vec<Case> {
         SqlValue::String("q\"`'".into()),
     )));
     c.push(("string_with_quotes", sel(weird)));
+    let ident = SelectQuery::new(Author::SCHEMA).where_clause(WhereExpr::Predicate(Filter::new(
+        "we\"ird`col",
+        Op::Eq,
+        SqlValue::I64(1),
+    )));
+    c.push(("ident_with_quotes", sel(ident)));
     c
 }
 

@@ -565,3 +565,12 @@ SELECT `id`, `name` FROM `gold_author` WHERE `name` = ?
 == string_with_quotes / sqlite ==
 SELECT "id", "name" FROM "gold_author" WHERE "name" = ?
 [String("q\"`'")]
+== ident_with_quotes / postgres ==
+SELECT "id", "name" FROM "gold_author" WHERE "we""ird`col" = $1
+[I64(1)]
+== ident_with_quotes / mysql ==
+SELECT `id`, `name` FROM `gold_author` WHERE `we"ird``col` = ?
+[I64(1)]
+== ident_with_quotes / sqlite ==
+SELECT "id", "name" FROM "gold_author" WHERE "we""ird`col" = ?
+[I64(1)]
