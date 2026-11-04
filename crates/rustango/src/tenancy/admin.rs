@@ -1176,7 +1176,14 @@ async fn login_form(
             .unwrap_or_else(|_| crate::sso::policy::TenantSettings::break_glass());
         let local = query.is_some_and(|q| q.split('&').any(|p| p == "local=1"));
         ctx.insert("password_form", &settings.shows_password_form(local));
-        let providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
+        let mut providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
+        // The SSO start seals the landing; pass on only one this tenant accepts.
+        if let Some(n) = tenant_next(next.as_deref(), routes, cookie_path) {
+            let q = format!("?next={}", crate::url_codec::url_encode(&n));
+            for b in &mut providers {
+                b.login_url.push_str(&q);
+            }
+        }
         let marked =
             crate::cookies::cookie_from_headers(headers, super::sso::AUTO_COOKIE).is_some();
         if let Some(to) =
@@ -2063,23 +2070,30 @@ fn sanitize_next_with_routes(
     routes: &super::routes::RouteConfig,
     cookie_path: &str,
 ) -> String {
+    tenant_next(next, routes, cookie_path).unwrap_or_else(|| tenant_home(cookie_path))
+}
+
+/// A post-login `next` this tenant may land on (password or SSO sign-in).
+pub(super) fn tenant_next(
+    next: Option<&str>,
+    routes: &super::routes::RouteConfig,
+    cookie_path: &str,
+) -> Option<String> {
     // `auth_decorators::safe_next` owns the shape check: it
     // percent-decodes, requires both the raw and decoded form to look
     // like a path, and rejects `/\`, which a browser rewrites into a
     // protocol-relative URL. Do not hand-roll it here.
-    let Some(s) = next.and_then(crate::auth_decorators::safe_next) else {
-        return tenant_home(cookie_path);
-    };
+    let s = next.and_then(crate::auth_decorators::safe_next)?;
     // Bouncing back to login/logout would loop. Not a safety check —
     // that is `safe_next`'s job — so it stays here.
     if s.starts_with(&routes.login_url) || s.starts_with(&routes.logout_url) {
-        return tenant_home(cookie_path);
+        return None;
     }
     // A prefix tenant shares its host: `/` is the console, `/t2/` another tenant.
     if cookie_path != "/" && !stays_under(&s, cookie_path) {
-        return tenant_home(cookie_path);
+        return None;
     }
-    s
+    Some(s)
 }
 
 /// Is `next` under `prefix` once the browser resolves `\`, `%2e` and dot segments?

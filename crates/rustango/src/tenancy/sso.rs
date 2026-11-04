@@ -50,6 +50,12 @@ struct CallbackParams {
     error: Option<String>,
 }
 
+/// SSO start params: where to land after sign-in, sealed into the flow.
+#[derive(serde::Deserialize, Default)]
+struct BeginParams {
+    next: Option<String>,
+}
+
 use super::member_auth;
 use super::org::Org;
 use super::routes::RouteConfig;
@@ -555,7 +561,10 @@ pub(super) async fn tenant_sso_begin(
     let Some(tenant) = super::TenantSlug::of(org) else {
         return login_error(routes, "config");
     };
-    let (url, flow) = provider.begin();
+    let (url, mut flow) = provider.begin();
+    let params: BeginParams =
+        serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
+    flow.next = super::admin::tenant_next(params.next.as_deref(), routes, cookie_path);
     let sealed = seal_flow(
         &flow,
         FlowScope::for_tenant(FlowPurpose::TenantAdmin, &tenant, slug),
@@ -699,7 +708,9 @@ pub(super) async fn tenant_sso_callback(
         tenant_console::COOKIE_NAME,
         secure_suffix()
     );
-    let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();
+    let landing = super::admin::tenant_next(flow.next.as_deref(), routes, cookie_path)
+        .unwrap_or_else(|| routes.admin_url.clone());
+    let mut resp = Redirect::to(&landing).into_response();
     set_cookie(&mut resp, &session_cookie);
     for c in flow_cookie(cookie_path).clear() {
         set_cookie(&mut resp, &c);

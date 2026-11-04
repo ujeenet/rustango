@@ -264,6 +264,12 @@ para esa columna.
 7. En otro caso, el usuario es devuelto a la página de inicio de sesión con un
    error genérico (los detalles van al log del servidor, nunca al navegador).
 
+En el admin del tenant, `GET <login>/sso/<slug>?next=/ruta` lleva a `/ruta`
+tras iniciar sesión. La ruta viaja en la cookie de flujo firmada y pasa la
+misma comprobación que el inicio de sesión con contraseña: solo mismo origen y
+dentro del prefijo de ruta del tenant. Cualquier otra cosa lleva a `admin_url`.
+La página de inicio de sesión pasa su propio `?next` a los botones SSO.
+
 La tabla de enlaces es un modelo migrado normal: en el almacenamiento del tenant
 para los inicios de sesión de tenant, y en la base de datos del admin para el
 bare-admin. Un enlace se compara de forma exacta (issuer y subject con clave
