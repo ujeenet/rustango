@@ -33,7 +33,7 @@ use crate::sql::Auto;
         list_display = "slug, label, kind, enabled, sort_order",
         ordering = "sort_order",
         readonly_fields = "created_at, updated_at",
-        formfield_overrides = "client_secret: password, label: text, client_id: text, issuer_url: url, scopes: text, role_claims: text",
+        formfield_overrides = "client_secret: password, label: text, client_id: text, issuer_url: text, scopes: text, role_claims: text",
     )
 )]
 #[allow(dead_code)]
