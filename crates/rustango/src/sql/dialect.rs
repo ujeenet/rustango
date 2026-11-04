@@ -109,7 +109,8 @@ pub(crate) fn refuse_unbindable_values(
 /// a unit struct, so this costs nothing.
 pub trait Dialect: Send + Sync {
     /// This dialect's short name: `"postgres"`, `"sqlite"` or
-    /// `"mysql"`. For error messages and logs.
+    /// `"mysql"`. For logs, errors, and the dialect checks no trait
+    /// method covers yet; prefer a method for new SQL shapes.
     fn name(&self) -> &'static str;
 
     // ---- DDL primitives, defaulting to the ANSI shape ----

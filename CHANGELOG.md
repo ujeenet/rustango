@@ -54,6 +54,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
 - `testkit::matrix::Backend::pool` runs each nextest slot on its own database (`<db>-s<slot>`), so `tri_dialect_test!` suites no longer collide when run in parallel; `Backend::url` gives that database's URL.
 
+- CI's SQLite job runs every `*_sqlite_live` and `*_tri` suite without `postgres` (it named under half), and a guard keeps its feature set and the example `deny`/lockfile lists in step with the tree.
 ## [0.62.0] — 2026-11-02
 
 ### Added
