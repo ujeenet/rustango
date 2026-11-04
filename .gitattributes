@@ -13,6 +13,7 @@
 *.ttf binary
 *.otf binary
 *.pdf binary
+*.der binary
 *.zip binary
 *.gz binary
 *.db binary

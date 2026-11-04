@@ -6,8 +6,9 @@
 //! page and its generated file differ. Regenerate with
 //! `DOCS_COMPILE_BLESS=1 cargo test -p rustango --test docs_compile`.
 //!
-//! A fence is keyed by a hash of its text, so editing a listed fence takes it
-//! off the list: it then has to compile. The list may only shrink.
+//! `rust,ignore` fences are not compiled; their count per page may only
+//! shrink. A fence is keyed by a hash of its text, so editing a listed fence
+//! takes it off the list: it then has to compile. The list may only shrink.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -103,6 +104,8 @@ struct Page {
     /// Relative to this crate's manifest.
     source: &'static str,
     generated: &'static str,
+    /// `rust,ignore` fences, which are not compiled. May only go down.
+    uncompiled_max: usize,
 }
 
 const PAGES: &[Page] = &[
@@ -110,11 +113,13 @@ const PAGES: &[Page] = &[
         name: "orm.md",
         source: "../../docs/orm.md",
         generated: "tests/docs_compile/orm_blocks.rs",
+        uncompiled_max: 0,
     },
     Page {
         name: "COOKBOOK.md",
         source: "examples/cookbook_blog/COOKBOOK.md",
         generated: "tests/docs_compile/cookbook_blocks.rs",
+        uncompiled_max: 25,
     },
 ];
 
@@ -122,12 +127,29 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// The body of every ```` ```rust ```` fence, de-indented.
-fn fences(markdown: &str) -> Vec<String> {
+/// A fenced block whose info string starts with the `rust` tag.
+struct Fence {
+    /// The info string, e.g. `rust` or `rust,ignore`.
+    tags: String,
+    /// De-indented.
+    body: String,
+}
+
+impl Fence {
+    /// Only a bare `rust` fence is compiled; `rust,ignore` is budgeted.
+    fn compiled(&self) -> bool {
+        self.tags == "rust"
+    }
+}
+
+fn fences(markdown: &str) -> Vec<Fence> {
     let mut out = Vec::new();
     let mut lines = markdown.lines();
     while let Some(line) = lines.next() {
-        if line.trim_start() != "```rust" {
+        let Some(tags) = line.trim_start().strip_prefix("```") else {
+            continue;
+        };
+        if tags.split(',').next().map(str::trim) != Some("rust") {
             continue;
         }
         let indent = line.len() - line.trim_start().len();
@@ -139,7 +161,10 @@ fn fences(markdown: &str) -> Vec<String> {
             body.push_str(l.get(indent..).unwrap_or(l.trim_start()));
             body.push('\n');
         }
-        out.push(body);
+        out.push(Fence {
+            tags: tags.trim().to_owned(),
+            body,
+        });
     }
     out
 }
@@ -209,7 +234,11 @@ fn generate(page: &Page) -> String {
         page.name
     );
     let mut seen = std::collections::BTreeSet::new();
-    for body in fences(&markdown) {
+    for body in fences(&markdown)
+        .into_iter()
+        .filter(Fence::compiled)
+        .map(|f| f.body)
+    {
         let h = hash(&body);
         if !seen.insert(h.clone()) || is_known_failing(page.name, &h) {
             continue;
@@ -259,7 +288,9 @@ fn every_known_failing_entry_names_a_current_fence() {
     for (page, h, line) in KNOWN_FAILING {
         let source = PAGES.iter().find(|p| p.name == *page).expect(page).source;
         let markdown = std::fs::read_to_string(root().join(source)).unwrap();
-        let found = fences(&markdown).iter().any(|b| hash(b) == *h);
+        let found = fences(&markdown)
+            .iter()
+            .any(|f| f.compiled() && hash(&f.body) == *h);
         assert!(
             found,
             "{page} has no fence {h} ({line}); drop it from KNOWN_FAILING"
@@ -284,10 +315,31 @@ fn the_known_failing_list_only_shrinks() {
 fn the_fence_parser_sees_every_rust_fence() {
     for page in PAGES {
         let markdown = std::fs::read_to_string(Path::new(&root()).join(page.source)).unwrap();
+        // Counted apart from `fences`: every opening line whose first tag is `rust`.
         let opened = markdown
             .lines()
-            .filter(|l| l.trim_start() == "```rust")
+            .filter_map(|l| l.trim_start().strip_prefix("```rust"))
+            .filter(|rest| rest.is_empty() || rest.starts_with(','))
             .count();
         assert_eq!(fences(&markdown).len(), opened, "{}", page.name);
+    }
+}
+
+#[test]
+fn uncompiled_rust_fences_only_shrink() {
+    for page in PAGES {
+        let markdown = std::fs::read_to_string(root().join(page.source)).unwrap();
+        let n = fences(&markdown).iter().filter(|f| !f.compiled()).count();
+        assert!(
+            n <= page.uncompiled_max,
+            "{}: {n} `rust,ignore` fences, budget {}: make the new one compile",
+            page.name,
+            page.uncompiled_max
+        );
+        assert_eq!(
+            n, page.uncompiled_max,
+            "{}: `rust,ignore` fences went down to {n}: lower its `uncompiled_max`",
+            page.name
+        );
     }
 }

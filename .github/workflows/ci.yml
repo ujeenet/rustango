@@ -1163,6 +1163,8 @@ jobs:
         shell: bash
         env:
           CARGO_TARGET_DIR: ${{ runner.temp }}/scaffold-target
+          # No lockfile: pick deps that build on 1.88, as `scaffolded_projects` does.
+          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
         run: |
           set -euxo pipefail
           cargo build -p cargo-rustango
