@@ -804,7 +804,9 @@ async fn refresh_in(
         // Already redeemed. A retry just after rotation only gets the 401;
         // a later reuse is a stolen token, so end the chain.
         if !jwt.recently_attempted(&claims.jti, grace).await {
-            jwt.revoke_family(&session.fam, session.ends_at(&auth))
+            // A failure is logged there; this answer is a refusal anyway.
+            let _ = jwt
+                .revoke_family(&session.fam, session.ends_at(&auth))
                 .await;
         }
         return Err(refused());
@@ -884,6 +886,13 @@ async fn logout_in(
     // The family too, so every token of this login ends (#2119). Read from
     // any token signed for this tenant, expired or already rotated, so a
     // thief's rotated refresh dies with it (#2419).
+    // A revocation the store did not record leaves the session live: say so.
+    let not_recorded = |_| {
+        err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "logout was not recorded; try again",
+        )
+    };
     for token in std::iter::once(bearer.0.as_str()).chain(refresh.as_deref()) {
         let Some(c) = jwt.decode_signed(token) else {
             continue;
@@ -893,11 +902,12 @@ async fn logout_in(
         }
         if let Some(session) = RefreshSession::read(&c.custom) {
             jwt.revoke_family(&session.fam, session.ends_at(&auth))
-                .await;
+                .await
+                .map_err(not_recorded)?;
         }
     }
 
-    jwt.revoke(&bearer.0).await;
+    jwt.try_revoke(&bearer.0).await.map_err(not_recorded)?;
 
     // The refresh token too, when we were given one. Revoking it is what
     // actually ends the session: the access token expires on its own in
@@ -915,7 +925,7 @@ async fn logout_in(
             None => true,
         };
         if ok {
-            jwt.revoke(refresh).await;
+            jwt.try_revoke(refresh).await.map_err(not_recorded)?;
         }
     }
 
@@ -1326,6 +1336,55 @@ mod tests {
                 "logout"
             );
         }
+    }
+
+    /// A JTI store that records nothing: every write fails.
+    struct FailingStore;
+
+    impl crate::jti_store::JtiStore for FailingStore {
+        fn is_used<'a>(&'a self, _: &'a str) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+        fn mark_used<'a>(&'a self, _: &'a str, _: i64) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+    }
+
+    /// A logout the JTI store did not record answers 503, not 204: the
+    /// token stays valid, so the client must not think it logged out.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_logout_the_store_did_not_record_fails() {
+        let (_, pool, user) = verify_env("jwt_logout_store_fails").await;
+        let auth = JwtAuth::new(Config {
+            session_secret: Some(vec![7; 32]),
+            jti_store: Some(Arc::new(FailingStore)),
+            ..Config::default()
+        });
+        let id = *user.id.get().unwrap();
+        let pair = issue_login_pair(&auth, &user, id, &tenant()).unwrap();
+        assert_eq!(
+            auth.lifecycle().try_revoke(&pair.access).await,
+            Err(crate::tenancy::jwt_lifecycle::RevokeFailed)
+        );
+        assert!(!auth.lifecycle().revoke(&pair.access).await);
+        let out = LogoutInput {
+            refresh: Some(pair.refresh.clone()),
+        };
+        let resp = logout_in(
+            auth.clone(),
+            TenantScope::for_test(org(), pool.clone()),
+            axum::http::Extensions::new(),
+            axum::http::HeaderMap::new(),
+            Bearer(pair.access.clone()),
+            Some(Json(out)),
+        )
+        .await;
+        let status = match resp {
+            Ok(s) => s,
+            Err(r) => r.status(),
+        };
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     /// A custom store reaches the lifecycle the router hands its

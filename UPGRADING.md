@@ -148,6 +148,10 @@ untouched.
 
 ---
 
+## Unreleased
+
+- MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why.
+
 ## 0.62.0
 
 - Two-part JWTs (pre-0.57.5 shape) are refused and `JwtBackend::issue*` mint standard three-part tokens. Admin session, TOTP-pending, passkey challenge and OAuth2 flow cookies change format, and password links get a new scope value: those in flight end once. `tenancy` now enables the `jwt` feature.
