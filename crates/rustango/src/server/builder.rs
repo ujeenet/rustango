@@ -632,7 +632,10 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// [`Self::admin_register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
-    #[deprecated(note = "use `admin_register_action(table, name, ActionPerm::Change, handler)`")]
+    #[deprecated(
+        since = "0.63.0",
+        note = "use `admin_register_action(table, name, ActionPerm::Change, handler)`; removed in 0.64.0"
+    )]
     #[must_use]
     pub fn admin_register_tx_action<F>(
         self,
@@ -658,7 +661,10 @@ impl<DB: Database> Builder<DB> {
     }
 
     /// [`Self::admin_register_action`] with a `(tx, pks)` handler.
-    #[deprecated(note = "use `admin_register_action`, whose handler takes an `ActionCtx`")]
+    #[deprecated(
+        since = "0.63.0",
+        note = "use `admin_register_action`, whose handler takes an `ActionCtx`; removed in 0.64.0"
+    )]
     #[must_use]
     pub fn admin_register_tx_action_with_perm<F>(
         self,

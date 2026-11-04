@@ -26,23 +26,31 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
 - **Breaking:** duplicate implementations removed: `rustango::bulk_actions` (and `RustangoError::BulkAction`), the crate-root `rustango::auth_backends` registry, and the public `mcp::pagination` module; see UPGRADING.md.
 - The in-memory and database job queues decide retry or dead letter through one shared rule.
-
-### Deprecated
-
-- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`.
-- `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
-- `cargo rustango new -F mcp` is tenant-only: elsewhere `/mcp` refused every tool call, since agents live in tenant databases.
+- **Breaking:** `cargo rustango new -F mcp` is tenant-only: elsewhere `/mcp` refused every tool call, since agents live in tenant databases.
+- **Breaking:** `KeyBy` is `#[non_exhaustive]`; a `match` on it needs a `_` arm.
+- **Breaking:** `LoginScope::Tenant`, `TenantBasic`, `TenantApiKey` and `TenantAgent` take a `TenantSlug`; tenant login counters and locks reset once.
+- **Breaking:** the MCP `notify_*_list_changed`, `subscribe`, `frame_visible`, `cancel`, `grant_skill_pool` and `revoke_skill_pool` take a `&TenantSlug`; `McpAgent` gains `org_id`.
+- **Breaking:** tenant sessions and per-user flag overrides move to org-id keys, so they reset once.
+- **Breaking:** on a tenant route an app-built `Principal` with no `TenantSlug` next to it is `Anonymous` to object-permission hooks.
+- **Breaking:** a request with an `Idempotency-Key` gets `503` when tenant resolution fails, instead of running unkeyed.
+- **Breaking:** requests on the Builder's unresolved router are `Global`, so `CachePageLayer` there now caches them.
 - `manage` suggests the nearest verb for a typo, e.g. `createsuperuser` → `create-admin` (`create-superuser` on tenancy).
 - Scaffolded next steps use real usernames, so they paste into PowerShell 5.1.
 - `startapp` prints its next steps one command per line instead of joining them with `&&`.
 - `create-operator` help lists `--password-stdin`.
 - Only the fullstack template's index links `/admin`.
-- An idempotency replay no longer re-sends stored framing or hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Connection`, ...), including entries cached by 0.62.0.
-- A panic while the i18n translator's lock is held no longer makes every later translation panic.
-- `contenttypes::ensure_seeded` retries a deadlocked insert up to three times, so several processes booting at once all start.
+
+### Deprecated
+
+- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`. Removed in 0.64.0.
+- `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay one more minor; removed in 0.64.0.
 
 ### Fixed
 
+- An idempotency replay no longer re-sends stored framing or hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Connection`, ...), including entries cached by 0.62.0.
+- A panic while the i18n translator's lock is held no longer makes every later translation panic.
+- `contenttypes::ensure_seeded` retries a deadlocked insert up to three times, so several processes booting at once all start.
 - `dumpdata` fails on a cell it cannot decode, and on a NaN or infinite float, instead of writing `null` for it.
 - `loaddata` leaves generated columns out of its inserts, so a dump of a model with one loads back.
 - `dumpdata -o` creates its temp file with a random name, owner-only (0600 on Unix), and never through an existing file or link.
@@ -73,8 +81,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 - API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
 - `testkit::matrix::Backend::pool` runs each nextest slot on its own database (`<db>-s<slot>`), so `tri_dialect_test!` suites no longer collide when run in parallel; `Backend::url` gives that database's URL.
-
 - CI's SQLite job runs every `*_sqlite_live` and `*_tri` suite without `postgres` (it named under half), and a guard keeps its feature set and the example `deny`/lockfile lists in step with the tree.
+
 ## [0.62.0] — 2026-11-02
 
 ### Added
