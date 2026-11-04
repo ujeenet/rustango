@@ -94,6 +94,14 @@ o más bytes aleatorios:
 export RUSTANGO_SECRET_KEY="$(openssl rand -base64 48)"
 ```
 
+En PowerShell:
+
+```powershell
+$bytes = New-Object byte[] 48
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SECRET_KEY = [Convert]::ToBase64String($bytes)
+```
+
 Sin clave, o con una en blanco, la contraseña de un servidor se rechaza y la
 URL de un tenant se guarda sin sellar con una advertencia (se rechaza con
 `RUSTANGO_REQUIRE_SEALED_SECRETS=1`). Las páginas de servidores de bases de

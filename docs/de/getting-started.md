@@ -900,6 +900,17 @@ cargo build --release
 ./target/release/myblog
 ```
 
+In PowerShell:
+
+```powershell
+$env:RUSTANGO_ENV = "prod"
+$env:DATABASE_URL = "postgres://prod-host/myblog"
+$bytes = New-Object byte[] 32
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SESSION_SECRET = [Convert]::ToBase64String($bytes)
+cargo run --release -- migrate
+```
+
 Stelle sicher, dass dein Reverse-Proxy:
 - HTTPS terminiert
 - `X-Forwarded-For` weiterleitet und die App `RealIpLayer::trust_proxies([...])` mit diesem Proxy mountet (`Cli::with_trusted_proxies([...])?` oder `server::Builder::real_ip`), für akkurate IPs im `AccessLogLayer` und in den Throttles (siehe [security.md](security.md))

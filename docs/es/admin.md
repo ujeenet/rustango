@@ -639,6 +639,15 @@ cargo run -- migrate     # tables + the audit-log table
 cargo run                # seeds demo data, serves the admin at /admin
 ```
 
+En PowerShell:
+
+```powershell
+cd crates/rustango/examples/admin_demo
+$env:DATABASE_URL = "postgres://rustango:rustango@localhost:5432/admin_demo"
+cargo run -- migrate
+cargo run
+```
+
 Luego abre <http://localhost:8080/admin> y entra en **Posts** para ver los filtros, la
 búsqueda, la jerarquía de fechas, las acciones, los conjuntos de campos, los comentarios
 inline, el registro de auditoría y la referencia de modelos — cada captura de esta

@@ -244,6 +244,13 @@ pub fn run(url: &str) -> Result<std::convert::Infallible, Box<dyn std::error::Er
     }
     #[cfg(not(unix))]
     {
+        // The console sends Ctrl-C to the client and to us: while a listener
+        // is held we ignore it, so the client handles it; dropped after.
+        #[cfg(windows)]
+        let _ignore_ctrl_c = tokio::runtime::Handle::try_current().ok().and_then(|h| {
+            let _in_runtime = h.enter();
+            tokio::signal::windows::ctrl_c().ok()
+        });
         let status = cmd.status()?;
         if status.success() {
             std::process::exit(0);

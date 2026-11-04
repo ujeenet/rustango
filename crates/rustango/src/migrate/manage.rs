@@ -2701,19 +2701,21 @@ fn docs_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
         return Ok(());
     }
     // Best-effort — don't fail if the OS has no `open` / `xdg-open` / `start`
-    let opener = if cfg!(target_os = "macos") {
-        Some(("open", url))
-    } else if cfg!(target_os = "linux") {
-        Some(("xdg-open", url))
-    } else if cfg!(target_os = "windows") {
-        Some(("cmd", "/C start"))
-    } else {
-        None
-    };
-    if let Some((cmd, _)) = opener {
-        let _ = std::process::Command::new(cmd).arg(url).spawn();
+    if let Some((cmd, args)) = browser_opener(std::env::consts::OS, url) {
+        let _ = std::process::Command::new(cmd).args(args).spawn();
     }
     Ok(())
+}
+
+/// The command that opens `url` in a browser on `os`. `start` takes its
+/// first quoted argument as a window title, hence the empty one.
+fn browser_opener<'a>(os: &str, url: &'a str) -> Option<(&'static str, Vec<&'a str>)> {
+    match os {
+        "macos" => Some(("open", vec![url])),
+        "linux" => Some(("xdg-open", vec![url])),
+        "windows" => Some(("cmd", vec!["/C", "start", "", url])),
+        _ => None,
+    }
 }
 
 /// `manage version` — print the rustango framework version.
@@ -7404,6 +7406,19 @@ pub fn settings_audit_check(
 #[cfg(test)]
 mod gen_tests {
     use super::*;
+
+    /// `start` reads its first quoted argument as a title: the URL must not be it.
+    #[test]
+    fn the_browser_opener_passes_the_url_as_the_target() {
+        let url = "http://127.0.0.1:8000/__docs";
+        assert_eq!(
+            browser_opener("windows", url),
+            Some(("cmd", vec!["/C", "start", "", url]))
+        );
+        assert_eq!(browser_opener("macos", url), Some(("open", vec![url])));
+        assert_eq!(browser_opener("linux", url), Some(("xdg-open", vec![url])));
+        assert_eq!(browser_opener("plan9", url), None);
+    }
 
     /// The registry-scoped `Translation` must not flip a single-database
     /// build into two-scope `makemigrations` (#2360).

@@ -94,6 +94,14 @@ wird. Nimm 32 oder mehr Zufallsbytes:
 export RUSTANGO_SECRET_KEY="$(openssl rand -base64 48)"
 ```
 
+In PowerShell:
+
+```powershell
+$bytes = New-Object byte[] 48
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SECRET_KEY = [Convert]::ToBase64String($bytes)
+```
+
 Ohne Schlüssel oder mit einem leeren wird ein Server-Passwort abgelehnt und
 eine Tenant-URL unversiegelt mit einer Warnung gespeichert (abgelehnt unter
 `RUSTANGO_REQUIRE_SEALED_SECRETS=1`). Die Datenbankserver-Seiten der Konsole

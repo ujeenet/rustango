@@ -1014,7 +1014,6 @@ impl Refusal {
 }
 
 /// The list columns of a sign-in policy and whether each holds domains.
-#[cfg(feature = "admin")]
 pub(crate) const LIST_COLUMNS: &[(&str, bool)] = &[
     ("allowed_email_domains", true),
     ("blocked_email_domains", true),
@@ -1026,7 +1025,6 @@ pub(crate) const LIST_COLUMNS: &[(&str, bool)] = &[
 ///
 /// # Errors
 /// The entry that does not parse, naming the column.
-#[cfg(feature = "admin")]
 pub(crate) fn normalise_list(column: &str, raw: &str) -> Result<Option<String>, String> {
     let domains = LIST_COLUMNS
         .iter()
@@ -1176,7 +1174,7 @@ inventory::submit! {
 }
 
 /// Where a refusal happened, for [`refuse`].
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
+#[cfg(feature = "admin")]
 pub(crate) struct RefusalContext<'a> {
     /// The database the sign-in ran against; its audit log gets the row.
     pub pool: &'a Pool,
@@ -1195,7 +1193,7 @@ pub(crate) struct RefusalContext<'a> {
 
 /// Record a refusal: server log, an audit row naming the rule, the
 /// `user_login_failed` signal, and a failure against the client IP.
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
+#[cfg(feature = "admin")]
 pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
     let subject = ctx.identity.subject();
     let email = ctx.identity.email().map(EmailAddr::as_str);
@@ -1244,13 +1242,10 @@ pub(crate) async fn refuse(ctx: &RefusalContext<'_>, refusal: &Refusal) {
 }
 
 /// Repeated SSO audit rows one subject gets per [`REFUSAL_WINDOW`].
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 pub(crate) const MAX_REFUSAL_ROWS: i64 = 5;
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 const REFUSAL_WINDOW: chrono::TimeDelta = chrono::TimeDelta::minutes(10);
 
 /// Audit rows for `table`/`entity_pk` in the last [`REFUSAL_WINDOW`]; 0 when unreadable.
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 pub(crate) async fn recent_audit_rows(pool: &Pool, table: &'static str, entity_pk: &str) -> i64 {
     use crate::sql::CounterPool as _;
     crate::audit::AuditLog::objects()
@@ -1263,7 +1258,7 @@ pub(crate) async fn recent_audit_rows(pool: &Pool, table: &'static str, entity_p
 }
 
 /// The SSO throttle scope of a tenant (or the bare admin, `None`).
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
+#[cfg(feature = "admin")]
 pub(crate) fn throttle_scope(tenant: Option<&str>) -> crate::login_throttle::LoginScope {
     crate::login_throttle::LoginScope::Sso(match tenant {
         Some(t) => format!("tenant/{t}"),
@@ -1275,7 +1270,7 @@ pub(crate) fn throttle_scope(tenant: Option<&str>) -> crate::login_throttle::Log
 ///
 /// # Errors
 /// The `429` to send.
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
+#[cfg(feature = "admin")]
 pub(crate) async fn throttle_check(
     scope: &crate::login_throttle::LoginScope,
     extensions: &axum::http::Extensions,
@@ -1293,7 +1288,7 @@ pub(crate) async fn throttle_check(
 ///
 /// # Errors
 /// The `429` / `503` to send.
-#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
+#[cfg(feature = "admin")]
 pub(crate) async fn throttle_begin(
     scope: &crate::login_throttle::LoginScope,
     extensions: &axum::http::Extensions,
