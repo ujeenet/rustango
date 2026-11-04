@@ -75,9 +75,8 @@ pub fn verify_registration(
         PasskeyError::AuthData("registration authData has no attested credential data".into())
     })?;
     // `none`/self attestation: trust the embedded key (no cert chain).
-    // The COSE key was already validated as a parseable P-256 ES256 key
-    // by `parse_authenticator_data` → `canonicalize_cose_key`; confirm it
-    // builds a verifying key so we never store an unusable credential.
+    // This checks the COSE shape (EC2, P-256, ES256, 32-byte x and y); a point
+    // off the curve is only refused when an assertion is verified.
     verify::cose_es256_key(&attested.cose_public_key)?;
 
     Ok(RegistrationOutcome {
