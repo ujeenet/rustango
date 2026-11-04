@@ -280,7 +280,21 @@ Constructeurs de type : `string` · `integer` / `int32` · `number` · `boolean`
 ## Notes et limites
 
 - **C'est de l'OpenAPI 3.1** (`"openapi": "3.1.0"`), qui s'aligne sur JSON Schema
-  2020-12 — la plupart des outils modernes le consomment directement.
+  2020-12 — la plupart des outils modernes le consomment directement. **Ajouter
+  une opération QUERY fait passer la spec en `3.2.0`**, car c'est la version qui
+  définit la méthode : `PathItem::query` la fixe pour tout le document. Si vos
+  outils ne lisent que la 3.1, c'est la seule chose qui leur changera la version
+  — voir [query-method](query-method.md).
+
+  Un ViewSet monte une route QUERY mais **ne la décrit pas par défaut**, donc le
+  document généré reste en 3.1.0. Activez-la quand votre chaîne d'outils lit la 3.2 :
+
+  ```rust,ignore
+  ViewSet::for_model(Post::SCHEMA, &["id", "title"]).openapi_query(true)
+  ```
+
+  La route est servie dans tous les cas ; l'option décide seulement si le document
+  la mentionne, et donc quelle version il doit déclarer.
 - **Le routeur du visualiseur nécessite la feature `admin`** (pour axum) ;
   `openapi` seul suffit à *construire* et sérialiser une spec (`spec.to_json()`).
 - **Les visualiseurs chargent depuis un CDN** — convient pour la documentation

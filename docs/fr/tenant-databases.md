@@ -100,6 +100,20 @@ URL de tenant est stockée non scellée avec un avertissement (refusée sous
 la console et sa page **New tenant** affichent une bannière tant que la clé
 manque ou est trop courte.
 
+Sur les tiers dev et test (`RUSTANGO_ENV` non défini, `dev` ou `test`), une clé
+non définie se rabat sur celle enregistrée dans `var/.rustango_secret.key`, dans
+chaque binaire qui scelle ou ouvre. Le fichier est cherché depuis le répertoire de
+travail jusqu'à la racine du workspace Cargo (le répertoire le plus proche avec
+`Cargo.lock`) ; un nouveau est créé dans cette racine, ou dans le répertoire de
+travail hors d'un projet Cargo. Une fois `RUSTANGO_SECRET_KEY` défini, ouvrez les
+valeurs que le fichier a scellées :
+
+```bash
+export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+puis rescellez-les comme dans [rotation](#la-clé-secrète--sauvegarde-et-rotation).
+
 ## 2. Enregistrer le serveur
 
 Console : **Organizations → Database servers**. CLI :

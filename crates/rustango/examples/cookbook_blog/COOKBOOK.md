@@ -411,13 +411,16 @@ let auth = rustango::tenancy::auth_routes::Config::default()
 api.merge(rustango::tenancy::auth_routes::JwtAuth::new(auth).router());
 
 // security_headers — preset + csp + hsts override
+use rustango::security_headers::SecurityHeadersRouterExt as _;
 let sec = rustango::security_headers::SecurityHeadersLayer::from_settings(&cfg.security);
-let app = app.layer(sec.into_layer());
+let app = app.security_headers(sec);
 
 // CORS — empty list = skip, "*" = permissive, otherwise allowlist
-if let Some(cors) = rustango::cors::CorsLayer::from_settings(&cfg.security) {
-    let app = app.layer(cors.into_layer());
-}
+use rustango::cors::CorsRouterExt as _;
+let app = match rustango::cors::CorsLayer::from_settings(&cfg.security) {
+    Some(cors) => app.cors(cors),
+    None => app,
+};
 
 // access_log — extends the redact list with project additions
 let log = rustango::access_log::AccessLogLayer::default()
@@ -425,9 +428,10 @@ let log = rustango::access_log::AccessLogLayer::default()
 let app = app.access_log(log);
 
 // body_limit — opt-in (returns None when max_body_bytes is unset)
-if let Some(layer) = rustango::body_limit::BodyLimitLayer::from_settings(&cfg.server) {
-    let app = app.body_limit(layer);
-}
+let app = match rustango::body_limit::BodyLimitLayer::from_settings(&cfg.server) {
+    Some(layer) => app.body_limit(layer),
+    None => app,
+};
 
 // cache backend selection — "memory" / "redis" / "null" / unset
 let cache: rustango::cache::BoxedCache = rustango::cache::from_settings(&cfg.cache);
@@ -1036,22 +1040,15 @@ pub struct Activity { ... }
 ensure_seeded(&pool).await?;
 let ct = ContentType::for_model::<Author>(&pool).await?.unwrap();
 let mut act = Activity {
-    target_content_type_id: ct.id_value()?,
+    target_content_type_id: *ct.id.get().expect("a saved content type has an id"),
     target_object_pk: author_id,
     action: "viewed".into(), ..
 };
 act.save(&pool).await?;
 ```
 
-> **`save` is Postgres-only; `save_pool` is the portable one.** `save` is
-> `#[cfg(feature = "postgres")]` and takes `&PgPool`, so it does not exist
-> on a SQLite or MySQL build — this chapter uses it because the recipes
-> here run on Postgres. `save_pool(&Pool)` is the same operation across all
-> three backends, and it is what Chapter 13 uses. The naming reads
-> backwards (the unsuffixed name is the *narrower* one) and cannot be
-> corrected without a deprecation cycle; [#1293](https://github.com/ujeenet/rustango/issues/1293)
-> tracks it. Writing portable code today means reaching for the `_pool`
-> suffix.
+> **`save` runs on every backend.** It takes `rustango::sql::Pool`;
+> `save_pool` is its deprecated old name.
 
 **Verified by**: `generic_fk_schema_and_content_type_lookup`
 
@@ -1363,22 +1360,15 @@ test result: ok. 17 passed; 0 failed; 0 ignored
 * §3.37 `.aggregate().annotate("alias", AggregateExpr::Count|Sum|Avg|...)`
   + `rustango::sql::fetch_aggregate_on(&q, &pool)` →
   `Vec<HashMap<String, SqlValue>>` → `aggregate_count_and_sum`.
-  Note the order: `fetch_aggregate_on` is **query-first**, and is
-  **Postgres-only** (`E: sqlx::Executor<Database = Postgres>`). The
-  portable spelling is `rustango::sql::fetch_aggregate_dict(&pool, &q)`
-  — **pool-first** — which takes `rustango::sql::Pool` and runs on all
-  three backends; that is what [`docs/orm.md`](../../../../docs/orm.md)
+  Note the order: `fetch_aggregate_on` is **query-first** and takes any
+  `SqlExecutor` (a `&Pool`, a held `PoolConn`, a `PoolTx`). The pool
+  form `rustango::sql::fetch_aggregate_dict(&pool, &q)` is
+  **pool-first**; that is what [`docs/orm.md`](../../../../docs/orm.md)
   uses. Reach for `_on` only when you need the aggregate on a specific
   connection or open transaction.
 * §3.42 `model.save(&pool)` does INSERT (PK Unset) or UPDATE (PK Set) →
-  `save_inserts_then_updates_in_place`. **Postgres-only** — `save`,
-  `insert` and `delete` take `&sqlx::PgPool` behind
-  `#[cfg(feature = "postgres")]`, so on a `sqlite` or `mysql` build they
-  do not exist rather than fail. The portable spelling is `save_pool` /
-  `insert_pool` / `delete_pool`, which take `rustango::sql::Pool`; this
-  chapter pins `DATABASE_URL=postgres://…`, and Chapter 13 uses the
-  portable family throughout. The short name being the narrow one is an
-  inversion tracked in #1293.
+  `save_inserts_then_updates_in_place`. `save`, `insert` and `delete`
+  take `rustango::sql::Pool` and run on all three backends.
 * §3.46 raw `sqlx::query_scalar / query_as` for SQL the QuerySet
   doesn't cover → `raw_sql_escape_via_sqlx`
 * §3.47 manual `pool.begin() ... tx.rollback()` — atomic rollback on
@@ -2301,12 +2291,15 @@ let publish: BulkActionFn = Arc::new(|pool, pks| {
     let pool = pool.clone();
     let pks = pks.to_vec();
     Box::pin(async move {
-        let ids: Vec<i64> = pks.iter()
-            .filter_map(|v| match v { SqlValue::I64(n) => Some(*n), _ => None })
-            .collect();
-        sqlx::query("UPDATE posts SET status = 'published' WHERE id = ANY($1)")
-            .bind(&ids).execute(&pool).await
-            .map(|_| ()).map_err(|e| e.to_string())
+        use rustango::sql::UpdaterPool as _;
+        Post::objects()
+            .filter("id__in", SqlValue::List(pks))
+            .update()
+            .set("status", "published")
+            .execute_pool(&pool)
+            .await
+            .map(drop)
+            .map_err(|e| e.to_string())
     })
 });
 
@@ -2677,7 +2670,7 @@ middleware, and CSP-nonce injection.
 
 3 live tests against a docker MySQL 8.0 container, exercising the
 same cookbook model that PG tests use through the dialect-agnostic
-`Pool` + `save_pool` / `fetch` ORM API. Run with:
+`Pool` + `save` / `fetch` ORM API. Run with:
 
 ```sh
 docker run -d --name rustango-mysql \
@@ -2703,7 +2696,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored
 ```
 
 * §12.140 / §12.141 — `Rating` model save + fetch + multi-row decode
-  via `Pool::Mysql` and `save_pool` / `fetch`. Exercises
+  via `Pool::Mysql` and `save` / `fetch`. Exercises
   AUTO_INCREMENT for `Auto<i64>`, BIGINT round-trip, and per-backend
   trait dispatch.
   → `cookbook_rating_round_trips_against_mysql`,
@@ -2713,7 +2706,7 @@ test result: ok. 3 passed; 0 failed; 0 ignored
 `Author` has two `Auto<T>` columns (`id: Auto<i64>` PK + `joined_at:
 Auto<DateTime>` from `auto_now_add`). Postgres fills both in one
 `INSERT ... RETURNING`; MySQL has only single-column
-`LAST_INSERT_ID()`, so `save_pool` fills the PK and leaves the other
+`LAST_INSERT_ID()`, so `save` fills the PK and leaves the other
 `Auto` fields `Unset`. Re-fetch the row by PK to materialize the
 DB-defaulted timestamp — the usual move whenever you need a
 server-set value right after the save.
@@ -2765,7 +2758,7 @@ Verified by:  [`tests/sqlite_live.rs`](../../tests/sqlite_live.rs)
 What:        SQLite ≥ 3.35 supports `INSERT … RETURNING <cols>` with
              the same shape as Postgres. The macro emits
              `__rustango_assign_from_sqlite_row` mirroring the PG
-             arm — `insert_pool` populates every `Auto<T>` field
+             arm — `insert` populates every `Auto<T>` field
              from the returned row in one round trip.
 API:         [`crates/rustango/src/sql/backend.rs`](../../src/sql/backend.rs)
 Recipe:
@@ -2784,9 +2777,9 @@ Every `_pool` executor function has a SQLite arm now. The
 
 | Feature                       | API                                          |
 |-------------------------------|----------------------------------------------|
-| `INSERT … RETURNING`          | `Model::insert_pool`                         |
-| `UPDATE` single row           | `Model::save_pool`                           |
-| `DELETE` single row           | `Model::delete_pool`                         |
+| `INSERT … RETURNING`          | `Model::insert`                              |
+| `UPDATE` single row           | `Model::save`                                |
+| `DELETE` single row           | `Model::delete`                              |
 | `SELECT *`                    | `QuerySet::fetch` (`FetcherPool`)            |
 | `SELECT COUNT(*)`             | `QuerySet::count` (`CounterPool`)            |
 | `WHERE col <op> v`            | `QuerySet::filter` (Eq/Gt/In/Like/ILike/Between) |
@@ -3425,7 +3418,7 @@ rustango = { version = "0.62", default-features = false, features = ["sqlite", "
 
 ```rust,ignore
 let pool = rustango::sql::Pool::connect("sqlite:./var/app.db?mode=rwc").await?;
-rustango::media::ensure_all_tables_pool(&pool).await?;
+// `cargo run -- migrate` has created the media tables.
 let manager = MediaManager::new(pool, registry);
 let m = manager.save_bytes(opts).await?;
 let m = manager.get(m.id.get().copied().unwrap()).await?.unwrap();
