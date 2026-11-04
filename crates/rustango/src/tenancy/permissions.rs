@@ -241,7 +241,9 @@ pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Err
 
 // ------------------------------------------------------------------ has_perm (CTE query)
 
-/// v0.38 — tri-dialect counterpart of [`has_perm`]. **One round trip**:
+/// Whether `uid` holds `codename`, on every backend.
+///
+/// **One round trip**:
 /// a single `SELECT` with four scalar subqueries (superuser, explicit
 /// denial, explicit grant, role-via grant), portable across
 /// PG/MySQL/SQLite without dialect-specific `TRUE`/`FALSE` literals or
@@ -254,7 +256,7 @@ pub async fn ensure_tables_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Err
 /// `unique_together (user_id, codename)`, `(user_id, role_id)` and
 /// `(role_id, codename)`, so each subquery is an indexed lookup.
 ///
-/// Resolution order is identical to [`has_perm`]:
+/// Resolution order:
 /// 1. Superuser → true
 /// 2. Explicit per-user denial (`granted = false`) → false
 /// 3. Explicit per-user grant (`granted = true`) → true
@@ -362,10 +364,10 @@ pub async fn has_perm_pool(
 
 // ------------------------------------------------------------------ Role management (ORM-backed)
 
-/// v0.38 — tri-dialect counterpart of [`create_role`].
+/// Create a role and return its id, on every backend.
 ///
 /// # Errors
-/// As [`create_role`].
+/// A database error.
 pub async fn create_role_pool(
     name: &str,
     description: &str,
@@ -426,11 +428,11 @@ async fn role_id_by_name(name: &str, pool: &crate::sql::Pool) -> Result<Option<i
         .and_then(|r| r.id.get().copied()))
 }
 
-/// v0.38 — tri-dialect counterpart of [`has_any_perm`]. Issues one
-/// `has_perm_pool` per codename and short-circuits on the first hit.
-/// PG keeps the single-CTE [`has_any_perm`] for hot paths; the
-/// loop-per-codename path is fine for sqlite/mysql given the typical
-/// codename-list size (≤ a handful).
+/// Whether `uid` holds any of `codenames`, on every backend.
+///
+/// Issues one
+/// `has_perm_pool` per codename and short-circuits on the first hit,
+/// which is fine for the typical codename list (a handful).
 ///
 /// # Errors
 /// As [`has_perm_pool`].
@@ -447,7 +449,9 @@ pub async fn has_any_perm_pool(
     Ok(false)
 }
 
-/// v0.38 — tri-dialect counterpart of [`has_all_perms`]. Issues one
+/// Whether `uid` holds all of `codenames`, on every backend.
+///
+/// Issues one
 /// `has_perm_pool` per codename and short-circuits on the first miss.
 ///
 /// # Errors
@@ -465,7 +469,9 @@ pub async fn has_all_perms_pool(
     Ok(true)
 }
 
-/// v0.38 — tri-dialect counterpart of [`user_roles`]. Reuses
+/// The `(id, name)` of each role `uid` belongs to, on every backend.
+///
+/// Reuses
 /// [`user_roles_qs_pool`] and projects to `(id, name)` pairs.
 ///
 /// # Errors
@@ -481,10 +487,10 @@ pub async fn user_roles_pool(
         .collect())
 }
 
-/// v0.38 — tri-dialect counterpart of [`grant_role_perm`].
+/// Grant `codename` to a role, on every backend.
 ///
 /// # Errors
-/// As [`grant_role_perm`].
+/// A database error.
 pub async fn grant_role_perm_pool(
     role_id: i64,
     codename: &str,
@@ -502,10 +508,10 @@ pub async fn grant_role_perm_pool(
     Ok(())
 }
 
-/// v0.38 — tri-dialect counterpart of [`revoke_role_perm`].
+/// Revoke `codename` from a role, on every backend.
 ///
 /// # Errors
-/// As [`revoke_role_perm`].
+/// A database error.
 pub async fn revoke_role_perm_pool(
     role_id: i64,
     codename: &str,
@@ -533,7 +539,7 @@ pub async fn revoke_role_perm_pool(
     Ok(())
 }
 
-/// v0.38 — tri-dialect counterpart of [`assign_role`].
+/// Add a user to a role, on every backend.
 pub async fn assign_role_pool(
     user_id: i64,
     role_id: i64,
@@ -580,7 +586,7 @@ pub async fn remove_role_tx(
         .map(|_| ())
 }
 
-/// v0.38 — tri-dialect counterpart of [`remove_role`].
+/// Remove a user from a role, on every backend.
 pub async fn remove_role_pool(
     user_id: i64,
     role_id: i64,
@@ -608,7 +614,7 @@ fn remove_role_query(user_id: i64, role_id: i64) -> DeleteQuery {
     }
 }
 
-/// v0.38 — tri-dialect counterpart of [`set_user_perm`].
+/// Grant or deny `codename` to one user, on every backend.
 pub async fn set_user_perm_pool(
     user_id: i64,
     codename: &str,
@@ -635,7 +641,7 @@ pub async fn set_user_perm_pool(
     Ok(())
 }
 
-/// v0.38 — tri-dialect counterpart of [`clear_user_perm`].
+/// Drop a user's own grant or denial of `codename`, on every backend.
 pub async fn clear_user_perm_pool(
     user_id: i64,
     codename: &str,
@@ -663,7 +669,9 @@ pub async fn clear_user_perm_pool(
     Ok(())
 }
 
-/// v0.37 — tri-dialect counterpart of [`user_roles_qs`]. SQL is
+/// The roles `user_id` belongs to, on every backend.
+///
+/// SQL is
 /// rendered via the dialect's emitter so identifier quoting +
 /// placeholder syntax come out right per backend.
 ///
@@ -805,7 +813,9 @@ fn decode_role_sq_row(row: &sqlx::sqlite::SqliteRow) -> Result<Role, sqlx::Error
     })
 }
 
-/// v0.37 — tri-dialect counterpart of [`user_permissions`]. The CTE
+/// Every codename `uid` holds, on every backend.
+///
+/// The CTE
 /// + UNION ALL shape is supported on PG, MySQL 8+ and SQLite 3.8+,
 /// so the query template is the same across backends — only quoting
 /// (`"…"` vs `` `…` ``) and placeholder syntax (`$1` vs `?`) differ,
@@ -895,7 +905,7 @@ pub fn model_codenames(table: &str) -> [String; 4] {
     ]
 }
 
-/// v0.38 — tri-dialect counterpart of [`auto_create_permissions`].
+/// Create the permission rows of every registered model, on every backend.
 ///
 /// Unlike [`ensure_tables_pool`], this is *not* redundant with the
 /// bootstrap migration: the migration creates the `rustango_permissions`

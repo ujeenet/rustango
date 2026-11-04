@@ -2,7 +2,7 @@
 //! above a list view.
 //!
 //! A [`BulkAction`](crate::bulk_actions::BulkAction) has a codename, a
-//! label, and a `run` that acts on a [`PkSet`] of selected primary keys.
+//! label, and a `run` that acts on a [`PkSet`](crate::bulk_actions::PkSet) of selected primary keys.
 //! The admin's "Action" dropdown is built from a
 //! [`BulkActionRegistry`](crate::bulk_actions::BulkActionRegistry) mounted
 //! on the [`crate::server::Builder`].

@@ -25,7 +25,7 @@
 //!   that check off, so use it only on a directory layout you trust.
 //! - A name starting with `.` gets a 404 unless
 //!   [`StaticFiles::serve_hidden`] is on.
-//! - Mount user uploads with [`StaticFiles::user_content`]: HTML, SVG
+//! - Mount user uploads with [`StaticFiles::user_content`](crate::static_files::StaticFiles::user_content): HTML, SVG
 //!   and XML then download instead of running script on your origin, and
 //!   JS, CSS and WASM go out untyped so no page here can load them.
 //!

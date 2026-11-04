@@ -301,7 +301,7 @@ impl ScopedProject {
 /// [`migrate_tenants`].
 ///
 /// # Errors
-/// As [`crate::migrate::migrate`].
+/// A database error.
 /// v0.38 — generic over the registry backend. Routes through the
 /// tri-dialect [`migrate_registry_pool`].
 pub async fn migrate_registry<DB: Database>(

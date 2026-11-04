@@ -15,7 +15,7 @@
 //!   `/operator` even with that flag.
 //!
 //! The hard wall is enforced by middleware: operator routes call
-//! [`authenticate_operator`] against the registry; tenant routes
+//! [`authenticate_operator_pool`] against the registry; tenant routes
 //! call [`authenticate_user_pool`] against the resolved tenant's pool.
 //! An operator's `Authorization: Basic …` header sent to a tenant
 //! URL won't authenticate (the username doesn't exist in the
@@ -336,14 +336,14 @@ impl PasswordVerified<Operator> {
     }
 }
 
-/// Backend-agnostic counterpart of [`authenticate_operator`]. Routes
-/// the Operator lookup through [`crate::sql::FetcherPool`] so the same
+/// Check an operator's username and password, on every backend.
+///
+/// Routes the Operator lookup through [`crate::sql::FetcherPool`] so the same
 /// auth path works against `Pool::Postgres` / `Pool::Mysql` /
-/// `Pool::Sqlite`. Preferred for new code; the PG-typed wrapper above
-/// keeps existing callers compiling.
+/// `Pool::Sqlite`.
 ///
 /// # Errors
-/// As [`authenticate_operator`].
+/// A database error.
 pub async fn authenticate_operator_pool(
     registry: &crate::sql::Pool,
     username: &str,
@@ -395,7 +395,7 @@ pub(crate) async fn check_operator_password(
 /// `search_path`; database mode is naturally scoped to the tenant
 /// DB).
 ///
-/// Same return semantics as [`authenticate_operator`]: `Ok(None)`
+/// Same return semantics as [`authenticate_operator_pool`]: `Ok(None)`
 /// for unknown user, wrong password, or inactive row; `Ok(Some(_))`
 /// only on a successful match.
 ///
@@ -411,7 +411,7 @@ pub(crate) async fn check_operator_password(
 /// through SSO gets in with a password. Use [`authenticate_user_pool`].
 ///
 /// # Errors
-/// As [`authenticate_operator`].
+/// A database error.
 #[cfg(feature = "postgres")]
 #[deprecated(
     since = "0.61.15",
@@ -443,7 +443,7 @@ pub async fn authenticate_user(
 ///   typically built via
 ///   [`super::TenantPools::scoped_pool_dyn`].
 ///
-/// Same return semantics as [`authenticate_operator`]: `Ok(None)`
+/// Same return semantics as [`authenticate_operator_pool`]: `Ok(None)`
 /// for unknown user, wrong password, or inactive row; `Ok(Some(_))`
 /// only on a successful match.
 ///

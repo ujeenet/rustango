@@ -11,7 +11,7 @@
 //! rustango::tenancy::permissions::has_perm_pool(uid, "post.change", &pool).await?;
 //!
 //! // By model type:
-//! rustango::permissions::has_perm_for_model::<Post>(uid, "change", &pool).await?;
+//! rustango::permissions::has_perm_for_model_pool::<Post>(uid, "change", &pool).await?;
 //! ```
 //!
 //! Codenames stay `{table}.{action}`; the typed helpers just build that
@@ -62,8 +62,7 @@ pub fn codename_for<T: Model>(action: &str) -> String {
     format!("{}.{action}", T::SCHEMA.table)
 }
 
-/// [`has_perm_for_model`] over [`crate::sql::Pool`], so the same call
-/// works on Postgres, SQLite and MySQL.
+/// Whether `uid` may do `action` on `T`, on Postgres, SQLite and MySQL.
 ///
 /// # Errors
 /// As [`has_perm_pool`].
@@ -75,7 +74,7 @@ pub async fn has_perm_for_model_pool<T: Model>(
     has_perm_pool(uid, &codename_for::<T>(action), pool).await
 }
 
-/// [`grant_role_perm_for_model`] for any backend.
+/// Grant a role `action` on `T`, on any backend.
 ///
 /// # Errors
 /// As [`grant_role_perm_pool`].
@@ -87,7 +86,7 @@ pub async fn grant_role_perm_for_model_pool<T: Model>(
     grant_role_perm_pool(role_id, &codename_for::<T>(action), pool).await
 }
 
-/// [`revoke_role_perm_for_model`] for any backend.
+/// Revoke a role's `action` on `T`, on any backend.
 ///
 /// # Errors
 /// As [`revoke_role_perm_pool`].
@@ -99,7 +98,7 @@ pub async fn revoke_role_perm_for_model_pool<T: Model>(
     revoke_role_perm_pool(role_id, &codename_for::<T>(action), pool).await
 }
 
-/// [`set_user_perm_for_model`] for any backend.
+/// Set a user's own grant or denial of `action` on `T`, on any backend.
 ///
 /// # Errors
 /// As [`set_user_perm_pool`].
@@ -112,7 +111,7 @@ pub async fn set_user_perm_for_model_pool<T: Model>(
     set_user_perm_pool(uid, &codename_for::<T>(action), granted, pool).await
 }
 
-/// [`clear_user_perm_for_model`] for any backend.
+/// Clear a user's own grant or denial of `action` on `T`, on any backend.
 ///
 /// # Errors
 /// As [`clear_user_perm_pool`].

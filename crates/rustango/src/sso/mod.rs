@@ -13,7 +13,7 @@
 //! It reuses the existing [`crate::oauth2`] handshake
 //! ([`OAuth2Provider::begin`]/[`complete`](crate::oauth2::OAuth2Provider::complete) +
 //! [`seal_flow`]/[`open_flow`]) to prove identity, then signs in the user
-//! linked to the IdP subject ([`link`]) and mints that surface's normal
+//! linked to the IdP subject ([`link`](crate::sso::link)) and mints that surface's normal
 //! session cookie. SSO never auto-provisions an admin. (The member flow
 //! may opt into auto-provisioning.)
 //!

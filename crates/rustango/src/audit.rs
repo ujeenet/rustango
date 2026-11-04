@@ -1063,7 +1063,9 @@ pub async fn emit_many_pool(
     emit_many(pool, entries).await
 }
 
-/// All-backend counterpart of [`fetch_for_entity`]. The `changes` column
+/// The audit entries of one row, on every backend.
+///
+/// The `changes` column
 /// is JSON on PG and MySQL and TEXT on SQLite; both decode into
 /// `serde_json::Value`, so the audit panel renders the same everywhere.
 ///
@@ -1109,7 +1111,9 @@ pub async fn fetch_for_entity_pool(
     }
 }
 
-/// All-backend counterpart of [`cleanup_older_than`]. The cutoff is
+/// Delete audit entries older than a cutoff, on every backend.
+///
+/// The cutoff is
 /// computed in Rust and bound, so the SQL needs no
 /// `NOW() - INTERVAL '… day'`.
 ///
@@ -1147,7 +1151,8 @@ pub async fn cleanup_older_than_pool(
         })
 }
 
-/// All-backend counterpart of [`cleanup_keep_last_n`].
+/// Keep only the newest `keep` audit entries per row, on every backend.
+///
 /// `ROW_NUMBER() OVER (PARTITION BY …)` works on PG, MySQL 8+ and
 /// SQLite 3.25+, so only identifier quoting differs.
 ///

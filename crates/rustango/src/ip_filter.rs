@@ -26,7 +26,7 @@
 //! `allow_no_ip` path.
 //!
 //! Behind a proxy the peer is the proxy, not the client. To gate the
-//! client instead, call [`IpFilterLayer::behind_trusted_proxy`]. This
+//! client instead, call [`IpFilterLayer::behind_trusted_proxy`](crate::ip_filter::IpFilterLayer::behind_trusted_proxy). This
 //! filter never reads a forwarded header itself: any client can forge one.
 
 use std::net::{IpAddr, SocketAddr};

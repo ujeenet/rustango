@@ -38,7 +38,7 @@
 //!
 //! The [`object_permissions`](crate::object_permissions) hooks and queryset
 //! scopes run as in the admin: a row `view` hides is a `404`, a refused
-//! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`].
+//! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`](crate::viewset::ViewSet::skip_object_permissions).
 //! Update and delete judge the row locked in their transaction. One limit: a
 //! model whose hand-written `ModelEntry` audits updates only on a pool is
 //! updated there, unlocked and without the queryset-scope re-check.
