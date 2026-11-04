@@ -150,7 +150,7 @@ untouched.
 
 ## Unreleased
 
-- A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does.
+- A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 
 ## 0.62.0
 

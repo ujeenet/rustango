@@ -356,8 +356,10 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
         Flavor::CurrentThread => quote! {
             #root::__private_runtime::tokio::runtime::Builder::new_current_thread()
         },
+        // Worker threads run handlers and `tokio::spawn` tasks: same stack.
         Flavor::MultiThread => quote! {
             #root::__private_runtime::tokio::runtime::Builder::new_multi_thread()
+                .thread_stack_size(#stack_size)
         },
     };
 
@@ -365,7 +367,12 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     // the outer sync fn runs it on a big-stack thread and reports its exit code.
     let mut inner = input.clone();
     inner.sig.ident = syn::Ident::new("__rustango_main_body", input.sig.ident.span());
-    inner.attrs.clear();
+    // Lint attributes still apply to the body; the rest stay on the outer fn.
+    inner.attrs.retain(|a| {
+        ["allow", "expect", "deny", "warn", "forbid"]
+            .iter()
+            .any(|l| a.path().is_ident(l))
+    });
     inner.vis = syn::Visibility::Inherited;
     input.sig.asyncness = None;
     input.sig.output = syn::parse2(quote!(-> ::std::process::ExitCode))?;
@@ -418,6 +425,9 @@ struct MainArgs {
     stack_size: Option<usize>,
 }
 
+/// The smallest `stack_size` `#[rustango::main]` accepts: 64 KiB.
+const MIN_STACK_SIZE: usize = 64 * 1024;
+
 const MAIN_ARGS_HELP: &str =
     "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`, `stack_size = <bytes>`";
 
@@ -452,7 +462,14 @@ fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
             }
             (Some("logging"), Some(syn::Lit::Bool(b))) => out.logging = b.value,
             (Some("stack_size"), Some(syn::Lit::Int(n))) => {
-                out.stack_size = Some(n.base10_parse::<usize>()?);
+                let bytes = n.base10_parse::<usize>()?;
+                if bytes < MIN_STACK_SIZE {
+                    return Err(syn::Error::new(
+                        n.span(),
+                        format!("#[rustango::main]: `stack_size` must be at least {MIN_STACK_SIZE} bytes"),
+                    ));
+                }
+                out.stack_size = Some(bytes);
             }
             _ => {
                 return Err(syn::Error::new(
@@ -14325,6 +14342,33 @@ mod main_attr_tests {
         let out = expand("stack_size = 16777216, logging = false");
         assert!(out.contains("16777216usize"), "{out}");
         assert!(!out.contains("MAIN_STACK_SIZE"), "{out}");
+        assert!(
+            out.contains("thread_stack_size"),
+            "workers get it too:\n{out}"
+        );
+    }
+
+    /// A stack too small to run anything is a compile error.
+    #[test]
+    fn a_tiny_stack_size_is_refused() {
+        let body = quote! { async fn main() {} };
+        let err = expand_main("stack_size = 4096".parse().unwrap(), body)
+            .expect_err("4 KiB")
+            .to_string();
+        assert!(err.contains("at least"), "{err}");
+    }
+
+    /// Lint attributes reach the inner body fn; others do not.
+    #[test]
+    fn lint_attributes_reach_the_body() {
+        let body = quote! {
+            #[allow(unused_variables)]
+            #[doc = "entry"]
+            async fn main() { let x = 1; }
+        };
+        let out = expand_main(quote!(), body).unwrap().to_string();
+        assert_eq!(out.matches("allow (unused_variables)").count(), 2, "{out}");
+        assert_eq!(out.matches("doc = \"entry\"").count(), 1, "{out}");
     }
 
     #[test]
