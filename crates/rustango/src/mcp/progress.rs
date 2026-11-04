@@ -200,9 +200,10 @@ mod tests {
 
     #[tokio::test]
     async fn progress_emits_when_token_present_and_silent_otherwise() {
-        let mut rx = super::super::notifications::subscribe("acme");
+        let acme = crate::tenancy::TenantSlug::new(1, "acme");
+        let mut rx = super::super::notifications::subscribe(&acme);
         ProgressReporter::disabled().report(0.5, Some(1.0), Some("half"));
-        ProgressReporter::for_agent(Some(json!("p1-unit")), "acme".into(), 5).report(
+        ProgressReporter::for_agent(Some(json!("p1-unit")), acme.namespace(), 5).report(
             0.5,
             Some(1.0),
             Some("half"),
@@ -214,7 +215,7 @@ mod tests {
             let v: Value = serde_json::from_str(&frame.body).unwrap();
             if v["method"] == "notifications/progress" && v["params"]["progressToken"] == "p1-unit"
             {
-                assert_eq!(frame.tenant, "acme");
+                assert_eq!(frame.tenant, acme.namespace());
                 assert_eq!(frame.agent_id, Some(5));
                 assert_eq!(v["params"]["progress"], 0.5);
                 return;

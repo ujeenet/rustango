@@ -200,6 +200,27 @@ where
     Ok(())
 }
 
+/// `slug`'s registry row as a [`crate::tenancy::TenantSlug`], for notifications.
+async fn tenant_binding<DB: Database>(
+    pools: &TenantPools<DB>,
+    slug: &str,
+) -> Result<crate::tenancy::TenantSlug, TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
+    use crate::core::Column as _;
+    use crate::sql::FetcherPool as _;
+    let org = crate::tenancy::Org::objects()
+        .where_(crate::tenancy::Org::slug.eq(slug.to_owned()))
+        .fetch(&pools.registry_pool())
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| TenancyError::Validation(format!("no tenant with slug `{slug}`")))?;
+    crate::tenancy::TenantSlug::of(&org)
+        .ok_or_else(|| TenancyError::Validation(format!("tenant `{slug}` has no id")))
+}
+
 /// `grant-skill <slug> <agent> <skill>`
 pub(super) async fn grant_skill_cmd<W: Write + Send, DB: Database>(
     pools: &TenantPools<DB>,
@@ -212,7 +233,8 @@ where
 {
     let (slug, agent, skill) = three_positionals(args, "grant-skill", GRANT_HELP)?;
     let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    crate::tenancy::grant_skill_pool(&scoped, &slug, &agent, &skill)
+    let tenant = tenant_binding(pools, &slug).await?;
+    crate::tenancy::grant_skill_pool(&scoped, &tenant, &agent, &skill)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     writeln!(
@@ -234,7 +256,8 @@ where
 {
     let (slug, agent, skill) = three_positionals(args, "revoke-skill", REVOKE_HELP)?;
     let scoped = scoped_tenant_pool(pools, registry_url, &slug).await?;
-    crate::tenancy::revoke_skill_pool(&scoped, &slug, &agent, &skill)
+    let tenant = tenant_binding(pools, &slug).await?;
+    crate::tenancy::revoke_skill_pool(&scoped, &tenant, &agent, &skill)
         .await
         .map_err(|e| TenancyError::Validation(e.to_string()))?;
     writeln!(

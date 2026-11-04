@@ -48,6 +48,7 @@ async fn agent_id(pool: &Pool, name: &str) -> i64 {
 
 fn agent_with(tools: Vec<String>) -> McpAgent {
     McpAgent {
+        org_id: 1,
         agent_id: 1,
         tenant: "acme".into(),
         skills: vec![],
@@ -79,25 +80,40 @@ async fn grant_resolves_tools_revoke_removes_them() {
     assert!(skills.is_empty() && tools.is_empty());
 
     // Grant → skill codename + its tools resolve.
-    grant_skill_pool(&pool, "acme", "bot", "reader")
-        .await
-        .expect("grant");
+    grant_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "bot",
+        "reader",
+    )
+    .await
+    .expect("grant");
     let (skills, mut tools) = resolve_agent_grants_pool(&pool, id).await.unwrap();
     tools.sort();
     assert_eq!(skills, vec!["reader"]);
     assert_eq!(tools, vec!["posts.get", "posts.list"]);
 
     // Granting again is idempotent (UNIQUE(agent_id, skill_id)).
-    grant_skill_pool(&pool, "acme", "bot", "reader")
-        .await
-        .expect("re-grant");
+    grant_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "bot",
+        "reader",
+    )
+    .await
+    .expect("re-grant");
     let (_, tools) = resolve_agent_grants_pool(&pool, id).await.unwrap();
     assert_eq!(tools.len(), 2);
 
     // Revoke → back to empty.
-    revoke_skill_pool(&pool, "acme", "bot", "reader")
-        .await
-        .expect("revoke");
+    revoke_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "bot",
+        "reader",
+    )
+    .await
+    .expect("revoke");
     let (skills, tools) = resolve_agent_grants_pool(&pool, id).await.unwrap();
     assert!(skills.is_empty() && tools.is_empty());
 }
@@ -124,22 +140,23 @@ async fn grant_fires_scoped_list_changed() {
     let bot_id = agent_id(&pool, "bot").await;
     let other_id = bot_id + 1; // a different agent in the same tenant
 
+    let tenant = rustango::tenancy::TenantSlug::new(1, SLUG);
     let mut rx = bus().subscribe();
-    rustango::tenancy::grant_skill_pool(&pool, SLUG, "bot", "reader")
+    rustango::tenancy::grant_skill_pool(&pool, &tenant, "bot", "reader")
         .await
         .unwrap();
 
     for _ in 0..200 {
         let Ok(frame) = rx.recv().await else { continue };
-        if frame.tenant != SLUG {
+        if frame.tenant != tenant.namespace() {
             continue;
         }
         let v: serde_json::Value = serde_json::from_str(&frame.body).unwrap();
         if v["method"] == "notifications/tools/list_changed" {
             // Scoped to bot: bot sees it, another agent in the tenant does not.
             assert_eq!(frame.agent_id, Some(bot_id));
-            assert!(frame_visible(&frame, SLUG, bot_id));
-            assert!(!frame_visible(&frame, SLUG, other_id));
+            assert!(frame_visible(&frame, &tenant, bot_id));
+            assert!(!frame_visible(&frame, &tenant, other_id));
             return;
         }
     }

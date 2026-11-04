@@ -165,7 +165,7 @@ impl TenantSlug {
     /// `#org:<id>:<slug>`: the tenant part of cache keys. Both halves, so a
     /// hand-built id shared by two slugs still keeps them apart.
     #[must_use]
-    pub(crate) fn namespace(&self) -> String {
+    pub fn namespace(&self) -> String {
         format!("#org:{}:{}", self.org_id, self.slug)
     }
 }

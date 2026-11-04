@@ -105,7 +105,8 @@ impl OrgResolver for AcmeResolver {
 
 fn acme_org(database_url: String) -> Org {
     Org {
-        id: Auto::default(),
+        // A registry row has an id; tokens and notifications bind to it.
+        id: Auto::Set(1),
         slug: TENANT_SLUG.into(),
         display_name: "Acme Inc.".into(),
         storage_mode: "database".into(),
@@ -153,7 +154,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &["add".into()],
     )
     .await?;
-    grant_skill_pool(&tenant_pool, TENANT_SLUG, AGENT_NAME, SKILL_SLUG).await?;
+    let tenant = rustango::tenancy::TenantSlug::of(&org).expect("the org has an id");
+    grant_skill_pool(&tenant_pool, &tenant, AGENT_NAME, SKILL_SLUG).await?;
 
     // ── Step 3: mount the agent-guarded MCP router ──────────────────────────
     // Keys come from the environment, else random for this process: tokens

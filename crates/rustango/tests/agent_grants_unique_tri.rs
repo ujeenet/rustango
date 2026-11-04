@@ -33,7 +33,8 @@ async fn concurrent_grants_leave_one_row(pool: &Pool) {
     create_skill_pool(pool, "s1", "S1", "", "", &[])
         .await
         .unwrap();
-    let runs = (0..8).map(|_| grant_skill_pool(pool, "t", "bot", "s1"));
+    let tenant = rustango::tenancy::TenantSlug::new(1, "t");
+    let runs = (0..8).map(|_| grant_skill_pool(pool, &tenant, "bot", "s1"));
     for r in futures_util::future::join_all(runs).await {
         r.unwrap();
     }
