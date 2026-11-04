@@ -83,8 +83,8 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Registered, Running,
-    StopSignal, DEFAULT_SHUTDOWN_GRACE,
+    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Next, Registered,
+    Running, StopSignal, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::Pool;
 
@@ -994,8 +994,9 @@ async fn run_one(
     // `attempt` already counts this run. Past the cap means earlier runs
     // died with their worker; running it again could crash the next one.
     // Rows queued before #2333 may still hold 0.
-    let max_attempts = job.max_attempts.max(1);
-    if job.attempt > max_attempts {
+    let runs = u32::try_from(job.attempt).unwrap_or(0);
+    let max_attempts = u32::try_from(job.max_attempts).unwrap_or(0);
+    if super::attempts_spent(runs.saturating_sub(1), max_attempts) {
         let msg = "no attempts left: an earlier run stopped without finishing";
         handle_dead_letter(pool, dead_letter, worker, &job, &entry, msg).await;
         return;
@@ -1003,7 +1004,7 @@ async fn run_one(
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
     // `attempt` counts this run, so the run's 0-based number is one less.
-    let failed = u32::try_from(job.attempt - 1).unwrap_or(0);
+    let failed = runs.saturating_sub(1);
     let run = job
         .context
         .clone()
@@ -1015,21 +1016,14 @@ async fn run_one(
         return;
     }
 
-    match outcome.result {
-        Ok(()) => {
-            finish_job(pool, worker, job.id).await;
+    match outcome.next(runs, max_attempts) {
+        Next::Done => finish_job(pool, worker, job.id).await,
+        Next::Retry { wait, error } => {
+            let backoff = chrono::Duration::from_std(wait).unwrap_or_default();
+            let next_run: DateTime<Utc> = Utc::now() + backoff;
+            schedule_retry(pool, worker, job.id, next_run, &error).await;
         }
-        Err(JobError::Retryable(msg)) => {
-            if job.attempt >= max_attempts {
-                handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
-            } else {
-                let backoff = chrono::Duration::from_std(outcome.retry_in).unwrap_or_default();
-                let next_run: DateTime<Utc> = Utc::now() + backoff;
-                schedule_retry(pool, worker, job.id, next_run, &msg).await;
-            }
-        }
-        Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
-            let msg = e.to_string();
+        Next::DeadLetter(msg) => {
             handle_dead_letter(pool, dead_letter, worker, &job, &entry, &msg).await;
         }
     }

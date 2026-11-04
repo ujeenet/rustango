@@ -15,6 +15,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Framework models show readable labels in admin column headers and forms (e.g. `Display name`, not `display_name`).
 - The `urlencoding` dependency is gone: OAuth URLs and tests use the crate's own `url_codec::url_encode`, which escapes the same characters.
 - **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
+- **Breaking:** duplicate implementations removed: `rustango::bulk_actions` (and `RustangoError::BulkAction`), the crate-root `rustango::auth_backends` registry, and the public `mcp::pagination` module; see UPGRADING.md.
+- The in-memory and database job queues decide retry or dead letter through one shared rule.
 
 ### Deprecated
 

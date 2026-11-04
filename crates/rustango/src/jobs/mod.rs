@@ -287,6 +287,37 @@ pub(crate) fn retry_after(at_least: Duration) {
         RETRY_AFTER.try_with(|hint| hint.set(Some(hint.get().unwrap_or_default().max(at_least))));
 }
 
+/// A finished run's next step; one rule for every queue.
+enum Next {
+    Done,
+    /// Run again after `wait`; `error` is the failed run's message.
+    Retry {
+        wait: Duration,
+        error: String,
+    },
+    DeadLetter(String),
+}
+
+impl Ran {
+    /// `runs` counts this run.
+    fn next(self, runs: u32, max_attempts: u32) -> Next {
+        match self.result {
+            Ok(()) => Next::Done,
+            Err(JobError::Retryable(error)) if !attempts_spent(runs, max_attempts) => Next::Retry {
+                wait: self.retry_in,
+                error,
+            },
+            Err(JobError::Retryable(msg)) => Next::DeadLetter(msg),
+            Err(e) => Next::DeadLetter(e.to_string()),
+        }
+    }
+}
+
+/// `true` once `runs` finished runs leave no attempt for another.
+fn attempts_spent(runs: u32, max_attempts: u32) -> bool {
+    runs >= max_attempts.max(1)
+}
+
 /// A job's backoff, capped at a year so a runaway hook cannot overflow
 /// a deadline.
 fn cap_backoff(wait: Duration) -> Duration {
@@ -708,7 +739,7 @@ async fn worker_loop(w: InMemoryWorker) {
             park(&retries, &tx, stop.clone(), envelope, until);
             continue;
         }
-        if envelope.attempt >= envelope.max_attempts {
+        if attempts_spent(envelope.attempt, envelope.max_attempts) {
             // Aborted at shutdown on its last run: dead-letter, do not rerun.
             current.lock().unwrap().take();
             pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
@@ -745,36 +776,22 @@ async fn worker_loop(w: InMemoryWorker) {
             .await;
         current.lock().unwrap().take();
 
-        match ran.result {
-            Ok(()) => {
+        let runs = envelope.attempt + 1;
+        match ran.next(runs, envelope.max_attempts) {
+            Next::Done => {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
-            Err(JobError::Retryable(msg)) => {
-                let next_attempt = envelope.attempt + 1;
-                if next_attempt >= envelope.max_attempts {
-                    // Count it done first: an abort in the callback must not leak `pending`.
-                    pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                    dead_letter_job(&dead_letter, Some(&entry), envelope, next_attempt, msg).await;
-                } else {
-                    let backoff = ran.retry_in;
-                    let mut retry = envelope;
-                    retry.attempt = next_attempt;
-                    // Still counted in `pending` while parked.
-                    let until = tokio::time::Instant::now() + backoff;
-                    park(&retries, &tx, stop.clone(), retry, until);
-                }
+            Next::Retry { wait: backoff, .. } => {
+                let mut retry = envelope;
+                retry.attempt = runs;
+                // Still counted in `pending` while parked.
+                let until = tokio::time::Instant::now() + backoff;
+                park(&retries, &tx, stop.clone(), retry, until);
             }
-            Err(e @ (JobError::Fatal(_) | JobError::Queue(_))) => {
+            Next::DeadLetter(error) => {
+                // Count it done first: an abort in the callback must not leak `pending`.
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-                let attempts = envelope.attempt + 1;
-                dead_letter_job(
-                    &dead_letter,
-                    Some(&entry),
-                    envelope,
-                    attempts,
-                    e.to_string(),
-                )
-                .await;
+                dead_letter_job(&dead_letter, Some(&entry), envelope, runs, error).await;
             }
         }
     }
@@ -832,6 +849,27 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One retry rule for both queues: retry until `max_attempts` runs, then dead-letter.
+    #[test]
+    fn next_retries_until_the_cap_then_dead_letters() {
+        let ran = |result| Ran {
+            result,
+            retry_in: Duration::from_secs(3),
+        };
+        let retry = || ran(Err(JobError::Retryable("boom".into())));
+        assert!(matches!(ran(Ok(())).next(1, 3), Next::Done));
+        assert!(matches!(
+            retry().next(2, 3),
+            Next::Retry { wait, error } if wait == Duration::from_secs(3) && error == "boom"
+        ));
+        assert!(matches!(retry().next(3, 3), Next::DeadLetter(e) if e == "boom"));
+        // A cap of 0 still allows the one run.
+        assert!(matches!(retry().next(1, 0), Next::DeadLetter(_)));
+        let fatal = ran(Err(JobError::Fatal("no".into()))).next(1, 3);
+        assert!(matches!(fatal, Next::DeadLetter(e) if e == "fatal: no"));
+        assert!(attempts_spent(3, 3) && !attempts_spent(2, 3) && attempts_spent(1, 0));
+    }
 
     /// Pins the documented 1s, 2s, 4s, 8s sequence.
     #[test]

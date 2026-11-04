@@ -312,9 +312,9 @@ L'injection SQL survient lorsqu'une entrée utilisateur est collée directement 
 
 Il y a deux endroits où rester vigilant :
 
-**1. Les noms de table et de colonne dans `bulk_actions` :**
+**1. Les noms de table et de colonne dans les actions groupées :**
 
-Les placeholders protègent les valeurs, mais ils ne peuvent pas porter un identifiant (un nom de table ou de colonne), donc ceux-ci ont besoin de leur propre garde-fou. Les actions groupées écrivent via l'ORM, donc aucun nom brut n'atteint le SQL. Une action intégrée qui fixe une colonne la cherche dans le schéma du modèle ; un nom que le modèle n'a pas échoue avec `BulkActionError::InvalidIdent`. Les clés sélectionnées forment un `PkSet`, typé d'après la clé primaire du modèle : une clé du mauvais type échoue avec `InvalidPk`, et un ensemble contient au plus 10 000 clés. Ce garde-fou s'exécute pour vous — vous ne l'appelez pas vous-même.
+Les placeholders protègent les valeurs, mais ils ne peuvent pas porter un identifiant (un nom de table ou de colonne), donc ceux-ci ont besoin de leur propre garde-fou. Les actions groupées de l'admin et de `ListView` écrivent via l'ORM, donc aucun nom brut n'atteint le SQL. Chaque clé sélectionnée est lue avec le type de la clé primaire du modèle, et une clé du mauvais type est refusée. Ce garde-fou s'exécute pour vous — vous ne l'appelez pas vous-même.
 
 **2. L'échappatoire du SQL brut :**
 

@@ -1016,7 +1016,7 @@ fn validate_base64_impl(s: &str, urlsafe: bool) -> Result<(), ValidationError> {
 /// **Shape check only — does NOT verify the signature.** The whole
 /// point of this validator is to catch a typoed / truncated JWT at
 /// form-input time before the real JWT library returns a less clear
-/// error. Use [`crate::auth_backends`] / `jsonwebtoken` to actually verify
+/// error. Use `tenancy::auth_backends::JwtBackend` / `jsonwebtoken` to actually verify
 /// the signature and claims.
 ///
 /// # Errors

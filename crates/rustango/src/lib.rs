@@ -144,7 +144,7 @@
 //! - Admin — [`admin`]
 //! - REST — [`viewset`], [`serializer`]
 //! - Multi-tenancy — [`tenancy`]
-//! - Auth — [`auth_backends`], [`jwt`], [`sso`]
+//! - Auth — [`tenancy::auth_backends`], [`jwt`], [`sso`]
 //! - Background work — [`jobs`], [`scheduler`]
 //! - Caching — [`cache`]
 //!
@@ -711,12 +711,6 @@ pub mod tenant_log;
 /// See [`fixtures::Fixture`].
 pub mod fixtures;
 
-/// Bulk-action runner — apply one operation to a set of selected PKs.
-/// Works on all three backends. See [`bulk_actions::BulkActionRegistry`]
-/// and the built-in actions.
-#[cfg(feature = "tenancy")]
-pub mod bulk_actions;
-
 /// TOTP — RFC 6238 time-based one-time passwords for 2FA.
 /// See [`totp::generate`] / [`totp::verify`] / [`totp::otpauth_url`].
 #[cfg(feature = "totp")]
@@ -1187,12 +1181,6 @@ pub mod messages;
 /// `?next=` round-trip helpers.
 #[cfg(feature = "_axum")]
 pub mod auth_decorators;
-
-/// Pluggable `AUTHENTICATION_BACKENDS` chain — register an ordered list of
-/// [`auth_backends::AuthBackend`] impls; the chain returns the first
-/// non-`None` result. Ships `RemoteUserBackend` for SSO proxy setups.
-#[cfg(feature = "_async_trait")]
-pub mod auth_backends;
 
 /// Pluggable `AUTH_PASSWORD_VALIDATORS` chain — run an ordered list of
 /// [`password_validators::PasswordValidator`]s at signup and password

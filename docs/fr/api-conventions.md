@@ -48,7 +48,7 @@ Ils suivent la casse standard de Rust, la même que la distinction de PEP 8 en P
 ### Modules
 
 - **Singulier** lorsque le module contient UN seul type ou concept principal : `cache`, `email`, `storage`, `signed_url`, `request_id`.
-- **Pluriel** lorsque le module contient une COLLECTION d'éléments : `bulk_actions`, `api_keys`, `passwords`, `forms`, `signals`.
+- **Pluriel** lorsque le module contient une COLLECTION d'éléments : `api_keys`, `passwords`, `forms`, `signals`.
 
 ---
 
@@ -173,7 +173,6 @@ Vous pouvez **mélanger les trois** dans un même queryset.
 | Mots de passe | `passwords::*` | `PasswordError` |
 | Webhooks | `webhook::*` | `EmptySigningKey` depuis `sign` ; `verify_*` retourne un `bool` |
 | URLs signées | `signed_url::*` | `SignedUrlError` |
-| Actions en masse | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
 | Filtre IP | `ip_filter::*` | `IpFilterError` |
 | i18n | `i18n::*` | `I18nError` |
@@ -217,7 +216,6 @@ Le nom d'un module devrait vous permettre de **deviner les noms des types qu'il 
 | `storage` | le trait `Storage`, les impls `*Storage` | élevée |
 | `signed_url` | les fonctions libres `sign`, `verify` | moyenne |
 | `text` | les fonctions libres `slugify`, `html_escape`, `truncate` | moyenne |
-| `bulk_actions` | `BulkActionRegistry`, `BulkAction`, les impls `Bulk*Action` | élevée |
 | `api_keys` | les fonctions libres `generate_key`, `verify_key`, `split_token` | moyenne |
 
 **À éviter :** un module qui contient un fourre-tout hétéroclite (`utils`, `helpers`, `common`). Si vous ne pouvez pas nommer le concept unique qu'il couvre, il ne devrait pas être un module.

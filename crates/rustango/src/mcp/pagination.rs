@@ -24,7 +24,7 @@ use crate::signing::Signer;
 /// # Errors
 /// `invalid_params` when `cursor` is present but malformed, altered,
 /// or minted for another agent.
-pub fn paginate(
+pub(crate) fn paginate(
     mut full: Value,
     key: &str,
     cursor: Option<&str>,

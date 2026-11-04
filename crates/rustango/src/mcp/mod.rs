@@ -6,7 +6,7 @@
 //! `initialize` and `ping` methods, agent authentication with scoped
 //! JWTs, [`tools`](crate::mcp::tools), [`resources`](crate::mcp::resources)
 //! and prompts, [`progress`](crate::mcp::progress) reporting with
-//! cancellation, [`pagination`](crate::mcp::pagination),
+//! cancellation, signed cursor pagination for `*/list`,
 //! [`oauth`](crate::mcp::oauth) discovery, and the
 //! [`utilities`](crate::mcp::utilities) methods.
 //!
@@ -33,7 +33,7 @@ pub mod auth;
 mod handlers;
 pub mod notifications;
 pub mod oauth;
-pub mod pagination;
+mod pagination;
 pub mod progress;
 pub mod resources;
 mod router;

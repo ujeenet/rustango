@@ -312,9 +312,9 @@ SQL injection happens when user input gets pasted straight into a SQL string and
 
 There are two spots to stay careful about:
 
-**1. Table and column names in `bulk_actions`:**
+**1. Table and column names in bulk actions:**
 
-Placeholders protect values, but they can't carry an identifier (a table or column name), so those need their own guard. Bulk actions write through the ORM, so no raw name reaches SQL. A built-in action that sets a column looks it up in the model schema; a name the model does not have fails with `BulkActionError::InvalidIdent`. The selected keys are a `PkSet`, typed from the model's primary key: a key of the wrong type fails with `InvalidPk`, and one set holds at most 10,000 keys. This guard runs for you — you don't call it yourself.
+Placeholders protect values, but they can't carry an identifier (a table or column name), so those need their own guard. The admin and `ListView` bulk actions write through the ORM, so no raw name reaches SQL. Each selected key is parsed with the model's primary-key type, and a key of the wrong type is refused. This guard runs for you — you don't call it yourself.
 
 **2. The raw SQL escape hatch:**
 
