@@ -81,7 +81,7 @@ pub(crate) async fn handle_message(
                     .and_then(|p| p.get("requestId"))
                     .map(jsonrpc_id_string),
             ) {
-                super::progress::cancel(&ctx.agent.tenant, ctx.agent.agent_id, &rid);
+                super::progress::cancel(&ctx.agent.tenant_binding(), ctx.agent.agent_id, &rid);
             }
         }
         return StatusCode::ACCEPTED.into_response();
@@ -144,7 +144,7 @@ async fn sse_in(
         Err(e) => return e.into_response(&headers, &extensions, &uri),
     };
     open_capped(
-        t.pool().clone(),
+        Liveness::of(t.pool(), &extensions),
         agent,
         exp.map(|exp| JwtBound { jwt, exp }),
         StreamCaps::from_env(),
@@ -152,15 +152,59 @@ async fn sse_in(
     )
 }
 
+/// Where a stream re-checks that its agent and its tenant still exist.
+#[derive(Clone)]
+struct Liveness {
+    /// The tenant's pool, holding the agent row.
+    pool: crate::sql::Pool,
+    /// The registry, holding the org row; `None` outside a tenant context.
+    registry: Option<crate::sql::Pool>,
+}
+
+impl Liveness {
+    /// `pool`, and the registry of the tenant context mounted in `extensions`.
+    fn of(pool: &crate::sql::Pool, extensions: &axum::http::Extensions) -> Self {
+        Self {
+            pool: pool.clone(),
+            registry: crate::tenancy::middleware::session_keys(extensions).map(|k| k.registry),
+        }
+    }
+
+    /// `Ok(false)` once the agent is revoked, or the org is deactivated or gone.
+    async fn check(&self, agent: &super::McpAgent) -> Result<bool, String> {
+        if let Some(registry) = &self.registry {
+            use crate::sql::ExistsPool as _;
+            let org = crate::tenancy::Org::objects()
+                .filter("id", agent.org_id)
+                .filter("active", true)
+                .exists(registry)
+                .await
+                .map_err(|e| e.to_string())?;
+            if !org {
+                return Ok(false);
+            }
+        }
+        crate::tenancy::agent_token_still_valid_pool(
+            &self.pool,
+            agent.agent_id,
+            agent.user_id,
+            &agent.secret_prefix,
+        )
+        .await
+        .map_err(|e| e.to_string())
+    }
+}
+
 /// The agent's stream, or `429` when it or its tenant has too many open.
 fn open_capped(
-    pool: crate::sql::Pool,
+    live: Liveness,
     agent: super::McpAgent,
     token: Option<JwtBound>,
     caps: StreamCaps,
     shutdown: crate::shutdown::Shutdown,
 ) -> Response {
-    let Some(slot) = StreamSlot::acquire(&agent.tenant, agent.agent_id, caps) else {
+    let scope = agent.tenant_binding().namespace();
+    let Some(slot) = StreamSlot::acquire(&scope, agent.agent_id, caps) else {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             "too many open notification streams",
@@ -168,7 +212,7 @@ fn open_capped(
             .into_response();
     };
     agent_sse(
-        pool,
+        live,
         agent,
         token,
         KEEP_ALIVE * RECHECK_EVERY_KEEP_ALIVES,
@@ -203,8 +247,9 @@ impl StreamCaps {
     }
 }
 
-/// Open streams by `(tenant, agent)` and by tenant. Keyed by tenant, so
-/// one tenant's count never touches another's.
+/// Open streams by `(tenant, agent)` and by tenant, the tenant being its
+/// [`crate::tenancy::TenantSlug::namespace`], so one tenant's count, or a
+/// purged tenant's with the same slug, never touches another's.
 #[derive(Default)]
 struct OpenStreams {
     by_agent: std::collections::HashMap<(String, i64), usize>,
@@ -272,11 +317,14 @@ const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// The stream re-checks the agent row every 4 keep-alives (once a minute):
 /// one indexed lookup per open stream, and a revoke ends it within 60s (#2237).
 const RECHECK_EVERY_KEEP_ALIVES: u32 = 4;
+/// Failed re-checks in a row that end a stream: a blip is retried, a gone
+/// tenant (its pool errors forever) is not.
+const MAX_RECHECK_ERRORS: u32 = 5;
 
 /// The agent's frames until the JWT's `exp`, a re-check that finds the agent
 /// revoked, deactivated or rotated or the JWT revoked, the bus closing, or shutdown.
 fn agent_sse(
-    pool: crate::sql::Pool,
+    live: Liveness,
     agent: super::McpAgent,
     token: Option<JwtBound>,
     recheck_every: Duration,
@@ -285,7 +333,8 @@ fn agent_sse(
 ) -> Response {
     use tokio::sync::broadcast::error::RecvError;
     // Own tenant's channel: another tenant's burst cannot make it lag.
-    let mut rx = super::notifications::subscribe(&agent.tenant);
+    let tenant = agent.tenant_binding();
+    let mut rx = super::notifications::subscribe(&tenant);
     let exp = token.as_ref().map(|t| t.exp);
     let stream = async_stream::stream! {
         // Held while the stream lives; the client going away frees it.
@@ -302,6 +351,7 @@ fn agent_sse(
         tokio::pin!(expired);
         let start = tokio::time::Instant::now() + recheck_every;
         let mut recheck = tokio::time::interval_at(start, recheck_every);
+        let mut failed = 0;
         loop {
             let received = tokio::select! {
                 () = &mut expired => break,
@@ -311,18 +361,17 @@ fn agent_sse(
                             break;
                         }
                     }
-                    let live = crate::tenancy::agent_token_still_valid_pool(
-                        &pool,
-                        agent.agent_id,
-                        agent.user_id,
-                        &agent.secret_prefix,
-                    )
-                    .await;
-                    match live {
-                        Ok(true) => {}
+                    match live.check(&agent).await {
+                        Ok(true) => failed = 0,
                         Ok(false) => break,
                         // A DB blip must not drop every open stream: retry next tick.
-                        Err(e) => tracing::warn!(error = %e, "mcp sse liveness re-check failed"),
+                        Err(e) => {
+                            failed += 1;
+                            tracing::warn!(error = %e, failed, "mcp sse liveness re-check failed");
+                            if failed >= MAX_RECHECK_ERRORS {
+                                break;
+                            }
+                        }
                     }
                     continue;
                 }
@@ -330,7 +379,7 @@ fn agent_sse(
             };
             match received {
                 Ok(frame) => {
-                    if super::notifications::frame_visible(&frame, &agent.tenant, agent.agent_id) {
+                    if super::notifications::frame_visible(&frame, &tenant, agent.agent_id) {
                         yield Ok::<Event, std::convert::Infallible>(Event::default().data(frame.body));
                     }
                     // Frames for anyone else are dropped.
@@ -428,8 +477,27 @@ mod tests {
         token: Option<JwtBound>,
         recheck: Duration,
     ) -> Response {
-        let slot = StreamSlot::acquire(&agent.tenant, agent.agent_id, NO_CAP).unwrap();
-        agent_sse(pool, agent, token, recheck, slot, Shutdown::default())
+        open_with(
+            Liveness {
+                pool,
+                registry: None,
+            },
+            agent,
+            token,
+            recheck,
+        )
+    }
+
+    /// [`open`] re-checking against `live`.
+    fn open_with(
+        live: Liveness,
+        agent: super::super::McpAgent,
+        token: Option<JwtBound>,
+        recheck: Duration,
+    ) -> Response {
+        let scope = agent.tenant_binding().namespace();
+        let slot = StreamSlot::acquire(&scope, agent.agent_id, NO_CAP).unwrap();
+        agent_sse(live, agent, token, recheck, slot, Shutdown::default())
     }
 
     /// Past either cap a stream is refused; a closed stream frees its place.
@@ -468,8 +536,13 @@ mod tests {
             per_agent: 1,
             per_tenant: 0,
         };
-        let held = StreamSlot::acquire(&agent.tenant, agent.agent_id, caps).unwrap();
-        let resp = open_capped(pool, agent, None, caps, Shutdown::default());
+        let scope = agent.tenant_binding().namespace();
+        let held = StreamSlot::acquire(&scope, agent.agent_id, caps).unwrap();
+        let live = Liveness {
+            pool,
+            registry: None,
+        };
+        let resp = open_capped(live, agent, None, caps, Shutdown::default());
         assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
         drop(held);
     }
@@ -529,9 +602,13 @@ mod tests {
     async fn the_stream_ends_at_shutdown() {
         let (pool, agent, token, _) = world(jwt(), false).await;
         let (stop, on_stop) = tokio::sync::watch::channel(());
-        let slot = StreamSlot::acquire(&agent.tenant, agent.agent_id, NO_CAP).unwrap();
+        let scope = agent.tenant_binding().namespace();
+        let slot = StreamSlot::acquire(&scope, agent.agent_id, NO_CAP).unwrap();
         let resp = agent_sse(
-            pool,
+            Liveness {
+                pool,
+                registry: None,
+            },
             agent,
             token,
             Duration::from_secs(3600),
@@ -554,16 +631,123 @@ mod tests {
         assert_ends_on_revoke(pool, agent, token).await;
     }
 
+    /// A tenant that reuses a purged tenant's slug (a new org id, agent ids
+    /// restarting at 1) sends nothing to the old tenant's stream.
+    #[tokio::test]
+    async fn a_reused_slugs_frames_do_not_reach_the_purged_tenants_stream() {
+        use http_body_util::BodyExt as _;
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        let own = agent.tenant_binding();
+        let heir = crate::tenancy::TenantSlug::new(own.org_id + 1, own.slug.clone());
+        let agent_id = agent.agent_id;
+        let mut body = open(pool, agent, token, Duration::from_secs(3600)).into_body();
+        super::super::notifications::notify_tools_list_changed(&heir, Some(agent_id));
+        super::super::notifications::notify_resources_list_changed(&own, None);
+        let first = tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(Ok(frame)) = body.frame().await {
+                let data = frame.into_data().unwrap_or_default();
+                let text = String::from_utf8_lossy(&data).into_owned();
+                if text.contains("list_changed") {
+                    return text;
+                }
+            }
+            String::new()
+        })
+        .await
+        .unwrap();
+        assert!(
+            first.contains("resources/list_changed"),
+            "got the heir's frame: {first}"
+        );
+    }
+
+    /// Org `id`'s registry row in `pool`, `active` or not.
+    async fn seed_org(pool: &crate::sql::Pool, id: i64, active: bool) {
+        let mut org = crate::tenancy::Org {
+            id: crate::sql::Auto::Set(id),
+            slug: format!("live-{id}"),
+            active,
+            ..crate::testkit::org()
+        };
+        org.insert(pool).await.unwrap();
+    }
+
+    /// Re-check `agent`'s stream against `registry` every 300ms; whether it
+    /// ended within one second, before five failed re-checks could end it.
+    async fn ends_within_a_second(
+        pool: crate::sql::Pool,
+        registry: crate::sql::Pool,
+        agent: super::super::McpAgent,
+        token: Option<JwtBound>,
+    ) -> bool {
+        let live = Liveness {
+            pool,
+            registry: Some(registry),
+        };
+        let body = drain(open_with(live, agent, token, Duration::from_millis(300)));
+        tokio::time::timeout(Duration::from_secs(1), body)
+            .await
+            .is_ok()
+    }
+
+    /// A stream whose org row is gone, as after a purge, ends at the next
+    /// re-check, not after the error limit.
+    #[tokio::test]
+    async fn the_stream_ends_when_the_org_is_gone() {
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        // The framework tables include the registry's; this org has no row.
+        assert!(ends_within_a_second(pool.clone(), pool, agent, token).await);
+    }
+
+    /// A deactivated org ends its streams too: deactivate keeps the row.
+    #[tokio::test]
+    async fn the_stream_ends_when_the_org_is_deactivated() {
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        seed_org(&pool, agent.org_id, false).await;
+        assert!(ends_within_a_second(pool.clone(), pool, agent, token).await);
+    }
+
+    /// A live, active org keeps its stream open across re-checks.
+    #[tokio::test]
+    async fn a_live_orgs_stream_stays_open() {
+        let (pool, agent, token, _) = world(jwt(), false).await;
+        seed_org(&pool, agent.org_id, true).await;
+        assert!(!ends_within_a_second(pool.clone(), pool, agent, token).await);
+    }
+
+    /// The handler re-checks against the mounted tenant context's registry.
+    #[tokio::test]
+    async fn the_handler_wires_the_registry_from_the_tenant_context() {
+        use crate::extractors::DatabaseTenantContext;
+        use crate::tenancy::{session::SessionSecret, BackendKind, ChainResolver, DatabasePools};
+        let (pool, _, _, _) = world(jwt(), false).await;
+        assert!(Liveness::of(&pool, &axum::http::Extensions::new())
+            .registry
+            .is_none());
+        let mut ext = axum::http::Extensions::new();
+        ext.insert(std::sync::Arc::new(DatabaseTenantContext {
+            pools: std::sync::Arc::new(DatabasePools::<crate::sql::sqlx::Sqlite>::new(
+                BackendKind::Sqlite,
+            )),
+            resolver: ChainResolver::new(),
+            session_secret: SessionSecret::from_bytes(vec![1; 32]),
+            operator_secret: SessionSecret::from_bytes(vec![2; 32]),
+            registry: pool.clone(),
+        }));
+        assert!(Liveness::of(&pool, &ext).registry.is_some());
+    }
+
     /// Another tenant's burst, past the buffer, does not drop this tenant's frame.
     #[tokio::test]
     async fn another_tenants_burst_does_not_drop_this_tenants_frames() {
         use http_body_util::BodyExt as _;
         let (pool, agent, token, _) = world(jwt(), false).await;
-        let tenant = agent.tenant.clone();
+        let tenant = agent.tenant_binding();
         let mut body = open(pool, agent, token, Duration::from_secs(3600)).into_body();
         super::super::notifications::notify_resources_list_changed(&tenant, None);
+        let other = crate::tenancy::TenantSlug::new(99, "other-tenant");
         for _ in 0..1000 {
-            super::super::notifications::notify_tools_list_changed("other-tenant", None);
+            super::super::notifications::notify_tools_list_changed(&other, None);
         }
         let found = tokio::time::timeout(Duration::from_secs(5), async {
             while let Some(Ok(frame)) = body.frame().await {
@@ -596,12 +780,35 @@ mod tests {
             }
         };
         rename("rustango_agents", "rustango_agents_off").await;
-        let body = drain(open(pool.clone(), agent, token, Duration::from_millis(50)));
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        let body = drain(open(pool.clone(), agent, token, Duration::from_millis(100)));
+        // About two failed re-checks, fewer than `MAX_RECHECK_ERRORS`.
+        tokio::time::sleep(Duration::from_millis(250)).await;
         assert!(!body.is_finished(), "a DB error must not end the stream");
         rename("rustango_agents_off", "rustango_agents").await;
         rotate_agent_secret_pool(&pool, "bot").await.unwrap();
         let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
         assert!(ended.is_ok(), "the stream outlived the revoke");
+    }
+
+    /// A re-check that keeps failing, as on a purged tenant's pool, ends the
+    /// stream, raw-key streams included, which have no `exp`.
+    #[tokio::test]
+    async fn the_stream_ends_after_repeated_recheck_errors() {
+        let _g = super::super::auth::raw_key_cache_test_lock().lock().await;
+        let (pool, agent, token, _) = world(jwt(), true).await;
+        assert!(token.is_none());
+        crate::sql::raw_execute_pool(
+            &pool,
+            "ALTER TABLE rustango_agents RENAME TO rustango_agents_gone",
+            vec![],
+        )
+        .await
+        .unwrap();
+        let body = drain(open(pool, agent, token, Duration::from_millis(50)));
+        let ended = tokio::time::timeout(Duration::from_secs(5), body).await;
+        assert!(
+            ended.is_ok(),
+            "the stream outlived a tenant whose pool always errors"
+        );
     }
 }

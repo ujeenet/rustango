@@ -188,7 +188,8 @@ pub(crate) async fn call_tool_with(
     }
 
     // Copy what the scoping needs, before `ctx` moves into the tool.
-    let tenant = ctx.agent.tenant.clone();
+    // Keyed by the org id too, so a tenant reusing a purged slug is apart.
+    let tenant = ctx.agent.tenant_binding();
     let agent_id = ctx.agent.agent_id;
 
     // Set up progress, from `_meta.progressToken`, and cancellation.
@@ -197,7 +198,7 @@ pub(crate) async fn call_tool_with(
     // even when the handler panics.
     ctx.progress = super::progress::ProgressReporter::for_agent(
         super::progress::progress_token(&params),
-        tenant.clone(),
+        tenant.namespace(),
         agent_id,
     );
     let mut _cancel_guard = None;

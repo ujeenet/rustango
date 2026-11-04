@@ -216,7 +216,7 @@ create_skill_pool(&pool, "calculator", "Calculator", "does arithmetic",
                   "You are a precise calculator.", &["add".into()]).await?;
 
 // 3. Grant it to the agent in tenant "acme".
-grant_skill_pool(&pool, "acme", "calc-bot", "calculator").await?;
+grant_skill_pool(&pool, &rustango::tenancy::TenantSlug::new(1, "acme"), "calc-bot", "calculator").await?;
 ```
 
 El cliente intercambia su credencial por un **JWT fijado al tenant y con alcance

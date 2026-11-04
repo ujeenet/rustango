@@ -456,7 +456,7 @@ pub async fn list_skills_pool(pool: &Pool) -> Result<Vec<AgentSkill>, AgentError
 /// [`AgentError::NotFound`] if the agent or skill doesn't exist.
 pub async fn grant_skill_pool(
     pool: &Pool,
-    slug: &str,
+    tenant: &super::TenantSlug,
     agent_name: &str,
     skill_codename: &str,
 ) -> Result<(), AgentError> {
@@ -481,7 +481,7 @@ pub async fn grant_skill_pool(
         };
         // A concurrent grant may have won the race; the unique key makes this a no-op.
         if grant.insert_or_ignore(pool).await? {
-            notify_grants_changed(slug, agent_id);
+            notify_grants_changed(tenant, agent_id);
         }
     }
     Ok(())
@@ -525,7 +525,7 @@ async fn pin_user_key(pool: &Pool, agent_id: i64) -> Result<(), AgentError> {
 /// [`AgentError::NotFound`] if the agent or skill doesn't exist.
 pub async fn revoke_skill_pool(
     pool: &Pool,
-    slug: &str,
+    tenant: &super::TenantSlug,
     agent_name: &str,
     skill_codename: &str,
 ) -> Result<(), AgentError> {
@@ -546,7 +546,7 @@ pub async fn revoke_skill_pool(
         grant.delete(pool).await?;
     }
     if had_grant {
-        notify_grants_changed(slug, agent_id);
+        notify_grants_changed(tenant, agent_id);
     }
     Ok(())
 }
@@ -556,12 +556,12 @@ pub async fn revoke_skill_pool(
 /// a no-op in a separate process (e.g. the `manage` CLI) — see the
 /// notifications module's cross-process caveat.
 #[allow(unused_variables)]
-fn notify_grants_changed(slug: &str, agent_id: i64) {
+fn notify_grants_changed(tenant: &super::TenantSlug, agent_id: i64) {
     #[cfg(feature = "mcp")]
     {
-        crate::mcp::notify_tools_list_changed(slug, Some(agent_id));
-        crate::mcp::notify_prompts_list_changed(slug, Some(agent_id));
-        crate::mcp::notify_resources_list_changed(slug, Some(agent_id));
+        crate::mcp::notify_tools_list_changed(tenant, Some(agent_id));
+        crate::mcp::notify_prompts_list_changed(tenant, Some(agent_id));
+        crate::mcp::notify_resources_list_changed(tenant, Some(agent_id));
     }
 }
 

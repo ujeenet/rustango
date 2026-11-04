@@ -680,6 +680,20 @@ pub(super) async fn scoped_tenant_pool<DB: Database>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    scoped_tenant(pools, registry_url, slug)
+        .await
+        .map(|(pool, _)| pool)
+}
+
+/// [`scoped_tenant_pool`] plus the org row it resolved.
+pub(super) async fn scoped_tenant<DB: Database>(
+    pools: &TenantPools<DB>,
+    registry_url: &str,
+    slug: &str,
+) -> Result<(rustango::sql::Pool, crate::tenancy::Org), TenancyError>
+where
+    crate::sql::Pool: From<sqlx::Pool<DB>>,
+{
     let orgs: Vec<crate::tenancy::Org> = crate::tenancy::Org::objects()
         .where_(crate::tenancy::Org::slug.eq(slug.to_owned()))
         .fetch(&pools.registry_pool())
@@ -704,7 +718,7 @@ where
                     pools.pool_config().database_pool_acquire_timeout,
                 )
                 .await?;
-                Ok(rustango::sql::Pool::Postgres(pg))
+                Ok((rustango::sql::Pool::Postgres(pg), org))
             }
             #[cfg(not(feature = "postgres"))]
             {
@@ -718,7 +732,7 @@ where
             let tp = pools.database_pool_for_org(&org).await?;
             match tp {
                 crate::tenancy::TenantPool::Database { pool } => {
-                    Ok(rustango::sql::Pool::from((*pool).clone()))
+                    Ok((rustango::sql::Pool::from((*pool).clone()), org))
                 }
                 #[cfg(feature = "postgres")]
                 crate::tenancy::TenantPool::Schema { .. } => {

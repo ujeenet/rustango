@@ -26,11 +26,13 @@ use std::sync::{Mutex, OnceLock};
 use serde_json::json;
 
 use crate::sse::EventBus;
+use crate::tenancy::TenantSlug;
 
 /// A notification plus the scope it belongs to.
 #[derive(Clone, Debug)]
 pub struct ScopedFrame {
-    /// The tenant slug this frame is for.
+    /// The tenant this frame is for: its [`TenantSlug::namespace`], org id
+    /// included, so a tenant that reuses a purged slug never gets it.
     pub tenant: String,
     /// One agent's id, or `None` for the whole tenant.
     pub agent_id: Option<i64>,
@@ -71,14 +73,14 @@ pub fn send(frame: ScopedFrame) -> usize {
 
 /// A receiver of `tenant`'s frames only.
 #[must_use]
-pub fn subscribe(tenant: &str) -> tokio::sync::broadcast::Receiver<ScopedFrame> {
+pub fn subscribe(tenant: &TenantSlug) -> tokio::sync::broadcast::Receiver<ScopedFrame> {
     let mut buses = tenant_buses()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Channels of tenants with no open stream are dropped here.
     buses.retain(|_, b| b.receiver_count() > 0);
     buses
-        .entry(tenant.to_owned())
+        .entry(tenant.namespace())
         .or_insert_with(|| EventBus::new(TENANT_CAPACITY))
         .subscribe()
 }
@@ -86,14 +88,14 @@ pub fn subscribe(tenant: &str) -> tokio::sync::broadcast::Receiver<ScopedFrame> 
 /// Whether this agent may see a frame: it must be the same tenant,
 /// and the frame must be tenant-wide or for this agent.
 #[must_use]
-pub fn frame_visible(frame: &ScopedFrame, tenant: &str, agent_id: i64) -> bool {
-    frame.tenant == tenant && frame.agent_id.map_or(true, |a| a == agent_id)
+pub fn frame_visible(frame: &ScopedFrame, tenant: &TenantSlug, agent_id: i64) -> bool {
+    frame.tenant == tenant.namespace() && frame.agent_id.map_or(true, |a| a == agent_id)
 }
 
-fn notify(tenant: &str, agent_id: Option<i64>, method: &str) {
+fn notify(tenant: &TenantSlug, agent_id: Option<i64>, method: &str) {
     let body = json!({ "jsonrpc": "2.0", "method": method }).to_string();
     send(ScopedFrame {
-        tenant: tenant.to_owned(),
+        tenant: tenant.namespace(),
         agent_id,
         body,
     });
@@ -101,17 +103,17 @@ fn notify(tenant: &str, agent_id: Option<i64>, method: &str) {
 
 /// Say the tool list changed, for one agent or, with `None`, for the
 /// whole tenant.
-pub fn notify_tools_list_changed(tenant: &str, agent_id: Option<i64>) {
+pub fn notify_tools_list_changed(tenant: &TenantSlug, agent_id: Option<i64>) {
     notify(tenant, agent_id, "notifications/tools/list_changed");
 }
 
 /// Say the prompt list changed.
-pub fn notify_prompts_list_changed(tenant: &str, agent_id: Option<i64>) {
+pub fn notify_prompts_list_changed(tenant: &TenantSlug, agent_id: Option<i64>) {
     notify(tenant, agent_id, "notifications/prompts/list_changed");
 }
 
 /// Say the resource list changed.
-pub fn notify_resources_list_changed(tenant: &str, agent_id: Option<i64>) {
+pub fn notify_resources_list_changed(tenant: &TenantSlug, agent_id: Option<i64>) {
     notify(tenant, agent_id, "notifications/resources/list_changed");
 }
 
@@ -119,34 +121,56 @@ pub fn notify_resources_list_changed(tenant: &str, agent_id: Option<i64>) {
 mod tests {
     use super::*;
 
-    #[test]
-    fn visibility_is_tenant_and_agent_scoped() {
-        let per_agent = ScopedFrame {
-            tenant: "acme".into(),
-            agent_id: Some(1),
-            body: String::new(),
-        };
-        assert!(frame_visible(&per_agent, "acme", 1));
-        assert!(!frame_visible(&per_agent, "acme", 2)); // other agent, same tenant
-        assert!(!frame_visible(&per_agent, "other", 1)); // other tenant
+    fn acme() -> TenantSlug {
+        TenantSlug::new(1, "acme")
+    }
 
-        let tenant_wide = ScopedFrame {
-            tenant: "acme".into(),
+    /// A tenant that reuses a purged tenant's slug has a new org id: its
+    /// frames never reach the old tenant's streams, and the other way round.
+    #[test]
+    fn a_reused_slug_does_not_see_the_purged_tenants_frames() {
+        let heir = TenantSlug::new(2, "acme");
+        let frame = ScopedFrame {
+            tenant: heir.namespace(),
             agent_id: None,
             body: String::new(),
         };
-        assert!(frame_visible(&tenant_wide, "acme", 1));
-        assert!(frame_visible(&tenant_wide, "acme", 999)); // any agent in tenant
-        assert!(!frame_visible(&tenant_wide, "other", 1)); // not other tenants
+        assert!(!frame_visible(&frame, &acme(), 1));
+        assert!(frame_visible(&frame, &heir, 1));
+    }
+
+    #[test]
+    fn visibility_is_tenant_and_agent_scoped() {
+        let per_agent = ScopedFrame {
+            tenant: acme().namespace(),
+            agent_id: Some(1),
+            body: String::new(),
+        };
+        assert!(frame_visible(&per_agent, &acme(), 1));
+        assert!(!frame_visible(&per_agent, &acme(), 2)); // other agent, same tenant
+        assert!(!frame_visible(&per_agent, &TenantSlug::new(2, "other"), 1)); // other tenant
+
+        let tenant_wide = ScopedFrame {
+            tenant: acme().namespace(),
+            agent_id: None,
+            body: String::new(),
+        };
+        assert!(frame_visible(&tenant_wide, &acme(), 1));
+        assert!(frame_visible(&tenant_wide, &acme(), 999)); // any agent in tenant
+        assert!(!frame_visible(
+            &tenant_wide,
+            &TenantSlug::new(2, "other"),
+            1
+        )); // not other tenants
     }
 
     #[tokio::test]
     async fn notify_emits_a_scoped_jsonrpc_frame() {
-        let mut rx = subscribe("acme");
-        notify_prompts_list_changed("acme", Some(7));
+        let mut rx = subscribe(&acme());
+        notify_prompts_list_changed(&acme(), Some(7));
         for _ in 0..200 {
             let Ok(frame) = rx.recv().await else { continue };
-            if frame.tenant == "acme" && frame.agent_id == Some(7) {
+            if frame.tenant == acme().namespace() && frame.agent_id == Some(7) {
                 let v: serde_json::Value = serde_json::from_str(&frame.body).unwrap();
                 assert_eq!(v["method"], "notifications/prompts/list_changed");
                 assert!(v.get("id").is_none());

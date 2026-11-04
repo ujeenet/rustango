@@ -303,6 +303,7 @@ mod tests {
         let agent = |owner| {
             with(|e| {
                 e.insert(crate::mcp::auth::McpAgent {
+                    org_id: 1,
                     agent_id: 5,
                     tenant: "acme".into(),
                     skills: vec![],

@@ -117,9 +117,14 @@ async fn agent_lists_and_calls_only_its_granted_tools() {
     )
     .await
     .unwrap();
-    grant_skill_pool(&pool, "acme", "calc-bot", "calculator")
-        .await
-        .unwrap();
+    grant_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "calc-bot",
+        "calculator",
+    )
+    .await
+    .unwrap();
 
     // Resolve the grant → mint a tenant-pinned, scoped agent JWT (what the
     // /token and /oauth/token endpoints do under the hood).
@@ -188,6 +193,7 @@ async fn ungranted_agent_sees_nothing_and_is_refused() {
 
     // An agent with NO grants — fail-closed: empty tool list, calls refused.
     let agent = McpAgent {
+        org_id: 1,
         agent_id: 1,
         tenant: "acme".into(),
         skills: vec![],

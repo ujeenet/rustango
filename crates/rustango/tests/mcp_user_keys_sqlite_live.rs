@@ -514,9 +514,14 @@ async fn scoped_key_without_grants_gets_nothing() {
         .await
         .expect("scoped");
     let agent_id = scoped.agent.id.get().copied().unwrap();
-    rustango::tenancy::revoke_skill_pool(&pool, "", &scoped.agent.name, "coach")
-        .await
-        .expect("revoke last skill");
+    rustango::tenancy::revoke_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, ""),
+        &scoped.agent.name,
+        "coach",
+    )
+    .await
+    .expect("revoke last skill");
     let (skills, tools) = resolve_user_agent_grants_pool(&pool, agent_id, uid)
         .await
         .expect("resolve");
@@ -567,12 +572,22 @@ async fn a_pinned_user_key_never_widens() {
     // Unscoped, then granted and revoked.
     let key = create_user_key_pool(&pool, uid, "k", &[]).await.unwrap();
     let id = key.agent.id.get().copied().unwrap();
-    grant_skill_pool(&pool, "", &key.agent.name, "coach")
-        .await
-        .unwrap();
-    revoke_skill_pool(&pool, "", &key.agent.name, "coach")
-        .await
-        .unwrap();
+    grant_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, ""),
+        &key.agent.name,
+        "coach",
+    )
+    .await
+    .unwrap();
+    revoke_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, ""),
+        &key.agent.name,
+        "coach",
+    )
+    .await
+    .unwrap();
     assert!(empty(id, uid).await, "a granted-then-revoked key widened");
 
     // Minted before the flag existed: no `scoped` in its data.
@@ -588,9 +603,14 @@ async fn a_pinned_user_key_never_widens() {
         .remove(0);
     row.data = json!({ "kind": "user_key", "label": "old" });
     row.save(&pool).await.unwrap();
-    revoke_skill_pool(&pool, "", &key.agent.name, "coach")
-        .await
-        .unwrap();
+    revoke_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, ""),
+        &key.agent.name,
+        "coach",
+    )
+    .await
+    .unwrap();
     assert!(empty(id, uid).await, "a pre-flag scoped key widened");
 
     // A superuser's scoped key.
@@ -598,9 +618,14 @@ async fn a_pinned_user_key_never_widens() {
         .await
         .unwrap();
     let id = key.agent.id.get().copied().unwrap();
-    revoke_skill_pool(&pool, "", &key.agent.name, "coach")
-        .await
-        .unwrap();
+    revoke_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, ""),
+        &key.agent.name,
+        "coach",
+    )
+    .await
+    .unwrap();
     assert!(empty(id, root).await, "a superuser's scoped key widened");
 }
 

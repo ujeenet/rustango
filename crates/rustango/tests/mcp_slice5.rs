@@ -35,6 +35,7 @@ fn ctx(pool: Pool, skills: &[&str]) -> McpContext {
     McpContext {
         pool,
         agent: McpAgent {
+            org_id: 1,
             agent_id: 1,
             tenant: "acme".into(),
             skills: skills.iter().map(|s| s.to_string()).collect(),

@@ -55,6 +55,8 @@ pub struct McpAgent {
     pub agent_id: i64,
     /// The tenant slug this token is pinned to.
     pub tenant: String,
+    /// That tenant's org id: a later tenant reusing the slug has another.
+    pub org_id: i64,
     /// The granted skill codenames.
     pub skills: Vec<String>,
     /// The tools those skills add up to.
@@ -66,6 +68,14 @@ pub struct McpAgent {
     pub jti: String,
     /// The public prefix of the credential this agent signed in with.
     pub secret_prefix: String,
+}
+
+impl McpAgent {
+    /// The tenant this agent belongs to, org id included.
+    #[must_use]
+    pub fn tenant_binding(&self) -> TenantSlug {
+        TenantSlug::new(self.org_id, self.tenant.clone())
+    }
 }
 
 /// Issue a short-lived access token for `agent_id`, pinned to
@@ -133,6 +143,7 @@ async fn verify_agent_claims(
     let agent = McpAgent {
         agent_id: claims.sub,
         tenant,
+        org_id: expected_tenant.org_id,
         skills: claims
             .get_custom::<Vec<String>>(CLAIM_SKILLS)
             .unwrap_or_default(),
@@ -586,6 +597,7 @@ async fn verify_raw_with<E: From<AgentError>>(
     Ok(Some(McpAgent {
         agent_id,
         tenant: tenant.slug.clone(),
+        org_id: tenant.org_id,
         skills,
         tools,
         user_id: live.agent.user_id,
@@ -897,9 +909,14 @@ mod tests {
             .await
             .unwrap();
         let bot = create_agent_pool(&pool, "bot").await.unwrap();
-        grant_skill_pool(&pool, "acme", "bot", "editor")
-            .await
-            .unwrap();
+        grant_skill_pool(
+            &pool,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            "bot",
+            "editor",
+        )
+        .await
+        .unwrap();
         let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
         let Ok(minted) = mint_agent_jwt(
             &jwt,
@@ -926,9 +943,14 @@ mod tests {
             .map(|a| a.tools)
         };
         assert_eq!(tools().await, Some(vec!["edit".to_owned()]));
-        revoke_skill_pool(&pool, "acme", "bot", "editor")
-            .await
-            .unwrap();
+        revoke_skill_pool(
+            &pool,
+            &crate::tenancy::TenantSlug::new(1, "acme"),
+            "bot",
+            "editor",
+        )
+        .await
+        .unwrap();
         assert_eq!(tools().await, Some(vec![]), "a revoked skill ends at once");
         rotate_agent_secret_pool(&pool, "bot").await.unwrap();
         assert_eq!(tools().await, None, "a rotation ends the JWT");
