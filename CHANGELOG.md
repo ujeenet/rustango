@@ -38,6 +38,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- `dumpdata` fails on a cell it cannot decode, and on a NaN or infinite float, instead of writing `null` for it.
+- `loaddata` leaves generated columns out of its inserts, so a dump of a model with one loads back.
+- `dumpdata -o` creates its temp file with a random name, owner-only (0600 on Unix), and never through an existing file or link.
 - `ModelFormError::Database` displays only `database error`; the driver text, which could name tables and hosts, moved to `source()`.
 - `SessionStore::for_tenant` and `FeatureFlags::for_tenant` bind sessions and per-user flag overrides to the tenant's org id and slug; unscoped, a session or override from one tenant applied in another.
 - A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.

@@ -4513,7 +4513,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
                     });
                 }
             }
-            let rows = crate::sql::select_rows_as_json_with(pool, &query, &fields, fixture_json)
+            let rows = crate::sql::select_rows_as_json_with(pool, &query, &fields, DUMP_DECODE)
                 .await
                 .map_err(|e| {
                     MigrateError::Validation(format!(
@@ -4577,7 +4577,8 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
 }
 
 /// A file written beside `dest` and renamed over it only once complete, so
-/// a failed dump leaves the old fixture as it was.
+/// a failed dump leaves the old fixture as it was. Owner-only: a dump holds
+/// every row, credentials included.
 struct PendingFile {
     file: std::fs::File,
     tmp: std::path::PathBuf,
@@ -4588,9 +4589,11 @@ struct PendingFile {
 impl PendingFile {
     fn create(dest: &Path) -> std::io::Result<Self> {
         let name = dest.file_name().unwrap_or_default().to_string_lossy();
-        let tmp = dest.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+        // Unguessable, and never opened through a link planted there.
+        let rand = uuid::Uuid::new_v4().simple();
+        let tmp = dest.with_file_name(format!(".{name}.{rand}.tmp"));
         Ok(Self {
-            file: std::fs::File::create(&tmp)?,
+            file: crate::private_file::create(&tmp)?,
             tmp,
             dest: dest.to_owned(),
             done: false,
@@ -4648,6 +4651,12 @@ fn fixture_json(v: serde_json::Value) -> serde_json::Value {
         v
     }
 }
+
+/// dumpdata's read: a cell it cannot decode fails the dump, never `null`.
+const DUMP_DECODE: crate::sql::CellDecode = crate::sql::CellDecode {
+    json: fixture_json,
+    on_bad: crate::sql::OnBadCell::Fail,
+};
 
 /// The value inside a [`JSON_TAG`] wrapper.
 fn json_tagged(v: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -4870,7 +4879,7 @@ async fn m2m_links(
     for rel in schema.m2m.iter().filter(|r| r.auto_create) {
         let (junction, [src, dst]) = junction_of(schema, rel)?;
         let query = crate::core::SelectQuery::by_pk_in(junction, rel.src_col, src_pks.to_vec());
-        let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
+        let rows = crate::sql::select_rows_as_json_with(pool, &query, &[src, dst], DUMP_DECODE)
             .await
             .map_err(|e| {
                 MigrateError::Validation(format!(
@@ -4902,7 +4911,7 @@ async fn load_links(
     schema: &'static crate::core::ModelSchema,
     rel: &crate::core::M2MRelation,
     rows: &[RowLinks],
-    fail_fast: bool,
+    on_error: OnRowError,
 ) -> Result<Vec<String>, String> {
     let (junction, [s, d]) = junction_of(schema, rel).map_err(|e| e.to_string())?;
     let insert = |values| async move {
@@ -4924,7 +4933,7 @@ async fn load_links(
             Ok(values) => converted.push((line, values)),
             Err(e) => failed.push(format!("entry #{line}: {e}")),
         }
-        if fail_fast && !failed.is_empty() {
+        if on_error == OnRowError::Abort && !failed.is_empty() {
             return Ok(failed);
         }
     }
@@ -4936,7 +4945,7 @@ async fn load_links(
     for (line, values) in converted {
         if let Err(e) = insert(values).await {
             failed.push(format!("entry #{line}: {e}"));
-            if fail_fast {
+            if on_error == OnRowError::Abort {
                 break;
             }
         }
@@ -4944,20 +4953,27 @@ async fn load_links(
     Ok(failed)
 }
 
+/// What a load does with a row it cannot write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnRowError {
+    /// Warn, count it skipped, and go on; the load still fails at the end.
+    Skip,
+    /// Stop at the first one (`--fail-fast`).
+    Abort,
+}
+
 #[derive(Debug, PartialEq)]
 struct LoaddataArgs {
     /// Path to the fixture JSON file.
     file: String,
-    /// Stop on the first error (`true`) vs. log + continue (`false`,
-    /// default).
-    fail_fast: bool,
+    on_error: OnRowError,
     /// Help short-circuit.
     help: bool,
 }
 
 fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
     let mut file: Option<String> = None;
-    let mut fail_fast = false;
+    let mut on_error = OnRowError::Skip;
     let mut help = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -4966,7 +4982,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
                 help = true;
                 break;
             }
-            "--fail-fast" => fail_fast = true,
+            "--fail-fast" => on_error = OnRowError::Abort,
             other if other.starts_with('-') => {
                 return Err(unknown_flag(other));
             }
@@ -4981,7 +4997,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
     if help {
         return Ok(LoaddataArgs {
             file: String::new(),
-            fail_fast: false,
+            on_error: OnRowError::Skip,
             help: true,
         });
     }
@@ -4990,7 +5006,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
     })?;
     Ok(LoaddataArgs {
         file,
-        fail_fast,
+        on_error,
         help: false,
     })
 }
@@ -5070,17 +5086,9 @@ pub(crate) async fn loaddata_cmd<W: Write>(
     // Parents first: fixtures come in registration order, and a child
     // inserted before its parent fails its FK (#1911). A nullable link in a
     // cycle goes in as NULL and is set once every row is in.
-    let LoadPlan { order, deferred } = load_plan(&entries, &schemas);
+    let (named, used) = fixture_tables(&entries, &schemas);
+    let LoadPlan { order, deferred } = load_plan(&named, &used);
     let entries = in_fk_order(entries, &schemas, &order);
-    let mut named: Vec<&'static crate::core::ModelSchema> = Vec::new();
-    for s in entries
-        .iter()
-        .filter_map(|e| schemas.get(e.get("model").and_then(|v| v.as_str()).unwrap_or("")))
-    {
-        if !named.iter().any(|n| n.table == s.table) {
-            named.push(s);
-        }
-    }
     require_tenant_tables(pool, scope, &named, "loaddata").await?;
 
     let mut loaded = 0_usize;
@@ -5114,7 +5122,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
                         schemas.len() / 2, // dotted + bare keys
                     ),
                 };
-                if parsed.fail_fast {
+                if parsed.on_error == OnRowError::Abort {
                     abort = Some(msg);
                     break;
                 }
@@ -5140,7 +5148,8 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut columns: Vec<&'static str> = Vec::new();
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
-        for f in schema.scalar_fields() {
+        // The database computes a generated column; an INSERT naming it fails.
+        for f in schema.scalar_fields().filter(|f| f.generated_as.is_none()) {
             // An absent key takes the column default, not NULL; a null pk is absent.
             let Some(raw) = fields_obj
                 .get(f.name)
@@ -5176,7 +5185,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         }
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
-            if parsed.fail_fast {
+            if parsed.on_error == OnRowError::Abort {
                 abort = Some(msg);
                 break;
             }
@@ -5204,7 +5213,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
                  database-generated `{}`, so this row's cycle link can't be set; give it a `pk`",
                 pk.name
             );
-            if parsed.fail_fast {
+            if parsed.on_error == OnRowError::Abort {
                 abort = Some(msg);
                 break;
             }
@@ -5273,7 +5282,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             }
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
-                if parsed.fail_fast {
+                if parsed.on_error == OnRowError::Abort {
                     abort = Some(msg);
                     break;
                 }
@@ -5294,15 +5303,14 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             tracing::warn!("{msg}");
             loaded -= 1;
             skipped += 1;
-            if parsed.fail_fast && abort.is_none() {
+            if parsed.on_error == OnRowError::Abort && abort.is_none() {
                 abort = Some(msg);
             }
         }
     }
     if abort.is_none() {
         'rels: for (schema, rel, model_name, rows) in links {
-            let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.fail_fast).await
-            {
+            let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.on_error).await {
                 Ok(failed) => {
                     let n = failed.len();
                     (failed, n)
@@ -5312,7 +5320,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             };
             for e in failed {
                 let msg = format!("loaddata: `{model_name}` `{}`: {e}", rel.name);
-                if parsed.fail_fast {
+                if parsed.on_error == OnRowError::Abort {
                     abort = Some(msg);
                     break 'rels;
                 }
@@ -5353,47 +5361,50 @@ struct LoadPlan {
     deferred: DeferredLinks,
 }
 
-/// Plan over the fixture's own tables and the links its rows set: a
-/// nullable link no row fills never orders. A link is deferred only when
-/// the tables still form a cycle, and then only one that points against
-/// the order the NOT NULL links give (as `flush_plan` breaks cycles).
-/// Self-links are left to [`self_parents_first`].
-fn load_plan(
+/// `(table, column)` of each FK column at least one row fills.
+type UsedLinks = std::collections::HashSet<(&'static str, &'static str)>;
+
+/// The fixture's tables in first-seen order, and the FK columns its rows fill.
+fn fixture_tables(
     entries: &[serde_json::Value],
     schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
-) -> LoadPlan {
-    let schema_of = |e: &serde_json::Value| {
-        schemas
+) -> (Vec<&'static crate::core::ModelSchema>, UsedLinks) {
+    let mut nodes: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    let mut used = UsedLinks::new();
+    for e in entries {
+        let Some(s) = schemas
             .get(e.get("model").and_then(|v| v.as_str()).unwrap_or(""))
             .copied()
-    };
-    let mut nodes: Vec<&'static crate::core::ModelSchema> = Vec::new();
-    for s in entries.iter().filter_map(schema_of) {
+        else {
+            continue;
+        };
         if !nodes.iter().any(|n| n.table == s.table) {
             nodes.push(s);
         }
-    }
-    // Every (table, column) some fixture row sets, in one pass.
-    let mut set_by_a_row: std::collections::HashSet<(&str, &str)> =
-        std::collections::HashSet::new();
-    for e in entries {
-        let (Some(s), Some(fields)) = (schema_of(e), e.get("fields")) else {
+        let Some(fields) = e.get("fields") else {
             continue;
         };
-        set_by_a_row.extend(
+        used.extend(
             s.fields
                 .iter()
+                .filter(|f| f.relation.is_some())
                 .filter(|f| fields.get(f.name).is_some_and(|v| !v.is_null()))
                 .map(|f| (s.table, f.column)),
         );
     }
-    // Is `col` of `s` set by any of the fixture's `s` rows?
-    let filled = |s: &crate::core::ModelSchema, col: &str| {
-        !s.fields.iter().any(|f| f.column == col) || set_by_a_row.contains(&(s.table, col))
+    (nodes, used)
+}
+
+/// Plan over `nodes` and the links `used` says some row sets: a nullable
+/// link no row fills never orders. A link is deferred only when the tables
+/// still form a cycle, and then only one that points against the order the
+/// NOT NULL links give (as `flush_plan` breaks cycles). Self-links are left
+/// to [`self_parents_first`].
+fn load_plan(nodes: &[&'static crate::core::ModelSchema], used: &UsedLinks) -> LoadPlan {
+    let used = |s: &crate::core::ModelSchema, col: Option<&'static str>| {
+        col.is_none_or(|c| used.contains(&(s.table, c)))
     };
-    let used =
-        |s: &crate::core::ModelSchema, col: Option<&'static str>| col.is_none_or(|c| filled(s, c));
-    let (mut children_first_order, cyclic) = children_first(&nodes, used);
+    let (mut children_first_order, cyclic) = children_first(nodes, used);
     let (rest, stuck) = children_first(&cyclic, |_, col| col.is_none());
     children_first_order.extend(rest);
     children_first_order.extend(stuck);
@@ -8115,14 +8126,14 @@ mod gen_tests {
     fn parse_loaddata_args_path_then_flag() {
         let p = parse_loaddata_args(&["fixtures.json".into(), "--fail-fast".into()]).unwrap();
         assert_eq!(p.file, "fixtures.json");
-        assert!(p.fail_fast);
+        assert_eq!(p.on_error, OnRowError::Abort);
     }
 
     #[test]
     fn parse_loaddata_args_flag_then_path() {
         let p = parse_loaddata_args(&["--fail-fast".into(), "fixtures.json".into()]).unwrap();
         assert_eq!(p.file, "fixtures.json");
-        assert!(p.fail_fast);
+        assert_eq!(p.on_error, OnRowError::Abort);
     }
 
     #[test]
