@@ -217,6 +217,8 @@ It counts in fixed windows, so a burst across a window edge can reach twice the 
 
 > **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key, so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` with `trust_proxies` in front); without it the limiter warns once and falls back to a single shared bucket.
 
+`key_by(KeyBy::Tenant)` gives each tenant its own bucket, keyed by org id, so one busy tenant cannot use up another's quota; `KeyBy::Global` stays one bucket for the whole platform. Mount it on the tenant routes: outside them every request shares one bucket.
+
 
 ---
 

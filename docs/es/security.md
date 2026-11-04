@@ -217,6 +217,8 @@ Cuenta en ventanas fijas, así que una ráfaga a caballo de un borde de ventana 
 
 > **Keyear por una cabecera secreta es seguro de compartir.** Con `key_by(KeyBy::Header("authorization"))` o `"x-api-key"`, el limitador respaldado por caché **hashea** el valor de la cabecera antes de usarlo como clave, de modo que un Redis compartido nunca almacena una credencial viva donde alguien con acceso de lectura a las claves pudiera cosecharla. `KeyBy::Ip` necesita `ConnectInfo` (o un `RealIpLayer` con `trust_proxies` delante); sin ello, el limitador avisa una vez y recae en un único bucket compartido.
 
+`key_by(KeyBy::Tenant)` da a cada tenant su propio bucket, por id de org, así que un tenant con mucho tráfico no agota la cuota de otro; `KeyBy::Global` sigue siendo un único bucket para toda la plataforma. Móntalo en las rutas de tenant: fuera de ellas todas las peticiones comparten un bucket.
+
 
 ---
 

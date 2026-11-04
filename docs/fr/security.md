@@ -217,6 +217,8 @@ Il compte par fenêtres fixes, donc une rafale à cheval sur une limite de fenê
 
 > **Keyer sur un en-tête secret est sûr à partager.** Avec `key_by(KeyBy::Header("authorization"))` ou `"x-api-key"`, le limiteur adossé au cache **hache** la valeur de l'en-tête avant de l'utiliser comme clé : un Redis partagé ne stocke donc jamais une crédential vivante là où quelqu'un lisant les clés pourrait la récolter. `KeyBy::Ip` nécessite `ConnectInfo` (ou un `RealIpLayer` avec `trust_proxies` en amont) ; sans cela, le limiteur avertit une fois et retombe sur un unique bucket partagé.
 
+`key_by(KeyBy::Tenant)` donne à chaque tenant son propre bucket, par id d'org, si bien qu'un tenant très actif n'épuise pas le quota d'un autre ; `KeyBy::Global` reste un bucket unique pour toute la plateforme. Montez-le sur les routes du tenant : en dehors, toutes les requêtes partagent un bucket.
+
 
 ---
 

@@ -301,7 +301,10 @@ invalidación.
 Un tenant nuevo puede reutilizar el slug de un tenant purgado. Para que
 `purge-tenant` borre las claves `ScopedCache::for_tenant` del tenant anterior, llama a
 `rustango::tenancy::decommission::clear_on_purge(cache)` al arrancar por cada caché
-que las guarde.
+que las guarde. La purga también borra allí los locks, las sesiones y los
+overrides de flags del tenant. Las entradas de idempotencia y de caché de página
+se quedan hasta que expiran: van ligadas al id de la org, así que el tenant nuevo
+no puede leerlas.
 
 ---
 
