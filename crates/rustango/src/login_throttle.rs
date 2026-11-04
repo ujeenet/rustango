@@ -1144,7 +1144,27 @@ static SHARED: crate::boot_slot::BootSlot<LoginThrottle> = crate::boot_slot::Boo
 /// unless [`configure_shared`] or `[auth] login_*` settings set it.
 #[must_use]
 pub fn shared() -> &'static LoginThrottle {
+    #[cfg(test)]
+    if let Ok(gate) = TEST_GATE.try_with(|g| *g) {
+        return gate;
+    }
     SHARED.get(|| LoginThrottle::new(LoginLimits::default()))
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    static TEST_GATE: &'static LoginThrottle;
+}
+
+/// Run `f` with `gate` as this task's [`shared`] gate, so a test neither
+/// sees nor swaps the process-wide one other tests install.
+#[cfg(test)]
+#[cfg_attr(
+    not(all(feature = "mcp", feature = "sqlite", feature = "testkit")),
+    allow(dead_code)
+)]
+pub(crate) async fn with_test_gate<F: std::future::Future>(gate: LoginThrottle, f: F) -> F::Output {
+    TEST_GATE.scope(Box::leak(Box::new(gate)), f).await
 }
 
 /// Install the [`shared`] gate at boot. It replaces the default and the

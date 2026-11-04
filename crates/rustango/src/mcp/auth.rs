@@ -1046,64 +1046,103 @@ mod tests {
         ClientIp::from_parts(&ext, &HeaderMap::new())
     }
 
+    /// Re-run `f` while the process-wide hashing queue is busy: that checked
+    /// nothing and spent no attempt.
+    #[cfg(all(feature = "sqlite", feature = "testkit"))]
+    async fn past_busy<T, F: std::future::Future<Output = T>>(
+        mut f: impl FnMut() -> F,
+        busy: impl Fn(&T) -> bool,
+    ) -> T {
+        for _ in 0..100 {
+            let r = f().await;
+            if !busy(&r) {
+                return r;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        panic!("the hashing queue stayed busy");
+    }
+
     /// Wrong agent secrets are limited per IP, on the token endpoints and
     /// as a raw bearer, so a flood cannot fill the hashing queue.
     #[cfg(all(feature = "sqlite", feature = "testkit"))]
     #[tokio::test]
     async fn wrong_agent_secrets_are_limited_per_ip() {
+        use crate::login_throttle::{with_test_gate, LoginLimits, LoginThrottle};
         let _g = super::raw_key_cache_test_lock().lock().await;
-        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
-        crate::testkit::migrate_framework(&pool).await.unwrap();
-        let bot = crate::tenancy::create_agent_pool(&pool, "bot")
-            .await
-            .unwrap();
-        let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
-        // The bucket refills while Argon2 runs, so allow a few extra tries.
-        let tries = crate::login_throttle::shared().limits().ip_limit + 5;
-        let throttled = |r: LoginRefused| matches!(r, LoginRefused::Throttled { .. });
+        // This task's own gate: other tests swap the shared one, and a
+        // decade window cannot refill or roll over however slow Argon2 is.
+        let limits = LoginLimits {
+            ip_limit: 3,
+            ip_window: std::time::Duration::from_secs(10 * 365 * 24 * 3600),
+            ..LoginLimits::default()
+        };
+        with_test_gate(LoginThrottle::new(limits), async {
+            let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+            crate::testkit::migrate_framework(&pool).await.unwrap();
+            let bot = crate::tenancy::create_agent_pool(&pool, "bot")
+                .await
+                .unwrap();
+            let jwt = JwtLifecycle::new(b"unit-secret-at-least-32-bytes-long!!".to_vec());
+            let mint_busy = |r: &Result<MintedToken, MintError>| {
+                matches!(r, Err(MintError::Refused(LoginRefused::Busy)))
+            };
+            let bearer_busy = |r: &Result<McpAgent, BearerRejection>| {
+                matches!(r, Err(BearerRejection::Refused(LoginRefused::Busy)))
+            };
 
-        let (slug, ip) = (&TenantSlug::new(1, "t-mint-limit"), client([10, 78, 0, 1]));
-        let mut refused = false;
-        for _ in 0..tries {
-            match mint_agent_jwt(&jwt, &pool, slug, "bot", "wrong", &ip).await {
-                Err(MintError::Unauthorized) => {}
-                Err(MintError::Refused(r)) if throttled(r) => refused = true,
-                _ => panic!("unexpected mint outcome"),
+            let (slug, ip) = (&TenantSlug::new(1, "t-mint-limit"), client([10, 78, 0, 1]));
+            for _ in 0..limits.ip_limit {
+                let r = past_busy(
+                    || mint_agent_jwt(&jwt, &pool, slug, "bot", "wrong", &ip),
+                    mint_busy,
+                )
+                .await;
+                assert!(
+                    matches!(r, Err(MintError::Unauthorized)),
+                    "a wrong secret within the limit"
+                );
             }
-            if refused {
-                break;
+            for secret in ["wrong", bot.token.as_str()] {
+                let r = mint_agent_jwt(&jwt, &pool, slug, "bot", secret, &ip).await;
+                assert!(
+                    matches!(r, Err(MintError::Refused(LoginRefused::Throttled { .. }))),
+                    "past the limit, even the right secret is refused"
+                );
             }
-        }
-        assert!(refused, "wrong secrets were never limited");
-        let r = mint_agent_jwt(&jwt, &pool, slug, "bot", &bot.token, &ip).await;
-        assert!(matches!(
-            r,
-            Err(MintError::Refused(LoginRefused::Throttled { .. }))
-        ));
-        let other = client([10, 78, 0, 2]);
-        assert!(mint_agent_jwt(&jwt, &pool, slug, "bot", &bot.token, &other)
-            .await
-            .is_ok());
+            let other = client([10, 78, 0, 2]);
+            let r = past_busy(
+                || mint_agent_jwt(&jwt, &pool, slug, "bot", &bot.token, &other),
+                mint_busy,
+            )
+            .await;
+            assert!(r.is_ok(), "another IP is not limited");
 
-        let (slug, ip) = (&TenantSlug::new(1, "t-raw-limit"), client([10, 78, 1, 1]));
-        let junk = "abcdef12.0123456789abcdef";
-        let mut refused = false;
-        for _ in 0..tries {
-            match authenticate_bearer(&jwt, &pool, slug, junk, &ip).await {
-                Err(BearerRejection::Unauthorized) => {}
-                Err(BearerRejection::Refused(r)) if throttled(r) => refused = true,
-                _ => panic!("unexpected bearer outcome"),
+            let (slug, ip) = (&TenantSlug::new(1, "t-raw-limit"), client([10, 78, 1, 1]));
+            let junk = "abcdef12.0123456789abcdef";
+            for _ in 0..limits.ip_limit {
+                let r = past_busy(
+                    || authenticate_bearer(&jwt, &pool, slug, junk, &ip),
+                    bearer_busy,
+                )
+                .await;
+                assert!(
+                    matches!(r, Err(BearerRejection::Unauthorized)),
+                    "a wrong key within the limit"
+                );
             }
-            if refused {
-                break;
+            for token in [junk, bot.token.as_str()] {
+                let r = authenticate_bearer(&jwt, &pool, slug, token, &ip).await;
+                assert!(
+                    matches!(
+                        r,
+                        Err(BearerRejection::Refused(LoginRefused::Throttled { .. }))
+                    ),
+                    "past the limit, even the right key is refused"
+                );
             }
-        }
-        assert!(refused, "wrong raw keys were never limited");
-        let r = authenticate_bearer(&jwt, &pool, slug, &bot.token, &ip).await;
-        assert!(matches!(
-            r,
-            Err(BearerRejection::Refused(LoginRefused::Throttled { .. }))
-        ));
+        })
+        .await;
     }
 
     #[tokio::test]
