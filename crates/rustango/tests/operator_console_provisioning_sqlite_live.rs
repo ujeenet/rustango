@@ -144,22 +144,7 @@ async fn boot_wrapped(provisioner_url: Option<&str>, wrap: Wrap) -> Booted {
 }
 
 /// Percent-encode a form value.
-///
-/// Local rather than `urlencoding::encode`: that crate is an optional
-/// dependency not enabled by `sqlite,tenancy`, and widening a feature
-/// set to spell one test fixture is the wrong trade.
-fn form_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+use rustango::url_codec::url_encode as form_encode;
 
 async fn body_of(resp: axum::response::Response) -> String {
     String::from_utf8_lossy(&to_bytes(resp.into_body(), 4 * 1024 * 1024).await.unwrap())

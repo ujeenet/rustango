@@ -39,6 +39,11 @@ is doing real work, the [glossary](glossary.md) defines it in plain language.
 rustc --version    # should print 1.88+
 ```
 
+On an older toolchain a fresh `Cargo.lock` can pick a dependency release
+that needs a newer Rust. Set `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`
+when you generate the lock file, and Cargo picks the newest releases your
+toolchain can build.
+
 ### Choosing a database
 
 **Docker is not required.** This guide reaches for it because one command gives

@@ -144,12 +144,11 @@ impl<DB: Database> Tenant<DB> {
     /// pool should take [`TenantScope`], which holds no connection.
     ///
     /// **Cost in schema mode:** one pool build on the first miss,
-    /// then free — until the cache fills. `scoped_pool` caches per
-    /// tenant slug up to `max_cached_scoped_pools`, 64 by default.
-    /// Past that it warns and returns the new pool without caching
-    /// it, so every tenant outside the cache rebuilds a pool on every
-    /// request. Raise the cap if you have many tenants. Database mode
-    /// reuses the tenant's own pool throughout.
+    /// then free. `scoped_pool` caches per tenant slug up to
+    /// `max_cached_scoped_pools`, 64 by default; past that it evicts the
+    /// least recently used tenant's pool, which rebuilds on its next
+    /// request. Raise the cap if many tenants are busy at once. Database
+    /// mode reuses the tenant's own pool throughout.
     #[must_use]
     pub fn pool(&self) -> &crate::sql::Pool {
         &self.pool

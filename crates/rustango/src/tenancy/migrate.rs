@@ -25,11 +25,10 @@
 //!   unchanged against this pool; its ledger queries
 //!   (`__rustango_migrations__`) resolve to `<schema>.__rustango_migrations__`
 //!   thanks to search_path. Each tenant gets its own ledger row set.
-//!   The ephemeral pool is dropped after the tenant finishes; we
-//!   do not reuse it as the runtime tenant pool because runtime
-//!   uses the shared registry pool with per-checkout `SET`
-//!   (whereas migration wants connection-level `SET` for transaction
-//!   safety).
+//!   The ephemeral pool is dropped after the tenant finishes. Runtime
+//!   tenants use per-tenant cached pools with `search_path` in their
+//!   connect options instead; migration keeps its own pool, whose path
+//!   also reaches `public` (see `TenantSearchPath`).
 //!
 //! * **Database mode** — the runner uses the tenant's dedicated
 //!   pool (built lazily through [`TenantPools::pool_for_org`]). The
