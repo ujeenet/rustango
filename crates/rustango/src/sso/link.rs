@@ -775,7 +775,7 @@ impl std::fmt::Display for LinkRefusal {
 
 /// Send `user_login_failed` for a refused SSO sign-in, naming the IdP's
 /// verified email, else its subject (#2559).
-#[cfg(feature = "signals")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 pub(crate) async fn signal_refused(
     source: &'static str,
     profile: &NormalizedUser,
