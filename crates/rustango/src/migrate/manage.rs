@@ -2709,6 +2709,7 @@ fn docs_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
 
 /// The command that opens `url` in a browser on `os`. `start` takes its
 /// first quoted argument as a window title, hence the empty one.
+/// `cmd` splits an unquoted `&`, so `url` must not contain one.
 fn browser_opener<'a>(os: &str, url: &'a str) -> Option<(&'static str, Vec<&'a str>)> {
     match os {
         "macos" => Some(("open", vec![url])),

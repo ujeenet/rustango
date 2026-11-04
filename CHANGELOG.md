@@ -10,9 +10,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `manage docs` opens the browser on Windows instead of starting a stray `cmd`.
 - Ctrl-C inside `dbshell` on Windows reaches the database client and no longer kills rustango, leaving the client orphaned.
 - The docs and the scaffolded tenant README give a PowerShell line next to each bash-only `export` / `openssl` / `mkdir -p` command.
-
-### Fixed
-
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 
 ## [0.62.0] — 2026-11-02
