@@ -150,6 +150,7 @@ untouched.
 
 ## Unreleased
 
+- Under nextest, `testkit::matrix::Backend::pool` connects to `<db>-s<slot>` (created on first use), not to the URL's database. A test that re-reads `DATABASE_URL`/`MYSQL_TEST_URL` to reach the same tables should call `Backend::url()`. The database user needs `CREATE DATABASE` rights.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 
 ## 0.62.0

@@ -88,6 +88,8 @@ impl Backend {
     }
 
     /// Open a pool, or `None` when this backend is not configured here.
+    /// Under nextest it is the running slot's own database (see [`Self::url`]),
+    /// so tests in parallel processes never share tables.
     ///
     /// # Panics
     ///
@@ -106,19 +108,13 @@ impl Backend {
                     &url,
                     &["postgres://", "postgresql://"],
                 );
-                Some(
-                    Pool::connect(&url).await.unwrap_or_else(|e| {
-                        panic!("DATABASE_URL is set but unreachable ({url}): {e}")
-                    }),
-                )
+                Some(connect_isolated("DATABASE_URL", &url).await)
             }
             #[cfg(feature = "mysql")]
             Backend::MySql => {
                 let url = std::env::var("MYSQL_TEST_URL").ok()?;
                 assert_scheme(self, "MYSQL_TEST_URL", &url, &["mysql://", "mariadb://"]);
-                Some(Pool::connect(&url).await.unwrap_or_else(|e| {
-                    panic!("MYSQL_TEST_URL is set but unreachable ({url}): {e}")
-                }))
+                Some(connect_isolated("MYSQL_TEST_URL", &url).await)
             }
             #[cfg(feature = "sqlite")]
             Backend::Sqlite => Some(
@@ -133,6 +129,99 @@ impl Backend {
             _ => None,
         }
     }
+
+    /// The URL [`Self::pool`] connects to, for a suite that needs a second
+    /// connection to the same database. `None` when unset, and for SQLite.
+    /// Under nextest that is the slot database, which `pool()` creates.
+    #[must_use]
+    pub fn url(self) -> Option<String> {
+        let var = self.env_var()?;
+        let url = std::env::var(var).ok()?;
+        Some(match nextest_slot() {
+            Some(slot) => SlotDatabase::of(var, &url, slot).url,
+            None => url,
+        })
+    }
+}
+
+/// nextest's global slot: unique among the tests running at one moment,
+/// across every binary. Unset under `cargo test`.
+fn nextest_slot() -> Option<u64> {
+    std::env::var("NEXTEST_TEST_GLOBAL_SLOT").ok()?.parse().ok()
+}
+
+/// The database a test in one nextest slot runs on: `<db>-s<slot>` next
+/// to the configured one, so parallel tests never share tables.
+#[derive(Debug, PartialEq, Eq)]
+struct SlotDatabase {
+    name: crate::sql::server::DatabaseName,
+    url: String,
+}
+
+impl SlotDatabase {
+    /// # Panics
+    /// When `url` names no database, or one that cannot become a slug.
+    fn of(var: &str, url: &str, slot: u64) -> Self {
+        let (scheme, rest) = url
+            .split_once("://")
+            .unwrap_or_else(|| panic!("{var} `{url}` has no scheme"));
+        let (main, query) = rest
+            .split_once('?')
+            .map_or((rest, None), |(m, q)| (m, Some(q)));
+        let (authority, db) = main
+            .split_once('/')
+            .filter(|(_, db)| !db.is_empty())
+            .unwrap_or_else(|| panic!("{var} `{url}` must name a database"));
+        let slug = format!("{}-s{slot}", db.to_ascii_lowercase().replace('_', "-"));
+        let name = crate::sql::server::DatabaseName::new(slug)
+            .unwrap_or_else(|e| panic!("{var}: no slot database for `{db}`: {e}"));
+        let query = query.map_or(String::new(), |q| format!("?{q}"));
+        let url = format!("{scheme}://{authority}/{}{query}", name.as_str());
+        Self { name, url }
+    }
+
+    /// Create the database unless it exists, from an admin connection on
+    /// `admin_url`'s server.
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
+    async fn ensure(&self, var: &str, admin_url: &str) {
+        let admin = Pool::connect_admin(admin_url, None, std::time::Duration::from_secs(10))
+            .await
+            .unwrap_or_else(|e| panic!("{var} is set but unreachable ({admin_url}): {e}"));
+        let d = admin.dialect();
+        let exists = || async {
+            let stmt = d.database_exists_sql(&self.name).expect("a server backend");
+            let rows: Vec<(i64,)> = crate::sql::raw_query_pool(&stmt.sql, stmt.params, &admin)
+                .await
+                .unwrap_or_else(|e| panic!("looking up {}: {e}", self.name));
+            rows.first().is_some_and(|(n,)| *n > 0)
+        };
+        if !exists().await {
+            let sql = d
+                .create_database_sql(&self.name, None)
+                .expect("a server backend");
+            // Another run on the same server may have made it meanwhile.
+            if let Err(e) = crate::sql::raw_execute_pool(&admin, &sql, Vec::new()).await {
+                assert!(exists().await, "creating {}: {e}", self.name);
+            }
+        }
+        admin.close().await;
+    }
+}
+
+/// Connect to `url`'s database, or under nextest to this slot's own.
+#[cfg(any(feature = "postgres", feature = "mysql"))]
+async fn connect_isolated(var: &str, url: &str) -> Pool {
+    let url = match nextest_slot() {
+        Some(slot) => {
+            let db = SlotDatabase::of(var, url, slot);
+            db.ensure(var, url).await;
+            db.url
+        }
+        None => url.to_owned(),
+    };
+    Pool::connect(&url)
+        .await
+        .unwrap_or_else(|e| panic!("{var} is set but unreachable ({url}): {e}"))
 }
 
 /// The URL for a backend must actually name that backend.
@@ -238,10 +327,8 @@ pub async fn pg_extension(pool: &Pool, name: &str) -> bool {
 /// files used to carry protected a suite from itself, and so does this,
 /// with less to forget.
 ///
-/// Cross-suite isolation needs something a lock cannot provide:
-/// per-suite table names (which `fresh_table::<M>` already gives, since
-/// every converted suite names its own model's table), or a per-suite
-/// schema or database. Table naming is why this has not bitten.
+/// Cross-process isolation comes from [`Backend::pool`] instead: under
+/// nextest each slot runs on its own database.
 #[must_use]
 pub fn live_lock() -> &'static tokio::sync::Mutex<()> {
     static M: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -754,6 +841,26 @@ mod tests {
             None,
             "SQLite is in-memory and must never gate on configuration"
         );
+    }
+
+    /// Each slot gets its own database next to the configured one; the
+    /// rest of the URL is kept.
+    #[test]
+    fn a_slot_database_sits_next_to_the_configured_one() {
+        let db = SlotDatabase::of("V", "mysql://u:p@h:3306/rustango_test?ssl-mode=disabled", 3);
+        assert_eq!(db.name.as_str(), "rustango-test-s3");
+        assert_eq!(
+            db.url,
+            "mysql://u:p@h:3306/rustango-test-s3?ssl-mode=disabled"
+        );
+        let db = SlotDatabase::of("V", "postgres://u@h/Live_Iso", 0);
+        assert_eq!(db.url, "postgres://u@h/live-iso-s0");
+    }
+
+    #[test]
+    #[should_panic(expected = "must name a database")]
+    fn a_slot_database_needs_a_database_in_the_url() {
+        let _ = SlotDatabase::of("V", "postgres://u@h:5432", 1);
     }
 
     /// The names must match `Dialect::name`, because that string is what

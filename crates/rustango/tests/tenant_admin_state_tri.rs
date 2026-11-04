@@ -77,9 +77,15 @@ async fn tenant(pool: &Pool, session: bool) -> Tenant {
     let dir = tempfile::tempdir().unwrap();
     let (url, kind) = match pool {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(_) => (std::env::var("DATABASE_URL").unwrap(), "postgres"),
+        Pool::Postgres(_) => (
+            rustango::testkit::matrix::Backend::Postgres.url().unwrap(),
+            "postgres",
+        ),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(_) => (std::env::var("MYSQL_TEST_URL").unwrap(), "mysql"),
+        Pool::Mysql(_) => (
+            rustango::testkit::matrix::Backend::MySql.url().unwrap(),
+            "mysql",
+        ),
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(_) => (
             format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display()),

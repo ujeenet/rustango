@@ -33,16 +33,10 @@ fn serial_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 async fn mysql_pool() -> Option<Pool> {
-    let url = std::env::var("MYSQL_TEST_URL").ok()?;
-    let mp = sqlx::mysql::MySqlPoolOptions::new()
-        .max_connections(5)
-        .connect(&url)
-        .await
-        .expect("mysql connect");
+    let pool = rustango::testkit::matrix::Backend::MySql.pool().await?;
     let _ = sqlx::query("DROP TABLE IF EXISTS rustango_audit_log")
-        .execute(&mp)
+        .execute(pool.as_mysql().expect("a MySQL pool"))
         .await;
-    let pool = Pool::Mysql(mp);
     ensure_table_pool(&pool).await.expect("ensure_table_pool");
     Some(pool)
 }

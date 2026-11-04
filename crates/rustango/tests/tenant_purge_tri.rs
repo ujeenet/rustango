@@ -18,7 +18,9 @@ async fn setup(pool: &Pool) {
 /// The registry URL the Postgres matrix pool connects to.
 #[cfg(feature = "postgres")]
 fn registry_url() -> String {
-    std::env::var("DATABASE_URL").expect("DATABASE_URL")
+    rustango::testkit::matrix::Backend::Postgres
+        .url()
+        .expect("DATABASE_URL")
 }
 
 async fn purge_on(pool: &Pool, slug: &str) -> Result<Report, TenancyError> {
@@ -243,7 +245,7 @@ async fn mysql_purge_sees_through_a_host_alias() {
     let Pool::Mysql(my) = &pool else {
         unreachable!()
     };
-    let base = std::env::var("MYSQL_TEST_URL").unwrap();
+    let base = rustango::testkit::matrix::Backend::MySql.url().unwrap();
     let alias = |url: &str| {
         if url.contains("@127.0.0.1") {
             url.replace("@127.0.0.1", "@localhost")
@@ -568,7 +570,7 @@ async fn org_with_database(pool: &Pool, tag: &str) -> (Org, String) {
         .execute(pg)
         .await
         .unwrap();
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let url = rustango::testkit::matrix::Backend::Postgres.url().unwrap();
     let mut org = Org {
         slug,
         display_name: tag.into(),
@@ -744,7 +746,7 @@ async fn database_purge_refuses_the_registry_database() {
         slug: slug.clone(),
         display_name: slug.clone(),
         backend_kind: "postgres".into(),
-        database_url: Some(std::env::var("DATABASE_URL").unwrap()),
+        database_url: Some(rustango::testkit::matrix::Backend::Postgres.url().unwrap()),
         ..rustango::testkit::org()
     };
     org.save(&pool).await.expect("insert org");
@@ -863,7 +865,7 @@ async fn schema_purge_refuses_a_reserved_schema() {
         .execute(pg)
         .await
         .unwrap();
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let url = rustango::testkit::matrix::Backend::Postgres.url().unwrap();
     let private =
         rustango::sql::sqlx::PgPool::connect(&format!("{}/{db}", url.rsplit_once('/').unwrap().0))
             .await
@@ -930,7 +932,7 @@ where
         .execute(pg)
         .await
         .unwrap();
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let url = rustango::testkit::matrix::Backend::Postgres.url().unwrap();
     let private =
         rustango::sql::sqlx::PgPool::connect(&format!("{}/{db}", url.rsplit_once('/').unwrap().0))
             .await
@@ -1229,7 +1231,7 @@ async fn database_purge_refuses_the_registry_under_another_host_name() {
         return;
     };
     setup(&pool).await;
-    let url = std::env::var("DATABASE_URL").unwrap();
+    let url = rustango::testkit::matrix::Backend::Postgres.url().unwrap();
     let alias = if url.contains("127.0.0.1") {
         url.replace("127.0.0.1", "localhost")
     } else {
