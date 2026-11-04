@@ -158,6 +158,7 @@ untouched.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 - `cargo rustango new --features mcp` needs `--template tenant`; the api and fullstack templates refuse it. A project scaffolded before can drop its `/mcp` mount: it could not authenticate an agent.
 - `FeatureFlags` write methods return `Result<(), CacheError>`; add `?` (or handle the error) where you call `enable`, `disable`, `clear`, `set_percentage`, `enable_for_user` or `disable_for_user`.
+- A custom `Dialect` that overrides `quote_ident` or `placeholder` must override `push_quoted_ident` / `push_placeholder` instead: query compiles call those, and the old methods now wrap them.
 
 ## 0.62.0
 

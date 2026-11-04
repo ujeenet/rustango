@@ -96,7 +96,16 @@ pub(crate) fn sql_label(name: &str) -> std::borrow::Cow<'_, str> {
 
 /// The `alias__column` key a joined column is reported under.
 pub(crate) fn joined_key(alias: &str, column: &str) -> String {
-    format!("{alias}__{column}")
+    let mut out = String::with_capacity(alias.len() + 2 + column.len());
+    push_joined_key(&mut out, alias, column);
+    out
+}
+
+/// [`joined_key`] appended to `out`.
+pub(crate) fn push_joined_key(out: &mut String, alias: &str, column: &str) {
+    out.push_str(alias);
+    out.push_str("__");
+    out.push_str(column);
 }
 
 /// Predicate builder for JOIN `on` clauses. Emits
