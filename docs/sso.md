@@ -221,9 +221,9 @@ auto-admin, so an end-user (member) login can build without pulling in
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.62", features = ["admin-sso"] }
+rustango = { version = "0.63", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.62", features = ["tenancy", "sso"] }
+rustango = { version = "0.63", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` and the historical `admin::sso::*` core paths are

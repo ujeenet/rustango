@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.63.0] — 2026-11-04
+
 ### Added
 
 - `admin::Builder::register_action` (and `TenantAdminBuilder::register_action`, `server::Builder::admin_register_action`): the handler takes an `ActionCtx` with the transaction, the rows that passed the permission checks, the actor, the tenant, and the request's method, path and client IP.
