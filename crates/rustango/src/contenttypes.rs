@@ -1064,16 +1064,33 @@ pub async fn ensure_seeded(pool: &crate::sql::Pool) -> Result<usize, ExecError> 
             table: table.to_owned(),
         };
         // Another process seeding at the same time may have won the row.
-        // MySQL can break the two inserts with a deadlock; the retry sees the winner.
-        let won = match row.insert_or_ignore(pool).await {
-            Err(e) if e.is_deadlock() => row.insert_or_ignore(pool).await?,
-            r => r?,
-        };
-        if won {
+        if insert_retrying_deadlocks(&mut row, pool).await? {
             inserted += 1;
         }
     }
     Ok(inserted)
+}
+
+/// Concurrent boots can deadlock on the unique index; a jittered retry sees the winner's row.
+async fn insert_retrying_deadlocks(
+    row: &mut ContentType,
+    pool: &crate::sql::Pool,
+) -> Result<bool, ExecError> {
+    const ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    loop {
+        match row.insert_or_ignore(pool).await {
+            Err(e) if e.is_deadlock() && attempt < ATTEMPTS => {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.subsec_nanos());
+                let ms = 10 + u64::from(nanos % 40);
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                attempt += 1;
+            }
+            r => return r,
+        }
+    }
 }
 
 #[cfg(test)]

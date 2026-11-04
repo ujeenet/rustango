@@ -328,8 +328,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             headers: parts
                 .headers
                 .iter()
-                // The replay body is in memory; a stored framing header would contradict it.
-                .filter(|(k, _)| *k != CONTENT_LENGTH && *k != TRANSFER_ENCODING)
+                .filter(|(k, _)| !is_hop_by_hop(k))
                 .filter_map(|(k, v)| {
                     let k = k.as_str().to_owned();
                     v.to_str().ok().map(|s| (k, s.to_owned()))
@@ -600,6 +599,25 @@ async fn read_stored(cache: &BoxedCache, cache_key: &str) -> Option<StoredRespon
     serde_json::from_str(&raw).ok()
 }
 
+/// Framing and hop-by-hop headers: they describe the original connection, not the replay.
+fn is_hop_by_hop(name: &HeaderName) -> bool {
+    use axum::http::header::{
+        CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, UPGRADE,
+    };
+    [
+        CONTENT_LENGTH,
+        TRANSFER_ENCODING,
+        CONNECTION,
+        PROXY_AUTHENTICATE,
+        PROXY_AUTHORIZATION,
+        TE,
+        TRAILER,
+        UPGRADE,
+    ]
+    .contains(name)
+        || name.as_str() == "keep-alive"
+}
+
 fn rebuild(stored: StoredResponse) -> Response<Body> {
     let body_bytes = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -612,7 +630,10 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
     for (k, v) in &stored.headers {
         if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v))
         {
-            builder = builder.header(name, value);
+            // Entries stored before the filter at store time may still hold these.
+            if !is_hop_by_hop(&name) {
+                builder = builder.header(name, value);
+            }
         }
     }
     let mut resp = builder
@@ -762,6 +783,37 @@ mod tests {
         );
         assert!(r2.headers().get("transfer-encoding").is_none());
         assert_eq!(body_string(r2).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn replay_of_an_old_entry_drops_its_hop_by_hop_headers() {
+        // An entry cached before the store-time filter still holds them.
+        let h = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let stored = StoredResponse {
+            request_sha256: String::new(),
+            status: 200,
+            headers: vec![
+                h("content-length", "999"),
+                h("transfer-encoding", "chunked"),
+                h("connection", "close"),
+                h("keep-alive", "timeout=5"),
+                h("upgrade", "websocket"),
+                h("x-kept", "1"),
+            ],
+            body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"ok"),
+        };
+        let resp = rebuild(stored);
+        for name in [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "upgrade",
+        ] {
+            assert!(resp.headers().get(name).is_none(), "{name} replayed");
+        }
+        assert_eq!(resp.headers().get("x-kept").unwrap(), "1");
+        assert_eq!(body_string(resp).await, "ok");
     }
 
     #[tokio::test]

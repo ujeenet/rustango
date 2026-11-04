@@ -7,10 +7,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Fixed
 
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
-- `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return the cache error instead of dropping it, so a kill switch that did not land is visible.
-- An idempotency replay no longer re-sends the stored `Content-Length` / `Transfer-Encoding`.
+- An idempotency replay no longer re-sends stored framing or hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Connection`, ...), including entries cached by 0.62.0.
 - A panic while the i18n translator's lock is held no longer makes every later translation panic.
-- `contenttypes::ensure_seeded` retries once on a MySQL deadlock, so two processes booting at once both start.
+- `contenttypes::ensure_seeded` retries a deadlocked insert up to three times, so several processes booting at once all start.
+
+### Changed
+
+- **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
 
 ## [0.62.0] — 2026-11-02
 
