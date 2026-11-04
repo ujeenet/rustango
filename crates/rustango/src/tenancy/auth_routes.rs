@@ -1345,8 +1345,10 @@ mod tests {
     }
 
     /// A JTI store that records nothing: every write fails.
+    #[cfg(feature = "sqlite")]
     struct FailingStore;
 
+    #[cfg(feature = "sqlite")]
     impl crate::jti_store::JtiStore for FailingStore {
         fn is_used<'a>(&'a self, _: &'a str) -> crate::jti_store::JtiFuture<'a, bool> {
             Box::pin(async { false })
@@ -1394,8 +1396,10 @@ mod tests {
     }
 
     /// Like Redis `SET NX EX`: a TTL of zero or less is refused, nothing stored.
+    #[cfg(feature = "sqlite")]
     struct TtlStore(std::sync::Mutex<std::collections::HashSet<String>>);
 
+    #[cfg(feature = "sqlite")]
     impl crate::jti_store::JtiStore for TtlStore {
         fn is_used<'a>(&'a self, k: &'a str) -> crate::jti_store::JtiFuture<'a, bool> {
             Box::pin(async move { self.0.lock().unwrap().contains(k) })

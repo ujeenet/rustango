@@ -76,7 +76,7 @@
   {% if first_admin %}
   <table>
     <tr>
-      <th><label for="admin_email">{{ user_label.email }}</label></th>
+      <th><label for="admin_email">{{ user_label.email | default(value="Email") }}</label></th>
       <td><input type="email" id="admin_email" name="admin_email" maxlength="254" placeholder="optional"></td>
     </tr>
     <tr>

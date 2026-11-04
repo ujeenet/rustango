@@ -1213,7 +1213,10 @@ jobs:
           Set-Location "$env:RUNNER_TEMP\firsttenant"
           $bytes = New-Object byte[] 48
           [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
-          $env:RUSTANGO_SECRET_KEY_PREVIOUS = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path "var/.rustango_secret.key")))
+          if (Test-Path "var/.rustango_secret.key") {
+            $env:RUSTANGO_SECRET_KEY_PREVIOUS = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path "var/.rustango_secret.key")))
+          }
+          $env:RUSTANGO_SECRET_KEY = [Convert]::ToBase64String($bytes)
           New-Item -ItemType Directory -Force var/tenants2 | Out-Null
           Run cargo run -q -- add-db-server files2 --sqlite-dir "$PWD\var\tenants2"
           Run cargo run -q -- create-tenant beta --mode database --server files2 --host-pattern beta.localhost

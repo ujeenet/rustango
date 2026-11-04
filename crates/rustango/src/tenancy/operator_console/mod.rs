@@ -2754,6 +2754,29 @@ mod withheld_tests {
 }
 
 #[cfg(test)]
+mod field_text_tests {
+    /// The first-admin email row renders whether or not `User` has an
+    /// `email` column (it exists only with `sso`).
+    #[test]
+    fn the_email_label_renders_without_the_column() {
+        let mut ctx = tera::Context::new();
+        super::insert_field_text_as(
+            &mut ctx,
+            "user",
+            <crate::tenancy::User as crate::core::Model>::SCHEMA,
+        );
+        let line = r#"{{ user_label.email | default(value="Email") }}"#;
+        let out = tera::Tera::one_off(line, &ctx, false).expect("renders");
+        assert!(!out.is_empty());
+        #[cfg(not(feature = "sso"))]
+        {
+            assert_eq!(out, "Email");
+            assert!(tera::Tera::one_off("{{ user_label.email }}", &ctx, false).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod database_url_hint_tests {
     use super::database_url_hint;
 

@@ -781,7 +781,11 @@ async fn worker_loop(w: InMemoryWorker) {
             Next::Done => {
                 pending.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             }
-            Next::Retry { wait: backoff, .. } => {
+            Next::Retry {
+                wait: backoff,
+                error,
+            } => {
+                tracing::debug!(target: "rustango::jobs", job = envelope.name, attempt = runs, %error, "job failed; retrying");
                 let mut retry = envelope;
                 retry.attempt = runs;
                 // Still counted in `pending` while parked.
