@@ -14,13 +14,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A new tenant project's `.env.example` sets `RUSTANGO_TENANT_PORT=8080`, so `create-tenant --admin-email` prints a link with the dev server's port.
 - The `startapp` tests template uses `contains` and passes `clippy::manual_contains`.
 - Fullstack and tenant projects on the prod tier without `RUSTANGO_SESSION_SECRET` exit with `Error:` instead of panicking (`run-server` and `server::Builder` return the error); the prod Dockerfile header names the keys each template needs.
+- `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 
 ### Deprecated
 
 - `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
-### Fixed
-
-- `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 
 ## [0.62.0] — 2026-11-02
 
