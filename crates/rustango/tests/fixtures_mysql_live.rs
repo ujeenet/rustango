@@ -17,12 +17,8 @@ fn serial_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 async fn mysql_pool_with_table() -> Option<Pool> {
-    let url = std::env::var("MYSQL_TEST_URL").ok()?;
-    let mp = sqlx::mysql::MySqlPoolOptions::new()
-        .max_connections(5)
-        .connect(&url)
-        .await
-        .expect("mysql connect");
+    let pool = rustango::testkit::matrix::Backend::MySql.pool().await?;
+    let mp = pool.as_mysql().expect("a MySQL pool").clone();
     let _ = sqlx::query("DROP TABLE IF EXISTS `fixture_widgets`")
         .execute(&mp)
         .await;
@@ -37,7 +33,7 @@ async fn mysql_pool_with_table() -> Option<Pool> {
     .execute(&mp)
     .await
     .expect("create widget table");
-    Some(Pool::Mysql(mp))
+    Some(pool)
 }
 
 #[tokio::test]

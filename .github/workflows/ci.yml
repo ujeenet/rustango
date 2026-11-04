@@ -1720,11 +1720,12 @@ jobs:
           path: ${{ runner.temp }}
       # Suites that make their own `rustango_*` databases (#1988) need CREATE
       # rights, and tenancy provisions into a second database the service
-      # does not grant.
+      # does not grant. `Backend::pool` runs each nextest slot on `rustango-test-s<N>`.
       - name: Grant rustango_* databases
         run: |
           mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
             GRANT ALL PRIVILEGES ON \`rustango\_%\`.* TO 'rustango'@'%';
+            GRANT ALL PRIVILEGES ON \`rustango-test-s%\`.* TO 'rustango'@'%';
             CREATE DATABASE IF NOT EXISTS rustango_tenant_test;
             GRANT ALL PRIVILEGES ON rustango_tenant_test.* TO 'rustango'@'%';
             FLUSH PRIVILEGES;"

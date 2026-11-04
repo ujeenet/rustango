@@ -52,6 +52,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The internal `_tera` and `_aead` features build alone under `-D warnings`.
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 - API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
+- `testkit::matrix::Backend::pool` runs each nextest slot on its own database (`<db>-s<slot>`), so `tri_dialect_test!` suites no longer collide when run in parallel; `Backend::url` gives that database's URL.
+
 ## [0.62.0] — 2026-11-02
 
 ### Added
