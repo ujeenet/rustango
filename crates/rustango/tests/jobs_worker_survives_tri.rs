@@ -1389,6 +1389,8 @@ async fn a_blocking_handler_is_not_run_twice(pool: &Pool) {
 // Multi-thread: a blocked thread must leave others for the heartbeat.
 mod multi_thread {
     use super::*;
+    // Only the server arms take the live lock.
+    #[cfg(any(feature = "postgres", feature = "mysql"))]
     use rustango::testkit::matrix::{live_lock, Backend};
 
     #[cfg(feature = "postgres")]
