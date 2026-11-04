@@ -130,8 +130,8 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
     // POST /login → cookie. Required to authenticate the upload.
     let login_form = format!(
         "username={}&password={}&next=%2F",
-        urlencoding::encode(&username),
-        urlencoding::encode(&password),
+        rustango::url_codec::url_encode(&username),
+        rustango::url_codec::url_encode(&password),
     );
     let login_req = Request::builder()
         .method("POST")

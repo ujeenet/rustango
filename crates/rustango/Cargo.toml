@@ -238,7 +238,7 @@ mcp = ["tenancy", "sse", "serializer", "openapi", "jwt", "_axum", "dep:async-str
 # providers (GitHub, Discord) AND OIDC providers (Google, Microsoft,
 # Apple, Keycloak) via the `/userinfo` endpoint as identity source.
 # Per-tenant via `OAuth2Registry`. Pulls reqwest (rustls — no openssl).
-oauth2 = ["_signing", "dep:reqwest", "dep:urlencoding", "_rand", "_async_trait"]
+oauth2 = ["_signing", "dep:reqwest", "_rand", "_async_trait"]
 
 # Opinionated HTTP client (`rustango::http_client`) — reqwest wrapper
 # with sane timeouts, exponential-backoff retry on idempotent verbs +
@@ -609,7 +609,6 @@ bytes            = { version = "1", optional = true }
 # `oauth2` feature deps — optional.
 reqwest     = { workspace = true, optional = true }
 ring        = { workspace = true, optional = true }
-urlencoding = { workspace = true, optional = true }
 
 # `compression` feature dep — optional.
 flate2 = { workspace = true, optional = true }
@@ -668,8 +667,6 @@ http-body-util = { workspace = true }
 axum           = { workspace = true }
 base64         = { workspace = true }
 dotenvy        = { workspace = true }
-# Tests build form bodies with it; the lib only pulls it in via `oauth2`.
-urlencoding    = { workspace = true }
 # Signs id_tokens for the fake IdP in the SSO tests.
 ring           = { workspace = true }
 tempfile       = "3"

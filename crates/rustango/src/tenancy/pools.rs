@@ -108,11 +108,11 @@ pub struct TenantPoolsConfig {
     /// `None` disables. Default: `Some(30 minutes)`.
     pub database_pool_max_lifetime: Option<std::time::Duration>,
 
-    /// When `true`, [`TenantPools`] eagerly builds pools for every
-    /// active database-mode tenant at construction time (`new()` /
-    /// `with_secrets()`). Bounded by `max_cached_database_pools`.
-    /// Schema-mode tenants are never pre-warmed (they share the
-    /// registry pool which is already up). Default: `false`.
+    /// When `true`, the server builder (`Builder::into_router`) builds
+    /// pools for every active database-mode tenant before it serves,
+    /// through [`TenantPools::prewarm_database_tenants`]. Bounded by
+    /// `max_cached_database_pools`. Schema-mode tenants are not
+    /// pre-warmed: their pools are built on first use. Default: `false`.
     pub prewarm_active_tenants: bool,
 
     // v0.53 — schema-mode scoped-pool caching (#1235).

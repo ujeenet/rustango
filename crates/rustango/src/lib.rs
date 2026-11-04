@@ -1045,7 +1045,8 @@ pub mod template_debug;
 
 /// Sitewide template context processors — see
 /// [`template_context_processors`].
-#[cfg(feature = "_tera")]
+// Its hooks read request `Parts`, which come from axum.
+#[cfg(all(feature = "_tera", feature = "_axum"))]
 pub mod template_context_processors;
 
 /// Custom template filters and functions — see

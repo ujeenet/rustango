@@ -547,9 +547,9 @@ impl OAuth2Provider {
         url.push_str(&encode_form(params.iter().map(|(k, v)| (*k, v.as_str()))));
         for (k, v) in &self.extra_auth_params {
             url.push('&');
-            url.push_str(&urlencoding::encode(k));
+            url.push_str(&crate::url_codec::url_encode(k));
             url.push('=');
-            url.push_str(&urlencoding::encode(v));
+            url.push_str(&crate::url_codec::url_encode(v));
         }
 
         let flow = OAuth2Flow {
@@ -864,9 +864,9 @@ fn encode_form<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
             out.push('&');
         }
         first = false;
-        out.push_str(&urlencoding::encode(k));
+        out.push_str(&crate::url_codec::url_encode(k));
         out.push('=');
-        out.push_str(&urlencoding::encode(v));
+        out.push_str(&crate::url_codec::url_encode(v));
     }
     out
 }

@@ -542,7 +542,7 @@ impl Env {
     async fn shared_provider(&self, slug: &str, allow_email_link: bool) {
         let mut form = format!(
             "slug={slug}&label={slug}&kind=oidc&issuer_url={}&client_id=cid&client_secret=cs&enabled=on",
-            urlencoding::encode(&self.idp.issuer)
+            rustango::url_codec::url_encode(&self.idp.issuer)
         );
         if allow_email_link {
             form.push_str("&allow_email_link=on");
@@ -2499,7 +2499,7 @@ async fn admin_written_links_get_the_key_and_stay_unique() {
     let form = |subject: &str| {
         format!(
             "provider_source=tenant&provider_id=1&issuer={}&subject={subject}&user_id={ann}",
-            urlencoding::encode(&issuer)
+            rustango::url_codec::url_encode(&issuer)
         )
     };
     let links = || async { SsoLink::objects().fetch(env.pool()).await.unwrap() };

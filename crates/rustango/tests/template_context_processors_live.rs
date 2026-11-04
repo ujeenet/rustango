@@ -3,7 +3,7 @@
 //! template's context via `apply_to_context`. Verifies the macro
 //! shape end-to-end + the handler-key-wins override semantics.
 
-#![cfg(all(feature = "sqlite", feature = "_tera"))]
+#![cfg(all(feature = "sqlite", feature = "_tera", feature = "_axum"))]
 
 use std::collections::HashMap;
 
