@@ -185,14 +185,14 @@ async fn a_value_the_resolver_could_never_match_is_refused() {
 async fn clear_empties_a_field_that_was_set() {
     let b = boot().await;
     b.tenant("acme").await;
-    // A port keeps the tenant routable once its host is gone.
+    // A path prefix keeps the tenant routable once its host is gone.
     b.run(&[
         "edit-tenant",
         "acme",
         "--host-pattern",
         "shop.example.com",
-        "--port",
-        "8081",
+        "--path-prefix",
+        "/acme",
     ])
     .await
     .expect("set");
@@ -206,7 +206,7 @@ async fn clear_empties_a_field_that_was_set() {
     );
 }
 
-/// No resolver routes a tenant without a host, path prefix or port.
+/// No resolver routes a tenant without a host or path prefix.
 #[tokio::test]
 async fn clearing_the_last_routing_key_is_refused() {
     let b = boot().await;
@@ -218,10 +218,7 @@ async fn clearing_the_last_routing_key_is_refused() {
         .run(&["edit-tenant", "acme", "--clear", "host-pattern"])
         .await
         .expect_err("an unroutable tenant must be refused");
-    assert!(
-        err.contains("needs a host, a path prefix or a port"),
-        "{err}"
-    );
+    assert!(err.contains("needs a host or a path prefix"), "{err}");
     assert_eq!(b.org("acme").await.host_pattern, before, "row unchanged");
 }
 

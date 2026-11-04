@@ -304,14 +304,19 @@ pub async fn add_missing_columns<M: crate::core::Model>(pool: &Pool) -> Result<(
 
 // ======================================================= factories
 
-/// `request` with host `<slug>.localhost` when it has no host, path prefix
-/// or port: provisioning refuses a tenant no resolver routes.
+/// `request` with host `<slug>.localhost` when no resolver would route it:
+/// provisioning refuses such a tenant.
 #[cfg(feature = "tenancy")]
 #[must_use]
 pub fn routed(
     mut request: crate::tenancy::provision::ProvisionRequest,
 ) -> crate::tenancy::provision::ProvisionRequest {
-    if request.host_pattern.is_none() && request.path_prefix.is_none() && request.port.is_none() {
+    let routable = crate::tenancy::provision::is_routable(
+        request.host_pattern.as_deref(),
+        request.path_prefix.as_deref(),
+        request.port,
+    );
+    if !routable {
         request.host_pattern = Some(format!("{}.localhost", request.slug));
     }
     request
@@ -324,7 +329,12 @@ pub fn routed_opts(
     slug: &str,
     mut opts: crate::tenancy::manage::api::CreateTenantOpts,
 ) -> crate::tenancy::manage::api::CreateTenantOpts {
-    if opts.host_pattern.is_none() && opts.path_prefix.is_none() && opts.port.is_none() {
+    let routable = crate::tenancy::provision::is_routable(
+        opts.host_pattern.as_deref(),
+        opts.path_prefix.as_deref(),
+        opts.port,
+    );
+    if !routable {
         opts.host_pattern = Some(format!("{slug}.localhost"));
     }
     opts
@@ -336,7 +346,8 @@ pub fn routed_opts(
 #[must_use]
 pub fn routed_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     let mut out: Vec<String> = args.iter().map(|a| a.as_ref().to_owned()).collect();
-    let routing = ["--host-pattern", "--path-prefix", "--port"];
+    // A port alone routes nothing on the built-in server.
+    let routing = ["--host-pattern", "--path-prefix"];
     if let [verb, slug, rest @ ..] = out.as_slice() {
         if verb == "create-tenant"
             && !slug.starts_with('-')

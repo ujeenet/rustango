@@ -148,6 +148,10 @@ untouched.
 
 ---
 
+## Unreleased
+
+- Creating or editing a tenant with a port but no host or path prefix is refused. Give it a host, or set `RUSTANGO_TENANT_PORT_ROUTING=1` if your app mounts `PortResolver` on its own listeners.
+
 ## 0.62.0
 
 - Two-part JWTs (pre-0.57.5 shape) are refused and `JwtBackend::issue*` mint standard three-part tokens. Admin session, TOTP-pending, passkey challenge and OAuth2 flow cookies change format, and password links get a new scope value: those in flight end once. `tenancy` now enables the `jwt` feature.

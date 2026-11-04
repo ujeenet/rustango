@@ -1020,7 +1020,7 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--no-migrate` | Skip applying tenant-scoped migrations after provisioning |
 | `--backend postgres \| mysql \| sqlite` | Must be the registry's backend, which is the default |
 | `--schema-name <s>` | Override the generated schema name in schema mode |
-| `--port <n>` | Port the tenant is reachable on, for routing |
+| `--port <n>` | Port in the tenant's links; alone it routes nothing (see below) |
 | `--path-prefix <s>` | Path prefix the tenant is reachable under, for routing |
 | `--admin-email <e>` / `--admin-username <u>` | Create the tenant's first superuser (see **First admin** above) |
 | `--resume` | Finish a tenant an earlier run left inactive because its migrations failed; give the same flags again |
@@ -1066,7 +1066,7 @@ cargo run -- edit-tenant acme --clear host-pattern
 | `--display-name <name>` | Human-readable label |
 | `--host-pattern <host>` | Bare hostname the tenant answers on |
 | `--path-prefix <path>` | One leading-slash segment, e.g. `/acme` |
-| `--port <n>` | Port the tenant is matched on |
+| `--port <n>` | Port in the tenant's links |
 | `--database-url <url>` | Rotate the tenant's connection URL |
 | `--activate` / `--deactivate` | Put the tenant in or out of service |
 | `--clear <field>` | Empty one of `host-pattern`, `path-prefix`, `port` |
@@ -1078,6 +1078,10 @@ relying on `--host-pattern ""`, which some shells and CI runners eat.
 Values are validated the way `create-tenant` validates them, so a host
 pattern carrying a port, or a path prefix the resolver could never
 produce, is refused rather than stored to silently never match.
+
+A tenant needs a host or a path prefix. The built-in server does not route
+by port, so a port alone is refused; an app that mounts `PortResolver` on
+listeners of its own sets `RUSTANGO_TENANT_PORT_ROUTING=1`.
 
 Rotating `--database-url` changes the stored URL. Every server switches
 within 30 s, when its tenant cache refreshes; other edits leave warm

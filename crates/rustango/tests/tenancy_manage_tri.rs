@@ -2157,6 +2157,26 @@ async fn check_keeps_no_tenant_pool_open(pool: &Pool) {
 }
 
 /// Flags a verb would ignore are refused, and nothing is written.
+/// The built-in server has no port resolver, so a tenant routed by port
+/// alone would never be reached: creating one is refused.
+async fn a_port_only_tenant_is_refused(pool: &Pool) {
+    let mut env = Env::new(pool).await;
+    let dir = env.dir("migrations");
+    let opts = CreateTenantOpts {
+        port: Some(8443),
+        no_migrate: true,
+        ..env.tenant_opts("portonly").await
+    };
+    // Not `env.create`: its routing default would add a host.
+    let res = typed!(env.registry, p => create_tenant(&p, &env.url, &dir, "portonly", opts).await);
+    let err = res.expect_err("a port-only tenant routes nowhere");
+    assert!(
+        err.to_string().contains("needs a host or a path prefix"),
+        "{err}"
+    );
+    assert!(env.org("portonly").await.is_none(), "no org row");
+}
+
 async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
     let mut env = Env::new(pool).await;
     let dir = env.dir("migrations");
@@ -2231,6 +2251,7 @@ tri_dialect_test! {
     setup: setup,
     sqlite: file,
     scenarios: [
+        a_port_only_tenant_is_refused,
         reseal_leaves_a_sealed_url_without_a_password,
         a_resolved_secret_is_never_echoed,
         migrate_storage_checks_the_target_url,

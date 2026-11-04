@@ -154,6 +154,12 @@ impl LinkApex {
     }
 }
 
+/// `RUSTANGO_TENANT_PORT_ROUTING=1`: the app routes tenants by listener port itself.
+pub(crate) fn port_routing_setting() -> bool {
+    std::env::var("RUSTANGO_TENANT_PORT_ROUTING")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+}
+
 /// `RUSTANGO_TENANT_SCHEME`, empty counted as unset. The one reader of it.
 pub(crate) fn tenant_scheme_setting() -> Option<String> {
     std::env::var("RUSTANGO_TENANT_SCHEME")
@@ -634,11 +640,12 @@ mod apex_tests {
             ..bare.clone()
         };
         assert!(tenant_link(&prefixed, "/x", None, &apex).is_ok());
+        // The built-in server does not route by port, so a port alone gets no link.
         let ported = crate::tenancy::Org {
             port: Some(8081),
             ..bare
         };
-        assert!(tenant_link(&ported, "/x", None, &apex).is_ok());
+        assert!(tenant_link(&ported, "/x", None, &apex).is_err());
     }
 
     /// #2425 — a handoff link defaults to https where cookies are Secure.
