@@ -78,8 +78,9 @@ Ein **Resolver** macht aus einer Anfrage eine `Org`. Der Server probiert eine
 Kette von Resolvern der Reihe nach, und der erste Treffer gewinnt:
 
 1. **Host.** Der `Host`-Header ist gleich dem `host_pattern` des Tenants,
-   zum Beispiel `acme.app.com`. Der Vergleich ist exakt. `create-tenant`
-   setzt `<slug>.<apex>`, wenn du keinen angibst.
+   zum Beispiel `acme.app.com`. Der Vergleich ist exakt. Gibst du keinen Host an,
+   setzt `create-tenant` `<slug>.<apex>`, aber nur ohne `--path-prefix` und
+   wenn der Apex gesetzt ist.
 2. **Weitere Hosts.** Ein Hostname, der in `rustango_org_hosts` an den
    Tenant gebunden ist. Er schlägt nie den eigenen Host eines anderen
    Tenants.
@@ -90,24 +91,27 @@ Kette von Resolvern der Reihe nach, und der erste Treffer gewinnt:
    einen Header im Stil von `X-Org` hinzu. Kombiniere ihn mit
    `HeaderResolver::allow_only`: der Client wählt den Header-Wert.
 
-Nur **aktive** Tenants werden getroffen. Der Apex selbst
-(`RUSTANGO_APEX_DOMAIN`) führt nie zu einem Tenant: er zeigt die
-Operator-Konsole. Eine Anfrage ohne Tenant bekommt von den Tenant-Routen ein
+Nur **aktive** Tenants werden getroffen. Der Apex allein
+(`RUSTANGO_APEX_DOMAIN`) führt zu keinem Tenant: er zeigt die
+Operator-Konsole. Der Apex plus ein Pfad-Präfix führt zu einem, ebenso eine
+Apex-Anfrage mit dem Header `X-Org`, wenn `HeaderResolver` aktiv ist. Eine Anfrage ohne Tenant bekommt von den Tenant-Routen ein
 404, oder geht an [`unresolved_tenant`](operator-console.md#unbekannte-hosts),
 wenn du einen gesetzt hast.
 
-**Port.** `Org.port` wird von `PortResolver` verglichen. Er liest den Port
-des Listeners, der die Anfrage angenommen hat, nie die URI des Clients. Er
-steht nicht in der Kette des Servers: füge ihn einer Kette hinzu, die du
-selbst baust.
+**Port.** Der eingebaute Server (`Builder::serve`, `run-server`) hat kein
+Port-Routing und keinen Weg, `PortResolver` in seine Kette zu nehmen. Ein
+Tenant, der nur über seinen Port erreichbar ist, wird dort nicht erreicht.
+`PortResolver` (er liest den Port des Listeners, nie die URI des Clients)
+wirkt nur in einer Kette, die du selbst baust und betreibst.
 
 Ein Tenant ohne Host, ohne Pfad-Präfix und ohne Port ist **nicht
 erreichbar** und wird abgelehnt: von `create-tenant`, von der Konsole und von
 einer Änderung am Routing.
 
 Ergebnisse werden 30 Sekunden gecacht. Ein anderer Server sieht eine
-Änderung an `rustango_orgs` innerhalb einer Fingerprint-Abfrage
-(`RUSTANGO_HOST_GEN_CHECK_SECS`, Standard 5 Sekunden).
+Änderung an `rustango_orgs` innerhalb von zwei Fingerprint-Abfragen
+(`RUSTANGO_HOST_GEN_CHECK_SECS`, Standard 5 Sekunden), und nie später als
+der 30-Sekunden-Cache.
 
 Im Handler nimmst du `TenantScope` (hält keine Verbindung) oder `Tenant`
 (hält eine Verbindung für die Anfrage):
@@ -149,7 +153,7 @@ praktisch in der Entwicklung, wo du nur einen Host hast.
 
 Jeder Tenant hat einen `storage_mode`: `schema` oder `database`.
 
-[![Schema-Modus: eine Postgres-Datenbank mit einem Schema pro Tenant, der search_path ist das Tenant-Schema plus Schemas nur mit Erweiterungen, und der Pool lehnt ein fehlendes Schema, ein nach einer Rolle benanntes Schema oder ein public mit einer fehlenden Tenant-Tabelle ab. Datenbank-Modus: jeder Tenant hat seine eigene Postgres-, MySQL- oder SQLite-Datenbank](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
+[![Schema-Modus: eine Postgres-Datenbank mit einem Schema pro Tenant, der search_path ist das Tenant-Schema plus Schemas nur mit Erweiterungen, und der Pool lehnt ein fehlendes Schema, ein nach einer Rolle benanntes Schema oder ein public mit einer fehlenden Tenant-Tabelle ab. Datenbank-Modus: jeder Tenant hat seine eigene Datenbank auf demselben Backend wie die Registry](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
 
 ### Schema-Modus (nur Postgres)
 
@@ -175,8 +179,10 @@ Ein Tenant-Pool **öffnet nicht**, wenn:
   die dem Schema des Tenants fehlt. Abfragen würden sonst diese Tabelle
   lesen.
 
-Eine Erweiterung im eigenen Schema des Tenants, oder in einem Schema mit
-eigenen Objekten, bleibt mit einer Warnung außerhalb des Pfads. Verschiebe
+Eine Erweiterung im eigenen Schema des Tenants ist kein Problem: dieses
+Schema steht zuerst im Pfad. Eine Erweiterung im Schema eines anderen
+Tenants, oder in einem Schema mit eigenen Objekten, bleibt mit einer Warnung
+außerhalb des Pfads. Verschiebe
 sie mit `ALTER EXTENSION <name> SET SCHEMA public`.
 
 Auf MySQL und SQLite wird der Schema-Modus mit einem Hinweis auf den
@@ -229,9 +235,9 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
 - **Bei Änderung neu gebaut.** Ein Pool merkt sich die URL oder das Schema,
   aus dem er gebaut wurde. Nennt die `Org` etwas anderes, baut die nächste
   Anfrage einen neuen Pool.
-- **Markiert.** Eine Postgres-Tenant-Verbindung trägt
+- **Markiert.** Eine Postgres-Verbindung im Datenbank-Modus trägt
   `application_name=rustango-tenant:<org id>`, damit ein Purge ihre
-  Sitzungen beenden kann.
+  Sitzungen beenden kann. Pools im Schema-Modus sind nicht markiert.
 
 Standards: 16 Verbindungen pro Pool im Datenbank-Modus, 8 pro Pool im
 Schema-Modus, keine warm gehaltenen Verbindungen, Leerlauf-Timeout

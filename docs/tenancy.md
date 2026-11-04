@@ -77,8 +77,9 @@ A **resolver** turns a request into an `Org`. The server tries a chain of
 resolvers in order, and the first match wins:
 
 1. **Host.** The `Host` header equals the tenant's `host_pattern`, for
-   example `acme.app.com`. The match is exact. `create-tenant` sets it to
-   `<slug>.<apex>` unless you give one.
+   example `acme.app.com`. The match is exact. When you give no host,
+   `create-tenant` sets `<slug>.<apex>`, but only when there is no
+   `--path-prefix` and the apex is set.
 2. **Extra hosts.** A hostname bound to the tenant in
    `rustango_org_hosts`. It never beats another tenant's own host.
 3. **Path prefix, on the apex only.** `app.com/acme/...` matches the tenant
@@ -88,22 +89,26 @@ resolvers in order, and the first match wins:
    header after the others. Pair it with `HeaderResolver::allow_only`: the
    client chooses the header value.
 
-Only **active** tenants match. The apex itself (`RUSTANGO_APEX_DOMAIN`)
-never resolves to a tenant: it serves the operator console. A request that
+Only **active** tenants match. The bare apex (`RUSTANGO_APEX_DOMAIN`)
+resolves to no tenant: it serves the operator console. The apex plus a path
+prefix does resolve, and so does an apex request with the `X-Org` header when
+`HeaderResolver` is on. A request that
 matches no tenant gets a 404 from the tenant routes, or goes to
 [`unresolved_tenant`](operator-console.md#unknown-hosts) if you set one.
 
-**Port.** `Org.port` is matched by `PortResolver`, which reads the port of
-the listener that took the request, never the client's URI. It is not in the
-server's chain: add it to a chain you build yourself.
+**Port.** The built-in server (`Builder::serve`, `run-server`) has no port
+routing, and no way to add `PortResolver` to its chain. A tenant reachable
+only by its port is not reached there. `PortResolver` (it reads the
+listener's port, never the client's URI) works only in a chain you build and
+serve yourself.
 
 A tenant with no host, no path prefix and no port is **unroutable**, and it
 is refused: by `create-tenant`, by the console, and by an edit that changes
 routing.
 
 Resolutions are cached for 30 seconds. Another server sees a change to
-`rustango_orgs` within one fingerprint poll (`RUSTANGO_HOST_GEN_CHECK_SECS`,
-default 5 seconds).
+`rustango_orgs` within two fingerprint polls (`RUSTANGO_HOST_GEN_CHECK_SECS`,
+default 5 seconds), and never later than the 30-second cache.
 
 In a handler, take `TenantScope` (holds no connection) or `Tenant` (holds
 one connection for the request):
@@ -144,7 +149,7 @@ in development, where you have one host.
 
 Each tenant has a `storage_mode`: `schema` or `database`.
 
-[![Schema mode: one Postgres database with a schema per tenant, search_path is the tenant schema plus extension-only schemas, and the pool refuses a missing schema, a role-named schema, or public holding a tenant table the schema lacks. Database mode: each tenant has its own Postgres, MySQL or SQLite database](img/tenancy-storage-modes.png)](img/tenancy-storage-modes.png)
+[![Schema mode: one Postgres database with a schema per tenant, search_path is the tenant schema plus extension-only schemas, and the pool refuses a missing schema, a role-named schema, or public holding a tenant table the schema lacks. Database mode: each tenant has its own database on the same backend as the registry](img/tenancy-storage-modes.png)](img/tenancy-storage-modes.png)
 
 ### Schema mode (Postgres only)
 
@@ -168,8 +173,9 @@ A tenant pool **refuses to open** when:
 - an extension schema on the path, such as `public`, holds a tenant table
   the tenant's schema lacks. Queries would read that table instead.
 
-An extension that lives in the tenant's own schema, or in a schema with its
-own objects, stays off the path, with a warning. Move it with
+An extension in the tenant's own schema is fine: that schema is first on
+the path. An extension in another tenant's schema, or in a schema with
+objects of its own, stays off the path, with a warning. Move it with
 `ALTER EXTENSION <name> SET SCHEMA public`.
 
 On MySQL and SQLite, schema mode is refused with a message that points to
@@ -219,9 +225,9 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
   the queries.
 - **Rebuilt on change.** A pool remembers the URL or schema it was built
   from. When the `Org` names another one, the next request builds a new pool.
-- **Tagged.** A Postgres tenant connection carries
+- **Tagged.** A database-mode Postgres connection carries
   `application_name=rustango-tenant:<org id>`, so a purge can end its
-  sessions.
+  sessions. Schema-mode pools are not tagged.
 
 Defaults: 16 connections per database-mode pool, 8 per schema-mode pool,
 no idle connections kept warm, idle timeout 10 minutes, max lifetime

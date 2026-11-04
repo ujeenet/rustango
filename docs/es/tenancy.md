@@ -78,8 +78,9 @@ Un **resolver** convierte una petición en una `Org`. El servidor prueba una
 cadena de resolvers en orden, y gana el primero que coincide:
 
 1. **Host.** La cabecera `Host` es igual al `host_pattern` del tenant, por
-   ejemplo `acme.app.com`. La comparación es exacta. `create-tenant` pone
-   `<slug>.<apex>` si no das uno.
+   ejemplo `acme.app.com`. La comparación es exacta. Si no das un host,
+   `create-tenant` pone `<slug>.<apex>`, pero solo sin `--path-prefix` y con
+   el apex configurado.
 2. **Hosts extra.** Un hostname atado al tenant en `rustango_org_hosts`.
    Nunca gana al host propio de otro tenant.
 3. **Prefijo de ruta, solo en el apex.** `app.com/acme/...` coincide con el
@@ -89,23 +90,28 @@ cadena de resolvers en orden, y gana el primero que coincide:
    estilo `X-Org` después de las demás. Úsala con
    `HeaderResolver::allow_only`: el cliente elige el valor de la cabecera.
 
-Solo coinciden los tenants **activos**. El apex (`RUSTANGO_APEX_DOMAIN`)
-nunca resuelve a un tenant: sirve la consola de operador. Una petición sin
+Solo coinciden los tenants **activos**. El apex solo (`RUSTANGO_APEX_DOMAIN`)
+no resuelve a ningún tenant: sirve la consola de operador. El apex más un
+prefijo de ruta sí resuelve, y también una petición al apex con la cabecera
+`X-Org` cuando `HeaderResolver` está activo. Una petición sin
 tenant recibe un 404 de las rutas de tenant, o va a
 [`unresolved_tenant`](operator-console.md#hosts-desconocidos) si lo
 configuras.
 
-**Puerto.** `Org.port` lo compara `PortResolver`, que lee el puerto del
-listener que aceptó la petición, nunca la URI del cliente. No está en la
-cadena del servidor: añádelo a una cadena que construyas tú.
+**Puerto.** El servidor incluido (`Builder::serve`, `run-server`) no
+enruta por puerto, y no hay forma de añadir `PortResolver` a su cadena. Un
+tenant que solo se alcanza por su puerto no se alcanza ahí. `PortResolver`
+(lee el puerto del listener, nunca la URI del cliente) solo funciona en una
+cadena que construyes y sirves tú.
 
 Un tenant sin host, sin prefijo de ruta y sin puerto es **inalcanzable**, y
 se rechaza: en `create-tenant`, en la consola y en una edición que cambie el
 enrutado.
 
 Los resultados se cachean 30 segundos. Otro servidor ve un cambio en
-`rustango_orgs` dentro de una consulta de huella
-(`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 segundos por defecto).
+`rustango_orgs` dentro de dos consultas de huella
+(`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 segundos por defecto), y nunca después
+de la caché de 30 segundos.
 
 En un handler, usa `TenantScope` (no retiene conexión) o `Tenant` (retiene
 una conexión durante la petición):
@@ -147,7 +153,7 @@ ruta son útiles en desarrollo, donde tienes un solo host.
 
 Cada tenant tiene un `storage_mode`: `schema` o `database`.
 
-[![Modo schema: una base de datos Postgres con un schema por tenant, el search_path es el schema del tenant más schemas que solo tienen extensiones, y el pool rechaza un schema que falta, un schema con nombre de rol o un public con una tabla de tenant que falta en el schema. Modo database: cada tenant tiene su propia base de datos Postgres, MySQL o SQLite](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
+[![Modo schema: una base de datos Postgres con un schema por tenant, el search_path es el schema del tenant más schemas que solo tienen extensiones, y el pool rechaza un schema que falta, un schema con nombre de rol o un public con una tabla de tenant que falta en el schema. Modo database: cada tenant tiene su propia base de datos en el mismo backend que el registry](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
 
 ### Modo schema (solo Postgres)
 
@@ -172,8 +178,9 @@ Un pool de tenant **no se abre** cuando:
 - un schema de extensiones en la ruta, como `public`, tiene una tabla de
   tenant que falta en el schema del tenant. Las consultas leerían esa tabla.
 
-Una extensión en el propio schema del tenant, o en un schema con objetos
-propios, queda fuera de la ruta, con un aviso. Muévela con
+Una extensión en el propio schema del tenant no es problema: ese schema va
+primero en la ruta. Una extensión en el schema de otro tenant, o en un
+schema con objetos propios, queda fuera de la ruta, con un aviso. Muévela con
 `ALTER EXTENSION <name> SET SCHEMA public`.
 
 En MySQL y SQLite el modo schema se rechaza con un mensaje que apunta al
@@ -226,9 +233,9 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
 - **Se reconstruye al cambiar.** Un pool recuerda la URL o el schema con que
   se creó. Cuando la `Org` nombra otro, la siguiente petición crea un pool
   nuevo.
-- **Etiquetado.** Una conexión de tenant en Postgres lleva
+- **Etiquetado.** Una conexión Postgres en modo database lleva
   `application_name=rustango-tenant:<org id>`, para que una purga pueda
-  terminar sus sesiones.
+  terminar sus sesiones. Los pools de modo schema no se etiquetan.
 
 Por defecto: 16 conexiones por pool de modo database, 8 por pool de modo
 schema, ninguna conexión inactiva mantenida, timeout de inactividad

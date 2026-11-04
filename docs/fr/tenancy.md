@@ -80,8 +80,9 @@ Un **resolver** transforme une requête en `Org`. Le serveur essaie une chaîne
 de resolvers dans l'ordre, et le premier qui trouve gagne :
 
 1. **Hôte.** L'en-tête `Host` est égal au `host_pattern` du tenant, par
-   exemple `acme.app.com`. La comparaison est exacte. `create-tenant` met
-   `<slug>.<apex>` si vous n'en donnez pas.
+   exemple `acme.app.com`. La comparaison est exacte. Sans hôte donné,
+   `create-tenant` met `<slug>.<apex>`, mais seulement sans `--path-prefix`
+   et si l'apex est défini.
 2. **Hôtes supplémentaires.** Un nom d'hôte lié au tenant dans
    `rustango_org_hosts`. Il ne passe jamais devant l'hôte propre d'un autre
    tenant.
@@ -92,23 +93,28 @@ de resolvers dans l'ordre, et le premier qui trouve gagne :
    type `X-Org` après les autres. Associez-le à
    `HeaderResolver::allow_only` : c'est le client qui choisit la valeur.
 
-Seuls les tenants **actifs** sont trouvés. L'apex lui-même
-(`RUSTANGO_APEX_DOMAIN`) ne mène jamais à un tenant : il sert la console
-opérateur. Une requête sans tenant reçoit un 404 des routes de tenant, ou va
+Seuls les tenants **actifs** sont trouvés. L'apex seul
+(`RUSTANGO_APEX_DOMAIN`) ne mène à aucun tenant : il sert la console
+opérateur. L'apex plus un préfixe de chemin mène à un tenant, de même qu'une
+requête sur l'apex avec l'en-tête `X-Org` quand `HeaderResolver` est actif.
+Une requête sans tenant reçoit un 404 des routes de tenant, ou va
 à [`unresolved_tenant`](operator-console.md#hôtes-inconnus) si vous en avez
 défini un.
 
-**Port.** `Org.port` est comparé par `PortResolver`, qui lit le port du
-listener qui a accepté la requête, jamais l'URI du client. Il n'est pas dans
-la chaîne du serveur : ajoutez-le à une chaîne que vous construisez vous-même.
+**Port.** Le serveur intégré (`Builder::serve`, `run-server`) n'a pas de
+routage par port, ni de moyen d'ajouter `PortResolver` à sa chaîne. Un
+tenant joignable seulement par son port n'y est pas atteint. `PortResolver`
+(il lit le port du listener, jamais l'URI du client) ne marche que dans une
+chaîne que vous construisez et servez vous-même.
 
 Un tenant sans hôte, sans préfixe de chemin et sans port est **injoignable**,
 et il est refusé : par `create-tenant`, par la console et par une
 modification qui touche au routage.
 
 Les résultats sont mis en cache 30 secondes. Un autre serveur voit un
-changement de `rustango_orgs` en une lecture d'empreinte
-(`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 secondes par défaut).
+changement de `rustango_orgs` en deux lectures d'empreinte
+(`RUSTANGO_HOST_GEN_CHECK_SECS`, 5 secondes par défaut), et jamais après le
+cache de 30 secondes.
 
 Dans un handler, prenez `TenantScope` (ne garde aucune connexion) ou
 `Tenant` (garde une connexion pour la requête) :
@@ -150,7 +156,7 @@ chemin sont pratiques en développement, quand vous n'avez qu'un hôte.
 
 Chaque tenant a un `storage_mode` : `schema` ou `database`.
 
-[![Mode schéma : une base Postgres avec un schéma par tenant, le search_path est le schéma du tenant plus les schémas qui ne contiennent que des extensions, et le pool refuse un schéma manquant, un schéma au nom d'un rôle ou un public qui contient une table de tenant absente du schéma. Mode base : chaque tenant a sa propre base Postgres, MySQL ou SQLite](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
+[![Mode schéma : une base Postgres avec un schéma par tenant, le search_path est le schéma du tenant plus les schémas qui ne contiennent que des extensions, et le pool refuse un schéma manquant, un schéma au nom d'un rôle ou un public qui contient une table de tenant absente du schéma. Mode base : chaque tenant a sa propre base sur le même backend que le registry](../img/tenancy-storage-modes.png)](../img/tenancy-storage-modes.png)
 
 ### Mode schéma (Postgres seulement)
 
@@ -176,8 +182,10 @@ Un pool de tenant **refuse de s'ouvrir** quand :
   tenant absente du schéma du tenant. Les requêtes liraient cette table à la
   place.
 
-Une extension placée dans le schéma du tenant, ou dans un schéma qui a ses
-propres objets, reste hors du chemin, avec un avertissement. Déplacez-la
+Une extension dans le schéma du tenant ne pose pas de problème : ce schéma
+est le premier du chemin. Une extension dans le schéma d'un autre tenant, ou
+dans un schéma qui a ses propres objets, reste hors du chemin, avec un
+avertissement. Déplacez-la
 avec `ALTER EXTENSION <name> SET SCHEMA public`.
 
 Sur MySQL et SQLite, le mode schéma est refusé avec un message qui renvoie
@@ -230,9 +238,9 @@ cargo run -- create-tenant initech --mode database --database-url "postgres://..
 - **Reconstruit en cas de changement.** Un pool retient l'URL ou le schéma
   dont il est issu. Quand l'`Org` en nomme un autre, la requête suivante
   construit un nouveau pool.
-- **Marqué.** Une connexion de tenant Postgres porte
+- **Marqué.** Une connexion Postgres en mode base porte
   `application_name=rustango-tenant:<org id>`, pour qu'une purge puisse
-  terminer ses sessions.
+  terminer ses sessions. Les pools en mode schéma ne sont pas marqués.
 
 Par défaut : 16 connexions par pool en mode base, 8 par pool en mode schéma,
 aucune connexion inactive gardée au chaud, délai d'inactivité 10 minutes,
