@@ -281,12 +281,14 @@ fn code_lines(src: &str) -> impl Iterator<Item = &str> {
         .filter(|l| !l.starts_with("//"))
 }
 
-/// The suite reaches MySQL through `testkit::matrix::Backend::MySql`
-/// whatever its filename. A quoted mention (a guard's own pattern) is not a call.
+/// The suite reaches MySQL through `testkit::matrix::Backend::MySql`, or a
+/// local `Backend::Mysql` enum, whatever its filename. A quoted mention (a
+/// guard's own pattern) is not a call.
 fn calls_the_mysql_backend(src: &str) -> bool {
     code_lines(src).any(|l| {
-        l.match_indices("Backend::MySql")
-            .any(|(i, _)| !l[..i].ends_with('"'))
+        ["Backend::MySql", "Backend::Mysql"]
+            .iter()
+            .any(|pat| l.match_indices(pat).any(|(i, _)| !l[..i].ends_with('"')))
     })
 }
 
