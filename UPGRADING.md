@@ -162,6 +162,7 @@ untouched.
 - `rustango::bulk_actions` and `RustangoError::BulkAction` are gone; nothing in the framework ran them. Use the admin's `actions = "..."` or `ListView::bulk_actions(true)` with `tenant_action(...)`.
 - The crate-root `rustango::auth_backends` (`Credentials`, `Principal`, `AuthBackendChain`, `RemoteUserBackend`) is gone. Implement `tenancy::auth_backends::AuthBackend`, which `require_auth` runs.
 - `mcp::pagination` is private; the MCP `*/list` handlers still paginate. Use `rustango::pagination` in your own endpoints.
+- A custom `Dialect` that overrides `quote_ident` or `placeholder` must override `push_quoted_ident` / `push_placeholder` instead: query compiles call those, and the old methods now wrap them.
 
 ## 0.62.0
 

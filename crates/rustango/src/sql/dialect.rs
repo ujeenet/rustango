@@ -48,9 +48,16 @@ pub(crate) fn is_uuid_expr(expr: &str) -> bool {
 }
 
 /// `name` in `q` quotes with any `q` inside doubled, in one allocation.
-/// Every compiled query quotes each identifier, so this is hot (#2662).
+#[allow(dead_code)] // its callers are feature-gated (PG schemas, SQLite inspectdb)
 pub(crate) fn quote_with(name: &str, q: char) -> String {
     let mut out = String::with_capacity(name.len() + 2);
+    push_quoted_with(&mut out, name, q);
+    out
+}
+
+/// [`quote_with`] appended to `out`. Every compiled query quotes each
+/// identifier, so the writer appends in place instead of allocating.
+pub(crate) fn push_quoted_with(out: &mut String, name: &str, q: char) {
     out.push(q);
     for part in name.split_inclusive(q) {
         out.push_str(part);
@@ -59,7 +66,6 @@ pub(crate) fn quote_with(name: &str, q: char) -> String {
         }
     }
     out.push(q);
-    out
 }
 
 /// `name` as `(schema, table)`: a dotted name splits at its first dot.
@@ -118,8 +124,16 @@ pub trait Dialect: Send + Sync {
     /// Quote a table or column name. The default is ANSI
     /// double-quotes, which suit PG and SQLite; MySQL uses backticks.
     /// A quote inside the name is doubled, so the result is safe.
+    /// A wrapper over [`Self::push_quoted_ident`]; override that one.
     fn quote_ident(&self, name: &str) -> String {
-        quote_with(name, '"')
+        let mut out = String::with_capacity(name.len() + 2);
+        self.push_quoted_ident(&mut out, name);
+        out
+    }
+
+    /// Append `name` quoted as [`Self::quote_ident`] describes to `out`.
+    fn push_quoted_ident(&self, out: &mut String, name: &str) {
+        push_quoted_with(out, name, '"');
     }
 
     /// Quote text as an inline string literal, for the few spots
@@ -148,9 +162,18 @@ pub trait Dialect: Send + Sync {
     /// `sql::writers::Sql::push_param` cannot get this wrong, because
     /// it pushes the value and then reads `params.len()`. It is
     /// private to `sql`, so code outside writes the pattern by hand.
+    ///
+    /// A wrapper over [`Self::push_placeholder`]; override that one.
     fn placeholder(&self, n: usize) -> String {
+        let mut out = String::new();
+        self.push_placeholder(&mut out, n);
+        out
+    }
+
+    /// Append the placeholder [`Self::placeholder`] describes to `out`.
+    fn push_placeholder(&self, out: &mut String, n: usize) {
         let _ = n;
-        "?".to_owned()
+        out.push('?');
     }
 
     /// The column type for an `Auto<T>` primary key. `field_type` is
