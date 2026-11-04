@@ -744,7 +744,7 @@ impl ServerAdmin {
             return Err(TenantDbError::Protected(name.to_string()));
         }
         let pool = match &self.target {
-            Target::Sqlite { dir } => return drop_sqlite(dir, name),
+            Target::Sqlite { dir } => return drop_sqlite(dir, name).await,
             Target::Server { pool, .. } => pool,
         };
         let d = pool.dialect();
@@ -927,7 +927,7 @@ impl ServerAdmin {
     /// before can reach it.
     pub(crate) async fn roll_back(&self, created: Created) -> Result<(), TenantDbError> {
         match &self.target {
-            Target::Sqlite { dir } => drop_sqlite(dir, &created.database),
+            Target::Sqlite { dir } => drop_sqlite(dir, &created.database).await,
             Target::Server { pool, .. } => {
                 undo_create(pool, &created.database, created.login.as_ref()).await
             }
@@ -1166,15 +1166,26 @@ fn create_sqlite(dir: &Path, name: &DatabaseName) -> Result<Created, TenantDbErr
     })
 }
 
-fn drop_sqlite(dir: &Path, name: &DatabaseName) -> Result<(), TenantDbError> {
+async fn drop_sqlite(dir: &Path, name: &DatabaseName) -> Result<(), TenantDbError> {
     let path = sqlite_file(dir, name);
     for suffix in ["", "-wal", "-shm", "-journal"] {
         let mut file = path.clone().into_os_string();
         file.push(suffix);
-        match std::fs::remove_file(&file) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.into()),
+        remove_closing_file(Path::new(&file)).await?;
+    }
+    Ok(())
+}
+
+/// Remove `file`, retrying briefly: on Windows a just-closed handle can
+/// keep it locked (os error 32) for a moment. A missing file is fine.
+async fn remove_closing_file(file: &Path) -> std::io::Result<()> {
+    const TRIES: u32 = 10;
+    for attempt in 1..=TRIES {
+        match std::fs::remove_file(file) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if attempt == TRIES => return Err(e),
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
         }
     }
     Ok(())

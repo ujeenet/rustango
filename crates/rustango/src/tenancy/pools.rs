@@ -864,10 +864,33 @@ impl<DB: Database> TenantPools<DB> {
     /// otherwise keep being served a pool pointing at the old schema —
     /// a cross-tenant read, and the exact failure #1224 was about.
     pub async fn invalidate(&self, slug: &str) {
-        self.cache.write().await.remove(slug);
-        self.scoped_cache.write().await.remove(slug);
-        self.held_cache.write().await.remove(slug);
-        self.held_database_cache.write().await.remove(slug);
+        drop(self.take_cached(slug).await);
+    }
+
+    /// [`Self::invalidate`], then close those pools and wait for their
+    /// connections: before a tenant's database is removed, as Windows
+    /// refuses to delete a file that is still open.
+    pub async fn close_tenant(&self, slug: &str) {
+        for pool in self.take_cached(slug).await {
+            pool.close().await;
+        }
+    }
+
+    /// Remove `slug`'s pools from every cache, handing them back.
+    async fn take_cached(&self, slug: &str) -> Vec<Arc<sqlx::Pool<DB>>> {
+        let caches = [
+            &self.cache,
+            &self.scoped_cache,
+            &self.held_cache,
+            &self.held_database_cache,
+        ];
+        let mut out = Vec::new();
+        for cache in caches {
+            if let Some(entry) = cache.write().await.remove(slug) {
+                out.push(entry.pool);
+            }
+        }
+        out
     }
 }
 

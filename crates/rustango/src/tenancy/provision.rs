@@ -2059,8 +2059,12 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
             return None;
         }
         // A bare filename is relative to the working directory, which
-        // is where the sibling belongs.
-        let dir = path.rsplit_once('/').map_or(".", |(d, _)| d);
+        // is where the sibling belongs. Either separator: `C:\data\reg.db`
+        // is a Windows path whichever OS reads the URL.
+        let (dir, sep) = match path.rfind(['/', '\\']) {
+            Some(i) => (&path[..i], &path[i..=i]),
+            None => (".", "/"),
+        };
         // A sqlite database is a file, so `acme` becomes `acme.db` and
         // `acme.db` is left as-is. The check ignores case: `acme.DB` is
         // the same file on a case-insensitive filesystem.
@@ -2072,7 +2076,7 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
         } else {
             format!("{database}.db")
         };
-        return Some(format!("sqlite://{dir}/{file}?mode=rwc"));
+        return Some(format!("sqlite://{dir}{sep}{file}?mode=rwc"));
     }
 
     let (scheme, rest) = registry_url.split_once("://")?;
@@ -2785,7 +2789,7 @@ impl ServerDatabase {
         };
         if let Some(org) = org {
             // Its pool holds sessions in the database about to go.
-            pools.invalidate(&org.slug).await;
+            pools.close_tenant(&org.slug).await;
         }
         let dropped = self.admin.roll_back(self.created).await;
         self.admin.close().await;
@@ -3215,6 +3219,26 @@ mod validation_tests {
         let err = validate_slug("tennant 1").expect_err("a space is not a hostname character");
         assert!(err.contains("tennant 1"), "{err}");
         assert!(err.contains("hostname"), "should say why: {err}");
+    }
+
+    /// A Windows registry path, whichever OS parses it: the sibling lands
+    /// beside it, not in `.`.
+    #[test]
+    fn a_sibling_of_a_windows_registry_path_lands_beside_it() {
+        let url = |reg: &str| tenant_url_on_registry_server(reg, "acme").unwrap();
+        assert_eq!(
+            url("sqlite://C:\\Data\\REG.DB?mode=rwc"),
+            "sqlite://C:\\Data\\acme.db?mode=rwc"
+        );
+        assert_eq!(
+            url("sqlite://C:/data\\sub\\reg.db"),
+            "sqlite://C:/data\\sub\\acme.db?mode=rwc"
+        );
+        assert_eq!(
+            url("sqlite:///srv/reg.db"),
+            "sqlite:///srv/acme.db?mode=rwc"
+        );
+        assert_eq!(url("sqlite://reg.db"), "sqlite://./acme.db?mode=rwc");
     }
 
     /// A request that leaves the tenant with no host, path prefix or port

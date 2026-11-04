@@ -3,7 +3,8 @@
 
 use super::BackendKind;
 
-/// An existing file: `(dev, ino)` on unix, the path SQLite opens elsewhere.
+/// An existing file: `(dev, ino)` on unix; elsewhere its canonical path,
+/// case-folded (see [`folded_canonical`]).
 #[cfg(unix)]
 type FileKey = (u64, u64);
 #[cfg(not(unix))]
@@ -97,7 +98,7 @@ impl DbIdentity {
                 .map(|m| Self::File((m.dev(), m.ino())))
         }
         #[cfg(not(unix))]
-        path.is_file().then_some(Self::File(path))
+        folded_canonical(&path).map(Self::File)
     }
 
     /// The server's key and database through the dialect's emitter;
@@ -131,6 +132,17 @@ impl DbIdentity {
     }
 }
 
+/// `path`'s canonical form, case-folded: Windows paths ignore case, and
+/// canonicalizing resolves junctions, links and 8.3 short names. `None`
+/// when the file does not exist.
+#[cfg(any(not(unix), test))]
+fn folded_canonical(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    canonical
+        .is_file()
+        .then(|| canonical.to_string_lossy().to_lowercase().into())
+}
+
 /// The database a server URL names, as its driver reads it; `None` when
 /// unreadable or another backend.
 fn url_database(url: &str) -> Option<String> {
@@ -148,5 +160,36 @@ fn url_database(url: &str) -> Option<String> {
             .map(str::to_owned),
         #[allow(unreachable_patterns)]
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::folded_canonical;
+
+    /// A link and a differently cased name fold to one key.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_and_its_target_fold_to_one_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("Reg.db");
+        std::fs::write(&file, b"").unwrap();
+        let link = dir.path().join("alias.db");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let key = folded_canonical(&file).expect("exists");
+        assert_eq!(folded_canonical(&link).as_ref(), Some(&key));
+        assert_eq!(key.to_string_lossy(), key.to_string_lossy().to_lowercase());
+        assert!(folded_canonical(&dir.path().join("gone.db")).is_none());
+    }
+
+    /// `REG.DB` and `reg.db` are one file on Windows: one identity.
+    #[cfg(all(windows, feature = "sqlite"))]
+    #[test]
+    fn case_is_ignored_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("reg.db"), b"").unwrap();
+        let lower = super::DbIdentity::file(&dir.path().join("reg.db"));
+        assert!(lower.is_some());
+        assert_eq!(super::DbIdentity::file(&dir.path().join("REG.DB")), lower);
     }
 }
