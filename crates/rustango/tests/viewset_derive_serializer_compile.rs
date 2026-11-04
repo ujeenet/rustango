@@ -8,7 +8,7 @@
 //! regression in `expand_viewset`'s serializer emit trips the
 //! `--all-features` build that CI runs.
 
-#![cfg(all(feature = "postgres", feature = "serializer"))]
+#![cfg(all(feature = "postgres", feature = "serializer", feature = "admin"))]
 
 use rustango::sql::Auto;
 use rustango::{Model, Serializer, ViewSet};
