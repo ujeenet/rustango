@@ -1337,10 +1337,23 @@ jobs:
     needs: gate
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # About 313 all-feature test binaries, each linking rustango: strip
+    # symbols and free disk, as `tests_compile` does.
     env:
-      # Hundreds of test links, as in `tests_compile_narrow`.
+      CARGO_PROFILE_DEV_STRIP: symbols
+      CARGO_PROFILE_TEST_STRIP: symbols
       RUSTFLAGS: -C link-arg=-fuse-ld=lld
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - name: Install lld
