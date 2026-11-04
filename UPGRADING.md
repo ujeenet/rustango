@@ -156,6 +156,7 @@ untouched.
 - `passkey::verify::cose_es256_key` returns `passkey::Es256Key` instead of `p256::ecdsa::VerifyingKey`; read the point with `Es256Key::to_sec1()` (65 bytes, `0x04 || x || y`). An off-curve point is now refused when a signature is verified, not when the key is read.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
 - `cargo rustango new --features mcp` needs `--template tenant`; the api and fullstack templates refuse it. A project scaffolded before can drop its `/mcp` mount: it could not authenticate an agent.
+- `FeatureFlags` write methods return `Result<(), CacheError>`; add `?` (or handle the error) where you call `enable`, `disable`, `clear`, `set_percentage`, `enable_for_user` or `disable_for_user`.
 
 ## 0.62.0
 

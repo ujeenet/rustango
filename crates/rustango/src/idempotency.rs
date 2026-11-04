@@ -64,9 +64,9 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
-use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE};
+use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE, TRANSFER_ENCODING};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::Router;
@@ -328,6 +328,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             headers: parts
                 .headers
                 .iter()
+                .filter(|(k, _)| !is_hop_by_hop(k))
                 .filter_map(|(k, v)| {
                     let k = k.as_str().to_owned();
                     v.to_str().ok().map(|s| (k, s.to_owned()))
@@ -598,6 +599,25 @@ async fn read_stored(cache: &BoxedCache, cache_key: &str) -> Option<StoredRespon
     serde_json::from_str(&raw).ok()
 }
 
+/// Framing and hop-by-hop headers: they describe the original connection, not the replay.
+fn is_hop_by_hop(name: &HeaderName) -> bool {
+    use axum::http::header::{
+        CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, UPGRADE,
+    };
+    [
+        CONTENT_LENGTH,
+        TRANSFER_ENCODING,
+        CONNECTION,
+        PROXY_AUTHENTICATE,
+        PROXY_AUTHORIZATION,
+        TE,
+        TRAILER,
+        UPGRADE,
+    ]
+    .contains(name)
+        || name.as_str() == "keep-alive"
+}
+
 fn rebuild(stored: StoredResponse) -> Response<Body> {
     let body_bytes = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -610,7 +630,10 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
     for (k, v) in &stored.headers {
         if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v))
         {
-            builder = builder.header(name, value);
+            // Entries stored before the filter at store time may still hold these.
+            if !is_hop_by_hop(&name) {
+                builder = builder.header(name, value);
+            }
         }
     }
     let mut resp = builder
@@ -621,15 +644,7 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
         HeaderName::from_static("idempotent-replayed"),
         HeaderValue::from_static("true"),
     );
-    let _ = headers_align_content_length(resp.headers_mut());
     resp
-}
-
-/// Hook for fixing up `Content-Length` on a replayed response. It does
-/// nothing today: the cached body is already in memory, so axum works
-/// the length out on the way out.
-fn headers_align_content_length(_headers: &mut HeaderMap) -> Result<(), ()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -735,6 +750,70 @@ mod tests {
 
         // Handler ran exactly once.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replay_drops_stored_framing_headers() {
+        let app = Router::new()
+            .route(
+                "/",
+                post(|| async {
+                    (
+                        [("content-length", "999"), ("transfer-encoding", "chunked")],
+                        "ok",
+                    )
+                }),
+            )
+            .idempotency(IdempotencyLayer::new(cache()));
+        let req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .header("idempotency-key", "framing")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let _ = app.clone().oneshot(req()).await.unwrap();
+        let r2 = app.clone().oneshot(req()).await.unwrap();
+        assert!(r2.headers().contains_key("idempotent-replayed"));
+        // axum sets the real length of the replayed body, not the stored 999.
+        assert_ne!(
+            r2.headers().get("content-length").map(|v| v.as_bytes()),
+            Some(&b"999"[..])
+        );
+        assert!(r2.headers().get("transfer-encoding").is_none());
+        assert_eq!(body_string(r2).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn replay_of_an_old_entry_drops_its_hop_by_hop_headers() {
+        // An entry cached before the store-time filter still holds them.
+        let h = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let stored = StoredResponse {
+            request_sha256: String::new(),
+            status: 200,
+            headers: vec![
+                h("content-length", "999"),
+                h("transfer-encoding", "chunked"),
+                h("connection", "close"),
+                h("keep-alive", "timeout=5"),
+                h("upgrade", "websocket"),
+                h("x-kept", "1"),
+            ],
+            body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"ok"),
+        };
+        let resp = rebuild(stored);
+        for name in [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "upgrade",
+        ] {
+            assert!(resp.headers().get(name).is_none(), "{name} replayed");
+        }
+        assert_eq!(resp.headers().get("x-kept").unwrap(), "1");
+        assert_eq!(body_string(resp).await, "ok");
     }
 
     #[tokio::test]

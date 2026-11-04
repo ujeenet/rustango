@@ -58,6 +58,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `startapp` prints its next steps one command per line instead of joining them with `&&`.
 - `create-operator` help lists `--password-stdin`.
 - Only the fullstack template's index links `/admin`.
+- An idempotency replay no longer re-sends stored framing or hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Connection`, ...), including entries cached by 0.62.0.
+- A panic while the i18n translator's lock is held no longer makes every later translation panic.
+- `contenttypes::ensure_seeded` retries a deadlocked insert up to three times, so several processes booting at once all start.
+
+### Changed
+
+- **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
 
 ## [0.62.0] — 2026-11-02
 
