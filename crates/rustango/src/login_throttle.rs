@@ -1159,6 +1159,10 @@ tokio::task_local! {
 /// Run `f` with `gate` as this task's [`shared`] gate, so a test neither
 /// sees nor swaps the process-wide one other tests install.
 #[cfg(test)]
+#[cfg_attr(
+    not(all(feature = "mcp", feature = "sqlite", feature = "testkit")),
+    allow(dead_code)
+)]
 pub(crate) async fn with_test_gate<F: std::future::Future>(gate: LoginThrottle, f: F) -> F::Output {
     TEST_GATE.scope(Box::leak(Box::new(gate)), f).await
 }
