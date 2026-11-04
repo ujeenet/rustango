@@ -293,6 +293,10 @@ pub fn Q(input: TokenStream) -> TokenStream {
 /// Optional `flavor = "current_thread"` passes through to
 /// `#[tokio::main]`; default is the multi-threaded runtime.
 ///
+/// The body runs on a thread named `main` with an 8 MiB stack, since
+/// Windows gives the real main thread 1 MiB; `stack_size = <bytes>`
+/// overrides it. A panic there resumes on the real main thread.
+///
 /// `logging = false` suppresses the default subscriber, for apps
 /// that install their own. Needed whenever the body reaches
 /// `Cli::with_logging()` or `logging::Setup`: the subscriber this
@@ -339,7 +343,15 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
     //
     // `flavor` and `logging`; anything else is a compile error.
     let root = rustango_root();
-    let MainArgs { flavor, logging } = parse_main_args(&args)?;
+    let MainArgs {
+        flavor,
+        logging,
+        stack_size,
+    } = parse_main_args(&args)?;
+    let stack_size = match stack_size {
+        Some(n) => quote!(#n),
+        None => quote!(#root::__private_runtime::MAIN_STACK_SIZE),
+    };
     let builder_call = match flavor {
         Flavor::CurrentThread => quote! {
             #root::__private_runtime::tokio::runtime::Builder::new_current_thread()
@@ -349,10 +361,14 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
         },
     };
 
-    // Detach the user body and rewrite `main` as a sync fn that
-    // builds the runtime and blocks on the async body.
-    let user_body = input.block.clone();
+    // The user's fn becomes an inner `async fn` with its own return type;
+    // the outer sync fn runs it on a big-stack thread and reports its exit code.
+    let mut inner = input.clone();
+    inner.sig.ident = syn::Ident::new("__rustango_main_body", input.sig.ident.span());
+    inner.attrs.clear();
+    inner.vis = syn::Visibility::Inherited;
     input.sig.asyncness = None;
+    input.sig.output = syn::parse2(quote!(-> ::std::process::ExitCode))?;
 
     // `logging = false` drops the block entirely, so a later
     // `Cli::with_logging()` is the first installer and its
@@ -374,11 +390,14 @@ fn expand_main(args: TokenStream2, item: TokenStream2) -> syn::Result<TokenStrea
 
     input.block = syn::parse2(quote! {{
         { #logging_prologue }
-        let __rt = #builder_call
-            .enable_all()
-            .build()
-            .expect("failed to build tokio runtime");
-        __rt.block_on(async move #user_body)
+        #inner
+        #root::__private_runtime::run_on_main_thread(#stack_size, || {
+            let __rt = #builder_call
+                .enable_all()
+                .build()
+                .expect("failed to build tokio runtime");
+            ::std::process::Termination::report(__rt.block_on(__rustango_main_body()))
+        })
     }})?;
 
     Ok(quote! {
@@ -395,10 +414,12 @@ enum Flavor {
 struct MainArgs {
     flavor: Flavor,
     logging: bool,
+    /// Bytes of stack for the main thread; `None` keeps the default.
+    stack_size: Option<usize>,
 }
 
 const MAIN_ARGS_HELP: &str =
-    "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`";
+    "supported: `flavor = \"current_thread\" | \"multi_thread\"`, `logging = true | false`, `stack_size = <bytes>`";
 
 /// Parse `#[rustango::main(...)]`; an unknown or misspelt argument is an error.
 fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
@@ -414,6 +435,7 @@ fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
     let mut out = MainArgs {
         flavor: Flavor::MultiThread,
         logging: true,
+        stack_size: None,
     };
     for meta in &metas {
         let lit = match &meta.value {
@@ -429,6 +451,9 @@ fn parse_main_args(args: &TokenStream2) -> syn::Result<MainArgs> {
                 out.flavor = Flavor::MultiThread;
             }
             (Some("logging"), Some(syn::Lit::Bool(b))) => out.logging = b.value,
+            (Some("stack_size"), Some(syn::Lit::Int(n))) => {
+                out.stack_size = Some(n.base10_parse::<usize>()?);
+            }
             _ => {
                 return Err(syn::Error::new(
                     meta.span(),
@@ -14289,6 +14314,17 @@ mod main_attr_tests {
         let out = expand("flavor = \"current_thread\", logging = false");
         assert!(!out.contains("logging :: Setup"), "{out}");
         assert!(out.contains("new_current_thread"), "{out}");
+    }
+
+    /// The body runs on the big-stack thread; `stack_size` overrides it.
+    #[test]
+    fn body_runs_on_a_big_stack_thread() {
+        let out = expand("");
+        assert!(out.contains("run_on_main_thread"), "{out}");
+        assert!(out.contains("MAIN_STACK_SIZE"), "{out}");
+        let out = expand("stack_size = 16777216, logging = false");
+        assert!(out.contains("16777216usize"), "{out}");
+        assert!(!out.contains("MAIN_STACK_SIZE"), "{out}");
     }
 
     #[test]

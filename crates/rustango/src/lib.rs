@@ -1319,6 +1319,27 @@ pub mod __private_runtime {
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
 
+    /// Stack of the thread `#[rustango::main]` runs on: Windows gives the
+    /// real main thread only 1 MiB, too little for a debug build.
+    pub const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+    /// Run `body` on a thread named `main` with `stack_size` bytes of
+    /// stack, and pass its exit code through; a panic in it resumes here.
+    pub fn run_on_main_thread<F>(stack_size: usize, body: F) -> std::process::ExitCode
+    where
+        F: FnOnce() -> std::process::ExitCode + Send + 'static,
+    {
+        let thread = std::thread::Builder::new()
+            .name("main".to_owned())
+            .stack_size(stack_size)
+            .spawn(body)
+            .expect("failed to spawn the main thread");
+        match thread.join() {
+            Ok(code) => code,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// `#[rustango::main]`'s default filter: `RUST_LOG` from `./.env`, else
     /// `info,sqlx=warn` (#2204). Sets no env vars, searches no parent dirs.
     pub fn main_default_filter() -> String {
