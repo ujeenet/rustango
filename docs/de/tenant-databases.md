@@ -11,6 +11,9 @@ hat. Beides wird in `rustango_tenant_databases` festgehalten. Nur eine
 festgehaltene Datenbank wird von rustango je gelöscht oder bekommt ein neues
 Passwort.
 
+Wie die zwei Speichermodi, Pools und Routing zusammenpassen, steht unter
+[Multi-Tenancy](tenancy.md).
+
 ## Inhaltsverzeichnis
 
 - [Bevor du anfängst](#bevor-du-anfängst)

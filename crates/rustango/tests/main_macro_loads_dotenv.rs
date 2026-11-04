@@ -8,14 +8,17 @@
 
 use rustango::__private_runtime::main_default_filter;
 use rustango::logging::DEFAULT_FILTER;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::Level;
 
+static INFO: AtomicBool = AtomicBool::new(false);
+static ERROR: AtomicBool = AtomicBool::new(false);
+
+// The macro's fn reports an exit code, so the levels come back through statics.
 #[rustango::main]
-async fn run_app() -> (bool, bool) {
-    (
-        tracing::enabled!(Level::INFO),
-        tracing::enabled!(Level::ERROR),
-    )
+async fn run_app() {
+    INFO.store(tracing::enabled!(Level::INFO), Ordering::SeqCst);
+    ERROR.store(tracing::enabled!(Level::ERROR), Ordering::SeqCst);
 }
 
 #[test]
@@ -31,7 +34,8 @@ fn rust_log_from_dotenv_reaches_the_installed_filter() {
     .expect("write .env");
     std::env::set_current_dir(tmp.path()).expect("chdir");
 
-    let (info, error) = run_app();
+    run_app();
+    let (info, error) = (INFO.load(Ordering::SeqCst), ERROR.load(Ordering::SeqCst));
 
     // The default filter is `info,sqlx=warn`; `info` off means `.env` won.
     assert!(!info, "RUST_LOG=error from .env must disable info events");
