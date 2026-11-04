@@ -8,7 +8,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
 - `cargo rustango new -F mcp` is tenant-only: elsewhere `/mcp` refused every tool call, since agents live in tenant databases.
-- `manage` suggests the nearest verb for a typo (`createsuperuser` → `create-admin`, or `create-superuser` on tenancy); scaffolded next steps paste into PowerShell 5.1, and only fullstack's index links `/admin`.
+- `manage` suggests the nearest verb for a typo, e.g. `createsuperuser` → `create-admin` (`create-superuser` on tenancy).
+- Scaffolded next steps use real usernames, so they paste into PowerShell 5.1.
+- `startapp` prints its next steps one command per line instead of joining them with `&&`.
+- `create-operator` help lists `--password-stdin`.
+- Only the fullstack template's index links `/admin`.
 
 ## [0.62.0] — 2026-11-02
 

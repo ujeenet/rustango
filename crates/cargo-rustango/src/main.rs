@@ -279,9 +279,6 @@ impl Backend {
 /// `tests/templates_name_real_features.rs` asserts the list stays both real
 /// and complete.
 /// `tenancy` is not here: it is the `tenant` template, whose `main.rs` serves it.
-/// The [`OPTIONAL_FEATURES`] only the tenant template can serve.
-const TENANT_ONLY_FEATURES: &[&str] = &["mcp"];
-
 pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("csrf", "CSRF protection middleware for form POSTs"),
     ("sso", "OIDC single sign-on for application users"),
@@ -304,6 +301,9 @@ pub const OPTIONAL_FEATURES: &[(&str, &str)] = &[
     ("testkit", "test-only schema builders and model factories"),
     ("test_utils", "test-only constructors for downstream crates"),
 ];
+
+/// The [`OPTIONAL_FEATURES`] only the tenant template can serve.
+const TENANT_ONLY_FEATURES: &[&str] = &["mcp"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Template {

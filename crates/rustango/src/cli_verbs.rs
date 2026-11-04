@@ -164,7 +164,7 @@ pub(crate) fn did_you_mean<'a>(input: &str, verbs: &[&'a [&'a str]]) -> Option<&
             .filter(|v| !v.starts_with('-'))
     };
     let typed = squash(input);
-    let limit = (typed.chars().count() / 3).max(2);
+    let limit = (typed.chars().count() / 3).clamp(2, 3);
     let near = known()
         .map(|v| (distance(&typed, &squash(v)), v))
         .filter(|(d, _)| *d <= limit)

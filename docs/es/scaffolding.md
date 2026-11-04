@@ -142,7 +142,7 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 | `jobs` / `jobs-postgres` | Cola de trabajos en segundo plano, en proceso / respaldada por la base de datos y por tanto resistente a reinicios |
 | `scheduler` | Tareas en segundo plano a intervalos fijos |
 | `email-smtp` | Transporte SMTP para el framework de email |
-| `mcp` | Servidor Model Context Protocol para agentes de IA |
+| `mcp` | Servidor Model Context Protocol para agentes de IA (solo plantilla tenant) |
 | `http2` | Servir HTTP/2 sin cifrar (h2c) junto a HTTP/1 |
 | `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |
 

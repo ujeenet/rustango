@@ -253,12 +253,12 @@ fn selected_features_compile() {
     );
 }
 
-/// `--features mcp` mounts the MCP router, on both template shapes.
+/// `--features mcp` mounts the agent-authed MCP router; only the tenant
+/// template offers it.
 #[test]
 #[ignore = "compiles rustango; run with --ignored"]
 fn mcp_feature_compiles() {
     assert_compiles_with("tenant", &["--features", "mcp"], &[], "mcp-tenant");
-    assert_compiles_with("fullstack", &["--features", "mcp"], &[], "mcp-fullstack");
 }
 
 /// `--alias rgo`: the dependency is renamed and the code says `rgo::` and

@@ -142,7 +142,7 @@ Un template active un ensemble raisonnable ; `--features` ajoute les options qu'
 | `jobs` / `jobs-postgres` | File de tâches en arrière-plan, en processus / adossée à la base et donc résistante aux redémarrages |
 | `scheduler` | Tâches d'arrière-plan à intervalle fixe |
 | `email-smtp` | Transport SMTP pour le framework e-mail |
-| `mcp` | Serveur Model Context Protocol pour les agents IA |
+| `mcp` | Serveur Model Context Protocol pour les agents IA (modèle tenant uniquement) |
 | `http2` | Servir HTTP/2 en clair (h2c) à côté de HTTP/1 |
 | `testkit` / `test_utils` | Constructeurs de schéma, fabriques et constructeurs réservés aux tests |
 

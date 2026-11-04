@@ -146,7 +146,7 @@ Eine Vorlage schaltet einen sinnvollen Satz ein; `--features` ergänzt die Opt-i
 | `jobs` / `jobs-postgres` | Hintergrund-Job-Queue, prozessintern / datenbankgestützt und damit neustartfest |
 | `scheduler` | Hintergrundaufgaben in festen Intervallen |
 | `email-smtp` | SMTP-Transport für das E-Mail-Framework |
-| `mcp` | Model-Context-Protocol-Server für KI-Agenten |
+| `mcp` | Model-Context-Protocol-Server für KI-Agenten (nur Tenant-Template) |
 | `http2` | Klartext-HTTP/2 (h2c) neben HTTP/1 bereitstellen |
 | `testkit` / `test_utils` | Nur-Test-Schema-Builder, Factories und Konstruktoren |
 

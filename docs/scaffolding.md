@@ -142,7 +142,7 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `jobs` / `jobs-postgres` | Background job queue, in-process / database-backed so it survives restarts |
 | `scheduler` | Fixed-interval background tasks |
 | `email-smtp` | SMTP transport for the email framework |
-| `mcp` | Model Context Protocol server for AI agents |
+| `mcp` | Model Context Protocol server for AI agents (tenant template only) |
 | `http2` | Serve cleartext HTTP/2 (h2c) next to HTTP/1 |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
