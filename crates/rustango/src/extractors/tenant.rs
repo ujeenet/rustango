@@ -268,6 +268,16 @@ impl TenantScope {
     }
 }
 
+/// The tenant argument a framework router's handlers take: `Tenant<DB>`
+/// serves one backend's context (the `_for::<DB>` routers), `TenantScope`
+/// any mounted one (the default routers).
+pub(crate) trait TenantArg<S>:
+    FromRequestParts<S> + Into<TenantScope> + Send + 'static
+{
+}
+
+impl<S, T> TenantArg<S> for T where T: FromRequestParts<S> + Into<TenantScope> + Send + 'static {}
+
 impl<DB: Database> From<Tenant<DB>> for TenantScope {
     fn from(t: Tenant<DB>) -> Self {
         Self {

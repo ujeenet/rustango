@@ -25,7 +25,7 @@ use base64::Engine;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::extractors::{Tenant, TenantScope};
+use crate::extractors::TenantScope;
 use crate::login_throttle::{ClientIp, LoginRefused};
 
 use super::auth::{mint_agent_jwt, MintError};
@@ -128,8 +128,8 @@ fn basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
 /// and secret. Send them in an HTTP Basic header, which is
 /// preferred, or as form fields. The token it returns is the same
 /// scoped JWT as `/token`.
-pub(crate) fn oauth_token<DB: crate::sql::sqlx::Database>(
-    t: Tenant<DB>,
+pub(crate) fn oauth_token<T: Into<TenantScope>>(
+    t: T,
     State(state): State<AuthedMcpState>,
     ip: ClientIp,
     headers: HeaderMap,

@@ -19,10 +19,9 @@ use axum::extract::FromRequestParts;
 use axum::routing::{get, post};
 use axum::Router;
 
-use crate::extractors::Tenant;
+use crate::extractors::{Tenant, TenantArg, TenantScope};
 use crate::sql::sqlx::Database;
 use crate::tenancy::jwt_lifecycle::JwtLifecycle;
-use crate::tenancy::DefaultTenantDb;
 
 use super::auth::{agent_token, default_jwt, post_authed};
 use super::transport::{post_handler, sse_handler};
@@ -142,7 +141,7 @@ where
 #[cfg(feature = "config")]
 #[must_use]
 pub fn secure_tenant_router_from_settings(settings: &crate::config::McpSettings) -> Router {
-    secure_tenant_router_from_settings_for::<DefaultTenantDb>(settings)
+    secure_router_from_settings::<TenantScope>(settings)
 }
 
 /// [`secure_tenant_router_from_settings`] for a `Tenant<DB>` other than
@@ -154,6 +153,13 @@ where
     DB: Database,
     Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
+    secure_router_from_settings::<Tenant<DB>>(settings)
+}
+
+#[cfg(feature = "config")]
+fn secure_router_from_settings<T: TenantArg<AuthedMcpState>>(
+    settings: &crate::config::McpSettings,
+) -> Router {
     let jwt = Arc::new(
         JwtLifecycle::lazy(super::auth::jwt_secret).with_access_ttl(settings.token_ttl_secs()),
     );
@@ -164,7 +170,7 @@ where
         },
         jwt,
     };
-    let mut router = authed_routes::<DB>(state, settings.sse_enabled());
+    let mut router = authed_routes::<T>(state, settings.sse_enabled());
 
     // An empty allow-list means no CORS layer, so same-origin only.
     if !settings.allowed_origins.is_empty() {
@@ -195,7 +201,7 @@ where
 /// variant to gate it.
 #[must_use]
 pub fn tenant_router_authed(jwt: Arc<JwtLifecycle>) -> Router {
-    tenant_router_authed_for::<DefaultTenantDb>(jwt)
+    authed_routes::<TenantScope>(authed_state(jwt), true)
 }
 
 /// [`tenant_router_authed`] for a `Tenant<DB>` other than the default,
@@ -206,38 +212,38 @@ where
     DB: Database,
     Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
 {
-    let state = AuthedMcpState {
+    authed_routes::<Tenant<DB>>(authed_state(jwt), true)
+}
+
+fn authed_state(jwt: Arc<JwtLifecycle>) -> AuthedMcpState {
+    AuthedMcpState {
         mcp: McpState::new(None),
         jwt,
-    };
-    authed_routes::<DB>(state, true)
+    }
 }
 
 /// The authenticated route set: JSON-RPC on `/`, the notification
 /// stream when `enable_sse`, `/token`, and the OAuth 2.1 discovery
 /// and `client_credentials` endpoints.
-fn authed_routes<DB>(state: AuthedMcpState, enable_sse: bool) -> Router
-where
-    DB: Database,
-    Tenant<DB>: FromRequestParts<AuthedMcpState> + Send,
-{
+/// The authed MCP routes, taking the tenant as `T` (see [`TenantArg`]).
+fn authed_routes<T: TenantArg<AuthedMcpState>>(state: AuthedMcpState, enable_sse: bool) -> Router {
     use super::oauth;
     use axum::middleware::map_response;
     let root = if enable_sse {
-        post(post_authed::<DB>).get(sse_handler::<DB>)
+        post(post_authed::<T>).get(sse_handler::<T>)
     } else {
-        post(post_authed::<DB>)
+        post(post_authed::<T>)
     };
     Router::new()
         .route("/", root)
         // Tokens, and refusals of them: no cache keeps either.
         .route(
             TOKEN_PATH,
-            post(agent_token::<DB>).layer(map_response(crate::vary::token_reply)),
+            post(agent_token::<T>).layer(map_response(crate::vary::token_reply)),
         )
         .route(
             OAUTH_TOKEN_PATH,
-            post(oauth::oauth_token::<DB>).layer(map_response(crate::vary::token_reply)),
+            post(oauth::oauth_token::<T>).layer(map_response(crate::vary::token_reply)),
         )
         .route(
             "/.well-known/oauth-protected-resource",

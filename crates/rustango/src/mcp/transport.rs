@@ -110,8 +110,8 @@ pub(crate) async fn handle_message(
 /// then filters the shared bus, so an agent never sees another
 /// agent's or another tenant's frames. It ends at the JWT's `exp`, or
 /// within a minute of a revoke.
-pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
-    t: crate::extractors::Tenant<DB>,
+pub(crate) fn sse_handler<T: Into<crate::extractors::TenantScope>>(
+    t: T,
     axum::extract::State(state): axum::extract::State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: axum::http::HeaderMap,

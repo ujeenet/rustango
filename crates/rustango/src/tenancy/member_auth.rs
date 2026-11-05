@@ -68,7 +68,6 @@ use crate::sso::provider::resolve_by_slug;
 use crate::sso::{
     build_provider_for, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser,
 };
-use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
 // ===================================================================
@@ -446,7 +445,12 @@ impl Default for MemberAuthConfig {
 /// it, so a SQLite tenant works in a build that also enables `postgres`.
 #[must_use]
 pub fn member_sso_router(config: MemberAuthConfig) -> Router<()> {
-    sso_routes(config, get(begin_any), get(callback_any))
+    // `TenantScope` reads whichever tenant context is mounted, whatever its backend.
+    sso_routes(
+        config,
+        get(sso_begin::<TenantScope>),
+        get(sso_callback::<TenantScope>),
+    )
 }
 
 /// The begin and callback routes, plain and under a tenant's path prefix.
@@ -469,26 +473,6 @@ fn sso_routes(
     router.layer(Extension(config))
 }
 
-/// `TenantScope` reads whichever tenant context is mounted, whatever its backend.
-async fn begin_any(
-    t: TenantScope,
-    Path(sso): Path<SsoPath>,
-    Extension(config): Extension<MemberAuthConfig>,
-    req: Request,
-) -> Response {
-    sso_begin_in(t, sso, config, req).await
-}
-
-async fn callback_any(
-    t: TenantScope,
-    Path(sso): Path<SsoPath>,
-    Extension(config): Extension<MemberAuthConfig>,
-    Query(params): Query<CallbackParams>,
-    req: Request,
-) -> Response {
-    sso_callback_in(t, sso, config, params, req).await
-}
-
 /// [`member_sso_router`] for a `Tenant<DB>` other than the default, e.g.
 /// SQLite in a build that also enables `postgres` (#1741).
 #[must_use]
@@ -497,7 +481,11 @@ where
     DB: Database,
     Tenant<DB>: FromRequestParts<()> + Send,
 {
-    sso_routes(config, get(sso_begin::<DB>), get(sso_callback::<DB>))
+    sso_routes(
+        config,
+        get(sso_begin::<Tenant<DB>>),
+        get(sso_callback::<Tenant<DB>>),
+    )
 }
 
 /// Path params; `prefix` is set on the path-prefix tenant routes.
@@ -643,8 +631,8 @@ pub(crate) fn external_base(parts: &Parts) -> Option<String> {
 
 /// `GET {login_base}/sso/{slug}` — begin the OAuth2 flow, redirect to
 /// the IdP, seal the flow into the transient flow cookie.
-fn sso_begin<DB: Database>(
-    t: Tenant<DB>,
+fn sso_begin<T: Into<TenantScope>>(
+    t: T,
     Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     req: Request,
@@ -716,8 +704,8 @@ async fn sso_begin_in(
 
 /// `GET {login_base}/sso/{slug}/callback` — exchange the code,
 /// find-or-provision the member, mint the member session cookie.
-fn sso_callback<DB: Database>(
-    t: Tenant<DB>,
+fn sso_callback<T: Into<TenantScope>>(
+    t: T,
     Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     Query(params): Query<CallbackParams>,

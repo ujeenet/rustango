@@ -4,10 +4,10 @@
 //! `database_tenant_sqlite_live.rs` (DatabaseTenant<Sqlite> path).
 //!
 //! Confirms `fn handler(t: Tenant<sqlx::Sqlite>)` resolves the org,
-//! checks out a sqlite connection, and answers a real query — no
-//! Postgres in the binary.
+//! checks out a sqlite connection, and answers a real query, with or
+//! without Postgres in the binary.
 
-#![cfg(all(feature = "sqlite", feature = "tenancy", not(feature = "postgres")))]
+#![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
 use std::sync::Arc;
 

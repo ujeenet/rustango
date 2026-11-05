@@ -1,5 +1,5 @@
 //! Tenant routers serve a `TenantContext<Sqlite>` through their `*_for::<DB>`
-//! entry. With `postgres` also on, the default `Tenant` is Postgres and
+//! entry and their defaults. With `postgres` also on, the default `Tenant` is Postgres and
 //! these got 500 (#1741, #1787). The pure `DatabaseTenantContext` stack got
 //! 500 too (#1802).
 
@@ -168,7 +168,16 @@ async fn tenant_extractor_reads_the_database_tenant_context() {
 async fn mcp_tenant_router_serves_a_non_default_backend() {
     let _g = SUITE.lock().await;
     let env = boot().await;
-    mcp_flow(&env, Env::mount).await;
+    mcp_flow(&env, Env::mount, false).await;
+}
+
+/// The default MCP routers serve the mounted backend too, not only `_for::<DB>`.
+#[cfg(feature = "mcp")]
+#[tokio::test]
+async fn mcp_default_router_serves_a_non_default_backend() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    mcp_flow(&env, Env::mount, true).await;
 }
 
 #[cfg(feature = "mcp")]
@@ -176,12 +185,13 @@ async fn mcp_tenant_router_serves_a_non_default_backend() {
 async fn mcp_tenant_router_serves_the_database_tenant_stack() {
     let _g = SUITE.lock().await;
     let env = boot().await;
-    mcp_flow(&env, Env::mount_db).await;
+    mcp_flow(&env, Env::mount_db, false).await;
 }
 
-/// Token, OAuth, JSON-RPC and SSE all answer through `mount`'s context.
+/// Token, OAuth, JSON-RPC and SSE all answer through `mount`'s context;
+/// `default`: through the default routers instead of `_for::<Sqlite>`.
 #[cfg(feature = "mcp")]
-async fn mcp_flow(env: &Env, mount: fn(&Env, Router) -> Router) {
+async fn mcp_flow(env: &Env, mount: fn(&Env, Router) -> Router, default: bool) {
     use axum::http::StatusCode;
     use base64::Engine as _;
     use rustango::tenancy::jwt_lifecycle::JwtLifecycle;
@@ -201,7 +211,11 @@ async fn mcp_flow(env: &Env, mount: fn(&Env, Router) -> Router) {
         env,
         Router::new().nest(
             "/mcp",
-            rustango::mcp::tenant_router_authed_for::<sqlx::Sqlite>(jwt),
+            if default {
+                rustango::mcp::tenant_router_authed(jwt)
+            } else {
+                rustango::mcp::tenant_router_authed_for::<sqlx::Sqlite>(jwt)
+            },
         ),
     );
 
@@ -262,7 +276,11 @@ async fn mcp_flow(env: &Env, mount: fn(&Env, Router) -> Router) {
         env,
         Router::new().nest(
             "/mcp",
-            rustango::mcp::secure_tenant_router_for::<sqlx::Sqlite>(),
+            if default {
+                rustango::mcp::secure_tenant_router()
+            } else {
+                rustango::mcp::secure_tenant_router_for::<sqlx::Sqlite>()
+            },
         ),
     );
     for app in [&app, &secure] {

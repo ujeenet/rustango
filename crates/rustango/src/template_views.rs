@@ -3726,7 +3726,8 @@ where
 #[cfg(feature = "tenancy")]
 mod tenant {
     use super::*;
-    use crate::extractors::Tenant;
+    // Any mounted backend: a SQLite tenant works in a build that also has Postgres.
+    use crate::extractors::TenantScope;
 
     // ---------- ListView ----------
 
@@ -3741,7 +3742,7 @@ mod tenant {
         parts: Parts,
         csrf: CsrfCookie,
         Query(params): Query<HashMap<String, String>>,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let page = crate::list_params::parse_page(&params);
         let page_size =
@@ -3817,7 +3818,7 @@ mod tenant {
     /// action against it, and 303s back to the same prefix.
     pub(super) async fn handle_list_action_tenant(
         State(state): State<Arc<TenantListViewState>>,
-        t: Tenant,
+        t: TenantScope,
         req: axum::extract::Request,
     ) -> Response {
         let (parts, body) = req.into_parts();
@@ -3949,7 +3950,7 @@ mod tenant {
         State(state): State<Arc<TenantDetailViewState>>,
         parts: Parts,
         Path(pk): Path<String>,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         // #379 — `lookup_field` opt-in: probe by the named column
         // instead of the PK. Tenant variant mirrors the
@@ -3994,7 +3995,7 @@ mod tenant {
         parts: Parts,
         Path(pk): Path<String>,
         csrf: CsrfCookie,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -4026,7 +4027,7 @@ mod tenant {
     pub(super) async fn handle_delete_submit_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -4088,7 +4089,7 @@ mod tenant {
     pub(super) async fn handle_create_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         parts: Parts,
-        t: Tenant,
+        t: TenantScope,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let (mut columns, mut values, mut errors) = parse_form(
@@ -4125,7 +4126,7 @@ mod tenant {
         parts: Parts,
         Path(pk): Path<String>,
         csrf: CsrfCookie,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let page = state.page();
         let object = match page.object(t.pool(), &pk).await {
@@ -4141,7 +4142,7 @@ mod tenant {
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
         parts: Parts,
-        t: Tenant,
+        t: TenantScope,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {

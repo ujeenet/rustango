@@ -10,15 +10,13 @@
 //! * a token minted for another tenant is refused even though both tenants
 //!   share one signing key.
 
-// `not(postgres)`: the `Tenant` extractor looks up `TenantContext<DefaultDb>`,
-// and enabling the postgres feature makes that Postgres — the sqlite context
-// this test hands it would simply not be found.
+// No `not(postgres)`: `require_bearer` and `JwtAuth::router` serve whichever
+// backend is mounted.
 #![cfg(all(
     feature = "sqlite",
     feature = "tenancy",
     feature = "passwords",
-    feature = "admin",
-    not(feature = "postgres")
+    feature = "admin"
 ))]
 
 use std::sync::Arc;

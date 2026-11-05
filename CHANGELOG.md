@@ -49,6 +49,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The fullstack index links the admin at its configured prefix, not a fixed `/admin`.
 - Guides: viewsets, getting-started, scaffolding, manage and the cookbook match what the generators write.
 - `member_sso_router()` serves the backend of the mounted tenant context, so a SQLite or MySQL tenant signs in under a build that also enables `postgres`; it answered 500 there.
+- Template views' `tenant_router()`, `require_bearer`, `JwtAuth::router()` and the MCP routers (`secure_tenant_router`, `secure_tenant_router_from_settings`, `tenant_router_authed`) serve the backend of the mounted tenant context, so SQLite and MySQL tenants work under a build that also enables `postgres`; they answered 500 there. The `_for::<DB>` variants are unchanged. `require_bearer` now takes `TenantScope` instead of `Tenant`.
 
 ## [0.63.0] — 2026-11-04
 
