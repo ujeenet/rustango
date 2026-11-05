@@ -149,6 +149,13 @@ Präfix ebenfalls.
 Host-Routing ist die stärkere Wahl für die Produktion. Pfad-Präfixe sind
 praktisch in der Entwicklung, wo du nur einen Host hast.
 
+Tenants mit Pfad-Präfix teilen sich außerdem den Apex-Origin mit der
+Betreiberkonsole. Ein Skript auf einer Tenant-Seite läuft dann im Origin der
+Konsole und kann dort als angemeldeter Betreiber handeln, oder im Admin eines
+anderen Präfix-Tenants. Der Server warnt beim Start, wenn er beides ausliefert.
+Gib Tenants in Produktion eigene Hosts, oder öffne im Browser, den du für die
+Konsole nutzt, keine Tenant-Seiten.
+
 ## Speichermodi
 
 Jeder Tenant hat einen `storage_mode`: `schema` oder `database`.

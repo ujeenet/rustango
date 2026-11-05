@@ -28,11 +28,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
 - The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply to a sign-in started at the login page.
 - **Breaking:** without the `tenancy` feature, mounting a ViewSet that sets permission codenames panics with the fix, instead of answering 403 forever; the open-writes warning and `make:viewset` name only what the build has.
+- `server::Builder` warns at boot when path-prefix tenants share the apex origin with the operator console.
 
 ### Deprecated
 
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` (removed in 0.66.0): use `CacheScope::for_tenant(..).app()` / `.locks()`.
 - **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
+- `tenancy::server::run` (removed in 0.66.0): it serves without the `[security]` / `[server]` layers; use `manage::Cli` or `server::Builder`.
 
 ### Fixed
 
@@ -70,6 +72,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A regenerated system chain refuses, listing each column, when the database differs from it in nullability, `max_length`, having a DEFAULT, UNIQUE or ON DELETE; it used to record itself as applied.
 - PostgreSQL: drops, alters, renames, index drops, UNIQUE adds, CHECK drops and comments name the table in the migration's schema, and FK and UNIQUE names are looked up there before their drop, so a schema-mode tenant migration never reaches a same-named table in `public`.
 - SQLite: a table rebuild no longer fails when a view or another table's trigger names the table; it refuses one that would break a view.
+- `HmacAuthLayer` signs the URL the client sent (`OriginalUri`): under a path-prefix tenant it checked the stripped path, so real signatures failed and one tenant's signature passed on another tenant's path.
+- The login throttle lets a client that signed in to an account lately (same username and IP) past that account's lock, so a guesser's bad passwords no longer lock its owner out; the lock stays on for everyone else.
 
 ## [0.63.0] — 2026-11-04
 

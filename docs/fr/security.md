@@ -48,6 +48,10 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Les tenants à préfixe de chemin partagent une origine avec la console
+opérateur : voir [Noms d'hôte](operator-console.md). En production, préférez un
+hôte par tenant.
+
 ---
 
 ## Définir les en-têtes de sécurité
@@ -184,7 +188,7 @@ En cas d'épuisement : `429 Too Many Requests` avec l'en-tête `Retry-After`. Ch
 
 ### Limites de connexion intégrées
 
-Chaque connexion par mot de passe intégrée (admin, console opérateur, admin de tenant, JWT `/auth/login`) passe par `rustango::login_throttle` avant la recherche de l'utilisateur. Il vérifie, dans l'ordre, un verrou par nom d'utilisateur (5 échecs, 15 min) qui compte les noms inconnus comme les vrais, une limite par IP (20 connexions échouées/min ; en IPv6, par /64) et une limite globale par point de connexion (600 connexions échouées/min chacun pour l'admin, la console opérateur et chaque tenant). Une connexion réussie ne compte pas dans les limites. Un nom d'utilisateur qui s'est connecté depuis une IP au cours des 30 derniers jours passe outre une limite globale épuisée depuis cette IP, pour qu'une attaque depuis de nombreuses IP ne puisse pas verrouiller tous les utilisateurs ; sa limite par IP et son verrou par nom d'utilisateur s'appliquent toujours. Une fois la ligne utilisateur trouvée, le verrou suit aussi le nom d'utilisateur stocké, de sorte que les graphies que la base considère égales (MySQL fait correspondre `alicé` à `alice`) partagent un même verrou. HTTP Basic et les clés d'API ont leur propre portée et ne comptent que les échecs. Une connexion refusée reçoit `429` avec `Retry-After`, et la même réponse que le compte existe ou non.
+Chaque connexion par mot de passe intégrée (admin, console opérateur, admin de tenant, JWT `/auth/login`) passe par `rustango::login_throttle` avant la recherche de l'utilisateur. Il vérifie, dans l'ordre, un verrou par nom d'utilisateur (5 échecs, 15 min) qui compte les noms inconnus comme les vrais, une limite par IP (20 connexions échouées/min ; en IPv6, par /64) et une limite globale par point de connexion (600 connexions échouées/min chacun pour l'admin, la console opérateur et chaque tenant). Une connexion réussie ne compte pas dans les limites. Un nom d'utilisateur qui s'est connecté depuis une IP au cours des 30 derniers jours passe outre une limite globale épuisée depuis cette IP, pour qu'une attaque depuis de nombreuses IP ne puisse pas verrouiller tous les utilisateurs. Depuis cette IP, il compte aussi sur son propre verrou par nom d'utilisateur, de sorte que les mauvais mots de passe d'un autre client ne le verrouillent pas ; sa limite par IP s'applique toujours. Une fois la ligne utilisateur trouvée, le verrou suit aussi le nom d'utilisateur stocké, de sorte que les graphies que la base considère égales (MySQL fait correspondre `alicé` à `alice`) partagent un même verrou. HTTP Basic et les clés d'API ont leur propre portée et ne comptent que les échecs. Une connexion refusée reçoit `429` avec `Retry-After`, et la même réponse que le compte existe ou non.
 
 Derrière un reverse proxy, montez `RealIpLayer` avec vos proxys comme ci-dessus ; une application `Cli` appelle plutôt `Cli::with_trusted_proxies(["127.0.0.1/32"])?`. Sans cela, chaque client a l'adresse du proxy et partage un seul compartiment par IP ; un avertissement est journalisé une fois quand des en-têtes de transfert arrivent.
 

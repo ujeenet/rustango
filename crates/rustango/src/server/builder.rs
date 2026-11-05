@@ -1059,6 +1059,7 @@ impl<DB: Database> Builder<DB> {
                 ),
             }
         }
+        warn_if_prefix_tenants_share_the_console(&registry_pool).await;
         // Links are signed with the tenant admin's own secret and path.
         let handover = crate::tenancy::FirstAdminHandover::new(&session_secret_for_tenant)
             .set_password_path(self.routes.change_password_url.clone())
@@ -1476,6 +1477,25 @@ fn strip_tenant_prefix(
         *req.uri_mut() = stripped;
     }
     req
+}
+
+/// Path-prefix tenants live on the apex, the console's origin: a script on a
+/// tenant page can call the console with an operator's cookies. Warn once at boot.
+async fn warn_if_prefix_tenants_share_the_console(registry: &crate::sql::Pool) {
+    use crate::core::Column as _;
+    use crate::sql::ExistsPool as _;
+    let prefixed = crate::tenancy::Org::objects()
+        .where_(crate::tenancy::Org::path_prefix.is_not_null())
+        .exists(registry)
+        .await;
+    if prefixed.unwrap_or(false) {
+        tracing::warn!(
+            target: "rustango::server",
+            "path-prefix tenants share the apex origin with the operator console, so a \
+             script on a tenant page can act in the console as a signed-in operator; serve \
+             tenants on their own hosts in production (docs/operator-console.md)"
+        );
+    }
 }
 
 /// Mark a request the console or the unresolved router serves: no tenant.

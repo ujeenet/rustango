@@ -152,6 +152,13 @@ tenant portent aussi le préfixe.
 Le routage par hôte est le meilleur choix en production. Les préfixes de
 chemin sont pratiques en développement, quand vous n'avez qu'un hôte.
 
+Les tenants à préfixe de chemin partagent aussi l'origine de l'apex avec la
+console opérateur. Un script sur une page du tenant s'exécute alors sur
+l'origine de la console et peut y agir comme un opérateur connecté, ou dans
+l'admin d'un autre tenant à préfixe. Le serveur avertit au démarrage quand il
+sert les deux. En production, donnez à chaque tenant son propre hôte, ou
+n'ouvrez pas de pages de tenant dans le navigateur utilisé pour la console.
+
 ## Modes de stockage
 
 Chaque tenant a un `storage_mode` : `schema` ou `database`.

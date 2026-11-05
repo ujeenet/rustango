@@ -105,6 +105,13 @@ Los nombres de host se normalizan a la entrada: minúsculas, sin esquema, sin pu
 
 Desde la CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#nombres-de-host).
 
+**Los tenants con prefijo de ruta comparten el origen de la consola.** La
+consola y cada tenant con prefijo viven en el apex, así que un script en una
+página del tenant puede enviar peticiones a la consola con las cookies de un
+operador. El servidor registra un aviso al arrancar si algún tenant tiene
+prefijo. En producción sirve los tenants en sus propios hosts, o entra en la
+consola desde un perfil de navegador que nunca abra páginas de tenants.
+
 ---
 
 ## Hosts desconocidos

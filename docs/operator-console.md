@@ -105,6 +105,13 @@ Hostnames are normalized on the way in: lowercased, no scheme, no port, no path.
 
 From the CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#hostnames).
 
+**Path-prefix tenants share the console's origin.** The console and every
+path-prefix tenant live on the apex, so a script on a tenant page can send the
+console requests with an operator's cookies. The server logs a warning at boot
+when any tenant has a path prefix. Serve tenants on their own hosts in
+production, or sign in to the console from a browser profile that never opens
+tenant pages.
+
 ---
 
 ## Unknown hosts

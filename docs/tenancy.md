@@ -145,6 +145,12 @@ cookies use `Path=/<prefix>`, and `/acme`'s cookies are not sent to
 Host routing is the stronger choice for production. Path prefixes are handy
 in development, where you have one host.
 
+Path-prefix tenants also share the apex origin with the operator console. A
+script on a tenant page then runs on the console's origin and can act there as
+a signed-in operator, or in another prefix tenant's admin. The server warns at
+boot when it serves both. In production, give tenants their own hosts, or keep
+operators off tenant pages in the browser they use for the console.
+
 ## Storage modes
 
 Each tenant has a `storage_mode`: `schema` or `database`.
