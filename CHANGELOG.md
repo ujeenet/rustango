@@ -68,6 +68,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `[errors] enabled` without `template_views`, and tenancy-only `[routes]` keys on a single-database app, now warn; `check-settings` marks those keys "tenancy apps only".
 - `RouteConfig::basic_auth_realm` and `tenancy::server::ServerConfig::operator_show_only`, which nothing read, are removed; the `save_quietly` docs say ORM writes send no signals.
 - Migrations: `makemigrations` refuses a model whose `table =` changed with its columns kept (it wrote a drop + create that emptied the table) and names the `RenameTable` route; every `DropTable` now warns. `migrate <target>` refuses a target an applied squash replaces, `unapply` refuses a migration that is not applied, and `migrate_embedded` reconciles squashes like `migrate`. On SQLite a migration whose ledger row committed is no longer reported as failed when only the FK restore failed.
+- System migrations stage their files in a fresh, owner-only temp dir; a leftover or planted dir under the old guessable name is never read.
+- A regenerated system chain refuses, listing each column, when the database differs from it in nullability, `max_length`, having a DEFAULT, UNIQUE or ON DELETE; it used to record itself as applied.
+- PostgreSQL: drops, alters, renames and index drops name the table in the migration's schema, so a schema-mode tenant migration never reaches a same-named table in `public`.
+- SQLite: a table rebuild no longer fails when a view or another table's trigger names the table; it refuses one that would break a view.
 - `HmacAuthLayer` signs the URL the client sent (`OriginalUri`): under a path-prefix tenant it checked the stripped path, so real signatures failed and one tenant's signature passed on another tenant's path.
 - The login throttle lets a client that signed in to an account lately (same username and IP) past that account's lock, so a guesser's bad passwords no longer lock its owner out; the lock stays on for everyone else.
 

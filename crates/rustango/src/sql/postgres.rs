@@ -374,6 +374,27 @@ impl Dialect for Postgres {
         )
     }
 
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT a.attname::text FROM pg_index i \
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
+             WHERE i.indrelid = to_regclass(quote_ident($1)) AND i.indisunique \
+             AND NOT i.indisprimary AND i.indnkeyatts = 1 \
+             AND i.indpred IS NULL AND i.indexprs IS NULL",
+        )
+    }
+
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT a.attname::text, CASE c.confdeltype WHEN 'c' THEN 'CASCADE' \
+             WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' \
+             ELSE 'NO ACTION' END FROM pg_constraint c \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
+             AND cardinality(c.conkey) = 1",
+        )
+    }
+
     fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT {}",

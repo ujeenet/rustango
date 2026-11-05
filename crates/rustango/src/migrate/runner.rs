@@ -1259,8 +1259,8 @@ async fn apply_chain(
         }
         if !unfixed.is_empty() {
             return Err(MigrateError::Validation(format!(
-                "the framework schema is missing objects `migrate` cannot add; \
-                     add them by hand, then rerun `migrate`:\n  - {}",
+                "the database differs from the framework schema in ways `migrate` \
+                     cannot fix; fix them by hand, then rerun `migrate`:\n  - {}",
                 unfixed.join("\n  - ")
             )));
         }
@@ -1866,13 +1866,15 @@ fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
 
 /// Create what `mig` creates and the database lacks: missing tables with
 /// their indexes, and missing columns of tables already there. One object
-/// at a time, so one failure does not block the rest; returns the failures.
+/// at a time, so one failure does not block the rest; returns the failures,
+/// and the columns that differ from `mig`, which it cannot alter.
 async fn converge_regenerated(
     pool: &crate::sql::Pool,
     mig: &Migration,
 ) -> Result<Vec<String>, MigrateError> {
     use super::diff::SchemaChange as SC;
     let mut groups: Vec<Vec<SC>> = Vec::new();
+    let mut drift = Vec::new();
     for op in &mig.forward {
         let Operation::Schema(change) = op else {
             continue;
@@ -1895,6 +1897,7 @@ async fn converge_regenerated(
         let (SC::CreateTable(_), Some(snap)) = (change, mig.snapshot.table(table)) else {
             continue;
         };
+        drift.extend(super::ensure::column_drift(pool, snap, &mig.snapshot.indexes).await?);
         let live = super::ensure::live_columns(pool, table).await?;
         groups.extend(
             snap.fields
@@ -1924,8 +1927,9 @@ async fn converge_regenerated(
             );
         }
     }
-    let failed = super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?;
+    let mut failed = super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?;
     warn_on_index_clash(pool, mig).await?;
+    failed.extend(drift);
     Ok(failed)
 }
 
