@@ -2492,7 +2492,7 @@ struct Step {
     /// The column whose FK the step adds back before the migration ends.
     readded_now: Option<(String, String)>,
     /// The schema its catalog lookups and drops are in (PG), not `search_path`'s pick.
-    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
     schema: Option<String>,
 }
 

@@ -229,8 +229,10 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 Una columna eliminada junto a una columna nueva del mismo tipo en una tabla
 parece un campo renombrado, y eliminar+añadir borraría sus datos.
 `makemigrations` lo rechaza y nombra las columnas; escribe el `RenameColumn`
-como abajo, o pasa `--drop-and-add` para eliminar y añadir a propósito. Cada
-otro `DropColumn` avisa de que sus datos se pierden.
+como abajo, o pasa `--drop-and-add` para eliminar y añadir a propósito. Una
+tabla eliminada junto a una tabla nueva con las mismas columnas (un `table =`
+cambiado) se rechaza igual; escribe un `RenameTable` en su lugar. Cada otro
+`DropColumn` o `DropTable` avisa de que sus datos se pierden.
 
 ### `makemigrations --app <app>`
 
@@ -342,6 +344,10 @@ cargo run -- migrate 0003_add_slug      # forward to 0003
 cargo run -- migrate 0001_initial       # roll back to 0001 (unapply 0002+)
 cargo run -- migrate zero               # unapply EVERY migration
 ```
+
+Un objetivo que un squash aplicado reemplazó se rechaza: moverse a él
+desharía el squash y sus filas. Apunta al squash o a una migración fuera de
+él. Revertir rechaza una migración que el ledger no ha aplicado.
 
 ### `migrate --squash`
 

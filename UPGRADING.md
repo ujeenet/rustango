@@ -157,6 +157,7 @@ untouched.
 - `tenancy::manage::run` no longer serves `run-server`: serve with `manage::Cli::new().tenancy()`.
 - `RouteConfig::basic_auth_realm` and `ServerConfig::operator_show_only` are gone: delete them from struct literals. `JtiBlacklist::end_session` returns a `bool` (`#[must_use]`).
 - `makemigrations` refuses a renamed table (a dropped table beside a new one with the same columns). Write the `RenameTable` it names in a `makemigrations --empty` file, or pass `--drop-and-add` to drop the old table on purpose.
+- `Dialect`'s `drop_foreign_key_sql`, `drop_check_constraint_sql`, `drop_unique_index_sql`, `add_unique_constraint_sql` and comment statements take a `sql::TableTarget`: pass `TableTarget::bare(table)` where you passed `table`.
 - `migrate <target>` refuses a target an applied squash replaces; target the squash instead. `unapply` / `unapply_force` refuse a migration that is not in the ledger (they used to run its inverse anyway).
 - The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
 - `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.

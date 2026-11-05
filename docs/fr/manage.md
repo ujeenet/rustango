@@ -234,7 +234,10 @@ Une colonne supprimée à côté d'une nouvelle colonne du même type dans une t
 ressemble à un champ renommé, et suppression+ajout effacerait ses données.
 `makemigrations` le refuse et nomme les colonnes ; écrivez le `RenameColumn`
 comme ci-dessous, ou passez `--drop-and-add` pour supprimer et ajouter
-volontairement. Tout autre `DropColumn` avertit que ses données disparaissent.
+volontairement. Une table supprimée à côté d'une nouvelle table aux mêmes
+colonnes (un `table =` modifié) est refusée de la même façon ; écrivez plutôt
+un `RenameTable`. Tout autre `DropColumn` ou `DropTable` avertit que ses
+données disparaissent.
 
 ### `makemigrations --app <app>`
 
@@ -354,6 +357,10 @@ cargo run -- migrate 0003_add_slug      # forward to 0003
 cargo run -- migrate 0001_initial       # roll back to 0001 (unapply 0002+)
 cargo run -- migrate zero               # unapply EVERY migration
 ```
+
+Une cible qu'un squash appliqué a remplacée est refusée : y aller déferait le
+squash et ses lignes. Visez le squash ou une migration hors de lui. Le retour
+arrière refuse une migration que le ledger n'a pas appliquée.
 
 ### `migrate --squash`
 
