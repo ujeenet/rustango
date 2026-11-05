@@ -217,6 +217,7 @@ pub struct IdleSweep {
 }
 
 /// `days` before `now`; `None` when that falls outside the calendar.
+#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 fn idle_cutoff(
     now: chrono::DateTime<chrono::Utc>,
     days: i32,

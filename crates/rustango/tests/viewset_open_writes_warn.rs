@@ -11,7 +11,9 @@
 use rustango::core::Model as _;
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::testkit::CaptureWriter;
-use rustango::viewset::{ViewSet, ViewSetPerms};
+use rustango::viewset::ViewSet;
+#[cfg(feature = "tenancy")]
+use rustango::viewset::ViewSetPerms;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
