@@ -176,6 +176,48 @@ mod scenarios {
         }
     }
 
+    /// A filtered `any_value` must skip rows the filter rejects. Group
+    /// `beta` holds ids 2 and 4: its first row fails `id > 2`.
+    pub async fn check_filtered_any_value_skips_rejected_rows(pool: &Pool) {
+        use rustango::core::aggregates::any_value;
+        use rustango::core::Column as _;
+        let rows = DeltaRow::objects()
+            .aggregate()
+            .group_by("name")
+            .annotate(
+                "anyid",
+                any_value("id").filter(DeltaRow::id.gt(2_i64)).build(),
+            )
+            .fetch(pool)
+            .await
+            .expect("filtered any_value on every backend");
+        let mut got: Vec<(String, Option<i64>)> = rows
+            .iter()
+            .map(|row| {
+                let name = match row.get("name") {
+                    Some(SqlValue::String(s)) => s.clone(),
+                    other => panic!("expected name, got {other:?}"),
+                };
+                let id = match row.get("anyid") {
+                    Some(SqlValue::I64(n)) => Some(*n),
+                    Some(SqlValue::I32(n)) => Some(i64::from(*n)),
+                    Some(SqlValue::Null) | None => None,
+                    other => panic!("expected integer anyid, got {other:?}"),
+                };
+                (name, id)
+            })
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("alpha".to_owned(), None),
+                ("beta".to_owned(), Some(4)),
+                ("gamma".to_owned(), Some(3)),
+            ]
+        );
+    }
+
     /// After `save()`, generated columns refresh from the
     /// database via RETURNING (PG/SQLite; deferred on MySQL, which has no
     /// `INSERT … RETURNING`). #1028.
@@ -282,6 +324,7 @@ mod pg_live {
     pg_case!(check_string_agg_dialect_matrix);
     pg_case!(check_string_agg_distinct);
     pg_case!(check_any_value);
+    pg_case!(check_filtered_any_value_skips_rejected_rows);
     pg_case!(check_string_agg_ordered);
     pg_case!(check_generated_column_refreshed_on_save);
     pg_case!(check_auto_pk_is_64_bit);
@@ -330,6 +373,7 @@ mod sqlite_live {
     sqlite_case!(check_string_agg_dialect_matrix);
     sqlite_case!(check_string_agg_distinct);
     sqlite_case!(check_any_value);
+    sqlite_case!(check_filtered_any_value_skips_rejected_rows);
     sqlite_case!(check_string_agg_ordered);
     sqlite_case!(check_generated_column_refreshed_on_save);
     sqlite_case!(check_auto_pk_is_64_bit);
@@ -396,6 +440,7 @@ mod mysql_live {
     mysql_case!(check_string_agg_dialect_matrix);
     mysql_case!(check_string_agg_distinct);
     mysql_case!(check_any_value);
+    mysql_case!(check_filtered_any_value_skips_rejected_rows);
     mysql_case!(check_string_agg_ordered);
     mysql_case!(check_generated_column_refreshed_on_save);
     mysql_case!(check_auto_pk_is_64_bit);

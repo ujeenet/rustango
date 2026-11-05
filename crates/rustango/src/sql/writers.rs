@@ -1629,6 +1629,39 @@ fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> St
     s
 }
 
+/// What an `AnyValue` call aggregates over.
+#[derive(Clone, Copy)]
+enum AnyValueArg {
+    /// A plain column.
+    Column,
+    /// The `CASE WHEN <filter> THEN col END` stand-in for `FILTER`,
+    /// which yields NULL for every rejected row.
+    FilterCase,
+}
+
+/// The one writer for `AnyValue`. PG 16+ and MySQL have `any_value()`;
+/// SQLite and MariaDB use `min()`, as any value satisfies the contract.
+/// Over a filter CASE every dialect uses `MIN`, which skips the NULLs
+/// that `ANY_VALUE` may return.
+fn any_value_call(b: &Sql<'_>, arg: &str, kind: AnyValueArg) -> String {
+    if let AnyValueArg::FilterCase = kind {
+        return format!("MIN({arg})");
+    }
+    match b.d.name() {
+        "mysql" => {
+            let mut sql = String::new();
+            super::mysql::ByServer {
+                mysql: &format!("ANY_VALUE({arg})"),
+                mariadb: &format!("MIN({arg})"),
+            }
+            .write(&mut sql);
+            sql
+        }
+        "sqlite" => format!("min({arg})"),
+        _ => format!("any_value({arg})"),
+    }
+}
+
 /// Build the bare aggregate call for a flat variant, with no cast.
 /// It returns the string instead of writing it, so the caller can put
 /// it inside a `FILTER` clause and then apply [`apply_agg_cast`].
@@ -1644,24 +1677,7 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         AggregateExpr::Avg(col) => format!("AVG({})", col_sql(col)),
         AggregateExpr::Max(col) => format!("MAX({})", col_sql(col)),
         AggregateExpr::Min(col) => format!("MIN({})", col_sql(col)),
-        AggregateExpr::AnyValue(col) => {
-            // PG 16+ and MySQL have `any_value()`. SQLite and MariaDB do
-            // not, so use `min()`: any value satisfies the contract.
-            let ident = col_sql(col);
-            match b.d.name() {
-                "mysql" => {
-                    let mut sql = String::new();
-                    super::mysql::ByServer {
-                        mysql: &format!("ANY_VALUE({ident})"),
-                        mariadb: &format!("MIN({ident})"),
-                    }
-                    .write(&mut sql);
-                    sql
-                }
-                "sqlite" => format!("min({ident})"),
-                _ => format!("any_value({ident})"),
-            }
-        }
+        AggregateExpr::AnyValue(col) => any_value_call(b, &col_sql(col), AnyValueArg::Column),
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
@@ -1895,7 +1911,7 @@ fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), Sql
 
 /// MySQL stand-in for `<inner> FILTER (WHERE p)`, written as
 /// `<agg>(CASE WHEN p THEN <arg> END)`. `COUNT(*)` uses `THEN 1`,
-/// every other aggregate uses `THEN <col>`.
+/// every other aggregate uses `THEN <col>`; `AnyValue` becomes `MIN`.
 fn write_aggregate_as_case_when(
     b: &mut Sql<'_>,
     inner: &AggregateExpr,
@@ -1909,7 +1925,8 @@ fn write_aggregate_as_case_when(
         AggregateExpr::Avg(col) => ("AVG", Some(*col), ""),
         AggregateExpr::Max(col) => ("MAX", Some(*col), ""),
         AggregateExpr::Min(col) => ("MIN", Some(*col), ""),
-        AggregateExpr::AnyValue(col) => ("ANY_VALUE", Some(*col), ""),
+        // Wrapped by `any_value_call` below.
+        AggregateExpr::AnyValue(col) => ("", Some(*col), ""),
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
@@ -1938,10 +1955,9 @@ fn write_aggregate_as_case_when(
             });
         }
     };
+    // Write the CASE in place so its binds keep their text order, then
+    // lift it out to wrap it in the aggregate call and cast.
     let prior = b.sql.len();
-    b.sql.push_str(agg_kw);
-    b.sql.push('(');
-    b.sql.push_str(distinct_prefix);
     b.sql.push_str("CASE WHEN ");
     write_where_expr(b, filter, None)?;
     b.sql.push_str(" THEN ");
@@ -1949,13 +1965,18 @@ fn write_aggregate_as_case_when(
         Some(col) => b.write_scope_col(col),
         None => b.sql.push('1'),
     }
-    b.sql.push_str(" END)");
-    if let Some(kind) = aggregate_cast_kind(b, inner) {
-        let emitted = b.sql[prior..].to_string();
-        b.sql.truncate(prior);
-        let wrapped = apply_agg_cast(b.d, kind, &emitted);
-        b.sql.push_str(&wrapped);
-    }
+    b.sql.push_str(" END");
+    let case = b.sql[prior..].to_string();
+    b.sql.truncate(prior);
+    let call = match inner {
+        AggregateExpr::AnyValue(_) => any_value_call(b, &case, AnyValueArg::FilterCase),
+        _ => format!("{agg_kw}({distinct_prefix}{case})"),
+    };
+    let out = match aggregate_cast_kind(b, inner) {
+        Some(kind) => apply_agg_cast(b.d, kind, &call),
+        None => call,
+    };
+    b.sql.push_str(&out);
     Ok(())
 }
 
