@@ -158,7 +158,7 @@ cargo rgo new shop --alias rgo
 
 ```toml
 [dependencies]
-rgo = { package = "rustango", version = "0.63", default-features = false, features = ["batteries"] }
+rgo = { package = "rustango", version = "0.64", default-features = false, features = ["batteries"] }
 
 [features]
 postgres = ["rgo/postgres"]

@@ -225,7 +225,7 @@ signal `Lagged` plutôt qu'une croissance mémoire illimitée.
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "0.63", features = ["sse", "websocket"] }
+rustango = { version = "0.64", features = ["sse", "websocket"] }
 ```
 
 - **`sse`** — le bus de diffusion `EventBus` (aucune dépendance en plus). Suffisant

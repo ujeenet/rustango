@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+## 0.64.0
+
 - `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
 - New tenant table `rustango_sso_landing_rules`: run `makemigrations` and `migrate`. Until then sign-ins land as before.

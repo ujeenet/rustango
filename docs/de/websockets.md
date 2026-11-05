@@ -223,7 +223,7 @@ Abonnent, und ein Client, der weiter als `capacity` zurückfällt, erhält ein
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "0.63", features = ["sse", "websocket"] }
+rustango = { version = "0.64", features = ["sse", "websocket"] }
 ```
 
 - **`sse`** — der `EventBus`-Broadcast-Bus (keine zusätzlichen Abhängigkeiten).

@@ -4,6 +4,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.64.0] — 2026-11-05
+
 ### Added
 
 - `Cache::delete_prefixes` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.

@@ -223,7 +223,7 @@ buffer, and a client that falls further behind than `capacity` gets a
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "0.63", features = ["sse", "websocket"] }
+rustango = { version = "0.64", features = ["sse", "websocket"] }
 ```
 
 - **`sse`** — the `EventBus` broadcast bus (no extra dependencies). Enough for

@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.63"                                        # Postgres (the default backend)
+//! rustango = "0.64"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.63", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.63", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.64", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.64", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
