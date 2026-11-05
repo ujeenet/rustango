@@ -48,6 +48,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The startapp smoke test checks the app's own models, so renaming the starter model keeps `cargo test` green.
 - The fullstack index links the admin at its configured prefix, not a fixed `/admin`.
 - Guides: viewsets, getting-started, scaffolding, manage and the cookbook match what the generators write.
+- `member_sso_router()` serves the backend of the mounted tenant context, so a SQLite or MySQL tenant signs in under a build that also enables `postgres`; it answered 500 there.
 
 ## [0.63.0] — 2026-11-04
 

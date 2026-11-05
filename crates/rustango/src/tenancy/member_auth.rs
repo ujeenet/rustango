@@ -440,9 +440,53 @@ impl Default for MemberAuthConfig {
 /// [`crate::server::Builder`] stack — the handlers read the
 /// `TenantContext` extension for the resolved tenant, its scoped
 /// pool, and the session secret.
+///
+///
+/// Each request is served for the backend of the tenant context mounted on
+/// it, so a SQLite tenant works in a build that also enables `postgres`.
 #[must_use]
 pub fn member_sso_router(config: MemberAuthConfig) -> Router<()> {
-    member_sso_router_for::<DefaultTenantDb>(config)
+    sso_routes(config, get(begin_any), get(callback_any))
+}
+
+/// The begin and callback routes, plain and under a tenant's path prefix.
+fn sso_routes(
+    config: MemberAuthConfig,
+    begin: axum::routing::MethodRouter<()>,
+    callback: axum::routing::MethodRouter<()>,
+) -> Router<()> {
+    let login = config.login_base.trim_end_matches('/').to_owned();
+    let mut router = Router::new();
+    // A path-prefix tenant reaches the same routes under its prefix (#2145).
+    for mount in ["", "/{prefix}"] {
+        router = router
+            .route(&format!("{mount}{login}/sso/{{slug}}"), begin.clone())
+            .route(
+                &format!("{mount}{login}/sso/{{slug}}/callback"),
+                callback.clone(),
+            );
+    }
+    router.layer(Extension(config))
+}
+
+/// `TenantScope` reads whichever tenant context is mounted, whatever its backend.
+async fn begin_any(
+    t: TenantScope,
+    Path(sso): Path<SsoPath>,
+    Extension(config): Extension<MemberAuthConfig>,
+    req: Request,
+) -> Response {
+    sso_begin_in(t, sso, config, req).await
+}
+
+async fn callback_any(
+    t: TenantScope,
+    Path(sso): Path<SsoPath>,
+    Extension(config): Extension<MemberAuthConfig>,
+    Query(params): Query<CallbackParams>,
+    req: Request,
+) -> Response {
+    sso_callback_in(t, sso, config, params, req).await
 }
 
 /// [`member_sso_router`] for a `Tenant<DB>` other than the default, e.g.
@@ -453,21 +497,7 @@ where
     DB: Database,
     Tenant<DB>: FromRequestParts<()> + Send,
 {
-    let login = config.login_base.trim_end_matches('/').to_owned();
-    let mut router = Router::new();
-    // A path-prefix tenant reaches the same routes under its prefix (#2145).
-    for mount in ["", "/{prefix}"] {
-        router = router
-            .route(
-                &format!("{mount}{login}/sso/{{slug}}"),
-                get(sso_begin::<DB>),
-            )
-            .route(
-                &format!("{mount}{login}/sso/{{slug}}/callback"),
-                get(sso_callback::<DB>),
-            );
-    }
-    router.layer(Extension(config))
+    sso_routes(config, get(sso_begin::<DB>), get(sso_callback::<DB>))
 }
 
 /// Path params; `prefix` is set on the path-prefix tenant routes.
