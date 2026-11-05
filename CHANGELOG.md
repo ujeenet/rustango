@@ -14,7 +14,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `cache::CacheScope::from_request(&root, &mut parts)` gives the request's tenant-scoped app cache, `sessions()` and `flags()`; `None` with no tenant context mounted.
 - `KeyBy::Tenant` counts each tenant in its own bucket; `KeyBy::Global` stays platform-wide. With no tenant context mounted it warns once and counts everyone in one unknown-tenant bucket, never the `Global` one.
 - SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
-- Tenant SSO sign-in honours `?next` on `<login>/sso/<slug>`: sealed in the flow cookie, checked like the password login's, else `admin_url`; the login page passes its `?next` on.
+- Tenant and bare-admin SSO sign-in honour `?next` on `<login>/sso/<slug>`: sealed in the flow cookie (and kept through the TOTP step), checked like the password login's, else the admin home; the login page passes its `?next` on. The bare admin's login gate now sends the requested page as `?next`, and its password login lands back there (through the TOTP prompt too).
 
 ### Changed
 
