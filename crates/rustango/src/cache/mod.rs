@@ -62,6 +62,7 @@ pub mod redis_backend;
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub use db_backend::DatabaseCache;
 
+pub(crate) mod keyspace;
 #[cfg(feature = "tenancy")]
 mod scope;
 pub mod scoped;

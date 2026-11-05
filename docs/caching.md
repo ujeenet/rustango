@@ -239,13 +239,13 @@ Wrap the shared cache in a **`ScopedCache`** so the namespace is applied for
 you and the call site cannot forget:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -281,12 +281,16 @@ Two things worth knowing:
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.
 
+Every tenant key is `tenant:#org:<id>:<slug>:<area>:<rest>`, one area each
+for app keys, locks, idempotency, pages, rate limits, sessions and flag
+overrides. A tenant app `clear()` drops only the `app` area, so it never frees
+a running job's lock.
+
 A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`
-delete the old tenant's `ScopedCache::for_tenant` keys, call
+delete the old tenant's keys, call
 `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache
-that holds them. The purge also deletes the tenant's locks, sessions and flag
-overrides there. Idempotency and page-cache entries stay until they expire:
-they are bound to the org id, so the new tenant cannot read them.
+that holds them. The purge deletes every area there
+(`CacheScope::for_tenant(cache, &tenant).purge()` does the same by hand).
 
 ---
 

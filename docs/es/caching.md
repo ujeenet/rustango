@@ -252,13 +252,13 @@ Envuelve la caché compartida en un **`ScopedCache`** para que el namespace se
 aplique por ti y el sitio de llamada no pueda olvidarlo:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -299,7 +299,7 @@ vista acotada siempre que el cambio de un solo tenant sea lo que disparó la
 invalidación.
 
 Un tenant nuevo puede reutilizar el slug de un tenant purgado. Para que
-`purge-tenant` borre las claves `ScopedCache::for_tenant` del tenant anterior, llama a
+`purge-tenant` borre las claves `CacheScope::for_tenant` del tenant anterior, llama a
 `rustango::tenancy::decommission::clear_on_purge(cache)` al arrancar por cada caché
 que las guarde. La purga también borra allí los locks, las sesiones y los
 overrides de flags del tenant. Las entradas de idempotencia y de caché de página

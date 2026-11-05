@@ -292,8 +292,8 @@ What carries it:
 - the tenant session cookie and the impersonation handoff token;
 - JWTs: the `tenant` and `org_id` claims must both match;
 - HMAC signing keys and MCP agent keys bound to a tenant;
-- `ScopedCache::for_tenant`, the page cache, idempotency keys and
-  `DistributedLock::for_tenant`, all keyed `#org:<id>:<slug>`;
+- `CacheScope::for_tenant`, the page cache, idempotency keys and
+  `CacheScope::locks`, all keyed `#org:<id>:<slug>`;
 - password-reset and verify links.
 
 Tenant API keys and users live in the tenant's own storage, which a purge
@@ -301,14 +301,14 @@ drops. An `Org` with no id (one not read from the registry) has no
 `TenantSlug`, and authentication refuses it.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` only for an Org that was not read from the registry.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

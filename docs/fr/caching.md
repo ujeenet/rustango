@@ -257,13 +257,13 @@ Enveloppez le cache partagé dans un **`ScopedCache`** pour que l'espace de noms
 soit appliqué à votre place et que le site d'appel ne puisse pas l'oublier :
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -303,7 +303,7 @@ Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadr�
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
 
 Le slug d'un tenant purgé peut être réutilisé par un nouveau tenant. Pour que
-`purge-tenant` supprime les clés `ScopedCache::for_tenant` de l'ancien tenant,
+`purge-tenant` supprime les clés `CacheScope::for_tenant` de l'ancien tenant,
 appelez `rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage
 pour chaque cache qui les contient. La purge y supprime aussi les verrous, les
 sessions et les overrides de flags du tenant. Les entrées d'idempotence et du

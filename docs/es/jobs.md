@@ -540,10 +540,10 @@ Si proteges el barrido para que solo una réplica lo ejecute, **acota el lock po
 tenant**:
 
 ```rust
-use rustango::distributed_lock::DistributedLock;
+use rustango::cache::CacheScope;
 
 let tenant = TenantSlug::of(&org).expect("a registry org");
-let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
+let lock = CacheScope::for_tenant(cache.clone(), &tenant).locks();
 // Tick every minute; this runs once per UTC day across replicas.
 lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```

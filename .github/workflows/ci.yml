@@ -1721,6 +1721,7 @@ jobs:
           binary(=cache_delete_prefix_live) |
           binary(=cache_db_long_keys_tri) |
           binary(=cache_db_incr_tri) |
+          binary(=tenant_cache_keys_tri) |
           binary(=login_throttle_cache_tri) |
           binary(=tenant_request_scope_live) |
           binary(=like_escape_live) |

@@ -305,8 +305,8 @@ Was ihn trägt:
 - JWTs: die Claims `tenant` und `org_id` müssen beide passen;
 - HMAC-Signaturschlüssel und MCP-Agent-Schlüssel, die an einen Tenant
   gebunden sind;
-- `ScopedCache::for_tenant`, der Seiten-Cache, Idempotenz-Schlüssel und
-  `DistributedLock::for_tenant`, alle mit dem Schlüssel `#org:<id>:<slug>`;
+- `CacheScope::for_tenant`, der Seiten-Cache, Idempotenz-Schlüssel und
+  `CacheScope::locks`, alle mit dem Schlüssel `#org:<id>:<slug>`;
 - Links zum Zurücksetzen des Passworts und zur Bestätigung.
 
 API-Schlüssel und Benutzer eines Tenants liegen in seinem eigenen Speicher,
@@ -314,14 +314,14 @@ den ein Purge löscht. Eine `Org` ohne ID (nicht aus der Registry gelesen) hat
 keinen `TenantSlug`, und die Anmeldung lehnt sie ab.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` nur für eine Org, die nicht aus der Registry gelesen wurde.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

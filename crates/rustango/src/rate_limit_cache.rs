@@ -48,8 +48,18 @@ use axum::http::{HeaderValue, Response};
 use axum::middleware::Next;
 use axum::Router;
 
+use crate::cache::keyspace::{Area, KeySpace};
 use crate::cache::BoxedCache;
-use crate::rate_limit::KeyBy;
+use crate::rate_limit::{KeyBy, TenantBucket};
+
+/// Where a request counts.
+enum Bucket {
+    /// A platform-wide discriminator: IP, header hash, or a fixed name.
+    Shared(String),
+    /// One tenant's [`KeyBy::Tenant`] bucket.
+    #[cfg(feature = "tenancy")]
+    Tenant(crate::tenancy::TenantSlug),
+}
 
 /// One-way hash of a bucket discriminator. A `SHA-256` prefix is
 /// stable per client, so the counter still works, but a secret header
@@ -148,13 +158,19 @@ impl CacheRateLimitLayer {
         }
     }
 
-    /// The bucket key; [`KeyBy::Tenant`] may resolve the tenant first.
-    async fn bucket_key(&self, req: Request<Body>) -> (Request<Body>, String) {
+    /// The bucket; [`KeyBy::Tenant`] may resolve the tenant first.
+    async fn bucket(&self, req: Request<Body>) -> (Request<Body>, Bucket) {
         if matches!(self.key_by, KeyBy::Tenant) {
-            return crate::rate_limit::tenant_key(req).await;
+            let (req, bucket) = crate::rate_limit::tenant_bucket(req).await;
+            let bucket = match bucket {
+                #[cfg(feature = "tenancy")]
+                TenantBucket::Tenant(t) => Bucket::Tenant(t),
+                TenantBucket::Fixed(name) => Bucket::Shared(name.to_owned()),
+            };
+            return (req, bucket);
         }
         let key = self.extract_key(&req);
-        (req, key)
+        (req, Bucket::Shared(key))
     }
 
     fn window_secs(&self) -> u64 {
@@ -170,7 +186,21 @@ impl CacheRateLimitLayer {
     }
 
     fn cache_key(&self, key: &str, window_start: u64) -> String {
-        format!("{}:{}:{window_start}", self.key_prefix.as_str(), key)
+        self.bucket_cache_key(&Bucket::Shared(key.to_owned()), window_start)
+    }
+
+    /// `<prefix>:<key>:<window>`; `tenant:#org:<id>:<slug>:rl:<prefix>:<window>` for a tenant.
+    fn bucket_cache_key(&self, bucket: &Bucket, window_start: u64) -> String {
+        let prefix = self.key_prefix.as_str();
+        match bucket {
+            Bucket::Shared(key) => {
+                KeySpace::Global.key(Area::Rl, &format!("{prefix}:{key}:{window_start}"))
+            }
+            #[cfg(feature = "tenancy")]
+            Bucket::Tenant(t) => {
+                KeySpace::Tenant(t.clone()).key(Area::Rl, &format!("{prefix}:{window_start}"))
+            }
+        }
     }
 
     fn retry_after(&self, now: u64, window_start: u64) -> u64 {
@@ -188,7 +218,11 @@ impl CacheRateLimitLayer {
     /// returned, so a short cache outage does not block all traffic.
     /// Call `cache.incr(...)` yourself if you need fail-closed.
     pub async fn take(&self, key: &str) -> Result<(u32, u64), u64> {
-        match self.try_take(key).await {
+        self.take_in(&Bucket::Shared(key.to_owned())).await
+    }
+
+    async fn take_in(&self, bucket: &Bucket) -> Result<(u32, u64), u64> {
+        match self.try_take_in(bucket).await {
             Ok(r) => r
                 .map(|(count, window_start)| (count, window_start + self.window_secs()))
                 .map_err(|(retry_after, _)| retry_after),
@@ -206,11 +240,18 @@ impl CacheRateLimitLayer {
         &self,
         key: &str,
     ) -> Result<Result<(u32, u64), (u64, u64)>, crate::cache::CacheError> {
+        self.try_take_in(&Bucket::Shared(key.to_owned())).await
+    }
+
+    async fn try_take_in(
+        &self,
+        bucket: &Bucket,
+    ) -> Result<Result<(u32, u64), (u64, u64)>, crate::cache::CacheError> {
         let (now, window_start) = self.window_now();
         let count = self
             .cache
             .incr(
-                &self.cache_key(key, window_start),
+                &self.bucket_cache_key(bucket, window_start),
                 1,
                 Some(Duration::from_secs(self.window_secs())),
             )
@@ -269,7 +310,7 @@ impl CacheRateLimitLayer {
     /// The key prefix of every window's counter of `key`, in [`Self::cache`].
     #[cfg(all(feature = "admin", feature = "tenancy"))] // only `login_throttle` calls it
     pub(crate) fn counter_prefix(&self, key: &str) -> String {
-        format!("{}:{key}:", self.key_prefix.as_str())
+        KeySpace::Global.key(Area::Rl, &format!("{}:{key}:", self.key_prefix.as_str()))
     }
 
     /// The cache the counters live in.
@@ -297,8 +338,8 @@ impl<S: Clone + Send + Sync + 'static> CacheRateLimitRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<CacheRateLimitLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    let (req, key) = cfg.bucket_key(req).await;
-    match cfg.take(&key).await {
+    let (req, bucket) = cfg.bucket(req).await;
+    match cfg.take_in(&bucket).await {
         Ok((count, reset_at)) => {
             let mut response = next.run(req).await;
             let remaining = i64::from(cfg.capacity).saturating_sub(i64::from(count));

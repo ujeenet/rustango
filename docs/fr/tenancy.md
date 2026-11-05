@@ -307,8 +307,8 @@ Ce qui le porte :
 - le cookie de session du tenant et le jeton de passage d'impersonation ;
 - les JWT : les claims `tenant` et `org_id` doivent tous deux correspondre ;
 - les clés de signature HMAC et les clés d'agents MCP liées à un tenant ;
-- `ScopedCache::for_tenant`, le cache de page, les clés d'idempotence et
-  `DistributedLock::for_tenant`, tous avec la clé `#org:<id>:<slug>` ;
+- `CacheScope::for_tenant`, le cache de page, les clés d'idempotence et
+  `CacheScope::locks`, tous avec la clé `#org:<id>:<slug>` ;
 - les liens de réinitialisation de mot de passe et de vérification.
 
 Les clés d'API et les utilisateurs du tenant vivent dans son propre
@@ -316,14 +316,14 @@ stockage, qu'une purge supprime. Une `Org` sans id (non lue depuis le
 registry) n'a pas de `TenantSlug`, et l'authentification la refuse.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` seulement pour une Org qui n'a pas été lue depuis le registry.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

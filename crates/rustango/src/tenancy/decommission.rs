@@ -34,14 +34,13 @@ use super::server_tenant::ServerTenant;
 use crate::core::Column as _;
 use crate::sql::{FetcherPool as _, UpdaterPool as _};
 
-/// Caches whose `ScopedCache::for_tenant` keys a purge deletes.
+/// Caches whose tenant keys a purge deletes.
 static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
     std::sync::RwLock::new(Vec::new());
 
-/// Make every purge delete the tenant's [`crate::cache::ScopedCache::for_tenant`]
-/// keys (sessions and flag overrides included) and its tenant locks from `cache`.
-/// Idempotency and page entries are not deleted; they carry the org id and expire.
-/// Call at boot for each cache holding tenant-scoped entries.
+/// Make every purge delete the tenant's keys from `cache`: every
+/// `tenant:#org:<id>:<slug>:` area (app, locks, idempotency, pages, rate
+/// limits, sessions, flag overrides). Call at boot for each such cache.
 pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
     PURGE_CACHES
         .write()
@@ -49,11 +48,10 @@ pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
         .push(cache);
 }
 
-/// Forget the tenant's cached state: its scoped keys, locks and login state
-/// on every registered cache. Keys carry the org id, so a tenant reusing the
-/// slug cannot reach them anyway; this frees the space. Idempotency and page
-/// entries hash the tenant into the key and expire on their own.
-/// Best-effort: what stays is noted in the report.
+/// Forget the tenant's cached state: its keys on every registered cache and
+/// its login state. Keys carry the org id, so a tenant reusing the slug cannot
+/// reach them anyway; this frees the space. Best-effort: what stays is noted
+/// in the report.
 async fn forget_slug(org: &Org, report: &mut Report) {
     crate::contenttypes::clear_cache();
     let Some(tenant) = super::TenantSlug::of(org) else {
@@ -77,16 +75,13 @@ async fn forget_slug(org: &Org, report: &mut Report) {
     }
 }
 
-/// Delete `tenant`'s `ScopedCache` (sessions and flag overrides included)
-/// and `DistributedLock` keys from `cache`.
+/// Delete every key of `tenant` from `cache`.
 async fn forget_in(
     cache: &crate::cache::BoxedCache,
     tenant: &super::TenantSlug,
 ) -> Result<(), crate::cache::CacheError> {
-    let scoped = crate::cache::ScopedCache::for_tenant(cache.clone(), tenant);
-    let locks = crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(tenant);
-    cache
-        .delete_prefixes(&[scoped.prefix().to_owned(), locks.key_prefix()])
+    crate::cache::CacheScope::for_tenant(cache.clone(), tenant)
+        .purge()
         .await
 }
 
@@ -1270,14 +1265,14 @@ mod forget_tests {
                 .enable_for_user("beta", "5")
                 .await
                 .unwrap();
-            let lock = crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(t);
+            let lock = crate::cache::CacheScope::for_tenant(cache.clone(), t).locks();
             let held = lock
                 .try_acquire("job", std::time::Duration::from_secs(60))
                 .await;
             assert!(held.is_some());
         }
         forget_in(&cache, &old).await.unwrap();
-        let lock = |t| crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(t);
+        let lock = |t| crate::cache::CacheScope::for_tenant(cache.clone(), t).locks();
         assert!(
             lock(&old)
                 .try_acquire("job", std::time::Duration::from_secs(1))

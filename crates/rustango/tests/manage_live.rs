@@ -781,7 +781,7 @@ async fn purge_tenant_drops_a_legacy_schema_name() {
 /// no `tenant:{slug}:` cache entries of the old one.
 #[tokio::test]
 async fn purge_tenant_forgets_slug_keyed_state() {
-    use rustango::cache::{BoxedCache, Cache as _, InMemoryCache, ScopedCache};
+    use rustango::cache::{BoxedCache, InMemoryCache};
     use rustango::login_throttle::{shared, ClientIp, LoginScope};
     let _g = live_lock().lock().await;
     let Some(pool) = pool().await else {
@@ -812,12 +812,12 @@ async fn purge_tenant_forgets_slug_keyed_state() {
         .unwrap()
         .remove(0);
     let tenant = rustango::tenancy::TenantSlug::of(&org).expect("org id");
-    let mine = ScopedCache::for_tenant(cache.clone(), &tenant);
+    let mine = rustango::cache::CacheScope::for_tenant(cache.clone(), &tenant).app();
     let other = rustango::tenancy::TenantSlug::new(tenant.org_id + 1, format!("{slug}x"));
-    let theirs = ScopedCache::for_tenant(cache.clone(), &other);
+    let theirs = rustango::cache::CacheScope::for_tenant(cache.clone(), &other).app();
     mine.set_forever("stats", "old").await.unwrap();
     theirs.set_forever("stats", "kept").await.unwrap();
-    let locks = rustango::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(&tenant);
+    let locks = rustango::cache::CacheScope::for_tenant(cache.clone(), &tenant).locks();
     let held = locks
         .try_acquire("job", std::time::Duration::from_secs(60))
         .await;

@@ -67,78 +67,80 @@
 //!   so looping over tenants with one `with_lock("daily_report")`
 //!   lets the first tenant win and skips the rest for a whole TTL,
 //!   and nothing is logged, because a refused acquire is normal. Use
-//!   `DistributedLock::for_tenant` to give each tenant its own
-//!   lock. Stay unscoped only for process-wide work.
+//!   `CacheScope::for_tenant(cache, &tenant).locks()` to give each tenant
+//!   its own lock. Stay unscoped only for process-wide work.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::cache::keyspace::{Area, KeySpace};
 use crate::cache::BoxedCache;
-
-const KEY_PREFIX: &str = "lock";
 
 /// Lock factory. Cheap to clone.
 #[derive(Clone)]
 pub struct DistributedLock {
     cache: BoxedCache,
-    /// Prefix on every lock name. `None` is process-wide;
-    /// `for_tenant` sets `tenant:#org:<id>:<slug>`.
-    scope: Option<String>,
+    /// `Global` is process-wide: `lock:<name>`.
+    space: KeySpace,
+    /// The deprecated [`Self::scoped`] namespace, put before each name.
+    named: Option<String>,
 }
 
 impl DistributedLock {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
-        Self { cache, scope: None }
+        Self::in_space(cache, KeySpace::Global)
+    }
+
+    /// Locks of `space`: `tenant:#org:<id>:<slug>:lock:<name>` for a tenant.
+    pub(crate) fn in_space(cache: BoxedCache, space: KeySpace) -> Self {
+        Self {
+            cache,
+            space,
+            named: None,
+        }
     }
 
     /// Scope every lock name to one tenant, so the same name in two
     /// tenants gives two separate locks.
-    ///
-    /// Use this for any per-tenant job. Unscoped, a loop over tenants
-    /// makes them all contend for one `lock:daily_report`: the first
-    /// wins and the rest are skipped for a whole TTL, without a log
-    /// line. Scoped, each gets `lock:tenant:#org:<id>:<slug>:daily_report`;
-    /// the org id keeps a tenant that reuses a purged slug out of its locks.
-    ///
-    /// ```ignore
-    /// let lock = DistributedLock::new(cache).for_tenant(&tenant);
-    /// lock.with_lock("daily_report", ttl, || async { … }).await;
-    /// ```
-    ///
-    /// Stay unscoped only when "one replica, ever" is the point, such
-    /// as registry cleanup or a cross-tenant rollup.
     #[cfg(feature = "tenancy")]
+    #[deprecated(
+        since = "0.64.0",
+        note = "use `CacheScope::for_tenant(cache, tenant).locks()`; removed in 0.66.0"
+    )]
     #[must_use]
-    pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        self.scope = Some(format!(
-            "{}:{}",
-            crate::cache::TENANT_PREFIX,
-            tenant.namespace()
-        ));
-        self
+    pub fn for_tenant(self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        Self::in_space(self.cache, KeySpace::Tenant(tenant.clone()))
     }
 
-    /// Scope lock names under any namespace. `for_tenant` is this with
-    /// a `tenant:` prefix.
+    /// Scope lock names under any namespace: `lock:<namespace>:<name>`.
+    #[deprecated(
+        since = "0.64.0",
+        note = "put the namespace in the lock name, or use `CacheScope::locks()` per tenant; removed in 0.66.0"
+    )]
     #[must_use]
-    pub fn scoped(mut self, namespace: impl AsRef<str>) -> Self {
-        self.scope = Some(namespace.as_ref().to_owned());
-        self
+    pub fn scoped(self, namespace: impl AsRef<str>) -> Self {
+        Self {
+            named: Some(namespace.as_ref().to_owned()),
+            ..Self::new(self.cache)
+        }
     }
 
-    /// The prefix every key of this factory starts with.
-    #[cfg(feature = "tenancy")]
-    pub(crate) fn key_prefix(&self) -> String {
-        self.key_for("")
+    fn rest(&self, name: &str) -> String {
+        match &self.named {
+            Some(ns) => format!("{ns}:{name}"),
+            None => name.to_owned(),
+        }
     }
 
     /// The cache key for `name`, including this factory's scope.
     fn key_for(&self, name: &str) -> String {
-        match &self.scope {
-            Some(scope) => format!("{KEY_PREFIX}:{scope}:{name}"),
-            None => format!("{KEY_PREFIX}:{name}"),
-        }
+        self.space.key(Area::Lock, &self.rest(name))
+    }
+
+    /// The 0.63 key of a tenant lock. Remove in 0.65.0.
+    fn legacy_key_for(&self, name: &str) -> Option<String> {
+        self.space.legacy_key(Area::Lock, &self.rest(name))
     }
 
     /// Try to take `name` for `ttl`. Gives `None` when someone else
@@ -149,6 +151,7 @@ impl DistributedLock {
     /// the TTL runs out.
     pub async fn try_acquire(&self, name: &str, ttl: Duration) -> Option<LockGuard> {
         let key = self.key_for(name);
+        let legacy = self.legacy_key_for(name);
         // The whole acquire is one atomic set-if-absent: `add` writes
         // the key only when it is absent and says whether it did. The
         // key's value IS the token, so there is no second write that
@@ -160,17 +163,30 @@ impl DistributedLock {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos())
         );
-        match self.cache.add(&key, &token, Some(ttl)).await {
-            Ok(true) => Some(LockGuard {
-                cache: self.cache.clone(),
-                key,
-                token: Arc::new(token),
-                released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            }),
+        // Remove in 0.65.0: the 0.63 key first, so a pod still on 0.63 and
+        // this one exclude each other during a rolling deploy.
+        if let Some(old) = &legacy {
+            if !matches!(self.cache.add(old, &token, Some(ttl)).await, Ok(true)) {
+                return None;
+            }
+        }
+        let guard = LockGuard {
+            cache: self.cache.clone(),
+            key,
+            legacy,
+            token: Arc::new(token),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        match self.cache.add(&guard.key, &guard.token, Some(ttl)).await {
+            Ok(true) => Some(guard),
             // `Ok(false)`: another holder. `Err`: the cache is down.
             // Both fail closed — skip the work rather than run it
-            // unguarded.
-            _ => None,
+            // unguarded. Frees the 0.63 key taken above.
+            _ => {
+                guard.release_key(guard.legacy.as_deref()).await;
+                guard.keep_until_ttl();
+                None
+            }
         }
     }
 
@@ -239,10 +255,12 @@ impl DistributedLock {
         // The key two windows back is past any skew; drop it so a database
         // cache does not keep one row per window forever.
         if let Some(old) = window.checked_sub(2) {
-            let _ = self
-                .cache
-                .delete(&self.key_for(&format!("{name}@{old}")))
-                .await;
+            let old = format!("{name}@{old}");
+            let _ = self.cache.delete(&self.key_for(&old)).await;
+            // Remove in 0.65.0.
+            if let Some(legacy) = self.legacy_key_for(&old) {
+                let _ = self.cache.delete(&legacy).await;
+            }
         }
         // A run from the last window may still be going on another pod.
         // Free this window so a later tick retries once it ends.
@@ -293,6 +311,8 @@ impl Drop for ReleaseOnDrop {
 pub struct LockGuard {
     cache: BoxedCache,
     key: String,
+    /// The 0.63 key, held too. Remove in 0.65.0.
+    legacy: Option<String>,
     token: Arc<String>,
     released: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -317,13 +337,19 @@ impl LockGuard {
         {
             return;
         }
+        self.release_key(Some(&self.key)).await;
+        self.release_key(self.legacy.as_deref()).await;
+    }
+
+    async fn release_key(&self, key: Option<&str>) {
+        let Some(key) = key else { return };
         // Delete only if the stored value is still our token. If our
         // TTL ran out and someone else took the lock, the value is
         // theirs and we must not free it. Get-then-delete leaves a
         // small window; a compare-and-delete script would close it.
-        let stored = self.cache.get(&self.key).await.ok().flatten();
+        let stored = self.cache.get(key).await.ok().flatten();
         if stored.as_deref() == Some(self.token.as_str()) {
-            let _ = self.cache.delete(&self.key).await;
+            let _ = self.cache.delete(key).await;
         }
     }
 }
@@ -749,6 +775,7 @@ mod tests {
 
     /// Scoped, the same lock name in two tenants is two locks, so a
     /// per-tenant cron actually runs for every tenant.
+    #[allow(deprecated)]
     #[tokio::test]
     async fn scoped_locks_do_not_contend_across_tenants() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
@@ -767,6 +794,7 @@ mod tests {
     }
 
     /// Scoping must not weaken the guarantee inside a tenant.
+    #[allow(deprecated)]
     #[tokio::test]
     async fn scoped_lock_still_excludes_within_a_tenant() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
@@ -785,6 +813,7 @@ mod tests {
 
     /// One slug must not collide with another by prefix, such as
     /// `acme` against `acme-corp`.
+    #[allow(deprecated)]
     #[tokio::test]
     async fn tenant_scopes_are_separated_by_slug() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
@@ -808,10 +837,9 @@ mod tests {
     #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn a_reused_slug_does_not_contend_with_the_purged_tenant() {
-        use crate::tenancy::TenantSlug;
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let old = DistributedLock::new(cache.clone()).for_tenant(&TenantSlug::new(1, "acme"));
-        let heir = DistributedLock::new(cache).for_tenant(&TenantSlug::new(2, "acme"));
+        let old = tenant_lock(&cache, 1, "acme");
+        let heir = tenant_lock(&cache, 2, "acme");
         let ttl = Duration::from_secs(30);
         let _held = old.try_acquire("j", ttl).await.expect("old");
         assert!(heir.try_acquire("j", ttl).await.is_some(), "heir blocked");
@@ -824,11 +852,11 @@ mod tests {
         use crate::cache::{Cache as _, ScopedCache};
         let tenant = crate::tenancy::TenantSlug::new(1, "acme");
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());
-        let acme = DistributedLock::new(cache.clone()).for_tenant(&tenant);
+        let acme = tenant_lock(&cache, 1, "acme");
         let ttl = Duration::from_secs(30);
         let _held = acme.try_acquire("j", ttl).await.expect("acme");
 
-        ScopedCache::for_tenant(cache, &tenant)
+        ScopedCache::in_space(cache, KeySpace::Tenant(tenant), Area::App)
             .clear()
             .await
             .unwrap();
@@ -836,7 +864,75 @@ mod tests {
         assert!(acme.try_acquire("j", ttl).await.is_none(), "lock freed");
     }
 
+    #[cfg(feature = "tenancy")]
+    fn tenant_lock(cache: &BoxedCache, id: i64, slug: &str) -> DistributedLock {
+        let t = crate::tenancy::TenantSlug::new(id, slug);
+        DistributedLock::in_space(cache.clone(), KeySpace::Tenant(t))
+    }
+
+    /// A tenant lock is `tenant:<ns>:lock:<name>`, and the 0.63 key is held too.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_tenant_lock_holds_the_new_and_the_old_key() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let ttl = Duration::from_secs(30);
+        let held = tenant_lock(&cache, 1, "acme").try_acquire("j", ttl).await;
+        let held = held.expect("free");
+        assert!(cache.exists("tenant:#org:1:acme:lock:j").await.unwrap());
+        // A pod still on 0.63 takes only the old key: it must be refused.
+        assert!(!cache
+            .add("lock:tenant:#org:1:acme:j", "pod-063", Some(ttl))
+            .await
+            .unwrap());
+        held.release().await;
+        assert!(!cache.exists("tenant:#org:1:acme:lock:j").await.unwrap());
+        assert!(!cache.exists("lock:tenant:#org:1:acme:j").await.unwrap());
+    }
+
+    /// Dual read: a lock a 0.63 pod holds under the old key blocks this release.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_lock_held_under_the_old_key_blocks_a_new_acquire() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let ttl = Duration::from_secs(30);
+        cache
+            .add("lock:tenant:#org:1:acme:j", "pod-063", Some(ttl))
+            .await
+            .unwrap();
+        let acme = tenant_lock(&cache, 1, "acme");
+        assert!(acme.try_acquire("j", ttl).await.is_none(), "ran twice");
+        assert!(
+            !cache.exists("tenant:#org:1:acme:lock:j").await.unwrap(),
+            "a refused acquire left the new key"
+        );
+        // A new key held elsewhere frees the old key this acquire took.
+        cache.delete("lock:tenant:#org:1:acme:j").await.unwrap();
+        cache
+            .add("tenant:#org:1:acme:lock:j", "other", Some(ttl))
+            .await
+            .unwrap();
+        assert!(acme.try_acquire("j", ttl).await.is_none());
+        assert!(!cache.exists("lock:tenant:#org:1:acme:j").await.unwrap());
+    }
+
+    /// The deprecated wrappers build the same keys as before or the new layout.
+    #[cfg(feature = "tenancy")]
+    #[allow(deprecated)]
+    #[test]
+    fn deprecated_wrappers_map_onto_the_key_space() {
+        let cache: BoxedCache = StdArc::new(InMemoryCache::new());
+        let t = crate::tenancy::TenantSlug::new(1, "acme");
+        let lock = DistributedLock::new(cache.clone()).for_tenant(&t);
+        assert_eq!(lock.key_for("j"), "tenant:#org:1:acme:lock:j");
+        let named = DistributedLock::new(cache.clone())
+            .for_tenant(&t)
+            .scoped("r");
+        assert_eq!(named.key_for("j"), "lock:r:j");
+        assert_eq!(DistributedLock::new(cache).key_for("j"), "lock:j");
+    }
+
     /// `scoped` names its own keyspace, apart from unscoped and other scopes.
+    #[allow(deprecated)]
     #[tokio::test]
     async fn scoped_locks_use_their_namespace() {
         let cache: BoxedCache = StdArc::new(InMemoryCache::new());

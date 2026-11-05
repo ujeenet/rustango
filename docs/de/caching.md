@@ -255,13 +255,13 @@ Wickle den gemeinsamen Cache in einen **`ScopedCache`**, damit der Namespace
 für dich angewendet wird und die Aufrufstelle es nicht vergessen kann:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -302,7 +302,7 @@ gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
 Invalidierung ausgelöst hat.
 
 Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
-werden. Damit `purge-tenant` die `ScopedCache::for_tenant`-Keys des alten Tenants
+werden. Damit `purge-tenant` die `CacheScope::for_tenant`-Keys des alten Tenants
 löscht, rufe beim Start `rustango::tenancy::decommission::clear_on_purge(cache)`
 für jeden Cache auf, der sie hält. Der Purge löscht dort auch die Locks, Sessions
 und Flag-Overrides des Tenants. Idempotency- und Page-Cache-Einträge bleiben, bis
