@@ -154,6 +154,7 @@ untouched.
 
 - The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
 - `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.
+- `server::Builder` refuses to start, and `check --deploy` errors, when a registered model has a sealed (`EncryptedString`) field and `RUSTANGO_SECRET_KEY` is unset outside the dev and test tiers (`sso` registers one). Set the key; it used to panic at the first write.
 - `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - Path-prefix tenants: app routes now see the path without the prefix (`/about`, not `/acme/about`). Drop routes you registered under `/{prefix}/…`; read the prefix from the `TenantPathPrefix` extension or the full path from `OriginalUri`.
 - `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.

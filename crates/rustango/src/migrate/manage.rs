@@ -2641,6 +2641,8 @@ where
         run_settings_audit(&mut audit);
         #[cfg(feature = "cache")]
         login_store_audit(crate::account_lockout::shared(), &mut audit);
+        #[cfg(feature = "casts")]
+        audit.errors.extend(crate::casts::sealed_key_problem());
         collation_audit(pool, &mut audit).await;
         time_zone_audit(pool, &mut audit).await;
         #[cfg(feature = "admin-sso")]

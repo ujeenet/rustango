@@ -216,6 +216,14 @@ pub struct IdleSweep {
     pub failed: usize,
 }
 
+/// `days` before `now`; `None` when that falls outside the calendar.
+fn idle_cutoff(
+    now: chrono::DateTime<chrono::Utc>,
+    days: i32,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::TimeDelta::try_days(i64::from(days)).and_then(|d| now.checked_sub_signed(d))
+}
+
 /// Switch off tenant users whose every link was made by SSO sign-up and
 /// has not been used for its provider's `auto_deactivate_after_days`, and
 /// who cannot use a password here ([`password_login_allowed`]): `active`
@@ -276,7 +284,11 @@ pub async fn deactivate_idle(pool: &Pool, registry: Option<&Pool>) -> Result<Idl
             let Some(days) = rule.and_then(|r| r.auto_deactivate_after_days) else {
                 continue 'users;
             };
-            let cutoff = now - chrono::TimeDelta::days(i64::from(days));
+            let Some(cutoff) = idle_cutoff(now, days) else {
+                // Past the calendar: never idle. Validation caps the days.
+                tracing::warn!(target: "rustango::sso", user_id, days, "idle check skipped: days out of range");
+                continue 'users;
+            };
             let last = l.last_used_at.or_else(|| l.created_at.get().copied());
             if last.is_none_or(|at| at >= cutoff) {
                 continue 'users;
@@ -374,4 +386,16 @@ async fn deactivate(
         tracing::error!(target: "rustango::sso", user_id, error = %e, "an idle deactivation was NOT written to the audit log");
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A huge day count is no cutoff, not a panic that stops the sweep.
+    #[test]
+    fn an_out_of_range_day_count_has_no_cutoff() {
+        let now = chrono::Utc::now();
+        assert_eq!(super::idle_cutoff(now, i32::MAX), None);
+        let month = super::idle_cutoff(now, 30).unwrap();
+        assert_eq!(now - month, chrono::TimeDelta::days(30));
+    }
 }
