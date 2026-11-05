@@ -4,10 +4,6 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
-### Fixed
-
-- MariaDB: `string_agg` is no longer cut at 1 MiB (`SET STATEMENT group_concat_max_len`, since MariaDB ignores the `SET_VAR` hint); `lag` / `lead` with a JSON default work.
-
 ## [0.64.0] — 2026-11-05
 
 ### Added
@@ -28,8 +24,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Deprecated
 
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` (removed in 0.66.0): use `CacheScope::for_tenant(..).app()` / `.locks()`.
-
 - **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
+
 ### Fixed
 
 - MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
@@ -37,7 +33,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in without `?next` lands, by role, claim or `any`, in `position` order. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
 - `make:viewset` mounts the ViewSet at the model's table (`/api/posts`), not the module name (`/api/post_view_set`), and prints the URL it answers at.
 - MariaDB: `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; `inspectdb` and the jobs queue see a JSON column as `json`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
-
+- MariaDB: `string_agg` is no longer cut at 1 MiB (`SET STATEMENT group_concat_max_len`, since MariaDB ignores the `SET_VAR` hint); `lag` / `lead` with a JSON default work.
 ## [0.63.0] — 2026-11-04
 
 ### Added
