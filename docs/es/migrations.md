@@ -61,6 +61,9 @@ reciben la aplicación de la cadena del sistema.
 
 ## Reconciliación de squash — `Migration.replaces`
 
+> **Solo base única.** El `migrate` multi-tenant (`Cli::tenancy()`) rechaza
+> `--squash`.
+
 Un **squash** colapsa una serie de migraciones en un único archivo
 recién generado que recrea el mismo estado final — útil cuando una pila de
 migraciones a medio terminar es más fácil de regenerar que de arreglar.

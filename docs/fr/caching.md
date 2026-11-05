@@ -67,9 +67,9 @@ avertissement.
 
 Il n'y a pas de valeur `postgres` : le backend base de données est `db` ou
 `database`. Les valeurs sont en minuscules. Une valeur inconnue ou mal casée
-(`Redis`, une faute de frappe), ou `file` sans `file_cache_dir`, journalise une
-`error` et se replie sur un cache en mémoire ; une version mineure ultérieure
-la refusera.
+(`Redis`, une faute de frappe), ou `file` sans `file_cache_dir`, est refusée :
+`from_settings` panique au démarrage et `from_settings_async` renvoie l'erreur.
+Un substitut par processus casserait ce que garantit un cache partagé.
 
 `FileCache` balaie un seizième de son répertoire à la recherche d'entrées
 expirées toutes les 16 écritures. Appelez `FileCache::purge_expired()` de façon
@@ -347,7 +347,8 @@ par défaut). Il est sûr par défaut :
 
 Pour retirer une page après une écriture, appelez
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sur un clone de la
-couche (ajoutez `.tenant(org_id)` à la clé en multi-tenancy). Cela purge chaque
+couche (en multi-tenancy ajoutez `.tenant(&slug)` à la clé, le `TenantSlug` de la
+requête, par exemple via `RequestTenant::tenant()`). Cela purge chaque
 variante en cache de ce chemin : toute chaîne de requête, toute valeur
 `vary_on`, GET et `QUERY` confondus. Cela passe par un compteur de génération
 par chemin, donc chaque GET en cache lit une petite clé de cache de plus.

@@ -47,7 +47,8 @@ unbekannte E-Mail auch ein Konto anlegen; das ist standardmäßig aus.)
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), die
 > Link-Tabelle `rustango::sso::link` (`SsoLink`, `ProviderKey`, `sign_in`), die
 > Bare-Admin-Verdrahtung `rustango::admin::sso`, das SSO pro Tenant/Konsole
-> `rustango::tenancy::sso` (`SharedSsoProvider`) und das Member-SSO
+> (gemeinsame Provider: die Registry-Tabelle `rustango_shared_sso_providers`,
+> in der Operator-Konsole bearbeitet) und das Member-SSO
 > `rustango::tenancy::member_auth`.
 
 ## Callback-URLs
@@ -424,10 +425,13 @@ Unterschiede zum Admin-Ablauf:
   einem bestehenden Konto passt, folgt der obigen `allow_email_link`-Regel.
   Setzen Sie es auf `false`, um unbekannte E-Mails abzuweisen. Eine native
   Anmeldung (eine App, die ihr ID-Token selbst geprüft hat) ruft
-  `find_or_provision_member` direkt auf, mit `ProviderKey::app(issuer)` als
-  Schlüssel. Ihr Ergebnis `MemberSignIn` ist `Member(id)`, `NotLinked` (ein
-  Konto hat die E-Mail, darf aber nicht darüber verknüpft werden), `NoAccount`,
-  `Inactive`, `Unverified` oder `Refused`.
+  `sso::policy::admit` mit `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` und
+  `tenancy::member_auth::TenantAccounts(pool)` auf; die übergebene
+  `EffectivePolicy` ist die Anmelde-Policy, gehören ihre Regeln also dorthin.
+  Das veraltete `find_or_provision_member` wendet die Regeln eines
+  Tenant-Providers noch an, aber ein App-Schlüssel hat keine: Mit
+  `auto_provision` registriert es jede verifizierte E-Mail.
 - **Ein eigenes Session-Cookie.** Das Member-Cookie
   (`rustango_member_session`) ist von den Tenant- / Admin-Session-Cookies
   **domänengetrennt**: die signierte Nachricht trägt einen Tag pro Domäne und
@@ -609,8 +613,9 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
   per E-Mail verknüpft, ein Rolleninhaber nur mit `allow_email_link_staff`. Eine per E-Mail angelegte Verknüpfung
   funktioniert weiter, nachdem der Benutzer befördert wurde; löschen Sie sie,
   wenn das nicht gewollt ist.
-- **Keine Auto-Provisionierung** für die Admins — eine unbekannte E-Mail
-  kommt nicht hinein.
+- **Keine Auto-Provisionierung im Bare-Admin** — eine unbekannte E-Mail
+  kommt nicht hinein. Ein Tenant-Admin-Provider registriert nur, wenn sein
+  `signup_mode` es erlaubt.
 - **Secrets im Ruhezustand verschlüsselt** (`RUSTANGO_SECRET_KEY`), nur zur
   Anmeldezeit im Speicher entschlüsselt; Bearbeitungsformulare maskieren das
   gespeicherte Secret.

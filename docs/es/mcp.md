@@ -161,7 +161,7 @@ El router autenticado monta: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (notificaciones SSE), `POST {prefix}/token` (credencial → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1), y los dos documentos de descubrimiento
 `.well-known/*`. Firma los tokens de agente con `RUSTANGO_SESSION_SECRET`. Si
-falta o tiene menos de 32 bytes, fuera de prod usa la clave de sesión de tenant
+falta, o no es base64 que decodifique a al menos 32 bytes, fuera de prod usa la clave de sesión de tenant
 guardada en `./var/`; en prod avisa y usa una clave aleatoria por proceso: los
 tokens no sobreviven a un reinicio.
 Cada proceso mantiene como mucho 8 streams SSE abiertos por agente y 256 por

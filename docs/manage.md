@@ -79,7 +79,7 @@ Verbs marked **T** need the `tenancy` feature and are reached through
 | Verb | What it does |
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Generate a migration from the model diff |
-| `migrate [target]` / `--dry-run` / `--squash` | Apply pending migrations |
+| `migrate [target]` / `--dry-run` / `--squash` / `--fake` | Apply pending migrations (`--squash` single-database only, `--fake` tenancy only) |
 | `downgrade [N \| <target>]` | Roll back the last N applied migrations, or those of `<target>`'s folder applied after it (tenant scope) |
 | `showmigrations` / `status` | List migrations and their applied state |
 | `sqlmigrate <name>` | Print the SQL a migration would run, without running it |
@@ -341,6 +341,9 @@ cargo run -- migrate zero               # unapply EVERY migration
 
 ### `migrate --squash`
 
+> **Single-database only.** The tenancy `migrate` (`Cli::tenancy()`) refuses
+> `--squash`.
+
 Collapses every **pending** (un-applied) migration into one freshly
 generated diff — the dev-iteration escape hatch for when a stack of
 half-finished migrations is easier to regenerate than to fix. It refuses
@@ -384,6 +387,9 @@ rather than a known-equivalent history.
 
 ### `migrate --fake <name>`
 
+Tenancy projects only (`Cli::tenancy()`): the single-database `migrate`
+refuses `--fake` as an unknown flag.
+
 Stamps a migration as applied **without running its SQL** — the operator
 escape hatch when the database is already in the target state but the
 ledger doesn't know it (a DB set up out-of-band, a dropped ledger table, a
@@ -407,6 +413,9 @@ the framework's tables live per tenant, so repairing them is a per-tenant
 job.
 
 ### `downgrade [N | <target>]`
+
+`<target>` works in a tenancy project only; the single-database `downgrade`
+takes a step count.
 
 Rolls back the last N applied migrations (default 1). Each migration must be reversible: schema changes
 reverse automatically, but data operations need a `reverse_sql` defined
@@ -1692,8 +1701,7 @@ the database from `DATABASE_URL`, or from `DB_DRIVER`, `DB_HOST`,
 it), `DB_NAME` and `DB_PARAMS`. For SQLite set `DB_DRIVER=sqlite` and
 `DB_NAME` to the file path. Setting both `DB_PASSWORD` and
 `DB_PASSWORD_FILE` is an error. When both styles are set, `DATABASE_URL` wins
-and one warning (password hidden) says so, and `check --deploy` lists it; from
-0.62.0 the `DB_*` vars will win, so keep one style.
+and one warning (password hidden) says so, and `check --deploy` lists it, so keep one style.
 
 ---
 

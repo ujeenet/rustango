@@ -909,16 +909,17 @@ pub enum MemberSignIn {
 /// verified email ([`crate::sso::policy::admit`]); else, with
 /// `auto_provision`, a new linked member.
 ///
-/// **Applies none of the provider's sign-in policy** (domain, tenant and
-/// claim rules, sign-up mode, tenant settings): `auto_provision` alone lets
-/// anyone in. Call [`crate::sso::policy::admit`] with
-/// [`crate::sso::ResolvedProvider::effective_policy`] instead.
+/// A tenant provider key runs under that row's sign-in, sign-up and lifecycle
+/// rules, and every key under the tenant's settings. A shared or admin key's
+/// row is not in this database, so it never provisions. Prefer
+/// [`crate::sso::policy::admit`] with
+/// [`crate::sso::ResolvedProvider::effective_policy`].
 ///
 /// # Errors
 /// Storage failures.
 #[deprecated(
     since = "0.61.15",
-    note = "ignores the provider's sign-in policy; use `sso::policy::admit` with `ResolvedProvider::effective_policy()`"
+    note = "use `sso::policy::admit` with `ResolvedProvider::effective_policy()`"
 )]
 pub async fn find_or_provision_member(
     pool: &Pool,
@@ -928,8 +929,7 @@ pub async fn find_or_provision_member(
     auto_provision: bool,
 ) -> Result<MemberSignIn, String> {
     let identity = Identity::from_profile(profile.clone());
-    let policy = EffectivePolicy::legacy(allow_email_link)
-        .default_signup(member_default_signup(auto_provision));
+    let policy = legacy_policy(pool, provider, allow_email_link, auto_provision).await;
     match admit_member(pool, provider, &policy, &identity, "").await {
         Ok(id) => Ok(MemberSignIn::Member(id)),
         Err(Denied::Refused(r)) => {
@@ -937,6 +937,36 @@ pub async fn find_or_provision_member(
             Ok(MemberSignIn::of(&r))
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The policy [`find_or_provision_member`] runs under, so `auto_provision`
+/// cannot skip the provider's rules.
+async fn legacy_policy(
+    pool: &Pool,
+    provider: &ProviderKey,
+    allow_email_link: bool,
+    auto_provision: bool,
+) -> EffectivePolicy {
+    let signup = member_default_signup(auto_provision);
+    let policy = match provider.source() {
+        LinkSource::App => EffectivePolicy::legacy(allow_email_link).default_signup(signup),
+        LinkSource::Tenant => {
+            let (rules, signups, lifecycle) = crate::sso::provider::read_rules::<
+                crate::sso::SsoProvider,
+            >(pool, provider.provider_id())
+            .await;
+            EffectivePolicy::new(rules, allow_email_link)
+                .with_signup(signups)
+                .with_lifecycle(lifecycle)
+                .default_signup(signup)
+        }
+        // Its rules live in another database: link only, never provision.
+        LinkSource::Shared | LinkSource::Admin => EffectivePolicy::legacy(allow_email_link),
+    };
+    match crate::sso::policy::TenantSettings::load(pool).await {
+        Ok(settings) => policy.tenant(&settings),
+        Err(e) => policy.tighten(Err(e)),
     }
 }
 

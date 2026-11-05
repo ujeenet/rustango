@@ -205,7 +205,7 @@ pool, at most one job per CPU at once.
 A job waits up to `hash_wait()` for a free slot (default 5 s,
 `DEFAULT_HASH_WAIT`), then fails with `PasswordError::Busy`. Answer that with a
 503, the same for a known and an unknown user. Set the wait with
-`[auth] hash_wait_ms` or `configure_hash_wait(duration)` at boot.
+`[auth] hash_wait_ms` or `configure_hash_wait(duration)` at boot. The `[auth]` keys are applied by `manage::Cli` when it loads settings; an app that builds `server::Builder` without it calls the functions instead.
 
 ---
 
@@ -215,7 +215,7 @@ New hashes use `argon2_params()`, by default `Argon2Params::DEFAULT`
 (m=19456 KiB, t=2, p=1). Raise it with `[auth] argon2_memory_kib`,
 `argon2_iterations` and `argon2_parallelism`, or call
 `configure_argon2(Argon2Params::new(m, t, p)?)` at boot; a value set in code
-wins over the settings. `Argon2Params::new` refuses a combination argon2 rejects.
+wins over the settings, and the keys apply only through `manage::Cli`. `Argon2Params::new` refuses a combination argon2 rejects.
 
 Old hashes still verify, because their cost lives in the PHC string.
 `needs_rehash(&stored)` is `true` when a hash is weaker than today's cost (or

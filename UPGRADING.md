@@ -152,6 +152,8 @@ untouched.
 
 ## 0.64.0
 
+- The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
+- `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.
 - `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - Path-prefix tenants: app routes now see the path without the prefix (`/about`, not `/acme/about`). Drop routes you registered under `/{prefix}/…`; read the prefix from the `TenantPathPrefix` extension or the full path from `OriginalUri`.
 - `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
@@ -195,9 +197,9 @@ untouched.
 - `mcp::pagination` is private; the MCP `*/list` handlers still paginate. Use `rustango::pagination` in your own endpoints.
 - `Dialect` is sealed: only rustango's PostgreSQL, MySQL and SQLite dialects implement it, so a downstream `impl Dialect` no longer compiles (none could reach a `Pool`). Calling its methods is unchanged.
 - `InsertReturningPool` is hidden from the docs: it is plumbing for the derive and may change without notice.
-- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work, are deprecated and are removed in 0.64.0.
+- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work, are deprecated and are removed in 0.65.0.
 - `ModelFormError::Database`'s `Display` is now `database error`. Log the error with `{:?}` or its `source()` to keep the driver detail.
-- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay deprecated one more minor and are removed in 0.64.0.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay deprecated one more minor and are removed in 0.65.0.
 
 ## 0.62.0
 
@@ -273,7 +275,7 @@ untouched.
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take any `SqlExecutor`: a `&Pool`, a held `PoolConn`, a `PoolTx`, or a Postgres sqlx executor. Past the bind cap they write in chunks inside one transaction; a raw sqlx executor cannot, so it refuses there.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
 - ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
-- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.64.0. `ObjectPermission` gains `origin`: build it with the macro.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.65.0. `ObjectPermission` gains `origin`: build it with the macro.
 - A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
 - `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
 - A ViewSet page or offset list under a `view` hook is a 400 past `view_hook_scan_cap` rows; add a queryset scope or use cursor pagination for big tables.

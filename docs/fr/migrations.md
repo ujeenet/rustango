@@ -57,6 +57,9 @@ sans tenancy. Les applications sans tenancy qui utilisent un sous-système du fr
 
 ## Réconciliation de squash — `Migration.replaces`
 
+> **Base unique seulement.** Le `migrate` multi-tenant (`Cli::tenancy()`) refuse
+> `--squash`.
+
 Un **squash** effondre une série de migrations en un seul fichier fraîchement
 généré qui recrée le même état final — pratique quand une pile de
 migrations à moitié terminées est plus facile à régénérer qu'à corriger.

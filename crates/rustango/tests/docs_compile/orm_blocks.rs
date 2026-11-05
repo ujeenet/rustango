@@ -508,6 +508,35 @@ mod b_b394cd47 {
     }
 }
 
+// use rustango::sql::sqlx;
+mod b_ee44430d {
+    use crate::prelude::*;
+    pub async fn run(pool: Pool) -> Result<(), BoxError> {
+        let _ = {
+            use rustango::sql::sqlx;
+
+            // sqlx runs on one driver's pool. Take it with `as_sqlite()` (or
+            // `as_postgres()` / `as_mysql()`) and write that backend's SQL.
+            let db = pool.as_sqlite().ok_or("not a SQLite pool")?;
+
+            // Raw query → typed rows
+            let rows = sqlx::query_as::<_, (i64, String)>("SELECT id, title FROM posts WHERE views > ? ORDER BY views DESC")
+                .bind(1000)
+                .fetch_all(db)
+                .await?;
+
+            // Raw with model decoding
+            let posts: Vec<Post> = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE complicated_condition")
+                .fetch_all(db)
+                .await?;
+
+            // Raw without rows (DDL / DML)
+            sqlx::query("VACUUM").execute(db).await?;
+        };
+        Ok(())
+    }
+}
+
 // use rustango::sql::raw_query_pool;
 mod b_a8613729 {
     use crate::prelude::*;

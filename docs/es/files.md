@@ -398,7 +398,7 @@ let app = axum::Router::new()
     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 ```
 
-`media_router(manager)` — el constructor antiguo — está obsoleto (se elimina en 0.64.0) y ahora
+`media_router(manager)` — el constructor antiguo — está obsoleto (se elimina en 0.65.0) y ahora
 responde `403` en cada ruta. Es un cambio de comportamiento deliberado en
 0.57.7: antes, esas rutas no tomaban ningún extractor de autenticación,
 autorización ni tenant, así que `GET /media/{id}` devolvía la fila **y una

@@ -82,7 +82,7 @@ Les verbes marqués **T** exigent la fonctionnalité `tenancy` et passent par
 | Verbe | Ce qu'il fait |
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Génère une migration à partir du diff des modèles |
-| `migrate [target]` / `--dry-run` / `--squash` | Applique les migrations en attente |
+| `migrate [target]` / `--dry-run` / `--squash` / `--fake` | Applique les migrations en attente (`--squash` base unique seulement, `--fake` multi-tenant seulement) |
 | `downgrade [N \| <target>]` | Annule les N dernières migrations, ou celles après `<target>` (portée tenant) |
 | `showmigrations` / `status` | Liste les migrations et leur état d'application |
 | `sqlmigrate <name>` | Affiche le SQL qu'une migration exécuterait, sans l'exécuter |
@@ -357,6 +357,9 @@ cargo run -- migrate zero               # unapply EVERY migration
 
 ### `migrate --squash`
 
+> **Base unique seulement.** Le `migrate` multi-tenant (`Cli::tenancy()`) refuse
+> `--squash`.
+
 Regroupe chaque migration **en attente** (non appliquée) en un seul diff
 nouvellement généré — l'échappatoire pour l'itération de développement,
 utile quand une pile de migrations à moitié terminées est plus simple à
@@ -404,6 +407,9 @@ bruyamment, car il s'agit d'un vrai conflit et non d'un historique
 
 ### `migrate --fake <name>`
 
+Projets multi-tenant seulement (`Cli::tenancy()`) : le `migrate` à base unique
+refuse `--fake` comme flag inconnu.
+
 Marque une migration comme appliquée **sans exécuter son SQL** —
 l'échappatoire opérateur pour quand la base de données est déjà dans
 l'état cible mais que le journal ne le sait pas (une base de données
@@ -429,6 +435,9 @@ rapportant chacun et en continuant malgré les échecs — les tables du
 framework vivent par tenant, donc les réparer est une tâche par tenant.
 
 ### `downgrade [N | <target>]`
+
+`<target>` ne marche que dans un projet multi-tenant ; le `downgrade` à base
+unique prend un nombre d'étapes.
 
 Annule les N dernières migrations appliquées (par défaut 1). Chaque migration doit être réversible :
 les changements de schéma s'annulent automatiquement, mais les
@@ -1786,8 +1795,7 @@ fichier qui le contient), `DB_NAME` et `DB_PARAMS`. Pour SQLite, mettez
 `DB_DRIVER=sqlite` et le chemin du fichier dans `DB_NAME`. Définir à la fois
 `DB_PASSWORD` et `DB_PASSWORD_FILE` est une erreur. Si les deux styles sont
 définis, `DATABASE_URL` l'emporte, un seul avertissement (mot de passe masqué)
-le signale, et `check --deploy` le liste ; à partir de 0.62.0, les variables
-`DB_*` l'emporteront, donc gardez un seul style.
+le signale, et `check --deploy` le liste ; gardez donc un seul style.
 
 ---
 

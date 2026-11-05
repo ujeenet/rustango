@@ -190,7 +190,7 @@ Hinter einem Reverse Proxy mountest du `RealIpLayer` mit deinen Proxys wie oben 
 
 Passwort-Hashing führt höchstens einen Job pro CPU aus, geteilt von jedem Login; HTTP Basic, API-Keys und Agent-Secrets dürfen höchstens die Hälfte der Slots belegen. Ein Login, der länger als `hash_wait_ms` (5 s) auf einen Slot wartet, bekommt `503` mit `Retry-After`, für bekannte und unbekannte Benutzer gleichermaßen.
 
-Feinjustiert wird unter `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Ein im Code gesetzter Wert (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) gewinnt über diese Schlüssel. Die IP- und globalen Buckets gelten pro Prozess, außer du installierst `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, das sie in festen Fenstern in einem geteilten Cache zählt (bei einem Cache-Fehler fallen beide auf den Prozess zurück; ein Burst über eine Fenstergrenze kann das Doppelte eines Limits erreichen; Apps, die sich einen Cache teilen, teilen die Zähler, außer jede nutzt ihren eigenen `ScopedCache`); der erste Login loggt eine Warnung, solange sie pro Prozess gelten. Die Benutzernamen-Sperre nutzt `account_lockout::shared()`, das du über `account_lockout::configure_shared` mit einem geteilten Cache unterlegen kannst. Fehlversuche zählen in einem festen Fenster (standardmäßig 1 Stunde), das mit dem ersten Fehlversuch beginnt, ein Angreifer bekommt also `lockout_threshold - 1` Versuche pro Fenster ohne Sperre; die IP- und globalen Limits begrenzen den Rest.
+Feinjustiert wird unter `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Ein im Code gesetzter Wert (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) gewinnt über diese Schlüssel. Die IP- und globalen Buckets gelten pro Prozess, außer du installierst `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, das sie in festen Fenstern in einem geteilten Cache zählt (bei einem Cache-Fehler fallen beide auf den Prozess zurück; ein Burst über eine Fenstergrenze kann das Doppelte eines Limits erreichen; Apps, die sich einen Cache teilen, teilen die Zähler, außer jede nutzt ihren eigenen `ScopedCache`); der erste Login loggt eine Warnung, solange sie pro Prozess gelten. Die Benutzernamen-Sperre nutzt `account_lockout::shared()`, das du über `account_lockout::configure_shared` mit einem geteilten Cache unterlegen kannst. Fehlversuche zählen in einem festen Fenster (standardmäßig 1 Stunde), das mit dem ersten Fehlversuch beginnt, ein Angreifer bekommt also `lockout_threshold - 1` Versuche pro Fenster ohne Sperre; die IP- und globalen Limits begrenzen den Rest. Die `[auth]`-Schlüssel wendet `manage::Cli` beim Laden der Einstellungen an; eine App, die `server::Builder` ohne ihn baut, ruft stattdessen die Funktionen auf.
 
 **Anmeldefeld.** Tenant-Benutzer melden sich mit ihrem Benutzernamen an, außer bei `[auth] login_field = "email"` (oder `Cli::login_field(LoginField::Email)` / `server::Builder::login_field`, die über den Schlüssel gewinnen). E-Mail braucht das Feature `sso`, das die Spalte `email` anlegt. Die E-Mail passt auf jedem Backend ohne Rücksicht auf Groß- und Kleinschreibung, im Tenant-Anmeldeformular (Beschriftung „Email“), bei HTTP Basic und `/auth/login` (`{"username": …}` oder `{"email": …}`), und die Login-Sperre oben folgt der gespeicherten E-Mail. Jeder Benutzer braucht eine eigene E-Mail: ein Benutzer ohne kann sich nicht anmelden, und eine E-Mail, die sich zwei Benutzer (ohne Groß-/Kleinschreibung) teilen, meldet keinen an. Der Server loggt beim Start jeden Tenant mit solchen Benutzern; er warnt, statt den Start zu verweigern, damit die Daten eines Tenants nicht alle Tenants lahmlegen. `create-user --email` setzt sie.
 
@@ -340,7 +340,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 Authentifizierung ist die Art, wie du bestätigst, wer eine Anfrage stellt. **Rustango** bringt drei fertige Backends mit (Basic Auth, API-Keys und JWTs) und lässt dich eigene schreiben, indem du ein einziges Trait implementierst. Du hängst sie an Routen an, und Anfragen ohne ein erkanntes Credential erhalten ein `401`.
 
-> **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es meldet das Konto an, das mit dem IdP-Subject verknüpft ist (Verknüpfen per E-Mail ist pro Provider optional und gilt nie für Superuser oder Staff; kein Auto-Provisioning) und verwendet die bestehende Session wieder.
+> **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es meldet das Konto an, das mit dem IdP-Subject verknüpft ist (Verknüpfen per E-Mail ist pro Provider optional und gilt nie für Superuser oder Staff; der Bare-Admin registriert nie, ein Tenant-Admin-Provider nur laut seinem `signup_mode`) und verwendet die bestehende Session wieder.
 
 ### Drei fertige Backends
 
@@ -513,7 +513,7 @@ if !verify_key_async(secret, &row.hash).await? {
 }
 ```
 
-Diese Keys funktionieren direkt mit dem Multi-Tenancy-`ApiKeyBackend` — beide verwenden dasselbe `{prefix}.{secret}`-Format mit argon2id-gehashten Secrets, sodass ein hier ausgestellter Key dort ohne zusätzliche Arbeit authentifiziert.
+Diese Keys funktionieren direkt mit dem Multi-Tenancy-`ApiKeyBackend` — beide verwenden dasselbe `{prefix}.{secret}`-Format. Das Backend speichert einen HMAC-SHA256 des Secrets (`hmac-sha256v2$…`); es akzeptiert auch einen argon2id-Hash aus `api_keys` und tauscht ihn bei der ersten Nutzung gegen den HMAC, sodass ein hier ausgestellter Key dort ohne zusätzliche Arbeit authentifiziert.
 
 ---
 
@@ -789,7 +789,7 @@ Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 
 Gibt bei jedem Befund auf **Error-Level** einen Exit-Code ungleich null zurück (gut für CI-Gates). Warnungen lösen kein Fehlschlagen aus, erscheinen aber in der Ausgabe.
 
-Für Prüfungen jenseits des Mitgelieferten erweitere mit benutzerdefiniertem Code in deinem `manage`-Binary, bevor du an `manage::run` weiterleitest.
+Für Prüfungen jenseits des Mitgelieferten registriere ein eigenes Verb mit `register_command!` und führe es neben `check --deploy` aus.
 
 ---
 

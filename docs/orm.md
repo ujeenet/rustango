@@ -4,7 +4,7 @@ Patterns for the **Rustango** ORM beyond the basics. Most examples assume you al
 
 [![Type-checked ORM queries: chained filters, ordering, limits, and aggregation — all without raw SQL](img/orm.png)](img/orm.png)
 
-> **Source:** `rustango::sql` (`QuerySet`, the `Q!` macro / `Qb` builder) and the
+> **Source:** `rustango::sql` (`QuerySet`, the `Q!` macro / `query::Q` builder) and the
 > `#[derive(Model)]` query API — always compiled; pick a backend feature
 > (`postgres` / `mysql` / `sqlite`).
 >
@@ -20,7 +20,7 @@ A few Rust terms recur throughout. `&pool` is a shared reference to a database c
 
 Recent releases added a batch of features that aren't yet woven into every section below. Quick pointers:
 
-- **`Q!` macro + `Qb` runtime builder** — compile-time-safe filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **`Q!` macro + `query::Q` runtime builder** — compile-time-safe filters. `User::objects().where_(Q!(User.email__icontains = "alice"))` fails to build on a typo'd field name. Runtime-composable variant for admin filter chips: `let q = rustango::query::Q::eq("active", true) & rustango::query::Q::gt("age", 18i64);`.
 - **`.distinct_on(&["author_id"])`** — PG native; portable window-function fallback on MySQL / SQLite. "Latest per group" patterns.
 - **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insert many rows, updating the ones that already exist. Tri-dialect ON CONFLICT / ON DUPLICATE KEY UPDATE. Rows that repeat a key: the last one wins.
 - **`explain_pool()`** — tri-dialect EXPLAIN. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
@@ -1137,7 +1137,7 @@ let frame = WindowFrame {
 **Caveats:**
 
 - **`FILTER` + `Window` not yet supported**: combining `.filter(...)` with a window function raises `SqlError::NestedAggregateWrapper { wrapper: "Filtered(Window)" }` — the underlying syntax varies by function kind (PG allows `agg_fn() FILTER (WHERE …) OVER (…)` for aggregate-window funcs but not for ranking ones), and the writer hasn't been taught the dispatch. Filed for a follow-up if demand surfaces.
-- **`PercentRank` / `CumeDist` / `NthValue`** aren't in v1. It ships the 8 most-used variants; the missing three can be added incrementally with the same builder shape.
+- **`PercentRank` / `CumeDist` / `NthValue`** aren't in v1. It ships the fourteen above; the missing three can be added incrementally with the same builder shape.
 
 ### Filtering on aggregates (HAVING)
 
@@ -1433,7 +1433,7 @@ Post::objects()
 
 Insert a row, or update it if a row with the same key already exists. It emits the database's native `ON CONFLICT … DO UPDATE`.
 
-The single-instance `.upsert_on(executor)` conflicts on the **primary key**: with an `Auto::Unset` PK the server assigns a new key (equivalent to `insert`); with an `Auto::Set` PK the row is inserted if absent or all non-PK columns are overwritten if present.
+The single-instance `.upsert_on(executor)` conflicts on the model's first `unique_together`, else on the **primary key**: with an `Auto::Unset` PK the server assigns a new key (equivalent to `insert`); with an `Auto::Set` PK the row is inserted if absent or all non-PK columns are overwritten if present.
 
 ```rust
 // Upsert on the PK — INSERT, or UPDATE every non-PK column if the
@@ -1590,7 +1590,7 @@ post.force_delete(&pool).await?;       // real DELETE
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the Postgres-only executor forms (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. To exclude them by default, declare a global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, where `live_only()` returns the `deleted_at IS NULL` filter — and opt out per query with `.without_global_scope("live")`.
+These take the `&Pool` and run on all three backends; `soft_delete_on` / `restore_on` are the executor forms, on every backend (pass a transaction). The admin's "Delete" button soft-deletes any model that has the column. Default queries still include soft-deleted rows, but you no longer need to hand-roll the filter: `.active()` excludes them, `.only_trashed()` returns just them, and `.with_trashed()` is a marker that states intent and changes nothing — it does not undo an earlier `.active()`. To exclude them by default, declare a global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, where `live_only()` returns the `deleted_at IS NULL` filter — and opt out per query with `.without_global_scope("live")`.
 
 Global scopes apply to every `QuerySet` and to the `Model` shortcuts built on one (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). They do not apply to `Model::truncate`, which empties the whole table, or to the instance methods keyed by the primary key (`save`, `save_partial`, `delete`, `soft_delete`, `restore`): those act on the row you already hold.
 
@@ -1645,19 +1645,23 @@ Drop to hand-written SQL when the query builder can't express what you need. The
 ```rust
 use rustango::sql::sqlx;
 
+// sqlx runs on one driver's pool. Take it with `as_sqlite()` (or
+// `as_postgres()` / `as_mysql()`) and write that backend's SQL.
+let db = pool.as_sqlite().ok_or("not a SQLite pool")?;
+
 // Raw query → typed rows
-let rows = sqlx::query_as::<_, (i64, String)>("SELECT id, title FROM posts WHERE views > $1 ORDER BY views DESC")
+let rows = sqlx::query_as::<_, (i64, String)>("SELECT id, title FROM posts WHERE views > ? ORDER BY views DESC")
     .bind(1000)
-    .fetch_all(&pool)
+    .fetch_all(db)
     .await?;
 
 // Raw with model decoding
 let posts: Vec<Post> = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE complicated_condition")
-    .fetch_all(&pool)
+    .fetch_all(db)
     .await?;
 
 // Raw without rows (DDL / DML)
-sqlx::query("REINDEX TABLE posts").execute(&pool).await?;
+sqlx::query("VACUUM").execute(db).await?;
 ```
 
 For programmatic raw SQL within the **Rustango** query layer (tri-dialect; takes the SQL, a `Vec<SqlValue>` of binds, then the pool LAST, and returns `Vec<T>`):
@@ -1869,7 +1873,7 @@ A quick checklist for keeping queries fast as the data grows:
 - **`select_related` for FK display in lists** — eliminates N+1 in admin/list views.
 - **`.limit()` / `fetch_paginated_on` instead of loading everything** — never load entire tables.
 - **Cursor pagination for huge tables** — skips `COUNT(*)` per page.
-- **`bulk_insert_on` (Postgres) or `bulk_upsert_pool` for batches** — single round trip vs N.
+- **`bulk_insert_on` or `bulk_upsert_pool` for batches** — single round trip vs N.
 - **`upsert_on` for idempotent imports** — `ON CONFLICT` is faster than SELECT-then-INSERT.
 - **`transaction_pool` / `atomic` for related writes** — reduces commit overhead and keeps consistency.
 - **Cache hot reads** with `cache::get_or_set` — invalidate on `connect_post_save<T>(...)` signal handler.

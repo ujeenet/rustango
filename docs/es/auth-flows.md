@@ -34,7 +34,9 @@ firma HMAC añadida, de modo que el servidor puede confiar en sus parámetros si
 
 ## URL firmadas: el sustrato
 
-`sign` añade una firma HMAC-SHA256 (y una caducidad opcional) sobre la ruta + la query de la URL.
+`sign` añade una firma HMAC-SHA256 (y una caducidad opcional) sobre toda la URL antes del
+fragmento: esquema, host, ruta y query. Verifica la URL pública completa, no
+`req.uri()` (sin esquema ni host).
 `verify` la vuelve a calcular: manipula cualquier parámetro, usa el secreto equivocado o deja que
 caduque, y falla.
 

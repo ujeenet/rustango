@@ -298,7 +298,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     /// [`Self::register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
     #[deprecated(
         since = "0.63.0",
-        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.64.0"
+        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.65.0"
     )]
     #[must_use]
     pub fn register_tx_action<F>(
@@ -327,7 +327,7 @@ impl<DB: Database> TenantAdminBuilder<DB> {
     /// [`Self::register_action`] with a `(tx, pks)` handler.
     #[deprecated(
         since = "0.63.0",
-        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.64.0"
+        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.65.0"
     )]
     #[must_use]
     pub fn register_tx_action_with_perm<F>(

@@ -47,8 +47,8 @@ peut aussi créer un compte pour un email inconnu ; c'est désactivé par défau
 > (`SsoProvider`, `build_provider`, `verified_email`, `ResolvedSso`,
 > `SsoError`), la table de liens `rustango::sso::link` (`SsoLink`,
 > `ProviderKey`, `sign_in`), le câblage bare-admin `rustango::admin::sso`, le SSO
-> par tenant / console `rustango::tenancy::sso`
-> (`SharedSsoProvider`), et le SSO membre
+> par tenant / console (fournisseurs partagés : la table du registre
+> `rustango_shared_sso_providers`, éditée dans la console opérateur), et le SSO membre
 > `rustango::tenancy::member_auth`.
 
 ## URL de callback
@@ -437,10 +437,13 @@ Différences avec le flux admin :
   correspond à un compte existant suit la règle `allow_email_link`
   ci-dessus. Mettez-le à `false` pour refuser les emails inconnus. Une
   connexion native (une app qui a vérifié elle-même son ID token) appelle
-  directement `find_or_provision_member`, avec `ProviderKey::app(issuer)`
-  comme clé. Son résultat `MemberSignIn` vaut `Member(id)`, `NotLinked` (un
-  compte a cet email mais ne peut pas être lié par lui), `NoAccount`,
-  `Inactive`, `Unverified` ou `Refused`.
+  `sso::policy::admit` avec `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` et
+  `tenancy::member_auth::TenantAccounts(pool)` ; l'`EffectivePolicy` passée
+  est la politique de connexion, mettez-y donc ses règles. Le
+  `find_or_provision_member` déprécié applique encore les règles d'un
+  fournisseur de tenant, mais une clé d'app n'en a pas : avec
+  `auto_provision`, il inscrit tout email vérifié.
 - **Son propre cookie de session.** Le cookie membre
   (`rustango_member_session`) est **séparé par domaine** des cookies de
   session tenant / admin : le message signé porte une étiquette
@@ -628,8 +631,9 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
   lié par email, un détenteur de rôle seulement avec `allow_email_link_staff`. Un lien créé par email continue de
   fonctionner après la promotion de l'utilisateur ; supprimez-le si ce
   n'est pas voulu.
-- **Pas de provisionnement automatique** pour les admins — un email inconnu
-  ne peut pas entrer.
+- **Pas de provisionnement automatique sur le bare admin** — un email inconnu
+  ne peut pas entrer. Un fournisseur de l'admin de tenant n'inscrit que si son
+  `signup_mode` le permet.
 - **Secrets chiffrés au repos** (`RUSTANGO_SECRET_KEY`), déchiffrés
   uniquement en mémoire au moment de la connexion ; les formulaires
   d'édition masquent le secret stocké.

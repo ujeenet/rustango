@@ -383,7 +383,7 @@ fn settings_backend(s: &crate::config::CacheSettings) -> Result<SettingsBackend<
 /// - `"null"` / `"none"` → [`NullCache`]
 /// - `"file"` → [`FileCache`]. Needs `file_cache_dir`.
 /// - `"redis"`, `"db"` / `"database"` → **panics**, see below
-/// - anything else → [`InMemoryCache`], logged at `error`
+/// - anything else, or `"file"` without `file_cache_dir` → **panics**
 ///
 /// # Panics
 /// On `backend = "redis"` or `"db"`. Both need to connect, which this

@@ -57,6 +57,9 @@ without tenancy. Non-tenancy apps that use a framework subsystem (e.g.
 
 ## Squash reconciliation — `Migration.replaces`
 
+> **Single-database only.** The tenancy `migrate` (`Cli::tenancy()`) refuses
+> `--squash`.
+
 A **squash** collapses a run of migrations into one freshly generated file
 that recreates the same end state — handy when a stack of half-finished
 migrations is easier to regenerate than to fix.

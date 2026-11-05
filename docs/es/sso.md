@@ -45,7 +45,8 @@ correo desconocido; está desactivado por defecto.)
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), la tabla de
 > enlaces `rustango::sso::link` (`SsoLink`, `ProviderKey`, `sign_in`), el cableado del
 > bare-admin `rustango::admin::sso`, el SSO por tenant/consola
-> `rustango::tenancy::sso` (`SharedSsoProvider`) y el SSO de miembro
+> (proveedores compartidos: la tabla del registro `rustango_shared_sso_providers`,
+> editada en la consola del operador) y el SSO de miembro
 > `rustango::tenancy::member_auth`.
 
 ## URL de callback
@@ -418,11 +419,14 @@ Diferencias respecto al flujo del admin:
   usuarios de SSO no pueden iniciar sesión con contraseña) — y la enlaza. Un
   correo que coincide con una cuenta existente sigue la regla `allow_email_link`
   de arriba. Ponlo a `false` para rechazar correos desconocidos. Un inicio de
-  sesión nativo (una app que verificó su propio ID token) llama directamente a
-  `find_or_provision_member`, con `ProviderKey::app(issuer)` como clave. Su
-  resultado `MemberSignIn` es `Member(id)`, `NotLinked` (una cuenta tiene el
-  correo pero no puede enlazarse por él), `NoAccount`, `Inactive`, `Unverified`
-  o `Refused`.
+  sesión nativo (una app que verificó su propio ID token) llama a
+  `sso::policy::admit` con `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` y
+  `tenancy::member_auth::TenantAccounts(pool)`; la `EffectivePolicy` que pasa
+  es la política de inicio de sesión, así que pon ahí sus reglas. El
+  `find_or_provision_member` obsoleto aún aplica las reglas de un proveedor de
+  tenant, pero una clave de app no tiene ninguna: con `auto_provision` registra
+  cualquier correo verificado.
 - **Su propia cookie de sesión.** La cookie de miembro
   (`rustango_member_session`) está **separada por dominio** de las cookies de
   sesión de tenant / admin: el mensaje firmado lleva una etiqueta por dominio y
@@ -604,8 +608,9 @@ emisor y hora).
 - **Sin enlaces privilegiados por correo** — un superusuario nunca se enlaza
   por correo, y quien tiene roles solo con `allow_email_link_staff`. Un enlace creado por correo sigue funcionando después
   de ascender al usuario; bórralo si no se desea.
-- **Sin aprovisionamiento automático** para los admins — un correo desconocido
-  no puede entrar.
+- **Sin aprovisionamiento automático en el bare admin** — un correo desconocido
+  no puede entrar. Un proveedor del admin de tenant solo registra cuando su
+  `signup_mode` lo permite.
 - **Secretos cifrados en reposo** (`RUSTANGO_SECRET_KEY`), descifrados solo en
   memoria al iniciar sesión; los formularios de edición enmascaran el secreto
   almacenado.

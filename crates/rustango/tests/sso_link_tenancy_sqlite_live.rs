@@ -2522,6 +2522,33 @@ async fn member_flow_provisions_with_a_link_and_tells_not_linked_apart() {
     );
 }
 
+/// The legacy helper applies a tenant provider's rules: `auto_provision`
+/// does not let an email from another domain in.
+#[tokio::test]
+// The legacy helper, kept until it is removed.
+#[allow(deprecated)]
+async fn legacy_member_helper_applies_the_provider_rules() {
+    use rustango::sso::LinkSource;
+    use rustango::tenancy::member_auth::{find_or_provision_member, MemberSignIn};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    let pool = env.pool();
+    env.tenant_provider("corp", false).await;
+    env.set_policy("corp", "allowed_email_domains", "client.org")
+        .await;
+    let key = rustango::sso::resolve_by_slug(pool, "corp", "https://x/cb".into())
+        .await
+        .unwrap()
+        .expect("corp")
+        .key(LinkSource::Tenant);
+    let p = profile("g-out", "out@example.com");
+    let got = find_or_provision_member(pool, &key, false, &p, true).await;
+    assert!(!matches!(got, Ok(MemberSignIn::Member(_))), "{got:?}");
+    let p = profile("g-in", "in@client.org");
+    let got = find_or_provision_member(pool, &key, false, &p, true).await;
+    assert!(matches!(got, Ok(MemberSignIn::Member(_))), "{got:?}");
+}
+
 /// The member HTTP callback. `Tenant` defaults to Postgres when that feature
 /// is on, so this runs in the SQLite-only build.
 #[tokio::test]
