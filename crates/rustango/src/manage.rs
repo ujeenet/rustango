@@ -2483,8 +2483,6 @@ async fn open_registry(
     })
 }
 
-/// `[admin] title`, else `[brand] name`: the admin title the settings name.
-#[cfg(all(feature = "config", feature = "tenancy"))]
 /// The `[admin]` keys the tenant admin honours: title, subtitle, the
 /// visible tables and the read-only ones.
 #[cfg(all(feature = "config", feature = "tenancy"))]
@@ -2513,6 +2511,8 @@ fn tenant_admin_settings<DB: sqlx::Database>(
     builder
 }
 
+/// `[admin] title`, else `[brand] name`: the admin title the settings name.
+#[cfg(all(feature = "config", feature = "tenancy"))]
 fn admin_title_setting(s: &crate::config::Settings) -> Option<String> {
     let set = |t: &&String| !t.is_empty();
     s.admin

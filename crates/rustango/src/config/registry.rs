@@ -74,6 +74,7 @@ pub(crate) const REMOVED: &[(&str, &str)] = &[
 
 /// `[routes]` keys only a tenancy app reads: set on a single-database app,
 /// they change nothing.
+#[cfg(feature = "manage")]
 pub(crate) fn tenancy_only_routes(s: &super::RoutesSettings) -> Vec<&'static str> {
     [
         ("routes.legacy_preset", s.legacy_preset.is_some()),
