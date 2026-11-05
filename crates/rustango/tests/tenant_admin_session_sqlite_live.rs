@@ -1313,7 +1313,7 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
     };
     user.insert(&env.tenant).await.expect("seed user");
 
-    // Opened directly: the form's `next` is the tenant root.
+    // Opened directly: the form invents no `next`.
     let form = env.get("/t1/__login", "").await;
     assert_eq!(form.status(), StatusCode::OK);
     let html = axum::body::to_bytes(form.into_body(), usize::MAX)
@@ -1321,7 +1321,7 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
         .unwrap();
     let html = String::from_utf8_lossy(&html);
     assert!(
-        html.contains(r#"name="next" value="&#x2F;t1&#x2F;""#),
+        html.contains(r#"name="next" value="""#),
         "login form next: {html}"
     );
 
@@ -1337,8 +1337,16 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
             resp.headers()["location"].to_str().unwrap().to_owned()
         }
     };
-    // The form's own default, and every `next` that would leave the tenant.
-    for next in ["/t1/", "/", "/t2/x", "/t1/__login", "/t1/../t2/x", "/t1x/y"] {
+    // The form's empty `next`, and every `next` that would leave the tenant.
+    for next in [
+        "",
+        "/t1/",
+        "/",
+        "/t2/x",
+        "/t1/__login",
+        "/t1/../t2/x",
+        "/t1x/y",
+    ] {
         assert_eq!(login_to(next).await, "/t1/", "next={next}");
     }
     assert_eq!(login_to("/t1/p/abc").await, "/t1/p/abc");
@@ -1363,7 +1371,7 @@ async fn a_host_tenant_login_defaults_to_the_root() {
         .unwrap();
     let html = String::from_utf8_lossy(&html);
     assert!(
-        html.contains(r#"name="next" value="&#x2F;""#),
+        html.contains(r#"name="next" value="""#),
         "login form next: {html}"
     );
     let mut user = User {
@@ -1376,6 +1384,15 @@ async fn a_host_tenant_login_defaults_to_the_root() {
             "/__login",
             "",
             "username=alice&password=first-password&_csrf=t&next=%2F__login",
+        )
+        .await;
+    assert_eq!(resp.headers()["location"], "/");
+    // The form's own empty `next` lands on the root too.
+    let resp = env
+        .post(
+            "/__login",
+            "",
+            "username=alice&password=first-password&_csrf=t&next=",
         )
         .await;
     assert_eq!(resp.headers()["location"], "/");

@@ -6,7 +6,7 @@
 use std::path::Path;
 
 /// `ignore` doctest fences under `crates/*/src` (2026-11-04, 0.62.0).
-const IGNORE_BUDGET: usize = 589;
+const IGNORE_BUDGET: usize = 588;
 
 /// Whether `tags` (the text after ```` ``` ````) include `ignore`.
 fn has_ignore_tag(tags: &str) -> bool {

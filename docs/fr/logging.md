@@ -157,6 +157,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::sql` | Exécution des requêtes |
 | `rustango::sql::lock` | Clauses de verrou de ligne |
 | `rustango::sso` | Liaison de comptes SSO |
+| `rustango::sso::landing` | Règles d'arrivée SSO : une règle sautée (id et tenant seulement) ou une table de règles illisible |
 | `rustango::static_files` | Montages de fichiers statiques |
 | `rustango::template_views` | Vues adossées à des templates |
 | `rustango::tenancy` | Multi-tenancy, général |
