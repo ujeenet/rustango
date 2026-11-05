@@ -156,6 +156,8 @@ untouched.
 - `RouteConfig::operator_session_ttl` now ends operator-console sessions; its default is 12 h (it said 7 days and did nothing). Values above 12 h are cut to 12 h.
 - `tenancy::manage::run` no longer serves `run-server`: serve with `manage::Cli::new().tenancy()`.
 - `RouteConfig::basic_auth_realm` and `ServerConfig::operator_show_only` are gone: delete them from struct literals. `JtiBlacklist::end_session` returns a `bool` (`#[must_use]`).
+- `makemigrations` refuses a renamed table (a dropped table beside a new one with the same columns). Write the `RenameTable` it names in a `makemigrations --empty` file, or pass `--drop-and-add` to drop the old table on purpose.
+- `migrate <target>` refuses a target an applied squash replaces; target the squash instead. `unapply` / `unapply_force` refuse a migration that is not in the ledger (they used to run its inverse anyway).
 - The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
 - `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.
 - `server::Builder` refuses to start, and `check --deploy` errors, when a registered model has a sealed (`EncryptedString`) field and `RUSTANGO_SECRET_KEY` is unset outside the dev and test tiers (`sso` registers one). Set the key; it used to panic at the first write.
@@ -180,6 +182,7 @@ untouched.
 - `save()` on a PK with no row returns `ExecError::Driver(sqlx::Error::RowNotFound)` instead of `Ok(0)`. Call `insert` for a new row with a manual PK.
 - Inside `atomic(&pool, …)`, ORM writes given the same pool now join the block and roll back with it. A write while you hold `tx.lock()` returns `NestedAtomic`: drop the guard first. Reads on the pool still do not see the block's uncommitted writes.
 - `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` with every `Auto` PK set now write the PK (it was dropped and the rows inserted again); a mix of set and unset is refused.
+- `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
 
 ## 0.63.0
 

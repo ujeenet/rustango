@@ -515,6 +515,18 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
         None
     }
 
+    /// Query for the columns of one table's single-column, non-partial
+    /// UNIQUE indexes or constraints, primary key aside, binding `(table)`.
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Query for `(column, ON DELETE action)` of one table's single-column
+    /// FKs, binding `(table)`. The action is its SQL token, such as `CASCADE`.
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        None
+    }
+
     /// Drop the UNIQUE index `name` from `table`, for
     /// [`Self::unique_index_names_sql`]'s names.
     fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {

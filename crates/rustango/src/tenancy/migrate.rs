@@ -1229,15 +1229,8 @@ impl ScopedDir {
     }
 }
 
-/// A new dir with a random name, owner-only on Unix: a leftover or planted
-/// dir is never reused, so only this run's files are applied.
 fn scoped_tempdir() -> Result<tempfile::TempDir, TenancyError> {
-    let mut builder = tempfile::Builder::new();
-    builder.prefix("rustango_tenancy_scoped_");
-    // tempfile makes dirs (unlike files) with the default 0777 less the umask.
-    #[cfg(unix)]
-    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
-    builder.tempdir().map_err(|e| {
+    crate::migrate::file::private_tempdir("rustango_tenancy_scoped_").map_err(|e| {
         TenancyError::Validation(format!("could not create scoped-migration tempdir: {e}"))
     })
 }
