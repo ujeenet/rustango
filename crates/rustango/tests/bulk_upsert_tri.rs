@@ -238,9 +238,105 @@ async fn caller_set_uuid_pk_never_updates_another_row(pool: &Pool) {
     assert_eq!(doc_title(pool, "b").await, "B");
 }
 
+/// A database-filled `Auto` PK and no other unique key, so MySQL can upsert by id.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "bulk_upsert_tri_tally")]
+#[rustango(app = "bulk_upsert_tri")]
+pub struct Tally {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(max_length = 64)]
+    pub label: String,
+    pub n: i64,
+}
+
+fn tally(id: Auto<i64>, label: &str, n: i64) -> Tally {
+    Tally {
+        id,
+        label: label.into(),
+        n,
+    }
+}
+
+async fn tallies(pool: &Pool) -> Vec<(i64, String, i64)> {
+    let rows: Vec<Tally> = Tally::objects()
+        .order_by(&[("id", false)])
+        .fetch(pool)
+        .await
+        .expect("fetch tallies");
+    rows.into_iter()
+        .map(|t| (t.id.get().copied().expect("id"), t.label, t.n))
+        .collect()
+}
+
+/// Two stored rows; returns their ids.
+async fn seed_tallies(pool: &Pool) -> Vec<i64> {
+    rustango::testkit::matrix::fresh_table::<Tally>(pool).await;
+    let mut ids = Vec::new();
+    for (label, n) in [("a", 1), ("b", 2)] {
+        let mut t = tally(Auto::Unset, label, n);
+        t.insert(pool).await.expect("seed tally");
+        ids.push(t.id.get().copied().expect("id"));
+    }
+    ids
+}
+
+/// Rows whose `Auto` PK is set keep it, so an upsert by id updates them.
+async fn set_ids_upsert_by_id(pool: &Pool) {
+    let ids = seed_tallies(pool).await;
+    let rows = [
+        tally(Auto::Set(ids[0]), "a2", 10),
+        tally(Auto::Set(ids[1]), "b2", 20),
+    ];
+    Tally::bulk_upsert_pool(&rows, &["id"], &["label", "n"], pool)
+        .await
+        .expect("upsert by id");
+    assert_eq!(
+        tallies(pool).await,
+        vec![(ids[0], "a2".into(), 10), (ids[1], "b2".into(), 20)],
+        "set ids must update their rows, not insert copies"
+    );
+}
+
+async fn set_ids_insert_or_ignore_skips_existing(pool: &Pool) {
+    let ids = seed_tallies(pool).await;
+    Tally::bulk_insert_or_ignore_pool(&[tally(Auto::Set(ids[0]), "dup", 9)], pool)
+        .await
+        .expect("insert_or_ignore by id");
+    assert_eq!(
+        tallies(pool).await,
+        vec![(ids[0], "a".into(), 1), (ids[1], "b".into(), 2)],
+        "an existing id must be skipped"
+    );
+}
+
+async fn mixed_set_and_unset_ids_are_refused(pool: &Pool) {
+    use rustango::sql::{ExecError, SqlError};
+    let ids = seed_tallies(pool).await;
+    let rows = [
+        tally(Auto::Set(ids[0]), "a2", 10),
+        tally(Auto::Unset, "c", 3),
+    ];
+    let mixed = |r: Result<(), ExecError>| {
+        assert!(
+            matches!(r, Err(ExecError::Sql(SqlError::BulkAutoMixed))),
+            "{r:?}"
+        );
+    };
+    mixed(Tally::bulk_upsert_pool(&rows, &["id"], &["label", "n"], pool).await);
+    mixed(Tally::bulk_insert_or_ignore_pool(&rows, pool).await);
+    assert_eq!(
+        tallies(pool).await,
+        vec![(ids[0], "a".into(), 1), (ids[1], "b".into(), 2)]
+    );
+}
+
 tri_dialect_test! {
     model: Post,
     scenarios: [
+        set_ids_upsert_by_id,
+        set_ids_insert_or_ignore_skips_existing,
+        mixed_set_and_unset_ids_are_refused,
         caller_set_uuid_pk_never_updates_another_row,
         empty_update_cols_is_refused,
         first_call_inserts_all_rows,

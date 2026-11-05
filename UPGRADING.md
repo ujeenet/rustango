@@ -181,6 +181,10 @@ untouched.
 - Without the `tenancy` feature, a ViewSet with `permissions(...)` codenames now panics at mount (it answered 403 to every gated request). Put your own auth layer in front and use `allow_anonymous`, or `read_only`.
 - `startapp --into <dir>` now means `src/<dir>/`, in the tenancy CLI too (it used to be relative to the project root). Run it from a workspace member's directory instead of `--into crates/web`.
 - `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is now applied; a value that is not a whole number of seconds of at least 1 stops the server.
+- `soft_delete` / `restore` (and `_on`) take `&mut self`: make the binding `mut`. They now set the soft-delete field on success.
+- `save()` on a PK with no row returns `ExecError::Driver(sqlx::Error::RowNotFound)` instead of `Ok(0)`. Call `insert` for a new row with a manual PK.
+- Inside `atomic(&pool, …)`, ORM writes given the same pool now join the block and roll back with it. A write while you hold `tx.lock()` returns `NestedAtomic`: drop the guard first. Reads on the pool still do not see the block's uncommitted writes.
+- `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` with every `Auto` PK set now write the PK (it was dropped and the rows inserted again); a mix of set and unset is refused.
 - `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
 
 ## 0.63.0

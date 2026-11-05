@@ -66,7 +66,7 @@ async fn a_note(pool: &Pool, title: &str) -> Note {
 async fn the_pool_trio_works_with_no_postgres_backend() {
     let pool = pool().await;
     let keep = a_note(&pool, "keep").await;
-    let gone = a_note(&pool, "gone").await;
+    let mut gone = a_note(&pool, "gone").await;
 
     gone.soft_delete(&pool).await.expect("soft delete");
 

@@ -343,7 +343,15 @@ async fn save_writes_the_auto_now_stamp_back(pool: &Pool) {
     );
     b.name = "c".into();
     b.delete(pool).await.expect("delete");
-    assert_eq!(b.save(pool).await.expect("save_pool"), 0);
+    assert!(
+        matches!(
+            b.save(pool).await,
+            Err(rustango::sql::ExecError::Driver(
+                rustango::sql::sqlx::Error::RowNotFound
+            ))
+        ),
+        "a save of no row is RowNotFound"
+    );
     assert_eq!(b.updated_at.get(), Some(&old), "a save of no row stamped");
 }
 
