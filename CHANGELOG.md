@@ -13,7 +13,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
 - Every tenant cache key is `tenant:#org:<id>:<slug>:<area>:<rest>` (areas `app`, `lock`, `idem`, `page`, `rl`, `session`, `flag`); global keys keep their bytes, and a global app, page or rate-limit key starting with `tenant:` or `~` gets a `~` in front.
-- Until 0.65.0, tenant idempotency and lock calls also read (locks: take) the 0.63 keys, so a rolling deploy never runs a request or a job twice.
+- Until 0.65.0, tenant locks also take the 0.63 key and idempotency also reads and writes the 0.63 entry and marker, so a rolling deploy never runs a request or a job twice.
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
 
 ### Deprecated

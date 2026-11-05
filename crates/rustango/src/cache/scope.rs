@@ -95,7 +95,9 @@ impl CacheScope {
     }
 
     /// Delete every key of this tenant from the root, in every area, plus the
-    /// 0.63 lock layout. A global scope deletes nothing.
+    /// 0.63 lock layout. The 0.63 idempotency copies (`idem:<sha>`, written until
+    /// 0.65.0) carry no tenant prefix, so they expire with their TTL instead.
+    /// A global scope deletes nothing.
     ///
     /// # Errors
     /// The backend's `delete_prefixes` error.

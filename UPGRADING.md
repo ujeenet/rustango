@@ -152,7 +152,7 @@ untouched.
 
 - `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - Tenant cache keys move to `tenant:#org:<id>:<slug>:<area>:<rest>`. Tenant app (`ScopedCache`) entries move to the `app` area and miss once; rename keys if you use it as a durable store. Page-cache and `KeyBy::Tenant` counters restart once; sessions and flag overrides keep their keys.
-- Tenant locks move to `tenant:<ns>:lock:<name>` and idempotency entries to `tenant:<ns>:idem:<sha>`. Until 0.65.0 this release also takes the old lock key and reads old idempotency entries and markers, so deploy 0.64 everywhere before 0.65.0. Idempotency writes only the new key: a retry that reaches a 0.63 pod after a 0.64 pod took it can still run again.
+- Tenant locks move to `tenant:<ns>:lock:<name>` and idempotency entries to `tenant:<ns>:idem:<sha>`. Until 0.65.0 this release also takes the old lock key and reads and writes the old idempotency entries and markers, so a 0.63 and a 0.64 pod never run one request or job twice; deploy 0.64 everywhere before 0.65.0. The purge cannot reach the hashed old idempotency copies; they expire with their TTL.
 - A global app, page or rate-limit key starting with `tenant:` or `~` is stored with a `~` in front, so it can never land in a tenant's keyspace.
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` are deprecated (removed in 0.66.0): use `CacheScope::for_tenant(cache, &tenant).app()` or `.locks()`; for `scoped`, put the namespace in the lock name.
 

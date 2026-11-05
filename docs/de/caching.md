@@ -301,13 +301,19 @@ Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
 Invalidierung ausgelöst hat.
 
+Jeder Tenant-Key ist `tenant:#org:<id>:<slug>:<area>:<rest>`, mit je einem
+Bereich für App-Keys, Locks, Idempotency, Seiten, Rate-Limits, Sessions und
+Flag-Overrides. Ein `clear()` des Tenant-App-Caches löscht nur den Bereich
+`app` und gibt also nie den Lock eines laufenden Jobs frei.
+
 Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
-werden. Damit `purge-tenant` die `CacheScope::for_tenant`-Keys des alten Tenants
-löscht, rufe beim Start `rustango::tenancy::decommission::clear_on_purge(cache)`
-für jeden Cache auf, der sie hält. Der Purge löscht dort auch die Locks, Sessions
-und Flag-Overrides des Tenants. Idempotency- und Page-Cache-Einträge bleiben, bis
-sie ablaufen: sie sind an die Org-ID gebunden, also kann der neue Tenant sie
-nicht lesen.
+werden. Damit `purge-tenant` die Keys des alten Tenants löscht, rufe beim Start
+`rustango::tenancy::decommission::clear_on_purge(cache)` für jeden Cache auf,
+der sie hält. Der Purge löscht dort jeden Bereich
+(`CacheScope::for_tenant(cache, &tenant).purge()` tut dasselbe von Hand). Bis
+0.65.0 werden Idempotency-Antworten auch unter ihrem 0.63-Key `idem:<sha>`
+geschrieben; dieser Key ist gehasht und hat kein Tenant-Präfix, der Purge findet
+ihn also nicht, und er läuft mit seiner TTL ab (standardmäßig 24 Stunden).
 
 ---
 

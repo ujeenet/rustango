@@ -263,18 +263,29 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
     let token = format!("{request_sha256}:{}", uuid::Uuid::new_v4().simple());
     let in_flight = match cfg.cache.add(&lock_key, &token, Some(cfg.lock_ttl)).await {
         Ok(true) => {
-            let held = InFlight::hold(cfg.cache.clone(), lock_key, token, cfg.lock_ttl);
+            let held = InFlight::hold(cfg.cache.clone(), lock_key, token.clone(), cfg.lock_ttl);
             // A run may have stored and released between the read above and the add.
             if let Some(stored) = keys.read_stored(&cfg.cache).await {
                 release(Some(held)).await;
                 return replay(stored, &request_sha256);
             }
-            // Remove in 0.65.0: a pod still on 0.63 may be running it under the old marker.
-            if let Some(holder) = keys.legacy_holder(&cfg.cache).await {
-                release(Some(held)).await;
-                return busy(&holder, &request_sha256);
+            // Remove in 0.65.0: hold the 0.63 marker too, so a pod still on 0.63
+            // and this one never run it side by side.
+            let mut held = vec![held];
+            if let Some(old) = keys.legacy.as_ref().map(|k| format!("{k}:inflight")) {
+                match cfg.cache.add(&old, &token, Some(cfg.lock_ttl)).await {
+                    Ok(true) => {
+                        held.push(InFlight::hold(cfg.cache.clone(), old, token, cfg.lock_ttl))
+                    }
+                    Ok(false) => {
+                        let holder = cfg.cache.get(&old).await.ok().flatten();
+                        release_all(held).await;
+                        return busy(holder.as_deref().unwrap_or(""), &request_sha256);
+                    }
+                    Err(_) => {}
+                }
             }
-            Some(held)
+            held
         }
         Ok(false) => {
             // The first run may have stored its answer since the read above.
@@ -287,7 +298,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         Err(e) => {
             // Fail open like the read and the write: a cache outage must not stop writes.
             tracing::warn!(error = %e, cache_key, "idempotency: in-flight marker failed");
-            None
+            Vec::new()
         }
     };
 
@@ -304,12 +315,12 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
                 cache_key,
                 "idempotency: response over body_cap, so it is not stored"
             );
-            release(in_flight).await;
+            release_all(in_flight).await;
             return Response::from_parts(parts, whole);
         }
         Err(_) => {
             // The stream broke; the client gets a 500, not a truncated body.
-            release(in_flight).await;
+            release_all(in_flight).await;
             return ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -345,13 +356,16 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         // A failed write is logged and ignored, so the caller still
         // gets the successful response.
         if let Ok(json) = serde_json::to_string(&stored) {
-            if let Err(e) = cfg.cache.set(cache_key, &json, Some(cfg.ttl)).await {
-                tracing::warn!(error = %e, cache_key, "idempotency: cache write failed");
+            // Remove in 0.65.0: the 0.63 key too, so a retry on a 0.63 pod replays.
+            for key in std::iter::once(cache_key).chain(keys.legacy.as_deref()) {
+                if let Err(e) = cfg.cache.set(key, &json, Some(cfg.ttl)).await {
+                    tracing::warn!(error = %e, key, "idempotency: cache write failed");
+                }
             }
         }
     }
     // Released after the store, so a waiting retry finds the stored answer.
-    release(in_flight).await;
+    release_all(in_flight).await;
 
     Response::from_parts(parts, Body::from(bytes))
 }
@@ -427,6 +441,12 @@ async fn release(in_flight: Option<InFlight>) {
     f.key = None;
 }
 
+async fn release_all(held: Vec<InFlight>) {
+    for f in held {
+        release(Some(f)).await;
+    }
+}
+
 /// Delete the marker only while it holds `token`, so a late run can't free a
 /// newer run's key. Get-then-delete: the `Cache` trait has no compare-and-delete.
 async fn delete_if_owner(
@@ -454,10 +474,10 @@ fn busy(holder: &str, request_sha256: &str) -> Response<Body> {
     in_progress()
 }
 
-/// Where one request's answer lives. Written only under `key`.
+/// Where one request's answer and in-flight marker live.
 struct EntryKeys {
     key: String,
-    /// The 0.63 key of a tenant entry, still read. Remove in 0.65.0.
+    /// The 0.63 key of a tenant entry, read and written too. Remove in 0.65.0.
     legacy: Option<String>,
 }
 
@@ -475,12 +495,6 @@ impl EntryKeys {
             return Some(stored);
         }
         read_stored(cache, self.legacy.as_deref()?).await
-    }
-
-    /// The token of a 0.63 in-flight marker, if one is held.
-    async fn legacy_holder(&self, cache: &BoxedCache) -> Option<String> {
-        let marker = format!("{}:inflight", self.legacy.as_deref()?);
-        cache.get(&marker).await.ok().flatten()
     }
 }
 
@@ -1881,8 +1895,7 @@ mod tests {
         key_digest("", &parts, Some("#org:1:t"), key)
     }
 
-    /// A tenant entry is written only under `tenant:<ns>:idem:`; one stored
-    /// under the 0.63 key still replays (dual read until 0.65.0).
+    /// An entry stored only under the 0.63 key still replays (dual read until 0.65.0).
     #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn an_entry_stored_under_the_old_key_replays() {
@@ -1897,7 +1910,6 @@ mod tests {
             format!("idem:{digest}"),
         );
         let stored = shared.get(&new).await.unwrap().expect("new layout");
-        assert!(!shared.exists(&old).await.unwrap(), "wrote the old key");
 
         // As a 0.63 pod left it.
         shared.delete(&new).await.unwrap();
@@ -1909,6 +1921,53 @@ mod tests {
             counter.load(Ordering::SeqCst),
             1,
             "ran twice across the deploy"
+        );
+    }
+
+    /// Dual write until 0.65.0: a 0.64 answer is also under the 0.63 key, so a
+    /// retry a 0.63 pod reads there replays instead of running again.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_new_answer_replays_from_the_old_key() {
+        let (counter, shared) = (StdArc::new(AtomicUsize::new(0)), cache());
+        let app = tenant_app(counter.clone(), shared.clone());
+        let r = app.oneshot(keyed("/a").body(Body::empty()).unwrap()).await;
+        assert_eq!(body_string(r.unwrap()).await, "call-0:");
+        // What a 0.63 pod does: read `idem:<sha>` and replay it.
+        let old = format!("idem:{}", tenant_digest("k1"));
+        let stored = read_stored(&shared, &old)
+            .await
+            .expect("not under the old key");
+        let r = replay(stored, &hex(&Sha256::digest(b"")));
+        assert_eq!(body_string(r).await, "call-0:");
+    }
+
+    /// While a run is going, its 0.63 marker is held too, so a 0.63 pod waits.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_run_holds_the_old_in_flight_marker_too() {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        let shared = cache();
+        let old = format!("idem:{}:inflight", tenant_digest("k1"));
+        let (probe, key) = (shared.clone(), old.clone());
+        let app = Router::new()
+            .route(
+                "/a",
+                post(move || async move { probe.exists(&key).await.unwrap().to_string() }),
+            )
+            .idempotency(IdempotencyLayer::new(shared.clone()))
+            .layer(axum::middleware::from_fn(
+                |mut req: Request<Body>, next: Next| async move {
+                    req.extensions_mut()
+                        .insert(RequestTenant::Tenant(TenantSlug::new(1, "t")));
+                    next.run(req).await
+                },
+            ));
+        let r = app.oneshot(keyed("/a").body(Body::empty()).unwrap()).await;
+        assert_eq!(body_string(r.unwrap()).await, "true", "old marker not held");
+        assert!(
+            !shared.exists(&old).await.unwrap(),
+            "old marker not released"
         );
     }
 

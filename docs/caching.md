@@ -290,7 +290,10 @@ A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`
 delete the old tenant's keys, call
 `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache
 that holds them. The purge deletes every area there
-(`CacheScope::for_tenant(cache, &tenant).purge()` does the same by hand).
+(`CacheScope::for_tenant(cache, &tenant).purge()` does the same by hand). Until
+0.65.0, idempotency answers are also written under their 0.63 key `idem:<sha>`;
+that key is hashed and has no tenant prefix, so the purge cannot find it and it
+expires with its TTL (24 hours by default).
 
 ---
 

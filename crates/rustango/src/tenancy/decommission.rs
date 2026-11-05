@@ -40,7 +40,9 @@ static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
 
 /// Make every purge delete the tenant's keys from `cache`: every
 /// `tenant:#org:<id>:<slug>:` area (app, locks, idempotency, pages, rate
-/// limits, sessions, flag overrides). Call at boot for each such cache.
+/// limits, sessions, flag overrides). The 0.63-layout idempotency copies are
+/// hashed with no tenant prefix and expire with their TTL. Call at boot for
+/// each such cache.
 pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
     PURGE_CACHES
         .write()

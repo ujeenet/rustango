@@ -214,7 +214,8 @@ async fn a_tenant_request_writes_only_tenant_keys(pool: &Pool) {
     let app = app(root.clone(), pages.clone());
     for t in [acme(), acme2()] {
         fill(&app, &pages, &t).await;
-        // The 0.63 lock key, held beside the new one. Remove in 0.65.0.
+        // The 0.63 lock and idempotency keys, written beside the new ones.
+        // Remove in 0.65.0.
         let legacy_lock = format!("lock:{}", prefix(&t));
         let written = rec.take();
         assert!(!written.is_empty());
@@ -222,6 +223,7 @@ async fn a_tenant_request_writes_only_tenant_keys(pool: &Pool) {
             assert!(
                 key.starts_with(&prefix(&t))
                     || key.starts_with(&legacy_lock)
+                    || key.starts_with("idem:")
                     || GLOBAL_ALLOW.iter().any(|g| key.starts_with(g)),
                 "{} wrote `{key}`",
                 t.slug
@@ -248,6 +250,11 @@ async fn purge_removes_one_tenant_only(pool: &Pool) {
     for t in [acme(), acme2()] {
         fill(&app, &pages, &t).await;
         for key in rec.take() {
+            // The 0.63 idempotency copy has no tenant prefix and expires
+            // instead. Remove in 0.65.0.
+            if key.starts_with("idem:") {
+                continue;
+            }
             if root.exists(&key).await.unwrap() {
                 live.push((t.org_id, key));
             }

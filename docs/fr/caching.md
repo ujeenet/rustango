@@ -302,13 +302,20 @@ Deux choses à savoir :
 Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
 
+Chaque clé de tenant est `tenant:#org:<id>:<slug>:<area>:<rest>`, avec une zone
+pour les clés de l'app, les verrous, l'idempotence, les pages, les limites de
+débit, les sessions et les overrides de flags. Un `clear()` du cache d'app du
+tenant ne supprime que la zone `app` : il ne libère donc jamais le verrou d'un
+job en cours.
+
 Le slug d'un tenant purgé peut être réutilisé par un nouveau tenant. Pour que
-`purge-tenant` supprime les clés `CacheScope::for_tenant` de l'ancien tenant,
-appelez `rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage
-pour chaque cache qui les contient. La purge y supprime aussi les verrous, les
-sessions et les overrides de flags du tenant. Les entrées d'idempotence et du
-cache de page restent jusqu'à leur expiration : elles sont liées à l'id de l'org,
-donc le nouveau tenant ne peut pas les lire.
+`purge-tenant` supprime les clés de l'ancien tenant, appelez
+`rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage pour
+chaque cache qui les contient. La purge y supprime toutes les zones
+(`CacheScope::for_tenant(cache, &tenant).purge()` fait de même à la main).
+Jusqu'à 0.65.0, les réponses d'idempotence sont aussi écrites sous leur clé 0.63
+`idem:<sha>` ; cette clé est hachée et n'a pas de préfixe de tenant, la purge ne
+la trouve donc pas et elle expire avec son TTL (24 heures par défaut).
 
 ---
 
