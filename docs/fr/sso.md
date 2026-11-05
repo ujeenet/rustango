@@ -295,7 +295,7 @@ même contrôle que la connexion par mot de passe : même origine uniquement, et
 dans le préfixe de chemin du tenant. Sans `next` valable, les
 [règles d'arrivée](#ssolandingrule) du tenant décident, et sans correspondance la
 connexion mène à `admin_url`. La page de connexion transmet son propre `?next`
-aux boutons SSO et n'en invente jamais : ouvrir la racine de l'admin n'envoie pas
+aux boutons SSO et n'en invente jamais : ouvrir l'accueil du tenant n'envoie pas
 de `next`. L'admin nu fait de même sans la règle du préfixe, garde le chemin
 pendant l'étape TOTP et revient à son préfixe.
 

@@ -279,7 +279,7 @@ check as the password login: same-origin only, and inside the tenant's path
 prefix. Without a usable `next`, the tenant's
 [landing rules](#ssolandingrule) decide, and with no match the sign-in lands on
 `admin_url`. The login page passes its own `?next` on to the SSO buttons, and
-never makes one up: opening the admin root sends no `next`. The bare admin does
+never makes one up: opening the tenant home sends no `next`. The bare admin does
 the same without the prefix rule, keeps the path through the TOTP step, and
 falls back to its prefix.
 

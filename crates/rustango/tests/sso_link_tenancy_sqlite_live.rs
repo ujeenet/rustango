@@ -4259,10 +4259,15 @@ async fn landing_rules_lead_a_tenant_password_sign_in() {
                     .unwrap(),
             )
         };
-        for root in ["/", "/__admin", "/__admin/"] {
-            let to = location(&get(format!("{pre}{root}")).await);
-            assert_eq!(to, format!("{pre}/__login"), "{pre}{root}");
-        }
+        let home = if pre.is_empty() { "/" } else { pre };
+        assert_eq!(
+            location(&get(home.to_owned()).await),
+            format!("{pre}/__login")
+        );
+        assert_eq!(
+            location(&get(format!("{pre}/")).await),
+            format!("{pre}/__login")
+        );
         assert_eq!(
             location(&get(format!("{pre}/__admin/x")).await),
             format!(
@@ -4338,4 +4343,37 @@ async fn landing_rules_lead_the_bare_admin_through_totp() {
     .await;
     assert!(signed_in(&done), "{}", location(&done));
     assert_eq!(location(&done), "/cms-admin/landing");
+}
+
+/// With no rules, signing in from a signed-out `/admin` lands back on it, on
+/// the host and under the apex prefix, as before landing rules.
+#[tokio::test]
+async fn a_signed_out_admin_visit_lands_back_on_the_admin() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.password_user("ann", false).await;
+    env.prefix_acme().await;
+    let host = env.tenants[0].host.clone();
+    for (h, pre) in [(host.as_str(), ""), ("app.test", "/acme")] {
+        let gate = send(
+            &env.admin,
+            Request::builder()
+                .uri(format!("{pre}/__admin"))
+                .header(header::HOST, h)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let to = location(&gate);
+        let next = to
+            .split_once("?next=")
+            .unwrap_or_else(|| panic!("{pre}: the gate kept no next: {to}"))
+            .1;
+        let login = format!("{pre}/__login");
+        assert_eq!(to.split('?').next(), Some(login.as_str()));
+        let landed = env
+            .password_landing(h, &login, "ann", &format!("&next={next}"))
+            .await;
+        assert_eq!(landed, format!("{pre}/__admin"), "{pre}");
+    }
 }

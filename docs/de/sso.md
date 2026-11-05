@@ -289,7 +289,7 @@ Prüfung wie bei der Passwort-Anmeldung: nur gleicher Origin und innerhalb des
 Pfadpräfixes des Tenants. Ohne brauchbares `next` entscheiden die
 [Landing-Regeln](#ssolandingrule) des Tenants, und ohne Treffer landet die
 Anmeldung auf `admin_url`. Die Anmeldeseite gibt ihr eigenes `?next` an die
-SSO-Buttons weiter und erfindet nie eines: wer die Admin-Startseite öffnet,
+SSO-Buttons weiter und erfindet nie eines: wer die Startseite des Tenants öffnet,
 schickt kein `next`. Der Bare-Admin macht es ebenso, ohne die Präfix-Regel,
 behält den Pfad über den TOTP-Schritt und fällt auf sein Präfix zurück.
 

@@ -286,7 +286,7 @@ misma comprobación que el inicio de sesión con contraseña: solo mismo origen 
 dentro del prefijo de ruta del tenant. Sin un `next` válido deciden las
 [reglas de destino](#ssolandingrule) del tenant, y sin coincidencia el inicio
 lleva a `admin_url`. La página de inicio de sesión pasa su propio `?next` a los
-botones SSO y nunca inventa uno: abrir la raíz del admin no envía `next`. El
+botones SSO y nunca inventa uno: abrir la página de inicio del tenant no envía `next`. El
 admin básico hace lo mismo sin la regla del prefijo, conserva la ruta durante
 el paso TOTP y vuelve a su prefijo.
 
