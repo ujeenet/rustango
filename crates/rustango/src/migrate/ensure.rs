@@ -287,7 +287,11 @@ pub(crate) async fn column_drift(
     let dialect = pool.dialect();
     let schema = creation_schema(pool).await?.unwrap_or_default();
     let live = super::inspectdb::list_columns(pool, &schema, &t.name).await?;
-    let table = || vec![crate::core::SqlValue::from(t.name.clone())];
+    let at = crate::sql::TableTarget::in_schema(
+        Some(schema.as_str()).filter(|s| !s.is_empty()),
+        &t.name,
+    );
+    let table = || vec![crate::core::SqlValue::from(dialect.catalog_table(at))];
     let unique = match dialect.unique_columns_sql() {
         Some(sql) => Some(
             crate::sql::raw_query_pool::<(String,)>(sql, table(), pool)

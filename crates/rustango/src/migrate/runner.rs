@@ -698,7 +698,9 @@ fn preview_schema_op(
     // The runner looks these names up live; this is the name it has then.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
         if let Some(name) = live.take(&fk.table, &fk.column) {
-            statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
+            statements.extend(
+                dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&fk.table), &name),
+            );
         }
     }
     // So does a MySQL key MODIFY with the FKs other tables point at it.
@@ -719,7 +721,9 @@ fn preview_schema_op(
         for (t, c) in live.columns() {
             if refs.contains(&at_end(&t, &c)) {
                 if let Some(name) = live.take(&t, &c) {
-                    statements.extend(dialect.drop_foreign_key_sql(&t, &name));
+                    statements.extend(
+                        dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&t), &name),
+                    );
                 }
             }
         }
@@ -730,7 +734,8 @@ fn preview_schema_op(
     // Apply drops the name it finds in the catalog; this is the usual one.
     if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
         let name = ddl::unique_constraint_name(&u.table, &u.column);
-        statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
+        statements
+            .extend(dialect.drop_unique_index_sql(crate::sql::TableTarget::bare(&u.table), &name));
     }
     // An index's FK, as apply finds it: by the index's first column, when no
     // other index (declared, UNIQUE or the PK) starts with it at this op.
@@ -792,11 +797,9 @@ fn preview_schema_op(
     }
     statements.extend(drops);
     // Apply finds these by their columns; this is the usual name.
-    statements.extend(
-        step.drop_composite_fks
-            .iter()
-            .filter_map(|fk| dialect.drop_foreign_key_sql(&fk.table, &fk.usual_name())),
-    );
+    statements.extend(step.drop_composite_fks.iter().filter_map(|fk| {
+        dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&fk.table), &fk.usual_name())
+    }));
     statements.extend(step.batch.immediate);
     if let Some(retry) = &step.retry {
         statements.extend(retry.preview().map(|l| format!("-- {l}")));
@@ -2488,6 +2491,9 @@ struct Step {
     index_fks: Option<Box<IndexFks>>,
     /// The column whose FK the step adds back before the migration ends.
     readded_now: Option<(String, String)>,
+    /// The schema its catalog lookups and drops are in (PG), not `search_path`'s pick.
+    #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+    schema: Option<String>,
 }
 
 /// The FKs a MySQL index drop must take off first, found in the catalog:
@@ -2667,7 +2673,9 @@ impl IndexFks {
                     }
                 }
             };
-            drops.extend(dialect.drop_foreign_key_sql(&self.table, name));
+            drops.extend(
+                dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&self.table), name),
+            );
             readds.extend(readd);
         }
         (drops, readds)
@@ -2699,7 +2707,9 @@ impl IndexFks {
         }
         let drops = names
             .iter()
-            .filter_map(|n| dialect.drop_foreign_key_sql(&self.table, n))
+            .filter_map(|n| {
+                dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&self.table), n)
+            })
             .collect();
         match fate {
             FkFate::Readd(sql) => (drops, Some(sql.to_owned())),
@@ -3184,6 +3194,7 @@ fn render_step(
         drop_composite_fks,
         index_fks,
         readded_now,
+        schema: schema.map(str::to_owned),
     })
 }
 
@@ -3633,17 +3644,19 @@ macro_rules! step_statements {
     ($conn:expr, $step:expr, $dialect:expr) => {{
         use crate::sql::Dialect as _;
         let (step, dialect): (&Step, _) = ($step, $dialect);
+        // Looked up and dropped in the step's schema, not whatever `search_path` finds.
+        let schema = step.schema.as_deref();
         let mut out = Vec::new();
         if let (Some(fk), Some(sql)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
             let names: Vec<String> = sqlx::query_scalar(sql)
-                .bind(&fk.table)
+                .bind(dialect.catalog_table(super::diff::target(schema, &fk.table)))
                 .bind(&fk.column)
                 .fetch_all(&mut *$conn)
                 .await?;
             out.extend(
                 names
                     .iter()
-                    .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                    .filter_map(|n| dialect.drop_foreign_key_sql(super::diff::target(schema, &fk.table), n)),
             );
         }
         if let (Some((table, column)), Some(sql)) = (
@@ -3657,12 +3670,12 @@ macro_rules! step_statements {
                 .await?;
             out.extend(
                 fks.iter()
-                    .filter_map(|(t, n)| dialect.drop_foreign_key_sql(t, n)),
+                    .filter_map(|(t, n)| dialect.drop_foreign_key_sql(super::diff::target(schema, t), n)),
             );
         }
         if let (Some(u), Some(sql)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
             let names: Vec<String> = sqlx::query_scalar(sql)
-                .bind(&u.table)
+                .bind(dialect.catalog_table(super::diff::target(schema, &u.table)))
                 .bind(&u.column)
                 .fetch_all(&mut *$conn)
                 .await?;
@@ -3670,13 +3683,13 @@ macro_rules! step_statements {
                 names
                     .iter()
                     .filter(|n| !u.keep.contains(n))
-                    .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
+                    .filter_map(|n| dialect.drop_unique_index_sql(super::diff::target(schema, &u.table), n)),
             );
         }
         if let Some(sql) = dialect.foreign_key_columns_sql() {
             for fk in &step.drop_composite_fks {
                 let rows: Vec<(String, String, String)> = sqlx::query_as(sql)
-                    .bind(&fk.table)
+                    .bind(dialect.catalog_table(super::diff::target(schema, &fk.table)))
                     .fetch_all(&mut *$conn)
                     .await?;
                 let names = fk
@@ -3693,7 +3706,7 @@ macro_rules! step_statements {
                 out.extend(
                     names
                         .iter()
-                        .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                        .filter_map(|n| dialect.drop_foreign_key_sql(super::diff::target(schema, &fk.table), n)),
                 );
             }
         }
@@ -3759,7 +3772,9 @@ async fn mysql_composite_drops(
     }
     let mut drops = Vec::new();
     for fk in fks {
-        drops.extend(dialect.drop_foreign_key_sql(&fk.table, &fk.name));
+        drops.extend(
+            dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&fk.table), &fk.name),
+        );
         dropped.push(fk.add_sql(&dialect, &cd.renames));
     }
     Ok(drops)

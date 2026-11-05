@@ -76,6 +76,46 @@ pub(crate) fn split_qualified(name: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// A table as DDL names it: in `schema` when set, so it cannot resolve
+/// through `search_path` to a same-named table in another schema.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TableTarget<'a> {
+    schema: Option<&'a str>,
+    table: &'a str,
+}
+
+impl<'a> TableTarget<'a> {
+    /// `table` resolved by the connection, unqualified.
+    #[must_use]
+    pub fn bare(table: &'a str) -> Self {
+        Self {
+            schema: None,
+            table,
+        }
+    }
+
+    /// `table` in `schema`, or [`Self::bare`] when `schema` is `None`.
+    #[must_use]
+    pub fn in_schema(schema: Option<&'a str>, table: &'a str) -> Self {
+        Self { schema, table }
+    }
+
+    /// The table's own name.
+    #[must_use]
+    pub fn table(&self) -> &'a str {
+        self.table
+    }
+
+    /// `"schema"."table"`, or `"table"` with no schema.
+    #[must_use]
+    pub fn quoted<D: Dialect + ?Sized>(&self, d: &D) -> String {
+        match self.schema {
+            Some(s) => format!("{}.{}", d.quote_ident(s), d.quote_ident(self.table)),
+            None => d.quote_ident(self.table),
+        }
+    }
+}
+
 /// `name` quoted part by part, so `schema.table` is not one identifier.
 #[cfg(any(feature = "cache", feature = "postgres"))]
 pub(crate) fn quote_qualified(d: &dyn Dialect, name: &str) -> String {
@@ -450,7 +490,7 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     /// `DROP CONSTRAINT IF EXISTS`, which is idempotent. MySQL spells
     /// it `DROP CHECK` (MariaDB `DROP CONSTRAINT`) and takes no `IF EXISTS`,
     /// so it errors when the constraint is already gone.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String>;
+    fn drop_check_constraint_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String>;
 
     /// `ALTER TABLE <table> DROP …` for a named foreign key, or
     /// `None` where there is no such statement. Required, as
@@ -458,7 +498,13 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     ///
     /// Postgres uses `DROP CONSTRAINT IF EXISTS`, MySQL the
     /// non-idempotent `DROP FOREIGN KEY`.
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String>;
+    fn drop_foreign_key_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String>;
+
+    /// How a catalog query binds `table`: the qualified name on PG, whose
+    /// queries look it up with `to_regclass`; the bare name elsewhere.
+    fn catalog_table(&self, table: TableTarget<'_>) -> String {
+        table.table().to_owned()
+    }
 
     /// Query for the names of the FKs on one column, binding `(table,
     /// column)`. Single-column FKs only: a composite one stays (#1557).
@@ -529,7 +575,7 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
 
     /// Drop the UNIQUE index `name` from `table`, for
     /// [`Self::unique_index_names_sql`]'s names.
-    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn drop_unique_index_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         let _ = (table, name);
         None
     }
@@ -595,10 +641,15 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
 
     /// Add a named UNIQUE on one column of an existing table. PG and MySQL
     /// share this form; SQLite has no `ADD CONSTRAINT` and overrides it.
-    fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {
+    fn add_unique_constraint_sql(
+        &self,
+        table: TableTarget<'_>,
+        name: &str,
+        column: &str,
+    ) -> String {
         format!(
             "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({})",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name),
             self.quote_ident(column)
         )
@@ -1113,7 +1164,7 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     /// implementation must escape single quotes itself.
     fn column_comment_statement(
         &self,
-        _table: &str,
+        _table: TableTarget<'_>,
         _column: &str,
         _comment: &str,
     ) -> Option<String> {
@@ -1128,14 +1179,18 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
 
     /// A `COMMENT ON TABLE` statement to run after `CREATE TABLE`.
     /// [`Self::column_comment_statement`] for the whole table.
-    fn table_comment_statement(&self, _table: &str, _comment: &str) -> Option<String> {
+    fn table_comment_statement(&self, _table: TableTarget<'_>, _comment: &str) -> Option<String> {
         None
     }
 
     /// Set the comment on an existing table; `""` drops it. Defaults to
     /// [`Self::table_comment_statement`]; MySQL alters the table instead.
     /// A dialect that writes the comment inline must override it, or a change is a no-op.
-    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+    fn alter_table_comment_statement(
+        &self,
+        table: TableTarget<'_>,
+        comment: &str,
+    ) -> Option<String> {
         self.table_comment_statement(table, comment)
     }
 

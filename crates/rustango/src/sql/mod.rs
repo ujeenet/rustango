@@ -58,7 +58,7 @@ pub(crate) use mysql::ByServer;
 pub(crate) use dialect::quote_with;
 pub(crate) use dialect::refuse_unbindable_values;
 pub(crate) use dialect::split_qualified;
-pub use dialect::Dialect;
+pub use dialect::{Dialect, TableTarget};
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
 #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 pub(crate) use error::{Refusal, STILL_REFERENCED};

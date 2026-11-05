@@ -16,7 +16,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError};
+use super::{CompiledStatement, Dialect, SqlError, TableTarget};
 
 /// The insert id a skipped `DoNothing` insert reports. No auto-increment
 /// column reaches it: a signed BIGINT stops at 2^63 - 1.
@@ -373,10 +373,14 @@ impl Dialect for MySql {
         Some(format!(" COMMENT={}", self.quote_literal(comment)))
     }
 
-    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+    fn alter_table_comment_statement(
+        &self,
+        table: TableTarget<'_>,
+        comment: &str,
+    ) -> Option<String> {
         Some(format!(
             "ALTER TABLE {}{}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.write_inline_table_comment(comment)?
         ))
     }
@@ -633,8 +637,8 @@ impl Dialect for MySql {
     /// **So this is not idempotent.** Dropping a constraint that is
     /// already gone is an error, where the Postgres form does
     /// nothing.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
-        let mut sql = format!("ALTER TABLE {} DROP ", self.quote_ident(table));
+    fn drop_check_constraint_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
+        let mut sql = format!("ALTER TABLE {} DROP ", table.quoted(self));
         ByServer {
             mysql: "CHECK",
             mariadb: "CONSTRAINT",
@@ -647,10 +651,10 @@ impl Dialect for MySql {
 
     /// MySQL spells this `DROP FOREIGN KEY` and takes no
     /// `IF EXISTS`, so it is not idempotent either.
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn drop_foreign_key_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP FOREIGN KEY {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }
@@ -838,10 +842,10 @@ impl Dialect for MySql {
         )
     }
 
-    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn drop_unique_index_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP INDEX {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }

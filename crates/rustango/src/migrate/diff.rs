@@ -1108,26 +1108,25 @@ pub(crate) fn render_changes_split_for_empty(
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
 /// A registry model's table is shared, so it resolves through `search_path` (#1718).
 fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &str) -> String {
-    in_table_schema(dialect, schema, table, table)
+    target(schema, table).quoted(dialect)
 }
 
-/// The quoted `name` (a table or index) in the schema [`fk_target`] puts `table` in.
-fn in_table_schema(
-    dialect: &dyn crate::sql::Dialect,
-    schema: Option<&str>,
+/// `table` in `schema`, unless it is a shared registry table.
+pub(crate) fn target<'a>(schema: Option<&'a str>, table: &'a str) -> crate::sql::TableTarget<'a> {
+    in_table_schema(schema, table, table)
+}
+
+/// `name` (a table or index) in the schema [`target`] puts `table` in.
+fn in_table_schema<'a>(
+    schema: Option<&'a str>,
     table: &str,
-    name: &str,
-) -> String {
+    name: &'a str,
+) -> crate::sql::TableTarget<'a> {
     let shared = || {
         crate::core::ModelEntry::for_table(table)
             .is_some_and(|e| e.schema.scope == crate::core::ModelScope::Registry)
     };
-    match schema {
-        Some(s) if !shared() => {
-            format!("{}.{}", dialect.quote_ident(s), dialect.quote_ident(name))
-        }
-        _ => dialect.quote_ident(name),
-    }
+    crate::sql::TableTarget::in_schema(schema.filter(|_| !shared()), name)
 }
 
 /// An `AlterColumn*` on MySQL or SQLite (#1676). MySQL restates the whole
@@ -1177,8 +1176,11 @@ fn alter_column_elsewhere(
     match unique {
         Some(true) => {
             let name = unique_names.get(table, &f.column)?;
-            out.immediate
-                .push(dialect.add_unique_constraint_sql(table, &name, &f.column));
+            out.immediate.push(dialect.add_unique_constraint_sql(
+                target(schema, table),
+                &name,
+                &f.column,
+            ));
         }
         // The runner drops it by its name in the catalog.
         Some(false) => {}
@@ -1199,7 +1201,7 @@ fn alter_column_elsewhere(
 
 /// PG's `COMMENT ON COLUMN` for `f`; MySQL inlines it and SQLite has none (#2270).
 fn column_comment(
-    table: &str,
+    table: crate::sql::TableTarget<'_>,
     f: &FieldSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Option<String> {
@@ -1408,11 +1410,12 @@ fn render_changes_split_inner(
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 for f in &table.fields {
-                    out.immediate.extend(column_comment(name, f, dialect));
+                    out.immediate
+                        .extend(column_comment(target(schema, name), f, dialect));
                 }
                 if let Some(comment) = &table.db_table_comment {
                     out.immediate
-                        .extend(dialect.table_comment_statement(name, comment));
+                        .extend(dialect.table_comment_statement(target(schema, name), comment));
                 }
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
@@ -1512,7 +1515,8 @@ fn render_changes_split_inner(
                     out.immediate
                         .push(add_column_sql(table, f, dialect, schema));
                 }
-                out.immediate.extend(column_comment(table, f, dialect));
+                out.immediate
+                    .extend(column_comment(target(schema, table), f, dialect));
                 if f.fk.is_some()
                     && dialect.inline_fks_in_create_table()
                     && inline_fk_on_add_column(f, dialect).is_none()
@@ -1526,8 +1530,11 @@ fn render_changes_split_inner(
                 // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
                 if f.unique && !f.primary_key {
                     let name = unique_names.get(table, column)?;
-                    out.immediate
-                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                    out.immediate.push(dialect.add_unique_constraint_sql(
+                        target(schema, table),
+                        &name,
+                        column,
+                    ));
                 }
                 if let Some(rel) =
                     f.fk.as_ref()
@@ -1750,13 +1757,16 @@ fn render_changes_split_inner(
             SchemaChange::AlterColumnComment {
                 table, column, to, ..
             } => out.immediate.extend(dialect.column_comment_statement(
-                table,
+                target(schema, table),
                 column,
                 to.as_deref().unwrap_or(""),
             )),
-            SchemaChange::AlterTableComment { table, to, .. } => out
-                .immediate
-                .extend(dialect.alter_table_comment_statement(table, to.as_deref().unwrap_or(""))),
+            SchemaChange::AlterTableComment { table, to, .. } => {
+                out.immediate.extend(dialect.alter_table_comment_statement(
+                    target(schema, table),
+                    to.as_deref().unwrap_or(""),
+                ))
+            }
             SchemaChange::AlterColumnUnique {
                 table,
                 column,
@@ -1765,8 +1775,11 @@ fn render_changes_split_inner(
                 // The runner drops the name it finds in the catalog (#2133).
                 if *unique {
                     let name = unique_names.get(table, column)?;
-                    out.immediate
-                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                    out.immediate.push(dialect.add_unique_constraint_sql(
+                        target(schema, table),
+                        &name,
+                        column,
+                    ));
                 } else if !by_catalog {
                     out.immediate.push(format!(
                         "ALTER TABLE {} DROP CONSTRAINT {}",
@@ -1916,7 +1929,7 @@ fn render_changes_split_inner(
                 }
                 out.immediate.push(format!(
                     "DROP INDEX IF EXISTS {}",
-                    in_table_schema(dialect, schema, table, name)
+                    in_table_schema(schema, table, name).quoted(dialect)
                 ));
             }
             // SQLite takes CHECKs and composite FKs only in `CREATE TABLE` (#2127).
@@ -1954,7 +1967,8 @@ fn render_changes_split_inner(
                 // This arm used to test `dialect.name() == "sqlite"`
                 // itself and then hand-write the statement — which is
                 // how it came to send PostgreSQL syntax to MySQL (#559).
-                let Some(sql) = dialect.drop_check_constraint_sql(table, name) else {
+                let Some(sql) = dialect.drop_check_constraint_sql(target(schema, table), name)
+                else {
                     return Err(format!(
                         "DropCheckConstraint for `{table}.{name}` is not yet supported on \
                          dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
@@ -2095,7 +2109,7 @@ fn render_changes_split_inner(
             SchemaChange::DropCompositeFk { table, name } => {
                 // The usual name; the runner finds the live one by its columns.
                 let fk = super::ddl::fk_constraint_name(table, name);
-                let Some(sql) = dialect.drop_foreign_key_sql(table, &fk) else {
+                let Some(sql) = dialect.drop_foreign_key_sql(target(schema, table), &fk) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
                          dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
