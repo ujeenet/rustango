@@ -1482,13 +1482,13 @@ fn strip_tenant_prefix(
 /// Path-prefix tenants live on the apex, the console's origin: a script on a
 /// tenant page can call the console with an operator's cookies. Warn once at boot.
 async fn warn_if_prefix_tenants_share_the_console(registry: &crate::sql::Pool) {
-    use crate::sql::FetcherPool as _;
-    let prefixed = crate::query::QuerySet::<crate::tenancy::Org>::new()
-        .filter("path_prefix__isnull", false)
-        .limit(1)
-        .fetch(registry)
+    use crate::core::Column as _;
+    use crate::sql::ExistsPool as _;
+    let prefixed = crate::tenancy::Org::objects()
+        .where_(crate::tenancy::Org::path_prefix.is_not_null())
+        .exists(registry)
         .await;
-    if prefixed.is_ok_and(|rows| rows.iter().any(|o| o.path_prefix.is_some())) {
+    if prefixed.unwrap_or(false) {
         tracing::warn!(
             target: "rustango::server",
             "path-prefix tenants share the apex origin with the operator console, so a \
