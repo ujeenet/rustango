@@ -25,8 +25,8 @@ use super::file::{self, extract_index, Migration, Operation};
 use super::snapshot::SchemaSnapshot;
 
 /// What `makemigrations` does when a table loses a column and gains one
-/// of the same type: likely a renamed field, whose drop + add deletes the
-/// column's data.
+/// of the same type, or a table goes beside a new one with its columns:
+/// likely a rename, whose drop + add deletes the data.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DropAndAdd {
@@ -435,14 +435,33 @@ fn refuse_unkeyed_composite_fks(
     )))
 }
 
-/// Warn for every dropped column; refuse a drop beside a same-type add
-/// unless `drops` allows it, as it empties what is likely a renamed field.
+/// Warn for every dropped table and column; refuse a drop beside a matching
+/// add unless `drops` allows it, as it empties what is likely a rename.
 fn check_drops(
     prev: &SchemaSnapshot,
     current: &SchemaSnapshot,
     changes: &[SchemaChange],
     drops: DropAndAdd,
 ) -> Result<(), MigrateError> {
+    let tables = super::diff::suspected_table_renames(prev, current, changes);
+    if drops == DropAndAdd::Refuse && !tables.is_empty() {
+        let pairs: Vec<String> = tables
+            .iter()
+            .map(|(old, new)| format!("`{old}` dropped, `{new}` created with its columns"))
+            .collect();
+        let (old, new) = &tables[0];
+        return Err(MigrateError::Validation(format!(
+            "makemigrations: refused, a renamed table would lose its data:\n  - {}\n\
+             A drop + create deletes every row in the old table. To keep the data, write \
+             the rename by hand:\n  \
+             cargo run -- makemigrations --empty rename_{old}\n  \
+             then put {{\"schema\": {{\"RenameTable\": {{\"old_name\": \"{old}\", \
+             \"new_name\": \"{new}\"}}}}}} in its `forward` and run makemigrations again.\n\
+             To drop the old table and create the new one on purpose, run \
+             `makemigrations --drop-and-add`.",
+            pairs.join("\n  - "),
+        )));
+    }
     let renames = super::diff::suspected_renames(prev, current, changes);
     if drops == DropAndAdd::Refuse && !renames.is_empty() {
         let pairs: Vec<String> = renames

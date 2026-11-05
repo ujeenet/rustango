@@ -65,6 +65,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Ending an impersonation logs an error when the revoke was not recorded; `JtiBlacklist::end_session` returns whether it was.
 - `[errors] enabled` without `template_views`, and tenancy-only `[routes]` keys on a single-database app, now warn; `check-settings` marks those keys "tenancy apps only".
 - `RouteConfig::basic_auth_realm` and `tenancy::server::ServerConfig::operator_show_only`, which nothing read, are removed; the `save_quietly` docs say ORM writes send no signals.
+- Migrations: `makemigrations` refuses a model whose `table =` changed with its columns kept (it wrote a drop + create that emptied the table) and names the `RenameTable` route; every `DropTable` now warns. `migrate <target>` refuses a target an applied squash replaces, `unapply` refuses a migration that is not applied, and `migrate_embedded` reconciles squashes like `migrate`. On SQLite a migration whose ledger row committed is no longer reported as failed when only the FK restore failed.
 
 ## [0.63.0] — 2026-11-04
 

@@ -505,9 +505,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-/// Warnings for every dropped column in `changes` (its data is deleted; a
-/// NOT NULL one with no default also cannot be unapplied once the table
-/// has rows), and for a junction dropped beside a new one with its ends.
+/// Warnings for every dropped table and column in `changes` (its data is
+/// deleted; a NOT NULL column with no default also cannot be unapplied once
+/// the table has rows), and for a junction dropped beside a new one with its ends.
 pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]) -> Vec<String> {
     changes
         .iter()
@@ -522,6 +522,9 @@ pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]
                     );
                 }
                 Some(w)
+            }
+            SchemaChange::DropTable(table) => {
+                Some(format!("dropping table `{table}` deletes every row in it"))
             }
             SchemaChange::DropM2MTable { through } => {
                 let gone = prev.m2m_table(through)?;
@@ -582,6 +585,36 @@ pub(crate) fn suspected_renames(
             {
                 if t == table && ty(current, t, added).as_ref() == Some(&dropped) {
                     out.push((table.clone(), column.clone(), added.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(dropped, created)` for each table `changes` drops beside a new table
+/// with the same column names: likely a changed `table =`, which a drop +
+/// create empties. Never guessed into a `RenameTable`.
+pub(crate) fn suspected_table_renames(
+    prev: &SchemaSnapshot,
+    current: &SchemaSnapshot,
+    changes: &[SchemaChange],
+) -> Vec<(String, String)> {
+    fn columns(t: &TableSnapshot) -> std::collections::BTreeSet<&str> {
+        t.fields.iter().map(|f| f.column.as_str()).collect()
+    }
+    let mut out = Vec::new();
+    for c in changes {
+        let SchemaChange::DropTable(old) = c else {
+            continue;
+        };
+        let Some(dropped) = prev.table(old).map(columns) else {
+            continue;
+        };
+        for a in changes {
+            if let SchemaChange::CreateTable(new) = a {
+                if current.table(new).map(columns).as_ref() == Some(&dropped) {
+                    out.push((old.clone(), new.clone()));
                 }
             }
         }
@@ -2940,6 +2973,46 @@ mod sql_type_tests {
             suspected_renames(&prev, &current, &changes),
             vec![("posts".into(), "subtitle".into(), "tagline".into())]
         );
+    }
+
+    /// A dropped table beside a new one with its columns is a suspected
+    /// rename; other columns are not. Every dropped table warns.
+    #[test]
+    fn a_dropped_table_beside_one_with_its_columns_is_a_suspected_rename() {
+        let table = |name: &str, columns: &[&str]| TableSnapshot {
+            name: name.into(),
+            model: "M".into(),
+            fields: columns
+                .iter()
+                .map(|c| FieldSnapshot {
+                    name: (*c).into(),
+                    column: (*c).into(),
+                    ..fs("i64", false)
+                })
+                .collect(),
+            composite_fks: Vec::new(),
+            db_table_comment: None,
+        };
+        let prev = SchemaSnapshot {
+            tables: vec![
+                table("posts", &["id", "n"]),
+                table("tags", &["id", "label"]),
+            ],
+            ..Default::default()
+        };
+        let current = SchemaSnapshot {
+            tables: vec![table("articles", &["n", "id"]), table("labels", &["id"])],
+            ..Default::default()
+        };
+        let changes = detect_changes(&prev, &current);
+        assert_eq!(
+            suspected_table_renames(&prev, &current, &changes),
+            vec![("posts".into(), "articles".into())]
+        );
+        let warned = irreversible_drops(&prev, &changes);
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(warned.iter().any(|w| w.contains("`posts`")), "{warned:?}");
+        assert!(warned.iter().any(|w| w.contains("`tags`")), "{warned:?}");
     }
 
     /// Swapping one M2M for another with the same ends drops the rows: say so.
