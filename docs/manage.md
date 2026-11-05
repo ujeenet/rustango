@@ -227,8 +227,10 @@ cargo run -- makemigrations rename_status_to_state   # custom suffix
 A column dropped beside a new column of the same type on one table looks like
 a renamed field, and a drop + add would delete its data. `makemigrations`
 refuses it and names the columns; write the `RenameColumn` as below, or pass
-`--drop-and-add` to drop and add on purpose. Every other `DropColumn` prints a
-warning that its data goes.
+`--drop-and-add` to drop and add on purpose. A table dropped beside a new table
+with the same columns (a changed `table =`) is refused the same way; write a
+`RenameTable` instead. Every other `DropColumn` or `DropTable` prints a warning
+that its data goes.
 
 ### `makemigrations --app <app>`
 

@@ -152,6 +152,8 @@ untouched.
 
 ## 0.64.0
 
+- `makemigrations` refuses a renamed table (a dropped table beside a new one with the same columns). Write the `RenameTable` it names in a `makemigrations --empty` file, or pass `--drop-and-add` to drop the old table on purpose.
+- `migrate <target>` refuses a target an applied squash replaces; target the squash instead. `unapply` / `unapply_force` refuse a migration that is not in the ledger (they used to run its inverse anyway).
 - The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
 - `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.
 - `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.

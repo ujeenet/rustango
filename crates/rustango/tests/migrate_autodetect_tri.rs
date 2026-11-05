@@ -3895,6 +3895,177 @@ async fn renamed_field_is_refused_and_keeps_its_rows(pool: &Pool) {
     );
 }
 
+/// A model's `table =` changed with its columns kept: refused, not a silent
+/// drop + create; `--empty` + `RenameTable` keeps every row.
+async fn renamed_table_is_refused_and_keeps_its_rows(pool: &Pool) {
+    let (old, new) = ("mad_rt_post", "mad_rt_article");
+    let chain = Chain::new(pool, "rt", &[old, new, "mad_rt_other"]).await;
+    let named = |t: &str| {
+        let f = vec![id(), col("title", "string", json!({"max_length": 50}))];
+        json!({"tables": [{"name": t, "model": "Post", "fields": f}]})
+    };
+    chain.step(pool, named(old)).await.expect("initial");
+    for (n, v) in [(1, "one"), (2, "two")] {
+        let sql = format!("INSERT INTO {{}} ({{}}, {{}}) VALUES ({n}, '{v}')");
+        exec(pool, &sql, &[old, "id", "title"]).await.unwrap();
+    }
+
+    let err = make_migrations_from(chain.dir.path(), &snap(named(new)), None)
+        .expect_err("a dropped table beside a created one with its columns is refused")
+        .to_string();
+    for part in [
+        "`mad_rt_post` dropped, `mad_rt_article` created",
+        "makemigrations --empty",
+        "RenameTable",
+        "--drop-and-add",
+    ] {
+        assert!(err.contains(part), "{part}: {err}");
+    }
+    assert_eq!(chain.head().name, "0001_initial", "nothing was written");
+
+    let mut mig = rustango::migrate::manage::make_empty(chain.dir.path(), "rename_mad_rt_post")
+        .expect("--empty");
+    mig.forward = vec![Operation::Schema(SchemaChange::RenameTable {
+        old_name: old.into(),
+        new_name: new.into(),
+    })];
+    chain.write(&mig);
+    let next = make_migrations_from(chain.dir.path(), &snap(named(new)), None).expect("diff");
+    assert!(next.is_none(), "{:?}", next.map(|m| m.forward));
+    chain.migrate(pool).await.expect("RenameTable");
+    let rows: Vec<(String,)> = rustango::sql::raw_query_pool(
+        &q(pool, "SELECT {} FROM {} ORDER BY {}", &["title", new, "id"]),
+        Vec::new(),
+        pool,
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, vec![("one".to_owned(),), ("two".to_owned(),)]);
+
+    let mig = rustango::migrate::make_migrations_from_with(
+        chain.dir.path(),
+        &snap(named("mad_rt_other")),
+        None,
+        rustango::migrate::DropAndAdd::Allow,
+    )
+    .expect("allowed")
+    .expect("written");
+    assert_eq!(
+        mig.forward,
+        vec![
+            Operation::Schema(SchemaChange::CreateTable("mad_rt_other".into())),
+            Operation::Schema(SchemaChange::DropTable(new.into())),
+        ]
+    );
+    for t in [old, new, "mad_rt_other", &chain.ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// Schema mode: a tenant chain refuses the rename too, and the confirmed
+/// `RenameTable` moves the tenant's rows, never a same-named `public` table.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn renamed_table_in_a_tenant_schema() {
+    use rustango::core::ModelScope;
+    use rustango::migrate::{make_migrations_scoped_with, DropAndAdd, MigrationScope};
+    let _guard = rustango::testkit::matrix::live_lock().lock().await;
+    let Some(Pool::Postgres(admin)) = rustango::testkit::matrix::Backend::Postgres.pool().await
+    else {
+        return;
+    };
+    let (schema, old, new) = ("mad_rts_tenant", "mad_rts_post", "mad_rts_article");
+    let run = |sql: String| {
+        let admin = admin.clone();
+        async move {
+            rustango::sql::sqlx::query(&sql)
+                .execute(&admin)
+                .await
+                .unwrap()
+        }
+    };
+    run(format!("DROP SCHEMA IF EXISTS {schema} CASCADE")).await;
+    run(format!("CREATE SCHEMA {schema}")).await;
+    for t in [old, new] {
+        run(format!("DROP TABLE IF EXISTS public.{t} CASCADE")).await;
+    }
+    run(format!(
+        "CREATE TABLE public.{old} (id BIGINT PRIMARY KEY, title VARCHAR(50))"
+    ))
+    .await;
+    run(format!("INSERT INTO public.{old} VALUES (9, 'public')")).await;
+    // As the tenant migrate pool: its schema first, then `public`.
+    let opts = (*admin.connect_options())
+        .clone()
+        .options([("search_path", format!("{schema},public"))]);
+    let tenant: Pool = rustango::sql::sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(opts)
+        .await
+        .unwrap()
+        .into();
+
+    let dir = tempfile::tempdir().unwrap();
+    let make = |t: &str| {
+        let f = vec![id(), col("title", "string", json!({"max_length": 50}))];
+        let s = snap(json!({"tables": [{"name": t, "model": "Post", "fields": f}]}));
+        make_migrations_scoped_with(
+            dir.path(),
+            &s,
+            ModelScope::Tenant,
+            MigrationScope::Tenant,
+            None,
+            DropAndAdd::Refuse,
+        )
+    };
+    let ledger = "mad_rts_ledger";
+    make(old).unwrap().expect("initial");
+    migrate_pool_with_ledger(&tenant, dir.path(), ledger)
+        .await
+        .unwrap();
+    run(format!("INSERT INTO {schema}.{old} VALUES (1, 'tenant')")).await;
+
+    let err = make(new)
+        .expect_err("refused in a tenant chain")
+        .to_string();
+    assert!(err.contains("RenameTable"), "{err}");
+    let mut mig = rustango::migrate::manage::make_empty_in_scope(
+        dir.path(),
+        "rename",
+        MigrationScope::Tenant,
+    )
+    .unwrap();
+    mig.forward = vec![Operation::Schema(SchemaChange::RenameTable {
+        old_name: old.into(),
+        new_name: new.into(),
+    })];
+    rustango::migrate::file::write(&dir.path().join(format!("{}.json", mig.name)), &mig).unwrap();
+    assert!(make(new).unwrap().is_none());
+    migrate_pool_with_ledger(&tenant, dir.path(), ledger)
+        .await
+        .unwrap();
+
+    let read = |sql: String| {
+        let admin = admin.clone();
+        async move {
+            rustango::sql::sqlx::query_scalar::<_, String>(&sql)
+                .fetch_all(&admin)
+                .await
+                .unwrap()
+        }
+    };
+    assert_eq!(
+        read(format!("SELECT title FROM {schema}.{new}")).await,
+        ["tenant"]
+    );
+    assert_eq!(
+        read(format!("SELECT title FROM public.{old}")).await,
+        ["public"]
+    );
+    run(format!("DROP SCHEMA {schema} CASCADE")).await;
+    run(format!("DROP TABLE public.{old}")).await;
+}
+
 // ---------------------------------------------------------------- #2574
 
 /// Two branches' `0002`s: makemigrations refuses until `--merge`, and the
@@ -4845,6 +5016,7 @@ tri_dialect_test!(
         unmanaged_model_keeps_its_table,
         empty_migration_renames_reach_the_snapshot,
         renamed_field_is_refused_and_keeps_its_rows,
+        renamed_table_is_refused_and_keeps_its_rows,
         branched_chain_needs_a_merge,
         type_change_with_a_default,
         dropped_exclude_unapplies,
