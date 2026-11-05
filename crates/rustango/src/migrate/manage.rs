@@ -7312,6 +7312,7 @@ fn write_settings_report<W: Write>(
         let note = match (key.reader, set) {
             (_, false) if missing.is_some() => format!("  {}", missing.unwrap_or_default()),
             (Reader::App(by), true) => format!("  (read only by {by})"),
+            (Reader::Tenancy, true) => "  (tenancy apps only)".to_owned(),
             _ => String::new(),
         };
         writeln!(w, "  {:<40} {source}{value}{note}", key.path)?;

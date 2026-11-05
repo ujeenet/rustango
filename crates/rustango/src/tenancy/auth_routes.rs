@@ -200,10 +200,7 @@ impl Config {
     /// defaults (15 min access, 7 days refresh) so partial config
     /// stays forward-compatible.
     ///
-    /// Currently honors `access_ttl_secs` and `refresh_ttl_secs`.
-    /// `issuer` and `audience` are accepted by the section but not
-    /// yet threaded through `JwtLifecycle` — when that ships, the
-    /// wiring lands here automatically.
+    /// It reads `access_ttl_secs` and `refresh_ttl_secs`.
     ///
     /// ```ignore
     /// let cfg = rustango::config::Settings::load_from_env()?;

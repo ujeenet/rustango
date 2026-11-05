@@ -47,9 +47,7 @@ pub(crate) const IMPERSONATION_TTL_ENV: &str = "RUSTANGO_OPERATOR_IMPERSONATION_
 
 /// Apex / tenant URL prefixes. Every framework-internal URL is
 /// derived from this struct (login, logout, admin, audit, static
-/// asset paths, brand asset paths, plus the HTTP Basic auth
-/// realm string). Defaults match the pre-0.28 hardcoded values
-/// so existing apps don't break on upgrade.
+/// and brand asset paths), plus the session lifetimes.
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
     /// URL of the login form / submit endpoint, on both the
@@ -101,16 +99,13 @@ pub struct RouteConfig {
     /// cookie (no `Domain=`) which Chromium accepts. Default
     /// `/_impersonation_handoff` (since v0.29).
     pub impersonation_handoff_url: String,
-    /// HTTP Basic auth realm. Used by the legacy
-    /// `protect_with_basic_auth` admin gate (pre-tenancy
-    /// projects); displayed by the browser's auth dialog.
-    /// Default `"Rustango Admin"`.
-    pub basic_auth_realm: String,
     /// Tenant-admin session lifetime. Default 7 days. Apps with
     /// tighter compliance requirements lower this; ones with
     /// a "remember me" UX raise it.
     pub tenant_session_ttl: Duration,
-    /// Operator-console session lifetime. Default 7 days.
+    /// Longest an operator-console session lasts from sign-in. Default
+    /// 12 hours, which is also the most: a longer value is cut to it. An
+    /// idle session still ends after 30 minutes.
     pub operator_session_ttl: Duration,
     /// Operator-as-superuser impersonation cookie lifetime.
     /// Default 1 hour. Short by design — long enough
@@ -135,9 +130,8 @@ impl Default for RouteConfig {
             brand_url: "/_brand".to_owned(),
             change_password_url: "/change-password".to_owned(),
             impersonation_handoff_url: "/_impersonation_handoff".to_owned(),
-            basic_auth_realm: "Rustango Admin".to_owned(),
             tenant_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
-            operator_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
+            operator_session_ttl: Duration::from_secs(12 * 60 * 60),
             impersonation_ttl: Duration::from_secs(60 * 60),
         }
     }
@@ -353,7 +347,6 @@ mod tests {
         assert_eq!(r.brand_url, "/_brand");
         assert_eq!(r.change_password_url, "/change-password");
         assert_eq!(r.impersonation_handoff_url, "/_impersonation_handoff");
-        assert_eq!(r.basic_auth_realm, "Rustango Admin");
     }
 
     /// `friendly()` is now an alias for `default()` — same
@@ -397,7 +390,7 @@ mod tests {
     fn ttls_have_sensible_defaults() {
         let r = RouteConfig::default();
         assert_eq!(r.tenant_session_ttl.as_secs(), 7 * 24 * 60 * 60);
-        assert_eq!(r.operator_session_ttl.as_secs(), 7 * 24 * 60 * 60);
+        assert_eq!(r.operator_session_ttl.as_secs(), 12 * 60 * 60);
         assert_eq!(r.impersonation_ttl.as_secs(), 60 * 60);
     }
 }

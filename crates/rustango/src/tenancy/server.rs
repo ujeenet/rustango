@@ -48,7 +48,6 @@ use crate::tenancy::admin::TenantAdminBuilder;
 pub struct ServerConfig {
     pub bind: String,
     pub apex_domain: String,
-    pub operator_show_only: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -56,7 +55,6 @@ impl Default for ServerConfig {
         Self {
             bind: crate::env::default_bind(&crate::env::tier_from_env()).into(),
             apex_domain: "localhost".into(),
-            operator_show_only: vec!["rustango_orgs".into(), "rustango_operators".into()],
         }
     }
 }

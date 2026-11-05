@@ -1583,3 +1583,51 @@ async fn a_tenant_action_gets_the_tenant_tx_rows_user_and_org() {
         "written in the tenant's transaction"
     );
 }
+
+/// `server::Builder::admin_read_only` reaches the tenant admin: a create
+/// on a read-only table is refused there, and works without the call.
+#[tokio::test]
+async fn a_read_only_table_refuses_writes_in_the_tenant_admin() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.host_pattern = None;
+    org.path_prefix = Some("/acme".into());
+    org.save(&env.registry).await.expect("prefix org");
+    rustango::tenancy::invalidate_org_cache();
+    let mut user = User {
+        username: "ro-boss".into(),
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("ro-password-123").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert(&env.tenant).await.expect("seed user");
+    let create = |read_only: bool| {
+        let reg_url = env.reg_url.clone();
+        async move {
+            let registry = sqlx::SqlitePool::connect(&reg_url).await.unwrap();
+            let b = rustango::server::Builder::from_pool(registry, reg_url, "apex.test")
+                .routes(RouteConfig::legacy());
+            let b = if read_only {
+                b.admin_read_only(["rustango_users"])
+            } else {
+                b
+            };
+            let app = b.into_router().await.expect("router");
+            let form = "username=ro-boss&password=ro-password-123&_csrf=t".to_owned();
+            let signed = apex_request(&app, "POST", "/acme/__login", "", form).await;
+            let session = signed.headers()["set-cookie"].to_str().unwrap();
+            let session = session.split(';').next().unwrap().to_owned();
+            let body = format!("username={}&_csrf=t", unique("new"));
+            apex_request(&app, "POST", "/acme/__admin/rustango_users", &session, body)
+                .await
+                .status()
+        }
+    };
+    assert_eq!(create(true).await, StatusCode::FORBIDDEN);
+    assert_ne!(create(false).await, StatusCode::FORBIDDEN);
+}

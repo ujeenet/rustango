@@ -1674,7 +1674,7 @@ rustango::server::Builder::from_pool(registry, "sqlite://registry.db?mode=rwc", 
     .await?;
 ```
 
-Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impersonation_ttl`) and the basic-auth realm string. The full URL builder `audit_full_url()` joins admin + audit prefixes for callers (`/admin/audit` with the friendly default, `/__admin/__audit` with `RouteConfig::legacy()`).
+Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl` (at most 12 h), `impersonation_ttl`). The full URL builder `audit_full_url()` joins admin + audit prefixes for callers (`/admin/audit` with the friendly default, `/__admin/__audit` with `RouteConfig::legacy()`).
 
 **Verified by**: `routes::tests::*` (4 unit tests covering defaults, friendly preset, joined audit URL, TTL defaults).
 
