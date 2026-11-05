@@ -489,7 +489,9 @@ struct Mount {
 impl Mount {
     /// `None` when a prefixed route matched a path outside the prefix.
     fn of(t: &TenantScope, sso: &SsoPath, parts: &Parts, login_base: &str) -> Option<Self> {
-        let mount = Self::at(&t.org, parts.uri.path(), login_base);
+        // The full path: the dispatcher may have cut the tenant's prefix off.
+        let full = crate::urls::original_uri(&parts.uri, &parts.extensions).path();
+        let mount = Self::at(&t.org, full, login_base);
         (sso.prefix.is_none() || mount.path != "/").then_some(mount)
     }
 

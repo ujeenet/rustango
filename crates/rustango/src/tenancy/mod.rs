@@ -183,7 +183,7 @@ pub use permissions::{
     user_permissions_pool, user_roles_pool, user_roles_qs_pool,
 };
 pub use principal::{OptionalPrincipal, Principal, PrincipalKind, TenantSlug};
-pub use request_tenant::RequestTenant;
+pub use request_tenant::{RequestTenant, TenantPathPrefix};
 
 pub use database_pools::{DatabaseConn, DatabasePool, DatabasePools};
 pub use db_server::{

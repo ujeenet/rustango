@@ -952,7 +952,15 @@ impl<DB: Database> Builder<DB> {
         let prefixed = build_admin_routes(&tenant_admin, &self.routes.under_prefix("/{prefix}"));
         #[cfg(feature = "_http_layers")]
         let prefixed = with_body_limit(prefixed, self.body_limit.clone());
-        let prefix_app = prefixed.fallback_service(tenant_app.clone());
+        // The app's own routes see the tenant-relative path (`/about`, not
+        // `/acme/about`); `OriginalUri` and `TenantPathPrefix` keep the prefix.
+        let prefix_app = prefixed.fallback_service(tower::service_fn({
+            let tenant_app = tenant_app.clone();
+            move |req: axum::http::Request<axum::body::Body>| {
+                let mut app = tenant_app.clone();
+                async move { app.as_service().oneshot(strip_tenant_prefix(req)).await }
+            }
+        }));
         let registry_pool: crate::sql::Pool = self.registry.clone().into();
         // Health too: a load balancer probes by IP, which resolves no tenant.
         let unresolved = self.unresolved.map(|r| {
@@ -1374,14 +1382,15 @@ pub(crate) async fn resolve(
     use crate::tenancy::OrgResolver as _;
     let (mut parts, body) = req.into_parts();
     let found = resolver.resolve(&parts, registry).await;
+    let mut prefix = None;
     let resolution = match &found {
         Ok(None) => Resolution::None,
         Ok(Some(org)) => {
-            if org
+            prefix = org
                 .path_prefix
-                .as_deref()
-                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), p))
-            {
+                .clone()
+                .filter(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), p));
+            if prefix.is_some() {
                 Resolution::PrefixTenant
             } else {
                 Resolution::Tenant
@@ -1393,10 +1402,35 @@ pub(crate) async fn resolve(
         }
     };
     // Layers further in read this answer instead of resolving again.
-    parts
-        .extensions
-        .insert(crate::tenancy::RequestTenant::from_resolution(found));
+    crate::tenancy::request_tenant::store_dispatched(
+        &mut parts.extensions,
+        found,
+        prefix.as_deref(),
+    );
     (axum::http::Request::from_parts(parts, body), resolution)
+}
+
+/// `req` with its [`crate::tenancy::TenantPathPrefix`] cut from the path:
+/// `/acme/about?x` → `/about?x`, `/acme` → `/`.
+fn strip_tenant_prefix(
+    mut req: axum::http::Request<axum::body::Body>,
+) -> axum::http::Request<axum::body::Body> {
+    let Some(prefix) = crate::tenancy::TenantPathPrefix::get(req.extensions()) else {
+        return req;
+    };
+    let uri = req.uri();
+    let Some(rest) = uri.path().strip_prefix(prefix.as_str()) else {
+        return req;
+    };
+    let path = if rest.is_empty() { "/" } else { rest };
+    let pq = match uri.query() {
+        Some(q) => format!("{path}?{q}"),
+        None => path.to_owned(),
+    };
+    if let Ok(stripped) = pq.parse::<axum::http::Uri>() {
+        *req.uri_mut() = stripped;
+    }
+    req
 }
 
 /// Mark a request the console or the unresolved router serves: no tenant.
@@ -2020,6 +2054,31 @@ mod secrets_tests {
             .secrets(Fixed)
             .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
         assert!(b.pools().secrets().requires_sealed());
+    }
+}
+
+#[cfg(test)]
+mod strip_prefix_tests {
+    use axum::body::Body;
+    use axum::http::Request;
+
+    fn stripped(uri: &str, prefix: Option<&str>) -> String {
+        let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let org = crate::testkit::org_with(|o| o.slug = "acme".into());
+        crate::tenancy::request_tenant::store_dispatched::<()>(
+            req.extensions_mut(),
+            Ok(Some(org)),
+            prefix,
+        );
+        super::strip_tenant_prefix(req).uri().to_string()
+    }
+
+    #[test]
+    fn the_prefix_comes_off_and_the_query_stays() {
+        assert_eq!(stripped("/acme/about?x=1", Some("/acme")), "/about?x=1");
+        assert_eq!(stripped("/acme", Some("/acme/")), "/");
+        assert_eq!(stripped("/acme/", Some("/acme")), "/");
+        assert_eq!(stripped("/acme/about", None), "/acme/about");
     }
 }
 

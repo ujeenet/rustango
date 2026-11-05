@@ -406,6 +406,22 @@ mod one_context_tests {
             .slug
     }
 
+    /// The dispatcher's org wins: under a stripped prefix the path names no tenant.
+    #[tokio::test]
+    async fn the_dispatched_org_wins_without_resolving_again() {
+        let mut p = parts();
+        p.extensions.insert(sqlite_ctx("from-the-path").await);
+        p.extensions
+            .insert(crate::tenancy::request_tenant::DispatchedOrg(org(
+                "dispatched",
+            )));
+        assert_eq!(auth_slug(&p).await, "dispatched");
+        let got = TenantScope::from_request_parts(&mut p, &())
+            .await
+            .map(|t| t.org.slug);
+        assert_eq!(got.ok().as_deref(), Some("dispatched"));
+    }
+
     #[tokio::test]
     async fn database_tenant_serves_the_tenant_auth_resolved() {
         let mut p = parts();
