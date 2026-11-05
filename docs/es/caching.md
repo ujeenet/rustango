@@ -252,13 +252,13 @@ Envuelve la caché compartida en un **`ScopedCache`** para que el namespace se
 aplique por ti y el sitio de llamada no pueda olvidarlo:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -298,13 +298,20 @@ El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la
 invalidación.
 
+Cada clave de tenant es `tenant:#org:<id>:<slug>:<area>:<rest>`, con un área
+para las claves de la app, los locks, la idempotencia, las páginas, los límites
+de tasa, las sesiones y los overrides de flags. Un `clear()` de la caché de app
+del tenant borra solo el área `app`, así que nunca libera el lock de un job en
+marcha.
+
 Un tenant nuevo puede reutilizar el slug de un tenant purgado. Para que
-`purge-tenant` borre las claves `ScopedCache::for_tenant` del tenant anterior, llama a
+`purge-tenant` borre las claves del tenant anterior, llama a
 `rustango::tenancy::decommission::clear_on_purge(cache)` al arrancar por cada caché
-que las guarde. La purga también borra allí los locks, las sesiones y los
-overrides de flags del tenant. Las entradas de idempotencia y de caché de página
-se quedan hasta que expiran: van ligadas al id de la org, así que el tenant nuevo
-no puede leerlas.
+que las guarde. La purga borra allí todas las áreas
+(`CacheScope::for_tenant(cache, &tenant).purge()` hace lo mismo a mano). Hasta
+0.65.0, las respuestas de idempotencia también se escriben bajo su clave de 0.63
+`idem:<sha>`; esa clave va con hash y sin prefijo de tenant, así que la purga no
+la encuentra y expira con su TTL (24 horas por defecto).
 
 ---
 

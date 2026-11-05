@@ -5,16 +5,20 @@
 //! let scope = CacheScope::from_request(&root, &mut parts).await?; // None: tenant unknown
 //! let session = scope.sessions().load(&sid).await?;
 //! let beta = scope.flags().is_enabled_for("beta", &user_id).await;
+//!
+//! // A job, for each tenant: every key is `tenant:#org:<id>:<slug>:<area>:…`.
+//! let locks = CacheScope::for_tenant(root.clone(), &tenant).locks();
 //! ```
 
-use super::{BoxedCache, ScopedCache};
+use super::keyspace::{Area, KeySpace};
+use super::{BoxedCache, CacheError, ScopedCache};
 use crate::tenancy::{RequestTenant, TenantSlug};
 
 /// A root cache and the request's tenant. Cheap to clone.
 #[derive(Clone)]
 pub struct CacheScope {
     root: BoxedCache,
-    tenant: Option<TenantSlug>,
+    space: KeySpace,
 }
 
 impl CacheScope {
@@ -29,51 +33,80 @@ impl CacheScope {
         if RequestTenant::unmounted(&parts.extensions) {
             return None;
         }
-        let tenant = match RequestTenant::resolve(parts).await {
-            RequestTenant::Tenant(t) => Some(t),
+        let space = match RequestTenant::resolve(parts).await {
+            RequestTenant::Tenant(t) => KeySpace::Tenant(t),
             RequestTenant::Unknown => return None,
-            _ => None,
+            _ => KeySpace::Global,
         };
         Some(Self {
             root: root.clone(),
-            tenant,
+            space,
         })
+    }
+
+    /// One tenant's scope, for a job or the scheduler.
+    #[must_use]
+    pub fn for_tenant(root: BoxedCache, tenant: &TenantSlug) -> Self {
+        Self {
+            root,
+            space: KeySpace::Tenant(tenant.clone()),
+        }
+    }
+
+    /// The platform-wide scope: keys as without tenancy.
+    #[must_use]
+    pub fn global(root: BoxedCache) -> Self {
+        Self {
+            root,
+            space: KeySpace::Global,
+        }
     }
 
     /// The request's tenant; `None` for a global request.
     #[must_use]
     pub fn tenant(&self) -> Option<&TenantSlug> {
-        self.tenant.as_ref()
+        self.space.tenant()
     }
 
-    /// App keys: [`ScopedCache::for_tenant`] for a tenant, the root otherwise.
+    /// App keys: `tenant:#org:<id>:<slug>:app:<key>`, or bare for global.
+    /// Its `clear()` keeps the tenant's locks, sessions and markers.
     #[must_use]
     pub fn app(&self) -> BoxedCache {
-        match &self.tenant {
-            Some(t) => ScopedCache::for_tenant(self.root.clone(), t).boxed(),
-            None => self.root.clone(),
-        }
+        ScopedCache::in_space(self.root.clone(), self.space.clone(), Area::App).boxed()
+    }
+
+    /// Locks of this tenant; process-wide for a global scope.
+    #[must_use]
+    pub fn locks(&self) -> crate::distributed_lock::DistributedLock {
+        crate::distributed_lock::DistributedLock::in_space(self.root.clone(), self.space.clone())
     }
 
     /// Sessions of this tenant; unscoped for a global request.
     #[cfg(feature = "sessions")]
     #[must_use]
     pub fn sessions(&self) -> crate::sessions::SessionStore {
-        let store = crate::sessions::SessionStore::new(self.root.clone());
-        match &self.tenant {
-            Some(t) => store.for_tenant(t),
-            None => store,
-        }
+        crate::sessions::SessionStore::new(self.root.clone()).in_space(self.space.clone())
     }
 
     /// Feature flags with this tenant's per-user overrides.
     #[must_use]
     pub fn flags(&self) -> crate::feature_flags::FeatureFlags {
-        let flags = crate::feature_flags::FeatureFlags::new(self.root.clone());
-        match &self.tenant {
-            Some(t) => flags.for_tenant(t),
-            None => flags,
+        crate::feature_flags::FeatureFlags::new(self.root.clone()).in_space(self.space.clone())
+    }
+
+    /// Delete every key of this tenant from the root, in every area, plus the
+    /// 0.63 lock layout. The 0.63 idempotency copies (`idem:<sha>`, written until
+    /// 0.65.0) carry no tenant prefix, so they expire with their TTL instead.
+    /// A global scope deletes nothing.
+    ///
+    /// # Errors
+    /// The backend's `delete_prefixes` error.
+    pub async fn purge(&self) -> Result<(), CacheError> {
+        let prefixes = self.space.purge_prefixes();
+        if prefixes.is_empty() {
+            return Ok(());
         }
+        self.root.delete_prefixes(&prefixes).await
     }
 }
 

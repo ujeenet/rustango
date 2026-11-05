@@ -7,6 +7,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added
 
 - `Cache::delete_prefixes` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.
+- `CacheScope::for_tenant(root, &tenant)` and `CacheScope::global(root)` for jobs; `locks()` gives the scope's `DistributedLock`, `purge()` deletes every key of its tenant.
 
 ### Changed
 
@@ -20,6 +21,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Changed
 
 - The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply.
+- Every tenant cache key is `tenant:#org:<id>:<slug>:<area>:<rest>` (areas `app`, `lock`, `idem`, `page`, `rl`, `session`, `flag`); global keys keep their bytes, and a global app, page or rate-limit key starting with `tenant:` or `~` gets a `~` in front.
+- Until 0.65.0, tenant locks also take the 0.63 key and idempotency also reads and writes the 0.63 entry and marker, so a rolling deploy never runs a request or a job twice.
+- A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
+
+### Deprecated
+
+- `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` (removed in 0.66.0): use `CacheScope::for_tenant(..).app()` / `.locks()`.
 
 ## [0.63.0] — 2026-11-04
 

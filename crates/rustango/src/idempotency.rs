@@ -41,7 +41,8 @@
 //!
 //! ## Cache keys
 //!
-//! `idem:<sha256>` over the [`IdempotencyLayer::scope`], host, the tenant
+//! `idem:<sha256>`, or `tenant:#org:<id>:<slug>:idem:<sha256>` for a tenant,
+//! over the [`IdempotencyLayer::scope`], host, the tenant
 //! the tenancy layer resolves for the request, the caller, method, path
 //! and query, and the client's key. The same key from another caller, tenant
 //! or route is a different entry. When tenant resolution fails, a keyed
@@ -77,6 +78,7 @@ use sha2::{Digest, Sha256};
 
 use crate::api_errors::ApiError;
 use crate::body_limit::{collect_capped, over_cap};
+use crate::cache::keyspace::{Area, KeySpace};
 use crate::cache::BoxedCache;
 use crate::vary::CREDENTIAL_HEADERS;
 
@@ -242,15 +244,17 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             .into_response()
         }
     };
-    let Ok(tenant) = request_tenant(&mut parts).await else {
+    let Ok(space) = request_tenant(&mut parts).await else {
         // Running it unkeyed could charge twice; the client retries later.
         return unknown_tenant();
     };
-    let cache_key = cache_key(&cfg.scope, &parts, tenant.as_deref(), &key);
+    let digest = key_digest(&cfg.scope, &parts, space.namespace().as_deref(), &key);
+    let keys = EntryKeys::new(&space, &digest);
+    let cache_key = keys.key.as_str();
     let request_sha256 = hex(&Sha256::digest(&req_bytes));
 
     // Hit: replay the stored response, if it answered this same body.
-    if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+    if let Some(stored) = keys.read_stored(&cfg.cache).await {
         return replay(stored, &request_sha256);
     }
 
@@ -259,29 +263,42 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
     let token = format!("{request_sha256}:{}", uuid::Uuid::new_v4().simple());
     let in_flight = match cfg.cache.add(&lock_key, &token, Some(cfg.lock_ttl)).await {
         Ok(true) => {
-            let held = InFlight::hold(cfg.cache.clone(), lock_key, token, cfg.lock_ttl);
+            let held = InFlight::hold(cfg.cache.clone(), lock_key, token.clone(), cfg.lock_ttl);
             // A run may have stored and released between the read above and the add.
-            if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+            if let Some(stored) = keys.read_stored(&cfg.cache).await {
                 release(Some(held)).await;
                 return replay(stored, &request_sha256);
             }
-            Some(held)
+            // Remove in 0.65.0: hold the 0.63 marker too, so a pod still on 0.63
+            // and this one never run it side by side.
+            let mut held = vec![held];
+            if let Some(old) = keys.legacy.as_ref().map(|k| format!("{k}:inflight")) {
+                match cfg.cache.add(&old, &token, Some(cfg.lock_ttl)).await {
+                    Ok(true) => {
+                        held.push(InFlight::hold(cfg.cache.clone(), old, token, cfg.lock_ttl))
+                    }
+                    Ok(false) => {
+                        let holder = cfg.cache.get(&old).await.ok().flatten();
+                        release_all(held).await;
+                        return busy(holder.as_deref().unwrap_or(""), &request_sha256);
+                    }
+                    Err(_) => {}
+                }
+            }
+            held
         }
         Ok(false) => {
             // The first run may have stored its answer since the read above.
-            if let Some(stored) = read_stored(&cfg.cache, &cache_key).await {
+            if let Some(stored) = keys.read_stored(&cfg.cache).await {
                 return replay(stored, &request_sha256);
             }
             let holder = cfg.cache.get(&lock_key).await.ok().flatten();
-            if holder.is_some_and(|t| marker_sha(&t) != request_sha256) {
-                return key_reused();
-            }
-            return in_progress();
+            return busy(holder.as_deref().unwrap_or(""), &request_sha256);
         }
         Err(e) => {
             // Fail open like the read and the write: a cache outage must not stop writes.
             tracing::warn!(error = %e, cache_key, "idempotency: in-flight marker failed");
-            None
+            Vec::new()
         }
     };
 
@@ -298,12 +315,12 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
                 cache_key,
                 "idempotency: response over body_cap, so it is not stored"
             );
-            release(in_flight).await;
+            release_all(in_flight).await;
             return Response::from_parts(parts, whole);
         }
         Err(_) => {
             // The stream broke; the client gets a 500, not a truncated body.
-            release(in_flight).await;
+            release_all(in_flight).await;
             return ApiError::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "internal_error",
@@ -339,13 +356,16 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         // A failed write is logged and ignored, so the caller still
         // gets the successful response.
         if let Ok(json) = serde_json::to_string(&stored) {
-            if let Err(e) = cfg.cache.set(&cache_key, &json, Some(cfg.ttl)).await {
-                tracing::warn!(error = %e, cache_key, "idempotency: cache write failed");
+            // Remove in 0.65.0: the 0.63 key too, so a retry on a 0.63 pod replays.
+            for key in std::iter::once(cache_key).chain(keys.legacy.as_deref()) {
+                if let Err(e) = cfg.cache.set(key, &json, Some(cfg.ttl)).await {
+                    tracing::warn!(error = %e, key, "idempotency: cache write failed");
+                }
             }
         }
     }
     // Released after the store, so a waiting retry finds the stored answer.
-    release(in_flight).await;
+    release_all(in_flight).await;
 
     Response::from_parts(parts, Body::from(bytes))
 }
@@ -421,6 +441,12 @@ async fn release(in_flight: Option<InFlight>) {
     f.key = None;
 }
 
+async fn release_all(held: Vec<InFlight>) {
+    for f in held {
+        release(Some(f)).await;
+    }
+}
+
 /// Delete the marker only while it holds `token`, so a late run can't free a
 /// newer run's key. Get-then-delete: the `Cache` trait has no compare-and-delete.
 async fn delete_if_owner(
@@ -437,6 +463,39 @@ async fn delete_if_owner(
 /// The request-body hash a marker carries.
 fn marker_sha(token: &str) -> &str {
     token.split_once(':').map_or(token, |(sha, _)| sha)
+}
+
+/// Another run holds the marker `holder` (`""` when it just went): `409`, or
+/// `422` when that run answers a different body.
+fn busy(holder: &str, request_sha256: &str) -> Response<Body> {
+    if !holder.is_empty() && marker_sha(holder) != request_sha256 {
+        return key_reused();
+    }
+    in_progress()
+}
+
+/// Where one request's answer and in-flight marker live.
+struct EntryKeys {
+    key: String,
+    /// The 0.63 key of a tenant entry, read and written too. Remove in 0.65.0.
+    legacy: Option<String>,
+}
+
+impl EntryKeys {
+    fn new(space: &KeySpace, digest: &str) -> Self {
+        Self {
+            key: space.key(Area::Idem, digest),
+            legacy: space.legacy_key(Area::Idem, digest),
+        }
+    }
+
+    /// The stored answer: this release's key, then the 0.63 one.
+    async fn read_stored(&self, cache: &BoxedCache) -> Option<StoredResponse> {
+        if let Some(stored) = read_stored(cache, &self.key).await {
+            return Some(stored);
+        }
+        read_stored(cache, self.legacy.as_deref()?).await
+    }
 }
 
 /// Replay `stored` if it answered this body, else `422`.
@@ -516,8 +575,8 @@ fn unknown_tenant() -> Response<Body> {
     resp
 }
 
-/// Cache key for who sent the request, where, and with which client key.
-fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> String {
+/// Hash of who sent the request, where, and with which client key.
+fn key_digest(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> String {
     let mut h = KeyHasher(Sha256::new());
     h.field(scope.as_bytes());
     let host = parts
@@ -538,7 +597,7 @@ fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> Str
     let uri = crate::urls::original_uri(&parts.uri, &parts.extensions);
     h.opt(uri.path_and_query().map(|pq| pq.as_str().as_bytes()));
     h.field(key.as_bytes());
-    format!("idem:{}", hex(&h.0.finalize()))
+    hex(&h.0.finalize())
 }
 
 /// Hash the resolved caller; `false` when the request has none.
@@ -565,23 +624,23 @@ fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
     false
 }
 
-/// The request's `#org:<id>:<slug>`, not its slug alone: a tenant that reuses a purged slug
+/// The request's org id and slug, not its slug alone: a tenant that reuses a purged slug
 /// must not replay the old one's responses. `Err` when resolution failed; no match is global.
 #[cfg(feature = "tenancy")]
-async fn request_tenant(parts: &mut Parts) -> Result<Option<String>, ()> {
+async fn request_tenant(parts: &mut Parts) -> Result<KeySpace, ()> {
     use crate::tenancy::RequestTenant;
     match RequestTenant::resolve(parts).await {
-        RequestTenant::Tenant(t) => Ok(Some(t.namespace())),
+        RequestTenant::Tenant(t) => Ok(KeySpace::Tenant(t)),
         RequestTenant::Unknown => Err(()),
         // Global, or no tenant matched (an apex webhook): keyed globally, as before.
-        _ => Ok(None),
+        _ => Ok(KeySpace::Global),
     }
 }
 
 #[cfg(not(feature = "tenancy"))]
 #[allow(clippy::unused_async)]
-async fn request_tenant(_parts: &mut Parts) -> Result<Option<String>, ()> {
-    Ok(None)
+async fn request_tenant(_parts: &mut Parts) -> Result<KeySpace, ()> {
+    Ok(KeySpace::Global)
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -1207,15 +1266,19 @@ mod tests {
         // Path and client key are hashed back to back.
         let ab = parts_for(Request::builder().uri("/ab"));
         let a = parts_for(Request::builder().uri("/a"));
-        assert_ne!(cache_key("", &ab, None, "c"), cache_key("", &a, None, "bc"));
-        assert_eq!(cache_key("x", &a, None, "z").len(), "idem:".len() + 64);
+        assert_ne!(
+            key_digest("", &ab, None, "c"),
+            key_digest("", &a, None, "bc")
+        );
+        assert_eq!(key_digest("x", &a, None, "z").len(), 64);
     }
 
     #[test]
     fn host_tenant_and_credentials_are_key_components() {
         let base = || Request::builder().uri("/a").header("host", "one.example");
-        let k =
-            |b: axum::http::request::Builder, t: Option<&str>| cache_key("", &parts_for(b), t, "k");
+        let k = |b: axum::http::request::Builder, t: Option<&str>| {
+            key_digest("", &parts_for(b), t, "k")
+        };
         let plain = k(base(), None);
         assert_ne!(
             plain,
@@ -1810,6 +1873,124 @@ mod tests {
         assert_eq!(body_string(r).await, "call-1:", "org 2 replayed org 1");
         let r = app.oneshot(send("1")).await.unwrap();
         assert_eq!(body_string(r).await, "call-0:", "own tenant still replays");
+    }
+
+    /// A counting app on `shared`, marked as tenant `#org:1:t`.
+    #[cfg(feature = "tenancy")]
+    fn tenant_app(counter: StdArc<AtomicUsize>, shared: BoxedCache) -> Router {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        counting_app(counter, IdempotencyLayer::new(shared)).layer(axum::middleware::from_fn(
+            |mut req: Request<Body>, next: Next| async move {
+                req.extensions_mut()
+                    .insert(RequestTenant::Tenant(TenantSlug::new(1, "t")));
+                next.run(req).await
+            },
+        ))
+    }
+
+    /// The digest `keyed("/a")` with client key `key` hashes to under `#org:1:t`.
+    #[cfg(feature = "tenancy")]
+    fn tenant_digest(key: &str) -> String {
+        let parts = parts_for(Request::builder().uri("/a").header("host", "shop.example"));
+        key_digest("", &parts, Some("#org:1:t"), key)
+    }
+
+    /// An entry stored only under the 0.63 key still replays (dual read until 0.65.0).
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn an_entry_stored_under_the_old_key_replays() {
+        let (counter, shared) = (StdArc::new(AtomicUsize::new(0)), cache());
+        let app = tenant_app(counter.clone(), shared.clone());
+        let send = || keyed("/a").body(Body::empty()).unwrap();
+        let r = app.clone().oneshot(send()).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let digest = tenant_digest("k1");
+        let (new, old) = (
+            format!("tenant:#org:1:t:idem:{digest}"),
+            format!("idem:{digest}"),
+        );
+        let stored = shared.get(&new).await.unwrap().expect("new layout");
+
+        // As a 0.63 pod left it.
+        shared.delete(&new).await.unwrap();
+        shared.set(&old, &stored, None).await.unwrap();
+        let r = app.oneshot(send()).await.unwrap();
+        assert!(r.headers().contains_key("idempotent-replayed"));
+        assert_eq!(body_string(r).await, "call-0:");
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "ran twice across the deploy"
+        );
+    }
+
+    /// Dual write until 0.65.0: a 0.64 answer is also under the 0.63 key, so a
+    /// retry a 0.63 pod reads there replays instead of running again.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_new_answer_replays_from_the_old_key() {
+        let (counter, shared) = (StdArc::new(AtomicUsize::new(0)), cache());
+        let app = tenant_app(counter.clone(), shared.clone());
+        let r = app.oneshot(keyed("/a").body(Body::empty()).unwrap()).await;
+        assert_eq!(body_string(r.unwrap()).await, "call-0:");
+        // What a 0.63 pod does: read `idem:<sha>` and replay it.
+        let old = format!("idem:{}", tenant_digest("k1"));
+        let stored = read_stored(&shared, &old)
+            .await
+            .expect("not under the old key");
+        let r = replay(stored, &hex(&Sha256::digest(b"")));
+        assert_eq!(body_string(r).await, "call-0:");
+    }
+
+    /// While a run is going, its 0.63 marker is held too, so a 0.63 pod waits.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_run_holds_the_old_in_flight_marker_too() {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        let shared = cache();
+        let old = format!("idem:{}:inflight", tenant_digest("k1"));
+        let (probe, key) = (shared.clone(), old.clone());
+        let app = Router::new()
+            .route(
+                "/a",
+                post(move || async move { probe.exists(&key).await.unwrap().to_string() }),
+            )
+            .idempotency(IdempotencyLayer::new(shared.clone()))
+            .layer(axum::middleware::from_fn(
+                |mut req: Request<Body>, next: Next| async move {
+                    req.extensions_mut()
+                        .insert(RequestTenant::Tenant(TenantSlug::new(1, "t")));
+                    next.run(req).await
+                },
+            ));
+        let r = app.oneshot(keyed("/a").body(Body::empty()).unwrap()).await;
+        assert_eq!(body_string(r.unwrap()).await, "true", "old marker not held");
+        assert!(
+            !shared.exists(&old).await.unwrap(),
+            "old marker not released"
+        );
+    }
+
+    /// A run a 0.63 pod holds under the old in-flight marker is not run again.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn an_old_in_flight_marker_blocks_a_second_run() {
+        let (counter, shared) = (StdArc::new(AtomicUsize::new(0)), cache());
+        let app = tenant_app(counter.clone(), shared.clone());
+        let empty = hex(&Sha256::digest(b""));
+        let old = format!("idem:{}:inflight", tenant_digest("k1"));
+        shared
+            .set(&old, &format!("{empty}:pod-063"), None)
+            .await
+            .unwrap();
+        let r = app
+            .oneshot(keyed("/a").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::CONFLICT);
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "ran beside the 0.63 run");
+        let new = format!("tenant:#org:1:t:idem:{}:inflight", tenant_digest("k1"));
+        assert!(!shared.exists(&new).await.unwrap(), "kept its marker");
     }
 
     /// `x-org: fail` makes the resolver error.

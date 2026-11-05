@@ -257,13 +257,13 @@ Enveloppez le cache partagé dans un **`ScopedCache`** pour que l'espace de noms
 soit appliqué à votre place et que le site d'appel ne puisse pas l'oublier :
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
@@ -302,13 +302,20 @@ Deux choses à savoir :
 Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
 
+Chaque clé de tenant est `tenant:#org:<id>:<slug>:<area>:<rest>`, avec une zone
+pour les clés de l'app, les verrous, l'idempotence, les pages, les limites de
+débit, les sessions et les overrides de flags. Un `clear()` du cache d'app du
+tenant ne supprime que la zone `app` : il ne libère donc jamais le verrou d'un
+job en cours.
+
 Le slug d'un tenant purgé peut être réutilisé par un nouveau tenant. Pour que
-`purge-tenant` supprime les clés `ScopedCache::for_tenant` de l'ancien tenant,
-appelez `rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage
-pour chaque cache qui les contient. La purge y supprime aussi les verrous, les
-sessions et les overrides de flags du tenant. Les entrées d'idempotence et du
-cache de page restent jusqu'à leur expiration : elles sont liées à l'id de l'org,
-donc le nouveau tenant ne peut pas les lire.
+`purge-tenant` supprime les clés de l'ancien tenant, appelez
+`rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage pour
+chaque cache qui les contient. La purge y supprime toutes les zones
+(`CacheScope::for_tenant(cache, &tenant).purge()` fait de même à la main).
+Jusqu'à 0.65.0, les réponses d'idempotence sont aussi écrites sous leur clé 0.63
+`idem:<sha>` ; cette clé est hachée et n'a pas de préfixe de tenant, la purge ne
+la trouve donc pas et elle expire avec son TTL (24 heures par défaut).
 
 ---
 

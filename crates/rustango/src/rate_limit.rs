@@ -170,27 +170,52 @@ pub enum KeyBy {
     Tenant,
 }
 
+/// A [`KeyBy::Tenant`] bucket.
+pub(crate) enum TenantBucket {
+    #[cfg(feature = "tenancy")]
+    Tenant(crate::tenancy::TenantSlug),
+    /// One shared bucket: `<global>`, `<no-tenant>` or `<unknown-tenant>`.
+    Fixed(&'static str),
+}
+
+impl TenantBucket {
+    /// The in-process bucket name.
+    fn name(self) -> String {
+        match self {
+            #[cfg(feature = "tenancy")]
+            Self::Tenant(t) => t.namespace(),
+            Self::Fixed(n) => n.to_owned(),
+        }
+    }
+}
+
 /// The [`KeyBy::Tenant`] bucket of `req`.
-pub(crate) async fn tenant_key(req: Request<Body>) -> (Request<Body>, String) {
+pub(crate) async fn tenant_bucket(req: Request<Body>) -> (Request<Body>, TenantBucket) {
     #[cfg(feature = "tenancy")]
     {
         use crate::tenancy::RequestTenant;
         // Nothing to tell tenants apart by: never the `Global` bucket by mistake.
         if RequestTenant::unmounted(req.extensions()) {
             warn_unmounted_tenant_key();
-            return (req, "<unknown-tenant>".to_owned());
+            return (req, TenantBucket::Fixed("<unknown-tenant>"));
         }
         let (req, tenant) = RequestTenant::resolve_request(req).await;
-        let key = match tenant {
-            RequestTenant::Tenant(t) => t.namespace(),
-            RequestTenant::Global => "<global>".to_owned(),
-            RequestTenant::Unmatched => "<no-tenant>".to_owned(),
-            _ => "<unknown-tenant>".to_owned(),
+        let bucket = match tenant {
+            RequestTenant::Tenant(t) => TenantBucket::Tenant(t),
+            RequestTenant::Global => TenantBucket::Fixed("<global>"),
+            RequestTenant::Unmatched => TenantBucket::Fixed("<no-tenant>"),
+            _ => TenantBucket::Fixed("<unknown-tenant>"),
         };
-        (req, key)
+        (req, bucket)
     }
     #[cfg(not(feature = "tenancy"))]
-    (req, "<global>".to_owned())
+    (req, TenantBucket::Fixed("<global>"))
+}
+
+/// [`tenant_bucket`] as the in-process limiter's bucket name.
+async fn tenant_key(req: Request<Body>) -> (Request<Body>, String) {
+    let (req, bucket) = tenant_bucket(req).await;
+    (req, bucket.name())
 }
 
 /// Log once per process: a misplaced `KeyBy::Tenant` limiter counts everyone together.
