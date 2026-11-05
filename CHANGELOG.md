@@ -28,6 +28,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
 - The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply to a sign-in started at the login page.
 - **Breaking:** without the `tenancy` feature, mounting a ViewSet that sets permission codenames panics with the fix, instead of answering 403 forever; the open-writes warning and `make:viewset` name only what the build has.
+- **Breaking:** `soft_delete`, `restore` and their `_on` forms take `&mut self` and set the soft-delete field when a row changed, so a later `save` keeps the change.
+- **Breaking:** `save()` (and `save_on` / `save_tx`) on a row whose PK matches nothing returns `RowNotFound` instead of `Ok(0)`.
+- ORM writes on a `&Pool` inside `atomic` on that pool join the block in a savepoint, single statements and audited writes included; with the block's guard held they return `NestedAtomic`.
 
 ### Deprecated
 
@@ -36,6 +39,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` keep a set `Auto` PK, so an upsert by id updates instead of inserting copies; a mix of set and unset PKs is `BulkAutoMixed`, as in `bulk_insert`.
+- A single-statement `save`, `insert`, `delete` or update on a `&Pool` inside `atomic` no longer commits outside the block.
 - The SSO idle sweep skips a provider whose `auto_deactivate_after_days` is past the calendar instead of panicking and stopping for every later tenant; stored values read as at most 36500 days and the operator console refuses more.
 - A server or `check --deploy` with a sealed (`EncryptedString`) field and no `RUSTANGO_SECRET_KEY` now refuses up front, not with a panic at the first write.
 - `text::dedent`, the `add` and `divisibleby` template filters, and the SSO `exp`/`nbf` check no longer panic on a split UTF-8 indent or on `i64` overflow.

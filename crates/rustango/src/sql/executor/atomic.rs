@@ -341,15 +341,90 @@ impl Drop for OpenSavepoint {
     }
 }
 
-/// Whether the running task is inside an [`atomic`] block on `pool`.
-pub(crate) fn in_block(pool: &Pool) -> bool {
+/// The innermost [`atomic`] block on `pool` around the running task.
+fn block_on(pool: &Pool) -> Option<Arc<Block>> {
     let id = PoolId::of(pool);
     BLOCK
         .try_with(|b| {
             std::iter::successors(Some(Arc::clone(b)), |b| b.enclosing.clone())
-                .any(|b| b.pool.same(&id))
+                .find(|b| b.pool.same(&id))
         })
-        .unwrap_or(false)
+        .ok()
+        .flatten()
+}
+
+/// Whether the running task is inside an [`atomic`] block on `pool`.
+#[cfg(feature = "jobs-postgres")]
+pub(crate) fn in_block(pool: &Pool) -> bool {
+    block_on(pool).is_some()
+}
+
+/// One ORM write's share of the open block on its pool: a savepoint on the
+/// block's transaction. Dropped unreleased, it rolls back on the next use.
+pub(crate) struct JoinedWrite {
+    guard: OwnedMutexGuard<TxState>,
+    slot: Arc<Slot>,
+    depth: usize,
+    released: bool,
+}
+
+/// A savepoint for one write in the [`atomic`] block on `pool`; `None`
+/// outside one. Refused with [`ExecError::NestedAtomic`] while the block's
+/// guard is held.
+pub(crate) async fn join(pool: &Pool) -> Option<Result<JoinedWrite, ExecError>> {
+    let block = block_on(pool)?;
+    Some(JoinedWrite::open(&block).await)
+}
+
+impl JoinedWrite {
+    async fn open(block: &Block) -> Result<Self, ExecError> {
+        let slot = Arc::clone(&block.slot);
+        let guard = acquire(&slot).await?;
+        if guard.depth != block.depth {
+            return Err(ExecError::NestedAtomic);
+        }
+        slot.guards.fetch_add(1, Ordering::SeqCst);
+        let mut w = Self {
+            guard,
+            slot,
+            depth: block.depth + 1,
+            released: false,
+        };
+        w.guard.savepoint("SAVEPOINT", w.depth).await?;
+        // Set only once it exists, so a cancel mid-open rolls nothing back.
+        w.guard.depth = w.depth;
+        Ok(w)
+    }
+
+    /// Keep the write: release its savepoint.
+    pub(crate) async fn release(mut self) -> Result<(), ExecError> {
+        self.guard.savepoint("RELEASE SAVEPOINT", self.depth).await?;
+        self.guard.depth = self.depth - 1;
+        self.released = true;
+        Ok(())
+    }
+}
+
+impl Drop for JoinedWrite {
+    fn drop(&mut self) {
+        if !self.released {
+            mark_cancelled(&self.slot, self.depth);
+        }
+        self.slot.guards.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl std::ops::Deref for JoinedWrite {
+    type Target = PoolTx<'static>;
+    fn deref(&self) -> &PoolTx<'static> {
+        self.guard.tx.as_ref().expect("atomic transaction is open")
+    }
+}
+
+impl std::ops::DerefMut for JoinedWrite {
+    fn deref_mut(&mut self) -> &mut PoolTx<'static> {
+        self.guard.tx()
+    }
 }
 
 /// Whether the running task is inside an [`atomic`] block whose commit
@@ -411,6 +486,12 @@ pub(crate) fn in_any_block() -> bool {
 /// whole transaction rolls back and [`ExecError::AtomicAborted`] is
 /// returned.
 ///
+/// **ORM writes on the pool** (`save`, `insert`, `delete`, `update`, bulk and
+/// audited writes given the same `&Pool`) join the block in a savepoint, so
+/// its rollback undoes them; with a [`TxGuard`] held they return
+/// [`ExecError::NestedAtomic`]. Reads, raw SQL and DDL still run on their own
+/// connection.
+///
 /// **Server-ended transactions:** after a statement error that ends the
 /// whole transaction (MySQL deadlock 1213 / timeout 1205, SQLite automatic
 /// rollback, a PG FATAL such as a terminated backend, a lost connection)
@@ -464,7 +545,7 @@ where
 /// Inside a block on the same pool it is a savepoint, like [`atomic`];
 /// inside another pool's block it begins deferred, as that pool may hold
 /// the file's lock. Other backends: exactly [`atomic`]. Writes that bypass
-/// the block (a spawned task, a pool write) wait for its lock.
+/// the block (a spawned task, raw SQL on the pool) wait for its lock.
 ///
 /// # Errors
 /// As [`atomic`].

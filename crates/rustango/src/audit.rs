@@ -1274,7 +1274,7 @@ pub async fn delete_one_with_audit(
     entry: &PendingEntry,
 ) -> Result<u64, crate::sql::ExecError> {
     // SQLite: the cascade reads before it deletes, so lock at BEGIN.
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let affected = crate::sql::delete_tx(&mut tx, query).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, entry).await?;
@@ -1318,7 +1318,7 @@ pub async fn save_one_with_audit(
 ) -> Result<u64, crate::sql::ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let affected = crate::sql::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
     if affected > 0 {
         emit_one_tx(&mut tx, entry).await?;
@@ -1449,7 +1449,7 @@ pub async fn insert_one_with_audit<M>(
 where
     M: crate::sql::AssignAutoPkPool,
 {
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let (returning, op) = insert_or_upsert_tx(&mut tx, query).await?;
     crate::sql::apply_auto_pk(returning, model)?;
     emit_one_tx(&mut tx, &entry(model, op)).await?;
@@ -1702,7 +1702,7 @@ where
         + Send
         + Unpin,
 {
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let mut affected = 0;
     for query in queries {
         let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
@@ -1760,7 +1760,7 @@ where
             reason: "a bulk update cannot change the primary key",
         });
     }
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let mut pages = Pages::<M>::start(&mut tx, query.model, &query.where_clause).await?;
     let mut affected = 0;
     loop {
@@ -2115,7 +2115,7 @@ pub(crate) async fn insert_returning(
         let pk = crate::sql::inserted_pk(query, &returning, pk_field)?;
         return Ok((pk, returning));
     }
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     // The create recorder only has the transaction.
     let inserted = insert_returning_tx(&mut tx, query, pk_field).await?;
     tx.commit().await?;
@@ -2221,7 +2221,7 @@ where
     if query.rows.is_empty() {
         return Ok(0);
     }
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     // Small pages also keep SQLite's per-row CTE lookup cheap.
     let stmts = crate::sql::compile_bulk_update_batches(tx.dialect(), query, BULK_AUDIT_CHUNK)?;
     let affected = crate::sql::execute_batches_tx(&mut tx, stmts).await?;
@@ -2289,7 +2289,7 @@ where
         .ok_or(crate::sql::ExecError::MissingPrimaryKey {
             table: query.model.table,
         })?;
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let mut created = Vec::new();
     let mut skipped = Vec::new();
     for row in &query.rows {
@@ -2448,7 +2448,7 @@ where
     let before = pool.dialect().compile_select(before_query)?;
     // SQLite's write lock at BEGIN: a deferred read-then-write fails at
     // once if another connection commits in between.
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     // Only the pre-update SELECT differs per backend: each row type is a
     // different concrete type, so each arm calls its own `decode_before_*`.
     // A failed pre-read must not let the UPDATE commit unaudited.

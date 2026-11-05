@@ -105,6 +105,7 @@ pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
     inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx,
+    write_tx,
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
@@ -136,6 +137,7 @@ pub mod __macro_internals {
     pub use super::executor::{
         bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on,
     };
+    pub use super::executor::{row_saved, write_tx, WriteTx};
 }
 
 /// The per-dialect `SqlValue` binders, so nothing outside `executor`

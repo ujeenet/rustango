@@ -859,9 +859,113 @@ async fn on_reads_refuse_a_dead_atomic_block(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![5], "nothing commits");
 }
 
+async fn label(pool: &Pool, id: i64) -> String {
+    let rows: Vec<Note> = Note::objects().filter("id", id).fetch(pool).await.unwrap();
+    rows[0].label.clone()
+}
+
+async fn seed(pool: &Pool, ids: &[i64]) {
+    for &id in ids {
+        Note {
+            id,
+            label: format!("n{id}"),
+        }
+        .insert(pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// One-statement `&Pool` writes inside `atomic` roll back with the block.
+async fn pool_writes_roll_back_with_the_block(pool: &Pool) {
+    seed(pool, &[1, 3]).await;
+    let q = pool.clone();
+    let res: Result<(), ExecError> = within(rustango::atomic!(pool, |_tx| {
+        let mut one = Note {
+            id: 1,
+            label: "changed".into(),
+        };
+        assert_eq!(one.save(&q).await?, 1);
+        Note {
+            id: 2,
+            label: "n2".into(),
+        }
+        .insert(&q)
+        .await?;
+        Note::bulk_insert(
+            &[Note {
+                id: 4,
+                label: "n4".into(),
+            }],
+            &q,
+        )
+        .await?;
+        Note {
+            id: 3,
+            label: String::new(),
+        }
+        .delete(&q)
+        .await?;
+        Err(bail())
+    }))
+    .await;
+    assert!(res.is_err());
+    assert_eq!(ids(pool).await, vec![1, 3], "the pool writes committed");
+    assert_eq!(label(pool, 1).await, "n1", "the save committed");
+}
+
+/// They run on the block's connection: a one-connection pool does not deadlock.
+async fn pool_writes_commit_with_the_block(pool: &Pool) {
+    seed(pool, &[1]).await;
+    let p = one_conn(pool).await;
+    let q = p.clone();
+    within(rustango::atomic!(&p, |_tx| {
+        Note {
+            id: 1,
+            label: "changed".into(),
+        }
+        .save(&q)
+        .await?;
+        Note {
+            id: 2,
+            label: "n2".into(),
+        }
+        .insert(&q)
+        .await?;
+        Ok(())
+    }))
+    .await
+    .unwrap();
+    assert_eq!(ids(pool).await, vec![1, 2]);
+    assert_eq!(label(pool, 1).await, "changed");
+}
+
+/// A pool write while the block's guard is held is refused, not run apart.
+async fn pool_write_with_the_guard_held_is_refused(pool: &Pool) {
+    let q = pool.clone();
+    within(rustango::atomic!(pool, |tx| {
+        let guard = tx.lock().await?;
+        let r = Note {
+            id: 1,
+            label: "n1".into(),
+        }
+        .insert(&q)
+        .await;
+        assert!(matches!(r, Err(ExecError::NestedAtomic)), "got {r:?}");
+        drop(guard);
+        Ok(())
+    }))
+    .await
+    .unwrap();
+    assert_eq!(ids(pool).await, Vec::<i64>::new());
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        pool_writes_roll_back_with_the_block,
+        pool_writes_commit_with_the_block,
+        pool_write_with_the_guard_held_is_refused,
         outer_rollback_drops_inner_write,
         inner_rollback_keeps_outer_write,
         on_commit_waits_for_outermost,
