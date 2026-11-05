@@ -662,8 +662,9 @@ fn makemigrations<W: Write>(dir: &Path, args: &[String], w: &mut W) -> Result<()
                                                             on the same parent) by writing an empty\n\
                                                             NNNN_merge.json\n\
                      makemigrations --drop-and-add          write a dropped column beside a new one of\n\
-                                                            the same type as drop + add (deletes its data);\n\
-                                                            refused by default as a likely rename\n\
+                                                            the same type, or a dropped table beside a new\n\
+                                                            one with its columns, as drop + add (deletes\n\
+                                                            its data); refused by default as a likely rename\n\
                      \n\
                      In tenancy projects (any registered model with scope = \"registry\"),\n\
                      a flagless makemigrations splits the diff into TWO files — one for\n\
@@ -7312,6 +7313,7 @@ fn write_settings_report<W: Write>(
         let note = match (key.reader, set) {
             (_, false) if missing.is_some() => format!("  {}", missing.unwrap_or_default()),
             (Reader::App(by), true) => format!("  (read only by {by})"),
+            (Reader::Tenancy, true) => "  (tenancy apps only)".to_owned(),
             _ => String::new(),
         };
         writeln!(w, "  {:<40} {source}{value}{note}", key.path)?;

@@ -1632,7 +1632,14 @@ async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfi
         ..
     }) = tenant_console::decode(&cfg.secret, &tenant, &value)
     {
-        cfg.jti().end_session(&sid, exp).await;
+        if !cfg.jti().end_session(&sid, exp).await {
+            // The cookie is still cleared, but a copy works until `exp`.
+            tracing::error!(
+                target: "rustango::tenancy::admin",
+                slug = %org.slug,
+                "could not revoke the impersonation session; a copied cookie stays valid until it expires",
+            );
+        }
     }
 }
 

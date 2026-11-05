@@ -879,7 +879,12 @@ impl Cli {
         // branch — RouteConfig is a tenancy-only construct.
         #[cfg(feature = "tenancy")]
         {
-            self.routes = Some(routes_from_settings(&s.routes, self.routes.take()));
+            let mut routes = routes_from_settings(&s.routes, self.routes.take());
+            // `[admin] url_prefix` beats `[routes] admin_url`, as on the single-db admin.
+            if let Some(prefix) = s.admin.url_prefix.as_deref().filter(|p| !p.is_empty()) {
+                routes.admin_url = prefix.trim_end_matches('/').to_owned();
+            }
+            self.routes = Some(routes);
         }
 
         // Audit N2 — set the tenancy console-cookie `Secure` policy
@@ -893,6 +898,15 @@ impl Cli {
 
         // #1609 / #1732 — login limits and the hash-slot wait; code-side config wins.
         apply_login_settings(&s.auth);
+
+        // The error pages are a `template_views` layer; without it the key is inert.
+        #[cfg(not(feature = "template_views"))]
+        if s.errors.enabled == Some(true) {
+            tracing::warn!(
+                target: "rustango::manage",
+                "[errors] enabled = true does nothing: the error pages need rustango's `template_views` feature"
+            );
+        }
 
         // `[server] trusted_proxies`; an earlier `with_trusted_proxies` wins.
         if self.real_ip.is_none() && !s.server.trusted_proxies.is_empty() {
@@ -1437,6 +1451,18 @@ impl Cli {
         let api = crate::panic_guard::catch_panics(api);
         #[cfg(feature = "config")]
         let settings = self.settings_for_layers.as_ref();
+        // This is the single-database app: the tenant-console routes do not exist.
+        #[cfg(feature = "config")]
+        if let Some(keys) = settings
+            .map(|s| crate::config::registry::tenancy_only_routes(&s.routes))
+            .filter(|k| !k.is_empty())
+        {
+            tracing::warn!(
+                target: "rustango::manage",
+                keys = ?keys,
+                "these [routes] keys apply only to a tenancy app (`Cli::tenancy()`); here they change nothing"
+            );
+        }
         // Health probes skip the Host check and the redirect when mounted.
         #[cfg(feature = "config")]
         let hp = self.health_endpoints;
@@ -1500,14 +1526,11 @@ impl Cli {
         if let Some(layer) = &self.real_ip {
             builder = builder.real_ip(layer.clone());
         }
-        // The tenant admin's title, as `[admin] title` documents it.
+        // `[admin]` as `admin::Builder::from_settings` reads it; the prefix
+        // reaches the routes in `with_settings`.
         #[cfg(feature = "config")]
-        if let Some(title) = self
-            .settings_for_layers
-            .as_ref()
-            .and_then(admin_title_setting)
-        {
-            builder = builder.admin_title(title);
+        if let Some(s) = &self.settings_for_layers {
+            builder = tenant_admin_settings(builder, s);
         }
         // The api router got it in `apply_settings_layers`; the admin and console did not.
         #[cfg(feature = "config")]
@@ -1517,6 +1540,14 @@ impl Cli {
             .and_then(|s| crate::body_limit::BodyLimitLayer::from_settings(&s.server))
         {
             builder = builder.body_limit(layer);
+        }
+        #[cfg(feature = "config")]
+        if let Some(layer) = self
+            .settings_for_layers
+            .as_ref()
+            .and_then(|s| crate::request_timeout::RequestTimeoutLayer::from_settings(&s.server))
+        {
+            builder = builder.request_timeout(layer);
         }
         #[cfg(all(feature = "config", feature = "template_views"))]
         if let Some(layer) = self
@@ -2454,6 +2485,34 @@ async fn open_registry(
 
 /// `[admin] title`, else `[brand] name`: the admin title the settings name.
 #[cfg(all(feature = "config", feature = "tenancy"))]
+/// The `[admin]` keys the tenant admin honours: title, subtitle, the
+/// visible tables and the read-only ones.
+#[cfg(all(feature = "config", feature = "tenancy"))]
+fn tenant_admin_settings<DB: sqlx::Database>(
+    mut builder: crate::server::Builder<DB>,
+    s: &crate::config::Settings,
+) -> crate::server::Builder<DB> {
+    let set = |t: &&String| !t.is_empty();
+    if let Some(title) = admin_title_setting(s) {
+        builder = builder.admin_title(title);
+    }
+    if let Some(sub) = s.admin.subtitle.as_ref().filter(set).or(s
+        .brand
+        .tagline
+        .as_ref()
+        .filter(set))
+    {
+        builder = builder.admin_subtitle(sub.clone());
+    }
+    if !s.admin.allowed_tables.is_empty() {
+        builder = builder.admin_show_only(s.admin.allowed_tables.iter().cloned());
+    }
+    if !s.admin.read_only_tables.is_empty() {
+        builder = builder.admin_read_only(s.admin.read_only_tables.iter().cloned());
+    }
+    builder
+}
+
 fn admin_title_setting(s: &crate::config::Settings) -> Option<String> {
     let set = |t: &&String| !t.is_empty();
     s.admin
@@ -2917,13 +2976,14 @@ mod tests {
     fn explicit_routes_then_with_settings_layers_overrides() {
         use crate::tenancy::RouteConfig;
         let mut base = RouteConfig::legacy();
-        base.basic_auth_realm = "MyApp".into();
+        base.tenant_session_ttl = std::time::Duration::from_secs(60);
         let mut s = crate::config::Settings::default();
         s.routes.admin_url = Some("/console".into());
         let cli = Cli::new().tenancy().routes(base).with_settings(&s);
         let rc = cli.routes.expect("routes set");
         assert_eq!(
-            rc.basic_auth_realm, "MyApp",
+            rc.tenant_session_ttl.as_secs(),
+            60,
             "explicit .routes() base preserved"
         );
         assert_eq!(rc.admin_url, "/console", "TOML override applied");
@@ -3200,6 +3260,29 @@ mod tests {
         let builder = crate::server::Builder::from_pool(pool, "sqlite::memory:", "localhost");
         let builder = Cli::new().with_settings(&s).tenancy_builder(builder, None);
         assert_eq!(builder.drain_timeout, std::time::Duration::from_secs(7));
+    }
+
+    /// `[admin]` and `[server] request_timeout_secs` reach the tenancy server,
+    /// and `[admin] url_prefix` its routes.
+    #[cfg(all(feature = "tenancy", feature = "config", feature = "sqlite"))]
+    #[tokio::test]
+    async fn tenancy_builder_hands_over_the_admin_settings() {
+        let mut s = crate::config::Settings::default();
+        s.admin.subtitle = Some("Back office".into());
+        s.admin.allowed_tables = vec!["orders".into(), "items".into()];
+        s.admin.read_only_tables = vec!["orders".into()];
+        s.admin.url_prefix = Some("/backoffice/".into());
+        s.routes.admin_url = Some("/control".into());
+        s.server.request_timeout_secs = Some(9);
+        let pool = sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy");
+        let builder = crate::server::Builder::from_pool(pool, "sqlite::memory:", "localhost");
+        let cli = Cli::new().tenancy().with_settings(&s);
+        assert_eq!(cli.routes.as_ref().unwrap().admin_url, "/backoffice");
+        let b = cli.tenancy_builder(builder, None);
+        assert_eq!(b.admin_subtitle.as_deref(), Some("Back office"));
+        assert_eq!(b.show_only, ["orders", "items"]);
+        assert_eq!(b.read_only, ["orders"]);
+        assert!(b.request_timeout.is_some());
     }
 
     /// `[server] max_body_bytes` reaches the operator console and tenant admin.

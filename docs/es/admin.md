@@ -526,6 +526,9 @@ read_only_tables = ["orders"]
 | `allowed_tables` | `[]`, todos los modelos | | Igual que `show_only` |
 | `read_only_tables` | `[]` | | Igual que `read_only` |
 
+Una app multi-tenant (`Cli::tenancy()`) aplica también `title`, `subtitle`,
+`url_prefix`, `allowed_tables` y `read_only_tables` al admin de tenant.
+
 `[brand]` también da estilo a las páginas de error incorporadas, que activa `[errors]`; ver [Páginas de error](html-views.md#páginas-de-error).
 
 `[brand] primary_color` tampoco tiñe este admin; es para la

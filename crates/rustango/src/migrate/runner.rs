@@ -1221,7 +1221,7 @@ async fn migrate_pool_with_ledger_opts(
     .await
 }
 
-/// The pool runner's apply loop; the caller holds the migrate lock.
+/// The pool runner's apply loop over `dir`; the caller holds the migrate lock.
 async fn migrate_pool_body(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -1231,6 +1231,18 @@ async fn migrate_pool_body(
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     let all = file::list_dir(dir)?;
+    apply_chain(pool, all, ledger, fake_initial, origin, observer).await
+}
+
+/// Apply `all`'s pending files, squashes reconciled; the caller holds the lock.
+async fn apply_chain(
+    pool: &crate::sql::Pool,
+    all: Vec<Migration>,
+    ledger: &str,
+    fake_initial: bool,
+    origin: ChainOrigin,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
     let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
     if origin == ChainOrigin::Regenerated && !applied.is_empty() {
         // Match the live schema, not the names, then record the chain.
@@ -1681,21 +1693,31 @@ pub(crate) fn migration_states<'a>(
     all: &'a [Migration],
     applied: &'a HashSet<String>,
 ) -> impl Iterator<Item = (&'a Migration, MigrationState)> + 'a {
-    let superseded: HashSet<&str> = all
-        .iter()
-        .filter(|m| applied.contains(&m.name))
-        .flat_map(|m| m.replaces.iter().map(String::as_str))
-        .collect();
     all.iter().map(move |m| {
         let state = if applied.contains(&m.name) {
             MigrationState::Applied
-        } else if superseded.contains(m.name.as_str()) {
+        } else if replaced_by(all, applied, &m.name).is_some() {
             MigrationState::Replaced
         } else {
             MigrationState::Pending
         };
         (m, state)
     })
+}
+
+/// The applied squash in `all` that replaces `name`.
+fn replaced_by<'a>(all: &'a [Migration], applied: &HashSet<String>, name: &str) -> Option<&'a str> {
+    all.iter()
+        .find(|m| applied.contains(&m.name) && m.replaces.iter().any(|r| r == name))
+        .map(|m| m.name.as_str())
+}
+
+/// Moving to or rolling back `name` would undo `squash` and its rows.
+fn replaced_error(name: &str, squash: &str) -> MigrateError {
+    MigrateError::Validation(format!(
+        "`{name}` was replaced by the applied squash `{squash}`; target `{squash}` \
+         or a migration outside it instead"
+    ))
 }
 
 /// `ledger`'s names, or none when it does not exist yet. Never creates it,
@@ -3983,33 +4005,12 @@ async fn atomic_sqlite(
             .iter()
             .filter(|op| matches!(op, Operation::Schema(_)))
             .count();
-        match ran {
-            Ok(()) => {}
-            // The last range also wrote the ledger: the migration is applied.
-            Err(SegmentFailed {
-                committed: true,
-                error,
-            }) if last => return Err(error),
-            Err(SegmentFailed { committed, error }) => {
-                if committed {
-                    applied += range.len();
-                    ddl_applied += ran_ddl;
-                }
-                if applied == 0 {
-                    return Err(error);
-                }
-                let source = match error {
-                    MigrateError::Driver(d) => d,
-                    other => sqlx::Error::Protocol(other.to_string()),
-                };
-                return Err(MigrateError::PartiallyApplied {
-                    migration: name.to_owned(),
-                    applied,
-                    total,
-                    ddl_applied,
-                    source: Box::new(source),
-                });
+        if let Err(failed) = ran {
+            if failed.committed {
+                applied += range.len();
+                ddl_applied += ran_ddl;
             }
+            return failed.outcome(name, last, applied, ddl_applied, total);
         }
         applied += range.len();
         ddl_applied += ran_ddl;
@@ -4023,6 +4024,44 @@ async fn atomic_sqlite(
 struct SegmentFailed {
     committed: bool,
     error: MigrateError,
+}
+
+#[cfg(feature = "sqlite")]
+impl SegmentFailed {
+    /// The run's result, `applied` counting this range if it committed. A
+    /// committed last range wrote the ledger row, so it only warns.
+    fn outcome(
+        self,
+        name: &str,
+        last: bool,
+        applied: usize,
+        ddl_applied: usize,
+        total: usize,
+    ) -> Result<(), MigrateError> {
+        let Self { committed, error } = self;
+        if committed && last {
+            tracing::warn!(
+                target: "rustango::migrate",
+                migration = %name,
+                "ran and recorded in the ledger, but restoring SQLite FK enforcement failed: {error}"
+            );
+            return Ok(());
+        }
+        if applied == 0 {
+            return Err(error);
+        }
+        let source = match error {
+            MigrateError::Driver(d) => d,
+            other => sqlx::Error::Protocol(other.to_string()),
+        };
+        Err(MigrateError::PartiallyApplied {
+            migration: name.to_owned(),
+            applied,
+            total,
+            ddl_applied,
+            source: Box::new(source),
+        })
+    }
 }
 
 /// `ops` cut where a RunSQL meets a rebuild: FK enforcement can only change
@@ -4343,7 +4382,8 @@ async fn apply_nonatomic_pool(
 /// Move the database to a specific migration target on any backend.
 ///
 /// # Errors
-/// [`MigrateError`]: a driver, ledger or validation error.
+/// [`MigrateError`]: a driver, ledger or validation error. A target an
+/// applied squash replaces is refused.
 pub async fn migrate_to_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4411,6 +4451,9 @@ pub(crate) async fn migrate_to_locked(
     }
 
     target_on_disk(&all, dir, target)?;
+    if let Some(squash) = replaced_by(&all, &applied, target) {
+        return Err(replaced_error(target, squash));
+    }
 
     let mut applied = applied;
     let mut moved = Moved {
@@ -4603,7 +4646,8 @@ pub(crate) async fn rollback_pool(
 /// [`unapply_force_pool`] to bypass).
 ///
 /// # Errors
-/// [`MigrateError`]: a driver, ledger or validation error. A target that is not the head is refused.
+/// [`MigrateError`]: a driver, ledger or validation error. A target that is
+/// not the head, or not applied, is refused.
 pub async fn unapply_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4634,7 +4678,8 @@ pub async fn unapply_pool_with_ledger(
 /// order. Caller accepts responsibility for the resulting schema state.
 ///
 /// # Errors
-/// [`MigrateError`]: a driver, ledger or validation error.
+/// [`MigrateError`]: a driver, ledger or validation error. A target that
+/// is not applied is refused.
 pub async fn unapply_force_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4808,10 +4853,17 @@ async fn unapply_locked_pool(
             MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
+    // Its inverse would undo what it never ran, or what a squash holds now.
+    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
+    if !applied.contains(name) {
+        return Err(replaced_by(&all, &applied, name).map_or_else(
+            || MigrateError::Validation(format!("migration `{name}` is not applied")),
+            |squash| replaced_error(name, squash),
+        ));
+    }
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert_migration(&target, &prev_snapshot)?;
-    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
     let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
     if target.atomic {
@@ -4948,6 +5000,7 @@ async fn unapply_atomic_pool(
 ///
 /// Each entry's first item must equal the migration's `name` field
 /// — a divergence would mean the slice was hand-built incorrectly.
+/// Squashes reconcile as in [`migrate_pool`].
 ///
 /// # Errors
 /// [`MigrateError`]: a driver, ledger or validation error, and
@@ -4979,21 +5032,7 @@ async fn migrate_embedded_pool_with_ledger(
         }
         all.sort_by(|a, b| a.name.cmp(&b.name));
         file::validate_chain(&all, "embedded slice")?;
-
-        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        let pending: Vec<Migration> = all
-            .iter()
-            .filter(|m| !applied.contains(&m.name))
-            .cloned()
-            .collect();
-
-        let mut newly = Vec::with_capacity(pending.len());
-        for mig in pending {
-            let before = snapshot_before(&all, &mig)?;
-            apply_one_pool(pool, &mig, &before, ledger).await?;
-            newly.push(mig);
-        }
-        Ok(newly)
+        apply_chain(pool, all, ledger, false, ChainOrigin::OnDisk, None).await
     })
     .await
 }
@@ -5058,6 +5097,24 @@ mod tests {
         assert!(super::mysql_lock_taken(Some(1)).unwrap());
         assert!(!super::mysql_lock_taken(Some(0)).unwrap());
         assert!(super::mysql_lock_taken(None).is_err());
+    }
+
+    /// Only the FK restore failed after the last range committed the ledger
+    /// row: the migration is applied, so the run is `Ok`.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_restore_failure_after_the_ledger_commit_is_ok() {
+        use super::{MigrateError, SegmentFailed};
+        let failed = |committed| SegmentFailed {
+            committed,
+            error: MigrateError::Validation("restore".into()),
+        };
+        assert!(failed(true).outcome("m", true, 2, 1, 2).is_ok());
+        assert!(failed(false).outcome("m", true, 0, 0, 2).is_err());
+        assert!(matches!(
+            failed(true).outcome("m", false, 1, 1, 2),
+            Err(MigrateError::PartiallyApplied { applied: 1, .. })
+        ));
     }
 
     /// SQLite finds `CaseT` under any case, so the check must too.
