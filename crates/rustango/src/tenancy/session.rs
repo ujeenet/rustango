@@ -252,14 +252,35 @@ impl SessionPayload {
     /// capped at the absolute lifetime. `None` while `exp` is still fresh.
     #[must_use]
     pub fn renewed(&self) -> Option<Self> {
+        self.renewed_within(SESSION_TTL_SECS)
+    }
+
+    /// [`Self::renewed`] for a console whose sessions last `lifetime` seconds.
+    #[must_use]
+    pub(crate) fn renewed_within(&self, lifetime: i64) -> Option<Self> {
         let now = chrono::Utc::now().timestamp();
-        let exp = (now + SESSION_IDLE_SECS).min(self.iat.saturating_add(SESSION_TTL_SECS));
+        let lifetime = lifetime.min(SESSION_TTL_SECS);
+        let exp = (now + SESSION_IDLE_SECS.min(lifetime)).min(self.iat.saturating_add(lifetime));
         // An older cookie's far `exp` is pulled in, too.
         (exp < self.exp || exp - self.exp >= RENEW_AFTER_SECS).then(|| Self {
             exp,
             ..self.clone()
         })
     }
+}
+
+impl SessionPayload {
+    /// Signed in `lifetime` seconds or more before `now`.
+    pub(crate) fn outlived(&self, lifetime: i64, now: i64) -> bool {
+        now >= self.iat.saturating_add(lifetime)
+    }
+}
+
+/// `RouteConfig::operator_session_ttl` in seconds, between 1 and [`SESSION_TTL_SECS`].
+pub(crate) fn lifetime_secs(ttl: std::time::Duration) -> i64 {
+    i64::try_from(ttl.as_secs())
+        .unwrap_or(SESSION_TTL_SECS)
+        .clamp(1, SESSION_TTL_SECS)
 }
 
 impl crate::session::Expiring for SessionPayload {

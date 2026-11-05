@@ -68,7 +68,6 @@ use crate::sso::provider::resolve_by_slug;
 use crate::sso::{
     build_provider_for, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser,
 };
-use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
 // ===================================================================

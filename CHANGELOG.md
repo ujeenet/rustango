@@ -54,6 +54,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The deprecated `find_or_provision_member` applies a tenant provider's sign-in, sign-up and lifecycle rules and the tenant's settings; a shared or admin key no longer provisions. `auto_provision` alone no longer lets anyone in.
 - Items announced as removed in 0.64.0 stay deprecated until 0.65.0, and their notes say so.
 - Guides: cookbook, orm, caching, models, api-conventions, manage, migrations, sso, security, auth, mcp and email match the code; `cache::from_settings` documents that a bad backend panics.
+- A tenancy app applies `[admin] read_only_tables`, `allowed_tables`, `subtitle` and `url_prefix` to the tenant admin; `server::Builder::admin_read_only` is new.
+- `RouteConfig::operator_session_ttl` caps operator-console sessions (default 12 h, also the most).
+- `[server] request_timeout_secs` also covers the tenant admin and the operator console (`server::Builder::request_timeout`).
+- `tenancy::manage::run` refuses `run-server`, which skipped every `[security]` / `[server]` layer, and points at `manage::Cli`.
+- Ending an impersonation logs an error when the revoke was not recorded; `JtiBlacklist::end_session` returns whether it was.
+- `[errors] enabled` without `template_views`, and tenancy-only `[routes]` keys on a single-database app, now warn; `check-settings` marks those keys "tenancy apps only".
+- `RouteConfig::basic_auth_realm` and `tenancy::server::ServerConfig::operator_show_only`, which nothing read, are removed; the `save_quietly` docs say ORM writes send no signals.
 
 ## [0.63.0] — 2026-11-04
 

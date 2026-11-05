@@ -4,9 +4,10 @@
 //! tenancy-specific verbs (`create-tenant`, `drop-tenant`,
 //! `purge-tenant`, `list-tenants`, `migrate-tenants`,
 //! `migrate-registry`, `init-tenancy`, `create-operator`,
-//! `create-user`, `run-server`, scope-aware `migrate`) and delegates
-//! everything else to the standard single-tenant runner using the
-//! registry pool.
+//! `create-user`, scope-aware `migrate`) and delegates everything else
+//! to the standard single-tenant runner using the registry pool.
+//! `run-server` is refused here: `manage::Cli` serves it with the
+//! settings layers.
 //!
 //! ## User wiring
 //!
@@ -35,8 +36,7 @@
 //!   schema-scoped pool builder used to land tenant inserts.
 //! - [`migrations`] — `init-tenancy`, `migrate`, `migrate-registry`,
 //!   `migrate-tenants` and the tenant migration report formatter.
-//! - [`server`] — `run-server` (thin wrapper around
-//!   [`super::server::run`]).
+//! - [`server`] — `run-server`, refused with a pointer to `manage::Cli`.
 //! - [`args`] — shared positional / flag parsing helpers.
 
 // Agent / skill verbs are MCP-only (see `super::agents`, gated the same way).
@@ -378,9 +378,7 @@ where
         "change-operator-password" => {
             users::change_operator_password_cmd(pools, &args[1..], writer).await
         }
-        "run-server" | "runserver" => {
-            server::run_server_cmd(pools, registry_url, &args[1..], writer).await
-        }
+        "run-server" | "runserver" => server::run_server_cmd(),
         "init-tenancy" => migrations::init_tenancy_cmd_with(dir, writer, init_fn),
         "wizard" | "init" => {
             // Interactive setup wizard (roadmap #2, v0.30.14).

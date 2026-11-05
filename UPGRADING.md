@@ -152,6 +152,10 @@ untouched.
 
 ## 0.64.0
 
+- Tenancy apps: `[admin] read_only_tables` now makes those tables read-only in the tenant admin, and `allowed_tables` hides the others. Check both lists before you deploy.
+- `RouteConfig::operator_session_ttl` now ends operator-console sessions; its default is 12 h (it said 7 days and did nothing). Values above 12 h are cut to 12 h.
+- `tenancy::manage::run` no longer serves `run-server`: serve with `manage::Cli::new().tenancy()`.
+- `RouteConfig::basic_auth_realm` and `ServerConfig::operator_show_only` are gone: delete them from struct literals. `JtiBlacklist::end_session` returns a `bool` (`#[must_use]`).
 - The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
 - `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.
 - `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.

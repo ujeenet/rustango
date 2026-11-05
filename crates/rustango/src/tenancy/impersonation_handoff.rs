@@ -230,9 +230,13 @@ impl JtiBlacklist {
         }
     }
 
-    /// Revoke the impersonation session `sid` until its cookie's `exp` (#2038).
-    pub async fn end_session(&self, sid: &str, exp: i64) {
-        self.store.mark_used(&Self::ended_key(sid), exp).await;
+    /// Revoke the impersonation session `sid` until its cookie's `exp`.
+    /// `false` when the store recorded nothing, so the session still works.
+    #[must_use]
+    pub async fn end_session(&self, sid: &str, exp: i64) -> bool {
+        let key = Self::ended_key(sid);
+        // `false` from `mark_used` is also "already ended": ask again.
+        self.store.mark_used(&key, exp).await || self.store.is_used(&key).await
     }
 
     /// `true` once [`Self::end_session`] revoked `sid`.
@@ -285,6 +289,32 @@ mod tests {
             decode(&secret, &zero, &format!("{b64}.{sig_b64}")).unwrap_err(),
             HandoffError::Malformed,
         );
+    }
+
+    /// A store that records nothing.
+    struct Broken;
+
+    impl crate::jti_store::JtiStore for Broken {
+        fn is_used<'a>(&'a self, _: &'a str) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+        fn mark_used<'a>(&'a self, _: &'a str, _: i64) -> crate::jti_store::JtiFuture<'a, bool> {
+            Box::pin(async { false })
+        }
+    }
+
+    /// Ending a session reports a store that did not record it, and a
+    /// second end of the same session is still a success.
+    #[tokio::test]
+    async fn end_session_reports_a_failed_revoke() {
+        let exp = chrono::Utc::now().timestamp() + 60;
+        let broken = JtiBlacklist::with_store(Arc::new(Broken));
+        assert!(!broken.end_session("s1", exp).await);
+        assert!(!broken.session_ended("s1").await);
+        let ok = JtiBlacklist::new();
+        assert!(ok.end_session("s1", exp).await);
+        assert!(ok.end_session("s1", exp).await, "already ended counts");
+        assert!(ok.session_ended("s1").await);
     }
 
     fn payload(ttl: i64) -> HandoffPayload {
