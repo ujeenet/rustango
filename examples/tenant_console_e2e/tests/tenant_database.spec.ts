@@ -74,7 +74,8 @@ test('operator signs in and no key warning shows', async ({ page }) => {
   for (const path of ['/db-servers', '/orgs/new']) {
     await page.goto(path);
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-    await expect(page.getByText('RUSTANGO_SECRET_KEY')).toHaveCount(0);
+    // The warning box, not field help that names the key.
+    await expect(page.locator('.key-warning')).toHaveCount(0);
   }
 });
 
