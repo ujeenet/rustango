@@ -185,6 +185,7 @@ untouched.
 - `save()` on a PK with no row returns `ExecError::Driver(sqlx::Error::RowNotFound)` instead of `Ok(0)`. Call `insert` for a new row with a manual PK.
 - Inside `atomic(&pool, …)`, ORM writes given the same pool now join the block and roll back with it. A write while you hold `tx.lock()` returns `NestedAtomic`: drop the guard first. Reads on the pool still do not see the block's uncommitted writes.
 - `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` with every `Auto` PK set now write the PK (it was dropped and the rows inserted again); a mix of set and unset is refused.
+- A filter, search or autocomplete value with a NUL byte now gets a 400 on MySQL and SQLite too (it matched nothing). An admin computed-field `link` that is not a `/` path or an `http(s):` URL renders as plain text.
 - `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
 
 ## 0.63.0

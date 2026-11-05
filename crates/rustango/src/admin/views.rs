@@ -332,6 +332,20 @@ const FACET_TRUNCATE: usize = 15;
 /// column never loads every distinct value.
 const FACET_SHOW_ALL_CAP: usize = 200;
 
+/// A computed-field link the list may emit: a path, or an `http:`/`https:` URL.
+fn is_link_href(url: &str) -> bool {
+    url.starts_with('/')
+        || ["http:", "https:"].iter().any(|scheme| {
+            url.get(..scheme.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(scheme))
+        })
+}
+
+/// A search or filter value, refused as a 400 when it holds `\0`.
+fn nul_free(value: &str) -> Result<&str, AdminError> {
+    crate::list_params::reject_nul(value).map_err(|e| AdminError::BadRequest(e.to_string()))
+}
+
 #[allow(clippy::too_many_lines)] // mostly linear HTML emission; splitting hurts readability
 pub(crate) async fn table_view(
     parts: axum::http::request::Parts,
@@ -352,7 +366,8 @@ pub(crate) async fn table_view(
     let offset = crate::list_params::page_offset(page, page_size);
     let q = params
         .get("q")
-        .map(String::as_str)
+        .map(|s| nul_free(s))
+        .transpose()?
         .filter(|s| !s.is_empty())
         .map(str::to_owned);
 
@@ -386,6 +401,7 @@ pub(crate) async fn table_view(
         else {
             continue;
         };
+        nul_free(value)?;
         if lookup != FieldLookup::Eq && value != "1" {
             continue;
         }
@@ -423,7 +439,7 @@ pub(crate) async fn table_view(
             if value.is_empty() {
                 continue;
             }
-            filters.extend((cf.to_filters)(value));
+            filters.extend((cf.to_filters)(nul_free(value)?));
             active_custom_filters.push((cf.parameter_name, value.clone()));
         }
     }
@@ -757,6 +773,10 @@ pub(crate) async fn table_view(
                     if let DisplayItem::Computed(cf) = item {
                         if let Some(link_fn) = cf.link {
                             if let Some(url) = link_fn(row) {
+                                // Any other scheme (`javascript:`) stays plain text.
+                                if !is_link_href(&url) {
+                                    return inner;
+                                }
                                 return format!(
                                     "<a href=\"{href}\">{inner}</a>",
                                     href = render::escape(&url),
@@ -1711,10 +1731,7 @@ pub(crate) async fn autocomplete_view(
 ) -> Result<axum::Json<serde_json::Value>, AdminError> {
     let model = resolve_model(&state, &table)?;
     let admin_cfg = admin_config_or_default(model);
-    let q = params
-        .get("q")
-        .map(String::as_str)
-        .unwrap_or("")
+    let q = nul_free(params.get("q").map_or("", String::as_str))?
         .trim()
         .to_owned();
 

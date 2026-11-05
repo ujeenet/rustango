@@ -14,6 +14,7 @@
 //! * [`parse_page`] / [`page_offset`] — `?page=N` and its overflow-safe offset.
 //! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`];
 //!   [`in_values_budget`] caps all lists of a request together.
+//! * [`reject_nul`] — refuses a filter or search value holding `\0`.
 //!
 //! Each layer still builds its own WHERE clause, because viewset
 //! supports a richer filter syntax than the CBV.
@@ -27,6 +28,7 @@
 //! [`split_in_list`]: crate::list_params::split_in_list
 //! [`MAX_IN_VALUES`]: crate::list_params::MAX_IN_VALUES
 //! [`in_values_budget`]: crate::list_params::in_values_budget
+//! [`reject_nul`]: crate::list_params::reject_nul
 
 use std::collections::HashMap;
 
@@ -177,6 +179,32 @@ pub fn page_offset(page: i64, page_size: i64) -> i64 {
     page.max(1)
         .saturating_sub(1)
         .saturating_mul(page_size.max(0))
+}
+
+/// A filter or search value holding a NUL byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NulInValue;
+
+impl std::fmt::Display for NulInValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a query value must not contain a NUL byte")
+    }
+}
+
+impl std::error::Error for NulInValue {}
+
+/// `value`, unless it holds `\0`. Postgres refuses NUL in text, so every
+/// backend answers 400 for it rather than PG alone failing with a 500.
+///
+/// # Errors
+/// [`NulInValue`] when `value` contains a NUL byte.
+pub fn reject_nul(value: &str) -> Result<&str, NulInValue> {
+    if value.contains('\0') {
+        Err(NulInValue)
+    } else {
+        Ok(value)
+    }
 }
 
 #[cfg(test)]

@@ -2681,6 +2681,7 @@ fn build_lookup_filter(
     if raw.is_empty() {
         return Ok(None);
     }
+    crate::list_params::reject_nul(raw).map_err(|e| FilterError::Invalid(e.to_string()))?;
     let column = field.column;
     let predicate = |op: Op, value: SqlValue| WhereExpr::Predicate(Filter { column, op, value });
     let parse =
@@ -2940,10 +2941,16 @@ async fn run_list(
 
     // Search
     // No `search_fields`: `?search=` is not a filter here.
-    let search = params
+    let search = match params
         .get("search")
-        .filter(|s| !s.is_empty() && !state.vs.search_fields.is_empty())
-        .cloned();
+        .map(|s| crate::list_params::reject_nul(s))
+        .transpose()
+    {
+        Ok(s) => s
+            .filter(|s| !s.is_empty() && !state.vs.search_fields.is_empty())
+            .map(str::to_owned),
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("`search`: {e}")),
+    };
     let search_clause = search.map(|q| SearchClause {
         query: q,
         columns: state

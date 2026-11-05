@@ -41,6 +41,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- A NUL byte in a ViewSet, admin or `ListView` filter, search or autocomplete value is a 400 on every backend, not a Postgres 500 (new `list_params::reject_nul`).
+- An admin computed-field `link` links only a `/` path or an `http:`/`https:` URL; any other scheme renders as plain text.
+- The operator console's audit "only this record" link URL-encodes the table and pk; the debug panel HTML-escapes the request method.
 - `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` keep a set `Auto` PK, so an upsert by id updates instead of inserting copies; a mix of set and unset PKs is `BulkAutoMixed`, as in `bulk_insert`.
 - A single-statement `save`, `insert`, `delete` or update on a `&Pool` inside `atomic` no longer commits outside the block.
 - The SSO idle sweep skips a provider whose `auto_deactivate_after_days` is past the calendar instead of panicking and stopping for every later tenant; stored values read as at most 36500 days and the operator console refuses more.
