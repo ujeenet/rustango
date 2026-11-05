@@ -75,12 +75,6 @@ fn login_path(state: &AppState) -> String {
     }
 }
 
-/// A `next` this admin's sign-in may land on, as on the tenant admin.
-pub(super) fn admin_next(state: &AppState, next: Option<&str>) -> Option<String> {
-    let logout = format!("{}/logout", state.config.admin_prefix);
-    crate::auth_decorators::login_next(next, &login_path(state), &logout)
-}
-
 /// Per-provider callback URL built from the request host:
 /// `{scheme}://{host}{login_path}/sso/{slug}/callback`. The scheme
 /// comes from `X-Forwarded-Proto` sent by a trusted proxy, else `https`.
@@ -167,7 +161,7 @@ async fn sso_begin(
     let (url, mut flow) = provider.begin();
     let params: BeginParams =
         serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
-    flow.next = admin_next(&state, params.next.as_deref());
+    flow.next = super::login_view::admin_next(&state, params.next.as_deref());
     let sealed = seal_flow(
         &flow,
         FlowScope::new(FlowPurpose::Admin, "", &slug),
@@ -346,13 +340,7 @@ async fn mint_session(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",
         s = cookie_attrs(state.config.secure_cookies),
     );
-    let redirect_to = admin_next(state, next).unwrap_or_else(|| {
-        if state.config.admin_prefix.is_empty() {
-            "/".to_owned()
-        } else {
-            state.config.admin_prefix.clone()
-        }
-    });
+    let redirect_to = super::login_view::admin_landing(state, next);
     let mut resp = Redirect::to(&redirect_to).into_response();
     if let Ok(v) = HeaderValue::from_str(&session_cookie) {
         resp.headers_mut().append(header::SET_COOKIE, v);

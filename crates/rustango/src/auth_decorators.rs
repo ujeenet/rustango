@@ -702,7 +702,7 @@ pub fn safe_next(next: &str) -> Option<String> {
 
 /// A post-login `next` to land on: [`safe_next`], and not back on the
 /// login or logout page, which would loop.
-#[cfg(any(feature = "tenancy", feature = "admin-sso"))]
+#[cfg(any(feature = "tenancy", feature = "admin"))]
 pub(crate) fn login_next(next: Option<&str>, login_url: &str, logout_url: &str) -> Option<String> {
     next.and_then(safe_next)
         .filter(|s| !s.starts_with(login_url) && !s.starts_with(logout_url))

@@ -2221,6 +2221,84 @@ async fn the_bare_admin_login_page_passes_next_to_sso() {
     );
 }
 
+/// POST the bare admin's password form as `root` with `extra` form fields.
+async fn bare_password_login(app: &Router, extra: &str) -> axum::response::Response {
+    send(
+        app,
+        Request::builder()
+            .method("POST")
+            .uri("/login")
+            .header(header::HOST, "admin.test")
+            .header(header::COOKIE, "rustango_csrf=t")
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "_csrf=t&username=root&password=pw-123456789{extra}"
+            )))
+            .unwrap(),
+    )
+    .await
+}
+
+/// A deep link without a session goes to the login page with `?next`, and
+/// the password sign-in lands back there; an unsafe `next` lands on the prefix.
+#[tokio::test]
+async fn a_bare_admin_password_login_lands_back_on_the_deep_link() {
+    let _g = SUITE.lock().await;
+    let (app, _pool, _idp) = bare_admin().await;
+    let gate = send(
+        &app,
+        Request::builder()
+            .uri("/?tab=1")
+            .header(header::HOST, "admin.test")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let to = location(&gate);
+    assert_eq!(to, "/__admin/login?next=%2F__admin%2F%3Ftab%3D1");
+    let next = to.split_once("next=").unwrap().1;
+    let done = bare_password_login(&app, &format!("&next={next}")).await;
+    assert!(signed_in(&done), "{}", location(&done));
+    assert_eq!(location(&done), "/__admin/?tab=1");
+    for hostile in [
+        "%2F%2Fevil.example",
+        "%2F%5Cevil.example",
+        "https%3A%2F%2Fevil.example",
+        "%252F%252Fevil.example",
+        "%2F__admin%2Flogin",
+        "%2F__admin%2Flogout",
+    ] {
+        let resp = bare_password_login(&app, &format!("&next={hostile}")).await;
+        assert!(signed_in(&resp), "{hostile}");
+        assert_eq!(location(&resp), "/__admin", "{hostile}");
+    }
+}
+
+/// The password form keeps `next` while it asks for the TOTP code.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn a_bare_admin_password_next_survives_the_totp_prompt() {
+    use rustango::admin::totp_store;
+    let _g = SUITE.lock().await;
+    let (app, pool, _idp, uid) = bare_admin_linked().await;
+    let device = rustango::totp::TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &device)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, uid).await.unwrap();
+    let prompt = bare_password_login(&app, "&next=%2Fcms-admin").await;
+    assert!(!signed_in(&prompt));
+    let html = body_of(prompt).await;
+    assert!(
+        html.contains(r#"name="next" value="&#x2F;cms-admin""#),
+        "{html}"
+    );
+    let code = rustango::totp::generate(&device, 30, 6);
+    let done = bare_password_login(&app, &format!("&next=%2Fcms-admin&totp_code={code}")).await;
+    assert!(signed_in(&done), "{}", location(&done));
+    assert_eq!(location(&done), "/cms-admin");
+}
+
 /// The landing survives the TOTP step an SSO sign-in owes.
 #[cfg(feature = "totp")]
 #[tokio::test]
