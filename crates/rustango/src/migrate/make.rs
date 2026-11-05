@@ -673,11 +673,20 @@ impl SystemChain {
     }
 
     /// A shipped chain in `dir`, as is: no catch-up step from today's models.
-    #[cfg(all(test, feature = "sqlite"))]
+    #[cfg(test)]
     pub(crate) fn shipped(dir: std::path::PathBuf) -> Self {
         Self {
             dir,
             origin: super::runner::ChainOrigin::OnDisk,
+        }
+    }
+
+    /// The chain in `dir` as if just regenerated from today's models.
+    #[cfg(test)]
+    pub(crate) fn regenerated(dir: std::path::PathBuf) -> Self {
+        Self {
+            dir,
+            origin: super::runner::ChainOrigin::Regenerated,
         }
     }
 

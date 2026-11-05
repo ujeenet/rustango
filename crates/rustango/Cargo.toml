@@ -498,7 +498,6 @@ tenancy = [
     "auth_flows",
     "dep:rpassword",
     "dep:serde_urlencoded",
-    "dep:tempfile",
     "_tower",
     # `migrate-tenant-storage` kills pg_dump when interrupted.
     "tokio/process",
@@ -577,9 +576,9 @@ rpassword        = { workspace = true, optional = true }
 serde_urlencoded = { workspace = true, optional = true }
 sha1             = { workspace = true, optional = true }
 sha2             = { workspace = true, optional = true }
-# Scoped-migration copies go to a fresh, owner-only temp dir.
-# 3.10 added `Builder::permissions`.
-tempfile         = { version = "3.10", optional = true }
+# Non-optional: system and scoped migration runs stage their files in a
+# fresh, owner-only temp dir. 3.10 added `Builder::permissions`.
+tempfile         = { version = "3.10" }
 # Non-optional as of #1535: `crypto::constant_time_compare` is
 # ungated and every credential comparison in the crate routes
 # through it, so the constant-time guarantee cannot be a feature

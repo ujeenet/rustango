@@ -705,3 +705,151 @@ async fn an_extension_only_schema_joins_the_path() {
         "ext_only missing from B's path: {path}"
     );
 }
+
+/// Writes `name` (after `prev`) holding one schema op on `widgets`.
+fn widgets_step(
+    dir: &std::path::Path,
+    name: &str,
+    prev: Option<&str>,
+    fields: &serde_json::Value,
+    op: serde_json::Value,
+) {
+    let tables = if fields.is_null() {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{ "name": "widgets", "model": "Widget", "fields": fields }])
+    };
+    let mig: rustango::migrate::file::Migration = serde_json::from_value(serde_json::json!({
+        "name": name, "created_at": "2026-01-01T00:00:00Z", "prev": prev,
+        "snapshot": { "tables": tables }, "forward": [{ "schema": op }],
+    }))
+    .unwrap();
+    rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+}
+
+/// A tenant migration's drops and alters stay in its schema: a same-named
+/// table in `public`, later on the migrate `search_path`, is never touched.
+#[tokio::test]
+async fn tenant_ddl_never_reaches_a_same_named_public_table() {
+    use serde_json::json;
+    let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let db = ScratchDb::create(&admin_url, "rustango_tddl").await;
+    let url = db.url().to_owned();
+    let admin = sqlx::PgPool::connect(&url).await.unwrap();
+    for sql in [
+        "CREATE TABLE public.widgets (id BIGINT PRIMARY KEY, note TEXT NOT NULL DEFAULT 'keep')",
+        "CREATE INDEX widgets_note_idx ON public.widgets (note)",
+        "INSERT INTO public.widgets (id) VALUES (1)",
+    ] {
+        sqlx::query(sql).execute(&admin).await.unwrap();
+    }
+    let fields = json!([
+        { "name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true },
+        { "name": "note", "column": "note", "ty": "string", "nullable": false,
+          "primary_key": false, "default": "'keep'" },
+    ]);
+    let mut loose = fields.clone();
+    loose[1]["nullable"] = json!(true);
+    let mut bare = fields.clone();
+    bare[1]["default"] = serde_json::Value::Null;
+    let only_id = json!([fields[0].clone()]);
+    let ops = [
+        (
+            "nullable",
+            loose,
+            json!({ "AlterColumnNullable":
+            { "table": "widgets", "column": "note", "nullable": true } }),
+        ),
+        (
+            "default",
+            bare,
+            json!({ "AlterColumnDefault":
+            { "table": "widgets", "column": "note", "from": "'keep'", "to": null } }),
+        ),
+        (
+            "index",
+            fields.clone(),
+            json!({ "DropIndex":
+            { "name": "widgets_note_idx", "table": "widgets" } }),
+        ),
+        (
+            "column",
+            only_id,
+            json!({ "DropColumn": { "table": "widgets", "column": "note" } }),
+        ),
+        (
+            "table",
+            serde_json::Value::Null,
+            json!({ "DropTable": "widgets" }),
+        ),
+        (
+            "rename",
+            serde_json::Value::Null,
+            json!({ "RenameTable": { "old_name": "widgets", "new_name": "gadgets" } }),
+        ),
+    ];
+    for (tag, snap, op) in ops {
+        // Its own tenant schema, which lost `widgets` after creating it.
+        let schema = format!("t_{tag}");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let path = format!("SET search_path TO {schema}, public");
+        let tenant = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |conn, _| {
+                let path = path.clone();
+                Box::pin(async move { sqlx::query(&path).execute(conn).await.map(drop) })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        let pool = rustango::sql::Pool::from(tenant.clone());
+        let tmp = tempfile::tempdir().unwrap();
+        widgets_step(
+            tmp.path(),
+            "0001_initial",
+            None,
+            &fields,
+            json!({ "CreateTable": "widgets" }),
+        );
+        rustango::migrate::migrate_pool(&pool, tmp.path())
+            .await
+            .unwrap();
+        sqlx::query(&format!("DROP TABLE {schema}.widgets"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        widgets_step(tmp.path(), "0002_op", Some("0001_initial"), &snap, op);
+        // Fails, or is a no-op for `DROP INDEX IF EXISTS`: the tenant has no widgets.
+        let _ = rustango::migrate::migrate_pool(&pool, tmp.path()).await;
+        tenant.close().await;
+    }
+    let (note_null, note_default): (String, Option<String>) = sqlx::query_as(
+        "SELECT is_nullable::text, column_default::text FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'widgets' AND column_name = 'note'",
+    )
+    .fetch_optional(&admin)
+    .await
+    .unwrap()
+    .expect("public.widgets.note still exists");
+    assert_eq!(note_null, "NO");
+    assert!(note_default.is_some_and(|d| d.contains("keep")));
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes \
+         WHERE schemaname = 'public' AND indexname = 'widgets_note_idx'",
+    )
+    .fetch_optional(&admin)
+    .await
+    .unwrap();
+    assert!(index.is_some(), "public's index was dropped");
+    let renamed: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.gadgets')::text")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    assert_eq!(renamed, None, "public.widgets was renamed");
+    admin.close().await;
+}

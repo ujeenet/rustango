@@ -178,6 +178,7 @@ untouched.
 - Without the `tenancy` feature, a ViewSet with `permissions(...)` codenames now panics at mount (it answered 403 to every gated request). Put your own auth layer in front and use `allow_anonymous`, or `read_only`.
 - `startapp --into <dir>` now means `src/<dir>/`, in the tenancy CLI too (it used to be relative to the project root). Run it from a workspace member's directory instead of `--into crates/web`.
 - `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is now applied; a value that is not a whole number of seconds of at least 1 stops the server.
+- `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
 
 ## 0.63.0
 

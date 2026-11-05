@@ -811,6 +811,33 @@ impl Dialect for MySql {
         )
     }
 
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(s.COLUMN_NAME AS CHAR) FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0 \
+             AND s.INDEX_NAME <> 'PRIMARY' AND s.COLUMN_NAME IS NOT NULL \
+             AND s.SUB_PART IS NULL AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS o \
+             WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
+             AND o.INDEX_NAME = s.INDEX_NAME AND o.SEQ_IN_INDEX > 1)",
+        )
+    }
+
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(k.COLUMN_NAME AS CHAR), CAST(r.DELETE_RULE AS CHAR) \
+             FROM information_schema.KEY_COLUMN_USAGE k \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+             ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA \
+             AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ? \
+             AND k.REFERENCED_TABLE_NAME IS NOT NULL AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
+             WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
+             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
+        )
+    }
+
     fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP INDEX {}",
