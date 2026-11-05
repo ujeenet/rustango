@@ -1744,11 +1744,11 @@ async fn tenant_domain_rule_refuses_a_linked_user() {
 }
 
 /// The member flow applies the rules before it provisions anyone.
-#[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn member_domain_rule_refuses_before_provisioning() {
     use rustango::extractors::TenantContext;
-    use rustango::tenancy::{member_sso_router, MemberAuthConfig, MEMBER_COOKIE};
+    use rustango::tenancy::member_auth::member_sso_router_for;
+    use rustango::tenancy::{MemberAuthConfig, MEMBER_COOKIE};
     let _g = SUITE.lock().await;
     let env = boot().await;
     rustango::audit::ensure_table_pool(env.pool())
@@ -1763,7 +1763,7 @@ async fn member_domain_rule_refuses_before_provisioning() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router(MemberAuthConfig {
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
         auto_provision: true,
         ..MemberAuthConfig::default()
     })
@@ -1889,11 +1889,11 @@ async fn tenant_console_signs_up_an_invitee_only() {
 
 /// The member flow: a domain refusal and a missing account get
 /// byte-identical error pages.
-#[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn member_refusals_look_like_no_account() {
     use rustango::extractors::TenantContext;
-    use rustango::tenancy::{member_sso_router, MemberAuthConfig};
+    use rustango::tenancy::member_auth::member_sso_router_for;
+    use rustango::tenancy::MemberAuthConfig;
     let _g = SUITE.lock().await;
     let env = boot().await;
     env.tenant_provider("corp", false).await;
@@ -1905,7 +1905,8 @@ async fn member_refusals_look_like_no_account() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx));
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
+        .layer(axum::Extension(ctx));
     let page = |sub: &'static str, email: &'static str| {
         let app = app.clone();
         let env = &env;
@@ -2523,11 +2524,11 @@ async fn member_flow_provisions_with_a_link_and_tells_not_linked_apart() {
 
 /// The member HTTP callback. `Tenant` defaults to Postgres when that feature
 /// is on, so this runs in the SQLite-only build.
-#[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn member_callback_signs_in_by_link_only() {
     use rustango::extractors::TenantContext;
-    use rustango::tenancy::{member_sso_router, MemberAuthConfig, MEMBER_COOKIE};
+    use rustango::tenancy::member_auth::member_sso_router_for;
+    use rustango::tenancy::{MemberAuthConfig, MEMBER_COOKIE};
     let _g = SUITE.lock().await;
     let env = boot().await;
     let ann = env.user("ann", "ann@example.com", false).await;
@@ -2539,7 +2540,8 @@ async fn member_callback_signs_in_by_link_only() {
         operator_secret: env.secret.clone(),
     });
     // #2560: the default refuses an unknown email.
-    let strict = member_sso_router(MemberAuthConfig::default()).layer(axum::Extension(ctx.clone()));
+    let strict = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig::default())
+        .layer(axum::Extension(ctx.clone()));
     env.idp.assert("sub-stranger", "stranger@example.com");
     let resp = handshake(&strict, &env.tenants[0].host, "/auth", "corp").await;
     assert!(
@@ -2548,7 +2550,7 @@ async fn member_callback_signs_in_by_link_only() {
             .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
         "default config provisioned a stranger"
     );
-    let app = member_sso_router(MemberAuthConfig {
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
         auto_provision: true,
         ..MemberAuthConfig::default()
     })
@@ -2570,6 +2572,13 @@ async fn member_callback_signs_in_by_link_only() {
     );
     assert!(member("sub-new", "new@example.com").await, "provisioned");
     assert!(member("sub-new", "changed@example.com").await, "by link");
+    // By its link, not a second sign-up under the new email.
+    assert!(User::objects()
+        .filter("email", "changed@example.com")
+        .fetch(env.pool())
+        .await
+        .unwrap()
+        .is_empty());
     let new = User::objects()
         .filter("email", "new@example.com")
         .fetch(env.pool())
@@ -3286,11 +3295,11 @@ async fn the_tenant_session_ttl_is_the_shortest() {
 }
 
 /// The member session is capped by the provider's lifetime too.
-#[cfg(not(feature = "postgres"))]
 #[tokio::test]
 async fn the_member_session_ttl_is_the_shortest() {
     use rustango::extractors::TenantContext;
-    use rustango::tenancy::{member_sso_router, MemberAuthConfig, MEMBER_COOKIE};
+    use rustango::tenancy::member_auth::member_sso_router_for;
+    use rustango::tenancy::{MemberAuthConfig, MEMBER_COOKIE};
     let _g = SUITE.lock().await;
     let env = boot().await;
     env.tenant_provider("corp", false).await;
@@ -3301,7 +3310,7 @@ async fn the_member_session_ttl_is_the_shortest() {
         session_secret: env.secret.clone(),
         operator_secret: env.secret.clone(),
     });
-    let app = member_sso_router(MemberAuthConfig {
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
         auto_provision: true,
         ..MemberAuthConfig::default()
     })
@@ -4442,4 +4451,35 @@ async fn member_sso_ignores_the_landing_rules() {
         location(&resp)
     );
     assert_eq!(location(&resp), "/");
+}
+
+/// The default member router serves the backend the mounted context runs
+/// on, so a SQLite tenant signs in even in a build that also has Postgres.
+#[tokio::test]
+async fn the_default_member_router_serves_a_sqlite_tenant() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::{member_sso_router, MemberAuthConfig, MEMBER_COOKIE};
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    env.idp.assert("sub-dflt", "dflt@example.com");
+    let resp = handshake(&app, &env.tenants[0].host, "/auth", "corp").await;
+    assert!(
+        set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
+        "not signed in: {}",
+        location(&resp)
+    );
 }

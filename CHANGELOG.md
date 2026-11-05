@@ -41,6 +41,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MariaDB: `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; `inspectdb` and the jobs queue see a JSON column as `json`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
 - MariaDB: `string_agg` is no longer cut at 1 MiB (`SET STATEMENT group_concat_max_len`, since MariaDB ignores the `SET_VAR` hint); `lag` / `lead` with a JSON default work.
 - Path-prefix tenants: the `server::Builder` dispatcher strips the prefix before the app's routes (`/acme/about` reaches `/about`); `OriginalUri` keeps the full path and the new `TenantPathPrefix` extension names the prefix. `Tenant`, `TenantScope`, `SessionUser` and `require_auth` use the tenant the dispatcher resolved instead of resolving again, and CSRF exemptions match the tenant-relative path.
+- `member_sso_router()` serves the backend of the mounted tenant context, so a SQLite or MySQL tenant signs in under a build that also enables `postgres`; it answered 500 there.
 
 ## [0.63.0] — 2026-11-04
 
