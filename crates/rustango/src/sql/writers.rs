@@ -374,6 +374,8 @@ impl<'d> Sql<'d> {
                     start + kw.len(),
                     " /*+ SET_VAR(group_concat_max_len = 4294967295) */",
                 );
+                // MariaDB ignores the hint (1 MiB cap) and takes SET STATEMENT.
+                self.sql.insert_str(0, &group_concat_statement_prefix());
             }
         }
         Ok(CompiledStatement {
@@ -381,6 +383,19 @@ impl<'d> Sql<'d> {
             params: self.params,
         })
     }
+}
+
+/// What a GROUP_CONCAT statement starts with: MariaDB's `SET STATEMENT`,
+/// which must stay first, so an `EXPLAIN` goes after it.
+pub(crate) fn group_concat_statement_prefix() -> String {
+    let mut sql = String::new();
+    super::mysql::ByServer {
+        mysql: "",
+        mariadb: "SET STATEMENT group_concat_max_len=4294967295 FOR",
+    }
+    .write(&mut sql);
+    sql.push(' ');
+    sql
 }
 
 /// The `::TYPE` a bind for a column gets on Postgres.
@@ -2766,10 +2781,17 @@ fn write_mariadb_lag_default(
         write_window_spec(b, w, false, false);
         Ok(())
     })?;
-    let mysql = b.sql[start..].to_owned();
-    if x_binds != 0 || d_binds != call_params || mysql.contains("*/") || x.contains("*/") {
+    if x_binds != 0 || d_binds != call_params {
         return Ok(());
     }
+    // A JSON default carries its own per-server comments: read each arm
+    // as its server would, so neither arm holds a `*/`.
+    use super::mysql::resolve_by_server as resolve;
+    let my = resolve(&b.sql[start..], false);
+    let maria = [&x, &d, &spec, &part].map(|t| resolve(t, true));
+    let (Some(mysql), [Some(x), Some(d), Some(spec), Some(part)]) = (my, maria) else {
+        return Ok(());
+    };
     let maria = match w.kind {
         WindowFn::Lag => format!(
             "(CASE WHEN ROW_NUMBER() OVER ({spec}) > {n} \

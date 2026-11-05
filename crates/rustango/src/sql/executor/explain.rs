@@ -153,7 +153,12 @@ pub(super) async fn explain_lines_on<'c, E: SqlExecutor<'c>>(
             c => format!("EXPLAIN {c} "),
         },
     };
-    let sql = format!("{prefix}{}", stmt.sql);
+    // MariaDB's `SET STATEMENT … FOR` must stay ahead of the EXPLAIN.
+    let lead = crate::sql::writers::group_concat_statement_prefix();
+    let sql = match stmt.sql.strip_prefix(lead.as_str()) {
+        Some(rest) => format!("{lead}{prefix}{rest}"),
+        None => format!("{prefix}{}", stmt.sql),
+    };
     let lines = run_on(exec, &sql, stmt.params, |row| match row {
         #[cfg(feature = "postgres")]
         RowRef::Postgres(r) => first_cell(r, json),
