@@ -153,6 +153,8 @@ untouched.
 ## 0.64.0
 
 - `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
+- Path-prefix tenants: app routes now see the path without the prefix (`/about`, not `/acme/about`). Drop routes you registered under `/{prefix}/…`; read the prefix from the `TenantPathPrefix` extension or the full path from `OriginalUri`.
+- `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
 - New tenant table `rustango_sso_landing_rules`: run `makemigrations` and `migrate`. Until then sign-ins land as before.
 - Tenant keys of the app cache, locks, idempotency, page cache, `KeyBy::Tenant` rate limits, sessions and flag overrides move to `tenant:#org:<id>:<slug>:<area>:<rest>`; login throttle, lockout and MCP key-cache keys do not. Tenant app (`ScopedCache`) entries move to the `app` area and miss once; rename keys if you use it as a durable store. Page-cache and `KeyBy::Tenant` counters restart once; sessions and flag overrides keep their keys.

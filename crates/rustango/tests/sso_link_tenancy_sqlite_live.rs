@@ -4409,3 +4409,37 @@ async fn a_signed_out_home_visit_lands_back_home_through_sso() {
         );
     }
 }
+
+/// Member sign-in ignores the tenant's landing rules: they send staff to
+/// admin pages, while a member lands on the member flow's own landing.
+#[tokio::test]
+async fn member_sso_ignores_the_landing_rules() {
+    use rustango::extractors::TenantContext;
+    use rustango::tenancy::member_auth::{member_sso_router_for, MemberAuthConfig};
+    use rustango::tenancy::MEMBER_COOKIE;
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    landing_rule(env.pool(), 0, "any", None, None, "/__admin/home").await;
+    let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
+        pools: env._pools.clone(),
+        resolver: ChainResolver::new().push(SubdomainResolver::new("app.test")),
+        session_secret: env.secret.clone(),
+        operator_secret: env.secret.clone(),
+    });
+    let app = member_sso_router_for::<sqlx::Sqlite>(MemberAuthConfig {
+        auto_provision: true,
+        ..MemberAuthConfig::default()
+    })
+    .layer(axum::Extension(ctx));
+    env.idp.assert("sub-mem", "mem@example.com");
+    let resp = handshake(&app, &env.tenants[0].host, "/auth", "corp").await;
+    assert!(
+        set_cookies(&resp)
+            .iter()
+            .any(|c| c.starts_with(&format!("{MEMBER_COOKIE}="))),
+        "not signed in: {}",
+        location(&resp)
+    );
+    assert_eq!(location(&resp), "/");
+}

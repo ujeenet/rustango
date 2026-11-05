@@ -182,7 +182,9 @@ Die tenantweiten Einstellungen, eine Zeile.
 ### `SsoLandingRule`
 
 Wohin eine Anmeldung ohne `?next=` führt. Die Regeln laufen nach `position`, die
-erste passende gewinnt. Sie gelten für SSO- und Passwort-Anmeldungen im
+erste passende gewinnt. Das Login-Gate behält `next` für jede Seite, die es
+umleitet; die Regeln greifen also, wenn die Anmeldung kein `next` hat, etwa wenn
+sie auf der Anmeldeseite selbst beginnt. Sie gelten für SSO- und Passwort-Anmeldungen im
 Tenant-Admin und im Bare-Admin; die Mitglieder-Anmeldung ignoriert sie. Eine
 Regel, deren Pfad die `next`-Prüfung nicht besteht (etwa die Anmeldeseite), wird
 übersprungen. Fehlt die Tabelle, gibt es keine Regeln.

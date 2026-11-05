@@ -173,7 +173,9 @@ The tenant-wide settings, one row.
 ### `SsoLandingRule`
 
 Where a sign-in without `?next=` lands. Rules run in `position` order and the
-first match wins. They apply to SSO and password sign-ins on the tenant admin
+first match wins. The login gate keeps `next` for every page it bounces, so the
+rules apply when the sign-in has no `next`, for example one started at the
+login page. They apply to SSO and password sign-ins on the tenant admin
 and the bare admin; member sign-in ignores them. A rule whose path fails the
 `next` check (say the login page) is skipped. A missing table means no rules.
 

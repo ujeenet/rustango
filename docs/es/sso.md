@@ -179,7 +179,9 @@ Los ajustes de todo el tenant, una fila.
 ### `SsoLandingRule`
 
 Adónde lleva un inicio de sesión sin `?next=`. Las reglas se aplican por
-`position` y gana la primera que coincide. Valen para el inicio con SSO y con
+`position` y gana la primera que coincide. El control de acceso conserva `next`
+para cada página que redirige, así que las reglas valen cuando el inicio no trae
+`next`, por ejemplo uno empezado en la propia página de inicio de sesión. Valen para el inicio con SSO y con
 contraseña en el admin del tenant y en el admin básico; el inicio de los miembros
 las ignora. Una regla cuya ruta no pasa la comprobación de `next` (p. ej. la
 página de inicio de sesión) se salta. Si falta la tabla, no hay reglas.
