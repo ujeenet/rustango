@@ -327,13 +327,17 @@ Ambas colas llaman a `Job::run_with(&self, ctx: &JobCtx)`. Por defecto llama a
 `run()`, así que los trabajos que solo implementan `run` funcionan sin cambios.
 Sobrescríbelo para leer:
 
-- `ctx.id()` — el id del trabajo, el mismo en cada reintento. Único en su cola.
+- `ctx.id()` — el id del trabajo, el mismo en cada reintento. Único solo en su cola.
+- `ctx.idempotency_key(scope)` — el id bajo tu ámbito, para un sistema externo.
 - `ctx.attempt()` — 1 en la primera ejecución, 2 en el primer reintento.
 - `ctx.stopping()` / `ctx.is_stopping()` — la cola se está deteniendo; termina
   dentro de `shutdown_grace` o la ejecución se aborta y vuelve a la cola.
 
-Usa el id como clave de idempotencia, para que un cobro reintentado no se cobre dos
-veces:
+Usa `idempotency_key` como la clave que ve un sistema externo, para que un cobro
+reintentado no se cobre dos veces. El id de la cola en BD es el id de la fila más
+su momento de encolado, así que una tabla recreada no lo repite. Los tenants con
+su propia tabla de trabajos empiezan igualmente en la fila 1; pasa un ámbito que
+distinga las tablas, como el slug del tenant:
 
 ```rust
 use rustango::jobs::{Job, JobCtx, JobError};
@@ -347,7 +351,7 @@ impl Job for ChargeCard {
     }
 
     async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
-        let key = format!("charge-{}", ctx.id());   // la misma clave en cada reintento
+        let key = ctx.idempotency_key(&self.tenant);   // la misma clave en cada reintento
         stripe_charge(self.order_id, self.cents, &key)
             .await
             .map_err(|e| JobError::Retryable(e.to_string()))

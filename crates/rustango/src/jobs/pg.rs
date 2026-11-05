@@ -804,6 +804,8 @@ struct PickedJob {
     payload: Value,
     attempt: i32,
     max_attempts: i32,
+    /// Set at dispatch; with `id` it names the job even across a recreated table.
+    created_at: Option<DateTime<Utc>>,
     /// The enqueuer's context, empty on a table without the column.
     context: crate::task_context::TaskContext,
 }
@@ -817,9 +819,9 @@ async fn pick_one(
     use crate::task_context::TaskContext;
     let now: DateTime<Utc> = Utc::now();
     let cols = if with_context {
-        "id, name, payload, attempt, max_attempts, context"
+        "id, name, payload, attempt, max_attempts, created_at, context"
     } else {
-        "id, name, payload, attempt, max_attempts"
+        "id, name, payload, attempt, max_attempts, created_at"
     };
     match pool {
         #[cfg(feature = "postgres")]
@@ -851,6 +853,7 @@ async fn pick_one(
                 payload: row.try_get("payload")?,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                created_at: decode_created_at(row.try_get("created_at")),
                 context: TaskContext::from_stored(if with_context {
                     decode_context(row.try_get("context"))
                 } else {
@@ -909,6 +912,7 @@ async fn pick_one(
                 payload: payload_json.0,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                created_at: decode_created_at(row.try_get("created_at")),
                 context: TaskContext::from_stored(context.map(|c| c.0)),
             }))
         }
@@ -960,12 +964,20 @@ async fn pick_one(
                 payload,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                created_at: decode_created_at(row.try_get("created_at")),
                 context: TaskContext::from_stored(
                     context.and_then(|c| serde_json::from_str(&c).ok()),
                 ),
             }))
         }
     }
+}
+
+/// The row is already locked here: an unreadable `created_at` only narrows
+/// the job id to the row id.
+fn decode_created_at(got: Result<DateTime<Utc>, sqlx::Error>) -> Option<DateTime<Utc>> {
+    got.map_err(|e| tracing::warn!(error = %e, "unreadable job created_at"))
+        .ok()
 }
 
 /// The row is already locked here: a bad `context` value must not stop
@@ -1004,8 +1016,8 @@ async fn run_one(
     }
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
-    // `attempt` already counts this run; the row id outlives its retries.
-    let ctx = JobCtx::new(JobId(job.id.to_string().into()), runs, stop.clone());
+    // `attempt` already counts this run; the row outlives its retries.
+    let ctx = JobCtx::new(JobId::of_row(job.id, job.created_at), runs, stop.clone());
     let run = job
         .context
         .clone()

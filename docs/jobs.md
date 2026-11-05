@@ -315,12 +315,17 @@ own base: `base`, doubled per failure, capped at `base · 1024`.
 Both queues call `Job::run_with(&self, ctx: &JobCtx)`. By default it calls
 `run()`, so jobs that implement only `run` work unchanged. Override it to read:
 
-- `ctx.id()` — the job's id, the same on every retry. Unique on its queue.
+- `ctx.id()` — the job's id, the same on every retry. Unique on its queue only.
+- `ctx.idempotency_key(scope)` — the id under your scope, for an outside system.
 - `ctx.attempt()` — 1 for the first run, 2 for the first retry.
 - `ctx.stopping()` / `ctx.is_stopping()` — the queue is shutting down; finish
   within `shutdown_grace` or the run is aborted and re-queued.
 
-Use the id as an idempotency key, so a retried charge is not charged twice:
+Use `idempotency_key` as the key an outside system sees, so a retried charge is
+not charged twice. The database queue's id is the row id plus its enqueue time,
+so a recreated table does not repeat it. Tenants with their own job tables still
+start at row 1, so pass a scope that tells the tables apart, such as the tenant
+slug:
 
 ```rust
 use rustango::jobs::{Job, JobCtx, JobError};
@@ -334,7 +339,7 @@ impl Job for ChargeCard {
     }
 
     async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
-        let key = format!("charge-{}", ctx.id());   // same key on every retry
+        let key = ctx.idempotency_key(&self.tenant);   // same key on every retry
         stripe_charge(self.order_id, self.cents, &key)
             .await
             .map_err(|e| JobError::Retryable(e.to_string()))
