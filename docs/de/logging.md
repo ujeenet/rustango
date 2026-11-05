@@ -152,6 +152,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::sql` | Query-Ausführung |
 | `rustango::sql::lock` | Row-Lock-Klauseln |
 | `rustango::sso` | SSO-Kontoverknüpfung |
+| `rustango::sso::landing` | SSO-Landing-Regeln: eine übersprungene Regel (nur ID und Tenant) oder eine unlesbare Regeltabelle |
 | `rustango::static_files` | Statische Datei-Mounts |
 | `rustango::template_views` | Template-basierte Views |
 | `rustango::tenancy` | Mandantenfähigkeit, allgemein |
