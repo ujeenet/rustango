@@ -24,7 +24,10 @@ use tower::ServiceExt;
 #[rustango(
     table = "cfl_post",
     display = "title",
-    admin(list_display = "title, author_link, plain_summary", ordering = "-id",)
+    admin(
+        list_display = "title, author_link, plain_summary, script_link, web_link",
+        ordering = "-id",
+    )
 )]
 pub struct CflPost {
     #[rustango(primary_key)]
@@ -62,6 +65,24 @@ rustango::register_admin_computed!("cfl_post", "plain_summary", "Summary", |row|
         .unwrap_or("");
     format!("re: {t}")
 });
+
+// A link callable returning a script URL: the cell must stay plain text.
+rustango::register_admin_computed!(
+    "cfl_post",
+    "script_link",
+    "Script",
+    |_row| "click-me".to_owned(),
+    link = |_row| Some("javascript:alert(1)".to_owned()),
+);
+
+// An absolute https link is kept.
+rustango::register_admin_computed!(
+    "cfl_post",
+    "web_link",
+    "Web",
+    |_row| "site".to_owned(),
+    link = |_row| Some("HTTPS://example.com/x".to_owned()),
+);
 
 fn build_app(pool: Pool) -> axum::Router {
     rustango::admin::Builder::new(pool).admin_prefix("").build()
@@ -143,5 +164,27 @@ async fn computed_without_link_renders_plain() {
     assert!(
         !body.contains(r#">re: Hello</a>"#),
         "plain_summary must not be wrapped in <a>, got: {body}"
+    );
+}
+
+#[tokio::test]
+async fn computed_link_with_a_script_scheme_renders_plain() {
+    let (pool, uri) = pool_with_post().await;
+    let body = fetch_body(pool, &uri).await;
+    assert!(
+        !body.to_ascii_lowercase().contains("javascript:"),
+        "a javascript: link must never reach the page, got: {body}"
+    );
+    assert!(
+        body.contains("click-me"),
+        "the cell text still renders: {body}"
+    );
+    assert!(
+        !body.contains(">click-me</a>"),
+        "the cell must not be wrapped in <a>, got: {body}"
+    );
+    assert!(
+        body.contains(r#"<a href="HTTPS://example.com/x">site</a>"#),
+        "an https link is kept, got: {body}"
     );
 }

@@ -66,6 +66,7 @@ fn app(pool: &Pool) -> axum::Router {
         &["id", "name", "category_id", "created_at", "price"],
     )
     .filter_fields(&["category_id", "name", "created_at"])
+    .search_fields(&["name"])
     .router("/items", pool.clone())
     .merge(
         ViewSet::for_model(
@@ -169,10 +170,24 @@ async fn a_like_lookup_on_a_number_is_400(pool: &Pool) {
     }
 }
 
+/// Postgres refuses a NUL byte in text, so every backend answers 400, not 500.
+async fn a_nul_byte_in_a_filter_or_search_is_400(pool: &Pool) {
+    for uri in [
+        "/items?name=a%00b",
+        "/items?name__icontains=a%00b",
+        "/items?name__in=x,a%00b",
+        "/items?search=a%00b",
+    ] {
+        let (status, _, body) = get(pool, uri).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
         an_empty_value_is_no_filter,
+        a_nul_byte_in_a_filter_or_search_is_400,
         a_bad_filter_is_400_naming_the_param,
         orm_lookups_filter,
         a_backend_owns_unknown_lookups,

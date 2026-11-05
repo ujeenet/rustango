@@ -317,7 +317,7 @@ fn render_panel(records: &[RequestRecord]) -> String {
                 <td class="rid">{rid}</td>
             </tr>"#,
             ts = r.timestamp.format("%H:%M:%S%.3f"),
-            method = r.method,
+            method = html_escape(&r.method),
             path = html_escape(&r.path),
             status = r.status,
             dur = r.duration_ms,
@@ -504,6 +504,27 @@ mod tests {
         let html = render_panel(&[r]);
         assert!(!html.contains("<script>alert(1)</script>"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+
+    /// An extension method token may hold `&` and `'`; it is escaped like the path.
+    #[test]
+    fn render_panel_html_escapes_method() {
+        let r = RequestRecord {
+            request_id: "x".into(),
+            method: "A&B'C".into(),
+            path: "/".into(),
+            status: 200,
+            duration_ms: 1,
+            timestamp: chrono::Utc::now(),
+            query_count: 0,
+            total_query_ms: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            signals_fired: 0,
+        };
+        let html = render_panel(&[r]);
+        assert!(!html.contains("A&B'C"), "method must be escaped");
+        assert!(html.contains("A&amp;B"), "{html}");
     }
 
     /// Every inline tag carries the nonce; no inline handler is left.

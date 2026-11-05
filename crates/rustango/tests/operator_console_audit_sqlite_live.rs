@@ -220,6 +220,20 @@ async fn filtering_narrows_to_one_record() {
     );
 }
 
+/// A pk with `&` or `#` must stay one query value in the record link.
+#[tokio::test]
+async fn the_record_link_url_encodes_the_pk() {
+    let b = boot().await;
+    b.record("rustango_orgs", "a&b=c#d e", "edit", ("k", "v"))
+        .await;
+
+    let html = body_of(b.get("/audit").await).await;
+    assert!(
+        html.contains("entity_table=rustango_orgs&amp;entity_pk=a%26b%3Dc%23d%20e"),
+        "the record link must URL-encode the pk: {html}"
+    );
+}
+
 /// A blank filter box posts `?entity_table=`, which must mean "no
 /// filter" rather than "match the empty string" — otherwise submitting
 /// the form with nothing typed returns nothing.
