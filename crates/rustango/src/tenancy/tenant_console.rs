@@ -43,7 +43,8 @@ pub const SESSION_TTL_SECS: i64 = 7 * 24 * 60 * 60;
 /// "Open admin as superuser →"). 1 hour by default — short
 /// enough that an idle operator gets dropped before they can
 /// forget they're impersonating, long enough for a debugging
-/// session. Override via `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS`.
+/// session. `RouteConfig::impersonation_ttl` sets it, and
+/// `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` overrides that on the server.
 /// (#78, v0.27.8)
 pub const IMPERSONATION_TTL_SECS: i64 = 60 * 60;
 

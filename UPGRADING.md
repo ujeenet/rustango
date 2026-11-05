@@ -166,6 +166,9 @@ untouched.
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` are deprecated (removed in 0.66.0): use `CacheScope::for_tenant(cache, &tenant).app()` or `.locks()`; for `scoped`, put the namespace in the lock name.
 - `Org` is `#[non_exhaustive]`, so `Org { .. }` literals and `..testkit::org()` no longer compile outside rustango. Use `let mut o = Org::new(slug); o.field = …;` or `testkit::org_with(|o| o.field = …)`. Fields stay public.
 - Jobs can override `Job::run_with(&self, ctx: &JobCtx)` to read the job id, attempt and stop signal; jobs with only `run` need no change.
+- Without the `tenancy` feature, a ViewSet with `permissions(...)` codenames now panics at mount (it answered 403 to every gated request). Put your own auth layer in front and use `allow_anonymous`, or `read_only`.
+- `startapp --into <dir>` now means `src/<dir>/`, in the tenancy CLI too (it used to be relative to the project root). Run it from a workspace member's directory instead of `--into crates/web`.
+- `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is now applied; a value that is not a whole number of seconds of at least 1 stops the server.
 
 ## 0.63.0
 

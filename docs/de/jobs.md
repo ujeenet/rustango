@@ -17,7 +17,8 @@ vollständig in Rust.
 > **Quelle:** `rustango::jobs` (`Job`, `JobQueue`, `InMemoryJobQueue`,
 > `JobError`, `JobDeadLetter`) und `rustango::jobs::DatabaseJobQueue` (die
 > tabellengestützte Queue, Alias von `pg::PgJobQueue`) — hinter der
-> `jobs`-Feature (standardmäßig aktiv).
+> `jobs`-Feature; `DatabaseJobQueue` und `make:worker` brauchen zusätzlich
+> `jobs-postgres` (beide standardmäßig aktiv).
 >
 > **Ausführbare Version:** die In-Memory-, Retry- und Dead-Letter-Snippets sind
 > aus [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs) kopiert

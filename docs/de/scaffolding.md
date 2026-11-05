@@ -286,7 +286,7 @@ Es schreibt `src/blog/` mit `mod.rs`, `models.rs` (ein Starter-Modell, benannt n
 
 Optionen:
 
-- **`--into <dir>`** — scaffolde unter einem anderen Basisverzeichnis als `src/` (z. B. einem Workspace-Member).
+- **`--into <dir>`** — scaffolde stattdessen unter `src/<dir>/` (`--into apps` schreibt `src/apps/blog/`); die Zeilen für das Eltern-Modul und `urls.rs` werden zum Einfügen ausgegeben.
 - **`--with-manage-bin`** — gib zusätzlich eine `src/bin/manage.rs` aus (für Layouts, die ein separates manage-Binary bevorzugen).
 
 ---
@@ -304,7 +304,7 @@ Innerhalb eines Projekts scaffolden die `make:*`-Verben jeweils eine Datei. Die 
 | `make:job <Name>` | Ein Handler für einen Hintergrund-Job |
 | `make:scheduled <Name>` | Eine Aufgabe mit festem Intervall für `scheduler::Scheduler` |
 | `make:worker <Name>` | Ein Worker-Binary unter `src/bin/`, das die Job-Queue abarbeitet |
-| `make:notification <Name>` | Eine Mehrkanal-Benachrichtigung |
+| `make:notification <Name>` | Eine E-Mail-Benachrichtigung: ein Struct, das eine `Email` baut |
 | `make:middleware <Name>` | Ein Middleware-Gerüst |
 | `make:test <Name>` | Ein Testmodul mit dem In-process-Testclient |
 
@@ -322,9 +322,11 @@ cargo run -- make:test post_smoke
 cargo rustango new myblog                              # 1. scaffold the project
 cd myblog
 cargo run -- startapp blog                             # 2. add a feature module
-# …add fields to src/blog/models.rs…
+# …rename the starter `Blog` in src/blog/models.rs to `Post`, add fields…
 cargo run -- makemigrations                            # 3. generate a migration
 cargo run -- migrate                                   # 4. apply it
 cargo run -- make:viewset PostViewSet --model Post     # 5. expose a JSON API
-cargo run                                              # 6. serve
+# …add `pub mod post_view_set;` to src/lib.rs and the `.nest_with` line from
+#    the end of src/post_view_set.rs to src/main.rs…
+cargo run                                              # 6. serve the URL make:viewset printed
 ```

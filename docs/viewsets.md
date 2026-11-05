@@ -23,7 +23,7 @@ is a reference for every knob.
 [![A Rustango ViewSet wired to a serializer: one #[viewset(serializer = …)] block gives typed JSON output and validated input across the six CRUD routes](img/viewsets.png)](img/viewsets.png)
 
 > **Source:** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, the
-> `#[viewset(...)]` options + the `for_model` builder) — gated on `admin` **or** `tenancy`. Within it, `.serializer::<S>()` needs `serializer`, the builder's `router()` needs `postgres`, `tenant_router()` / `OwnedBy` need `tenancy`, and the QUERY action needs `admin`.
+> `#[viewset(...)]` options + the `for_model` builder) — gated on `admin` **or** `tenancy`. Within it, `.serializer::<S>()` needs `serializer`, `tenant_router()` / `OwnedBy` need `tenancy`, and the QUERY action needs `admin`.
 >
 > **Runnable version:** the blog built here mirrors the tested, compilable
 > [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
@@ -96,7 +96,7 @@ cargo run -- startapp blog
 ```
 
 That writes `src/blog/{mod,models,views,urls,tests}.rs` and wires the module
-into `main.rs` + the `urls::api()` aggregator.
+into `src/lib.rs` + the `urls::api()` aggregator.
 
 ### Step 2 — Define the models
 
@@ -200,7 +200,8 @@ impl PostSerializer {
 }
 ```
 
-Register the module — add `pub mod post_serializer;` to `src/blog/mod.rs`.
+The generator writes `src/post_serializer.rs`: move it to `src/blog/post_serializer.rs`
+and add `pub mod post_serializer;` to `src/blog/mod.rs`.
 
 Note we only wrote one validator (`title_min_3`); the fields also **inherit the
 model's constraints** automatically — `title` is length-checked against the
@@ -222,10 +223,12 @@ attribute** — that one line turns on serializer-driven output *and* input:
 // src/blog/post_view_set.rs
 use rustango::ViewSet;
 
+use crate::blog::models::Post;
+
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
-    fields        = "id, title, body, author_id, published_at",
+    fields        = "id, title, body, status, author_id, published_at",
     serializer    = crate::blog::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
@@ -235,9 +238,9 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-The generator writes `src/post_view_set.rs` (it starts `read_only`, and its
-`use` line assumes `crate::models::Post`). Move it to `src/blog/post_view_set.rs`
-as shown and add `pub mod post_view_set;` to `src/blog/mod.rs`.
+The generator writes `src/post_view_set.rs`, starting `read_only` and importing
+`Post` from `crate::blog::models`. Move it to `src/blog/post_view_set.rs` as
+shown and add `pub mod post_view_set;` to `src/blog/mod.rs`.
 
 > `fields` is required: it is the write allow-list, so a body cannot set any
 > other column (say `author_id` on a model that should own it). A serializer
@@ -245,27 +248,26 @@ as shown and add `pub mod post_view_set;` to `src/blog/mod.rs`.
 
 ### Step 6 — Mount the routes
 
-In a single-tenant project, nest the ViewSet's router under a path, passing the
-pool:
+`startapp` already merged `blog::urls::api()` into `urls::api()`. Leave that
+one alone: it takes no pool. Generate the app's pool-taking composer instead
+with `cargo run -- make:api_routes blog`, and fill in `src/blog/api_routes.rs`:
 
 ```rust
-// src/blog/urls.rs (or your urls::api aggregator)
+// src/blog/api_routes.rs
 use axum::Router;
 use rustango::sql::Pool;
-use crate::blog::post_view_set::PostViewSet;
 
-pub fn api(pool: Pool) -> Router {
+pub fn api(pool: Pool) -> Router<()> {
     Router::new()
-        .merge(PostViewSet::router("/api/posts", pool))
+        .merge(crate::blog::post_view_set::PostViewSet::router("/posts", pool))
 }
 ```
 
-`make:api_routes blog` scaffolds the same shape as `src/blog/api_routes.rs` if
-you'd rather generate it. The top-level `urls::api()` has no pool, so mount this
-router from `src/main.rs`, where the `Cli` hands you the server's pool. A
-root nest is refused, so nest it under a prefix and drop that prefix from the
-ViewSet path: `.nest_with("/api", |pool| myapp::blog::urls::api(pool))` with
-`PostViewSet::router("/posts", pool)` inside.
+Add `pub mod api_routes;` to `src/blog/mod.rs`. Then mount it in `src/main.rs`,
+after `.api(urls::api())`, where the `Cli` hands it the server's pool:
+`.nest_with("/api", |pool| myblog::blog::api_routes::api(pool))`. The ViewSet
+now answers at `/api/posts`. Nest the `/api` prefix once: a ViewSet path that
+repeats it would serve `/api/api/posts`.
 
 ### Step 7 — Run it and exercise every endpoint
 
@@ -367,6 +369,8 @@ use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
+    // `cargo test` does not read `.env`; load it as main.rs does.
+    let _ = dotenvy::dotenv();
     // `Pool::connect` picks the backend from the URL scheme, so the
     // same test runs against sqlite, Postgres or MySQL.
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -465,7 +469,7 @@ Both produce an `axum::Router` of the same CRUD routes.
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
-    fields        = "id, title, body, author_id, published_at",
+    fields        = "id, title, body, status, author_id, published_at",
     serializer    = crate::blog::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
@@ -562,7 +566,7 @@ mount the ViewSet and override the one route with your own handler (see
 | `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 100). |
 | `read_only` | *(flag)* | off | Expose GET (list + retrieve) only. |
 | `allow_anonymous` | *(flag)* | off | Say that write actions with no codenames are meant to be open; silences the mount warning. |
-| `permissions(...)` | `permissions(create = "posts.add")` | none | Per-action permission codenames. |
+| `permissions(...)` | `permissions(create = "posts.add")` | none | Per-action permission codenames; needs `tenancy`. |
 
 ---
 
@@ -586,7 +590,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `related_filter(fk_field, backend)` | Limit which target rows a body's FK may name; any other is a `422`. |
 | `read_only()` | GET-only. |
 | `allow_anonymous()` | Writes without codenames are intended; skips the mount warning. |
-| `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates (the latter on tenancy). |
+| `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates; both need `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered NOT NULL column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
 | `pagination(PaginationStyle::…)` | Set the style explicitly. |
@@ -753,7 +757,10 @@ An empty action list = no check. Enforcement reads an authenticated user from
 the request (the `tenancy` auth integration); superusers bypass, a missing user
 is denied. `.permissions_for_model::<Post>()` auto-fills the standard
 `<table>.view` / `.add` / `.change` / `.delete` codenames (`posts.view`, … for
-the `posts` table).
+the `posts` table). Codenames need the `tenancy` feature: without it a ViewSet
+that sets any refuses to mount, with a panic naming the fix. On a
+single-database app, put your own auth layer in front and use `allow_anonymous`,
+or `read_only`.
 
 **Object permissions.** A ViewSet runs the same hooks as the admin
 (`register_object_permission!`, `register_queryset_scope!`):

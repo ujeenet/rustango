@@ -260,7 +260,7 @@ either idempotent or refuses on conflict.
 
 | Verb | Purpose |
 |---|---|
-| `make:api_routes <app> [--tenant]` | Scaffold `src/<app>/api_routes.rs` — the per-app composer that `.merge(...)`-es every viewset's router into a single `Router<()>`. `--tenant` emits the no-arg shape (each viewset resolves its own per-request connection); default emits the `pool: PgPool` shape. Refuses to overwrite existing files. |
+| `make:api_routes <app> [--tenant]` | Scaffold `src/<app>/api_routes.rs` — the per-app composer that `.merge(...)`-es every viewset's router into a single `Router<()>`. `--tenant` emits the no-arg shape (each viewset resolves its own per-request connection); default emits the `pool: Pool` shape (`rustango::sql::Pool`, any backend), with one commented `.merge(...)` per app model at its table's route. Refuses to overwrite existing files. |
 | `forget-pending <name>` | Delete a single un-applied migration JSON so the next `makemigrations` regenerates against current models. Accepts exact name or unique substring; refuses if the named migration is already in the ledger. |
 | `migrate --squash` | Delete every pending JSON and re-run `makemigrations` to produce a single fresh diff. Dev-iteration escape hatch when an evolving model produces a migration the validator rejects (e.g. `AddColumn NOT NULL no default`). Refuses with zero pending or only one pending (`forget-pending` is the right verb for the single-file case). |
 | `seed-permissions [--slug <s>]` | Re-run `auto_create_permissions` against one (`--slug`) or every active tenant. Idempotent — `UNIQUE (content_type_id, codename)` makes re-running on a populated catalog a no-op. Useful after adding `#[rustango(permissions)]` to a model without a fresh migrate cycle. |
@@ -278,8 +278,9 @@ either idempotent or refuses on conflict.
 cargo run -- startapp regions
 cargo run -- make:api_routes regions --tenant
 cargo run -- make:viewset CountryViewSet --model Country --tenant
-# Then in src/regions/api_routes.rs uncomment / add:
-#   .merge(super::viewsets::country::viewset().tenant_router("/api/countries"))
+# Add `pub mod api_routes;` to src/regions/mod.rs and `pub mod country_view_set;`
+# to src/lib.rs, then in src/regions/api_routes.rs uncomment / add:
+#   .merge(crate::country_view_set::router())
 
 # Got an `AddColumn NOT NULL no default` rejection on a fresh table?
 cargo run -- migrate --squash
@@ -1677,14 +1678,14 @@ Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impers
 
 **API**: [`tenancy::tenant_console::TenantSessionPayload::impersonation`](../../src/tenancy/tenant_console.rs); [`operator_console::router_with_impersonation`](../../src/tenancy/operator_console/mod.rs); [`admin::Builder::impersonated_by`](../../src/admin/urls.rs).
 
-**Recipe**: enabled automatically by `server::Builder` when both an operator session secret and a tenant session secret are configured. The operator-side form posts to `/orgs/{slug}/impersonate`; the response sets a slug-pinned tenant cookie with TTL `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` (default `3600`). The cookie payload carries an `imp` field (operator user id) — distinguishable from native tenant sessions and audit-logged into `rustango_audit_log` on issue. Clicking "End impersonation" in the banner clears the cookie.
+**Recipe**: enabled automatically by `server::Builder` when both an operator session secret and a tenant session secret are configured. The operator-side form posts to `/orgs/{slug}/impersonate`; the response sets a slug-pinned tenant cookie with TTL `RouteConfig::impersonation_ttl` (default 1h), which `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` overrides; a value that is not a whole number of seconds of at least 1 stops the server at boot. The cookie payload carries an `imp` field (operator user id) — distinguishable from native tenant sessions and audit-logged into `rustango_audit_log` on issue. Clicking "End impersonation" in the banner clears the cookie.
 
 ```env
 # Optional — override the 1h impersonation cookie TTL:
 RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 ```
 
-**Verified by**: framework unit tests in `tenant_console::tests` (5 tests covering the `imp` claim round-trip + `is_impersonation()` accessor + TTL defaults).
+**Verified by**: framework unit tests in `tenant_console::tests` (5 tests covering the `imp` claim round-trip + `is_impersonation()` accessor + TTL defaults); the env override in `server::builder::secrets_tests`.
 
 ---
 
@@ -3193,7 +3194,8 @@ with `--no-tenant`.
 $ cargo run -- make:viewset NewProductViewSet --model Product
 make:viewset: auto-detected tenancy mode from Cargo.toml (pass `--no-tenant` to override)
 wrote src/new_product_view_set.rs
-  add `mod new_product_view_set;` to src/main.rs (or `pub mod ...;` to src/lib.rs)
+  add `pub mod new_product_view_set;` to src/lib.rs
+  answers at /api/product after you mount it as the end of the file shows
 ```
 
 ---

@@ -70,11 +70,14 @@ pub(crate) fn startapp_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), T
             }
         }
     }
-    let base_label = into.clone().unwrap_or_else(|| "src".into());
+    let base_dir = into
+        .as_deref()
+        .map_or_else(|| "src".into(), rustango::migrate::scaffold::into_base_dir);
+    let base_label = rustango::migrate::scaffold::slash_path(&base_dir);
     let opts = rustango::migrate::scaffold::StartAppOptions {
         app_name: app_name.clone(),
         manage_bin: with_manage_bin.then_some(TENANCY_MANAGE_BIN),
-        base_dir: into.map(std::path::PathBuf::from),
+        base_dir: Some(base_dir.clone()),
         crate_root: None,
     };
     let cwd = std::env::current_dir().map_err(TenancyError::Io)?;
@@ -86,14 +89,7 @@ pub(crate) fn startapp_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), T
     // fresh project is `cargo run`-ready in one command — no separate
     // `init-tenancy` step.
     let bootstrap_report = if with_bootstrap {
-        let migrations_dir = cwd
-            .join(
-                opts.base_dir
-                    .clone()
-                    .unwrap_or_else(|| std::path::PathBuf::from("src")),
-            )
-            .join(&app_name)
-            .join("migrations");
+        let migrations_dir = cwd.join(&base_dir).join(&app_name).join("migrations");
         Some(crate::tenancy::init_tenancy(&migrations_dir)?)
     } else {
         None
@@ -158,22 +154,20 @@ fn write_report<W: Write>(
 
 fn usage() -> String {
     "startapp <name> [--into <dir>] [--with-manage-bin] [--with-bootstrap-migration]\n  \
-     Scaffold an app module under <dir>/<name>/ (mod.rs +\n  \
+     Scaffold an app module under src/<name>/ (mod.rs +\n  \
      models.rs + views.rs + urls.rs). Idempotent: existing files are\n  \
      left untouched. <name> must be a valid Rust identifier.\n\n  \
      --into <dir>\n  \
-     Override the default `src/` directory the app lands in. Use\n  \
-     for non-standard layouts — e.g. `--into examples/blog_demo`\n  \
-     for an in-tree example dir, or `--into crates/web` for a\n  \
-     workspace member with no `src/` parent. Default: `src`.\n\n  \
+     Write under src/<dir>/<name>/ instead, e.g. `--into apps`. The\n  \
+     parent module and urls.rs lines are printed for you to add.\n\n  \
      --with-manage-bin\n  \
-     Also write <dir>/bin/manage.rs with the **tenancy-aware**\n  \
+     Also write src/bin/manage.rs with the **tenancy-aware**\n  \
      dispatcher boilerplate (crate::tenancy::manage::run). Skipped\n  \
      if the file already exists.\n\n  \
      --with-bootstrap-migration\n  \
      Also drop the framework's registry+tenant bootstrap migrations\n  \
-     into <dir>/<name>/migrations/. Pair with\n  \
-     `Builder::migrate(\"<dir>/<name>/migrations\")` and the project\n  \
+     into the app's migrations/ dir. Pair with\n  \
+     `Builder::migrate(\"src/<name>/migrations\")` and the project\n  \
      is `cargo run`-ready out of the gate — no separate `init-tenancy`\n  \
      step. Idempotent."
         .to_owned()

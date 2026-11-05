@@ -259,7 +259,6 @@ Le fichier `.env` généré est prêt à l'emploi avec Docker. Comme nous allons
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_APEX_DOMAIN=localhost
 ```
 
 Les identifiants, le port et le nom de la base de données (`myblog_dev`) correspondent déjà au service Postgres du `docker-compose.yml`, donc vous n'avez pas besoin d'y toucher.
@@ -611,7 +610,7 @@ pub struct PostViewSet;
 
 Enregistrez le nouveau module en ajoutant `pub mod post_view_set;` à `src/lib.rs` (`make:viewset` affiche cette ligne pour vous).
 
-Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture sans codenames `permissions(...)` journalisent un avertissement au montage du routeur ; ajoutez `allow_anonymous` pour indiquer que c'est voulu.
+Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture ouvertes journalisent un avertissement au montage du routeur. Placez votre propre couche d'auth devant et ajoutez `allow_anonymous` pour indiquer que c'est voulu ; les codenames `permissions(...)` exigent la feature `tenancy` et refusent le montage sans elle.
 
 ### 12b. Monter les routes
 
@@ -630,7 +629,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{id}`. Le chemin est la table du modèle ; le commentaire à la fin de `src/post_view_set.rs` montre cette même ligne, et `make:viewset` affiche l'URL.
+Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{pk}`. Le chemin est la table du modèle ; le commentaire à la fin de `src/post_view_set.rs` montre cette même ligne, et `make:viewset` affiche l'URL.
 
 ### 12c. Essayer les points de terminaison
 
@@ -719,8 +718,9 @@ Intégrez l'identifiant de l'utilisateur (le « sujet » du jeton) et toute reve
 use rustango::jwt::{encode, Claims};
 use std::time::Duration;
 
-// Derive the signing key from your session secret.
-let secret = std::env::var("RUSTANGO_SESSION_SECRET")?.into_bytes();
+// A key of its own, 32+ bytes: add `JWT_SECRET=<output of openssl rand -base64 32>`
+// to `.env`. (Step 3 leaves `RUSTANGO_SESSION_SECRET` unset in development.)
+let secret = std::env::var("JWT_SECRET")?.into_bytes();
 
 let mut claims = Claims::new(user_id.to_string());   // subject = user id
 claims.set("roles", vec!["editor"]);

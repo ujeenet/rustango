@@ -809,10 +809,11 @@ impl<DB: Database> Builder<DB> {
     ///
     /// # Errors
     /// Pre-warm and bootstrap failures surfaced during assembly.
-    pub async fn into_router(self) -> Result<Router, Box<dyn std::error::Error>>
+    pub async fn into_router(mut self) -> Result<Router, Box<dyn std::error::Error>>
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        self.routes = self.routes.with_env_overrides()?;
         #[cfg(feature = "postgres")]
         crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let resolver_for_admin = self.resolver();
@@ -2045,6 +2046,30 @@ mod secrets_tests {
             .secrets(Fixed)
             .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
         assert_eq!(b.pools().resolve_secret("x").await.unwrap(), "fixed");
+    }
+
+    /// The impersonation TTL env var reaches the routes the server builds
+    /// with, and a bad value stops it instead of running on the default.
+    #[tokio::test]
+    async fn impersonation_ttl_env_is_read_and_checked() {
+        // Every test that sets this var holds the lock.
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        const VAR: &str = crate::tenancy::routes::IMPERSONATION_TTL_ENV;
+        let _g = LOCK.lock().await;
+        for bad in ["abc", "0", "-5"] {
+            std::env::set_var(VAR, bad);
+            let err = builder().into_router().await.err().map(|e| e.to_string());
+            assert!(
+                err.as_deref().is_some_and(|e| e.contains(VAR)),
+                "{bad}: {err:?}"
+            );
+        }
+        std::env::set_var(VAR, "900");
+        let routes = crate::tenancy::RouteConfig::default().with_env_overrides();
+        std::env::remove_var(VAR);
+        assert_eq!(routes.unwrap().impersonation_ttl.as_secs(), 900);
+        let routes = crate::tenancy::RouteConfig::default().with_env_overrides();
+        assert_eq!(routes.unwrap().impersonation_ttl.as_secs(), 60 * 60);
     }
 
     #[tokio::test]

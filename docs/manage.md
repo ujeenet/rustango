@@ -615,9 +615,12 @@ Pool template — generated `src/post_view_set.rs`:
 pub struct PostViewSet;
 ```
 
-It starts `read_only`: add `permissions(create = "...", ...)` behind an auth
-layer, then drop `read_only`, to serve writes. `--model Post` imports
-`crate::models::Post`; edit the `use` line if the model lives in an app.
+It starts `read_only`. To serve writes, guard them first: with `tenancy`, add
+`permissions(create = "...", ...)` behind an auth layer and drop `read_only`; on
+a single-database app, put your own auth layer in front and swap `read_only` for
+`allow_anonymous` (codenames there refuse to mount). `--model Post` finds
+`Post` in `src/models.rs` or an app's `models.rs` and imports it from there;
+`--model blog::models::Post` names the path outright.
 
 Mount it in `src/main.rs` with the server's pool:
 `.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. The path is the model's table (here `posts`); the model's snake name if it isn't compiled in yet.
@@ -1515,7 +1518,7 @@ impl rustango::tenancy::TenantUserModel for AppUser {}
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
-        .api(my_app::urls::router())
+        .api(my_app::urls::api())
         .tenancy()
         .user_model::<AppUser>()
         .run().await
@@ -1765,7 +1768,8 @@ Why this is safe:
 
 ```bash
 cargo run -- startapp blog        # if not done yet
-# Edit src/blog/models.rs — add #[derive(Model)]
+# Edit src/blog/models.rs — rename the starter `Blog` to `Post`
+#   (table = "posts") and add its fields
 # (startapp already added `pub mod blog;` to src/lib.rs)
 cargo run -- makemigrations
 cargo run -- migrate
@@ -1777,7 +1781,8 @@ cargo run -- migrate
 cargo run -- make:viewset PostViewSet --model Post
 # Edit src/post_view_set.rs — fill in field lists
 # Add `pub mod post_view_set;` to src/lib.rs
-# Mount it in src/main.rs: .nest_with("/api", |pool| PostViewSet::router("/posts", pool))
+# Mount it in src/main.rs, as the end of src/post_view_set.rs shows:
+#   .nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))
 cargo run                        # GET /api/posts now works
 ```
 
