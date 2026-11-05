@@ -638,7 +638,7 @@ Schreibzugriffe zu bedienen. `--model Post` importiert `crate::models::Post`;
 passen Sie die `use`-Zeile an, wenn das Modell in einer App liegt.
 
 In `src/main.rs` mit dem Pool des Servers einbinden:
-`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. Der Pfad ist die Tabelle des Modells (hier `posts`); der Snake-Name des Modells, falls es noch nicht einkompiliert ist.
 
 Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `pub fn router() -> Router<()>`, gebaut aus
@@ -646,7 +646,7 @@ Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `.permissions_for_model::<Post>()` und der restlichen Builder-Kette
 (`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
 `page_size` / `read_only`) als auskommentierte Zeilen vorgestubbt, am Ende
-`.tenant_router("/api/post_view_set")`. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
+`.tenant_router("/api/posts")`. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
 aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
 jeden Tenant.
 

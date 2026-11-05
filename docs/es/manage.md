@@ -628,7 +628,7 @@ capa de auth y luego quita `read_only` para servir escrituras. `--model Post`
 importa `crate::models::Post`; edita la línea `use` si el modelo vive en una app.
 
 Móntalo en `src/main.rs` con el pool del servidor:
-`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. La ruta es la tabla del modelo (aquí `posts`); el nombre snake del modelo si aún no está compilado.
 
 Plantilla de tenant — **no es un derive**. Emite un
 `pub fn router() -> Router<()>` construido a partir de
@@ -636,7 +636,7 @@ Plantilla de tenant — **no es un derive**. Emite un
 `.permissions_for_model::<Post>()` activo y el resto de la cadena del builder
 (`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
 `page_size` / `read_only`) esbozado en líneas comentadas, y termina en
-`.tenant_router("/api/post_view_set")`. La conexión se resuelve por petición mediante el extractor `Tenant`
+`.tenant_router("/api/posts")`. La conexión se resuelve por petición mediante el extractor `Tenant`
 en lugar de capturarse una sola vez al montar, así que un único `router()` sirve
 a todos los tenants.
 

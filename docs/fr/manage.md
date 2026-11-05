@@ -652,7 +652,7 @@ une couche d'auth, puis retirez `read_only`, pour servir les écritures.
 modèle vit dans une app.
 
 Montez-le dans `src/main.rs` avec le pool du serveur :
-`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. Le chemin est la table du modèle (ici `posts`) ; le nom snake du modèle s'il n'est pas encore compilé.
 
 Modèle tenant — **pas un derive**. Il émet un `pub fn router() -> Router<()>`
 construit à partir de
@@ -660,7 +660,7 @@ construit à partir de
 `.permissions_for_model::<Post>()` actif et le reste de la chaîne du builder
 (`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
 `page_size` / `read_only`) ébauché en lignes commentées, et se termine par
-`.tenant_router("/api/post_view_set")`. La connexion est résolue par requête via l'extracteur `Tenant` au
+`.tenant_router("/api/posts")`. La connexion est résolue par requête via l'extracteur `Tenant` au
 lieu d'être capturée une fois au montage, donc un seul `router()` sert tous les
 tenants.
 

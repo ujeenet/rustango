@@ -502,7 +502,7 @@ Ejecútalo:
 cargo run
 ```
 
-Deberías ver el id de tu nueva publicación y las filas leídas de vuelta. Restaura `src/main.rs` a su forma de servidor andamiada una vez que hayas confirmado que funciona — el siguiente paso parte de ahí.
+Deberías ver el id de tu nueva publicación y las filas leídas de vuelta. Restaura `src/main.rs` a su forma de servidor andamiada una vez que hayas confirmado que funciona — el siguiente paso parte de ahí. Quita también las tres líneas `use` de arriba: la forma de servidor no las usa y el compilador avisa de imports sin usar.
 
 ---
 
@@ -626,7 +626,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-El ViewSet responde ahora en `/api/posts` y `/api/posts/{id}`.
+El ViewSet responde ahora en `/api/posts` y `/api/posts/{id}`. La ruta es la tabla del modelo; el comentario al final de `src/post_view_set.rs` muestra esta misma línea, y `make:viewset` imprime la URL.
 
 ### 12c. Probar los endpoints
 

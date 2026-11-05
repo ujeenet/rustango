@@ -620,14 +620,14 @@ layer, then drop `read_only`, to serve writes. `--model Post` imports
 `crate::models::Post`; edit the `use` line if the model lives in an app.
 
 Mount it in `src/main.rs` with the server's pool:
-`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. The path is the model's table (here `posts`); the model's snake name if it isn't compiled in yet.
 
 Tenant template — **not a derive**. It emits a `pub fn router() -> Router<()>`
 built from `ViewSet::for_model(Post::SCHEMA, &["id"])`, with
 `.permissions_for_model::<Post>()` on and the rest of the builder chain
 (`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
 `page_size` / `read_only`) stubbed out as commented lines, ending in
-`.tenant_router("/api/post_view_set")`. The connection is resolved per request
+`.tenant_router("/api/posts")`. The connection is resolved per request
 through the `Tenant` extractor rather than captured once at mount time, so one
 `router()` serves every tenant.
 
