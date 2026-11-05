@@ -68,7 +68,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Migrations: `makemigrations` refuses a model whose `table =` changed with its columns kept (it wrote a drop + create that emptied the table) and names the `RenameTable` route; every `DropTable` now warns. `migrate <target>` refuses a target an applied squash replaces, `unapply` refuses a migration that is not applied, and `migrate_embedded` reconciles squashes like `migrate`. On SQLite a migration whose ledger row committed is no longer reported as failed when only the FK restore failed.
 - System migrations stage their files in a fresh, owner-only temp dir; a leftover or planted dir under the old guessable name is never read.
 - A regenerated system chain refuses, listing each column, when the database differs from it in nullability, `max_length`, having a DEFAULT, UNIQUE or ON DELETE; it used to record itself as applied.
-- PostgreSQL: drops, alters, renames and index drops name the table in the migration's schema, so a schema-mode tenant migration never reaches a same-named table in `public`.
+- PostgreSQL: drops, alters, renames, index drops, UNIQUE adds, CHECK drops and comments name the table in the migration's schema, and FK and UNIQUE names are looked up there before their drop, so a schema-mode tenant migration never reaches a same-named table in `public`.
 - SQLite: a table rebuild no longer fails when a view or another table's trigger names the table; it refuses one that would break a view.
 
 ## [0.63.0] — 2026-11-04

@@ -341,6 +341,10 @@ cargo run -- migrate 0001_initial       # roll back to 0001 (unapply 0002+)
 cargo run -- migrate zero               # unapply EVERY migration
 ```
 
+A target that an applied squash replaced is refused: moving to it would undo
+the squash and its rows. Target the squash or a migration outside it. Rolling
+back refuses a migration the ledger has not applied.
+
 ### `migrate --squash`
 
 > **Single-database only.** The tenancy `migrate` (`Cli::tenancy()`) refuses

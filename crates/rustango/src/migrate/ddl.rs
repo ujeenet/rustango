@@ -128,7 +128,9 @@ pub fn table_comment_statements_with_dialect(
 ) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(comment) = model.db_table_comment {
-        if let Some(stmt) = dialect.table_comment_statement(model.table, comment) {
+        if let Some(stmt) =
+            dialect.table_comment_statement(crate::sql::TableTarget::bare(model.table), comment)
+        {
             out.push(stmt);
         }
     }
@@ -200,7 +202,9 @@ pub fn drop_constraints_sql_with_dialect(
     // because a dialect with no drop-constraint syntax returns `None`
     // and must emit nothing rather than Postgres DDL.
     let mut out = Vec::new();
-    let mut push = |name: String| out.extend(dialect.drop_foreign_key_sql(model.table, &name));
+    let mut push = |name: String| {
+        out.extend(dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(model.table), &name))
+    };
     for field in model.scalar_fields() {
         if field.relation.is_some() {
             push(fk_constraint_name(model.table, field.column));
@@ -459,7 +463,8 @@ pub fn column_comment_statements_with_dialect(
         let Some(comment) = field.db_comment else {
             continue;
         };
-        if let Some(stmt) = dialect.column_comment_statement(model.table, field.column, comment) {
+        let table = crate::sql::TableTarget::bare(model.table);
+        if let Some(stmt) = dialect.column_comment_statement(table, field.column, comment) {
             out.push(stmt);
         }
     }

@@ -568,9 +568,13 @@ async fn composite_fk_drop_finds_the_live_name(pool: &Pool) {
             .await
             .expect("FK names");
         for (n,) in names {
-            exec(pool, &d.drop_foreign_key_sql(old, &n).expect("drop"))
-                .await
-                .expect("drop the FK");
+            exec(
+                pool,
+                &d.drop_foreign_key_sql(rustango::sql::TableTarget::bare(old), &n)
+                    .expect("drop"),
+            )
+            .await
+            .expect("drop the FK");
         }
         exec(
             pool,

@@ -231,8 +231,10 @@ Eine gelöschte Spalte neben einer neuen Spalte desselben Typs in einer Tabelle
 sieht nach einem umbenannten Feld aus, und Löschen+Hinzufügen würde ihre Daten
 löschen. `makemigrations` verweigert das und nennt die Spalten; schreiben Sie
 das `RenameColumn` wie unten, oder übergeben Sie `--drop-and-add`, um bewusst
-zu löschen und hinzuzufügen. Jedes andere `DropColumn` warnt, dass seine Daten
-verloren gehen.
+zu löschen und hinzuzufügen. Eine gelöschte Tabelle neben einer neuen Tabelle
+mit denselben Spalten (ein geändertes `table =`) wird genauso verweigert;
+schreiben Sie stattdessen ein `RenameTable`. Jedes andere `DropColumn` oder
+`DropTable` warnt, dass seine Daten verloren gehen.
 
 ### `makemigrations --app <app>`
 
@@ -347,6 +349,11 @@ cargo run -- migrate 0003_add_slug      # forward to 0003
 cargo run -- migrate 0001_initial       # roll back to 0001 (unapply 0002+)
 cargo run -- migrate zero               # unapply EVERY migration
 ```
+
+Ein Ziel, das ein angewendeter Squash ersetzt hat, wird verweigert: Der Wechsel
+dorthin würde den Squash und seine Zeilen rückgängig machen. Wählen Sie den
+Squash oder eine Migration außerhalb davon als Ziel. Das Zurückrollen verweigert
+eine Migration, die das Ledger nicht angewendet hat.
 
 ### `migrate --squash`
 
