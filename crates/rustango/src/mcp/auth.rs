@@ -9,8 +9,9 @@
 //!
 //! **HTTP handlers.** [`agent_token`] trades a `{name, secret}` pair
 //! for a scoped JWT, and [`post_authed`] is the JSON-RPC endpoint
-//! behind such a token. Both resolve the tenant with the [`Tenant`]
-//! extractor and work on that tenant's pool, so a token minted for
+//! behind such a token. Both resolve the tenant with the
+//! [`TenantScope`](crate::extractors::TenantScope) extractor (any mounted
+//! backend) and work on that tenant's pool, so a token minted for
 //! one tenant is refused on another.
 
 use std::sync::Arc;

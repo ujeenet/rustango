@@ -975,6 +975,7 @@ mod tests {
     }
 
     /// Run `chain` from its own dir under the system ledger.
+    #[cfg(feature = "sqlite")]
     async fn run_system(pool: &Pool, chain: &SystemChain) -> Result<(), MigrateError> {
         runner::with_migrate_lock_held(pool, |held| {
             runner::migrate_system_chain(held, pool, chain, chain.dir(), None)
@@ -985,6 +986,7 @@ mod tests {
 
     /// A regenerated chain refuses to record itself over columns that differ
     /// from it, rather than faking them; the same schema still converges.
+    #[cfg(feature = "sqlite")]
     async fn column_drift_is_refused(pool: &Pool) {
         let tmp = tempfile::tempdir().unwrap();
         let parent = table("cd_parent", None);
@@ -1050,6 +1052,9 @@ mod tests {
         assert!(!applied.contains("0001_cd_new"), "{applied:?}");
     }
 
+    // SQLite (in memory) is always reachable when compiled in, so the test
+    // never runs with nothing to check.
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn regenerated_chain_refuses_column_drift() {
         use crate::testkit::matrix::{Backend, OwnDatabase};
