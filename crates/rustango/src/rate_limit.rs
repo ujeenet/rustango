@@ -41,6 +41,13 @@ use axum::Router;
 /// that a flood of forged header values cannot exhaust memory.
 const MAX_BUCKETS: usize = 100_000;
 
+/// One-way hash of a bucket discriminator: a 64-bit SHA-256 prefix in hex.
+/// Stable per client, short, and a secret header value never shows in a key.
+pub(crate) fn hash_discriminator(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    crate::hex::hex_encode(&Sha256::digest(value.as_bytes())[..8])
+}
+
 /// Warn once per process that the limiter cannot tell clients apart
 /// and is using one shared bucket. That turns the limiter into a
 /// site-wide throttle. Logged once so a hot path cannot flood logs.
@@ -422,14 +429,12 @@ impl RateLimitLayer {
     fn extract_key(&self, req: &Request<Body>) -> String {
         match &self.key_by {
             KeyBy::Ip => client_ip_key(req),
-            // This map stays in process memory and is never written
-            // anywhere, so the raw header value needs no hashing. The
-            // cache-backed limiter does hash it.
+            // Hashed: a raw value can be hundreds of KB per bucket.
             KeyBy::Header(name) => req
                 .headers()
                 .get(*name)
                 .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
+                .map(hash_discriminator)
                 .unwrap_or_else(|| {
                     warn_missing_discriminator(name);
                     "<no-header>".to_owned()
@@ -593,6 +598,24 @@ mod tests {
         }
         assert!(scans <= CAP / 8 + 1, "{scans} scans for {CAP} new keys");
         assert!(l.store.lock().await.len() <= CAP);
+    }
+
+    /// A header value is stored as a short hash, so a huge or secret value costs 16 bytes.
+    #[test]
+    fn header_keys_are_hashed() {
+        let l = RateLimitLayer::per_header("x-key", 2, Duration::from_secs(60));
+        let key = |v: &str| {
+            let req = Request::builder()
+                .header("x-key", v)
+                .body(Body::empty())
+                .unwrap();
+            l.extract_key(&req)
+        };
+        let long = "s".repeat(64 * 1024);
+        assert_eq!(key(&long).len(), 16);
+        assert_eq!(key(&long), key(&long));
+        assert_ne!(key(&long), key("other"));
+        assert!(!key("secret-api-key").contains("secret"));
     }
 
     #[cfg(feature = "admin")]

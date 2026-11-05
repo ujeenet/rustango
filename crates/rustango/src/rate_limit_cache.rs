@@ -61,24 +61,6 @@ enum Bucket {
     Tenant(crate::tenancy::TenantSlug),
 }
 
-/// One-way hash of a bucket discriminator. A `SHA-256` prefix is
-/// stable per client, so the counter still works, but a secret header
-/// value (API key, bearer token) never lands in the cache as a
-/// readable key.
-fn hash_discriminator(value: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(value.as_bytes());
-    // 16 hex chars (64 bits): collisions are negligible for a
-    // rate-limit keyspace and the key stays short.
-    digest[..8]
-        .iter()
-        .fold(String::with_capacity(16), |mut s, b| {
-            use std::fmt::Write as _;
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
 /// Warn once per process that the limiter could not derive a
 /// per-client key and fell back to one shared bucket, which turns it
 /// into a site-wide throttle. One line only, so a hot path cannot
@@ -149,7 +131,7 @@ impl CacheRateLimitLayer {
                 .headers()
                 .get(*name)
                 .and_then(|v| v.to_str().ok())
-                .map(hash_discriminator)
+                .map(crate::rate_limit::hash_discriminator)
                 .unwrap_or_else(|| {
                     warn_missing_discriminator(name);
                     "<no-header>".to_owned()
@@ -391,7 +373,7 @@ mod tests {
         // A secret header value must never appear verbatim in a
         // cache key.
         let secret = "super-secret-api-key-abc123";
-        let h = hash_discriminator(secret);
+        let h = crate::rate_limit::hash_discriminator(secret);
         assert_ne!(h, secret, "value must be transformed");
         assert!(
             !h.contains("secret"),
@@ -400,9 +382,9 @@ mod tests {
         assert_eq!(h.len(), 16, "expected a 16-hex-char digest prefix");
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
         // Deterministic: the same client hashes to the same bucket.
-        assert_eq!(h, hash_discriminator(secret));
+        assert_eq!(h, crate::rate_limit::hash_discriminator(secret));
         // Distinct values → distinct keys.
-        assert_ne!(h, hash_discriminator("a-different-key"));
+        assert_ne!(h, crate::rate_limit::hash_discriminator("a-different-key"));
     }
 
     /// `KeyBy::Tenant`: a bucket per tenant, one for unresolved tenants,

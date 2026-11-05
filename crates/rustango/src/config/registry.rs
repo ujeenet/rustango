@@ -148,6 +148,8 @@ pub(crate) const KEYS: &[Key] = &[
     key("cache.backend", CACHE),
     secret("cache.redis_url", CACHE),
     key("cache.file_cache_dir", CACHE),
+    key("cache.file_cache_max_entries", CACHE),
+    key("cache.file_cache_max_bytes", CACHE),
     key("cache.redis_connect_timeout_ms", CACHE),
     key("cache.redis_command_timeout_ms", CACHE),
     key("jobs.backend", JOBS),

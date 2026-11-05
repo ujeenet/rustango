@@ -371,6 +371,10 @@ En multi-tenancy, montez la couche à l'intérieur de la couche tenancy ; voir
 
 **Entretien :** `DatabaseCache::purge_expired()` et
 `FileCache::purge_expired()` suppriment les entrées expirées ; appelez-les à intervalle régulier.
+`DatabaseCache` supprime aussi un lot de lignes expirées toutes les 256 écritures
+(`.purge_every(n)`, `0` le désactive). `FileCache` garde au plus 100 000 entrées
+et 1 Gio (`.max_entries(n)`, `.max_bytes(n)`, ou `file_cache_max_entries` /
+`file_cache_max_bytes` dans `[cache]` ; `0` lève une limite) et retire les plus anciennes d'abord.
 
 **Ce qui est bâti sur le cache :** les [sessions](auth-sessions.md) côté
 serveur, la [limitation de débit](middleware.md) distribuée

@@ -174,6 +174,7 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 | `.keepalive(Duration)` | 30 s | `Ping`-Intervall, mit oder ohne Verkehr; ein Peer, der nach einem Ping ein ganzes Intervall schweigt, wird geschlossen |
 | `.on_message(fn(&str) -> Option<String>)` | keine | verarbeitet Client→Server-Text; gib `Some(reply)` zurück, um ein Echo **nur an diesen Client** zu senden (rufe `hub.broadcast(..)` für das Auffächern auf) |
 | `.max_message_bytes(n)` | 1 MiB | schließt die Verbindung, wenn eine Client-Nachricht dies überschreitet |
+| `.max_connections(n)` | keine | höchstens so viele offene Sockets; darüber antwortet `upgrade` mit 503 |
 
 **Langsame Konsumenten** werden nicht stillschweigend verworfen: einem hinterherhinkenden Client
 wird mitgeteilt, dass er `n` Nachrichten verpasst hat, sodass er neu synchronisieren

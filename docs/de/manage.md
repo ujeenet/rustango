@@ -1686,6 +1686,11 @@ ohne Ping als bereit, damit eine Lastspitze nicht alle Replikas zugleich
 scheitern lässt. Nach 30 Sekunden pingt es wieder; eine hängende Datenbank gibt
 also weiter `503`. Jeder Prozess merkt sich seinen eigenen letzten Ping.
 
+Eine `/ready`-Antwort wird 1 Sekunde wiederverwendet, sodass eine Flut von Probes
+die Checks einmal pro Sekunde ausführt; `HealthRouter::ready_cache(d)` ändert das.
+Der Server hält höchstens `RUSTANGO_MAX_CONNECTIONS` (10 000) Verbindungen; die
+nächste wartet im Backlog.
+
 Bei einer App mit einer Datenbank `migrate_on_boot` abschalten und `migrate`
 einmal als Job vor dem Deploy laufen lassen (siehe `runserver` oben).
 
@@ -1911,6 +1916,8 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | `prewarm_active_tenants` | false | Wenn true, ruft `Server::Builder::serve` beim Boot `prewarm_database_tenants()` auf. |
 | `max_cached_scoped_pools` | 64 | Obergrenze für die gecachten Pools pro Tenant bei Tenants im schema-Modus. |
 | `scoped_pool_max_connections` | 8 | `max_connections` jedes Tenant-Pools im schema-Modus. |
+| `max_concurrent_pool_builds` | 16 | Gleichzeitige Pool-Aufbauten im Datenbank-Modus; ein Aufbau wartet bis `database_pool_acquire_timeout`, dann 503. `0` = keine Grenze. |
+| `max_pool_builds_per_minute` | 600 | Pool-Aufbauten im Datenbank-Modus pro Minute; darüber 503. `0` = keine Grenze. |
 
 Mit `Cli` übergeben Sie die Konfiguration über `Cli::with_tenant_pools(config)`.
 

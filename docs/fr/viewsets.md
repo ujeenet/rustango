@@ -610,6 +610,8 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `ordering_fields(&["…"])` | Liste blanche des champs que `?ordering=` peut utiliser. |
 | `page_size(n)` | Taille de page par défaut (≤ 100). |
 | `max_page_size(n)` | Relève ou abaisse le plafond client lui-même (100 par défaut). |
+| `max_offset(n)` | Ligne la plus profonde pour `?offset=` / `?page=` ; au-delà un 400 (10 000 par défaut, `0` le lève). |
+| `count(false)` | Saute le `COUNT(*)` ; `count` vaut alors `null`. |
 | `max_bulk_create(n)` | Nombre maximal de lignes qu'une création groupée peut porter (1000 par défaut). |
 | `pk_param(name)` | Renomme le paramètre de chemin des routes de détail (`pk_param_name()` le relit). |
 | `openapi_query(bool)` | Décrit la route `QUERY` dans le document OpenAPI généré (demande un outillage OpenAPI 3.2). Désactivé par défaut ; la route est montée dans tous les cas. |

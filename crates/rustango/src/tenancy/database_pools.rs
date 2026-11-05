@@ -122,6 +122,8 @@ pub struct DatabasePools<DB: Database> {
     cache: RwLock<HashMap<String, super::pools::CachedPool<DB>>>,
     /// Single-flight for cache misses.
     building: super::pools::SingleFlight<Arc<Pool<DB>>>,
+    /// Cold-build bounds, built from `config` on first use.
+    gate: std::sync::OnceLock<super::pools::BuildGate>,
     /// The backend type this registry serves. Validated against each
     /// `org.backend_kind` on `pool_for_org` so a mis-routed tenant
     /// fails loudly instead of silently building the wrong pool.
@@ -163,6 +165,7 @@ impl<DB: Database> DatabasePools<DB> {
             lru_tick: std::sync::atomic::AtomicU64::new(0),
             cache: RwLock::new(HashMap::new()),
             building: super::pools::SingleFlight::default(),
+            gate: std::sync::OnceLock::new(),
             backend,
             url_template: None,
         }
@@ -195,6 +198,7 @@ impl<DB: Database> DatabasePools<DB> {
     #[must_use]
     pub fn config(mut self, config: TenantPoolsConfig) -> Self {
         self.config = config;
+        self.gate = std::sync::OnceLock::new();
         self
     }
 
@@ -304,6 +308,11 @@ impl<DB: Database> DatabasePools<DB> {
                 }
             },
         };
+        let _slot = self
+            .gate
+            .get_or_init(|| super::pools::BuildGate::new(&self.config))
+            .admit()
+            .await?;
         let resolved = self
             .secrets
             .resolve(&url_ref)
@@ -417,6 +426,55 @@ mod tests {
     #[test]
     fn mysql_pool_registry_constructible() {
         let _: DatabasePools<sqlx::MySql> = DatabasePools::new(BackendKind::MySql);
+    }
+
+    /// Cold pool builds past the per-minute budget fail with `PoolBusy`;
+    /// cached tenants and builds under the budget are untouched.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn cold_builds_past_the_budget_are_refused() {
+        for (budget, built) in [(2, 2), (0, 4)] {
+            let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite)
+                .config(TenantPoolsConfig {
+                    max_cached_database_pools: 1,
+                    max_pool_builds_per_minute: budget,
+                    ..TenantPoolsConfig::default()
+                });
+            let org = |slug: &str| {
+                crate::testkit::org_with(|o| {
+                    o.slug = slug.into();
+                    o.backend_kind = "sqlite".into();
+                    o.database_url = Some("sqlite::memory:".into());
+                })
+            };
+            let mut ok = 0;
+            for slug in ["a", "b", "a", "b"] {
+                match pools.pool_for_org(&org(slug)).await {
+                    Ok(_) => ok += 1,
+                    Err(e) => assert!(matches!(e, TenancyError::PoolBusy), "{e}"),
+                }
+            }
+            assert_eq!(ok, built, "budget {budget}");
+            // A cached tenant needs no build.
+            if budget > 0 {
+                assert!(pools.pool_for_org(&org("b")).await.is_ok());
+            }
+        }
+    }
+
+    /// Only `max_concurrent_pool_builds` builds run at once.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn concurrent_builds_wait_for_a_slot() {
+        let gate = crate::tenancy::pools::BuildGate::new(&TenantPoolsConfig {
+            max_concurrent_pool_builds: 1,
+            database_pool_acquire_timeout: std::time::Duration::from_millis(50),
+            ..TenantPoolsConfig::default()
+        });
+        let held = gate.admit().await.expect("first slot");
+        assert!(matches!(gate.admit().await, Err(TenancyError::PoolBusy)));
+        drop(held);
+        assert!(gate.admit().await.is_ok(), "slot back after the build");
     }
 
     #[cfg(feature = "sqlite")]

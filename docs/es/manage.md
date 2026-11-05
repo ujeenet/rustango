@@ -1666,6 +1666,11 @@ la base como lista sin ping, para que un pico de tráfico no haga fallar todas l
 réplicas a la vez. Pasados 30 segundos vuelve a hacer ping, así que una base
 colgada sigue dando `503`. Cada proceso guarda su propio último ping.
 
+Una respuesta de `/ready` se reutiliza 1 segundo, así que una avalancha de sondas
+ejecuta las comprobaciones una vez por segundo; `HealthRouter::ready_cache(d)` lo
+cambia. El servidor mantiene como máximo `RUSTANGO_MAX_CONNECTIONS` (10 000)
+conexiones; la siguiente espera en la cola del kernel.
+
 En una app de una sola base, desactive `migrate_on_boot` y ejecute `migrate` una
 vez como job previo al despliegue (vea `runserver` más arriba).
 
@@ -1887,6 +1892,8 @@ actives el pre-calentamiento. Los ajustes viven en `TenantPoolsConfig`:
 | `prewarm_active_tenants` | false | Cuando es true, `Server::Builder::serve` llama a `prewarm_database_tenants()` en el arranque. |
 | `max_cached_scoped_pools` | 64 | Tope de pools por tenant en caché para los tenants en modo esquema. |
 | `scoped_pool_max_connections` | 8 | `max_connections` de cada pool de tenant en modo esquema. |
+| `max_concurrent_pool_builds` | 16 | Pools en modo base construidos a la vez; una construcción espera hasta `database_pool_acquire_timeout`, luego 503. `0` = sin límite. |
+| `max_pool_builds_per_minute` | 600 | Pools en modo base construidos por minuto; por encima 503. `0` = sin límite. |
 
 Con `Cli`, pasa la configuración mediante `Cli::with_tenant_pools(config)`.
 

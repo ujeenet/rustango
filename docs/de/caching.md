@@ -369,6 +369,10 @@ Unter Tenancy hängst du den Layer innerhalb des Tenancy-Layers ein; siehe
 
 **Aufräumen:** `DatabaseCache::purge_expired()` und
 `FileCache::purge_expired()` löschen abgelaufene Einträge; rufe sie zeitgesteuert auf.
+`DatabaseCache` löscht zudem alle 256 Schreibvorgänge einen Schub abgelaufener Zeilen
+(`.purge_every(n)`, `0` schaltet das ab). `FileCache` behält höchstens 100 000 Einträge
+und 1 GiB (`.max_entries(n)`, `.max_bytes(n)` oder `file_cache_max_entries` /
+`file_cache_max_bytes` in `[cache]`; `0` hebt eine Grenze auf) und löscht die ältesten zuerst.
 
 **Was auf dem Cache aufbaut:** serverseitige [Sessions](auth-sessions.md),
 verteiltes [Rate Limiting](middleware.md) (`CacheRateLimitLayer`),

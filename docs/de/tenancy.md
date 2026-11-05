@@ -270,6 +270,10 @@ Um den Pool jedes aktiven Tenants im Datenbank-Modus vorab zu öffnen, führe
 [`prewarm-pools`](manage.md#prewarm-pools) aus, nutze den Knopf in der
 Konsole oder setze `prewarm_active_tenants: true`.
 
+Kalte Pool-Aufbauten sind begrenzt: höchstens 16 gleichzeitig
+(`max_concurrent_pool_builds`) und 600 pro Minute (`max_pool_builds_per_minute`);
+darüber erhält eine Anfrage ein 503 mit `Retry-After`. `0` hebt eine Grenze auf.
+
 ## Migrationen
 
 Jede Migrationsdatei hat einen Scope, `registry` oder `tenant`.

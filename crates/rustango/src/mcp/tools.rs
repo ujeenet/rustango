@@ -303,6 +303,30 @@ fn redact_json(value: &Value) -> Value {
     }
 }
 
+/// Most bytes of redacted arguments an audit row keeps.
+const AUDIT_ARGS_MAX: usize = 8 * 1024;
+
+/// `args` redacted; past [`AUDIT_ARGS_MAX`] bytes, its head plus the
+/// full size and SHA-256, so one call cannot write a megabyte row.
+fn audit_arguments(args: &Value) -> Value {
+    let redacted = redact_json(args);
+    let text = redacted.to_string();
+    if text.len() <= AUDIT_ARGS_MAX {
+        return redacted;
+    }
+    use sha2::{Digest, Sha256};
+    let mut end = AUDIT_ARGS_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    json!({
+        "truncated": true,
+        "bytes": text.len(),
+        "sha256": crate::hex::hex_encode(&Sha256::digest(text.as_bytes())),
+        "head": &text[..end],
+    })
+}
+
 /// Audit a tool call, best effort: a failure here never fails the
 /// call. Arguments are redacted, so a tool that takes a `password`
 /// or a `token` cannot leak it into the audit table.
@@ -312,7 +336,7 @@ async fn audit_tool_call(pool: &Pool, agent_id: i64, tool: &str, args: &Value) {
         entity_pk: agent_id.to_string(),
         operation: crate::audit::AuditOp::Action,
         source: crate::audit::AuditSource::Custom(format!("mcp:agent:{agent_id}")),
-        changes: json!({ "tool": tool, "arguments": redact_json(args) }),
+        changes: json!({ "tool": tool, "arguments": audit_arguments(args) }),
     };
     if let Err(e) = crate::audit::emit_one(pool, &entry).await {
         tracing::warn!(error = %e, tool, "mcp tools/call audit not recorded");
@@ -382,6 +406,18 @@ mod tests {
             assert!(out.get("structuredContent").is_none(), "{out}");
             assert_eq!(out["content"][0]["text"], text, "{out}");
         }
+    }
+
+    #[test]
+    fn audit_arguments_are_capped_and_hashed() {
+        let small = json!({ "q": "hi", "password": "x" });
+        assert_eq!(audit_arguments(&small), redact_json(&small));
+        let big = json!({ "body": "é".repeat(10_000), "token": "secret" });
+        let row = audit_arguments(&big);
+        assert_eq!(row["truncated"], json!(true));
+        assert!(row["head"].as_str().unwrap().len() <= AUDIT_ARGS_MAX);
+        assert_eq!(row["sha256"].as_str().unwrap().len(), 64);
+        assert!(!row.to_string().contains("secret"));
     }
 
     #[test]

@@ -603,6 +603,8 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `ordering_fields(&["…"])` | Whitelist which fields `?ordering=` may use. |
 | `page_size(n)` | Default page size (≤ 100). |
 | `max_page_size(n)` | Raise or lower the client cap itself (default 100). |
+| `max_offset(n)` | Deepest `?offset=` / `?page=` row; past it a 400 (default 10 000, `0` lifts it). |
+| `count(false)` | Skip the `COUNT(*)`; `count` is then `null`. |
 | `max_bulk_create(n)` | Most rows one bulk create may carry (default 1000). |
 | `pk_param(name)` | Rename the path parameter used for detail routes (`pk_param_name()` reads it back). |
 | `openapi_query(bool)` | Describe the `QUERY` route in the generated OpenAPI document (needs OpenAPI 3.2 tooling). Off by default; the route is mounted either way. |

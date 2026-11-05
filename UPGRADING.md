@@ -152,6 +152,8 @@ untouched.
 
 ## 0.64.0
 
+- Resource caps, all configurable: `FileCache` keeps 100 000 entries / 1 GiB and drops the oldest; `DatabaseCache` purges expired rows every 256 writes; `/refresh` allows 30 per user per minute (429 past it); a full `InMemoryJtiStore` (1 000 000) refuses refreshes and revocations; ViewSet lists answer 400 past offset 10 000; tenant pool builds past 16 at once or 600 a minute answer 503; `/ready` answers are reused for 1 s; the server holds 10 000 connections (`RUSTANGO_MAX_CONNECTIONS`); a recursive media listing over 100 000 collections is a 400. `0` lifts most caps.
+- `auth_routes::Config` gains `refresh_per_minute` and `TenantPoolsConfig` gains `max_concurrent_pool_builds` / `max_pool_builds_per_minute`: add `..Default::default()` to struct literals. `TenantRejection` and `DatabaseTenantRejection` gain `Busy` and are `#[non_exhaustive]`; `TenancyError` gains `PoolBusy`.
 - `tenancy::server::run` is deprecated (removed in 0.66.0): it skips the `[security]` / `[server]` layers. Serve through `manage::Cli` (`run-server`) or `server::Builder`.
 - HMAC clients of a path-prefix tenant sign the full URL path, prefix included (`/acme/webhooks`), as they see it.
 - Tenancy apps: `[admin] read_only_tables` now makes those tables read-only in the tenant admin, and `allowed_tables` hides the others. Check both lists before you deploy.

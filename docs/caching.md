@@ -348,6 +348,10 @@ Under tenancy, mount the layer inside the tenancy layer; see
 
 **Housekeeping:** `DatabaseCache::purge_expired()` and
 `FileCache::purge_expired()` delete expired entries; call them on a schedule.
+`DatabaseCache` also deletes one batch of expired rows every 256 writes
+(`.purge_every(n)`, `0` turns it off). `FileCache` keeps at most 100 000 entries
+and 1 GiB (`.max_entries(n)`, `.max_bytes(n)`, or `file_cache_max_entries` /
+`file_cache_max_bytes` in `[cache]`; `0` lifts a cap) and drops the oldest first.
 
 **What's built on the cache:** server-side [sessions](auth-sessions.md),
 distributed [rate limiting](middleware.md) (`CacheRateLimitLayer`), idempotency

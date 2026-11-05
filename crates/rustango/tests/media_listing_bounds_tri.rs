@@ -372,6 +372,29 @@ async fn recursive_listing_spans_bind_cap(pool: &Pool) {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// A subtree past `with_max_subtree` is a 400; at the cap it lists.
+async fn recursive_listing_past_the_subtree_cap(pool: &Pool) {
+    let mgr = manager(pool);
+    let root = mgr
+        .create_collection("root", "root", None, "")
+        .await
+        .expect("root");
+    let Auto::Set(root) = root.id else {
+        panic!("no id")
+    };
+    seed_collections(pool, "s", 2, Some(root)).await;
+    let at_cap = mgr.clone().with_max_subtree(3);
+    assert!(at_cap.list_in_collection(root, true).await.is_ok());
+    let over = mgr.with_max_subtree(2);
+    let r = over.list_in_collection(root, true).await;
+    assert!(matches!(r, Err(MediaError::Other(_))), "{r:?}");
+    let uri = format!("/collections/{root}/contents?recursive=true");
+    let app = media_router_with(over, AllowAll);
+    let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.expect("router answers");
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
 /// A table made before the `parent_id` index (never migrated) still
 /// lists its subtree; MariaDB's walk hints that index by name.
 async fn recursive_listing_without_the_parent_index(pool: &Pool) {
@@ -427,6 +450,7 @@ tri_dialect_test!(
         racing_set_tags_keep_one,
         recursive_listing_spans_bind_cap,
         recursive_listing_without_the_parent_index,
+        recursive_listing_past_the_subtree_cap,
         popular_tags_are_counted,
     ]
 );

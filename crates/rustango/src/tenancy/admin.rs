@@ -2283,26 +2283,8 @@ async fn brand_response(
 /// The slug + filename are validated by the branding module — any
 /// path-traversal attempt comes back as a 404.
 async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStorage) -> Response {
-    match branding::load_brand_asset(slug, filename, brand_storage).await {
-        Ok((bytes, ct)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, ct)
-            .header(header::CACHE_CONTROL, "public, max-age=300")
-            .body(Body::from(bytes))
-            .expect("response builds")
-            .into_response(),
-        Err(
-            branding::BrandError::NotFound
-            | branding::BrandError::InvalidSlug
-            | branding::BrandError::InvalidFilename,
-        ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        // Unauthenticated route; a storage error can name the bucket or path.
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            crate::error::server_error_body("tenancy::admin::brand_asset", &e),
-        )
-            .into_response(),
-    }
+    branding::brand_asset_response(slug, filename, brand_storage, "tenancy::admin::brand_asset")
+        .await
 }
 
 /// A resolver failure is a 500 whose body withholds the driver text (#1684).

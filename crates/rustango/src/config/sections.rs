@@ -387,6 +387,12 @@ pub struct CacheSettings {
     /// key. Required when `backend = "file"`; without it the resolvers
     /// treat the backend as unknown.
     pub file_cache_dir: Option<std::path::PathBuf>,
+    /// Most entries the `"file"` backend keeps; the oldest go first.
+    /// `None` means 100 000, `0` no cap.
+    pub file_cache_max_entries: Option<usize>,
+    /// Most bytes the `"file"` backend keeps; the oldest go first.
+    /// `None` means 1 GiB, `0` no cap.
+    pub file_cache_max_bytes: Option<u64>,
     /// One Redis connect attempt, in milliseconds. `None` means 5000.
     pub redis_connect_timeout_ms: Option<u64>,
     /// One Redis command, send to reply, in milliseconds. `None` means 2000.
@@ -929,6 +935,8 @@ impl std::fmt::Debug for CacheSettings {
             .field("backend", &self.backend)
             .field("redis_url", &redacted_url(&self.redis_url))
             .field("file_cache_dir", &self.file_cache_dir)
+            .field("file_cache_max_entries", &self.file_cache_max_entries)
+            .field("file_cache_max_bytes", &self.file_cache_max_bytes)
             .field("redis_connect_timeout_ms", &self.redis_connect_timeout_ms)
             .field("redis_command_timeout_ms", &self.redis_command_timeout_ms)
             .finish()

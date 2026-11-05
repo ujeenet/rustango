@@ -98,6 +98,7 @@ nicht startet. Die `Config`-Felder:
 | `refresh_ttl_secs` | 7 Tage | Lebensdauer des Refresh-Tokens |
 | `refresh_absolute_ttl_secs` | 30 Tage | längste Dauer eines Logins über Refreshes hinweg; muss > 0 sein |
 | `refresh_reuse_grace_secs` | `10` | Fenster für Wiederholungen nach einer Rotation; `0` wertet jede Wiederverwendung als Diebstahl |
+| `refresh_per_minute` | `30` | Refreshes pro Benutzer und Minute in diesem Prozess; darüber ein 429; `0` schaltet das ab |
 | `session_secret` | `None` | expliziter Signierschlüssel statt `RUSTANGO_SESSION_SECRET` |
 | `jti_store` | `None` | Sperr-Store; `None` ist der In-Memory-Store |
 | `extra_claims` | `None` | Hook, der beim Login und bei jedem Refresh Claims in beide Tokens schreibt |

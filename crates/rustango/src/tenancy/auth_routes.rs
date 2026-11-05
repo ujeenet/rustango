@@ -70,6 +70,9 @@ pub struct Config {
     /// (up to twice it) is a client retry: 401 without revoking the chain.
     /// Default 10; `0` treats every reuse as theft (#1854).
     pub refresh_reuse_grace_secs: i64,
+    /// Refreshes one user may make per minute, per process; past it a 429.
+    /// Default 30; `0` turns the limit off.
+    pub refresh_per_minute: u32,
     /// HMAC signing key. `None` (default) reads from the
     /// `RUSTANGO_SESSION_SECRET` env var so the framework's own
     /// session secret is reused. Set explicitly for projects that
@@ -117,6 +120,7 @@ impl std::fmt::Debug for Config {
             .field("refresh_ttl_secs", &self.refresh_ttl_secs)
             .field("refresh_absolute_ttl_secs", &self.refresh_absolute_ttl_secs)
             .field("refresh_reuse_grace_secs", &self.refresh_reuse_grace_secs)
+            .field("refresh_per_minute", &self.refresh_per_minute)
             // Never the key itself — only whether one was set.
             .field("session_secret", &self.session_secret.is_some())
             .field("jti_store", &self.jti_store.is_some())
@@ -133,6 +137,7 @@ impl Default for Config {
             refresh_ttl_secs: 7 * 86400,
             refresh_absolute_ttl_secs: 30 * 86400,
             refresh_reuse_grace_secs: 10,
+            refresh_per_minute: 30,
             session_secret: None,
             jti_store: None,
             extra_claims: None,
@@ -256,6 +261,8 @@ struct AuthState {
     pwf_secret: crate::session::SessionSecret,
     session_cap_secs: i64,
     reuse_grace_secs: i64,
+    /// Per-user refresh buckets; `None` when the limit is off.
+    refresh_limit: Option<crate::rate_limit::RateLimitLayer>,
     extra_claims: Option<ClaimsHook>,
     prefix: String,
 }
@@ -292,6 +299,10 @@ impl JwtAuth {
             pwf_secret,
             session_cap_secs: cfg.refresh_absolute_ttl_secs,
             reuse_grace_secs: cfg.refresh_reuse_grace_secs,
+            refresh_limit: (cfg.refresh_per_minute > 0).then(|| {
+                let minute = std::time::Duration::from_secs(60);
+                crate::rate_limit::RateLimitLayer::global(cfg.refresh_per_minute, minute)
+            }),
             extra_claims: cfg.extra_claims,
             prefix: cfg.prefix,
         }))
@@ -769,6 +780,18 @@ async fn refresh_in(
             StatusCode::UNAUTHORIZED,
             "refresh token issued for a different tenant",
         ));
+    }
+    // Before any read or JTI write: a refresh loop must not grow the store.
+    if let Some(limit) = &auth.0.refresh_limit {
+        if let Err(retry) = limit
+            .take(&format!("{}:{}", tenant.org_id, claims.sub))
+            .await
+        {
+            return Err(crate::api_errors::ApiError::rate_limited_response(
+                "too many token refreshes",
+                retry,
+            ));
+        }
     }
     // Pre-#1854 tokens carry no session claims: fail closed.
     let session = RefreshSession::read(&claims.custom).ok_or_else(refused)?;
@@ -1592,6 +1615,19 @@ mod tests {
         cap: i64,
         grace: i64,
     ) -> (JwtAuth, crate::sql::Pool, crate::tenancy::auth::User) {
+        refresh_env_cfg(Config {
+            refresh_absolute_ttl_secs: cap,
+            refresh_reuse_grace_secs: grace,
+            ..Config::default()
+        })
+        .await
+    }
+
+    /// [`refresh_env`] with `cfg`; the signing key is set here.
+    #[cfg(feature = "sqlite")]
+    async fn refresh_env_cfg(
+        cfg: Config,
+    ) -> (JwtAuth, crate::sql::Pool, crate::tenancy::auth::User) {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         crate::testkit::create_tables_for::<crate::tenancy::auth::User>(&pool)
             .await
@@ -1603,11 +1639,40 @@ mod tests {
         user.insert(&pool).await.unwrap();
         let auth = JwtAuth::new(Config {
             session_secret: Some(vec![7; 32]),
-            refresh_absolute_ttl_secs: cap,
-            refresh_reuse_grace_secs: grace,
-            ..Config::default()
+            ..cfg
         });
         (auth, pool, user)
+    }
+
+    /// Refreshes past the per-user limit get a 429; with no limit all pass.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn refreshes_past_the_limit_are_throttled() {
+        for (limit, passed) in [(3, 3), (0, 5)] {
+            let (auth, pool, user) = refresh_env_cfg(Config {
+                refresh_per_minute: limit,
+                ..Config::default()
+            })
+            .await;
+            let mut token = login(&auth, &user);
+            for i in 0..5 {
+                let scope = TenantScope::for_test(org(), pool.clone());
+                let body = RefreshInput {
+                    refresh: token.clone(),
+                };
+                match refresh_in(auth.clone(), scope, body).await {
+                    Ok(Json(pair)) => {
+                        assert!(i < passed, "refresh {i} passed the limit {limit}");
+                        token = pair.refresh;
+                    }
+                    Err(r) => {
+                        assert!(i >= passed, "refresh {i} refused under the limit {limit}");
+                        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+                        assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "sqlite")]
