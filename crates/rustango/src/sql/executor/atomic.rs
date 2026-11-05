@@ -398,7 +398,9 @@ impl JoinedWrite {
 
     /// Keep the write: release its savepoint.
     pub(crate) async fn release(mut self) -> Result<(), ExecError> {
-        self.guard.savepoint("RELEASE SAVEPOINT", self.depth).await?;
+        self.guard
+            .savepoint("RELEASE SAVEPOINT", self.depth)
+            .await?;
         self.guard.depth = self.depth - 1;
         self.released = true;
         Ok(())

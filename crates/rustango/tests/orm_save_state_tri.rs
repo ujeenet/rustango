@@ -50,7 +50,10 @@ async fn stored(pool: &Pool, e: &Entry) -> Entry {
 
 fn not_found(r: Result<u64, ExecError>) {
     assert!(
-        matches!(r, Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound))),
+        matches!(
+            r,
+            Err(ExecError::Driver(rustango::sql::sqlx::Error::RowNotFound))
+        ),
         "{r:?}"
     );
 }

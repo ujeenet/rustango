@@ -313,7 +313,10 @@ async fn set_ids_insert_or_ignore_skips_existing(pool: &Pool) {
 async fn mixed_set_and_unset_ids_are_refused(pool: &Pool) {
     use rustango::sql::{ExecError, SqlError};
     let ids = seed_tallies(pool).await;
-    let rows = [tally(Auto::Set(ids[0]), "a2", 10), tally(Auto::Unset, "c", 3)];
+    let rows = [
+        tally(Auto::Set(ids[0]), "a2", 10),
+        tally(Auto::Unset, "c", 3),
+    ];
     let mixed = |r: Result<(), ExecError>| {
         assert!(
             matches!(r, Err(ExecError::Sql(SqlError::BulkAutoMixed))),
