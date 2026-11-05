@@ -2,14 +2,8 @@
 //! The template views' `tenant_router()` copies apply global scopes too (#1746),
 //! and audit their writes (#1794), and honour soft delete (#2082).
 
-// `not(postgres)`: the `Tenant` extractor looks up `TenantContext<DefaultDb>`,
-// which is Postgres once that feature is on.
-#![cfg(all(
-    feature = "sqlite",
-    feature = "tenancy",
-    feature = "template_views",
-    not(feature = "postgres")
-))]
+// No `not(postgres)`: `tenant_router()` serves whichever backend is mounted.
+#![cfg(all(feature = "sqlite", feature = "tenancy", feature = "template_views"))]
 
 use std::sync::Arc;
 

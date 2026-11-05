@@ -406,6 +406,7 @@ jobs:
             --test sqlite_datetime_ddl_is_consistent \
             --test system_migration_scopes \
             --test tracing_targets \
+            --test tenant_routers_serve_any_backend \
             --test every_test_suite_compiles_in_ci \
             --test framework_tables_are_never_hand_built \
             --test logging_fields_agree \

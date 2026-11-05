@@ -49,7 +49,6 @@ use crate::extractors::{Tenant, TenantScope};
 use crate::sql::sqlx::Database;
 use crate::sql::FetcherPool as _;
 use crate::tenancy::jwt_lifecycle::{JwtLifecycle, UserTokenScope};
-use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::TenantSlug;
 
 // ---------------------------------------------------------------- Config
@@ -301,11 +300,11 @@ impl JwtAuth {
         }))
     }
 
-    /// The login / refresh / logout / me endpoints under `Config::prefix`.
-    /// They are tenant-aware via the [`Tenant`] extractor.
+    /// The login / refresh / logout / me endpoints under `Config::prefix`,
+    /// for the tenant of whichever context is mounted, on any backend.
     #[must_use]
     pub fn router(&self) -> Router<()> {
-        self.router_for::<DefaultTenantDb>()
+        self.routes::<TenantScope>()
     }
 
     /// [`Self::router`] for a `Tenant<DB>` other than the default, e.g.
@@ -316,12 +315,16 @@ impl JwtAuth {
         DB: Database,
         Tenant<DB>: FromRequestParts<JwtAuth> + Send,
     {
+        self.routes::<Tenant<DB>>()
+    }
+
+    fn routes<T: crate::extractors::TenantArg<JwtAuth>>(&self) -> Router<()> {
         let p = &self.0.prefix;
         Router::new()
-            .route(&format!("{p}/login"), post(login::<DB>))
-            .route(&format!("{p}/refresh"), post(refresh::<DB>))
-            .route(&format!("{p}/logout"), post(logout::<DB>))
-            .route(&format!("{p}/me"), get(me::<DB>))
+            .route(&format!("{p}/login"), post(login::<T>))
+            .route(&format!("{p}/refresh"), post(refresh::<T>))
+            .route(&format!("{p}/logout"), post(logout::<T>))
+            .route(&format!("{p}/me"), get(me::<T>))
             .with_state(self.clone())
             // Tokens and the user's identity: no cache keeps them.
             .layer(axum::middleware::map_response(crate::vary::token_reply))
@@ -583,9 +586,9 @@ pub struct LoginOutput {
     pub user: UserBrief,
 }
 
-fn login<DB: Database>(
+fn login<T: Into<TenantScope>>(
     State(auth): State<JwtAuth>,
-    t: Tenant<DB>,
+    t: T,
     ip: crate::login_throttle::ClientIp,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
@@ -740,9 +743,9 @@ pub struct RefreshOutput {
 /// Rotate a refresh token. Each is single use; replaying a rotated one
 /// revokes the whole chain. A password change or the absolute cap
 /// (`Config::refresh_absolute_ttl_secs`) also ends it (#1854).
-fn refresh<DB: Database>(
+fn refresh<T: Into<TenantScope>>(
     State(auth): State<JwtAuth>,
-    t: Tenant<DB>,
+    t: T,
     Json(body): Json<RefreshInput>,
 ) -> impl std::future::Future<Output = Result<Json<RefreshOutput>, Response>> + Send {
     refresh_in(auth, t.into(), body)
@@ -838,9 +841,9 @@ pub struct LogoutInput {
     pub refresh: Option<String>,
 }
 
-fn logout<DB: Database>(
+fn logout<T: Into<TenantScope>>(
     State(auth): State<JwtAuth>,
-    t: Tenant<DB>,
+    t: T,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
     bearer: Bearer,
@@ -952,9 +955,9 @@ async fn logout_in(
 /// Validates the token's `tenant` claim against the resolved
 /// request tenant so a JWT minted on one subdomain can't be replayed
 /// against another, and refuses a token whose session has ended (#2086).
-fn me<DB: Database>(
+fn me<T: Into<TenantScope>>(
     State(auth): State<JwtAuth>,
-    t: Tenant<DB>,
+    t: T,
     bearer: Bearer,
 ) -> impl std::future::Future<Output = Result<Json<UserBrief>, Response>> + Send {
     me_in(auth, t.into(), bearer)
@@ -1014,13 +1017,15 @@ async fn me_in(auth: JwtAuth, t: TenantScope, bearer: Bearer) -> Result<Json<Use
 /// [`AuthenticatedUser`]: crate::tenancy::AuthenticatedUser
 /// [`Principal`]: crate::tenancy::Principal
 /// [`OwnedBy`]: crate::viewset::OwnedBy
+///
+/// It serves the tenant of whichever context is mounted, on any backend.
 pub fn require_bearer(
-    auth: State<JwtAuth>,
-    t: Tenant,
+    State(auth): State<JwtAuth>,
+    t: TenantScope,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> impl std::future::Future<Output = Response> + Send {
-    require_bearer_for::<DefaultTenantDb>(auth, t, req, next)
+    bearer_in(auth, t, req, next)
 }
 
 /// [`require_bearer`] for a `Tenant<DB>` other than the default (#1778).

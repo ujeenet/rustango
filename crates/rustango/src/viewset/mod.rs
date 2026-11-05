@@ -5628,6 +5628,52 @@ mod scan_cap_tests {
     }
 }
 
+/// Without `tenancy` nothing checks codenames: the `sqlite,admin` lib run covers it.
+#[cfg(all(test, not(feature = "tenancy"), feature = "sqlite"))]
+mod no_tenancy_tests {
+    use super::{ViewSet, ViewSetPerms, OPEN_WRITES_FIX};
+    use crate::core::Model as _;
+    use crate::sql::Auto;
+
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(table = "vs_open_note")]
+    #[allow(dead_code)]
+    pub struct Note {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 200)]
+        pub title: String,
+    }
+
+    /// The open-writes warning names only fixes this build has.
+    #[test]
+    fn the_open_writes_fix_names_no_codenames() {
+        assert!(!OPEN_WRITES_FIX.contains("permissions_for_model"));
+        assert!(
+            OPEN_WRITES_FIX.contains("read_only") && OPEN_WRITES_FIX.contains("allow_anonymous")
+        );
+    }
+
+    /// Codenames fail at mount instead of answering 403 forever.
+    #[tokio::test]
+    async fn codenames_without_tenancy_refuse_to_mount() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let vs = ViewSet::for_model(Note::SCHEMA, &["id", "title"]).permissions(ViewSetPerms {
+            list: vec!["vs_open_note.view".into()],
+            ..ViewSetPerms::default()
+        });
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = vs.router("/api/notes", pool);
+        }))
+        .expect_err("codenames must not mount without tenancy");
+        let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            msg.contains("need the `tenancy` feature") && msg.contains("allow_anonymous"),
+            "{msg}"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "sso"))]
 mod sso_table_tests {
     use super::ViewSet;

@@ -45,16 +45,14 @@ async fn open_writes_warn_unless_acknowledged() {
     assert!(open.contains("WARN"), "{open}");
     assert!(open.contains("rustango::viewset"), "{open}");
     assert!(open.contains("vs_open_note"), "{open}");
-    // The fix it names exists in this build: codenames only with tenancy.
+    // The fix it names exists in this build; the no-tenancy text is a
+    // unit test in `viewset`, which the `sqlite,admin` lib run covers.
     assert!(
         open.contains("allow_anonymous") && open.contains("read_only"),
         "{open}"
     );
-    assert_eq!(
-        open.contains("permissions_for_model"),
-        cfg!(feature = "tenancy"),
-        "{open}"
-    );
+    #[cfg(feature = "tenancy")]
+    assert!(open.contains("permissions_for_model"), "{open}");
 
     for (what, quiet) in [
         ("read_only", vs().read_only()),
@@ -92,25 +90,4 @@ async fn codenames_close_open_writes() {
     );
     let logs = mount_logs(vs().permissions(write_perms(true)), pool);
     assert!(!logs.contains("WARN"), "{logs}");
-}
-
-/// Without tenancy nothing checks codenames, so mounting them fails loudly
-/// instead of answering 403 forever.
-#[cfg(not(feature = "tenancy"))]
-#[tokio::test]
-async fn codenames_without_tenancy_refuse_to_mount() {
-    let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
-    let vs = ViewSet::for_model(Note::SCHEMA, &["id", "title"]).permissions(ViewSetPerms {
-        list: vec!["vs_open_note.view".into()],
-        ..ViewSetPerms::default()
-    });
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _ = vs.router("/api/notes", pool);
-    }))
-    .expect_err("codenames must not mount without tenancy");
-    let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
-    assert!(
-        msg.contains("need the `tenancy` feature") && msg.contains("allow_anonymous"),
-        "{msg}"
-    );
 }

@@ -54,6 +54,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The deprecated `find_or_provision_member` applies a tenant provider's sign-in, sign-up and lifecycle rules and the tenant's settings; a shared or admin key no longer provisions. `auto_provision` alone no longer lets anyone in.
 - Items announced as removed in 0.64.0 stay deprecated until 0.65.0, and their notes say so.
 - Guides: cookbook, orm, caching, models, api-conventions, manage, migrations, sso, security, auth, mcp and email match the code; `cache::from_settings` documents that a bad backend panics.
+- Template views' `tenant_router()`, `require_bearer`, `JwtAuth::router()` and the MCP routers (`secure_tenant_router`, `secure_tenant_router_from_settings`, `tenant_router_authed`) serve the backend of the mounted tenant context, so SQLite and MySQL tenants work under a build that also enables `postgres`; they answered 500 there. The `_for::<DB>` variants are unchanged. `require_bearer` now takes `TenantScope` instead of `Tenant`.
 
 ## [0.63.0] — 2026-11-04
 
