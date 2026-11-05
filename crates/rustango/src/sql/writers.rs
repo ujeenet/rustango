@@ -1909,8 +1909,7 @@ fn write_aggregate_as_case_when(
         AggregateExpr::Avg(col) => ("AVG", Some(*col), ""),
         AggregateExpr::Max(col) => ("MAX", Some(*col), ""),
         AggregateExpr::Min(col) => ("MIN", Some(*col), ""),
-        // MIN skips the CASE's NULLs, which ANY_VALUE may return; MariaDB has no ANY_VALUE.
-        AggregateExpr::AnyValue(col) => ("MIN", Some(*col), ""),
+        AggregateExpr::AnyValue(col) => ("ANY_VALUE", Some(*col), ""),
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
