@@ -2364,10 +2364,9 @@ mod tests {
     /// A tenant whose secret lookup fails.
     #[cfg(feature = "sqlite")]
     fn failing_sqlite_org() -> Org {
-        Org {
-            database_url: Some("fail".into()),
-            ..cold_sqlite_org()
-        }
+        let mut o = cold_sqlite_org();
+        o.database_url = Some("fail".into());
+        o
     }
 
     /// Waiters get the first build's error instead of each retrying in turn.
@@ -2464,13 +2463,12 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     fn cold_sqlite_org() -> Org {
-        Org {
-            slug: "cold".into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some("sqlite::memory:".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.slug = "cold".into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some("sqlite::memory:".into());
+        })
     }
 
     /// A cold tenant hit by many requests at once resolves and connects once.
@@ -2532,10 +2530,11 @@ mod tests {
     fn moved_sqlite_orgs(dir: &std::path::Path) -> (Org, Org, String, String) {
         let file = |name: &str| dir.join(name).to_string_lossy().into_owned();
         let (old, new) = (file("old.db"), file("new.db"));
-        let org = |path: &str| Org {
-            slug: "moved".into(),
-            database_url: Some(format!("sqlite:{path}?mode=rwc")),
-            ..cold_sqlite_org()
+        let org = |path: &str| {
+            let mut o = cold_sqlite_org();
+            o.slug = "moved".into();
+            o.database_url = Some(format!("sqlite:{path}?mode=rwc"));
+            o
         };
         (org(&old), org(&new), old, new)
     }
@@ -2599,10 +2598,8 @@ mod tests {
         let calls: Vec<_> = ["cold", "cold_v2"]
             .into_iter()
             .map(|schema| {
-                let org = Org {
-                    schema_name: Some(schema.into()),
-                    ..cold_schema_org()
-                };
+                let mut org = cold_schema_org();
+                org.schema_name = Some(schema.into());
                 let p = pools.clone();
                 tokio::spawn(async move { p.scoped_pool(&org).await })
             })
@@ -2701,12 +2698,11 @@ mod tests {
 
     #[cfg(feature = "postgres")]
     fn cold_schema_org() -> Org {
-        Org {
-            slug: "cold".into(),
-            storage_mode: "schema".into(),
-            schema_name: Some("cold".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.slug = "cold".into();
+            o.storage_mode = "schema".into();
+            o.schema_name = Some("cold".into());
+        })
     }
 
     /// `new` is what the builder, CLI and console use, so it must resolve
@@ -2797,12 +2793,11 @@ mod tests {
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
             Parked(gate.clone()),
         );
-        let org = Org {
-            slug: "leaky".into(),
-            storage_mode: "database".into(),
-            database_url: Some("ref".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.slug = "leaky".into();
+            o.storage_mode = "database".into();
+            o.database_url = Some("ref".into());
+        });
         let (res, ()) = tokio::join!(pools.pool_for_database_mode(&org), async {
             tokio::task::yield_now().await;
             tracing::info!("other-task-event");

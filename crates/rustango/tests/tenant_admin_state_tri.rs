@@ -13,7 +13,7 @@ use http_body_util::BodyExt;
 use rustango::sql::{sqlx, FetcherPool as _, Pool};
 use rustango::tenancy::session::SessionSecret;
 use rustango::tenancy::{
-    admin::TenantAdminBuilder, routes::RouteConfig, tenant_console, ChainResolver, Org,
+    admin::TenantAdminBuilder, routes::RouteConfig, tenant_console, ChainResolver,
     SubdomainResolver, TenantPools, User,
 };
 use rustango::tri_dialect_test;
@@ -98,14 +98,13 @@ async fn tenant(pool: &Pool, session: bool) -> Tenant {
     setup(&db).await;
     let slug = unique("st");
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug,
-        storage_mode: "database".into(),
-        backend_kind: kind.into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug;
+        o.storage_mode = "database".into();
+        o.backend_kind = kind.into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(&db).await.expect("seed org");
     let admin = match &db {
         #[cfg(feature = "postgres")]

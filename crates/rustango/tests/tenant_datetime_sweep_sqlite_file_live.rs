@@ -24,15 +24,14 @@ use rustango::tenancy::{BackendKind, DatabasePools, Org};
 use tempfile::TempDir;
 
 fn sqlite_org(slug: &str) -> Org {
-    Org {
-        id: rustango::sql::Auto::default(),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: None, // template path
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::default();
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = None;
+    })
 }
 
 /// Seed one tenant database with the two shapes a pre-0.57.11

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
-use rustango::sql::{sqlx, Auto};
+use rustango::sql::sqlx;
 use rustango::tenancy::admin::TenantAdminBuilder;
 use rustango::tenancy::operator_console::{router_full, SessionSecret};
 use rustango::tenancy::{branding, HeaderResolver, Org, TenantPools};
@@ -126,26 +126,13 @@ async fn tenant_at(prefixed: bool) -> Tenant {
     .await
     .expect("save favicon");
     let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(tenant_url),
-        schema_name: None,
-        host_pattern: (!prefixed).then(|| format!("{slug}.localhost")),
-        port: None,
-        path_prefix: prefixed.then(|| format!("/{slug}")),
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: Some(logo),
-        favicon_path: Some(favicon),
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = Org::new(slug.clone());
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(tenant_url);
+    org.host_pattern = (!prefixed).then(|| format!("{slug}.localhost"));
+    org.path_prefix = prefixed.then(|| format!("/{slug}"));
+    org.logo_path = Some(logo);
+    org.favicon_path = Some(favicon);
     org.insert(&pools.registry_pool()).await.expect("seed org");
     Tenant {
         url,

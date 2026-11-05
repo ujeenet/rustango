@@ -27,7 +27,7 @@ use rustango::idempotency::{IdempotencyLayer, IdempotencyRouterExt as _};
 use rustango::rate_limit::KeyBy;
 use rustango::rate_limit_cache::{CacheRateLimitLayer, CacheRateLimitRouterExt as _};
 use rustango::sessions::Session;
-use rustango::sql::{sqlx, Auto};
+use rustango::sql::sqlx;
 use rustango::tenancy::{Org, RequestTenant, TenantPools, TenantSlug};
 use tower::ServiceExt as _;
 
@@ -287,26 +287,14 @@ async fn failed_resolution(app: &Router, registry: impl std::future::Future<Outp
 }
 
 fn org(slug: &str, storage: &str, backend: &str, url: Option<String>) -> Org {
-    Org {
-        id: Auto::default(),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: storage.into(),
-        backend_kind: backend.into(),
-        database_url: url,
-        schema_name: (storage == "schema").then(|| slug.to_owned()),
-        host_pattern: Some(format!("{slug}.localhost")),
-        port: None,
-        path_prefix: Some(format!("/{slug}")),
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    }
+    let mut o = Org::new(slug.to_owned());
+    o.storage_mode = storage.into();
+    o.backend_kind = backend.into();
+    o.database_url = url;
+    o.schema_name = (storage == "schema").then(|| slug.to_owned());
+    o.host_pattern = Some(format!("{slug}.localhost"));
+    o.path_prefix = Some(format!("/{slug}"));
+    o
 }
 
 async fn migrate_registry<DB: sqlx::Database>(pools: &TenantPools<DB>, url: &str)

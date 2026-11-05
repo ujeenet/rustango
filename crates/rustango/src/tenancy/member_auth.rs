@@ -1473,10 +1473,9 @@ mod tests {
             .unwrap();
         let mut user = crate::testkit::user();
         user.insert(&pool).await.unwrap();
-        let org = crate::tenancy::Org {
-            path_prefix: Some("/acme".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.path_prefix = Some("/acme".into());
+        });
         let path_of = |cookie: &str| {
             cookie
                 .split("; ")

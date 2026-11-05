@@ -201,14 +201,13 @@ async fn boot_with(permissions: bool) -> Env {
     for slug in ["acme", "globex"] {
         let url = format!("sqlite://{}?mode=rwc", dir.path().join(slug).display());
         let host = format!("{slug}.app.test");
-        let mut org = Org {
-            slug: slug.into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some(url.clone()),
-            host_pattern: Some(host.clone()),
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some(url.clone());
+            o.host_pattern = Some(host.clone());
+        });
         org.insert(&registry).await.unwrap();
         let pool = Pool::connect(&url).await.unwrap();
         rustango::testkit::create_tables_for::<User>(&pool)
@@ -1283,12 +1282,11 @@ async fn check_deploy_reports_an_unopenable_tenant_without_its_url() {
     };
     run("migrate-registry").await.0.expect("migrate-registry");
     // `EnvSecretsResolver` wants `env://`; its error quotes the literal URL.
-    let mut org = Org {
-        slug: "acme".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite:///tmp/acme-hunter2.db".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "acme".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite:///tmp/acme-hunter2.db".into());
+    });
     org.insert(&pools.registry_pool()).await.unwrap();
     let (_, out) = run("check --deploy").await;
     assert!(

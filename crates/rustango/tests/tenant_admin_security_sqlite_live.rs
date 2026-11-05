@@ -19,8 +19,8 @@ use rustango::tenancy::tenant_console::{
     encode, PasswordFingerprint, SessionSecret, TenantSessionPayload, COOKIE_NAME,
 };
 use rustango::tenancy::{
-    admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, Org, SubdomainResolver,
-    TenantPools, User,
+    admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, SubdomainResolver, TenantPools,
+    User,
 };
 use rustango::Model;
 use tower::ServiceExt;
@@ -169,14 +169,13 @@ async fn boot() -> Env {
 
     let slug = unique("t");
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug: slug.clone(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(tenant_url.clone()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(tenant_url.clone());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(&registry).await.expect("seed org");
     let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 

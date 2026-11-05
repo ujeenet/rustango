@@ -1679,11 +1679,10 @@ mod tests {
         let pg = sqlx::PgPool::connect(&url).await.unwrap();
         let registry = crate::sql::Pool::Postgres(pg.clone());
         crate::testkit::migrate_framework(&registry).await.unwrap();
-        let mut org = Org {
-            database_url: Some("postgres://acme:pw@db.example/acme".into()),
-            active: false,
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.database_url = Some("postgres://acme:pw@db.example/acme".into());
+            o.active = false;
+        });
         org.insert(&registry).await.unwrap();
         let id = *org.id.get().unwrap();
         let mut record = TenantDatabase {

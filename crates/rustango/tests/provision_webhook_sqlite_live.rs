@@ -705,15 +705,14 @@ async fn half_made_at(b: &Booted, url: &str, slug: &str, key: &str, own: bool) -
         .await
         .unwrap();
     let run_id = run.id.get().copied().unwrap();
-    let mut org = Org {
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(url.to_owned()),
-        active: false,
-        host_pattern: Some(format!("{slug}.localhost")),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(url.to_owned());
+        o.active = false;
+        o.host_pattern = Some(format!("{slug}.localhost"));
+    });
     org.save(&registry).await.unwrap();
     if own {
         store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
@@ -842,18 +841,16 @@ async fn a_purged_tenant_is_not_resumed_through_a_reused_id() {
 
     let registry = b.pools.registry_pool();
     // Reused on purpose: a table without AUTOINCREMENT would do it itself.
-    let mut org = Org {
-        id: rustango::sql::Auto::Set(old_id),
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!(
-            "sqlite://{}/t_{slug}.db?mode=rwc",
-            holder.path().display()
-        )),
-        active: false,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org();
+    org.id = rustango::sql::Auto::Set(old_id);
+    org.slug = slug.clone();
+    org.display_name = slug.clone();
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(format!(
+        "sqlite://{}/t_{slug}.db?mode=rwc",
+        holder.path().display()
+    ));
+    org.active = false;
     org.insert(&registry).await.unwrap();
 
     let body = body_for(&slug, "evt-reused-2", chrono::Utc::now().timestamp());
@@ -981,17 +978,15 @@ async fn a_reaped_run_does_not_revive_a_deactivated_tenant() {
     .await
     .unwrap();
     let run_id = run.id.get().copied().unwrap();
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!(
-            "sqlite://{}/t_{slug}.db?mode=rwc",
-            holder.path().display()
-        )),
-        active: true,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org();
+    org.slug = slug.clone();
+    org.display_name = slug.clone();
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(format!(
+        "sqlite://{}/t_{slug}.db?mode=rwc",
+        holder.path().display()
+    ));
+    org.active = true;
     org.save(&registry).await.unwrap();
     store::attach_org(&registry, run_id, org.id.get().copied().unwrap())
         .await

@@ -39,6 +39,7 @@ use crate::Model;
 #[derive(Model, Clone, serde::Serialize)]
 #[rustango(table = "rustango_orgs", display = "slug", scope = "registry")]
 #[allow(dead_code)] // Slices 2+ wire these fields into resolvers / pools / migrations.
+#[non_exhaustive]
 pub struct Org {
     #[rustango(primary_key)]
     pub id: rustango::Auto<i64>,
@@ -241,6 +242,33 @@ pub(crate) fn redacted_url(url: Option<&str>) -> Option<String> {
 }
 
 impl Org {
+    /// An unsaved active database-mode `postgres` tenant named `slug`; every
+    /// optional field empty. Build with this and assign the fields you need.
+    #[must_use]
+    pub fn new(slug: impl Into<String>) -> Self {
+        let slug = slug.into();
+        Self {
+            id: crate::sql::Auto::Unset,
+            display_name: slug.clone(),
+            slug,
+            storage_mode: StorageMode::Database.as_str().to_owned(),
+            backend_kind: BackendKind::Postgres.as_str().to_owned(),
+            database_url: None,
+            schema_name: None,
+            host_pattern: None,
+            port: None,
+            path_prefix: None,
+            active: true,
+            created_at: chrono::Utc::now(),
+            brand_name: None,
+            brand_tagline: None,
+            logo_path: None,
+            favicon_path: None,
+            primary_color: None,
+            theme_mode: None,
+        }
+    }
+
     /// The schema a schema-mode tenant lives in: `schema_name`, else the slug.
     pub(crate) fn effective_schema(&self) -> &str {
         effective_schema(self.schema_name.as_deref(), &self.slug)
@@ -548,37 +576,19 @@ mod tests {
 
     #[test]
     fn org_debug_masks_the_database_password() {
-        let org = Org {
-            id: rustango::Auto::Set(1),
-            slug: "acme".into(),
-            display_name: "Acme".into(),
-            storage_mode: "database".into(),
-            backend_kind: "postgres".into(),
-            database_url: Some("postgres://u:db-pw-123@h/acme".into()),
-            schema_name: None,
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            active: true,
-            created_at: chrono::Utc::now(),
-            brand_name: None,
-            brand_tagline: None,
-            logo_path: None,
-            favicon_path: None,
-            primary_color: None,
-            theme_mode: None,
-        };
+        let mut org = Org::new("acme");
+        org.id = rustango::Auto::Set(1);
+        org.database_url = Some("postgres://u:db-pw-123@h/acme".into());
         let s = format!("{org:?}");
         assert!(s.contains("acme") && !s.contains("db-pw-123"), "{s}");
     }
 
     #[test]
     fn labels_fall_back_to_the_slug() {
-        let mut org = Org {
-            slug: "shufoundation".into(),
-            display_name: "Sandhill University Foundation".into(),
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.slug = "shufoundation".into();
+            o.display_name = "Sandhill University Foundation".into();
+        });
         assert_eq!(org.display_label(), "Sandhill University Foundation");
         assert_eq!(org.brand_label(), "Sandhill University Foundation");
         org.brand_name = Some("SHU".into());

@@ -39,15 +39,14 @@ async fn purge_on(pool: &Pool, slug: &str) -> Result<Report, TenancyError> {
 
 async fn tenant_with_host(pool: &Pool, tag: &str) -> (String, i64) {
     let slug = format!("purge-{tag}-{}", std::process::id());
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = slug.clone();
         // A database-mode org with a non-Postgres backend drops nothing;
         // the registry side is what this suite is about.
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        ..rustango::testkit::org()
-    };
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+    });
     org.save(pool).await.expect("insert org");
     let id = *org.id.get().expect("org id");
     let mut host = OrgHost {
@@ -139,13 +138,12 @@ async fn purge_deletes_the_tenants_media_objects() {
             format!("purge-media-{name}-{}", std::process::id()),
         );
         async move {
-            let mut org = Org {
-                slug: slug.clone(),
-                display_name: slug.clone(),
-                backend_kind: "sqlite".into(),
-                database_url: Some(url),
-                ..rustango::testkit::org()
-            };
+            let mut org = rustango::testkit::org_with(|o| {
+                o.slug = slug.clone();
+                o.display_name = slug.clone();
+                o.backend_kind = "sqlite".into();
+                o.database_url = Some(url);
+            });
             org.save(&reg).await.unwrap();
             slug
         }
@@ -278,13 +276,12 @@ async fn mysql_purge_sees_through_a_host_alias() {
     let org_on = |tag: &str, url: String| {
         let (pool, slug) = (pool.clone(), format!("purge-my-{tag}-{pid}"));
         async move {
-            let mut org = Org {
-                slug: slug.clone(),
-                display_name: slug.clone(),
-                backend_kind: "mysql".into(),
-                database_url: Some(url),
-                ..rustango::testkit::org()
-            };
+            let mut org = rustango::testkit::org_with(|o| {
+                o.slug = slug.clone();
+                o.display_name = slug.clone();
+                o.backend_kind = "mysql".into();
+                o.database_url = Some(url);
+            });
             org.save(&pool).await.unwrap();
             slug
         }
@@ -421,13 +418,12 @@ async fn schema_purge_deletes_only_the_tenant_schemas_media() {
     let public_keys = upload(&pool, &storage).await;
     let schema_org = |tag: &str| {
         let slug = format!("purge_media_{tag}_{}", std::process::id());
-        Org {
-            slug: slug.replace('_', "-"),
-            display_name: slug.clone(),
-            storage_mode: "schema".into(),
-            schema_name: Some(slug),
-            ..rustango::testkit::org()
-        }
+        rustango::testkit::org_with(|o| {
+            o.slug = slug.replace('_', "-");
+            o.display_name = slug.clone();
+            o.storage_mode = "schema".into();
+            o.schema_name = Some(slug);
+        })
     };
     let action = Action::Purge {
         purge_database: false,
@@ -525,13 +521,12 @@ async fn schema_purge_evicts_the_scoped_pool() {
         unreachable!()
     };
     let slug = format!("purge-schema-{}", std::process::id());
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        storage_mode: "schema".into(),
-        schema_name: Some(slug.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = slug.clone();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(slug.clone());
+    });
     org.save(&pool).await.expect("insert org");
     let pools = TenantPools::new(pg.clone());
     rustango::testkit::migrate_schema_tenant(&pools, &org, &registry_url())
@@ -571,13 +566,12 @@ async fn org_with_database(pool: &Pool, tag: &str) -> (Org, String) {
         .await
         .unwrap();
     let url = rustango::testkit::matrix::Backend::Postgres.url().unwrap();
-    let mut org = Org {
-        slug,
-        display_name: tag.into(),
-        backend_kind: "postgres".into(),
-        database_url: Some(format!("{}/{db}", url.rsplit_once('/').unwrap().0)),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug;
+        o.display_name = tag.into();
+        o.backend_kind = "postgres".into();
+        o.database_url = Some(format!("{}/{db}", url.rsplit_once('/').unwrap().0));
+    });
     org.save(pool).await.expect("insert org");
     (org, db)
 }
@@ -742,13 +736,12 @@ async fn database_purge_refuses_the_registry_database() {
         unreachable!()
     };
     let slug = format!("purge-registry-{}", std::process::id());
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        backend_kind: "postgres".into(),
-        database_url: Some(rustango::testkit::matrix::Backend::Postgres.url().unwrap()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = slug.clone();
+        o.backend_kind = "postgres".into();
+        o.database_url = Some(rustango::testkit::matrix::Backend::Postgres.url().unwrap());
+    });
     org.save(&pool).await.expect("insert org");
 
     let err = purge_on(&pool, &slug)
@@ -788,13 +781,12 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
     };
     let shared = format!("purge_shared_{}", std::process::id());
     // A legacy pair: one by slug default, one by explicit name.
-    let mut owner = Org {
-        slug: shared.replace('_', "-"),
-        display_name: "owner".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some(shared.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut owner = rustango::testkit::org_with(|o| {
+        o.slug = shared.replace('_', "-");
+        o.display_name = "owner".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(shared.clone());
+    });
     owner.save(&pool).await.unwrap();
     rustango::testkit::migrate_schema_tenant(
         &TenantPools::new(pg.clone()),
@@ -807,13 +799,12 @@ async fn schema_purge_refuses_a_shared_or_reserved_schema() {
         .execute(pg)
         .await
         .unwrap();
-    let mut legacy = Org {
-        slug: format!("{}-legacy", owner.slug),
-        display_name: "legacy".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some(shared.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut legacy = rustango::testkit::org_with(|o| {
+        o.slug = format!("{}-legacy", owner.slug);
+        o.display_name = "legacy".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(shared.clone());
+    });
     legacy.save(&pool).await.unwrap();
 
     let err = purge_on(&pool, &legacy.slug)
@@ -872,13 +863,12 @@ async fn schema_purge_refuses_a_reserved_schema() {
             .unwrap();
     let registry = Pool::from(private.clone());
     setup(&registry).await;
-    let mut reserved = Org {
-        slug: "reserved".into(),
-        display_name: "public".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some("public".into()),
-        ..rustango::testkit::org()
-    };
+    let mut reserved = rustango::testkit::org_with(|o| {
+        o.slug = "reserved".into();
+        o.display_name = "public".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some("public".into());
+    });
     reserved.save(&registry).await.unwrap();
 
     let err = purge_on(&registry, "reserved").await.expect_err("public");
@@ -943,13 +933,12 @@ where
     let private_url = format!("{}/{db}", url.rsplit_once('/').unwrap().0);
     let pools = TenantPools::new(private.clone());
     for (slug, name) in [("ext-a", a), ("ext-b", b)] {
-        let mut org = Org {
-            slug: slug.into(),
-            display_name: name.into(),
-            storage_mode: "schema".into(),
-            schema_name: Some(name.into()),
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.into();
+            o.display_name = name.into();
+            o.storage_mode = "schema".into();
+            o.schema_name = Some(name.into());
+        });
         org.save(&registry).await.unwrap();
         rustango::testkit::migrate_schema_tenant(&pools, &org, &private_url)
             .await
@@ -1100,13 +1089,12 @@ async fn database_purge_refuses_a_database_another_tenant_shares() {
     setup(&pool).await;
     let (a, db) = org_with_database(&pool, "sharea").await;
     let url = a.database_url.clone().unwrap();
-    let mut b = Org {
-        slug: format!("{}-b", a.slug),
-        display_name: "b".into(),
-        backend_kind: "postgres".into(),
-        database_url: Some(url.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut b = rustango::testkit::org_with(|o| {
+        o.slug = format!("{}-b", a.slug);
+        o.display_name = "b".into();
+        o.backend_kind = "postgres".into();
+        o.database_url = Some(url.clone());
+    });
     b.save(&pool).await.unwrap();
     let mut seed = PgConnection::connect(&url).await.unwrap();
     rustango::sql::sqlx::raw_sql("CREATE TABLE b_data (id INT); INSERT INTO b_data VALUES (1)")
@@ -1162,13 +1150,12 @@ async fn database_purge_refuses_an_idle_tenant_on_a_host_alias() {
         alias, url,
         "DATABASE_URL names neither localhost nor 127.0.0.1"
     );
-    let mut b = Org {
-        slug: format!("{}-b", a.slug),
-        display_name: "b".into(),
-        backend_kind: "postgres".into(),
-        database_url: Some(alias),
-        ..rustango::testkit::org()
-    };
+    let mut b = rustango::testkit::org_with(|o| {
+        o.slug = format!("{}-b", a.slug);
+        o.display_name = "b".into();
+        o.backend_kind = "postgres".into();
+        o.database_url = Some(alias);
+    });
     b.save(&pool).await.unwrap();
 
     let err = purge_on(&pool, &a.slug)
@@ -1205,13 +1192,12 @@ async fn database_purge_skips_a_tenant_whose_url_does_not_resolve() {
     };
     setup(&pool).await;
     let (a, db) = org_with_database(&pool, "unres").await;
-    let mut b = Org {
-        slug: format!("{}-b", a.slug),
-        display_name: "b".into(),
-        backend_kind: "mysql".into(),
-        database_url: Some("env://RUSTANGO_PURGE_TEST_UNSET_URL".into()),
-        ..rustango::testkit::org()
-    };
+    let mut b = rustango::testkit::org_with(|o| {
+        o.slug = format!("{}-b", a.slug);
+        o.display_name = "b".into();
+        o.backend_kind = "mysql".into();
+        o.database_url = Some("env://RUSTANGO_PURGE_TEST_UNSET_URL".into());
+    });
     b.save(&pool).await.unwrap();
     let purged = purge_on(&pool, &a.slug).await;
     b.delete(&pool).await.unwrap();
@@ -1242,13 +1228,12 @@ async fn database_purge_refuses_the_registry_under_another_host_name() {
         "DATABASE_URL names neither localhost nor 127.0.0.1"
     );
     let slug = format!("purge-alias-{}", std::process::id());
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        backend_kind: "postgres".into(),
-        database_url: Some(alias),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = slug.clone();
+        o.backend_kind = "postgres".into();
+        o.database_url = Some(alias);
+    });
     org.save(&pool).await.unwrap();
 
     let err = purge_on(&pool, &slug).await.expect_err("registry by alias");
@@ -1276,11 +1261,12 @@ async fn database_purge_does_not_end_another_tenants_tagged_session() {
     };
     let (a, db) = org_with_database(&pool, "tagged").await;
     // Not in this registry, so only its session can speak for it.
-    let b = Org {
-        id: Auto::Set(i64::from(i32::MAX) + i64::from(std::process::id())),
-        slug: format!("{}-b", a.slug),
-        database_url: a.database_url.clone(),
-        ..a.clone()
+    let b = {
+        let mut o = a.clone();
+        o.id = Auto::Set(i64::from(i32::MAX) + i64::from(std::process::id()));
+        o.slug = format!("{}-b", a.slug);
+        o.database_url = a.database_url.clone();
+        o
     };
     let other_pod = TenantPools::new(pg.clone());
     let mut held = other_pod.database_acquire(&b).await.unwrap();

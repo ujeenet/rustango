@@ -114,34 +114,34 @@ impl Env {
     /// An unsaved, active tenant with a ledger of its own: a PG schema, a
     /// MySQL scratch database, a SQLite file.
     async fn own_tenant(&mut self, tag: &str) -> Org {
-        let base = Org {
-            slug: format!("mt-{tag}"),
-            display_name: tag.into(),
-            ..rustango::testkit::org()
-        };
+        let base = rustango::testkit::org_with(|o| {
+            o.slug = format!("mt-{tag}");
+            o.display_name = tag.into();
+        });
         match self.backend() {
-            BackendKind::Postgres => Org {
-                storage_mode: "schema".into(),
-                schema_name: Some(format!("mt_{tag}")),
-                ..base
-            },
+            BackendKind::Postgres => {
+                let mut o = base;
+                o.storage_mode = "schema".into();
+                o.schema_name = Some(format!("mt_{tag}"));
+                o
+            }
             #[cfg(feature = "mysql")]
             BackendKind::MySql => {
                 let url = scratch(&mut self.guards, "MYSQL_TEST_URL").await;
-                Org {
-                    backend_kind: "mysql".into(),
-                    database_url: Some(url),
-                    ..base
-                }
+                let mut o = base;
+                o.backend_kind = "mysql".into();
+                o.database_url = Some(url);
+                o
             }
-            _ => Org {
-                backend_kind: "sqlite".into(),
-                database_url: Some(format!(
+            _ => {
+                let mut o = base;
+                o.backend_kind = "sqlite".into();
+                o.database_url = Some(format!(
                     "sqlite://{}?mode=rwc",
                     self.tmp.path().join(format!("{tag}.db")).display()
-                )),
-                ..base
-            },
+                ));
+                o
+            }
         }
     }
 
@@ -340,14 +340,13 @@ async fn create_tenant_if_missing_finishes_a_failed_create(pool: &Pool) {
 /// #2392 — a suspended tenant is not reactivated by `create_tenant_if_missing`.
 async fn create_tenant_if_missing_leaves_a_suspended_tenant(pool: &Pool) {
     let env = Env::new(pool).await;
-    let mut org = Org {
-        slug: "paused".into(),
-        display_name: "paused".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(env.url.clone()),
-        active: false,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "paused".into();
+        o.display_name = "paused".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(env.url.clone());
+        o.active = false;
+    });
     org.save(&env.registry).await.expect("insert org");
     let got = env
         .create_if_missing(
@@ -394,10 +393,8 @@ async fn create_tenant_migrates_only_the_new_tenant(pool: &Pool) {
 /// #2393 — a migration only an inactive tenant's ledger records is not forgotten.
 async fn forget_pending_refuses_a_tenant_applied_migration(pool: &Pool) {
     let mut env = Env::new(pool).await;
-    let mut org = Org {
-        active: false,
-        ..env.own_tenant("fp").await
-    };
+    let mut org = env.own_tenant("fp").await;
+    org.active = false;
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
@@ -560,13 +557,11 @@ async fn tenant_migrate_sends_migrate_signals(pool: &Pool) {
 async fn forget_pending_refuses_an_unreadable_tenant(pool: &Pool) {
     let env = Env::new(pool).await;
     let missing = env.tmp.path().join("missing.db");
-    let mut org = Org {
-        slug: "gone".into(),
-        display_name: "gone".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!("sqlite://{}?mode=rwc", missing.display())),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org();
+    org.slug = "gone".into();
+    org.display_name = "gone".into();
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(format!("sqlite://{}?mode=rwc", missing.display()));
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
@@ -718,13 +713,12 @@ async fn check_deploy_names_a_role_named_schema(pool: &Pool) {
     )
     .await
     .unwrap();
-    let mut org = Org {
-        slug: "rolehome".into(),
-        display_name: "rolehome".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some(role[0].0.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "rolehome".into();
+        o.display_name = "rolehome".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(role[0].0.clone());
+    });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let mut out = Vec::new();
@@ -751,12 +745,11 @@ where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
-    let mut owner = Org {
-        slug: "owner".into(),
-        display_name: "owner".into(),
-        database_url: Some(env.url.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut owner = rustango::testkit::org_with(|o| {
+        o.slug = "owner".into();
+        o.display_name = "owner".into();
+        o.database_url = Some(env.url.clone());
+    });
     owner.save(&env.registry).await.expect("owner");
     let mut tx = rustango::sql::transaction_pool(&env.registry)
         .await
@@ -1100,13 +1093,12 @@ async fn a_url_of_another_backend_is_refused(pool: &Pool) {
     assert!(env.org("foreign").await.is_none());
 
     let url = env.tenant_db_url("edited").await;
-    let mut org = Org {
-        slug: "edited".into(),
-        display_name: "edited".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(url.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "edited".into();
+        o.display_name = "edited".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(url.clone());
+    });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let err = env
@@ -1193,13 +1185,12 @@ async fn a_resolved_secret_is_never_echoed(pool: &Pool) {
     let stored = format!("{runs:?}{events:?}");
     assert!(!runs.is_empty() && !stored.contains("hunter2"), "{stored}");
 
-    let mut org = Org {
-        slug: "leak-edit".into(),
-        display_name: "leak-edit".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(env.unreachable_url()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "leak-edit".into();
+        o.display_name = "leak-edit".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(env.unreachable_url());
+    });
     org.save(&env.registry).await.expect("insert org");
     let err = env
         .run(
@@ -1271,13 +1262,12 @@ async fn the_registry_under_an_alias_is_refused(pool: &Pool) {
     .expect_err("the registry under an alias is refused");
     assert!(err.to_string().contains("registry's own database"), "{err}");
     // An edit to the alias is refused too.
-    let mut other = Org {
-        slug: "aliased".into(),
-        display_name: "aliased".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some("unused".into()),
-        ..rustango::testkit::org()
-    };
+    let mut other = rustango::testkit::org_with(|o| {
+        o.slug = "aliased".into();
+        o.display_name = "aliased".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some("unused".into());
+    });
     other.save(&env.registry).await.expect("insert org");
     let err = env
         .run_out(&dir, &["edit-tenant", "aliased", "--database-url", &alias])
@@ -1291,14 +1281,13 @@ async fn reseal_seals_a_plain_password_url(pool: &Pool) {
     with_secret_key();
     let mut env = Env::new(pool).await;
     let url = env.tenant_db_url("plain").await;
-    let mut org = Org {
-        slug: "plain".into(),
-        display_name: "plain".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some("plain.localhost".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "plain".into();
+        o.display_name = "plain".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some("plain.localhost".into());
+    });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let out = env
@@ -1480,15 +1469,14 @@ async fn reseal_leaves_a_schema_mode_url_alone(pool: &Pool) {
     with_secret_key();
     let env = Env::new(pool).await;
     let url = "postgres://u:pw@127.0.0.1:1/x";
-    let mut org = Org {
-        slug: "schemaurl".into(),
-        display_name: "schemaurl".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some("mt_schemaurl".into()),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(url.into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "schemaurl".into();
+        o.display_name = "schemaurl".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some("mt_schemaurl".into());
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(url.into());
+    });
     org.save(&env.registry).await.expect("insert org");
     // The tenant passes open its pool, which refuses a schema that was never migrated.
     #[cfg(feature = "postgres")]
@@ -1523,13 +1511,11 @@ async fn reseal_creates_no_missing_tenant_file(pool: &Pool) {
         return;
     }
     let path = env.tmp.path().join("gone.db");
-    let mut org = Org {
-        slug: "gone".into(),
-        display_name: "gone".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!("sqlite://{}?mode=rwc", path.display())),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org();
+    org.slug = "gone".into();
+    org.display_name = "gone".into();
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(format!("sqlite://{}?mode=rwc", path.display()));
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let (_, out) = env
@@ -1548,13 +1534,12 @@ async fn reseal_leaves_a_sealed_url_without_a_password(pool: &Pool) {
         BackendKind::MySql => "mysql://u@127.0.0.1:1/x".into(),
     };
     let sealed = rustango::tenancy::seal(&plain).expect("seal");
-    let mut org = Org {
-        slug: "nopw".into(),
-        display_name: "nopw".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(sealed.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "nopw".into();
+        o.display_name = "nopw".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(sealed.clone());
+    });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let out = env
@@ -1641,13 +1626,12 @@ async fn check_bounds_an_unreachable_tenant(pool: &Pool) {
         BackendKind::MySql => format!("mysql://u:pw@127.0.0.1:{port}/x"),
         BackendKind::Sqlite => return,
     };
-    let mut org = Org {
-        slug: "blackhole".into(),
-        display_name: "blackhole".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(url),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "blackhole".into();
+        o.display_name = "blackhole".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(url);
+    });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("proj/migrations");
     migration(&dir, "0001_tenant", "SELECT 1");
@@ -2207,15 +2191,14 @@ async fn a_port_only_tenant_is_accepted_with_port_routing(pool: &Pool) {
 /// `check --deploy` names an existing tenant that only a port routes.
 async fn check_deploy_names_a_port_only_tenant(pool: &Pool) {
     let env = Env::new(pool).await;
-    let mut org = Org {
-        slug: "portrow".into(),
-        display_name: "portrow".into(),
-        host_pattern: None,
-        path_prefix: None,
-        port: Some(8444),
-        backend_kind: env.backend().as_str().into(),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "portrow".into();
+        o.display_name = "portrow".into();
+        o.host_pattern = None;
+        o.path_prefix = None;
+        o.port = Some(8444);
+        o.backend_kind = env.backend().as_str().into();
+    });
     org.save(&env.registry).await.expect("insert org");
     let dir = env.dir("migrations");
     let _g = port_routing_lock().lock().await;
@@ -2257,14 +2240,13 @@ async fn ignored_tenancy_flags_are_refused(pool: &Pool) {
     assert!(err.to_string().contains("--schema-name"), "{err}");
     assert!(env.org("ign").await.is_none());
 
-    let mut org = Org {
-        slug: "schemy".into(),
-        display_name: "schemy".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some("mt_schemy".into()),
-        backend_kind: env.backend().as_str().into(),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "schemy".into();
+        o.display_name = "schemy".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some("mt_schemy".into());
+        o.backend_kind = env.backend().as_str().into();
+    });
     org.save(&env.registry).await.expect("insert org");
     let err = env
         .run(&dir, &["edit-tenant", "schemy", "--database-url", &url])

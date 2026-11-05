@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use rustango::core::SqlValue;
 use rustango::jobs::pg::PgJobQueue;
-use rustango::jobs::{Job, JobDeadLetter, JobError, JobQueue};
+use rustango::jobs::{Job, JobCtx, JobDeadLetter, JobError, JobQueue};
 use rustango::sql::Pool;
 use rustango::tri_dialect_test;
 use serde::{Deserialize, Serialize};
@@ -948,6 +948,113 @@ async fn a_dropped_queue_stops_its_workers(pool: &Pool) {
     assert_eq!(the_row(pool).await, (0, false), "nor to lock it");
 }
 
+/// Every run's `(id, attempt)` per token.
+fn ctx_runs() -> &'static Mutex<HashMap<String, Vec<(String, u32)>>> {
+    static R: OnceLock<Mutex<HashMap<String, Vec<(String, u32)>>>> = OnceLock::new();
+    R.get_or_init(Mutex::default)
+}
+
+fn ctx_seen(token: &str) -> Vec<(String, u32)> {
+    ctx_runs()
+        .lock()
+        .unwrap()
+        .get(token)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// Records its context; fails its first run.
+#[derive(Serialize, Deserialize)]
+struct CtxProbe {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for CtxProbe {
+    const NAME: &'static str = "tri:ctx_probe";
+    fn retry_backoff(_: u32) -> Duration {
+        Duration::ZERO
+    }
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("the queue calls run_with".into()))
+    }
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let run = (ctx.id().to_string(), ctx.attempt());
+        ctx_runs()
+            .lock()
+            .unwrap()
+            .entry(self.token.clone())
+            .or_default()
+            .push(run);
+        if ctx.attempt() == 1 {
+            return Err(JobError::Retryable("once more".into()));
+        }
+        Ok(())
+    }
+}
+
+/// A retry sees the first run's job id and the next attempt number.
+async fn a_retry_keeps_the_job_id_and_counts_the_attempt(pool: &Pool) {
+    let (a, b) = (token(pool, "ctx_a"), token(pool, "ctx_b"));
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<CtxProbe>().await;
+    q.dispatch(&CtxProbe { token: a.clone() }).await.unwrap();
+    q.dispatch(&CtxProbe { token: b.clone() }).await.unwrap();
+    q.start().await;
+    wait_for("both retries", || {
+        ctx_seen(&a).len() == 2 && ctx_seen(&b).len() == 2
+    })
+    .await;
+    q.shutdown().await;
+    let (a, b) = (ctx_seen(&a), ctx_seen(&b));
+    assert_eq!(a[0].0, a[1].0, "same id on the retry");
+    assert_eq!((a[0].1, a[1].1), (1, 2));
+    assert_ne!(a[0].0, b[0].0, "each job has its own id");
+    assert_eq!(job_rows(pool).await, 0);
+}
+
+/// Waits for the queue to stop, then finishes.
+#[derive(Serialize, Deserialize)]
+struct UntilStop {
+    token: String,
+}
+
+#[async_trait::async_trait]
+impl Job for UntilStop {
+    const NAME: &'static str = "tri:until_stop";
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("the queue calls run_with".into()))
+    }
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        start(&self.token);
+        ctx.stopping().await;
+        if ctx.is_stopping() {
+            finish(&self.token);
+        }
+        Ok(())
+    }
+}
+
+/// `shutdown` reaches a running job, which then finishes within the grace.
+async fn shutdown_fires_a_running_jobs_stop_signal(pool: &Pool) {
+    let tok = token(pool, "until_stop");
+    let q = queue(pool, 1, Duration::from_secs(60))
+        .await
+        .shutdown_grace(Duration::from_secs(10));
+    q.register::<UntilStop>().await;
+    q.dispatch(&UntilStop { token: tok.clone() }).await.unwrap();
+    q.start().await;
+    wait_for("the run to start", || counts(&tok).0 == 1).await;
+    let began = Instant::now();
+    q.shutdown().await;
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "waited out the grace"
+    );
+    assert_eq!(counts(&tok), (1, 1), "finished on the signal");
+    assert_eq!(job_rows(pool).await, 0, "done, not handed back");
+}
+
 #[derive(rustango::Model, Debug, Clone)]
 #[rustango(table = "jobs1229_note", app = "jobs1229", audit(track = "title"))]
 #[allow(dead_code)]
@@ -1322,6 +1429,8 @@ tri_dialect_test! {
         a_dispatch_in_a_block_wakes_the_worker_after_commit,
         named_queues_run_only_their_own_jobs,
         an_older_table_gets_the_queue_index,
+        a_retry_keeps_the_job_id_and_counts_the_attempt,
+        shutdown_fires_a_running_jobs_stop_signal,
     ],
 }
 

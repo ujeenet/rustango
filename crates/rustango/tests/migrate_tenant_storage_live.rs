@@ -63,19 +63,18 @@ async fn migrate_tenant_storage_dry_run_prints_plan() {
     fresh(&pool).await;
 
     // Seed a schema-mode tenant.
-    let mut org = Org {
-        id: Auto::default(),
-        slug: "acme_dryrun".into(),
-        display_name: "ACME Dry Run".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("acme_dryrun".into()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "acme_dryrun".into();
+        o.display_name = "ACME Dry Run".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("acme_dryrun".into());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
@@ -129,19 +128,18 @@ async fn migrate_tenant_storage_rejects_same_mode_no_op() {
     };
     fresh(&pool).await;
 
-    let mut org = Org {
-        id: Auto::default(),
-        slug: "noop_tenant".into(),
-        display_name: "No-op".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("noop_tenant".into()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "noop_tenant".into();
+        o.display_name = "No-op".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("noop_tenant".into());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
@@ -182,19 +180,18 @@ async fn migrate_tenant_storage_rejects_database_target_without_url() {
     };
     fresh(&pool).await;
 
-    let mut org = Org {
-        id: Auto::default(),
-        slug: "needs_url".into(),
-        display_name: "Needs URL".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("needs_url".into()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "needs_url".into();
+        o.display_name = "Needs URL".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("needs_url".into());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
@@ -295,19 +292,18 @@ async fn migrate_tenant_storage_restores_rows_into_a_schema() {
     let src_url = src_db.url().to_owned();
     // Stored as a secret reference: the move resolves it (#2384).
     std::env::set_var("RUSTANGO_T2384_SRC", &src_url);
-    let mut org = Org {
-        id: Auto::default(),
-        slug: "t1864".into(),
-        display_name: "Moved".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some("env://RUSTANGO_T2384_SRC".into()),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "t1864".into();
+        o.display_name = "Moved".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some("env://RUSTANGO_T2384_SRC".into());
+        o.schema_name = None;
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
@@ -499,19 +495,18 @@ async fn migrate_tenant_storage_restores_rows_into_a_database() {
     let dst_url = dst_db.url().to_owned();
     // Resolved to connect, stored as given (#2384).
     std::env::set_var("RUSTANGO_T2384_DST", &dst_url);
-    let mut org = Org {
-        id: Auto::default(),
-        slug: "t2189".into(),
-        display_name: "Moved".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("t2189_src".into()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "t2189".into();
+        o.display_name = "Moved".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("t2189_src".into());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
@@ -810,19 +805,18 @@ async fn a_foreign_owned_extension_on_the_target_is_refused_up_front() {
         format!("{scheme}://{role}:pw@{host}"),
     );
 
-    let mut org = Org {
-        id: Auto::default(),
-        slug: "tforeign".into(),
-        display_name: "Moved".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("tforeign_src".into()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "tforeign".into();
+        o.display_name = "Moved".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("tforeign_src".into());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     let pools = TenantPools::with_secrets(pool.clone(), ChainSecretsResolver::standard());
     let started = std::time::Instant::now();
@@ -869,20 +863,18 @@ async fn migrate_tenant_storage_refuses_a_schema_another_tenant_uses() {
     fresh(&pool).await;
 
     // `NULL` schema_name: the slug is the schema.
-    let mut owner = Org {
-        slug: "taken_schema".into(),
-        display_name: "Owner".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        schema_name: None,
-        ..rustango::testkit::org()
-    };
+    let mut owner = rustango::testkit::org_with(|o| {
+        o.slug = "taken_schema".into();
+        o.display_name = "Owner".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.schema_name = None;
+    });
     owner.insert(&pool.clone().into()).await.unwrap();
-    let mut mover = Org {
-        slug: "mover".into(),
-        display_name: "Mover".into(),
-        database_url: Some("postgres://example@db.example.com/mover".into()),
-        ..rustango::testkit::org()
-    };
+    let mut mover = rustango::testkit::org_with(|o| {
+        o.slug = "mover".into();
+        o.display_name = "Mover".into();
+        o.database_url = Some("postgres://example@db.example.com/mover".into());
+    });
     mover.insert(&pool.clone().into()).await.unwrap();
 
     let pools = TenantPools::new(pool.clone());
@@ -929,19 +921,18 @@ fn has_pg_dump() -> bool {
 
 /// A database-mode tenant whose database holds `rustango_users`.
 async fn movable_tenant(pool: &PgPool, slug: &str, src_url: &str) {
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.into(),
-        display_name: slug.into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(src_url.into()),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.into();
+        o.display_name = slug.into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(src_url.into());
+        o.schema_name = None;
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 }
 

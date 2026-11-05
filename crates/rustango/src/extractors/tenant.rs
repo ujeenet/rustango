@@ -370,13 +370,12 @@ mod one_context_tests {
     }
 
     fn org(slug: &str) -> Org {
-        Org {
-            slug: slug.into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some("sqlite::memory:".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.slug = slug.into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some("sqlite::memory:".into());
+        })
     }
 
     fn secret() -> SessionSecret {

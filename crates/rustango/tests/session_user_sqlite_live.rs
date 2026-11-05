@@ -54,15 +54,14 @@ impl OrgResolver for FixedResolver {
 }
 
 fn fake_sqlite_org() -> Org {
-    Org {
-        id: rustango::sql::Auto::Set(1),
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Set(1);
+        o.slug = "acme".into();
+        o.display_name = "Acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+    })
 }
 
 /// Handler that returns "anon" when no SessionUser is present.
@@ -149,10 +148,8 @@ async fn a_password_change_in_the_login_second_ends_that_session() {
     let registry = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("registry pool");
-    let org = Org {
-        database_url: Some(url.into()),
-        ..fake_sqlite_org()
-    };
+    let mut org = fake_sqlite_org();
+    org.database_url = Some(url.into());
     let ctx = Arc::new(TenantContext {
         pools: Arc::new(TenantPools::<sqlx::Sqlite>::new(registry)),
         resolver: ChainResolver::new().push(FixedResolver(org)),
@@ -353,9 +350,10 @@ async fn current_member_ends_on_a_same_second_password_change() {
     let app = app_with(
         member,
         sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
-        Org {
-            database_url: Some(url.into()),
-            ..fake_sqlite_org()
+        {
+            let mut o = fake_sqlite_org();
+            o.database_url = Some(url.into());
+            o
         },
         secret.clone(),
         rustango::tenancy::session::SessionSecret::from_bytes(
@@ -430,9 +428,10 @@ async fn a_member_logout_ends_member_and_tenant_sessions() {
     let app = app_with(
         both,
         sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap(),
-        Org {
-            database_url: Some(url.into()),
-            ..fake_sqlite_org()
+        {
+            let mut o = fake_sqlite_org();
+            o.database_url = Some(url.into());
+            o
         },
         secret.clone(),
         rustango::tenancy::session::SessionSecret::from_bytes(

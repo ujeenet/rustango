@@ -305,17 +305,16 @@ async fn exec(pool: &rustango::sql::Pool, sql: &str) {
 
 /// A `database`-mode SQLite tenant whose file is `<dir>/<slug>.db`.
 fn sqlite_org(dir: &std::path::Path, slug: &str) -> rustango::tenancy::Org {
-    rustango::tenancy::Org {
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!(
-            "sqlite:{}?mode=rwc",
-            dir.join(format!("{slug}.db")).display()
-        )),
-        ..rustango::testkit::org()
-    }
+    let mut o = rustango::testkit::org();
+    o.slug = slug.to_owned();
+    o.display_name = slug.to_owned();
+    o.storage_mode = "database".into();
+    o.backend_kind = "sqlite".into();
+    o.database_url = Some(format!(
+        "sqlite:{}?mode=rwc",
+        dir.join(format!("{slug}.db")).display()
+    ));
+    o
 }
 
 /// Migrate the registry, then every tenant, from `dir`.

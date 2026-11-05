@@ -1565,12 +1565,11 @@ pub(crate) mod resolver_tests {
         crate::testkit::create_tables_for::<Org>(&pool)
             .await
             .expect("orgs");
-        let mut org = Org {
-            slug: "acme".into(),
-            display_name: "acme".into(),
-            backend_kind: "sqlite".into(),
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+            o.display_name = "acme".into();
+            o.backend_kind = "sqlite".into();
+        });
         org.insert(&pool).await.expect("insert org");
         (tmp, sq, url)
     }
@@ -1609,11 +1608,10 @@ pub(crate) mod resolver_tests {
             .await
             .expect("orgs");
         if with_org {
-            let mut org = Org {
-                backend_kind: "sqlite".into(),
-                host_pattern: Some("acme.localhost".into()),
-                ..crate::testkit::org()
-            };
+            let mut org = crate::testkit::org_with(|o| {
+                o.backend_kind = "sqlite".into();
+                o.host_pattern = Some("acme.localhost".into());
+            });
             org.insert(&pool).await.expect("insert org");
         }
         (tmp, sq, url)

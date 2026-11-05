@@ -447,14 +447,13 @@ async fn tenancy(pool: &Pool) -> Tenancy {
 
     let slug = unique("t");
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug: slug.clone(),
-        storage_mode: "database".into(),
-        backend_kind: kind.into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.storage_mode = "database".into();
+        o.backend_kind = kind.into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(&db).await.expect("seed org");
     let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 

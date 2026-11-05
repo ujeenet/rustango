@@ -153,15 +153,14 @@ impl rustango::tenancy::OrgResolver for SoleTenant {
         _parts: &axum::http::request::Parts,
         _registry: &Pool,
     ) -> Result<Option<rustango::tenancy::Org>, rustango::tenancy::TenancyError> {
-        Ok(Some(rustango::tenancy::Org {
-            id: rustango::sql::Auto::Set(1),
-            slug: "sole".into(),
-            display_name: "sole".into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some(SOLE_TENANT_URL.to_owned()),
-            ..rustango::testkit::org()
-        }))
+        Ok(Some(rustango::testkit::org_with(|o| {
+            o.id = rustango::sql::Auto::Set(1);
+            o.slug = "sole".into();
+            o.display_name = "sole".into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some(SOLE_TENANT_URL.to_owned());
+        })))
     }
 }
 

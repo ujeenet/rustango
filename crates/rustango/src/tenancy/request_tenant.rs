@@ -119,10 +119,9 @@ mod tests {
 
     #[test]
     fn an_org_without_an_id_is_unknown() {
-        let org = crate::tenancy::Org {
-            slug: "acme".into(),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+        });
         assert_eq!(
             RequestTenant::from_resolution::<()>(Ok(Some(org))),
             RequestTenant::Unknown

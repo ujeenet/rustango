@@ -32,6 +32,7 @@ failures.
 - [Step 4 — Wire it into your app](#step-4--wire-it-into-your-app) — the full example
 - [Running the workers (CLI + production)](#running-the-workers-cli--production)
 - [Retries and backoff](#retries-and-backoff)
+- [The job context: id, attempt, stop](#the-job-context-id-attempt-stop)
 - [The dead-letter handler](#the-dead-letter-handler)
 - [The persistent queue (production)](#the-persistent-queue-production)
 - [Jobs under multi-tenancy](#jobs-under-multi-tenancy)
@@ -110,7 +111,8 @@ queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 then aborts and re-queues them. Queued jobs and parked retries stay queued, and
 `start()` again picks them up.
 
-Jobs are **at-least-once**. No stop signal reaches a running job, and an aborted
+Jobs are **at-least-once**. A running job sees the stop through
+[`JobCtx::stopping`](#the-job-context-id-attempt-stop), and an aborted
 job runs again from the start (the DB queue releases its row even if the job had
 just finished). The abort spends an attempt. Make every job idempotent.
 
@@ -305,6 +307,42 @@ the payload, override `fn max_attempts(&self) -> u32` or
 return `MAX_ATTEMPTS` and `retry_backoff`. The cap is read at dispatch.
 `jobs::exponential_backoff(base, failed_attempt)` is the default curve with your
 own base: `base`, doubled per failure, capped at `base · 1024`.
+
+---
+
+## The job context: id, attempt, stop
+
+Both queues call `Job::run_with(&self, ctx: &JobCtx)`. By default it calls
+`run()`, so jobs that implement only `run` work unchanged. Override it to read:
+
+- `ctx.id()` — the job's id, the same on every retry. Unique on its queue.
+- `ctx.attempt()` — 1 for the first run, 2 for the first retry.
+- `ctx.stopping()` / `ctx.is_stopping()` — the queue is shutting down; finish
+  within `shutdown_grace` or the run is aborted and re-queued.
+
+Use the id as an idempotency key, so a retried charge is not charged twice:
+
+```rust
+use rustango::jobs::{Job, JobCtx, JobError};
+
+#[async_trait::async_trait]
+impl Job for ChargeCard {
+    const NAME: &'static str = "charge_card";
+
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("ChargeCard runs through run_with".into()))
+    }
+
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let key = format!("charge-{}", ctx.id());   // same key on every retry
+        stripe_charge(self.order_id, self.cents, &key)
+            .await
+            .map_err(|e| JobError::Retryable(e.to_string()))
+    }
+}
+```
+
+A handler passed to `register_with` gets the payload only, not the context.
 
 ---
 
@@ -556,7 +594,8 @@ the expected outcome, so nothing is logged. This is a known gap.
 
 **`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
 `register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (jobs
-waiting to be picked up). Both queues have `on_dead_letter` and
+waiting to be picked up). `Job::run_with` gets a `JobCtx` (`id`, `attempt`,
+`stopping`). Both queues have `on_dead_letter` and
 `shutdown_grace`. The `DatabaseJobQueue` adds `ensure_table_pool`,
 `with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
 `queue_name`, `reclaim_stuck_after` and `reclaim_stuck_jobs_pool`.

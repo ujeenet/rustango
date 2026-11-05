@@ -157,6 +157,8 @@ untouched.
 - Tenant locks move to `tenant:<ns>:lock:<name>` and idempotency entries to `tenant:<ns>:idem:<sha>`. Until 0.65.0 this release also takes the old lock key and reads and writes the old idempotency entries and markers, so a 0.63 and a 0.64 pod never run one request or job twice; deploy 0.64 everywhere before 0.65.0. The purge cannot reach the hashed old idempotency copies; they expire with their TTL.
 - A global app, page or rate-limit key starting with `tenant:` or `~` is stored with a `~` in front, so it can never land in a tenant's keyspace.
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` are deprecated (removed in 0.66.0): use `CacheScope::for_tenant(cache, &tenant).app()` or `.locks()`; for `scoped`, put the namespace in the lock name.
+- `Org` is `#[non_exhaustive]`, so `Org { .. }` literals and `..testkit::org()` no longer compile outside rustango. Use `let mut o = Org::new(slug); o.field = …;` or `testkit::org_with(|o| o.field = …)`. Fields stay public.
+- Jobs can override `Job::run_with(&self, ctx: &JobCtx)` to read the job id, attempt and stop signal; jobs with only `run` need no change.
 
 ## 0.63.0
 

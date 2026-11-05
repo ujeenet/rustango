@@ -83,8 +83,8 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Next, Registered,
-    Running, StopSignal, DEFAULT_SHUTDOWN_GRACE,
+    DeadLetterFn, HandlerRegistry, Job, JobCtx, JobDeadLetter, JobError, JobId, JobQueue, Next,
+    Registered, Running, StopSignal, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::Pool;
 
@@ -760,7 +760,7 @@ async fn worker_loop(
             // Stop fired during the pick: hand the row back unrun.
             Ok(Some(row)) if stop.is_set() => unpick(&pool, &worker, row.id).await,
             Ok(Some(row)) => {
-                run_one(&pool, &registry, &dead_letter, &worker, row).await;
+                run_one(&pool, &registry, &dead_letter, &worker, row, &stop).await;
                 // Loop again immediately — there might be more.
             }
             Ok(None) => {
@@ -983,6 +983,7 @@ async fn run_one(
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
     worker: &Worker,
     job: PickedJob,
+    stop: &StopSignal,
 ) {
     let entry = registry.lock().await.lookup(&job.name);
     let Some(entry) = entry else {
@@ -1003,12 +1004,12 @@ async fn run_one(
     }
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
-    // `attempt` counts this run, so the run's 0-based number is one less.
-    let failed = runs.saturating_sub(1);
+    // `attempt` already counts this run; the row id outlives its retries.
+    let ctx = JobCtx::new(JobId(job.id.to_string().into()), runs, stop.clone());
     let run = job
         .context
         .clone()
-        .install((entry.handler)(job.payload.clone(), failed));
+        .install((entry.handler)(job.payload.clone(), ctx));
     let (outcome, held) = run_with_heartbeat(pool, worker, job.id, run).await;
     if !held {
         // Another worker may own the row now; its outcome is not ours to write.

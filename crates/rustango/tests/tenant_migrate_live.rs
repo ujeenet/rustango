@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rustango::migrate as rmig;
 use rustango::sql::{sqlx, Auto};
-use rustango::tenancy::{migrate_registry, migrate_tenants, Org, StorageMode, TenantPools};
+use rustango::tenancy::{migrate_registry, migrate_tenants, StorageMode, TenantPools};
 
 #[path = "support/scratch_db.rs"]
 mod scratch_db;
@@ -249,34 +249,32 @@ async fn tenant_migrate_fans_out_per_active_org_with_per_schema_ledger() {
     drop_schema(&pool, &acme_schema).await;
     drop_schema(&pool, &globex_schema).await;
 
-    let mut acme = Org {
-        id: Auto::default(),
-        slug: unique("acme"),
-        display_name: "ACME".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some(acme_schema.clone()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut acme = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = unique("acme");
+        o.display_name = "ACME".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some(acme_schema.clone());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     acme.insert(&pool.clone().into()).await.unwrap();
 
-    let mut globex = Org {
-        id: Auto::default(),
-        slug: unique("globex"),
-        display_name: "GLOBEX".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some(globex_schema.clone()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut globex = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = unique("globex");
+        o.display_name = "GLOBEX".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some(globex_schema.clone());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     globex.insert(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("tenant_fanout");
@@ -403,35 +401,33 @@ async fn tenant_migrate_skips_inactive_orgs() {
     drop_schema(&pool, &active_schema).await;
     drop_schema(&pool, &inactive_schema).await;
 
-    let mut active = Org {
-        id: Auto::default(),
-        slug: unique("active"),
-        display_name: "Active".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some(active_schema.clone()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut active = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = unique("active");
+        o.display_name = "Active".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some(active_schema.clone());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     active.insert(&pool.clone().into()).await.unwrap();
 
-    let mut inactive = Org {
-        id: Auto::default(),
-        slug: unique("inactive"),
-        display_name: "Inactive".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some(inactive_schema.clone()),
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: false,
-        ..rustango::testkit::org()
-    };
+    let mut inactive = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = unique("inactive");
+        o.display_name = "Inactive".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some(inactive_schema.clone());
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+        o.active = false;
+    });
     inactive.insert(&pool.clone().into()).await.unwrap();
 
     let dir = fresh_dir("inactive_skip");
@@ -486,19 +482,18 @@ async fn tenants_after_the_registry_restore_the_schema() {
     let boot = fresh_dir("1988_boot");
     migrate_registry(&pools, &boot).await.unwrap();
     for slug in ["t1", "t2", "t3"] {
-        let mut org = Org {
-            id: Auto::default(),
-            slug: slug.into(),
-            display_name: slug.into(),
-            storage_mode: StorageMode::Schema.as_str().into(),
-            backend_kind: "postgres".to_owned(),
-            database_url: None,
-            schema_name: Some(format!("sch_{slug}")),
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.id = Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = StorageMode::Schema.as_str().into();
+            o.backend_kind = "postgres".to_owned();
+            o.database_url = None;
+            o.schema_name = Some(format!("sch_{slug}"));
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
         org.insert(&pg.clone().into()).await.unwrap();
     }
     for label in ["1988_deploy1", "1988_deploy2"] {
@@ -552,19 +547,18 @@ async fn schema_mode_tenants_share_citext() {
 
     let schemas = [unique("ci_a"), unique("ci_b")];
     for schema in &schemas {
-        let mut org = Org {
-            id: Auto::default(),
-            slug: unique("ci"),
-            display_name: "CI".into(),
-            storage_mode: StorageMode::Schema.as_str().into(),
-            backend_kind: "postgres".to_owned(),
-            database_url: None,
-            schema_name: Some(schema.clone()),
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.id = Auto::default();
+            o.slug = unique("ci");
+            o.display_name = "CI".into();
+            o.storage_mode = StorageMode::Schema.as_str().into();
+            o.backend_kind = "postgres".to_owned();
+            o.database_url = None;
+            o.schema_name = Some(schema.clone());
+            o.host_pattern = None;
+            o.port = None;
+            o.path_prefix = None;
+        });
         org.insert(&pool.clone().into()).await.unwrap();
     }
     let dir = fresh_dir("tenant_citext");

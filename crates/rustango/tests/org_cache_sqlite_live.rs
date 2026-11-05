@@ -24,7 +24,7 @@
 use http::request::Parts;
 use http::Request;
 use rustango::sql::{sqlx, Pool};
-use rustango::tenancy::{Org, OrgResolver, SubdomainResolver};
+use rustango::tenancy::{OrgResolver, SubdomainResolver};
 
 /// Both the cache and its fingerprint are process-global.
 fn lock() -> &'static tokio::sync::Mutex<()> {
@@ -55,16 +55,15 @@ async fn registry() -> (Pool, tempfile::TempDir) {
 }
 
 async fn add_org(pool: &Pool, slug: &str, host: &str) {
-    let mut org = Org {
-        id: rustango::sql::Auto::Unset,
-        slug: slug.into(),
-        display_name: slug.into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some(host.into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Unset;
+        o.slug = slug.into();
+        o.display_name = slug.into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some(host.into());
+    });
     org.insert(pool).await.expect("insert org");
 }
 
