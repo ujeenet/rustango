@@ -156,7 +156,8 @@ SQLite or MySQL tenancy use `secure_tenant_router_from_settings_for::<sqlx::Sqli
 The authed router mounts: `POST {prefix}` (JSON-RPC), `GET {prefix}` (SSE
 notifications), `POST {prefix}/token` (credential → JWT), `POST {prefix}/oauth/token`
 (OAuth 2.1), and the two `.well-known/*` discovery documents. It signs agent
-tokens with `RUSTANGO_SESSION_SECRET`. If that is unset or shorter than 32 bytes,
+tokens with `RUSTANGO_SESSION_SECRET`. If that is unset, or is not base64 that
+decodes to at least 32 bytes,
 off the prod tier it uses the tenant session key saved in `./var/`; on prod it
 logs a warning and uses a random per-process key, so tokens die on restart.
 Each process keeps at most 8 open SSE streams per agent and 256 per tenant; past

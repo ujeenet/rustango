@@ -29,7 +29,7 @@ pub type AdminActionFuture<'a> = Pin<Box<dyn Future<Output = Result<(), AdminErr
 /// `register_tx_action*` methods.
 #[deprecated(
     since = "0.63.0",
-    note = "take an `ActionCtx`: see `Builder::register_action`; removed in 0.64.0"
+    note = "take an `ActionCtx`: see `Builder::register_action`; removed in 0.65.0"
 )]
 pub type AdminTxActionFn = Arc<
     dyn for<'a> Fn(&'a mut crate::sql::PoolTx<'static>, &'a [SqlValue]) -> AdminActionFuture<'a>
@@ -724,7 +724,7 @@ impl Builder {
     /// [`Self::register_action`] with [`ActionPerm::Change`] and a `(tx, pks)` handler.
     #[deprecated(
         since = "0.63.0",
-        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.64.0"
+        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.65.0"
     )]
     pub fn register_tx_action<F>(
         self,
@@ -749,7 +749,7 @@ impl Builder {
     /// [`Self::register_action`] with a `(tx, pks)` handler.
     #[deprecated(
         since = "0.63.0",
-        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.64.0"
+        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.65.0"
     )]
     pub fn register_tx_action_with_perm<F>(
         self,

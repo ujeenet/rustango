@@ -4,7 +4,7 @@ Modèles d'utilisation de l'ORM **Rustango** au-delà des bases. Si vous avez d�
 
 [![Requêtes ORM vérifiées par le typage : filtres chaînés, tri, limites et agrégation — le tout sans SQL brut](../img/orm.png)](../img/orm.png)
 
-> **Source :** `rustango::sql` (`QuerySet`, la macro `Q!` / le builder `Qb`) et
+> **Source :** `rustango::sql` (`QuerySet`, la macro `Q!` / le builder `query::Q`) et
 > l'API de requêtes `#[derive(Model)]` — toujours compilée ; choisissez une fonctionnalité de backend
 > (`postgres` / `mysql` / `sqlite`).
 >
@@ -20,7 +20,7 @@ Quelques termes Rust reviennent tout au long du document. `&pool` est une réfé
 
 Les versions récentes ont ajouté un lot de fonctionnalités qui ne sont pas encore intégrées à toutes les sections ci-dessous. Repères rapides :
 
-- **Macro `Q!` + builder d'exécution `Qb`** — filtres sûrs à la compilation. `User::objects().where_(Q!(User.email__icontains = "alice"))` échoue à la compilation si un nom de champ comporte une faute de frappe. Variante composable à l'exécution pour les puces de filtre de l'admin : `let q = Qb::eq("active", true) & Qb::gt("age", 18i64);`.
+- **Macro `Q!` + builder d'exécution `query::Q`** — filtres sûrs à la compilation. `User::objects().where_(Q!(User.email__icontains = "alice"))` échoue à la compilation si un nom de champ comporte une faute de frappe. Variante composable à l'exécution pour les puces de filtre de l'admin : `let q = rustango::query::Q::eq("active", true) & rustango::query::Q::gt("age", 18i64);`.
 - **`.distinct_on(&["author_id"])`** — natif sur PG ; repli portable via fonction de fenêtrage sur MySQL / SQLite. Modèles « le plus récent par groupe ».
 - **`bulk_upsert_pool(rows, unique_fields, update_fields, &pool)`** — insère de nombreuses lignes en une instruction, ou les met à jour en cas de conflit. `ON CONFLICT` / `ON DUPLICATE KEY UPDATE` tri-dialecte. Si une clé se répète, la dernière ligne gagne.
 - **`explain_pool()`** — EXPLAIN tri-dialecte. PG `EXPLAIN (FORMAT JSON, ANALYZE, BUFFERS)` / MySQL `EXPLAIN ANALYZE` / SQLite `EXPLAIN QUERY PLAN`.
@@ -1137,7 +1137,7 @@ let frame = WindowFrame {
 **Mises en garde :**
 
 - **`FILTER` + `Window` pas encore pris en charge** : combiner `.filter(...)` avec une fonction de fenêtrage lève `SqlError::NestedAggregateWrapper { wrapper: "Filtered(Window)" }` — la syntaxe sous-jacente varie selon le type de fonction (PG autorise `agg_fn() FILTER (WHERE …) OVER (…)` pour les fonctions agrégat-fenêtre mais pas pour les fonctions de classement), et le writer n'a pas encore appris la répartition. Reporté à un suivi si la demande émerge.
-- **`PercentRank` / `CumeDist` / `NthValue`** ne sont pas dans la v1 — SQL définit davantage de fonctions de fenêtrage que celles couvertes ici. La v1 livre les 8 variantes les plus utilisées ; les trois manquantes peuvent être ajoutées progressivement avec la même forme de builder.
+- **`PercentRank` / `CumeDist` / `NthValue`** ne sont pas dans la v1 — SQL définit davantage de fonctions de fenêtrage que celles couvertes ici. La v1 livre les quatorze ci-dessus ; les trois manquantes peuvent être ajoutées progressivement avec la même forme de builder.
 
 ### Filtrage sur les agrégats (HAVING)
 
@@ -1433,7 +1433,7 @@ Post::objects()
 
 Insère une ligne, ou la met à jour si une ligne avec la même clé existe déjà — un upsert. Cela émet le `ON CONFLICT … DO UPDATE` natif de la base de données.
 
-Le `.upsert_on(executor)` d'instance unique entre en conflit sur la **clé primaire** : avec une PK `Auto::Unset`, le serveur assigne une nouvelle clé (équivalent à `insert`) ; avec une PK `Auto::Set`, la ligne est insérée si absente ou toutes les colonnes non-PK sont écrasées si présente.
+Le `.upsert_on(executor)` d'instance unique entre en conflit sur le premier `unique_together` du modèle, sinon sur la **clé primaire** : avec une PK `Auto::Unset`, le serveur assigne une nouvelle clé (équivalent à `insert`) ; avec une PK `Auto::Set`, la ligne est insérée si absente ou toutes les colonnes non-PK sont écrasées si présente.
 
 ```rust
 // Upsert on the PK — INSERT, or UPDATE every non-PK column if the
@@ -1590,7 +1590,7 @@ post.force_delete(&pool).await?;       // real DELETE
 let live = Post::objects().where_(Post::deleted_at.is_null()).fetch(&pool).await?;
 ```
 
-Ces méthodes prennent le `&Pool` et tournent sur les trois backends ; `soft_delete_on` / `restore_on` sont les formes executor réservées à Postgres (pour passer une transaction). Le bouton « Delete » de l'admin supprime en douceur tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` est un marqueur qui exprime l'intention et ne change rien — il n'annule pas un `.active()` précédent. Pour les exclure par défaut, déclarez un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, où `live_only()` renvoie le filtre `deleted_at IS NULL` — et désactivez-le par requête avec `.without_global_scope("live")`.
+Ces méthodes prennent le `&Pool` et tournent sur les trois backends ; `soft_delete_on` / `restore_on` sont les formes executor, sur tous les backends (pour passer une transaction). Le bouton « Delete » de l'admin supprime en douceur tout modèle qui possède la colonne. Les requêtes par défaut incluent toujours les lignes supprimées en douceur, mais vous n'avez plus à écrire le filtre à la main : `.active()` les exclut, `.only_trashed()` ne renvoie qu'elles et `.with_trashed()` est un marqueur qui exprime l'intention et ne change rien — il n'annule pas un `.active()` précédent. Pour les exclure par défaut, déclarez un global scope — `#[rustango(global_scope(name = "live", apply = live_only))]`, où `live_only()` renvoie le filtre `deleted_at IS NULL` — et désactivez-le par requête avec `.without_global_scope("live")`.
 
 Les global scopes s'appliquent à chaque `QuerySet` et aux raccourcis de `Model` construits dessus (`count`, `sum`, `avg`, `min`, `max`, `destroy`, `delete_where`, …). Ils ne s'appliquent pas à `Model::truncate`, qui vide toute la table, ni aux méthodes d'instance indexées par la clé primaire (`save`, `save_partial`, `delete`, `soft_delete`, `restore`) : celles-ci agissent sur la ligne que vous tenez déjà.
 
@@ -1645,19 +1645,23 @@ Passe au SQL écrit à la main quand le query builder ne peut pas exprimer ce do
 ```rust
 use rustango::sql::sqlx;
 
+// sqlx runs on one driver's pool. Take it with `as_sqlite()` (or
+// `as_postgres()` / `as_mysql()`) and write that backend's SQL.
+let db = pool.as_sqlite().ok_or("not a SQLite pool")?;
+
 // Raw query → typed rows
-let rows = sqlx::query_as::<_, (i64, String)>("SELECT id, title FROM posts WHERE views > $1 ORDER BY views DESC")
+let rows = sqlx::query_as::<_, (i64, String)>("SELECT id, title FROM posts WHERE views > ? ORDER BY views DESC")
     .bind(1000)
-    .fetch_all(&pool)
+    .fetch_all(db)
     .await?;
 
 // Raw with model decoding
 let posts: Vec<Post> = sqlx::query_as::<_, Post>("SELECT * FROM posts WHERE complicated_condition")
-    .fetch_all(&pool)
+    .fetch_all(db)
     .await?;
 
 // Raw without rows (DDL / DML)
-sqlx::query("REINDEX TABLE posts").execute(&pool).await?;
+sqlx::query("VACUUM").execute(db).await?;
 ```
 
 Pour du SQL brut programmatique au sein de la couche de requêtes **Rustango** (tri-dialecte ; prend le SQL, un `Vec<SqlValue>` de valeurs à lier, puis le pool en DERNIER, et renvoie `Vec<T>`) :
@@ -1872,7 +1876,7 @@ Une liste de contrôle rapide pour garder les requêtes rapides à mesure que le
 - **`select_related` pour l'affichage des FK dans les listes** — élimine le N+1 dans les vues d'admin/liste.
 - **`.limit()` / `fetch_paginated_on` au lieu de tout charger** — ne chargez jamais des tables entières.
 - **Pagination par curseur pour les tables énormes** — évite le `COUNT(*)` par page.
-- **`bulk_insert_on` (Postgres) ou `bulk_upsert_pool` pour les lots** — un seul aller-retour au lieu de N.
+- **`bulk_insert_on` ou `bulk_upsert_pool` pour les lots** — un seul aller-retour au lieu de N.
 - **`upsert_on` pour les imports idempotents** — `ON CONFLICT` est plus rapide que SELECT-puis-INSERT.
 - **`transaction_pool` / `atomic` pour les écritures liées** — réduit le surcoût de commit et maintient la cohérence.
 - **Mettez en cache les lectures chaudes** avec `cache::get_or_set` — invalidez sur le gestionnaire de signal `connect_post_save<T>(...)`.

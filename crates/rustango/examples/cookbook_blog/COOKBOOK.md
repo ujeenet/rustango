@@ -159,7 +159,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ---
 
-### 1.3 `cargo run -- makemigrations [name] [--empty] [--dry-run]`
+### 1.3 `cargo run -- makemigrations [name] [--empty] [--merge]`
 
 **What**: Diff the current model registry against the latest snapshot and emit a new migration JSON.
 
@@ -167,7 +167,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **API**: [`migrate::make`](../../src/migrate/make.rs)
 
-**Recipe**: forwarded by `Cli::run()` to `migrate::manage::run`. `cargo run -- makemigrations [<name>]`. `--dry-run` prints the planned ops without writing; `--empty <name>` emits a stub for hand-written `Operation::Data` work (e.g. `RenameTable`).
+**Recipe**: forwarded by `Cli::run()` to `migrate::manage::run`. `cargo run -- makemigrations [<name>]`. `--empty <name>` emits a stub for hand-written `Operation::Data` work (e.g. `RenameTable`).
 
 **Not verified**: the `manage` dispatcher builds the pool *before* it dispatches, so a verb cannot be exercised without a live database — and `cargo run` with no args serves until killed. There is no in-process harness for either, so this recipe has no backing test. `cli_help_works_without_database_url` covers only that the verb is listed in `--help`.
 
@@ -445,6 +445,11 @@ let mailer: rustango::email::BoxedMailer = rustango::email::from_settings(&cfg.m
 let queue = rustango::jobs::inmemory_from_settings(&cfg.jobs);
 ```
 
+`cache::from_settings` is sync, so it panics on `redis` and `db` (both
+must connect) and on an unknown name. For redis use
+`cache::from_settings_async(&cfg.cache).await?`, which returns those as
+errors; build `DatabaseCache` where the pool is.
+
 The operator console **automatically** picks up `[brand]` from the
 loaded settings at boot — no wiring call needed. Resolution
 priority: defaults → `Settings.brand.*` (TOML) → `RUSTANGO_OPERATOR_*`
@@ -464,7 +469,7 @@ don't reset).
 [admin]                 # allowed_tables, read_only_tables
 [server]                # bind, request_timeout_secs, max_body_bytes
 [auth]                  # argon2 cost, lockout threshold/duration
-[auth.jwt]              # access_ttl_secs, refresh_ttl_secs, issuer, audience
+[auth.jwt]              # access_ttl_secs, refresh_ttl_secs
 [brand]                 # name, tagline, logo_url, primary_color, theme_mode
 [security]              # headers_preset, csp, hsts_max_age_secs, cors_allowed_origins
 [routes]                # legacy_preset + per-field URL prefix overrides
@@ -1107,7 +1112,7 @@ Two columns assigned in one call — caller never deals with the integer CT id b
 pub struct Activity { /* ... */ }
 ```
 
-The admin list view at `/__admin/cookbook_activity` shows `action | target | created_at`, where `target` is one clickable link per row. Raw `ct_column` / `pk_column` integers stay hidden.
+The admin list view at `/admin/cookbook_activity` shows `action | target | created_at`, where `target` is one clickable link per row. Raw `ct_column` / `pk_column` integers stay hidden.
 
 Implementation prefetches the page's distinct CT ids once before the row loop (usually 1 round-trip per distinct target type), so the cell render is hot-path.
 
@@ -1351,7 +1356,7 @@ test raw_sql_escape_via_sqlx ... ok
 test result: ok. 17 passed; 0 failed; 0 ignored
 ```
 
-* §3.31 `Post::objects().filter("published", Op::Eq, true).fetch_on(&pool)` →
+* §3.31 `Post::objects().filter_op("published", Op::Eq, true).fetch_on(&pool)` →
   `filter_eq_fetch_returns_matching_rows`
 * §3.34 `Op::Gt` / `Op::Lt` / `Op::ILike` / `Op::In` / `Op::Between` /
   `Op::IsNull` — six tests covering the full Op surface.
@@ -1617,20 +1622,23 @@ test.
 **Recipe**:
 
 ```rust
-use rustango::tenancy::TenantPoolsConfig;
+use rustango::sql::sqlx;
+use rustango::tenancy::{TenantPools, TenantPoolsConfig};
 use std::time::Duration;
 
-let cfg = TenantPoolsConfig {
-    max_cached_database_pools: 64,
-    database_pool_max_connections: 8,
-    database_pool_min_connections: 1,            // keep one warm
-    database_pool_acquire_timeout: Duration::from_secs(10),
-    database_pool_idle_timeout: Some(Duration::from_secs(10 * 60)),
-    database_pool_max_lifetime: Some(Duration::from_secs(30 * 60)),
-    prewarm_active_tenants: true,                // build all on boot
-};
-
-let pools = TenantPools::with_config(registry_pool, cfg);
+fn tuned_pools<DB: sqlx::Database>(registry_pool: sqlx::Pool<DB>) -> TenantPools<DB> {
+    let cfg = TenantPoolsConfig {
+        max_cached_database_pools: 64,
+        database_pool_max_connections: 8,
+        database_pool_min_connections: 1,            // keep one warm
+        database_pool_acquire_timeout: Duration::from_secs(10),
+        database_pool_idle_timeout: Some(Duration::from_secs(10 * 60)),
+        database_pool_max_lifetime: Some(Duration::from_secs(30 * 60)),
+        prewarm_active_tenants: true,                // build all on boot
+        ..TenantPoolsConfig::default()
+    };
+    TenantPools::new(registry_pool).config(cfg)
+}
 ```
 
 Defaults are conservative: `min_connections = 0`, `prewarm_active_tenants = false`. The `prewarm-pools` manage verb (§1.6b) runs the same warm-up loop one-shot.
@@ -1640,9 +1648,9 @@ Defaults are conservative: `min_connections = 0`, `prewarm_active_tenants = fals
 ---
 
 ### 5.79 `RouteConfig` — configurable URL prefixes
-**What**: One struct that drives every framework-mounted URL prefix on the tenant admin (login, logout, admin, audit, static, brand). Defaults are the underscore-prefixed `__login` / `__admin` / `__static__` / `__brand__` paths. `RouteConfig::friendly()` flips them all to underscore-free shapes (`/login`, `/admin`, `/audit`, `/_static`, `/_brand`) for projects that prefer clean, public-looking URLs.
+**What**: One struct that drives every framework-mounted URL prefix on the tenant admin (login, logout, admin, audit, static, brand). The default is `/login`, `/admin`, `/audit`, `/_static`, `/_brand` (`RouteConfig::friendly()` is the same); `RouteConfig::legacy()` switches to the old `__login` / `__admin` / `__static__` / `__brand__` paths.
 
-**When**: Apps that want public-facing tenant admins on clean paths instead of the framework's `__`-prefixed defaults; or apps hosting a tenant admin alongside their own routes that already use `/admin/...`.
+**When**: Apps whose own routes already use `/admin/...` or `/login`, or deployments that keep the pre-0.29 `__` URLs for bookmarks and integrations.
 
 **API**: [`tenancy::routes::RouteConfig`](../../src/tenancy/routes.rs); [`server::Builder::routes`](../../src/server/builder.rs).
 
@@ -1651,7 +1659,7 @@ Defaults are conservative: `min_connections = 0`, `prewarm_active_tenants = fals
 ```rust
 use rustango::tenancy::RouteConfig;
 
-let routes = RouteConfig::friendly();   // /login, /admin, /audit, /_static, /_brand
+let routes = RouteConfig::legacy();     // /__login, /__admin, /__static__, /__brand__
 // or pick individually:
 // let routes = RouteConfig {
 //     login_url: "/sign-in".into(),
@@ -1659,9 +1667,10 @@ let routes = RouteConfig::friendly();   // /login, /admin, /audit, /_static, /_b
 //     ..RouteConfig::default()
 // };
 
-rustango::server::Builder::new(api_router)
+let registry = sqlx::SqlitePool::connect("sqlite://registry.db?mode=rwc").await?;
+rustango::server::Builder::from_pool(registry, "sqlite://registry.db?mode=rwc", "localhost")
     .routes(routes)
-    .serve()
+    .serve("0.0.0.0:8080")
     .await?;
 ```
 
@@ -1672,7 +1681,7 @@ Also exposes session TTLs (`tenant_session_ttl`, `operator_session_ttl`, `impers
 ---
 
 ### 5.80 Operator-as-superuser tenant impersonation
-**What**: From the operator console org-edit page (`/orgs/{slug}/edit`), an operator can click "Open admin as superuser →" to get an HMAC-signed cross-domain cookie that logs them into that tenant's admin with implicit superuser rights. No password reset, no shadow account. The tenant admin renders a sticky warning banner ("You are impersonating tenant `acme` as operator `admin` — [End impersonation]") on every page so the privileged context is visible at all times.
+**What**: From the operator console org-edit page (`/orgs/{slug}/edit`), an operator can click "Open admin as superuser →" to get an HMAC-signed, single-use handoff token in the redirect URL, which the tenant admin redeems for a host-scoped cookie that logs them into that tenant's admin with implicit superuser rights. No password reset, no shadow account. The tenant admin renders a sticky warning banner ("You are impersonating tenant `acme` as operator `admin` — [End impersonation]") on every page so the privileged context is visible at all times.
 
 **When**: Customer support — operator needs to reproduce a tenant-side bug; admin maintenance — fix a malformed model row in a tenant DB; onboarding — sanity-check a freshly-provisioned tenant before handing it over.
 
@@ -1696,16 +1705,16 @@ RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS=900   # 15 min
 
 **API**: [`admin::Builder::tenant_mode`](../../src/admin/urls.rs); [`admin::AppState::is_visible`](../../src/admin/urls.rs); [`ModelScope::Registry` / `Tenant`](../../src/core/schema.rs).
 
-**Recipe**: opt-out only — most apps don't touch this. The check fires both on inventory-walk (sidebar enumeration) and on URL resolution (`lookup_model`), so a hand-typed `/__admin/rustango_orgs` URL on the tenant side returns 404 instead of leaking registry rows.
+**Recipe**: opt-out only — most apps don't touch this. The check fires both on inventory-walk (sidebar enumeration) and on URL resolution (`lookup_model`), so a hand-typed `/admin/rustango_orgs` URL on the tenant side returns 404 instead of leaking registry rows.
 
 **Verified by**: `admin::urls::tests::*` (6 unit tests covering scope filter + `admin_prefix` Builder variants).
 
 ---
 
 ### 5.82 `admin_prefix` template variable
-**What**: Every admin Tera template gets `{{ admin_prefix }}` injected (default `/__admin`) so links inside `_sidebar.html` / `index.html` / `form.html` / `detail.html` / `list.html` / `audit_log.html` follow the admin URL chosen by `RouteConfig`. Pre-0.27.9 the templates had hardcoded `/__admin/...` strings that would 404 if the admin was mounted under a different prefix.
+**What**: Every admin Tera template gets `{{ admin_prefix }}` injected (default `/admin`) so links inside `_sidebar.html` / `index.html` / `form.html` / `detail.html` / `list.html` / `audit_log.html` follow the admin URL chosen by `RouteConfig`. Pre-0.27.9 the templates had hardcoded `/__admin/...` strings that would 404 if the admin was mounted under a different prefix.
 
-**When**: Anyone using `RouteConfig::friendly()` or any custom `admin_url`. The framework keeps `/__admin` as the default so apps that don't override `RouteConfig` see no behavior change.
+**When**: Anyone using `RouteConfig::legacy()` (`/__admin`) or any custom `admin_url`; with the default the prefix is `/admin`.
 
 **API**: [`admin::Builder::admin_prefix`](../../src/admin/urls.rs); [`admin::helpers::chrome_context`](../../src/admin/helpers.rs).
 
@@ -1745,12 +1754,12 @@ cargo run -- create-user acme alice --password Hunter2-alice-pw
 ---
 
 ### 5.84 Self-serve change-password page + `--generate`
-**What**: A self-serve change-password flow on the tenant admin (`/__change-password`) — the user enters their current password plus a new one and the framework verifies + rotates without operator involvement. Plus a `change-password` / `change-operator-password` CLI counterpart and a `--generate` flag on every password verb.
+**What**: A self-serve change-password flow on the tenant admin (`/change-password`) — the user enters their current password plus a new one and the framework verifies + rotates without operator involvement. Plus a `change-password` / `change-operator-password` CLI counterpart and a `--generate` flag on every password verb.
 
 **When**: Whenever the user remembers their current password (rotation, periodic refresh, switching from a generated bootstrap password). Operator-driven recovery for locked-out users still uses `reset-password` / `reset-operator-password`.
 
 **API**:
-- [`tenancy::routes::RouteConfig::change_password_url`](../../src/tenancy/routes.rs) (default `/__change-password`; `friendly()` → `/change-password`).
+- [`tenancy::routes::RouteConfig::change_password_url`](../../src/tenancy/routes.rs) (default `/change-password`; `legacy()` → `/__change-password`).
 - [`admin::Builder::change_password_url`](../../src/admin/urls.rs) — surfaces the link in the standalone admin sidebar; tenant admin Builder threads it through automatically.
 - [`tenancy::password::generate(length)`](../../src/tenancy/password.rs) — `OsRng`-backed generator over a 58-character unambiguous alphabet (no `0/O`, `1/l/I`).
 
@@ -1812,7 +1821,7 @@ test result: ok. 7 passed; 0 failed; 0 ignored
   `jwt_rejects_wrong_secret_and_tampered_token`,
   `jwt_decode_at_rejects_expired_token`
 * §6.78 / 6.79 `permissions::codename_for::<T>("view"|"add"|"change"|"delete")`
-  → `{app}.{action}_{model}` codename strings.
+  → `<table>.<action>` codename strings (`cookbook_author.view`).
   → `permission_codename_for_model_resolves_app_action_model`
 
 ## Chapter 7 — Forms + serializer
@@ -2072,7 +2081,7 @@ rustango::register_admin_inline!(
 );
 ```
 
-The parent's `/__admin/blog_post/<pk>` page renders a "Comments"
+The parent's `/admin/blog_post/<pk>` page renders a "Comments"
 panel below the parent fields. Multiple inlines per parent are
 supported — each registration produces a separate panel.
 
@@ -2134,7 +2143,7 @@ attack pin).
 
 ### 8.115 GFK `<select>` picker on the standalone create/edit form
 **What**: When a model carries `#[rustango(generic_fk(...))]`, its
-standalone `/__admin/<table>/new` and `/__admin/<table>/<pk>/edit`
+standalone `/admin/<table>/new` and `/admin/<table>/<pk>/edit`
 pages render the `ct_column` as a `<select>` populated from
 `rustango_content_types`. Each option is labeled
 `<app_label>.<model_name>`; the row's current CT is pre-selected
@@ -2448,10 +2457,6 @@ success_url) carries through unchanged. The Tera context shape is
 identical between `router` and `tenant_router` so templates port
 across without edits. Available behind the combined `template_views`
 + `tenancy` features.
-
-Single-tenant only today (capture a `PgPool` at mount time). The
-`tenant_router` variant lands once we settle on the `Tenant`-extractor
-pattern matching the `viewset::tenant_router` shape.
 
 ---
 
@@ -2809,7 +2814,7 @@ API:         [`crates/rustango/src/sql/sqlite.rs`](../../src/sql/sqlite.rs)
 Recipe:
 ```rust,ignore
 Post::objects()
-    .filter("title", Op::ILike, "%hello%")
+    .filter_op("title", Op::ILike, "%hello%")
     .fetch(&pool).await?;  // emits: WHERE LOWER(title) LIKE LOWER(?)
 ```
 
@@ -2917,10 +2922,8 @@ Verified by:  [`examples/sqlite_app_demo.rs`](../sqlite_app_demo.rs) +
 
 What `AppBuilder` does NOT include (compared to the multi-tenant
 `Builder`): operator console, tenant admin, tenant resolver chain,
-session middleware. Those all sit on top of `TenantPools` which is
-still PG-bound. For a SQLite-backed multi-tenant app you'd
-combine `AppBuilder` with the per-tenant pool registry sketch from
-the cookbook discussion ("How do I use SQLite for tenants").
+session middleware. For a multi-tenant app on any of the three
+backends, use `server::Builder::from_pool` with a registry pool instead.
 
 The pool is injected as `Extension<Arc<Pool>>` into every request,
 so handlers extract it directly — no per-app `with_state(...)`

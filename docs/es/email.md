@@ -73,7 +73,8 @@ Constrúyelo a partir de la configuración para que difiera por entorno (`Consol
 en local, `SmtpMailer` en prod) mediante `email::from_settings(&settings.mail)?`. Con
 `backend = "smtp"` falla si el mailer no se puede construir (sin `smtp_host`, `from_address`
 inválida, `smtp_tls` distinto de `none` / `starttls` / `implicit`, o un build
-sin `email-smtp`). `backend` acepta `console` (por defecto), `memory`,
+sin `email-smtp`). `backend` acepta `console` (por defecto fuera de prod; sin definir en prod es un
+`MailError::Config`), `memory`,
 `null` / `none`, `file` (necesita `file_email_dir`) y `smtp`; cualquier otro valor da
 `MailError::Config`.
 

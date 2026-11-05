@@ -158,7 +158,7 @@ Der authentifizierte Router mountet: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (SSE-Benachrichtigungen), `POST {prefix}/token` (Credential → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1) und die beiden `.well-known/*`
 Discovery-Dokumente. Er signiert Agenten-Tokens mit `RUSTANGO_SESSION_SECRET`.
-Fehlt der Wert oder ist er kürzer als 32 Bytes, nutzt er außerhalb von prod den
+Fehlt der Wert oder ist er kein Base64, das zu mindestens 32 Bytes dekodiert, nutzt er außerhalb von prod den
 Tenant-Session-Schlüssel aus `./var/`; auf prod warnt er und nutzt einen
 zufälligen Schlüssel pro Prozess; Tokens gelten dann nur bis zum Neustart.
 Jeder Prozess hält höchstens 8 offene SSE-Streams pro Agent und 256 pro Tenant;

@@ -49,6 +49,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The fullstack index links the admin at its configured prefix, not a fixed `/admin`.
 - Guides: viewsets, getting-started, scaffolding, manage and the cookbook match what the generators write.
 - `member_sso_router()` serves the backend of the mounted tenant context, so a SQLite or MySQL tenant signs in under a build that also enables `postgres`; it answered 500 there.
+- The deprecated `find_or_provision_member` applies a tenant provider's sign-in, sign-up and lifecycle rules and the tenant's settings; a shared or admin key no longer provisions. `auto_provision` alone no longer lets anyone in.
+- Items announced as removed in 0.64.0 stay deprecated until 0.65.0, and their notes say so.
+- Guides: cookbook, orm, caching, models, api-conventions, manage, migrations, sso, security, auth, mcp and email match the code; `cache::from_settings` documents that a bad backend panics.
 
 ## [0.63.0] — 2026-11-04
 
@@ -89,9 +92,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Deprecated
 
-- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`. Removed in 0.64.0.
+- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`. Removed in 0.65.0.
 - `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
-- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay one more minor; removed in 0.64.0.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay one more minor; removed in 0.65.0.
 
 ### Fixed
 

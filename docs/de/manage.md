@@ -81,7 +81,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | Verb | Was es tut |
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
-| `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
+| `migrate [target]` / `--dry-run` / `--squash` / `--fake` | Wendet ausstehende Migrationen an (`--squash` nur Single-Database, `--fake` nur Tenancy) |
 | `downgrade [N \| <target>]` | Rollt die letzten N Migrationen zurück, oder die nach `<target>` (Tenant-Scope) |
 | `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
 | `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
@@ -350,6 +350,9 @@ cargo run -- migrate zero               # unapply EVERY migration
 
 ### `migrate --squash`
 
+> **Nur Single-Database.** Das `migrate` der Mandantenfähigkeit (`Cli::tenancy()`)
+> lehnt `--squash` ab.
+
 Fasst jede **ausstehende** (nicht angewendete) Migration in einem frisch
 generierten Diff zusammen — der Dev-Iterations-Notausgang, wenn ein Stapel
 halbfertiger Migrationen leichter neu zu generieren als zu reparieren ist. Es
@@ -394,6 +397,9 @@ denn das ist ein echter Konflikt und keine bekannt-äquivalente Historie.
 
 ### `migrate --fake <name>`
 
+Nur in Tenancy-Projekten (`Cli::tenancy()`): das Single-Database-`migrate`
+lehnt `--fake` als unbekanntes Flag ab.
+
 Stempelt eine Migration als angewendet **ohne ihr SQL auszuführen** — der
 Betreiber-Notausgang, wenn die Datenbank bereits im Zielzustand ist, das
 Ledger es aber nicht weiß (eine außerhalb des Kanals eingerichtete DB, eine
@@ -418,6 +424,9 @@ die Tabellen des Frameworks leben pro Tenant, ihre Reparatur ist also eine
 Per-Tenant-Aufgabe.
 
 ### `downgrade [N | <target>]`
+
+`<target>` geht nur in einem Tenancy-Projekt; das Single-Database-`downgrade`
+nimmt eine Schrittzahl.
 
 Rollt die letzten N angewendeten Migrationen zurück (Standard 1). Jede Migration muss reversibel sein: Schemaänderungen
 kehren sich automatisch um, aber Datenoperationen brauchen ein definiertes
@@ -1743,8 +1752,7 @@ mit dem Passwort), `DB_NAME` und `DB_PARAMS`. Für SQLite `DB_DRIVER=sqlite`
 und `DB_NAME` als Dateipfad setzen. `DB_PASSWORD` und `DB_PASSWORD_FILE`
 zusammen zu setzen ist ein Fehler. Sind beide Varianten gesetzt, gewinnt
 `DATABASE_URL`, eine einzige Warnung (Passwort verborgen) sagt es, und
-`check --deploy` listet es auf; ab 0.62.0 gewinnen die `DB_*`-Variablen,
-also bleib bei einer Variante.
+`check --deploy` listet es auf; bleib also bei einer Variante.
 
 ---
 

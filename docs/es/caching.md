@@ -66,8 +66,9 @@ poco, y un valor no reconocido te da una caché en memoria con una advertencia.
 
 No existe el valor `postgres`: el backend de base de datos es `db` o `database`. Los
 valores van en minúsculas. Un valor desconocido o con otras mayúsculas (`Redis`, una
-errata), o `file` sin `file_cache_dir`, registra un `error` y recurre a una caché en
-memoria; una versión menor posterior lo rechazará.
+errata), o `file` sin `file_cache_dir`, se rechaza: `from_settings` hace panic al
+arrancar y `from_settings_async` devuelve el error. Un sustituto por proceso
+rompería lo que garantiza una caché compartida.
 
 `FileCache` barre una dieciseisava parte de su directorio en busca de entradas
 expiradas cada 16 escrituras. Llama a `FileCache::purge_expired()` de forma periódica
@@ -342,7 +343,8 @@ seguro por defecto:
 
 Para descartar una página tras una escritura, llama a
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sobre un clon de la capa
-(añade `.tenant(org_id)` a la clave con tenancy). Purga todas las variantes cacheadas
+(con tenancy añade `.tenant(&slug)` a la clave, el `TenantSlug` de la
+petición, p. ej. de `RequestTenant::tenant()`). Purga todas las variantes cacheadas
 de esa ruta: cualquier query string, cualquier valor de `vary_on`, GET y `QUERY` por
 igual. Funciona con un contador de generación por ruta, así que cada GET cacheado lee
 una clave de caché pequeña más.

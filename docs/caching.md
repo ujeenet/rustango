@@ -60,8 +60,9 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 
 There is no `postgres` value — the DB backend is `db` or `database`. Values
 are lowercase. An unknown or mis-cased value (`Redis`, a typo), or `file`
-without `file_cache_dir`, logs an `error` and falls back to an in-memory cache;
-a later minor release will refuse it.
+without `file_cache_dir`, is refused: `from_settings` panics at boot and
+`from_settings_async` returns the error. A per-process stand-in would break
+what a shared cache guarantees.
 
 `FileCache` sweeps one sixteenth of its directory for expired entries every 16
 writes. Call `FileCache::purge_expired()` on a schedule to sweep it all. New
@@ -323,7 +324,8 @@ by default:
 
 To drop a page after a write, call
 `layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
-(add `.tenant(org_id)` to the key under tenancy). It purges every cached variant
+(under tenancy add `.tenant(&slug)`, the request's `TenantSlug`, e.g. from
+`RequestTenant::tenant()`). It purges every cached variant
 of that path: any query string, any `vary_on` value, GET and `QUERY` alike. It
 works through a per-path generation counter, so each cached GET reads one more
 small cache key.
