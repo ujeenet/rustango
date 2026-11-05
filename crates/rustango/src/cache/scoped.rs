@@ -195,6 +195,11 @@ impl Cache for ScopedCache {
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         self.inner.delete_prefix(&self.k(prefix)).await
     }
+
+    async fn delete_prefixes(&self, prefixes: &[String]) -> Result<(), CacheError> {
+        let scoped: Vec<String> = prefixes.iter().map(|p| self.k(p)).collect();
+        self.inner.delete_prefixes(&scoped).await
+    }
 }
 
 #[cfg(test)]

@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- `Cache::delete_prefixes` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.
+
+### Changed
+
+- `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
+
 ## [0.63.0] — 2026-11-04
 
 ### Added
