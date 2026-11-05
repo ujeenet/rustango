@@ -170,6 +170,21 @@ The tenant-wide settings, one row.
 | `default_provider` | Slug of the provider the sign-in page opens straight away, except at `?local=1` or after an error. |
 | `signups_per_hour` | Most SSO sign-ups per hour. Empty: 100; `0`: no limit. |
 
+### `SsoLandingRule`
+
+Where a sign-in without `?next=` lands. Rules run in `position` order and the
+first match wins. They apply to SSO and password sign-ins on the tenant admin
+and the bare admin; member sign-in ignores them. A rule whose path fails the
+`next` check (say the login page) is skipped. A missing table means no rules.
+
+| Field | What to enter |
+|---|---|
+| `position` | Rules are tried from the lowest number up and the first match wins. Equal numbers go by id. |
+| `match_kind` | `role`: the user holds the role in `match_value` (never on the bare admin, which has no roles). `claim`: the SSO sign-in carries claim `match_name` with `match_value`, read like a role-map claim. `any`: every sign-in; put it last as the default. |
+| `match_name` | The claim name, for `claim` rules only. Empty for the others. |
+| `match_value` | The role name (`role`) or the claim value (`claim`), matched exactly. Empty for `any`. |
+| `landing_url` | A path on this site starting with `/`, as on the tenant's own host, e.g. `/admin/reports`. A path prefix is added for you. Not access control: the page must check permissions itself. |
+
 ### `SsoSharedOverride`
 
 A tenant's narrowing of one shared provider. Empty fields keep the shared
@@ -261,9 +276,12 @@ feature emits an `AddColumn` / `DropColumn` migration for that column.
 On the tenant admin, `GET <login>/sso/<slug>?next=/path` lands on `/path`
 after sign-in. The path rides in the signed flow cookie and passes the same
 check as the password login: same-origin only, and inside the tenant's path
-prefix. Anything else lands on `admin_url`. The login page passes its own
-`?next` on to the SSO buttons. The bare admin does the same without the prefix
-rule, keeps the path through the TOTP step, and falls back to its prefix.
+prefix. Without a usable `next`, the tenant's
+[landing rules](#ssolandingrule) decide, and with no match the sign-in lands on
+`admin_url`. The login page passes its own `?next` on to the SSO buttons, and
+never makes one up. The bare admin does
+the same without the prefix rule, keeps the path through the TOTP step, and
+falls back to its prefix.
 
 The link table is a normal migrated model: in the tenant's storage for
 tenant logins, and in the admin database for the bare admin. A link is

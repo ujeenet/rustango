@@ -117,6 +117,22 @@ pub(super) fn admin_landing(state: &AppState, next: Option<&str>) -> String {
     })
 }
 
+/// Where this admin's landing rules send a sign-in, if one matches. The bare
+/// admin has no roles, so only claim and `any` rules can.
+#[cfg(feature = "sso")]
+pub(super) async fn admin_rule_landing(
+    state: &AppState,
+    identity: Option<&crate::sso::policy::Identity>,
+) -> Option<String> {
+    use crate::sso::policy::landing::{LandingRules, Signer};
+    let rules = LandingRules::load(&state.pool, state.config.tenant.as_deref()).await;
+    let who = Signer {
+        roles: &[],
+        identity,
+    };
+    rules.landing(&who, |url| admin_next(state, Some(url)))
+}
+
 /// The authenticator-code step an SSO sign-in owes (#2249).
 #[cfg(all(feature = "admin-sso", feature = "totp"))]
 pub(super) async fn sso_totp_response(
@@ -512,7 +528,14 @@ async fn login_submit(
             ""
         },
     );
-    let redirect_to = admin_landing(&state, form.next.as_deref());
+    // An explicit `next` wins; then the landing rules (`any` only here).
+    let next = admin_next(&state, form.next.as_deref());
+    #[cfg(feature = "sso")]
+    let next = match next {
+        Some(n) => Some(n),
+        None => admin_rule_landing(&state, None).await,
+    };
+    let redirect_to = admin_landing(&state, next.as_deref());
     let mut resp = Redirect::to(&redirect_to).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);

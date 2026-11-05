@@ -11,13 +11,15 @@ pub(crate) mod admin;
 pub mod domain;
 pub mod identity;
 pub mod jwks;
+#[cfg(feature = "admin")]
+pub(crate) mod landing;
 pub mod models;
 pub mod signup;
 pub mod tenant;
 
 pub use domain::{DomainList, DomainRule, EmailAddr, PolicyError, TokenList};
 pub use identity::{IdToken, Identity, RequiredClaims};
-pub use models::{SsoInvite, SsoSharedOverride, SsoTenantPolicy};
+pub use models::{SsoInvite, SsoLandingRule, SsoSharedOverride, SsoTenantPolicy};
 pub use signup::{InviteTarget, RoleMap, RoleNames, SignupColumns, SignupPolicy};
 pub use tenant::{SharedOverride, TenantSettings};
 

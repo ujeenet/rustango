@@ -176,6 +176,22 @@ Los ajustes de todo el tenant, una fila.
 | `default_provider` | Slug del proveedor que la página de inicio de sesión abre directamente, salvo en `?local=1` o tras un error. |
 | `signups_per_hour` | Máximo de registros SSO por hora. Vacío: 100; `0`: sin límite. |
 
+### `SsoLandingRule`
+
+Adónde lleva un inicio de sesión sin `?next=`. Las reglas se aplican por
+`position` y gana la primera que coincide. Valen para el inicio con SSO y con
+contraseña en el admin del tenant y en el admin básico; el inicio de los miembros
+las ignora. Una regla cuya ruta no pasa la comprobación de `next` (p. ej. la
+página de inicio de sesión) se salta. Si falta la tabla, no hay reglas.
+
+| Campo | Qué poner |
+|---|---|
+| `position` | Las reglas se prueban desde el número más bajo y gana la primera que coincide. A igual número decide el id. |
+| `match_kind` | `role`: el usuario tiene el rol de `match_value` (nunca en el admin básico, que no tiene roles). `claim`: el inicio SSO trae el claim `match_name` con `match_value`, leído como un claim del mapa de roles. `any`: todo inicio de sesión; póngala al final como valor por defecto. |
+| `match_name` | El nombre del claim, solo para reglas `claim`. Vacío en las demás. |
+| `match_value` | El nombre del rol (`role`) o el valor del claim (`claim`), comparado exactamente. Vacío para `any`. |
+| `landing_url` | Una ruta de este sitio que empieza por `/`, como en el host propio del tenant, p. ej. `/admin/reports`. El prefijo de ruta se añade solo. No es control de acceso: la página debe comprobar los permisos. |
+
 ### `SsoSharedOverride`
 
 La restricción de un proveedor compartido por un tenant. Los campos vacíos
@@ -267,8 +283,10 @@ para esa columna.
 En el admin del tenant, `GET <login>/sso/<slug>?next=/ruta` lleva a `/ruta`
 tras iniciar sesión. La ruta viaja en la cookie de flujo firmada y pasa la
 misma comprobación que el inicio de sesión con contraseña: solo mismo origen y
-dentro del prefijo de ruta del tenant. Cualquier otra cosa lleva a `admin_url`.
-La página de inicio de sesión pasa su propio `?next` a los botones SSO. El
+dentro del prefijo de ruta del tenant. Sin un `next` válido deciden las
+[reglas de destino](#ssolandingrule) del tenant, y sin coincidencia el inicio
+lleva a `admin_url`. La página de inicio de sesión pasa su propio `?next` a los
+botones SSO y nunca inventa uno. El
 admin básico hace lo mismo sin la regla del prefijo, conserva la ruta durante
 el paso TOTP y vuelve a su prefijo.
 

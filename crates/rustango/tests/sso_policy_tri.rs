@@ -2009,6 +2009,148 @@ async fn a_role_without_permissions_is_privileged(pool: &Pool) {
     assert_eq!(tenant(pool, "rl", &who).await, refused(Refusal::Privileged));
 }
 
+// ---- landing rules ------------------------------------------------------
+
+/// One landing rule row, written as stored: no admin save check.
+async fn landing_rule(pool: &Pool, position: i32, kind: &str, value: Option<&str>, url: &str) {
+    rustango::sso::policy::SsoLandingRule {
+        id: Auto::default(),
+        position,
+        match_kind: kind.into(),
+        match_name: None,
+        match_value: value.map(Into::into),
+        landing_url: url.into(),
+    }
+    .insert(pool)
+    .await
+    .unwrap();
+}
+
+/// A bare-admin password login on `pool`; its `Location`.
+async fn bare_login(pool: &Pool, next: Option<&str>) -> String {
+    use axum::body::Body;
+    use axum::http::{header, Request};
+    use tower::ServiceExt as _;
+    #[cfg(feature = "totp")]
+    rustango::admin::totp_store::ensure_table(pool)
+        .await
+        .expect("totp table");
+    let password = "landing-password-1";
+    let mut admin =
+        rustango::admin::AdminUser::new_with_password(&format!("land-{}", tok()), password, true)
+            .unwrap();
+    admin.insert(pool).await.expect("seed admin");
+    let app = rustango::admin::Builder::new(pool.clone())
+        .admin_prefix("")
+        .with_session_auth(rustango::tenancy::session::SessionSecret::from_bytes(
+            vec![7u8; 32],
+        ))
+        .build();
+    let mut form = format!("username={}&password={password}&_csrf=t", admin.username);
+    if let Some(n) = next {
+        form.push_str(&format!("&next={}", rustango::url_codec::url_encode(n)));
+    }
+    let res = app
+        .oneshot(
+            Request::post("/login")
+                .header(header::HOST, "admin.test")
+                .header(header::COOKIE, "rustango_csrf=t")
+                .header("x-csrf-token", "t")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(form))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(res.status().is_redirection(), "{}", res.status());
+    res.headers()[header::LOCATION].to_str().unwrap().to_owned()
+}
+
+async fn empty_landing_rules(pool: Pool) {
+    rustango::testkit::matrix::fresh_table::<rustango::sso::policy::SsoLandingRule>(&pool).await;
+}
+
+/// Rules apply in `(position, id)` order; a bad or looping path is skipped
+/// and the bare admin has no roles. An explicit `next` wins.
+async fn landing_rules_lead_a_sign_in_without_next(pool: &Pool) {
+    restoring(pool, landing_order_body, empty_landing_rules).await;
+}
+
+async fn landing_order_body(pool: Pool) {
+    let pool = &pool;
+    empty_landing_rules(pool.clone()).await;
+    // Stored out of order: only the `(position, id)` sort picks `/second`.
+    landing_rule(pool, 5, "any", None, "/late").await;
+    landing_rule(pool, 2, "any", None, "/second").await;
+    landing_rule(pool, 1, "any", None, "//evil.example").await;
+    landing_rule(pool, 1, "role", Some("ops"), "/role").await;
+    landing_rule(pool, 2, "any", None, "/tie-later").await;
+    landing_rule(pool, 0, "any", None, "/login").await;
+    assert_eq!(bare_login(pool, None).await, "/second");
+    assert_eq!(bare_login(pool, Some("/explicit")).await, "/explicit");
+}
+
+/// A tenant not yet migrated has no rules table: the default landing, never a refusal.
+async fn an_absent_landing_table_keeps_the_default(pool: &Pool) {
+    restoring(
+        pool,
+        |pool| async move {
+            rustango::testkit::matrix::drop_table(&pool, "rustango_sso_landing_rules").await;
+            assert_eq!(bare_login(&pool, None).await, "/");
+        },
+        empty_landing_rules,
+    )
+    .await;
+}
+
+/// Schema mode: a tenant schema without the table never reads `public`'s rules.
+async fn a_schema_tenant_never_reads_public_rules(pool: &Pool) {
+    #[cfg(feature = "postgres")]
+    if matches!(pool, Pool::Postgres(_)) {
+        restoring(pool, public_rules_body, empty_landing_rules).await;
+    }
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
+}
+
+#[cfg(feature = "postgres")]
+#[allow(irrefutable_let_patterns)]
+async fn public_rules_body(pool: Pool) {
+    use rustango::sql::sqlx::postgres::PgPoolOptions;
+    let Pool::Postgres(pg) = &pool else { return };
+    empty_landing_rules(pool.clone()).await;
+    landing_rule(&pool, 0, "any", None, "/public-leak").await;
+    let schema = format!("landing_{}", tok());
+    rustango::sql::sqlx::query(&format!("CREATE SCHEMA \"{schema}\""))
+        .execute(pg)
+        .await
+        .unwrap();
+    let path = format!("SET search_path TO \"{schema}\", public");
+    let scoped = PgPoolOptions::new()
+        .max_connections(2)
+        .after_connect(move |conn, _| {
+            let path = path.clone();
+            Box::pin(async move {
+                rustango::sql::sqlx::query(&path).execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect_with((*pg.connect_options()).clone())
+        .await
+        .unwrap();
+    let tenant = Pool::from(scoped.clone());
+    rustango::testkit::create_tables_for::<rustango::admin::AdminUser>(&tenant)
+        .await
+        .unwrap();
+    let got = bare_login(&tenant, None).await;
+    scoped.close().await;
+    rustango::sql::sqlx::query(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
+        .execute(pg)
+        .await
+        .unwrap();
+    assert_eq!(got, "/");
+}
+
 tri_dialect_test!(
     setup: setup,
     scenarios: [
@@ -2036,6 +2178,9 @@ tri_dialect_test!(
         successes_are_audited_and_signups_capped,
         shared_roles_need_tenant_approval,
         idle_users_are_deactivated,
+        landing_rules_lead_a_sign_in_without_next,
+        an_absent_landing_table_keeps_the_default,
+        a_schema_tenant_never_reads_public_rules,
     ],
 );
 

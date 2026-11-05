@@ -1461,9 +1461,13 @@ async fn only_a_superuser_writes_links_and_providers() {
     let root = env.user("root", "root@example.com", true).await;
     let ann = env.user("ann", "ann@example.com", false).await;
     let staff = env.user("staff", "staff@example.com", false).await;
+    rustango::testkit::create_tables_for::<rustango::sso::policy::SsoLandingRule>(env.pool())
+        .await
+        .unwrap();
     for table in [
         "rustango_sso_links",
         "rustango_sso_providers",
+        "rustango_sso_landing_rules",
         "rustango_roles",
     ] {
         for action in ["add", "change", "delete", "view"] {
@@ -1522,6 +1526,10 @@ async fn only_a_superuser_writes_links_and_providers() {
         (
             "/__admin/rustango_sso_providers/1/delete".to_owned(),
             String::new(),
+        ),
+        (
+            "/__admin/rustango_sso_landing_rules".to_owned(),
+            "position=0&match_kind=any&landing_url=%2Fx".to_owned(),
         ),
     ] {
         assert_eq!(
@@ -4073,4 +4081,333 @@ async fn a_shared_override_row_tightens_the_tenant_console() {
         env.sso_in(1, "corp", "sub-bea", "bea@example.com").await,
         Ok(bea)
     );
+}
+
+// ---- landing rules ------------------------------------------------------
+
+/// One landing rule in `pool`, as stored (no admin save check).
+async fn landing_rule(
+    pool: &Pool,
+    position: i32,
+    kind: &str,
+    name: Option<&str>,
+    value: Option<&str>,
+    url: &str,
+) {
+    use rustango::sso::policy::SsoLandingRule;
+    rustango::testkit::create_tables_for::<SsoLandingRule>(pool)
+        .await
+        .unwrap();
+    SsoLandingRule {
+        id: Auto::default(),
+        position,
+        match_kind: kind.into(),
+        match_name: name.map(Into::into),
+        match_value: value.map(Into::into),
+        landing_url: url.into(),
+    }
+    .insert(pool)
+    .await
+    .unwrap();
+}
+
+impl Env {
+    /// Tenant 0's rules: a looping path (skipped), `ops` holders, a claim, then everyone.
+    async fn acme_landing_rules(&self) {
+        let p = self.pool();
+        landing_rule(p, 0, "any", None, None, "/__login").await;
+        landing_rule(p, 1, "role", None, Some("ops"), "/__admin/reports").await;
+        landing_rule(p, 2, "claim", Some("dept"), Some("eng"), "/__admin/eng").await;
+        landing_rule(p, 5, "any", None, None, "/__admin/home").await;
+    }
+
+    /// `name` in tenant 0, linked to `sub-{name}` at `corp`, optionally in role `ops`.
+    async fn linked_user(&self, name: &str, ops: bool) -> i64 {
+        use rustango::tenancy::permissions::{assign_role_pool, get_or_create_role_pool};
+        let uid = self.password_user(name, false).await;
+        let key = rustango::sso::resolve_by_slug(self.pool(), "corp", String::new())
+            .await
+            .unwrap()
+            .unwrap()
+            .key(LinkSource::Tenant);
+        rustango::sso::link::create_link(self.pool(), &key, &format!("sub-{name}"), uid)
+            .await
+            .unwrap();
+        if ops {
+            let role = get_or_create_role_pool("ops", "", self.pool())
+                .await
+                .unwrap();
+            assign_role_pool(uid, role, self.pool()).await.unwrap();
+        }
+        uid
+    }
+
+    /// `name`'s tenant SSO sign-in begun at `begin` on `host`: where it lands.
+    async fn sso_landing(&self, host: &str, begin: &str, name: &str) -> String {
+        self.idp
+            .assert(&format!("sub-{name}"), &format!("{name}@example.com"));
+        let resp = handshake_with(&self.admin, host, begin, None, |c| c).await;
+        assert!(tenant_signed_in(&resp), "{begin}: {}", location(&resp));
+        location(&resp)
+    }
+
+    /// `name`'s tenant password sign-in at `login` on `host`, with `extra` fields.
+    async fn password_landing(&self, host: &str, login: &str, name: &str, extra: &str) -> String {
+        let resp = send(
+            &self.admin,
+            Request::builder()
+                .method("POST")
+                .uri(login)
+                .header(header::HOST, host)
+                .header(header::COOKIE, "rustango_csrf=t")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from(format!(
+                    "_csrf=t&username={name}&password=pw-123456789{extra}"
+                )))
+                .unwrap(),
+        )
+        .await;
+        assert!(tenant_signed_in(&resp), "{login}: {}", location(&resp));
+        location(&resp)
+    }
+
+    /// Serve tenant 0 under the apex with prefix `/acme` as well.
+    async fn prefix_acme(&self) {
+        let registry = self._pools.registry_pool();
+        let mut org = Org::objects()
+            .filter("slug", "acme")
+            .fetch(&registry)
+            .await
+            .unwrap()
+            .remove(0);
+        org.path_prefix = Some("/acme".into());
+        org.save(&registry).await.unwrap();
+        rustango::testkit::reset_org_cache();
+    }
+}
+
+/// A tenant SSO sign-in without `next` lands by the first matching rule, on
+/// the host and under the apex prefix; a `next` wins; tenant B has none.
+#[tokio::test]
+async fn landing_rules_lead_a_tenant_sso_sign_in() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.linked_user("ann", true).await;
+    env.linked_user("bob", false).await;
+    env.linked_user("cid", false).await;
+    env.acme_landing_rules().await;
+    env.prefix_acme().await;
+    let host = env.tenants[0].host.clone();
+    for (h, pre) in [(host.as_str(), ""), ("app.test", "/acme")] {
+        let begin = format!("{pre}/__login/sso/corp");
+        assert_eq!(
+            env.sso_landing(h, &begin, "ann").await,
+            format!("{pre}/__admin/reports")
+        );
+        assert_eq!(
+            env.sso_landing(h, &begin, "bob").await,
+            format!("{pre}/__admin/home")
+        );
+        let next = format!(
+            "{begin}?next={}",
+            rustango::url_codec::url_encode(&format!("{pre}/cms-admin"))
+        );
+        assert_eq!(
+            env.sso_landing(h, &next, "ann").await,
+            format!("{pre}/cms-admin")
+        );
+    }
+    // A claim rule reads only a verified id_token's claims.
+    env.idp
+        .id_token(Some((serde_json::json!({"dept": "eng"}), true)));
+    assert_eq!(
+        env.sso_landing(&host, "/__login/sso/corp", "cid").await,
+        "/__admin/eng"
+    );
+    env.idp.id_token(None);
+    // Tenant B has no rules: its own default.
+    env.provider_in(1, "corp", true).await;
+    env.user_in(1, "bea", "bea@example.com", false).await;
+    let globex = env.tenants[1].host.clone();
+    assert_eq!(
+        env.sso_landing(&globex, "/__login/sso/corp", "bea").await,
+        "/__admin"
+    );
+}
+
+/// The gate and the password form invent no `next`, so a password sign-in
+/// follows the rules on both routings; an explicit `next` still wins.
+#[tokio::test]
+async fn landing_rules_lead_a_tenant_password_sign_in() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.linked_user("ann", true).await;
+    env.linked_user("bob", false).await;
+    env.acme_landing_rules().await;
+    env.prefix_acme().await;
+    let host = env.tenants[0].host.clone();
+    for (h, pre) in [(host.as_str(), ""), ("app.test", "/acme")] {
+        let get = |uri: String| {
+            send(
+                &env.admin,
+                Request::builder()
+                    .uri(uri)
+                    .header(header::HOST, h)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+        };
+        // The gate keeps a requested home as `next`; only the form invents none.
+        assert_eq!(
+            location(&get(format!("{pre}/")).await),
+            format!(
+                "{pre}/__login?next={}",
+                rustango::url_codec::url_encode(&format!("{pre}/"))
+            )
+        );
+        assert_eq!(
+            location(&get(format!("{pre}/__admin/x")).await),
+            format!(
+                "{pre}/__login?next={}",
+                rustango::url_codec::url_encode(&format!("{pre}/__admin/x"))
+            )
+        );
+        let html = body_of(get(format!("{pre}/__login")).await).await;
+        assert!(html.contains(r#"name="next" value="""#), "{html}");
+        let login = format!("{pre}/__login");
+        assert_eq!(
+            env.password_landing(h, &login, "ann", "&next=").await,
+            format!("{pre}/__admin/reports")
+        );
+        assert_eq!(
+            env.password_landing(h, &login, "bob", "").await,
+            format!("{pre}/__admin/home")
+        );
+        let next = format!(
+            "&next={}",
+            rustango::url_codec::url_encode(&format!("{pre}/cms-admin"))
+        );
+        assert_eq!(
+            env.password_landing(h, &login, "ann", &next).await,
+            format!("{pre}/cms-admin")
+        );
+    }
+}
+
+/// The bare admin: no roles, so a role rule never matches; the rule chosen at
+/// the SSO callback survives the TOTP step; the password login follows it too.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn landing_rules_lead_the_bare_admin_through_totp() {
+    use rustango::admin::totp_store;
+    let _g = SUITE.lock().await;
+    let (app, pool, _idp, uid) = bare_admin_linked().await;
+    landing_rule(&pool, 0, "role", None, Some("ops"), "/cms-admin/ops").await;
+    landing_rule(&pool, 1, "any", None, None, "//evil.example").await;
+    landing_rule(&pool, 2, "any", None, None, "/cms-admin/landing").await;
+    let resp = handshake(&app, "admin.test", "/login", "corp").await;
+    assert!(signed_in(&resp), "{}", location(&resp));
+    assert_eq!(location(&resp), "/cms-admin/landing");
+    let done = bare_password_login(&app, "").await;
+    assert_eq!(location(&done), "/cms-admin/landing");
+    let done = bare_password_login(&app, "&next=%2Fcms-admin").await;
+    assert_eq!(location(&done), "/cms-admin");
+
+    let device = rustango::totp::TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &device)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, uid).await.unwrap();
+    let resp = handshake(&app, "admin.test", "/login", "corp").await;
+    let pending = set_cookies(&resp)
+        .into_iter()
+        .find(|c| c.starts_with("rustango_admin_sso_totp="))
+        .expect("pending cookie");
+    let done = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/login/sso-totp")
+            .header(header::HOST, "admin.test")
+            .header(header::COOKIE, format!("rustango_csrf=t; {pending}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "_csrf=t&totp_code={}",
+                rustango::totp::generate(&device, 30, 6)
+            )))
+            .unwrap(),
+    )
+    .await;
+    assert!(signed_in(&done), "{}", location(&done));
+    assert_eq!(location(&done), "/cms-admin/landing");
+}
+
+/// With no rules, signing in from a signed-out `/admin` lands back on it, on
+/// the host and under the apex prefix, as before landing rules.
+#[tokio::test]
+async fn a_signed_out_admin_visit_lands_back_on_the_admin() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.password_user("ann", false).await;
+    env.prefix_acme().await;
+    let host = env.tenants[0].host.clone();
+    for (h, pre) in [(host.as_str(), ""), ("app.test", "/acme")] {
+        let gate = send(
+            &env.admin,
+            Request::builder()
+                .uri(format!("{pre}/__admin"))
+                .header(header::HOST, h)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let to = location(&gate);
+        let next = to
+            .split_once("?next=")
+            .unwrap_or_else(|| panic!("{pre}: the gate kept no next: {to}"))
+            .1;
+        let login = format!("{pre}/__login");
+        assert_eq!(to.split('?').next(), Some(login.as_str()));
+        let landed = env
+            .password_landing(h, &login, "ann", &format!("&next={next}"))
+            .await;
+        assert_eq!(landed, format!("{pre}/__admin"), "{pre}");
+    }
+}
+
+/// With no rules, an SSO sign-in from a signed-out `/` lands back on it, on
+/// the host and under the apex prefix, as before landing rules.
+#[tokio::test]
+async fn a_signed_out_home_visit_lands_back_home_through_sso() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.linked_user("ann", false).await;
+    env.prefix_acme().await;
+    let host = env.tenants[0].host.clone();
+    for (h, pre) in [(host.as_str(), ""), ("app.test", "/acme")] {
+        let gate = send(
+            &env.admin,
+            Request::builder()
+                .uri(format!("{pre}/"))
+                .header(header::HOST, h)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let to = location(&gate);
+        let next = to
+            .split_once("?next=")
+            .unwrap_or_else(|| panic!("{pre}: the gate kept no next: {to}"))
+            .1;
+        // The login page hands its `next` to the SSO button.
+        let begin = format!("{pre}/__login/sso/corp?next={next}");
+        assert_eq!(
+            env.sso_landing(h, &begin, "ann").await,
+            format!("{pre}/"),
+            "{pre}"
+        );
+    }
 }

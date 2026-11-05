@@ -1135,10 +1135,9 @@ async fn login_form(
     let mut ctx = Context::new();
     ctx.insert("tenant_slug", &org.slug);
     ctx.insert("tenant_name", org.display_label());
-    ctx.insert(
-        "next",
-        &sanitize_next_with_routes(next.as_deref(), routes, cookie_path),
-    );
+    // Empty without a `next`: the landing rules decide, not a made-up one.
+    let next = tenant_next(next.as_deref(), routes, cookie_path);
+    ctx.insert("next", next.as_deref().unwrap_or_default());
     ctx.insert("error", &error);
     let field = super::login_field();
     ctx.insert("login_label", field.label());
@@ -1178,8 +1177,8 @@ async fn login_form(
         ctx.insert("password_form", &settings.shows_password_form(local));
         let mut providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
         // The SSO start seals the landing; pass on only one this tenant accepts.
-        if let Some(n) = tenant_next(next.as_deref(), routes, cookie_path) {
-            let q = format!("?next={}", crate::url_codec::url_encode(&n));
+        if let Some(n) = &next {
+            let q = format!("?next={}", crate::url_codec::url_encode(n));
             for b in &mut providers {
                 b.login_url.push_str(&q);
             }
@@ -1292,7 +1291,7 @@ async fn login_submit(
         Ok(f) => f,
         Err(_) => return (StatusCode::BAD_REQUEST, "malformed login form").into_response(),
     };
-    let next = sanitize_next_with_routes(form.next.as_deref(), routes, cookie_path);
+    let next = tenant_next(form.next.as_deref(), routes, cookie_path);
 
     // Login CSRF (#1607): reject before the user lookup, so a forged
     // POST costs nothing and cannot probe usernames by timing.
@@ -1337,7 +1336,10 @@ async fn login_submit(
     let bad_creds = || -> Response {
         flash::signed_redirect(
             &cfg.secret,
-            &format!("{}?next={}", routes.login_url, urlencoding_lite(&next)),
+            &next.as_ref().map_or_else(
+                || routes.login_url.clone(),
+                |n| format!("{}?next={}", routes.login_url, urlencoding_lite(n)),
+            ),
             flash::Flash::Error("Invalid credentials"),
         )
     };
@@ -1406,7 +1408,14 @@ async fn login_submit(
     let Some(tenant) = TenantSlug::of(org) else {
         return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
     };
-    let mut resp = Redirect::to(&next).into_response();
+    // An explicit `next` wins; then the landing rules (role and `any`).
+    #[cfg(feature = "sso")]
+    let next = match next {
+        Some(n) => Some(n),
+        None => rule_landing(tenant_pool, org, uid, None, routes, cookie_path).await,
+    };
+    let landing = next.unwrap_or_else(|| tenant_home(cookie_path));
+    let mut resp = Redirect::to(&landing).into_response();
     resp.headers_mut().append(
         header::SET_COOKIE,
         user_session_cookie(&cfg.secret, &tenant, cookie_path, &user, route_ttl(routes)),
@@ -2063,16 +2072,6 @@ fn tenant_home(cookie_path: &str) -> String {
     }
 }
 
-/// The post-login target: a safe path inside this tenant's `cookie_path`,
-/// else [`tenant_home`].
-fn sanitize_next_with_routes(
-    next: Option<&str>,
-    routes: &super::routes::RouteConfig,
-    cookie_path: &str,
-) -> String {
-    tenant_next(next, routes, cookie_path).unwrap_or_else(|| tenant_home(cookie_path))
-}
-
 /// A post-login `next` this tenant may land on (password or SSO sign-in).
 pub(super) fn tenant_next(
     next: Option<&str>,
@@ -2091,11 +2090,61 @@ pub(super) fn tenant_next(
 
 /// Is `next` under `prefix` once the browser resolves `\`, `%2e` and dot segments?
 fn stays_under(next: &str, prefix: &str) -> bool {
+    use crate::auth_decorators::{has_dot_segment, resolved_path};
     let raw = next.split(['?', '#']).next().unwrap_or_default();
-    let path = url_decode_lite(raw).replace('\\', "/");
+    let path = resolved_path(next);
     super::routes::path_is_under(raw, prefix)
         && super::routes::path_is_under(&path, prefix)
-        && !path.split('/').any(|seg| seg == "." || seg == "..")
+        && !has_dot_segment(&path)
+}
+
+/// A landing rule's path, joined under the tenant's prefix and checked like a `next`.
+#[cfg(feature = "sso")]
+pub(super) fn tenant_landing(
+    url: &str,
+    routes: &super::routes::RouteConfig,
+    cookie_path: &str,
+) -> Option<String> {
+    // Host routing has no prefix: joining `/` would make `//admin`.
+    let joined = match cookie_path.trim_end_matches('/') {
+        "" => url.to_owned(),
+        prefix => format!("{prefix}{url}"),
+    };
+    tenant_next(Some(&joined), routes, cookie_path)
+}
+
+/// Where this tenant's landing rules send admitted user `uid`, if any rule
+/// matches. `identity` is the policy-scoped SSO identity; `None` for a password.
+#[cfg(feature = "sso")]
+pub(super) async fn rule_landing(
+    pool: &crate::sql::Pool,
+    org: &Org,
+    uid: i64,
+    identity: Option<&crate::sso::policy::Identity>,
+    routes: &super::routes::RouteConfig,
+    cookie_path: &str,
+) -> Option<String> {
+    use crate::sso::policy::landing::{LandingRules, Signer};
+    let rules = LandingRules::load(pool, Some(&org.slug)).await;
+    if rules.is_empty() {
+        return None;
+    }
+    let roles: Vec<String> = if rules.needs_roles() {
+        match super::permissions::user_roles_pool(uid, pool).await {
+            Ok(roles) => roles.into_iter().map(|(_, name)| name).collect(),
+            Err(e) => {
+                warn!(target: "rustango::sso::landing", tenant = %org.slug, "roles unreadable: {e}");
+                Vec::new()
+            }
+        }
+    } else {
+        Vec::new()
+    };
+    let who = Signer {
+        roles: &roles,
+        identity,
+    };
+    rules.landing(&who, |url| tenant_landing(url, routes, cookie_path))
 }
 
 /// This request's admin state: its pool, user perms and tenant branding.
@@ -2249,11 +2298,6 @@ async fn serve_brand_asset(slug: &str, filename: &str, brand_storage: &BoxedStor
     }
 }
 
-/// #1526. Exercises `sanitize_next_with_routes` — the function
-/// `login_submit` actually calls at `:974`, whose result reaches
-/// `Location` — rather than `urls::url_has_allowed_host_and_scheme`,
-/// which nothing in this codebase calls and which is where the
-/// original fix landed.
 /// A resolver failure is a 500 whose body withholds the driver text (#1684).
 #[cfg(all(test, feature = "sqlite"))]
 mod resolver_error_tests {
@@ -2339,8 +2383,12 @@ mod resolver_error_tests {
 
 #[cfg(test)]
 mod sanitize_next_tests {
-    use super::sanitize_next_with_routes;
     use crate::tenancy::routes::RouteConfig;
+
+    /// Where a password sign-in with this `next` and no landing rule lands.
+    fn sanitize_next_with_routes(s: Option<&str>, routes: &RouteConfig, cp: &str) -> String {
+        super::tenant_next(s, routes, cp).unwrap_or_else(|| super::tenant_home(cp))
+    }
 
     fn nxt(s: Option<&str>) -> String {
         sanitize_next_with_routes(s, &RouteConfig::default(), "/")
@@ -2426,6 +2474,56 @@ mod sanitize_next_tests {
         }
         for ok in ["/t1", "/t1/", "/t1/p/abc", "/t1/admin?page=2"] {
             assert_eq!(nxt(Some(ok)), ok, "{ok} should survive");
+        }
+    }
+
+    /// The gate keeps every requested path as `next`; only login and logout,
+    /// which would loop, become the tenant home.
+    #[test]
+    fn the_gate_keeps_next_but_for_login_and_logout() {
+        let loc = |path: &str, routes: &RouteConfig, cp: &str| {
+            let r = axum::response::IntoResponse::into_response(super::redirect_to_tenant_login(
+                path, routes, cp,
+            ));
+            r.headers()["location"].to_str().unwrap().to_owned()
+        };
+        let host = RouteConfig::default();
+        for (p, next) in [
+            ("/", "%2F"),
+            ("/admin", "%2Fadmin"),
+            ("/admin/posts", "%2Fadmin%2Fposts"),
+        ] {
+            assert_eq!(loc(p, &host, "/"), format!("/login?next={next}"), "{p}");
+        }
+        for p in ["/login", "/logout"] {
+            assert_eq!(loc(p, &host, "/"), "/login?next=%2F", "{p}");
+        }
+        let pre = RouteConfig::default().under_prefix("/t1");
+        for (p, next) in [("/t1/", "%2Ft1%2F"), ("/t1/admin", "%2Ft1%2Fadmin")] {
+            assert_eq!(loc(p, &pre, "/t1"), format!("/t1/login?next={next}"), "{p}");
+        }
+        assert_eq!(loc("/t1/login", &pre, "/t1"), "/t1/login?next=%2Ft1%2F");
+    }
+
+    /// A rule path joins under a prefix, and never as `//` on a host.
+    #[cfg(feature = "sso")]
+    #[test]
+    fn a_rule_path_joins_under_the_prefix_only() {
+        let host = RouteConfig::default();
+        assert_eq!(
+            super::tenant_landing("/admin/reports", &host, "/").as_deref(),
+            Some("/admin/reports")
+        );
+        let pre = RouteConfig::default().under_prefix("/t1");
+        assert_eq!(
+            super::tenant_landing("/admin/reports", &pre, "/t1").as_deref(),
+            Some("/t1/admin/reports")
+        );
+        for bad in ["/login", "/logout"] {
+            assert_eq!(super::tenant_landing(bad, &host, "/"), None, "{bad}");
+        }
+        for bad in ["/login", "/logout", "/../t2/x"] {
+            assert_eq!(super::tenant_landing(bad, &pre, "/t1"), None, "{bad}");
         }
     }
 }

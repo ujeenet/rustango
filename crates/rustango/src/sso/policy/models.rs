@@ -1,5 +1,5 @@
 //! Tenant-scope tables of the SSO access policy. Only a superuser adds,
-//! changes or deletes their rows in the admin.
+//! changes, deletes or views their rows in the admin.
 
 use crate::sql::Auto;
 
@@ -229,6 +229,49 @@ pub struct SsoTenantPolicy {
     pub signups_per_hour: Option<i32>,
 }
 
+/// Where a sign-in without `?next=` lands: the first matching rule by `position`.
+#[derive(crate::Model, Debug, Clone)]
+#[rustango(
+    table = "rustango_sso_landing_rules",
+    admin(
+        list_display = "position, match_kind, match_name, match_value, landing_url",
+        ordering = "position",
+    )
+)]
+#[allow(dead_code)]
+pub struct SsoLandingRule {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    #[rustango(default = "0", index)]
+    #[rustango(
+        help_text = "Rules are tried from the lowest number up and the first match wins. Equal numbers go by id."
+    )]
+    #[rustango(verbose_name = "Position")]
+    pub position: i32,
+    #[rustango(max_length = 16, choices = "role:Role, claim:Claim, any:Any")]
+    #[rustango(
+        help_text = "`role`: the user holds the role in Value (never on the bare admin, which has no roles). `claim`: the SSO sign-in carries claim Name with Value. `any`: every sign-in; put it last as the default."
+    )]
+    #[rustango(verbose_name = "Match")]
+    pub match_kind: String,
+    #[rustango(max_length = 128)]
+    #[rustango(help_text = "The claim name, for `claim` rules only. Empty for the others.")]
+    #[rustango(verbose_name = "Name")]
+    pub match_name: Option<String>,
+    #[rustango(max_length = 254)]
+    #[rustango(
+        help_text = "The role name (`role`) or the claim value (`claim`), matched exactly. Empty for `any`."
+    )]
+    #[rustango(verbose_name = "Value")]
+    pub match_value: Option<String>,
+    #[rustango(max_length = 500)]
+    #[rustango(
+        help_text = "A path on this site starting with `/`, as on the tenant's own host, e.g. `/admin/reports`. A path prefix is added for you. Used only when the sign-in has no `?next=`. Not access control: the page must check permissions itself."
+    )]
+    #[rustango(verbose_name = "Landing path")]
+    pub landing_url: String,
+}
+
 // These rows decide who may sign up and sign in.
 #[cfg(feature = "admin")]
 crate::object_permissions::register_framework_object_permission!(
@@ -299,6 +342,31 @@ crate::object_permissions::register_framework_object_permission!(
 #[cfg(feature = "admin")]
 crate::object_permissions::register_framework_object_permission!(
     "rustango_sso_tenant_policy",
+    "view",
+    crate::object_permissions::superuser_only
+);
+// Landing rules name roles and claims.
+#[cfg(feature = "admin")]
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_landing_rules",
+    "add",
+    crate::object_permissions::superuser_only
+);
+#[cfg(feature = "admin")]
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_landing_rules",
+    "change",
+    crate::object_permissions::superuser_only
+);
+#[cfg(feature = "admin")]
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_landing_rules",
+    "delete",
+    crate::object_permissions::superuser_only
+);
+#[cfg(feature = "admin")]
+crate::object_permissions::register_framework_object_permission!(
+    "rustango_sso_landing_rules",
     "view",
     crate::object_permissions::superuser_only
 );

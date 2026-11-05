@@ -5622,6 +5622,7 @@ mod sso_table_tests {
             crate::sso::policy::SsoInvite::SCHEMA,
             crate::sso::policy::SsoSharedOverride::SCHEMA,
             crate::sso::policy::SsoTenantPolicy::SCHEMA,
+            crate::sso::policy::SsoLandingRule::SCHEMA,
         ];
         #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
         schemas.push(crate::tenancy::sso::SharedSsoProvider::SCHEMA);
