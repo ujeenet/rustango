@@ -671,7 +671,7 @@ async fn list_tables_my(
                ORDER BY TABLE_NAME"#
         }
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -694,9 +694,19 @@ async fn list_columns_my(
     use sqlx::Row as _;
     // See `list_tables_my` for why every string column is `CAST AS CHAR`.
     let use_default = schema == "public" || schema.is_empty();
-    let sql = if use_default {
+    let schema_filter = if use_default { "DATABASE()" } else { "?" };
+    // MariaDB's JSON is LONGTEXT plus a `json_valid` CHECK named for the column.
+    let mut data_type = String::new();
+    crate::sql::ByServer {
+        mysql: "DATA_TYPE",
+        mariadb: "IF(EXISTS (SELECT 1 FROM information_schema.CHECK_CONSTRAINTS k \
+         WHERE k.CONSTRAINT_SCHEMA = columns.TABLE_SCHEMA AND k.TABLE_NAME = columns.TABLE_NAME \
+         AND k.CHECK_CLAUSE = CONCAT('json_valid(`', columns.COLUMN_NAME, '`)')), 'json', DATA_TYPE)",
+    }
+    .write(&mut data_type);
+    let sql = format!(
         r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
-                  CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
+                  CAST({data_type} AS CHAR)      AS DATA_TYPE,
                   CAST(COLUMN_TYPE AS CHAR)    AS COLUMN_TYPE,
                   CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
                   CAST(CHARACTER_MAXIMUM_LENGTH AS SIGNED) AS CHARACTER_MAXIMUM_LENGTH,
@@ -704,22 +714,10 @@ async fn list_columns_my(
                   CAST(EXTRA AS CHAR)          AS EXTRA,
                   CAST(VERSION() LIKE '%MariaDB%' AS SIGNED) AS IS_MARIADB
            FROM information_schema.columns
-           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+           WHERE TABLE_SCHEMA = {schema_filter} AND TABLE_NAME = ?
            ORDER BY ORDINAL_POSITION"#
-    } else {
-        r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
-                  CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
-                  CAST(COLUMN_TYPE AS CHAR)    AS COLUMN_TYPE,
-                  CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
-                  CAST(CHARACTER_MAXIMUM_LENGTH AS SIGNED) AS CHARACTER_MAXIMUM_LENGTH,
-                  CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
-                  CAST(EXTRA AS CHAR)          AS EXTRA,
-                  CAST(VERSION() LIKE '%MariaDB%' AS SIGNED) AS IS_MARIADB
-           FROM information_schema.columns
-           WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-           ORDER BY ORDINAL_POSITION"#
-    };
-    let mut q = sqlx::query(sql);
+    );
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -790,7 +788,7 @@ async fn list_pk_columns_my(
              AND tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ?
            ORDER BY kcu.ORDINAL_POSITION"#
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -824,7 +822,7 @@ async fn list_fks_my(
            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
            ORDER BY ORDINAL_POSITION"#
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -873,7 +871,7 @@ async fn list_views_my(
                ORDER BY TABLE_NAME"#
         }
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -926,7 +924,7 @@ async fn list_tables_sqlite(
     } else {
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if let Some(t) = only {
         q = q.bind(t);
     }
@@ -1054,7 +1052,7 @@ async fn list_views_sqlite(
     } else {
         "SELECT name FROM sqlite_master WHERE type = 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if let Some(v) = only {
         q = q.bind(v);
     }

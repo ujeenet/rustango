@@ -50,6 +50,7 @@ pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 #[cfg(any(feature = "cache", feature = "postgres"))]
 pub(crate) use dialect::quote_qualified;
+pub(crate) use mysql::ByServer;
 // Its callers are feature-gated (PG schemas, SQLite inspectdb).
 #[allow(unused_imports)]
 pub(crate) use dialect::quote_with;

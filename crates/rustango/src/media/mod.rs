@@ -1343,13 +1343,38 @@ impl MediaManager {
         // Recursive CTE over the parent_id chain. The same syntax
         // works on PG, MySQL 8+ and SQLite 3.8+.
         let p = self.pool.dialect().placeholder(1);
+        // MariaDB plans the step for a 2-row `sub` and scans every
+        // collection per row; reading `sub` first through the `parent_id`
+        // index keeps it linear.
+        const STEP_FROM: &str = "FROM rustango_media_collections c JOIN sub";
+        let from = if self.pool.dialect().name() == "mysql" {
+            use crate::core::Model as _;
+            let index = MediaCollection::SCHEMA
+                .indexes
+                .iter()
+                .find(|i| i.columns == ["parent_id"])
+                .map(|i| i.name)
+                .expect("parent_id is indexed");
+            let mut from = String::new();
+            crate::sql::ByServer {
+                mysql: STEP_FROM,
+                mariadb: &format!(
+                    "FROM sub STRAIGHT_JOIN rustango_media_collections c \
+                     FORCE INDEX FOR JOIN (`{index}`)"
+                ),
+            }
+            .write(&mut from);
+            from
+        } else {
+            STEP_FROM.to_owned()
+        };
         let sql = format!(
             "WITH RECURSIVE sub AS ( \
                  SELECT id FROM rustango_media_collections \
                   WHERE id = {p} AND deleted_at IS NULL \
                  UNION \
-                 SELECT c.id FROM rustango_media_collections c \
-                   JOIN sub ON c.parent_id = sub.id \
+                 SELECT c.id {from} \
+                   ON c.parent_id = sub.id \
                   WHERE c.deleted_at IS NULL \
              ) SELECT id FROM sub"
         );

@@ -1805,7 +1805,8 @@ async fn waiters_leave_the_pool_free(backend: Backend) {
 
 /// The runner's per-database MySQL lock, taken from outside.
 #[cfg(feature = "mysql")]
-const MY_HOLD_LOCK: &str = "SELECT GET_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())), -1)";
+// Timeout 0: the lock is free here, and MariaDB answers NULL to `-1`.
+const MY_HOLD_LOCK: &str = "SELECT GET_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())), 0)";
 
 /// Whether the database at `url` has its migrate lock taken.
 #[cfg(any(feature = "postgres", feature = "mysql"))]

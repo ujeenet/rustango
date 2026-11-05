@@ -15,6 +15,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
 - MySQL / MariaDB: a filtered `AnyValue` is written as `MIN(CASE WHEN …)`, so a row the filter rejects can no longer turn the result NULL.
+- MariaDB: `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; `inspectdb` and the jobs queue see a JSON column as `json`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
 
 ## [0.63.0] — 2026-11-04
 

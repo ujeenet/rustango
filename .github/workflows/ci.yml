@@ -1548,8 +1548,6 @@ jobs:
       packages: read
     needs: [gate, tests_compile]
     runs-on: ubuntu-latest
-    # MariaDB has not run green yet: report it without blocking until it does.
-    continue-on-error: ${{ matrix.db == 'mariadb' }}
     strategy:
       fail-fast: false
       matrix:
