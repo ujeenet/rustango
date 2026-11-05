@@ -43,6 +43,35 @@ impl ByServer<'_> {
     }
 }
 
+/// `sql` as one server reads it: its own `/*!80000 …*/` or `/*M! …*/`
+/// text unwrapped, the other's dropped. `None` for any other comment,
+/// which this cannot read.
+pub(crate) fn resolve_by_server(sql: &str, mariadb: bool) -> Option<String> {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        let block = &rest[at..];
+        let (mine, body) = if let Some(b) = block.strip_prefix("/*!80000") {
+            (!mariadb, b)
+        } else if let Some(b) = block.strip_prefix("/*M!") {
+            if b.starts_with(|c: char| c.is_ascii_digit()) {
+                return None;
+            }
+            (mariadb, b)
+        } else {
+            return None;
+        };
+        let end = body.find("*/")?;
+        if mine {
+            out.push_str(&body[..end]);
+        }
+        rest = &body[end + 2..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
 /// The `MySQL` 8.4+ dialect. Stateless; construct with `MySql`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MySql;
@@ -1435,6 +1464,22 @@ mod tests {
               DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM `t`"
             ]
         );
+    }
+
+    /// Each server's view of per-server comments; other comments are unread.
+    #[test]
+    fn resolve_by_server_reads_each_servers_text() {
+        let json = "f(/*!80000 CAST(*/?/*!80000 AS JSON)*/)";
+        assert_eq!(
+            resolve_by_server(json, false).as_deref(),
+            Some("f( CAST(? AS JSON))")
+        );
+        assert_eq!(resolve_by_server(json, true).as_deref(), Some("f(?)"));
+        let both = "a /*!80000 b */ /*M! c */ d";
+        assert_eq!(resolve_by_server(both, true).as_deref(), Some("a   c  d"));
+        assert_eq!(resolve_by_server("x /*+ hint */", false), None);
+        assert_eq!(resolve_by_server("x /*M!101000 y */", true), None);
+        assert_eq!(resolve_by_server("plain", true).as_deref(), Some("plain"));
     }
 
     #[test]

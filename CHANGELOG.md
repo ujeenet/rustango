@@ -4,6 +4,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- MariaDB: `string_agg` is no longer cut at 1 MiB (`SET STATEMENT group_concat_max_len`, since MariaDB ignores the `SET_VAR` hint); `lag` / `lead` with a JSON default work.
+
 ## [0.64.0] — 2026-11-05
 
 ### Added

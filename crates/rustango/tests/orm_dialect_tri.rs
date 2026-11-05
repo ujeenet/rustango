@@ -37,6 +37,16 @@ pub struct Post {
     pub parent_id: Option<i64>,
 }
 
+/// An unbounded text column, for aggregates over 1 MiB.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "orm_dialect_tri_longtext")]
+#[rustango(app = "orm_dialect_tri")]
+pub struct LongText {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub body: String,
+}
+
 #[derive(Model, Debug, Clone)]
 #[rustango(table = "orm_dialect_tri_blob")]
 #[rustango(app = "orm_dialect_tri")]
@@ -623,6 +633,7 @@ async fn setup(pool: &Pool) {
     fresh_table::<Acct>(pool).await;
     fresh_table::<Entry>(pool).await;
     fresh_table::<TextKey>(pool).await;
+    fresh_table::<LongText>(pool).await;
 }
 
 async fn posts(pool: &Pool) -> Vec<Post> {
@@ -1348,6 +1359,32 @@ async fn string_agg_is_not_capped(pool: &Pool) {
     assert_eq!(s.len(), 30 * 60 + 29);
 }
 
+/// MariaDB ignores the `SET_VAR` hint and cut `GROUP_CONCAT` at 1 MiB.
+async fn string_agg_passes_one_mebibyte(pool: &Pool) {
+    let chunk = 400_000;
+    for c in ['a', 'b', 'c'] {
+        let mut row = LongText {
+            id: Auto::default(),
+            body: c.to_string().repeat(chunk),
+        };
+        row.insert(pool).await.expect("seed");
+    }
+    let rows = LongText::objects()
+        .aggregate()
+        .values(&[])
+        .annotate(
+            "t",
+            AggregateExpr::string_agg_ordered("body", ",", &[("body", false)]),
+        )
+        .fetch(pool)
+        .await
+        .expect("string_agg");
+    let SqlValue::String(s) = &rows[0]["t"] else {
+        panic!("not a string: {:?}", rows[0]["t"]);
+    };
+    assert_eq!(s.len(), 3 * chunk + 2, "over 1 MiB, uncut");
+}
+
 /// MySQL's `NOW()` and `CAST(.. AS DATETIME/TIME)` dropped the fraction.
 async fn now_and_casts_keep_fractional_seconds(pool: &Pool) {
     use chrono::Timelike as _;
@@ -1429,6 +1466,7 @@ tri_dialect_test! {
         iterator_keeps_the_queryset_window,
         upsert_never_updates_a_row_of_another_unique_key,
         string_agg_is_not_capped,
+        string_agg_passes_one_mebibyte,
         now_and_casts_keep_fractional_seconds,
         decimal_compares_with_expressions,
         insert_or_ignore_on_a_natural_pk,
