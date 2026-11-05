@@ -140,6 +140,15 @@ use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
 
+/// How to close or acknowledge open write actions, naming only what this
+/// build has: codenames need `tenancy`.
+#[cfg(feature = "tenancy")]
+const OPEN_WRITES_FIX: &str = "add `permissions(...)` (derive) or `.permissions_for_model()`, \
+     or set `read_only` / `allow_anonymous` if this is intended";
+#[cfg(not(feature = "tenancy"))]
+const OPEN_WRITES_FIX: &str =
+    "set `read_only`, or `allow_anonymous` behind your own auth layer if this is intended";
+
 /// Permission codenames required for each `ViewSet` action. The user
 /// needs every codename in the list; an empty vec skips the check.
 #[derive(Clone, Default)]
@@ -1108,7 +1117,8 @@ impl ViewSet {
 
     /// Permission codenames required per action. Empty vec = allow all;
     /// an open write action logs a warning at mount unless
-    /// [`Self::allow_anonymous`] is set.
+    /// [`Self::allow_anonymous`] is set. Codenames need the `tenancy`
+    /// feature: without it, mounting a ViewSet that sets any panics.
     pub fn permissions(mut self, perms: ViewSetPerms) -> Self {
         self.perms = perms;
         self
@@ -1274,6 +1284,7 @@ impl ViewSet {
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
         self.assert_cursor_is_rendered();
         self.assert_related_rows_are_unhooked();
+        self.assert_codenames_can_be_checked();
         let open = self.open_write_actions();
         if !open.is_empty() {
             tracing::warn!(
@@ -1282,8 +1293,7 @@ impl ViewSet {
                 prefix,
                 actions = ?open,
                 "ViewSet write actions need no permission, so any caller that reaches this \
-                 router can run them; set .permissions_for_model(), .read_only(), or \
-                 .allow_anonymous() if this is intended"
+                 router can run them; {OPEN_WRITES_FIX}"
             );
         }
         let state = Arc::new(ViewSetState {
@@ -1604,6 +1614,24 @@ impl ViewSet {
         }
     }
 
+    /// Without `tenancy` no engine checks codenames, so every gated request
+    /// would get 403 forever: refuse at mount instead.
+    fn assert_codenames_can_be_checked(&self) {
+        if cfg!(feature = "tenancy") {
+            return;
+        }
+        let p = &self.perms;
+        let gated = [&p.list, &p.retrieve, &p.create, &p.update, &p.destroy]
+            .iter()
+            .any(|codenames| !codenames.is_empty());
+        assert!(
+            !gated,
+            "ViewSet `{}`: permission codenames need the `tenancy` feature; on a \
+             single-database app use allow_anonymous behind your own auth layer, or read_only",
+            self.schema.table
+        );
+    }
+
     /// A serializer must render the cursor column and the primary key.
     fn assert_cursor_is_rendered(&self) {
         let PaginationStyle::Cursor { field, .. } = self.pagination else {
@@ -1757,11 +1785,10 @@ impl ViewSetState {
         }
         #[cfg(not(feature = "tenancy"))]
         {
-            // Without tenancy there is no `AuthenticatedUser` and no
-            // `has_perm` engine, so codenames with nothing to check
-            // them against are denied. 403, not 401: authenticating
-            // cannot satisfy a check with no engine behind it, and
-            // 401 would send a token client into a refresh loop.
+            // Mount refuses codenames without tenancy; should one get
+            // here anyway, there is no `has_perm` engine, so deny. 403,
+            // not 401: authenticating cannot satisfy it, and 401 would
+            // send a token client into a refresh loop.
             let _ = (parts, conn);
             PermOutcome::Forbidden
         }

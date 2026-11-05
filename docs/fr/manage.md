@@ -646,10 +646,13 @@ Modèle à pool — `src/post_view_set.rs` généré :
 pub struct PostViewSet;
 ```
 
-Il démarre en `read_only` : ajoutez `permissions(create = "...", ...)` derrière
-une couche d'auth, puis retirez `read_only`, pour servir les écritures.
-`--model Post` importe `crate::models::Post` ; modifiez la ligne `use` si le
-modèle vit dans une app.
+Il démarre en `read_only`. Pour servir les écritures, protégez-les d'abord : avec
+`tenancy`, ajoutez `permissions(create = "...", ...)` derrière une couche d'auth
+et retirez `read_only` ; dans une app mono-base, placez votre propre couche
+d'auth devant et remplacez `read_only` par `allow_anonymous` (des codenames y
+refusent le montage).
+`--model Post` cherche `Post` dans `src/models.rs` ou dans le `models.rs` d'une
+app et l'importe de là ; `--model blog::models::Post` donne le chemin directement.
 
 Montez-le dans `src/main.rs` avec le pool du serveur :
 `.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. Le chemin est la table du modèle (ici `posts`) ; le nom snake du modèle s'il n'est pas encore compilé.
@@ -1598,7 +1601,7 @@ impl rustango::tenancy::TenantUserModel for AppUser {}
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
-        .api(my_app::urls::router())
+        .api(my_app::urls::api())
         .tenancy()
         .user_model::<AppUser>()
         .run().await
@@ -1860,7 +1863,8 @@ Pourquoi c'est sûr :
 
 ```bash
 cargo run -- startapp blog        # if not done yet
-# Edit src/blog/models.rs — add #[derive(Model)]
+# Edit src/blog/models.rs — rename the starter `Blog` to `Post`
+#   (table = "posts") and add its fields
 # (startapp already added `pub mod blog;` to src/lib.rs)
 cargo run -- makemigrations
 cargo run -- migrate
@@ -1872,7 +1876,8 @@ cargo run -- migrate
 cargo run -- make:viewset PostViewSet --model Post
 # Edit src/post_view_set.rs — fill in field lists
 # Add `pub mod post_view_set;` to src/lib.rs
-# Mount it in src/main.rs: .nest_with("/api", |pool| PostViewSet::router("/posts", pool))
+# Mount it in src/main.rs, as the end of src/post_view_set.rs shows:
+#   .nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))
 cargo run                        # GET /api/posts now works
 ```
 

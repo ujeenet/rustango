@@ -16,8 +16,9 @@ en Rust.
 
 > **Source :** `rustango::jobs` (`Job`, `JobQueue`, `InMemoryJobQueue`,
 > `JobError`, `JobDeadLetter`) et `rustango::jobs::DatabaseJobQueue` (la file
-> adossée à une table, alias de `pg::PgJobQueue`) — derrière la feature `jobs`
-> (activée par défaut).
+> adossée à une table, alias de `pg::PgJobQueue`) — derrière la feature `jobs` ;
+> `DatabaseJobQueue` et `make:worker` demandent aussi `jobs-postgres` (toutes
+> deux activées par défaut).
 >
 > **Version exécutable :** les extraits in-memory, nouvelle tentative et
 > dead-letter sont copiés depuis [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)

@@ -26,7 +26,7 @@ est une référence pour chaque réglage.
 [![Un ViewSet Rustango branché sur un sérialiseur : un seul bloc #[viewset(serializer = …)] fournit une sortie JSON typée et une entrée validée sur les six routes CRUD](../img/viewsets.png)](../img/viewsets.png)
 
 > **Source :** `rustango::viewset` (`ViewSet`, `#[derive(ViewSet)]`, les
-> options `#[viewset(...)]` + le builder `for_model`) — conditionné à `admin` **ou** `tenancy`. À l'intérieur, `.serializer::<S>()` exige `serializer`, le `router()` du builder exige `postgres`, `tenant_router()` / `OwnedBy` exigent `tenancy`, et l'action QUERY exige `admin`.
+> options `#[viewset(...)]` + le builder `for_model`) — conditionné à `admin` **ou** `tenancy`. À l'intérieur, `.serializer::<S>()` exige `serializer`, `tenant_router()` / `OwnedBy` exigent `tenancy`, et l'action QUERY exige `admin`.
 >
 > **Version exécutable :** le blog construit ici reflète l'exemple testé et compilable
 > [`getting_started_blog`](https://github.com/ujeenet/rustango/tree/main/crates/rustango/examples/getting_started_blog)
@@ -99,7 +99,7 @@ cargo run -- startapp blog
 ```
 
 Cela écrit `src/blog/{mod,models,views,urls,tests}.rs` et branche le module
-dans `main.rs` + l'agrégateur `urls::api()`.
+dans `src/lib.rs` + l'agrégateur `urls::api()`.
 
 ### Étape 2 — Définir les modèles
 
@@ -204,7 +204,8 @@ impl PostSerializer {
 }
 ```
 
-Enregistrez le module — ajoutez `pub mod post_serializer;` à `src/blog/mod.rs`.
+Le générateur écrit `src/post_serializer.rs` : déplacez-le vers
+`src/blog/post_serializer.rs` et ajoutez `pub mod post_serializer;` à `src/blog/mod.rs`.
 
 Notez que nous n'avons écrit qu'un seul validateur (`title_min_3`) ; les champs **héritent aussi
 automatiquement des contraintes du modèle** — `title` voit sa longueur vérifiée contre le
@@ -226,10 +227,12 @@ Modifiez-le pour déclarer la ressource et **brancher le sérialiseur avec l'att
 // src/blog/post_view_set.rs
 use rustango::ViewSet;
 
+use crate::blog::models::Post;
+
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
-    fields        = "id, title, body, author_id, published_at",
+    fields        = "id, title, body, status, author_id, published_at",
     serializer    = crate::blog::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
@@ -239,8 +242,8 @@ use rustango::ViewSet;
 pub struct PostViewSet;
 ```
 
-Le générateur écrit `src/post_view_set.rs` (il démarre en `read_only`, et sa
-ligne `use` suppose `crate::models::Post`). Déplacez-le vers
+Le générateur écrit `src/post_view_set.rs`, démarre en `read_only` et importe
+`Post` depuis `crate::blog::models`. Déplacez-le vers
 `src/blog/post_view_set.rs` comme montré et ajoutez `pub mod post_view_set;` à
 `src/blog/mod.rs`.
 
@@ -250,28 +253,27 @@ ligne `use` suppose `crate::models::Post`). Déplacez-le vers
 
 ### Étape 6 — Monter les routes
 
-Dans un projet mono-locataire, imbriquez le routeur du ViewSet sous un chemin, en passant le
-pool :
+`startapp` a déjà fusionné `blog::urls::api()` dans `urls::api()`. Laissez-la
+telle quelle : elle ne prend pas de pool. Générez plutôt le compositeur de l'app
+qui prend le pool avec `cargo run -- make:api_routes blog`, et complétez
+`src/blog/api_routes.rs` :
 
 ```rust
-// src/blog/urls.rs (or your urls::api aggregator)
+// src/blog/api_routes.rs
 use axum::Router;
 use rustango::sql::Pool;
-use crate::blog::post_view_set::PostViewSet;
 
-pub fn api(pool: Pool) -> Router {
+pub fn api(pool: Pool) -> Router<()> {
     Router::new()
-        .merge(PostViewSet::router("/api/posts", pool))
+        .merge(crate::blog::post_view_set::PostViewSet::router("/posts", pool))
 }
 ```
 
-`make:api_routes blog` échafaude la même forme dans `src/blog/api_routes.rs` si
-vous préférez le générer. Le `urls::api()` de niveau supérieur n'a pas de pool,
-donc montez ce routeur depuis `src/main.rs`, où la `Cli` vous donne le pool du
-serveur. Un nest à la racine est refusé : imbriquez-le sous un préfixe et retirez
-ce préfixe du chemin du ViewSet :
-`.nest_with("/api", |pool| myapp::blog::urls::api(pool))` avec
-`PostViewSet::router("/posts", pool)` à l'intérieur.
+Ajoutez `pub mod api_routes;` à `src/blog/mod.rs`. Montez-le ensuite dans
+`src/main.rs`, après `.api(urls::api())`, où la `Cli` lui donne le pool du
+serveur : `.nest_with("/api", |pool| myblog::blog::api_routes::api(pool))`. Le
+ViewSet répond désormais sur `/api/posts`. N'imbriquez le préfixe `/api` qu'une
+fois : un chemin de ViewSet qui le répète servirait `/api/api/posts`.
 
 ### Étape 7 — Le lancer et exercer chaque endpoint
 
@@ -373,6 +375,8 @@ use rustango::sql::Pool;
 use serde_json::json;
 
 async fn app() -> axum::Router {
+    // `cargo test` does not read `.env`; load it as main.rs does.
+    let _ = dotenvy::dotenv();
     // `Pool::connect` picks the backend from the URL scheme, so the
     // same test runs against sqlite, Postgres or MySQL.
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
@@ -470,7 +474,7 @@ Les deux produisent un `axum::Router` des mêmes routes CRUD.
 #[derive(ViewSet)]
 #[viewset(
     model         = Post,
-    fields        = "id, title, body, author_id, published_at",
+    fields        = "id, title, body, status, author_id, published_at",
     serializer    = crate::blog::post_serializer::PostSerializer,
     filter_fields = "author_id, status",
     search_fields = "title, body",
@@ -569,7 +573,7 @@ montez le ViewSet et surchargez la route unique avec votre propre handler (voir
 | `page_size` | `20` | 20 | Lignes par page (le `?page_size=` du client est plafonné à 100). |
 | `read_only` | *(drapeau)* | désactivé | N'exposer que GET (list + retrieve). |
 | `allow_anonymous` | *(drapeau)* | désactivé | Indique que les actions d'écriture sans codename sont voulues ouvertes ; fait taire l'avertissement au montage. |
-| `permissions(...)` | `permissions(create = "posts.add")` | aucun | Codenames de permission par action. |
+| `permissions(...)` | `permissions(create = "posts.add")` | aucun | Codenames de permission par action ; exige `tenancy`. |
 
 ---
 
@@ -593,7 +597,7 @@ que les réponses affichent et que les bodies peuvent écrire. Chaque autre mét
 | `related_filter(fk_field, backend)` | Limite les lignes cibles qu'une FK du corps peut nommer ; toute autre donne un `422`. |
 | `read_only()` | GET uniquement. |
 | `allow_anonymous()` | Les écritures sans codename sont voulues ; évite l'avertissement au montage. |
-| `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Barrières de codename par action (cette dernière sur la multi-location). |
+| `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Barrières de codename par action ; les deux exigent `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Pagination par keyset (saute `COUNT(*)`). Toute colonne NOT NULL totalement ordonnée : entier, horodatage, date, uuid ou chaîne. |
 | `limit_offset_pagination()` | Fenêtrage `?limit=&offset=`. |
 | `pagination(PaginationStyle::…)` | Définir le style explicitement. |
@@ -763,7 +767,10 @@ Une liste d'action vide = pas de vérification. L'application lit un utilisateur
 la requête (l'intégration d'auth `tenancy`) ; les superusers contournent, un utilisateur manquant
 est refusé. `.permissions_for_model::<Post>()` remplit automatiquement les codenames standard
 `<table>.view` / `.add` / `.change` / `.delete` (`posts.view`, … pour la table
-`posts`).
+`posts`). Les codenames exigent la feature `tenancy` : sans elle, un ViewSet qui
+en fixe refuse le montage, avec un panic qui indique la solution. Dans une app
+mono-base, placez votre propre couche d'auth devant et utilisez `allow_anonymous`,
+ou `read_only`.
 
 **Permissions objet.** Un ViewSet exécute les mêmes hooks que l'admin
 (`register_object_permission!`, `register_queryset_scope!`) : `add` à la

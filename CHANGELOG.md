@@ -20,6 +20,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Every tenant cache key is `tenant:#org:<id>:<slug>:<area>:<rest>` (areas `app`, `lock`, `idem`, `page`, `rl`, `session`, `flag`); global keys keep their bytes, and a global app, page or rate-limit key starting with `tenant:` or `~` gets a `~` in front.
 - Until 0.65.0, tenant locks also take the 0.63 key and idempotency also reads and writes the 0.63 entry and marker, so a rolling deploy never runs a request or a job twice.
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
+- **Breaking:** without the `tenancy` feature, mounting a ViewSet that sets permission codenames panics with the fix, instead of answering 403 forever; the open-writes warning and `make:viewset` name only what the build has.
 
 ### Deprecated
 
@@ -34,6 +35,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `make:viewset` mounts the ViewSet at the model's table (`/api/posts`), not the module name (`/api/post_view_set`), and prints the URL it answers at.
 - MariaDB: `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; `inspectdb` and the jobs queue see a JSON column as `json`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
 - MariaDB: `string_agg` is no longer cut at 1 MiB (`SET STATEMENT group_concat_max_len`, since MariaDB ignores the `SET_VAR` hint); `lag` / `lead` with a JSON default work.
+- `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is read: `server::Builder` applies it to the impersonation cookie, and a bad or zero value stops boot.
+- `startapp --into <dir>` writes under `src/<dir>/` in both CLIs and prints the parent `mod` and `urls.rs` lines to add.
+- `make:worker` needs `jobs-postgres`, which its queue uses; `make:api_routes` routes each app model at its table, like `make:viewset`.
+- The startapp smoke test checks the app's own models, so renaming the starter model keeps `cargo test` green.
+- The fullstack index links the admin at its configured prefix, not a fixed `/admin`.
+- Guides: viewsets, getting-started, scaffolding, manage and the cookbook match what the generators write.
+
 ## [0.63.0] — 2026-11-04
 
 ### Added

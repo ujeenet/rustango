@@ -282,7 +282,7 @@ Escribe `src/blog/` conteniendo `mod.rs`, `models.rs` (un modelo inicial nombrad
 
 Opciones:
 
-- **`--into <dir>`** — genera el andamiaje bajo un directorio base distinto de `src/` (p. ej. un miembro del workspace).
+- **`--into <dir>`** — genera el andamiaje bajo `src/<dir>/` (`--into apps` escribe `src/apps/blog/`); imprime las líneas del módulo padre y de `urls.rs` que hay que añadir.
 - **`--with-manage-bin`** — emite además un `src/bin/manage.rs` (para diseños que prefieren un binario de manage aparte).
 
 ---
@@ -300,7 +300,7 @@ Dentro de un proyecto, los verbos `make:*` generan el andamiaje de un archivo ca
 | `make:job <Name>` | Un handler de job en segundo plano |
 | `make:scheduled <Name>` | Una tarea de intervalo fijo para `scheduler::Scheduler` |
 | `make:worker <Name>` | Un binario worker bajo `src/bin/` que vacía la cola de jobs |
-| `make:notification <Name>` | Una notificación multicanal |
+| `make:notification <Name>` | Una notificación por correo: un struct que construye un `Email` |
 | `make:middleware <Name>` | Un esqueleto de middleware |
 | `make:test <Name>` | Un módulo de pruebas usando el cliente de pruebas en el mismo proceso |
 
@@ -318,9 +318,11 @@ cargo run -- make:test post_smoke
 cargo rustango new myblog                              # 1. scaffold the project
 cd myblog
 cargo run -- startapp blog                             # 2. add a feature module
-# …add fields to src/blog/models.rs…
+# …rename the starter `Blog` in src/blog/models.rs to `Post`, add fields…
 cargo run -- makemigrations                            # 3. generate a migration
 cargo run -- migrate                                   # 4. apply it
 cargo run -- make:viewset PostViewSet --model Post     # 5. expose a JSON API
-cargo run                                              # 6. serve
+# …add `pub mod post_view_set;` to src/lib.rs and the `.nest_with` line from
+#    the end of src/post_view_set.rs to src/main.rs…
+cargo run                                              # 6. serve the URL make:viewset printed
 ```

@@ -1012,14 +1012,10 @@ pub struct Item {
 /// `src/views.rs`. Only fullstack mounts an admin, so only its index links one.
 pub fn views_rs(template: Template) -> String {
     match template {
-        Template::Fullstack => VIEWS_RS.to_owned(),
-        Template::Api | Template::Tenant => VIEWS_RS.replacen(ADMIN_LINK, "\",\n", 1),
+        Template::Fullstack => VIEWS_RS_ADMIN.to_owned(),
+        Template::Api | Template::Tenant => VIEWS_RS.to_owned(),
     }
 }
-
-/// The index's admin sentence, ending the `Html` literal.
-const ADMIN_LINK: &str =
-    "\\n\\\n         <p>The admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",\n";
 
 const VIEWS_RS: &str = "//! Project views — the request handlers this project mounts.
 
@@ -1029,9 +1025,35 @@ pub async fn index() -> Html<&'static str> {
     Html(
         \"<!doctype html>\\n\\
          <title>rustango app</title>\\n\\
-         <h1>Hello from Rustango!</h1>\\n\\
-         <p>The admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",
+         <h1>Hello from Rustango!</h1>\",
     )
+}
+
+pub async fn healthz() -> &'static str {
+    \"ok\"
+}
+";
+
+/// The fullstack index links the admin where `main.rs` nests it.
+const VIEWS_RS_ADMIN: &str = "//! Project views — the request handlers this project mounts.
+
+use std::sync::LazyLock;
+
+use axum::response::Html;
+
+/// The admin's path, as `main.rs` mounts it: `[admin] url_prefix`, else `/admin`.
+static ADMIN_PREFIX: LazyLock<String> = LazyLock::new(|| {
+    crate::urls::admin_prefix(&rustango::config::Settings::load_from_env().unwrap_or_default())
+});
+
+pub async fn index() -> Html<String> {
+    let admin = ADMIN_PREFIX.as_str();
+    Html(format!(
+        \"<!doctype html>\\n\\
+         <title>rustango app</title>\\n\\
+         <h1>Hello from Rustango!</h1>\\n\\
+         <p>The admin is at <a href=\\\"{admin}\\\">{admin}</a>.</p>\"
+    ))
 }
 
 pub async fn healthz() -> &'static str {

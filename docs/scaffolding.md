@@ -282,7 +282,7 @@ It writes `src/blog/` containing `mod.rs`, `models.rs` (a starter model named af
 
 Options:
 
-- **`--into <dir>`** — scaffold under a base directory other than `src/` (e.g. a workspace member).
+- **`--into <dir>`** — scaffold under `src/<dir>/` instead (`--into apps` writes `src/apps/blog/`); it prints the parent `mod` and `urls.rs` lines to add.
 - **`--with-manage-bin`** — also emit a `src/bin/manage.rs` (for layouts that prefer a separate manage binary).
 
 ---
@@ -300,7 +300,7 @@ Inside a project, the `make:*` verbs scaffold one file at a time. The full per-f
 | `make:job <Name>` | A background job handler |
 | `make:scheduled <Name>` | A fixed-interval task for `scheduler::Scheduler` |
 | `make:worker <Name>` | A worker binary under `src/bin/` that drains the job queue |
-| `make:notification <Name>` | A multi-channel notification |
+| `make:notification <Name>` | An email notification: a struct that builds an `Email` |
 | `make:middleware <Name>` | A middleware skeleton |
 | `make:test <Name>` | A test module using the in-process test client |
 
@@ -318,9 +318,11 @@ cargo run -- make:test post_smoke
 cargo rustango new myblog                              # 1. scaffold the project
 cd myblog
 cargo run -- startapp blog                             # 2. add a feature module
-# …add fields to src/blog/models.rs…
+# …rename the starter `Blog` in src/blog/models.rs to `Post`, add fields…
 cargo run -- makemigrations                            # 3. generate a migration
 cargo run -- migrate                                   # 4. apply it
 cargo run -- make:viewset PostViewSet --model Post     # 5. expose a JSON API
-cargo run                                              # 6. serve
+# …add `pub mod post_view_set;` to src/lib.rs and the `.nest_with` line from
+#    the end of src/post_view_set.rs to src/main.rs…
+cargo run                                              # 6. serve the URL make:viewset printed
 ```

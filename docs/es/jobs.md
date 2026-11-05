@@ -15,8 +15,9 @@ cola de tareas, íntegramente en Rust.
 
 > **Fuente:** `rustango::jobs` (`Job`, `JobQueue`, `InMemoryJobQueue`,
 > `JobError`, `JobDeadLetter`) y `rustango::jobs::DatabaseJobQueue` (la cola
-> respaldada por tabla, alias de `pg::PgJobQueue`) — tras la feature `jobs`
-> (activa por defecto).
+> respaldada por tabla, alias de `pg::PgJobQueue`) — tras la feature `jobs`;
+> `DatabaseJobQueue` y `make:worker` necesitan además `jobs-postgres` (ambas
+> activas por defecto).
 >
 > **Versión ejecutable:** los fragmentos in-memory, de reintento y de
 > dead-letter están copiados de

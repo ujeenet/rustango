@@ -14,8 +14,8 @@ failures.
 
 > **Source:** `rustango::jobs` (`Job`, `JobQueue`, `InMemoryJobQueue`,
 > `JobError`, `JobDeadLetter`) and `rustango::jobs::DatabaseJobQueue` (the
-> table-backed queue, alias of `pg::PgJobQueue`) — behind the `jobs` feature (on
-> by default).
+> table-backed queue, alias of `pg::PgJobQueue`) — behind the `jobs` feature;
+> `DatabaseJobQueue` and `make:worker` also need `jobs-postgres` (both on by default).
 >
 > **Runnable version:** the in-memory, retry, and dead-letter snippets are
 > copied from [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)

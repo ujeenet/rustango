@@ -42,6 +42,9 @@
 
 use std::time::Duration;
 
+/// Seconds that override [`RouteConfig::impersonation_ttl`] on the server.
+pub(crate) const IMPERSONATION_TTL_ENV: &str = "RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS";
+
 /// Apex / tenant URL prefixes. Every framework-internal URL is
 /// derived from this struct (login, logout, admin, audit, static
 /// asset paths, brand asset paths, plus the HTTP Basic auth
@@ -113,7 +116,8 @@ pub struct RouteConfig {
     /// Default 1 hour. Short by design — long enough
     /// for a debugging session, short enough that an idle
     /// operator gets dropped before they can forget they're
-    /// impersonating.
+    /// impersonating. `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS`
+    /// overrides it when `server::Builder` assembles the server.
     pub impersonation_ttl: Duration,
 }
 
@@ -203,6 +207,24 @@ impl RouteConfig {
         storage: &crate::storage::BoxedStorage,
     ) -> Option<String> {
         super::branding::brand_asset_url_at(self.brand_prefix(), slug, path, storage)
+    }
+
+    /// `self` with [`IMPERSONATION_TTL_ENV`] applied, when it is set.
+    ///
+    /// # Errors
+    /// The var is set but is not a whole number of seconds, or is `0`.
+    pub(crate) fn with_env_overrides(mut self) -> Result<Self, crate::env::EnvError> {
+        if let Some(secs) = crate::env::optional::<u32>(IMPERSONATION_TTL_ENV)? {
+            if secs == 0 {
+                return Err(crate::env::EnvError::Parse {
+                    name: IMPERSONATION_TTL_ENV.to_owned(),
+                    ty: "seconds",
+                    detail: "0 ends every impersonation at once; use 1 or more".to_owned(),
+                });
+            }
+            self.impersonation_ttl = Duration::from_secs(u64::from(secs));
+        }
+        Ok(self)
     }
 
     /// [`Self::brand_url`] without a trailing `/`, so links and routes never get `//`.
