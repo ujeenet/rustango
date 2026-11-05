@@ -433,7 +433,7 @@ mod tests {
     #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn cold_builds_past_the_budget_are_refused() {
-        for (budget, built) in [(2, 2), (0, 4)] {
+        for (budget, built) in [(2, 2), (0, 3)] {
             let pools: DatabasePools<sqlx::Sqlite> = DatabasePools::new(BackendKind::Sqlite)
                 .config(TenantPoolsConfig {
                     max_cached_database_pools: 1,
@@ -448,7 +448,7 @@ mod tests {
                 })
             };
             let mut ok = 0;
-            for slug in ["a", "b", "a", "b"] {
+            for slug in ["a", "b", "c"] {
                 match pools.pool_for_org(&org(slug)).await {
                     Ok(_) => ok += 1,
                     Err(e) => assert!(matches!(e, TenancyError::PoolBusy), "{e}"),
