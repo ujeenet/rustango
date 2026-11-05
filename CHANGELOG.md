@@ -12,27 +12,26 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `CacheScope::for_tenant(root, &tenant)` and `CacheScope::global(root)` for jobs; `locks()` gives the scope's `DistributedLock`, `purge()` deletes every key of its tenant.
 - `Job::run_with(&JobCtx)` defaults to `run()`; both queues call it. `JobCtx` gives the job id (stable across retries, an idempotency key), the attempt number and a shutdown signal.
 - `Org::new(slug)` and `testkit::org_with(|o| …)` build an `Org` with its defaults.
+- SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in with no `?next` lands, by role, claim or `any`, in `position` order. The login gate keeps `next` for every page it bounces, so rules apply to a sign-in started at the login page itself. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
 
 ### Changed
 
+- **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
 - `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
-- The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply.
 - Every tenant cache key is `tenant:#org:<id>:<slug>:<area>:<rest>` (areas `app`, `lock`, `idem`, `page`, `rl`, `session`, `flag`); global keys keep their bytes, and a global app, page or rate-limit key starting with `tenant:` or `~` gets a `~` in front.
 - Until 0.65.0, tenant locks also take the 0.63 key and idempotency also reads and writes the 0.63 entry and marker, so a rolling deploy never runs a request or a job twice.
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
+- The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply to a sign-in started at the login page.
 
 ### Deprecated
 
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` (removed in 0.66.0): use `CacheScope::for_tenant(..).app()` / `.locks()`.
 
-- **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
 ### Fixed
 
-- MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
+- MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()`, `inspectdb` and the jobs queue read a JSON column as JSON; `inspectdb` reads quoted defaults and unsigned lengths; `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
 - MySQL / MariaDB: a filtered `AnyValue` is written as `MIN(CASE WHEN …)`, so a row the filter rejects can no longer turn the result NULL.
-- SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in without `?next` lands, by role, claim or `any`, in `position` order. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
 - `make:viewset` mounts the ViewSet at the model's table (`/api/posts`), not the module name (`/api/post_view_set`), and prints the URL it answers at.
-- MariaDB: `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; `inspectdb` and the jobs queue see a JSON column as `json`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
 - Path-prefix tenants: the `server::Builder` dispatcher strips the prefix before the app's routes (`/acme/about` reaches `/about`); `OriginalUri` keeps the full path and the new `TenantPathPrefix` extension names the prefix. `Tenant`, `TenantScope`, `SessionUser` and `require_auth` use the tenant the dispatcher resolved instead of resolving again, and CSRF exemptions match the tenant-relative path.
 
 ## [0.63.0] — 2026-11-04

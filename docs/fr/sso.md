@@ -184,7 +184,10 @@ Les réglages de tout le tenant, une ligne.
 ### `SsoLandingRule`
 
 Où mène une connexion sans `?next=`. Les règles passent dans l'ordre de
-`position` et la première qui correspond gagne. Elles valent pour les connexions
+`position` et la première qui correspond gagne. Le contrôle de connexion garde
+`next` pour chaque page qu'il renvoie, donc les règles s'appliquent quand la
+connexion n'a pas de `next`, par exemple une connexion commencée sur la page de
+connexion elle-même. Elles valent pour les connexions
 SSO et par mot de passe sur l'admin du tenant et l'admin nu ; la connexion des
 membres les ignore. Une règle dont le chemin échoue au contrôle de `next` (par
 exemple la page de connexion) est sautée. Sans la table, il n'y a pas de règle.
