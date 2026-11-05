@@ -4,6 +4,9 @@
 //!
 //! SQLite, because the console is tri-dialect and this needs no server.
 
+#[path = "support/field_text.rs"]
+mod field_text;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -144,22 +147,7 @@ async fn boot_wrapped(provisioner_url: Option<&str>, wrap: Wrap) -> Booted {
 }
 
 /// Percent-encode a form value.
-///
-/// Local rather than `urlencoding::encode`: that crate is an optional
-/// dependency not enabled by `sqlite,tenancy`, and widening a feature
-/// set to spell one test fixture is the wrong trade.
-fn form_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char);
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
-}
+use rustango::url_codec::url_encode as form_encode;
 
 async fn body_of(resp: axum::response::Response) -> String {
     String::from_utf8_lossy(&to_bytes(resp.into_body(), 4 * 1024 * 1024).await.unwrap())
@@ -185,6 +173,16 @@ async fn the_create_form_renders_for_an_authenticated_operator() {
     let html = body_of(resp).await;
     assert!(html.contains("name=\"slug\""), "no slug field: {html}");
     assert!(html.contains("Test connection"), "no probe button");
+    let org = <Org as rustango::core::Model>::SCHEMA;
+    for field in [
+        "slug",
+        "display_name",
+        "host_pattern",
+        "path_prefix",
+        "port",
+    ] {
+        field_text::assert_shows(&html, org, field, field);
+    }
     // Schema mode is Postgres-only; a SQLite registry must not offer
     // a choice that can only fail.
     assert!(

@@ -77,9 +77,15 @@ async fn tenant(pool: &Pool, session: bool) -> Tenant {
     let dir = tempfile::tempdir().unwrap();
     let (url, kind) = match pool {
         #[cfg(feature = "postgres")]
-        Pool::Postgres(_) => (std::env::var("DATABASE_URL").unwrap(), "postgres"),
+        Pool::Postgres(_) => (
+            rustango::testkit::matrix::Backend::Postgres.url().unwrap(),
+            "postgres",
+        ),
         #[cfg(feature = "mysql")]
-        Pool::Mysql(_) => (std::env::var("MYSQL_TEST_URL").unwrap(), "mysql"),
+        Pool::Mysql(_) => (
+            rustango::testkit::matrix::Backend::MySql.url().unwrap(),
+            "mysql",
+        ),
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(_) => (
             format!("sqlite://{}?mode=rwc", dir.path().join("t.db").display()),
@@ -221,13 +227,22 @@ async fn perms_stay_with_their_request(pool: &Pool) {
     let boss_cookie = env.login(&boss).await;
     let clerk_cookie = env.login(&clerk).await;
     let list = "/__admin/rustango_users";
+    // Without a session the index is not served, so a 200 below proves one.
+    let (status, body, _) = env.send("GET", "/__admin/", String::new(), "").await;
+    assert_ne!(status, StatusCode::OK, "anonymous index: {body}");
     for _ in 0..2 {
         let (status, body, _) = env.send("GET", list, String::new(), &boss_cookie).await;
         assert_eq!(status, StatusCode::OK, "superuser: {body}");
         assert!(body.contains(&clerk.username), "{body}");
         let (status, body, _) = env.send("GET", list, String::new(), &clerk_cookie).await;
-        assert_ne!(status, StatusCode::OK, "no-perm user: {body}");
+        // No `{table}.view` hides the table, so it is a 404, not a 403.
+        assert_eq!(status, StatusCode::NOT_FOUND, "no-perm user: {body}");
         assert!(!body.contains(&boss.username), "{body}");
+        // Refused for lacking the perm, not for a dropped session.
+        let (status, body, _) = env
+            .send("GET", "/__admin/", String::new(), &clerk_cookie)
+            .await;
+        assert_eq!(status, StatusCode::OK, "clerk's session: {body}");
     }
 }
 

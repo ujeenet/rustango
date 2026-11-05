@@ -67,7 +67,7 @@ MCP ist das optionale `mcp`-Feature (standardmäßig aus). Schalten Sie es ein:
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.62", features = ["mcp"] }
+rustango = { version = "0.63", features = ["mcp"] }
 ```
 
 Es zieht `tenancy` (Agenten/Skills), `sse` (den Benachrichtigungsstrom),
@@ -182,7 +182,7 @@ und `ping`; ein Aufruf ohne Token erhält `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.62.0" },
+    "serverInfo": { "name": "rustango", "version": "0.63.0" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }
@@ -214,7 +214,7 @@ create_skill_pool(&pool, "calculator", "Calculator", "does arithmetic",
                   "You are a precise calculator.", &["add".into()]).await?;
 
 // 3. Grant it to the agent in tenant "acme".
-grant_skill_pool(&pool, "acme", "calc-bot", "calculator").await?;
+grant_skill_pool(&pool, &rustango::tenancy::TenantSlug::new(1, "acme"), "calc-bot", "calculator").await?;
 ```
 
 Der Client tauscht sein Credential gegen ein **tenant-gepinntes, scoped JWT** an

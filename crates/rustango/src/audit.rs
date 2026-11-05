@@ -529,15 +529,29 @@ pub struct AuditLog {
     // MUST have a max_length: MySQL cannot index an unbounded TEXT column
     // without a prefix length (error 1170).
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Table of the changed row.")]
+    #[rustango(verbose_name = "Table")]
     pub entity_table: String,
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Primary key of the changed row.")]
+    #[rustango(verbose_name = "Row id")]
     pub entity_pk: String,
     #[rustango(max_length = 32)]
+    #[rustango(help_text = "`create`, `update`, `delete`, `soft_delete`, `restore` or `action`.")]
+    #[rustango(verbose_name = "Operation")]
     pub operation: String,
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Who or what made the change, e.g. `user:42`, `cli` or `webhook:stripe`."
+    )]
+    #[rustango(verbose_name = "Source")]
     pub source: String,
+    #[rustango(help_text = "The changed fields as JSON, with before and after values.")]
+    #[rustango(verbose_name = "Changes")]
     pub changes: serde_json::Value,
     #[rustango(index, default = "now()")]
+    #[rustango(help_text = "When the change happened.")]
+    #[rustango(verbose_name = "Occurred at")]
     pub occurred_at: chrono::DateTime<chrono::Utc>,
 }
 
@@ -1063,7 +1077,9 @@ pub async fn emit_many_pool(
     emit_many(pool, entries).await
 }
 
-/// All-backend counterpart of [`fetch_for_entity`]. The `changes` column
+/// The audit entries of one row, on every backend.
+///
+/// The `changes` column
 /// is JSON on PG and MySQL and TEXT on SQLite; both decode into
 /// `serde_json::Value`, so the audit panel renders the same everywhere.
 ///
@@ -1109,7 +1125,9 @@ pub async fn fetch_for_entity_pool(
     }
 }
 
-/// All-backend counterpart of [`cleanup_older_than`]. The cutoff is
+/// Delete audit entries older than a cutoff, on every backend.
+///
+/// The cutoff is
 /// computed in Rust and bound, so the SQL needs no
 /// `NOW() - INTERVAL '… day'`.
 ///
@@ -1147,7 +1165,8 @@ pub async fn cleanup_older_than_pool(
         })
 }
 
-/// All-backend counterpart of [`cleanup_keep_last_n`].
+/// Keep only the newest `keep` audit entries per row, on every backend.
+///
 /// `ROW_NUMBER() OVER (PARTITION BY …)` works on PG, MySQL 8+ and
 /// SQLite 3.25+, so only identifier quoting differs.
 ///

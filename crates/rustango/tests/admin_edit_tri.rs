@@ -587,7 +587,7 @@ fn shown(html: &str, name: &str) -> String {
 fn encode(pairs: &[(&str, String)]) -> String {
     pairs
         .iter()
-        .map(|(k, v)| format!("{k}={}", urlencoding::encode(v)))
+        .map(|(k, v)| format!("{k}={}", rustango::url_codec::url_encode(v)))
         .collect::<Vec<_>>()
         .join("&")
 }
@@ -793,7 +793,7 @@ async fn slug_name(pool: &Pool, slug: &str) -> Option<String> {
 async fn string_pk_links_are_encoded(pool: &Pool) {
     seed_slugs(pool).await;
     for slug in AWKWARD_SLUGS {
-        let enc = urlencoding::encode(slug).into_owned();
+        let enc = rustango::url_codec::url_encode(slug);
         let (status, html) = send(pool, "GET", &format!("/aed_slug/{enc}"), "").await;
         assert_eq!(status, StatusCode::OK, "{slug}: {html}");
         for link in [
@@ -839,7 +839,7 @@ async fn string_fk_cell_link_is_encoded(pool: &Pool) {
     let (status, html) = send(pool, "GET", "/aed_slugref", "").await;
     assert_eq!(status, StatusCode::OK, "{html}");
     for slug in AWKWARD_SLUGS {
-        let enc = urlencoding::encode(slug).into_owned();
+        let enc = rustango::url_codec::url_encode(slug);
         let link = format!(r#"href="/aed_slug/{enc}""#);
         assert!(html.contains(&link), "{slug}: no {link} in {html}");
     }
@@ -849,7 +849,7 @@ async fn string_fk_cell_link_is_encoded(pool: &Pool) {
 /// read-only detail page instead of a form whose save is refused.
 async fn read_only_edit_link_shows_detail(pool: &Pool) {
     seed_slugs(pool).await;
-    let enc = urlencoding::encode("a/b").into_owned();
+    let enc = rustango::url_codec::url_encode("a/b");
     let builders = [
         rustango::admin::Builder::new(pool.clone()).with_user_perms(["aed_slug.view".to_owned()]),
         rustango::admin::Builder::new(pool.clone()).read_only(["aed_slug"]),

@@ -150,7 +150,34 @@ untouched.
 
 ## Unreleased
 
+## 0.63.0
+
+- `dumpdata` now errors on a cell it cannot decode (a column whose type no longer matches the model) and on NaN or infinite floats; it used to write `null`. Fix the column or `--exclude` the model. A `dumpdata -o` file is now owner-only on Unix.
+- Creating or editing a tenant with a port but no host or path prefix is refused (a create with an apex set gets `<slug>.<apex>` instead). Give it a host, or set `RUSTANGO_TENANT_PORT_ROUTING=1` if your app mounts `PortResolver` on its own listeners.
+- Existing port-only tenants lose their links (first-admin mail, console handoff, SSO example) and `check --deploy` names them: give each a host or a path prefix, or set `RUSTANGO_TENANT_PORT_ROUTING=1`.
+- MCP notifications take a `&TenantSlug`: `notify_*_list_changed`, `notifications::subscribe`, `frame_visible`, `grant_skill_pool` and `revoke_skill_pool`. `McpAgent` gains `org_id`, and `ScopedFrame::tenant` holds `TenantSlug::namespace()`. `JwtLifecycle::revoke` returns `false` when the store did not record it; `try_revoke` says why. `mcp::cancel` takes a `&TenantSlug`.
+- `passkey::verify::cose_es256_key` returns `passkey::Es256Key` instead of `p256::ecdsa::VerifyingKey`; read the point with `Es256Key::to_sec1()` (65 bytes, `0x04 || x || y`). An off-curve point is now refused when a signature is verified, not when the key is read.
+- Under nextest, `testkit::matrix::Backend::pool` connects to `<db>-s<slot>` (created on first use), not to the URL's database. A test that re-reads `DATABASE_URL`/`MYSQL_TEST_URL` to reach the same tables should call `Backend::url()`. The database user needs `CREATE DATABASE` rights.
 - A `#[rustango::main]` fn now returns `std::process::ExitCode`; its async body's return type must implement `Termination`, as `main`'s does. A caller that used the fn's return value now gets that `ExitCode`.
+- `cargo rustango new --features mcp` needs `--template tenant`; the api and fullstack templates refuse it. A project scaffolded before can drop its `/mcp` mount: it could not authenticate an agent.
+- `FeatureFlags` write methods return `Result<(), CacheError>`; add `?` (or handle the error) where you call `enable`, `disable`, `clear`, `set_percentage`, `enable_for_user` or `disable_for_user`.
+- When tenant resolution fails, a request carrying an `Idempotency-Key` gets `503` instead of running unkeyed. With no context mounted, or when no tenant matched, it is keyed globally, as before.
+- Requests the Builder's unresolved router serves are marked `Global`, so `CachePageLayer` on that router now caches them.
+- `LoginScope::Tenant`, `TenantBasic`, `TenantApiKey` and `TenantAgent` take a `TenantSlug`, not a slug, and exist only with `tenancy`. Tenant login counters and account locks reset once.
+- `KeyBy` is `#[non_exhaustive]` and gains `Tenant`: add a `_` arm to a `match` on it.
+- `CacheScope::from_request` returns `None` when no tenant context is mounted: a single-db app uses `SessionStore::new(root)` and `FeatureFlags::new(root)` directly.
+- Tenant SSO login limits are keyed by org id, so they reset once.
+- A tenant or bare-admin SSO sign-in started with a safe `?next` (the login page passes its own on) lands there, not on the admin home. The bare admin's gate now redirects to `{prefix}/login?next=<page>`, and its password login honours that `next`.
+- Object-permission hooks on any tenant route of the Builder now see the routed tenant, so a credential for that tenant resolves to its user, not `Anonymous`. The credential must carry the tenant's `TenantSlug` (org id and slug): an app-built `Principal` with only a slug, and no `TenantSlug` next to it, is `Anonymous` there.
+- Under tenancy, scope `SessionStore` and `FeatureFlags` per request with `.for_tenant(&TenantSlug::of(&t.org)?)`. Scoped keys live under `tenant:#org:<id>:<slug>:`, so existing sessions log out and per-user overrides must be set again, once. Global flags, percentages and single-db keys are unchanged.
+- `rustango::bulk_actions` and `RustangoError::BulkAction` are gone; nothing in the framework ran them. Use the admin's `actions = "..."` or `ListView::bulk_actions(true)` with `tenant_action(...)`.
+- The crate-root `rustango::auth_backends` (`Credentials`, `Principal`, `AuthBackendChain`, `RemoteUserBackend`) is gone. Implement `tenancy::auth_backends::AuthBackend`, which `require_auth` runs.
+- `mcp::pagination` is private; the MCP `*/list` handlers still paginate. Use `rustango::pagination` in your own endpoints.
+- `Dialect` is sealed: only rustango's PostgreSQL, MySQL and SQLite dialects implement it, so a downstream `impl Dialect` no longer compiles (none could reach a `Pool`). Calling its methods is unchanged.
+- `InsertReturningPool` is hidden from the docs: it is plumbing for the derive and may change without notice.
+- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work, are deprecated and are removed in 0.64.0.
+- `ModelFormError::Database`'s `Display` is now `database error`. Log the error with `{:?}` or its `source()` to keep the driver detail.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay deprecated one more minor and are removed in 0.64.0.
 
 ## 0.62.0
 
@@ -223,10 +250,10 @@ untouched.
 - `M2MManager::all` and `GenericM2MManager::all` are generic over the key type and `all_as` is gone: write `m.all::<i64>(&pool)` (or annotate `let ids: Vec<i64>`); use `String` / `Uuid` for those keys.
 - The deprecated `M2MManager` `_pool` aliases (`all_pool`, `add_pool`, `remove_pool`, `set_pool`, `clear_pool`, `contains_pool`) are removed; drop the suffix.
 - `reverse_has` / `generic_has` with a `self_pk_column` that names no column of the model no longer compiles (it used to fall back to the primary key).
-- `sql::bulk_insert_on` and the derive's `bulk_insert_on` take a `sqlx::Acquire` source instead of an `Executor`: pass `&PgPool`, `&mut PgConnection` (`&mut *tx`) or `&mut Transaction`. Past the bind cap they now write in chunks inside one transaction instead of failing.
+- `sql::bulk_insert_on` and the derive's `bulk_insert_on` take any `SqlExecutor`: a `&Pool`, a held `PoolConn`, a `PoolTx`, or a Postgres sqlx executor. Past the bind cap they write in chunks inside one transaction; a raw sqlx executor cannot, so it refuses there.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
 - ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
-- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.63.0. `ObjectPermission` gains `origin`: build it with the macro.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.64.0. `ObjectPermission` gains `origin`: build it with the macro.
 - A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
 - `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
 - A ViewSet page or offset list under a `view` hook is a 400 past `view_hook_scan_cap` rows; add a queryset scope or use cursor pagination for big tables.

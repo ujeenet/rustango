@@ -8,6 +8,9 @@
 //! must never succeed: the ones that lock somebody — or everybody — out
 //! of the console being used to make them.
 
+#[path = "support/field_text.rs"]
+mod field_text;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -225,6 +228,15 @@ async fn outcome(resp: axum::response::Response) -> String {
         }
         None => "rendered (no error)".to_owned(),
     }
+}
+
+/// The add form reads `Operator`'s schema text.
+#[tokio::test]
+async fn the_add_form_shows_the_schema_text() {
+    let b = boot().await;
+    let html = body_of(b.get("/operators").await).await;
+    let op = <Operator as rustango::core::Model>::SCHEMA;
+    field_text::assert_shows(&html, op, "username", "username");
 }
 
 #[tokio::test]

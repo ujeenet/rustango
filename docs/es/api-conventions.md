@@ -48,7 +48,7 @@ Estos siguen la convención de mayúsculas estándar de Rust, la misma división
 ### Módulos
 
 - **Singular** cuando el módulo alberga UN tipo o concepto principal: `cache`, `email`, `storage`, `signed_url`, `request_id`.
-- **Plural** cuando el módulo alberga una COLECCIÓN de elementos: `bulk_actions`, `api_keys`, `passwords`, `forms`, `signals`.
+- **Plural** cuando el módulo alberga una COLECCIÓN de elementos: `api_keys`, `passwords`, `forms`, `signals`.
 
 ---
 
@@ -173,7 +173,6 @@ Puedes **mezclar las tres** en un mismo queryset.
 | Contraseñas | `passwords::*` | `PasswordError` |
 | Webhooks | `webhook::*` | `EmptySigningKey` desde `sign`; `verify_*` devuelve `bool` |
 | URLs firmadas | `signed_url::*` | `SignedUrlError` |
-| Acciones masivas | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
 | Filtro de IP | `ip_filter::*` | `IpFilterError` |
 | i18n | `i18n::*` | `I18nError` |
@@ -217,7 +216,6 @@ El nombre de un módulo debería permitirte **adivinar los nombres de los tipos 
 | `storage` | el trait `Storage`, las impls `*Storage` | alta |
 | `signed_url` | las funciones libres `sign`, `verify` | media |
 | `text` | las funciones libres `slugify`, `html_escape`, `truncate` | media |
-| `bulk_actions` | `BulkActionRegistry`, `BulkAction`, las impls `Bulk*Action` | alta |
 | `api_keys` | las funciones libres `generate_key`, `verify_key`, `split_token` | media |
 
 **Evita esto:** un módulo que alberga un cajón de sastre heterogéneo (`utils`, `helpers`, `common`). Si no puedes nombrar el único concepto que cubre, no debería ser un módulo.
@@ -293,7 +291,7 @@ backend: `default-features = false, features = ["batteries", "sqlite"]`. La alte
 Para adelgazar un binario que no necesita todo, desactiva los valores por defecto y lista solo lo que uses:
 
 ```toml
-rustango = { version = "0.62", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.63", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

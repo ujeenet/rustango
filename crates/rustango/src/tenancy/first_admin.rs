@@ -244,7 +244,7 @@ impl FirstAdminHandover {
     ///
     /// # Errors
     /// [`TenancyError::Validation`] when no resolver routes `org` (no
-    /// host, path prefix or port), so the link would be dead.
+    /// host or path prefix), so the link would be dead.
     pub async fn hand_over(
         &self,
         org: &Org,

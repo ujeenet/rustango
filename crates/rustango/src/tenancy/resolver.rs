@@ -37,6 +37,7 @@ use http::HeaderName;
 use super::error::TenancyError;
 use super::org::Org;
 use super::resolver_cache::{Breaker, Cached, GenerationPoll, HostTtlCache};
+use super::unresolved::TenantRegistry;
 use crate::sql::PoolId;
 use std::sync::{Arc, PoisonError};
 
@@ -60,6 +61,19 @@ pub trait OrgResolver: Send + Sync + 'static {
     /// tenant" with diagnostic context (rare — most no-match cases
     /// return `Ok(None)`).
     async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError>;
+
+    /// [`Self::resolve`] against a [`TenantRegistry`]. The framework
+    /// calls this one; the default passes `registry.pool()` on.
+    ///
+    /// # Errors
+    /// As [`Self::resolve`].
+    async fn resolve_in(
+        &self,
+        parts: &Parts,
+        registry: &TenantRegistry,
+    ) -> Result<Option<Org>, TenancyError> {
+        self.resolve(parts, registry.pool()).await
+    }
 }
 
 // ---------------- SubdomainResolver ----------------
@@ -186,6 +200,9 @@ struct RegistryState {
     slug_cache: HostTtlCache<Org>,
     /// Listener port → [`Org`] by `port` (`None` = known miss).
     port_cache: HostTtlCache<Org>,
+    /// Org id → active [`Org`] (`None` = gone or inactive). Long-lived MCP
+    /// streams re-check their tenant here instead of querying each.
+    id_cache: HostTtlCache<Org>,
     /// Last `rustango_orgs` fingerprint seen, so this pod notices another
     /// pod's writes without a shared cache. See [`sync_org_generation`].
     org_gen: GenerationPoll<super::org::OrgGeneration>,
@@ -209,6 +226,7 @@ impl RegistryState {
             prefix_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             slug_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             port_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
+            id_cache: HostTtlCache::new(CACHE_TTL, CACHE_MAX),
             org_gen: GenerationPoll::new(),
             host_gen: GenerationPoll::new(),
             registry_down: Breaker::new(),
@@ -223,6 +241,7 @@ impl RegistryState {
         self.prefix_cache.clear();
         self.slug_cache.clear();
         self.port_cache.clear();
+        self.id_cache.clear();
     }
 }
 
@@ -613,6 +632,24 @@ where
     Ok(found)
 }
 
+/// The active org with `id`, from the resolver's cache: one registry query
+/// per id per TTL, cleared with the other org caches on a write or a
+/// fingerprint change.
+///
+/// # Errors
+/// A registry failure, or the breaker open.
+#[cfg(feature = "mcp")]
+pub(crate) async fn active_org_by_id(
+    registry: &Pool,
+    id: i64,
+) -> Result<Option<Org>, TenancyError> {
+    let st = state(registry);
+    cached_org_by(registry, &st, &st.id_cache, &id.to_string(), || {
+        Org::id.eq(id)
+    })
+    .await
+}
+
 /// Whether `candidate` (`/<segment>`) was looked up and cached, hit or miss.
 #[cfg(all(test, feature = "sqlite"))]
 pub(crate) fn prefix_looked_up(registry: &Pool, candidate: &str) -> bool {
@@ -827,8 +864,17 @@ impl Default for ChainResolver {
 #[async_trait]
 impl OrgResolver for ChainResolver {
     async fn resolve(&self, parts: &Parts, registry: &Pool) -> Result<Option<Org>, TenancyError> {
+        self.resolve_in(parts, &TenantRegistry::new(registry.clone()))
+            .await
+    }
+
+    async fn resolve_in(
+        &self,
+        parts: &Parts,
+        registry: &TenantRegistry,
+    ) -> Result<Option<Org>, TenancyError> {
         for resolver in &self.resolvers {
-            match resolver.resolve(parts, registry).await? {
+            match resolver.resolve_in(parts, registry).await? {
                 Some(org) => {
                     // The one funnel every request path goes through —
                     // extractors, tenant admin, operator console. Publish
@@ -956,6 +1002,35 @@ pub(crate) fn reset_registry_breaker() {
     each_state(|s| s.registry_down.close());
 }
 
+/// MCP streams re-check their tenant from the cache, not the registry.
+#[cfg(all(test, feature = "sqlite", feature = "mcp"))]
+#[tokio::test]
+async fn active_org_by_id_answers_from_the_cache() {
+    let _g = isolated().await;
+    let pool = Pool::connect("sqlite:file:resolver_id_cache?mode=memory&cache=shared")
+        .await
+        .unwrap();
+    crate::testkit::create_tables_for::<Org>(&pool)
+        .await
+        .unwrap();
+    let mut org = Org {
+        slug: "idc".into(),
+        ..crate::testkit::org()
+    };
+    org.insert(&pool).await.unwrap();
+    let id = *org.id.get().unwrap();
+    assert!(active_org_by_id(&pool, id).await.unwrap().is_some());
+    crate::sql::raw_execute_pool(&pool, "DROP TABLE rustango_orgs", Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        active_org_by_id(&pool, id).await.unwrap().is_some(),
+        "asked the registry again"
+    );
+    invalidate_org_cache();
+    assert!(active_org_by_id(&pool, id).await.is_err());
+}
+
 /// Serializes lib tests that resolve through this module's globals and
 /// starts each from a closed breaker and empty caches (#2067).
 #[cfg(all(test, feature = "sqlite"))]
@@ -1054,6 +1129,45 @@ mod tests {
             .0;
         let r = SubdomainResolver::new("app.test.");
         assert!(r.resolve(&parts, &pool).await.unwrap().is_none());
+    }
+
+    /// A chain hands its members the registry through `resolve_in`, so a
+    /// resolver that overrides only that one is reached.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn a_chain_calls_resolve_in_on_its_members() {
+        struct InOnly(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait]
+        impl OrgResolver for InOnly {
+            async fn resolve(&self, _: &Parts, _: &Pool) -> Result<Option<Org>, TenancyError> {
+                unreachable!("the framework calls resolve_in")
+            }
+            async fn resolve_in(
+                &self,
+                _: &Parts,
+                registry: &TenantRegistry,
+            ) -> Result<Option<Org>, TenancyError> {
+                assert_eq!(registry.pool().dialect().name(), "sqlite");
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(None)
+            }
+        }
+        let hit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let chain = ChainResolver::new().push(InOnly(hit.clone()));
+        let pool =
+            Pool::Sqlite(crate::sql::sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap());
+        let parts = http::Request::builder()
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        assert!(chain.resolve(&parts, &pool).await.unwrap().is_none());
+        assert!(hit.load(std::sync::atomic::Ordering::SeqCst));
+        let registry = TenantRegistry::new(pool);
+        hit.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(chain.resolve_in(&parts, &registry).await.unwrap().is_none());
+        assert!(hit.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// An IPv6 `Host` keeps its address, not just `[` (#2043).

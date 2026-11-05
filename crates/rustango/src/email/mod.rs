@@ -733,12 +733,7 @@ impl Mailer for FileMailer {
         loop {
             let seq = self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path = self.dir.join(format!("{stamp}-{pid}-{seq:04}.eml"));
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-            let file = opts.open(&path);
-            match file {
+            match crate::private_file::create(&path) {
                 Ok(mut f) => {
                     use std::io::Write as _;
                     return f.write_all(serialize_eml(email).as_bytes()).map_err(|e| {

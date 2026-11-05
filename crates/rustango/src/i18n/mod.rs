@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{PoisonError, RwLock};
 
 pub mod admin;
 pub mod db;
@@ -414,7 +414,7 @@ impl Translator {
     pub fn add_locale(self, locale: Locale, catalog: HashMap<String, String>) -> Self {
         self.catalogs
             .write()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(locale, catalog);
         self
     }
@@ -423,7 +423,7 @@ impl Translator {
     pub fn insert_locale(&self, locale: Locale, catalog: HashMap<String, String>) {
         self.catalogs
             .write()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(locale, catalog);
     }
 
@@ -439,7 +439,7 @@ impl Translator {
     ) -> Self {
         self.plural_catalogs
             .write()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(locale, catalog);
         self
     }
@@ -452,7 +452,7 @@ impl Translator {
     ) {
         self.plural_catalogs
             .write()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(locale, catalog);
     }
 
@@ -480,9 +480,15 @@ impl Translator {
         req: &Locale,
         lookup: impl Fn(&Locale) -> (&'k str, Option<&'static str>),
     ) -> Option<String> {
-        let ov = self.overrides.read().expect("translator poisoned");
-        let cats = self.catalogs.read().expect("translator poisoned");
-        let pc = self.plural_catalogs.read().expect("translator poisoned");
+        let ov = self
+            .overrides
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let cats = self.catalogs.read().unwrap_or_else(PoisonError::into_inner);
+        let pc = self
+            .plural_catalogs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         // Within a plural entry: the exact category, then `other`; past that the
         // flat entry decides, never an arbitrary form in HashMap order.
         let pick = |entry: &HashMap<String, String>, category: &str| -> Option<String> {
@@ -574,11 +580,14 @@ impl Translator {
     pub fn has_locale(&self, locale: &str) -> bool {
         let req = Locale::new(locale);
         let base = Locale::new(req.base_language());
-        let cats = self.catalogs.read().expect("translator poisoned");
+        let cats = self.catalogs.read().unwrap_or_else(PoisonError::into_inner);
         if cats.contains_key(&req) || cats.contains_key(&base) {
             return true;
         }
-        let ov = self.overrides.read().expect("translator poisoned");
+        let ov = self
+            .overrides
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
         ov.contains_key(&req) || ov.contains_key(&base)
     }
 
@@ -587,7 +596,7 @@ impl Translator {
     pub fn locales(&self) -> Vec<String> {
         self.catalogs
             .read()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .keys()
             .map(|l| l.0.clone())
             .collect()
@@ -597,7 +606,7 @@ impl Translator {
     /// to seed the editable DB layer from the on-disk defaults (#532).
     #[must_use]
     pub fn entries(&self) -> Vec<(String, String, String)> {
-        let cats = self.catalogs.read().expect("translator poisoned");
+        let cats = self.catalogs.read().unwrap_or_else(PoisonError::into_inner);
         let mut out = Vec::new();
         for (loc, catalog) in cats.iter() {
             for (k, v) in catalog {
@@ -619,7 +628,10 @@ impl Translator {
                 .or_default()
                 .insert(key, value);
         }
-        *self.overrides.write().expect("translator poisoned") = map;
+        *self
+            .overrides
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = map;
     }
 
     /// Set a single override entry (#532) without a full reload — used by
@@ -627,7 +639,7 @@ impl Translator {
     pub fn set_override(&self, locale: &str, key: impl Into<String>, value: impl Into<String>) {
         self.overrides
             .write()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .entry(Locale::new(locale))
             .or_default()
             .insert(key.into(), value.into());
@@ -635,7 +647,10 @@ impl Translator {
 
     /// Drop every DB override, falling back to the file catalogs (#532).
     pub fn clear_overrides(&self) {
-        self.overrides.write().expect("translator poisoned").clear();
+        self.overrides
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
     }
 
     /// Total number of override entries across all locales (#532) —
@@ -644,7 +659,7 @@ impl Translator {
     pub fn override_count(&self) -> usize {
         self.overrides
             .read()
-            .expect("translator poisoned")
+            .unwrap_or_else(PoisonError::into_inner)
             .values()
             .map(HashMap::len)
             .sum()
@@ -1110,7 +1125,7 @@ type PluralCatalog = HashMap<String, HashMap<String, String>>;
 
 /// One JSON catalog, split into its flat and plural entries.
 fn read_catalog(path: &Path) -> Result<(HashMap<String, String>, PluralCatalog), I18nError> {
-    let raw = std::fs::read_to_string(path).map_err(|e| I18nError::Io(e.to_string()))?;
+    let raw = crate::text_file::read(path).map_err(|e| I18nError::Io(e.to_string()))?;
     let entries: HashMap<String, CatalogEntry> =
         serde_json::from_str(&raw).map_err(|e| I18nError::Parse {
             file: path.display().to_string(),
@@ -1213,6 +1228,29 @@ mod tests {
         Translator::new(Locale::new("en"))
             .add_locale(Locale::new("en"), en)
             .add_locale(Locale::new("fr"), fr)
+    }
+
+    #[test]
+    fn a_poisoned_lock_does_not_break_later_translations() {
+        // One panicking writer must not turn every later request into a 500.
+        let t = make_translator();
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _c = t.catalogs.write().unwrap();
+                    let _o = t.overrides.write().unwrap();
+                    let _p = t.plural_catalogs.write().unwrap();
+                    panic!("poison");
+                })
+                .join();
+        });
+        assert!(t.catalogs.is_poisoned());
+        assert_eq!(t.translate("fr", "hello", &[]), "Bonjour");
+        t.insert_locale(
+            Locale::new("de"),
+            HashMap::from([("hello".into(), "Hallo".into())]),
+        );
+        assert_eq!(t.translate("de", "hello", &[]), "Hallo");
     }
 
     #[test]

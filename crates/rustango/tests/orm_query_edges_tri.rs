@@ -697,7 +697,9 @@ async fn date_buckets_are_utc(pool: &Pool) {
     let pool = match pool.as_postgres() {
         // One connection, so the session zone holds for every query.
         Some(_) => {
-            let url = std::env::var("DATABASE_URL").expect("the PG arm runs on DATABASE_URL");
+            let url = rustango::testkit::matrix::Backend::Postgres
+                .url()
+                .expect("the PG arm runs on DATABASE_URL");
             let one = rustango::sql::sqlx::postgres::PgPoolOptions::new()
                 .max_connections(1)
                 .connect(&url)

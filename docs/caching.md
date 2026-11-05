@@ -284,7 +284,9 @@ view whenever a single tenant's change is what triggered the invalidation.
 A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`
 delete the old tenant's `ScopedCache::for_tenant` keys, call
 `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache
-that holds them.
+that holds them. The purge also deletes the tenant's locks, sessions and flag
+overrides there. Idempotency and page-cache entries stay until they expire:
+they are bound to the org id, so the new tenant cannot read them.
 
 ---
 

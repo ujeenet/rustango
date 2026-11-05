@@ -180,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.62.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.63.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -519,18 +519,18 @@ L'utilitaire place l'administration derrière une connexion. Il lit ses options 
 ```rust
 use rustango::admin;
 use rustango::config::Settings;
-use rustango::session::{load_session_secret_for_tier, tier_from_env};
+use rustango::session::{tier_from_env, try_load_session_secret_for_tier, SessionSecretError};
 use rustango::sql::Pool;
 
-pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
-    let secret = load_session_secret_for_tier(
+pub fn admin_router(pool: Pool, settings: &Settings) -> Result<Router, SessionSecretError> {
+    let secret = try_load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new("./var/.rustango_session.key"),
-    );
-    admin::Builder::from_settings(pool, settings)
+    )?;
+    Ok(admin::Builder::from_settings(pool, settings)
         .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
-        .build()
+        .build())
 }
 ```
 
@@ -551,7 +551,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_settings = settings.clone();
     rustango::manage::Cli::new()
         .api(urls::api())
-        .nest_with(urls::admin_prefix(&settings), move |pool| {
+        .try_nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
         .with_health() // /health + /ready endpoints
@@ -620,7 +620,7 @@ Attachez les routes du ViewSet à l'application. Le routeur du ViewSet a besoin 
 ```rust
 rustango::manage::Cli::new()
     .api(urls::api())
-    .nest_with(urls::admin_prefix(&settings), move |pool| {
+    .try_nest_with(urls::admin_prefix(&settings), move |pool| {
         urls::admin_router(pool, &admin_settings)
     })
     .nest_with("/api", |pool| myblog::post_view_set::PostViewSet::router("/posts", pool))
@@ -902,6 +902,17 @@ cargo build --release
 
 # 5. Run with a process supervisor (systemd / docker / k8s)
 ./target/release/myblog
+```
+
+Dans PowerShell :
+
+```powershell
+$env:RUSTANGO_ENV = "prod"
+$env:DATABASE_URL = "postgres://prod-host/myblog"
+$bytes = New-Object byte[] 32
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SESSION_SECRET = [Convert]::ToBase64String($bytes)
+cargo run --release -- migrate
 ```
 
 Assurez-vous que votre proxy inverse :

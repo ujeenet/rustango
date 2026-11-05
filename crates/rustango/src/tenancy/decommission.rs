@@ -39,7 +39,8 @@ static PURGE_CACHES: std::sync::RwLock<Vec<crate::cache::BoxedCache>> =
     std::sync::RwLock::new(Vec::new());
 
 /// Make every purge delete the tenant's [`crate::cache::ScopedCache::for_tenant`]
-/// keys from `cache`, so a new tenant reusing the slug cannot read them.
+/// keys (sessions and flag overrides included) and its tenant locks from `cache`.
+/// Idempotency and page entries are not deleted; they carry the org id and expire.
 /// Call at boot for each cache holding tenant-scoped entries.
 pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
     PURGE_CACHES
@@ -48,33 +49,46 @@ pub fn clear_on_purge(cache: crate::cache::BoxedCache) {
         .push(cache);
 }
 
-/// Forget the state a new tenant reusing the slug could still reach.
+/// Forget the tenant's cached state: its scoped keys, locks and login state
+/// on every registered cache. Keys carry the org id, so a tenant reusing the
+/// slug cannot reach them anyway; this frees the space. Idempotency and page
+/// entries hash the tenant into the key and expire on their own.
 /// Best-effort: what stays is noted in the report.
 async fn forget_slug(org: &Org, report: &mut Report) {
-    use crate::cache::Cache as _;
     crate::contenttypes::clear_cache();
-    if let Err(e) = crate::login_throttle::forget_tenant(&org.slug).await {
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return;
+    };
+    if let Err(e) = crate::login_throttle::forget_tenant(&tenant).await {
         report
             .notes
-            .push(format!("the tenant's account locks were not cleared: {e}"));
+            .push(format!("the tenant's login state was not cleared: {e}"));
     }
     let caches = PURGE_CACHES
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    let Some(tenant) = super::TenantSlug::of(org) else {
-        return;
-    };
     for cache in caches {
-        if let Err(e) = crate::cache::ScopedCache::for_tenant(cache, &tenant)
-            .clear()
-            .await
-        {
+        if let Err(e) = forget_in(&cache, &tenant).await {
             report
                 .notes
                 .push(format!("the tenant's cache entries were not cleared: {e}"));
         }
     }
+}
+
+/// Delete `tenant`'s `ScopedCache` (sessions and flag overrides included)
+/// and `DistributedLock` keys from `cache`.
+async fn forget_in(
+    cache: &crate::cache::BoxedCache,
+    tenant: &super::TenantSlug,
+) -> Result<(), crate::cache::CacheError> {
+    use crate::cache::Cache as _;
+    crate::cache::ScopedCache::for_tenant(cache.clone(), tenant)
+        .clear()
+        .await?;
+    let locks = crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(tenant);
+    cache.delete_prefix(&locks.key_prefix()).await
 }
 
 /// What to do to the tenant.
@@ -331,7 +345,7 @@ async fn purge_media<DB: Database>(
     }
     .await;
     // The listing may have opened a tenant pool; don't keep it past the drop.
-    pools.invalidate(&org.slug).await;
+    pools.close_tenant(&org.slug).await;
     let rows = match rows {
         Ok(rows) => rows,
         Err(e) => {
@@ -754,7 +768,12 @@ where
         return rep.fail(Step::Deactivate, e).await;
     }
     super::invalidate_org_cache();
-    pools.invalidate(slug).await;
+    // Closed, not just evicted: the database is about to be dropped.
+    if !pools.close_tenant(slug).await {
+        report.notes.push(
+            "a tenant connection was still in use; the drop goes on without waiting for it".into(),
+        );
+    }
     rep.ok(Step::Deactivate).await;
 
     // While the rows that name the keys still exist (#2569).
@@ -1225,5 +1244,54 @@ mod tests {
             err.contains("env://ACME_DB") && err.contains("acme"),
             "{err}"
         );
+    }
+}
+
+#[cfg(all(test, feature = "sessions"))]
+mod forget_tests {
+    use super::*;
+    use crate::cache::{BoxedCache, InMemoryCache};
+
+    /// The purge deletes the tenant's scoped keys (sessions, flag overrides)
+    /// and its locks; the tenant reusing the slug keeps its own.
+    #[tokio::test]
+    async fn forget_in_deletes_the_tenants_keys_and_locks_only() {
+        use crate::tenancy::TenantSlug;
+        let cache: BoxedCache = std::sync::Arc::new(InMemoryCache::new());
+        let (old, heir) = (TenantSlug::new(1, "acme"), TenantSlug::new(2, "acme"));
+        for t in [&old, &heir] {
+            let sid = crate::sessions::SessionStore::new(cache.clone())
+                .for_tenant(t)
+                .save(&crate::sessions::Session::new())
+                .await
+                .unwrap();
+            assert!(!sid.is_empty());
+            crate::feature_flags::FeatureFlags::new(cache.clone())
+                .for_tenant(t)
+                .enable_for_user("beta", "5")
+                .await
+                .unwrap();
+            let lock = crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(t);
+            let held = lock
+                .try_acquire("job", std::time::Duration::from_secs(60))
+                .await;
+            assert!(held.is_some());
+        }
+        forget_in(&cache, &old).await.unwrap();
+        let lock = |t| crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(t);
+        assert!(
+            lock(&old)
+                .try_acquire("job", std::time::Duration::from_secs(1))
+                .await
+                .is_some(),
+            "the purged tenant's lock survived"
+        );
+        assert!(lock(&heir)
+            .try_acquire("job", std::time::Duration::from_secs(1))
+            .await
+            .is_none());
+        let flags = |t| crate::feature_flags::FeatureFlags::new(cache.clone()).for_tenant(t);
+        assert!(!flags(&old).is_enabled_for("beta", "5").await);
+        assert!(flags(&heir).is_enabled_for("beta", "5").await);
     }
 }

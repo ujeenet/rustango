@@ -203,6 +203,11 @@ fn enables_mysql(cmd: &str) -> bool {
     if cmd.contains("--all-features") || is_archive_run(cmd) {
         return true;
     }
+    listed_features(cmd).iter().any(|f| f == "mysql")
+}
+
+/// Every feature the command's `--features` / `-F` lists name.
+fn listed_features(cmd: &str) -> Vec<String> {
     // `--features` and its short form `-F`, and the list may be quoted:
     // `--features "mysql,testkit"` is the same thing as the bare form,
     // and reading the quotes as part of the feature name made a correct
@@ -212,15 +217,18 @@ fn enables_mysql(cmd: &str) -> bool {
     ["--features ", "--features=", "-F ", "-F="]
         .iter()
         .flat_map(|flag| cmd.match_indices(flag).map(|(i, m)| i + m.len()))
-        .any(|start| {
+        .flat_map(|start| {
             cmd[start..]
                 .chars()
                 .take_while(|c| !c.is_whitespace())
                 .filter(|c| !matches!(c, '"' | '\''))
                 .collect::<String>()
                 .split(',')
-                .any(|f| f == "mysql")
+                .filter(|f| !f.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         })
+        .collect()
 }
 
 /// Every `--test <target>` in the block, and whether the command naming
@@ -274,6 +282,51 @@ fn has_a_mysql_arm(stem: &str) -> bool {
     stem.ends_with("mysql_live") || stem.ends_with("_tri")
 }
 
+/// Source lines that are not `//` comments.
+fn code_lines(src: &str) -> impl Iterator<Item = &str> {
+    src.lines()
+        .map(str::trim_start)
+        .filter(|l| !l.starts_with("//"))
+}
+
+/// The suite reaches MySQL through `testkit::matrix::Backend::MySql`, or a
+/// local `Backend::Mysql` enum, whatever its filename. A quoted mention (a
+/// guard's own pattern) is not a call.
+fn calls_the_mysql_backend(src: &str) -> bool {
+    code_lines(src).any(|l| {
+        ["Backend::MySql", "Backend::Mysql"]
+            .iter()
+            .any(|pat| l.match_indices(pat).any(|(i, _)| !l[..i].ends_with('"')))
+    })
+}
+
+/// The suite gates on `testkit::matrix::pg_extension(.., "<name>")`,
+/// whatever its filename. The arguments may span lines.
+fn gates_on_pg_extension(src: &str, name: &str) -> bool {
+    let code: String = code_lines(src).collect::<Vec<_>>().join(" ");
+    code.match_indices("pg_extension(").any(|(i, m)| {
+        let rest = &code[i + m.len()..];
+        // Up to the call's own `)`, past nested ones like `.clone()`.
+        let mut depth = 0usize;
+        let end = rest
+            .char_indices()
+            .find(|&(_, c)| match c {
+                '(' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            })
+            .map_or(rest.len(), |(j, _)| j);
+        rest[..end].contains(&format!("\"{name}\""))
+    })
+}
+
 /// Every integration-test target that has a MySQL arm.
 ///
 /// Only top-level `.rs` files, which is exactly Cargo's auto-target rule.
@@ -283,8 +336,15 @@ fn suites_with_a_mysql_arm() -> BTreeSet<String> {
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
         .map(|e| e.expect("directory entry").path())
         .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("rs"))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_owned))
-        .filter(|stem| has_a_mysql_arm(stem))
+        .filter_map(|p| {
+            let stem = p.file_stem()?.to_str()?.to_owned();
+            // This file names the pattern in order to look for it.
+            if stem == "every_live_suite_runs_in_ci" {
+                return None;
+            }
+            let src = std::fs::read_to_string(&p).unwrap_or_default();
+            (has_a_mysql_arm(&stem) || calls_the_mysql_backend(&src)).then_some(stem)
+        })
         .collect()
 }
 
@@ -1023,9 +1083,9 @@ fn the_s3_job_sets_every_variable_its_suites_read() {
 ///
 /// By what it *reads*, not what it is called. A suite that reads
 /// `REDIS_TEST_URL` needs Redis whatever its filename; the naming
-/// convention is a hint, the env var is the requirement. PostGIS is the
-/// exception and is matched on filename, because it gates on
-/// `CREATE EXTENSION postgis` failing rather than on a variable.
+/// convention is a hint, the env var is the requirement. MySQL also counts
+/// a `Backend::MySql` call. PostGIS is matched on filename or a
+/// `pg_extension(.., "postgis")` gate, because it has no variable.
 ///
 /// ## Why omission is silent
 ///
@@ -1047,7 +1107,7 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
     let families: [(&str, Detect, &str); 4] = [
         ("redis_live", Detect::Reads("REDIS_TEST_URL"), "Redis"),
         // Eight suites with a MySQL arm ran nowhere on MySQL (#1678).
-        ("mysql_live", Detect::Reads("MYSQL_TEST_URL"), "MySQL"),
+        ("mysql_live", Detect::MySqlArm, "MySQL"),
         (
             "s3_live",
             Detect::Reads("RUSTANGO_S3_TEST_"),
@@ -1055,7 +1115,7 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
         ),
         (
             "postgis_live",
-            Detect::NamedLike("postgis"),
+            Detect::PgExtension("postgis"),
             "the PostGIS extension",
         ),
     ];
@@ -1099,7 +1159,10 @@ fn every_env_gated_live_suite_is_named_in_its_job() {
                 // variables while a mention in prose or a list does
                 // not.
                 Detect::Reads(var) => src.contains(&format!("env::var(\"{var}")),
-                Detect::NamedLike(frag) => stem.contains(frag),
+                Detect::MySqlArm => {
+                    src.contains("env::var(\"MYSQL_TEST_URL") || calls_the_mysql_backend(&src)
+                }
+                Detect::PgExtension(ext) => stem.contains(ext) || gates_on_pg_extension(&src, ext),
             };
             if needs && !runs(stem) {
                 problems.push(format!(
@@ -1134,12 +1197,12 @@ enum Detect {
     /// variable trains people to add exclusions, which is how a
     /// ratchet stops ratcheting.
     Reads(&'static str),
-    /// Its filename contains this — for services with no env gate.
-    ///
-    /// PostGIS is the only one: its suites skip on
-    /// `CREATE EXTENSION postgis` failing, so there is no variable to
-    /// look for.
-    NamedLike(&'static str),
+    /// It reads `MYSQL_TEST_URL` or calls `testkit::matrix::Backend::MySql`.
+    MySqlArm,
+    /// Its filename contains this extension, or it gates on
+    /// `testkit::matrix::pg_extension(.., "<name>")`: PostGIS suites skip
+    /// on the extension missing, so there is no variable to look for.
+    PgExtension(&'static str),
 }
 
 /// Naming a suite in a job proves nothing if the job skips ordinary PRs.
@@ -1249,4 +1312,141 @@ fn advisories_are_scanned_weekly() {
     );
     assert!(text.contains("check advisories"), "no advisory check");
     assert!(text.contains("examples"), "examples not scanned");
+}
+
+#[test]
+fn a_mysql_or_postgis_suite_is_found_by_what_it_calls() {
+    assert!(calls_the_mysql_backend(
+        "let Some(p) = rustango::testkit::matrix::Backend::MySql.pool().await else {"
+    ));
+    assert!(!calls_the_mysql_backend(
+        "    \"MYSQL_TEST_URL\" => text.contains(\"Backend::MySql.pool()\"),"
+    ));
+    assert!(!calls_the_mysql_backend(
+        "// Backend::MySql is skipped here"
+    ));
+    assert!(gates_on_pg_extension(
+        "if !matrix::pg_extension(&pg.clone().into(), \"postgis\").await {",
+        "postgis"
+    ));
+    assert!(gates_on_pg_extension(
+        "matrix::pg_extension(\n    &pool,\n    \"postgis\",\n)",
+        "postgis"
+    ));
+    assert!(!gates_on_pg_extension(
+        "matrix::pg_extension(&pool, \"hstore\"); let s = \"postgis\";",
+        "postgis"
+    ));
+}
+
+/// The `[features]` table of this crate's manifest: each feature and the
+/// entries it lists (`dep:` and `crate/feature` entries included).
+fn manifest_features() -> BTreeMap<String, Vec<String>> {
+    let src = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+        .expect("read Cargo.toml");
+    let body: String = src
+        .lines()
+        .skip_while(|l| l.trim() != "[features]")
+        .skip(1)
+        .take_while(|l| !l.starts_with('['))
+        .map(|l| l.split('#').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = BTreeMap::new();
+    let mut rest = body.as_str();
+    while let Some(eq) = rest.find('=') {
+        let open = eq + rest[eq..].find('[').expect("a feature's value is an array");
+        let close = open + rest[open..].find(']').expect("the array closes");
+        let entries = rest[open + 1..close]
+            .split(',')
+            .map(|e| e.trim().trim_matches('"'))
+            .filter(|e| !e.is_empty())
+            .map(str::to_owned)
+            .collect();
+        out.insert(rest[..eq].trim().to_owned(), entries);
+        rest = &rest[close + 1..];
+    }
+    out
+}
+
+/// The features `roots` turn on, transitively.
+fn enabled_features(table: &BTreeMap<String, Vec<String>>, roots: &[String]) -> BTreeSet<String> {
+    let mut on = BTreeSet::new();
+    let mut todo: Vec<String> = roots.to_vec();
+    while let Some(f) = todo.pop() {
+        if let Some(entries) = table.get(&f) {
+            if on.insert(f) {
+                todo.extend(entries.iter().cloned());
+            }
+        }
+    }
+    on
+}
+
+/// `sqlite_live` runs every `*_sqlite_live` and `*_tri` suite with
+/// every feature on but `postgres` and `mysql`.
+///
+/// It used to name 118 targets by hand, and 196 suites of those families
+/// never ran without `postgres`: their `not(postgres)` paths ran nowhere.
+/// The globs pick up new suites, and this keeps a new feature in the set.
+#[test]
+fn sqlite_live_globs_every_suite_on_every_non_backend_feature() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let block = job_block(&yaml, "sqlite_live");
+    let tokens = |cmd: &str| -> Vec<String> {
+        cmd.split_whitespace()
+            .map(|t| t.trim_matches(|c| matches!(c, '"' | '\'')).to_owned())
+            .collect()
+    };
+    let globs = |cmd: &str| -> BTreeSet<String> {
+        tokens(cmd)
+            .windows(2)
+            .filter(|w| w[0] == "--test")
+            .map(|w| w[1].clone())
+            .collect()
+    };
+    let commands = run_commands(&block);
+    let cmd = commands
+        .iter()
+        .find(|c| {
+            let g = globs(c);
+            g.contains("*_sqlite_live") && g.contains("*_tri")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "no `sqlite_live` step runs `--test '*_sqlite_live' --test '*_tri'`. Without \
+                 the globs every new suite needs a hand-written line there, and most never \
+                 got one."
+            )
+        });
+    assert!(
+        tokens(cmd).iter().any(|t| t == "--no-default-features"),
+        "the `sqlite_live` glob step must pass `--no-default-features`, or `postgres` is on \
+         and the `not(postgres)` paths it exists for compile out"
+    );
+
+    let table = manifest_features();
+    assert!(
+        table.contains_key("sqlite") && table.contains_key("postgres"),
+        "parsed no [features] table from Cargo.toml — this guard is reading the wrong text"
+    );
+    let on = enabled_features(&table, &listed_features(cmd));
+    let backends = ["postgres", "mysql"];
+    let missing: Vec<&String> = table
+        .keys()
+        .filter(|f| !f.starts_with('_') && *f != "default" && !backends.contains(&f.as_str()))
+        .filter(|f| !on.contains(*f))
+        .collect();
+    let leaked: Vec<&str> = backends.into_iter().filter(|b| on.contains(*b)).collect();
+    assert!(
+        missing.is_empty(),
+        "`sqlite_live` builds without feature(s) {missing:?}, so a suite gated on them \
+         compiles to nothing and passes. Add them to its `--features`."
+    );
+    assert!(
+        leaked.is_empty(),
+        "`sqlite_live` turns on {leaked:?}; the job is the run without them."
+    );
 }

@@ -111,7 +111,11 @@ impl DistributedLock {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        self.scope = Some(format!("tenant:{}", tenant.namespace()));
+        self.scope = Some(format!(
+            "{}:{}",
+            crate::cache::TENANT_PREFIX,
+            tenant.namespace()
+        ));
         self
     }
 
@@ -121,6 +125,12 @@ impl DistributedLock {
     pub fn scoped(mut self, namespace: impl AsRef<str>) -> Self {
         self.scope = Some(namespace.as_ref().to_owned());
         self
+    }
+
+    /// The prefix every key of this factory starts with.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn key_prefix(&self) -> String {
+        self.key_for("")
     }
 
     /// The cache key for `name`, including this factory's scope.

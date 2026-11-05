@@ -508,6 +508,8 @@ async fn clearsessions_without_a_cache_table_has_nothing_to_clear(pool: &Pool) {
 /// On a PG pool whose search path ends in `public`, a cache table in `public`
 /// is purged, as the cache itself finds it there. Other backends have no search path.
 async fn clearsessions_finds_the_cache_table_through_the_search_path(pool: &Pool) {
+    #[cfg(not(feature = "postgres"))]
+    let _ = pool;
     #[cfg(feature = "postgres")]
     if let Pool::Postgres(pg) = pool {
         use rustango::sql::sqlx;

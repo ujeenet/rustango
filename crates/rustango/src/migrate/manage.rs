@@ -124,6 +124,25 @@ pub async fn run_with_writer<W: Write + Send>(
     args: impl IntoIterator<Item = String>,
     writer: &mut W,
 ) -> Result<(), MigrateError> {
+    run_with_writer_for(
+        pool,
+        dir,
+        args,
+        writer,
+        &[crate::cli_verbs::SINGLE_DB_VERBS],
+    )
+    .await
+}
+
+/// [`run_with_writer`], hinting an unknown verb from `verbs`: the tenancy
+/// CLI falls through here with its own verbs too.
+pub(crate) async fn run_with_writer_for<W: Write + Send>(
+    pool: &Pool,
+    dir: &Path,
+    args: impl IntoIterator<Item = String>,
+    writer: &mut W,
+    verbs: &[&[&str]],
+) -> Result<(), MigrateError> {
     let args: Vec<String> = args.into_iter().collect();
     let cmd = args.first().map_or("", String::as_str);
 
@@ -194,8 +213,8 @@ pub async fn run_with_writer<W: Write + Send>(
         // `information_schema`, SQLite via `PRAGMA table_info` +
         // `sqlite_master`. Dispatch happens inside `inspectdb_cmd`.
         "inspectdb" => super::inspectdb::inspectdb_cmd(pool, &args[1..], writer).await,
-        other => Err(MigrateError::Validation(format!(
-            "unknown subcommand: `{other}` (run with --help for usage)"
+        other => Err(MigrateError::Validation(crate::cli_verbs::unknown_verb(
+            other, verbs,
         ))),
     }
 }
@@ -439,7 +458,7 @@ fn print_help<W: Write>(w: &mut W) -> std::io::Result<()> {
     )?;
     writeln!(
         w,
-        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>]"
+        "  dumpdata [--model <name>] [--exclude <name>] [--indent <N>] [--output <file>]"
     )?;
     writeln!(w, "      Export every registered model's rows as a JSON")?;
     writeln!(
@@ -2140,7 +2159,9 @@ fn write_startapp_report<W: Write>(
     }
     if !report.written.is_empty() {
         writeln!(w, "next:")?;
-        writeln!(w, "  {}", super::scaffold::STARTAPP_NEXT)?;
+        for cmd in super::scaffold::STARTAPP_NEXT {
+            writeln!(w, "  {cmd}")?;
+        }
     }
     Ok(())
 }
@@ -2701,19 +2722,22 @@ fn docs_cmd<W: Write>(w: &mut W) -> Result<(), MigrateError> {
         return Ok(());
     }
     // Best-effort — don't fail if the OS has no `open` / `xdg-open` / `start`
-    let opener = if cfg!(target_os = "macos") {
-        Some(("open", url))
-    } else if cfg!(target_os = "linux") {
-        Some(("xdg-open", url))
-    } else if cfg!(target_os = "windows") {
-        Some(("cmd", "/C start"))
-    } else {
-        None
-    };
-    if let Some((cmd, _)) = opener {
-        let _ = std::process::Command::new(cmd).arg(url).spawn();
+    if let Some((cmd, args)) = browser_opener(std::env::consts::OS, url) {
+        let _ = std::process::Command::new(cmd).args(args).spawn();
     }
     Ok(())
+}
+
+/// The command that opens `url` in a browser on `os`. `start` takes its
+/// first quoted argument as a window title, hence the empty one.
+/// `cmd` splits an unquoted `&`, so `url` must not contain one.
+fn browser_opener<'a>(os: &str, url: &'a str) -> Option<(&'static str, Vec<&'a str>)> {
+    match os {
+        "macos" => Some(("open", vec![url])),
+        "linux" => Some(("xdg-open", vec![url])),
+        "windows" => Some(("cmd", vec!["/C", "start", "", url])),
+        _ => None,
+    }
 }
 
 /// `manage version` — print the rustango framework version.
@@ -4290,8 +4314,8 @@ fn write_db_info<W: Write>(
 /// name OR bare model name); pass multiple times to limit to a set.
 /// `--indent N` controls JSON formatting (default `2`).
 ///
-/// Output goes to stdout so users can pipe to a file:
-/// `cargo run manage dumpdata > fixtures/seed.json`.
+/// Output goes to stdout, or with `--output <file>` to that file as
+/// UTF-8: PowerShell 5.1's `>` writes UTF-16.
 ///
 /// `loaddata` is the companion verb that re-applies a fixture
 /// export — queued as a follow-up.
@@ -4305,6 +4329,8 @@ struct DumpdataArgs {
     indent: usize,
     /// `true` when the user passed `--help`; cmd short-circuits to help.
     help: bool,
+    /// `--output`: write UTF-8 to this file instead of the writer.
+    output: Option<String>,
 }
 
 fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
@@ -4326,6 +4352,10 @@ fn parse_dumpdata_args(args: &[String]) -> Result<DumpdataArgs, MigrateError> {
             "--exclude" => {
                 let v = iter.next().ok_or_else(|| missing_value("--exclude"))?;
                 out.excludes.push(v.clone());
+            }
+            "--output" | "-o" => {
+                let v = iter.next().ok_or_else(|| missing_value("--output"))?;
+                out.output = Some(v.clone());
             }
             "--indent" => {
                 let v = iter.next().ok_or_else(|| missing_value("--indent"))?;
@@ -4355,7 +4385,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     if parsed.help {
         writeln!(
             w,
-            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N]"
+            "dumpdata [--model app.Name] [--exclude app.Name] [--indent N] [--output FILE]"
         )?;
         writeln!(w)?;
         writeln!(
@@ -4387,6 +4417,11 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
             w,
             "  --exclude <name> Leave a model out (repeatable; same forms as --model)."
         )?;
+        writeln!(
+            w,
+            "  --output, -o <file>  Write UTF-8 to <file>, replaced only once the dump is complete;"
+        )?;
+        writeln!(w, "                   PowerShell's `>` writes UTF-16.")?;
         return Ok(());
     }
     let model_filters = &parsed.model_filters;
@@ -4423,8 +4458,15 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
     let schemas: Vec<_> = selected.iter().map(|e| e.schema).collect();
     require_tenant_tables(pool, scope, &schemas, "dumpdata").await?;
 
+    let mut sink = match &parsed.output {
+        Some(path) => Sink::File(
+            PendingFile::create(Path::new(path))
+                .map_err(|e| MigrateError::Validation(format!("dumpdata: create `{path}`: {e}")))?,
+        ),
+        None => Sink::Out(w),
+    };
     // Walk every selected model, writing its rows a page at a time.
-    let mut out = FixtureWriter::new(w, indent);
+    let mut out = FixtureWriter::new(&mut sink, indent);
     for entry in selected {
         let schema = entry.schema;
         let dotted_name = dotted_model_name(entry);
@@ -4471,7 +4513,7 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
                     });
                 }
             }
-            let rows = crate::sql::select_rows_as_json_with(pool, &query, &fields, fixture_json)
+            let rows = crate::sql::select_rows_as_json_with(pool, &query, &fields, DUMP_DECODE)
                 .await
                 .map_err(|e| {
                     MigrateError::Validation(format!(
@@ -4527,7 +4569,73 @@ pub(crate) async fn dumpdata_cmd<W: Write>(
             after = pks.last().cloned();
         }
     }
-    out.finish()
+    out.finish()?;
+    if let Sink::File(file) = sink {
+        file.commit()?;
+    }
+    Ok(())
+}
+
+/// A file written beside `dest` and renamed over it only once complete, so
+/// a failed dump leaves the old fixture as it was. Owner-only: a dump holds
+/// every row, credentials included.
+struct PendingFile {
+    file: std::fs::File,
+    tmp: std::path::PathBuf,
+    dest: std::path::PathBuf,
+    done: bool,
+}
+
+impl PendingFile {
+    fn create(dest: &Path) -> std::io::Result<Self> {
+        let name = dest.file_name().unwrap_or_default().to_string_lossy();
+        // Unguessable, and never opened through a link planted there.
+        let rand = uuid::Uuid::new_v4().simple();
+        let tmp = dest.with_file_name(format!(".{name}.{rand}.tmp"));
+        Ok(Self {
+            file: crate::private_file::create(&tmp)?,
+            tmp,
+            dest: dest.to_owned(),
+            done: false,
+        })
+    }
+
+    fn commit(mut self) -> std::io::Result<()> {
+        self.file.sync_all()?;
+        std::fs::rename(&self.tmp, &self.dest)?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for PendingFile {
+    fn drop(&mut self) {
+        if !self.done {
+            let _ = std::fs::remove_file(&self.tmp);
+        }
+    }
+}
+
+/// Where `dumpdata` writes: the command's writer, or an `--output` file.
+enum Sink<'a, W: Write> {
+    Out(&'a mut W),
+    File(PendingFile),
+}
+
+impl<W: Write> Write for Sink<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Out(w) => w.write(buf),
+            Self::File(f) => f.file.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Out(w) => w.flush(),
+            Self::File(f) => f.file.flush(),
+        }
+    }
 }
 
 /// Tags a JSON column value in a fixture, so a JSON `null` stays apart
@@ -4543,6 +4651,12 @@ fn fixture_json(v: serde_json::Value) -> serde_json::Value {
         v
     }
 }
+
+/// dumpdata's read: a cell it cannot decode fails the dump, never `null`.
+const DUMP_DECODE: crate::sql::CellDecode = crate::sql::CellDecode {
+    json: fixture_json,
+    on_bad: crate::sql::OnBadCell::Fail,
+};
 
 /// The value inside a [`JSON_TAG`] wrapper.
 fn json_tagged(v: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -4765,7 +4879,7 @@ async fn m2m_links(
     for rel in schema.m2m.iter().filter(|r| r.auto_create) {
         let (junction, [src, dst]) = junction_of(schema, rel)?;
         let query = crate::core::SelectQuery::by_pk_in(junction, rel.src_col, src_pks.to_vec());
-        let rows = crate::sql::select_rows_as_json(pool, &query, &[src, dst])
+        let rows = crate::sql::select_rows_as_json_with(pool, &query, &[src, dst], DUMP_DECODE)
             .await
             .map_err(|e| {
                 MigrateError::Validation(format!(
@@ -4797,7 +4911,7 @@ async fn load_links(
     schema: &'static crate::core::ModelSchema,
     rel: &crate::core::M2MRelation,
     rows: &[RowLinks],
-    fail_fast: bool,
+    on_error: OnRowError,
 ) -> Result<Vec<String>, String> {
     let (junction, [s, d]) = junction_of(schema, rel).map_err(|e| e.to_string())?;
     let insert = |values| async move {
@@ -4819,7 +4933,7 @@ async fn load_links(
             Ok(values) => converted.push((line, values)),
             Err(e) => failed.push(format!("entry #{line}: {e}")),
         }
-        if fail_fast && !failed.is_empty() {
+        if on_error == OnRowError::Abort && !failed.is_empty() {
             return Ok(failed);
         }
     }
@@ -4831,7 +4945,7 @@ async fn load_links(
     for (line, values) in converted {
         if let Err(e) = insert(values).await {
             failed.push(format!("entry #{line}: {e}"));
-            if fail_fast {
+            if on_error == OnRowError::Abort {
                 break;
             }
         }
@@ -4839,20 +4953,27 @@ async fn load_links(
     Ok(failed)
 }
 
+/// What a load does with a row it cannot write.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnRowError {
+    /// Warn, count it skipped, and go on; the load still fails at the end.
+    Skip,
+    /// Stop at the first one (`--fail-fast`).
+    Abort,
+}
+
 #[derive(Debug, PartialEq)]
 struct LoaddataArgs {
     /// Path to the fixture JSON file.
     file: String,
-    /// Stop on the first error (`true`) vs. log + continue (`false`,
-    /// default).
-    fail_fast: bool,
+    on_error: OnRowError,
     /// Help short-circuit.
     help: bool,
 }
 
 fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
     let mut file: Option<String> = None;
-    let mut fail_fast = false;
+    let mut on_error = OnRowError::Skip;
     let mut help = false;
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -4861,7 +4982,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
                 help = true;
                 break;
             }
-            "--fail-fast" => fail_fast = true,
+            "--fail-fast" => on_error = OnRowError::Abort,
             other if other.starts_with('-') => {
                 return Err(unknown_flag(other));
             }
@@ -4876,7 +4997,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
     if help {
         return Ok(LoaddataArgs {
             file: String::new(),
-            fail_fast: false,
+            on_error: OnRowError::Skip,
             help: true,
         });
     }
@@ -4885,7 +5006,7 @@ fn parse_loaddata_args(args: &[String]) -> Result<LoaddataArgs, MigrateError> {
     })?;
     Ok(LoaddataArgs {
         file,
-        fail_fast,
+        on_error,
         help: false,
     })
 }
@@ -4939,7 +5060,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         return Ok(());
     }
 
-    let raw = std::fs::read_to_string(&parsed.file)
+    let raw = crate::text_file::read(Path::new(&parsed.file))
         .map_err(|e| MigrateError::Validation(format!("loaddata: read `{}`: {e}", parsed.file)))?;
     let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).map_err(|e| {
         MigrateError::Validation(format!("loaddata: parse `{}` as JSON: {e}", parsed.file))
@@ -4965,17 +5086,9 @@ pub(crate) async fn loaddata_cmd<W: Write>(
     // Parents first: fixtures come in registration order, and a child
     // inserted before its parent fails its FK (#1911). A nullable link in a
     // cycle goes in as NULL and is set once every row is in.
-    let LoadPlan { order, deferred } = load_plan(&entries, &schemas);
+    let (named, used) = fixture_tables(&entries, &schemas);
+    let LoadPlan { order, deferred } = load_plan(&named, &used);
     let entries = in_fk_order(entries, &schemas, &order);
-    let mut named: Vec<&'static crate::core::ModelSchema> = Vec::new();
-    for s in entries
-        .iter()
-        .filter_map(|e| schemas.get(e.get("model").and_then(|v| v.as_str()).unwrap_or("")))
-    {
-        if !named.iter().any(|n| n.table == s.table) {
-            named.push(s);
-        }
-    }
     require_tenant_tables(pool, scope, &named, "loaddata").await?;
 
     let mut loaded = 0_usize;
@@ -5009,7 +5122,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
                         schemas.len() / 2, // dotted + bare keys
                     ),
                 };
-                if parsed.fail_fast {
+                if parsed.on_error == OnRowError::Abort {
                     abort = Some(msg);
                     break;
                 }
@@ -5035,7 +5148,8 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         let mut columns: Vec<&'static str> = Vec::new();
         let mut values: Vec<crate::core::SqlValue> = Vec::new();
         let mut row_err: Option<String> = None;
-        for f in schema.scalar_fields() {
+        // The database computes a generated column; an INSERT naming it fails.
+        for f in schema.scalar_fields().filter(|f| f.generated_as.is_none()) {
             // An absent key takes the column default, not NULL; a null pk is absent.
             let Some(raw) = fields_obj
                 .get(f.name)
@@ -5071,7 +5185,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
         }
         if let Some(e) = row_err {
             let msg = format!("loaddata: entry #{line} (`{model_name}`): {e}");
-            if parsed.fail_fast {
+            if parsed.on_error == OnRowError::Abort {
                 abort = Some(msg);
                 break;
             }
@@ -5099,7 +5213,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
                  database-generated `{}`, so this row's cycle link can't be set; give it a `pk`",
                 pk.name
             );
-            if parsed.fail_fast {
+            if parsed.on_error == OnRowError::Abort {
                 abort = Some(msg);
                 break;
             }
@@ -5168,7 +5282,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             }
             Err(e) => {
                 let msg = format!("loaddata: entry #{line} (`{model_name}`) insert: {e}");
-                if parsed.fail_fast {
+                if parsed.on_error == OnRowError::Abort {
                     abort = Some(msg);
                     break;
                 }
@@ -5189,15 +5303,14 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             tracing::warn!("{msg}");
             loaded -= 1;
             skipped += 1;
-            if parsed.fail_fast && abort.is_none() {
+            if parsed.on_error == OnRowError::Abort && abort.is_none() {
                 abort = Some(msg);
             }
         }
     }
     if abort.is_none() {
         'rels: for (schema, rel, model_name, rows) in links {
-            let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.fail_fast).await
-            {
+            let (failed, lost) = match load_links(pool, schema, rel, &rows, parsed.on_error).await {
                 Ok(failed) => {
                     let n = failed.len();
                     (failed, n)
@@ -5207,7 +5320,7 @@ pub(crate) async fn loaddata_cmd<W: Write>(
             };
             for e in failed {
                 let msg = format!("loaddata: `{model_name}` `{}`: {e}", rel.name);
-                if parsed.fail_fast {
+                if parsed.on_error == OnRowError::Abort {
                     abort = Some(msg);
                     break 'rels;
                 }
@@ -5248,47 +5361,50 @@ struct LoadPlan {
     deferred: DeferredLinks,
 }
 
-/// Plan over the fixture's own tables and the links its rows set: a
-/// nullable link no row fills never orders. A link is deferred only when
-/// the tables still form a cycle, and then only one that points against
-/// the order the NOT NULL links give (as `flush_plan` breaks cycles).
-/// Self-links are left to [`self_parents_first`].
-fn load_plan(
+/// `(table, column)` of each FK column at least one row fills.
+type UsedLinks = std::collections::HashSet<(&'static str, &'static str)>;
+
+/// The fixture's tables in first-seen order, and the FK columns its rows fill.
+fn fixture_tables(
     entries: &[serde_json::Value],
     schemas: &std::collections::HashMap<String, &'static crate::core::ModelSchema>,
-) -> LoadPlan {
-    let schema_of = |e: &serde_json::Value| {
-        schemas
+) -> (Vec<&'static crate::core::ModelSchema>, UsedLinks) {
+    let mut nodes: Vec<&'static crate::core::ModelSchema> = Vec::new();
+    let mut used = UsedLinks::new();
+    for e in entries {
+        let Some(s) = schemas
             .get(e.get("model").and_then(|v| v.as_str()).unwrap_or(""))
             .copied()
-    };
-    let mut nodes: Vec<&'static crate::core::ModelSchema> = Vec::new();
-    for s in entries.iter().filter_map(schema_of) {
+        else {
+            continue;
+        };
         if !nodes.iter().any(|n| n.table == s.table) {
             nodes.push(s);
         }
-    }
-    // Every (table, column) some fixture row sets, in one pass.
-    let mut set_by_a_row: std::collections::HashSet<(&str, &str)> =
-        std::collections::HashSet::new();
-    for e in entries {
-        let (Some(s), Some(fields)) = (schema_of(e), e.get("fields")) else {
+        let Some(fields) = e.get("fields") else {
             continue;
         };
-        set_by_a_row.extend(
+        used.extend(
             s.fields
                 .iter()
+                .filter(|f| f.relation.is_some())
                 .filter(|f| fields.get(f.name).is_some_and(|v| !v.is_null()))
                 .map(|f| (s.table, f.column)),
         );
     }
-    // Is `col` of `s` set by any of the fixture's `s` rows?
-    let filled = |s: &crate::core::ModelSchema, col: &str| {
-        !s.fields.iter().any(|f| f.column == col) || set_by_a_row.contains(&(s.table, col))
+    (nodes, used)
+}
+
+/// Plan over `nodes` and the links `used` says some row sets: a nullable
+/// link no row fills never orders. A link is deferred only when the tables
+/// still form a cycle, and then only one that points against the order the
+/// NOT NULL links give (as `flush_plan` breaks cycles). Self-links are left
+/// to [`self_parents_first`].
+fn load_plan(nodes: &[&'static crate::core::ModelSchema], used: &UsedLinks) -> LoadPlan {
+    let used = |s: &crate::core::ModelSchema, col: Option<&'static str>| {
+        col.is_none_or(|c| used.contains(&(s.table, c)))
     };
-    let used =
-        |s: &crate::core::ModelSchema, col: Option<&'static str>| col.is_none_or(|c| filled(s, c));
-    let (mut children_first_order, cyclic) = children_first(&nodes, used);
+    let (mut children_first_order, cyclic) = children_first(nodes, used);
     let (rest, stuck) = children_first(&cyclic, |_, col| col.is_none());
     children_first_order.extend(rest);
     children_first_order.extend(stuck);
@@ -7405,6 +7521,19 @@ pub fn settings_audit_check(
 mod gen_tests {
     use super::*;
 
+    /// `start` reads its first quoted argument as a title: the URL must not be it.
+    #[test]
+    fn the_browser_opener_passes_the_url_as_the_target() {
+        let url = "http://127.0.0.1:8000/__docs";
+        assert_eq!(
+            browser_opener("windows", url),
+            Some(("cmd", vec!["/C", "start", "", url]))
+        );
+        assert_eq!(browser_opener("macos", url), Some(("open", vec![url])));
+        assert_eq!(browser_opener("linux", url), Some(("xdg-open", vec![url])));
+        assert_eq!(browser_opener("plan9", url), None);
+    }
+
     /// The registry-scoped `Translation` must not flip a single-database
     /// build into two-scope `makemigrations` (#2360).
     #[cfg(not(feature = "tenancy"))]
@@ -7997,14 +8126,14 @@ mod gen_tests {
     fn parse_loaddata_args_path_then_flag() {
         let p = parse_loaddata_args(&["fixtures.json".into(), "--fail-fast".into()]).unwrap();
         assert_eq!(p.file, "fixtures.json");
-        assert!(p.fail_fast);
+        assert_eq!(p.on_error, OnRowError::Abort);
     }
 
     #[test]
     fn parse_loaddata_args_flag_then_path() {
         let p = parse_loaddata_args(&["--fail-fast".into(), "fixtures.json".into()]).unwrap();
         assert_eq!(p.file, "fixtures.json");
-        assert!(p.fail_fast);
+        assert_eq!(p.on_error, OnRowError::Abort);
     }
 
     #[test]
@@ -8720,7 +8849,7 @@ version = "0.1.0"
 
 [dependencies]
 name = "not-this-one"
-rustango = { version = "0.62", features = ["batteries"] }
+rustango = { version = "0.63", features = ["batteries"] }
 "#;
         assert_eq!(
             package_name_from_cargo_toml(manifest).as_deref(),
@@ -9047,6 +9176,23 @@ rustango = { version = "0.30", features = ["postgres", "manage"] }
         .await;
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("[info]    account lockout"), "{s}");
+    }
+
+    /// An unknown verb names the nearest one, through the real dispatch.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn an_unknown_verb_suggests_the_nearest() {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        let err = run_with_writer(
+            &pool,
+            Path::new("/nonexistent"),
+            ["migrat".to_owned()],
+            &mut buf,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("did you mean `migrate`?"), "{err}");
     }
 
     /// A misspelt flag fails instead of running the plain check.

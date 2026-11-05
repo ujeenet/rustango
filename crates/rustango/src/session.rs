@@ -175,7 +175,7 @@ impl SessionSecret {
     /// [`Self::try_from_env`], an unset var is
     /// [`SessionSecretError::Missing`] and not a silent random key: a
     /// per-process key breaks multi-instance deployments and hides the
-    /// mistake. [`load_session_secret_for_tier`] uses it on prod.
+    /// mistake. [`try_load_session_secret_for_tier`] uses it on prod.
     ///
     /// # Errors
     /// [`SessionSecretError::Missing`] when unset; `BadBase64` /
@@ -260,18 +260,33 @@ pub fn is_prod_tier(tier: &str) -> bool {
 /// # Panics
 /// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing/invalid.
 #[must_use]
+#[deprecated(
+    since = "0.63.0",
+    note = "use `try_load_session_secret_for_tier` and report the error"
+)]
 pub fn load_session_secret_for_tier(tier: &str, disk_path: &std::path::Path) -> SessionSecret {
+    try_load_session_secret_for_tier(tier, disk_path).unwrap_or_else(|e| {
+        panic!(
+            "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
+             Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
+             key shared across all instances."
+        )
+    })
+}
+
+/// [`load_session_secret_for_tier`] that returns the prod tier's refusal
+/// instead of panicking, so `main` can report it and exit.
+///
+/// # Errors
+/// On the prod tier when `RUSTANGO_SESSION_SECRET` is missing or invalid.
+pub fn try_load_session_secret_for_tier(
+    tier: &str,
+    disk_path: &std::path::Path,
+) -> Result<SessionSecret, SessionSecretError> {
     if is_prod_tier(tier) {
-        match SessionSecret::require_from_env() {
-            Ok(secret) => secret,
-            Err(e) => panic!(
-                "refusing to start on the prod tier (RUSTANGO_ENV={tier}): {e}. \
-                 Set RUSTANGO_SESSION_SECRET to a stable base64-encoded 32+ byte \
-                 key shared across all instances."
-            ),
-        }
+        SessionSecret::require_from_env()
     } else {
-        SessionSecret::from_env_or_disk(disk_path)
+        Ok(SessionSecret::from_env_or_disk(disk_path))
     }
 }
 
@@ -386,7 +401,7 @@ fn persist_secret(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<Vec<u
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(format!(".{}.{suffix}.tmp", std::process::id()));
     let tmp = path.with_file_name(tmp_name);
-    let mut file = create_owner_only(&tmp)?;
+    let mut file = crate::private_file::create(&tmp)?;
     let published = file
         .write_all(bytes)
         .and_then(|()| file.sync_all())
@@ -439,15 +454,6 @@ fn sync_parent(path: &std::path::Path) {
     }
     #[cfg(not(unix))]
     let _ = path;
-}
-
-/// `O_CREAT | O_EXCL`, mode 0600 on Unix. Windows has no mode bits here.
-fn create_owner_only(path: &std::path::Path) -> std::io::Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    opts.open(path)
 }
 
 /// Make a saved secret other users can read owner-only, and say so. A
@@ -552,6 +558,9 @@ pub(crate) struct PendingSecondFactor {
     /// The session lifetime the sign-in earned, when shorter than the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session_ttl: Option<i64>,
+    /// Where the sign-in lands once the code is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) next: Option<String>,
 }
 
 #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
@@ -566,6 +575,7 @@ impl PendingSecondFactor {
             exp: chrono::Utc::now().timestamp() + Self::TTL_SECS,
             upgrade: None,
             session_ttl: None,
+            next: None,
         }
     }
 
@@ -861,6 +871,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn dev_tier_loads_without_requiring_env() {
         // The dev tier must never require RUSTANGO_SESSION_SECRET — it
         // falls back to a disk-persisted (or ephemeral) >=32-byte key.

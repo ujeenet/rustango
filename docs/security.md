@@ -217,6 +217,8 @@ It counts in fixed windows, so a burst across a window edge can reach twice the 
 
 > **Keying by a secret header is safe to share.** When you `key_by(KeyBy::Header("authorization"))` or `"x-api-key"`, the cache-backed limiter **hashes** the header value before using it as a key, so a shared Redis never stores a live credential where someone reading keys could harvest it. Keying by `KeyBy::Ip` needs `ConnectInfo` (or a `RealIpLayer` with `trust_proxies` in front); without it the limiter warns once and falls back to a single shared bucket.
 
+`key_by(KeyBy::Tenant)` gives each tenant its own bucket, keyed by org id, so one busy tenant cannot use up another's quota; `KeyBy::Global` stays one bucket for the whole platform. Mount it on the tenant routes: outside them every request shares one bucket.
+
 
 ---
 
@@ -312,9 +314,9 @@ SQL injection happens when user input gets pasted straight into a SQL string and
 
 There are two spots to stay careful about:
 
-**1. Table and column names in `bulk_actions`:**
+**1. Table and column names in bulk actions:**
 
-Placeholders protect values, but they can't carry an identifier (a table or column name), so those need their own guard. Bulk actions write through the ORM, so no raw name reaches SQL. A built-in action that sets a column looks it up in the model schema; a name the model does not have fails with `BulkActionError::InvalidIdent`. The selected keys are a `PkSet`, typed from the model's primary key: a key of the wrong type fails with `InvalidPk`, and one set holds at most 10,000 keys. This guard runs for you — you don't call it yourself.
+Placeholders protect values, but they can't carry an identifier (a table or column name), so those need their own guard. The admin and `ListView` bulk actions write through the ORM, so no raw name reaches SQL. Each selected key is parsed with the model's primary-key type, and a key of the wrong type is refused. This guard runs for you — you don't call it yourself.
 
 **2. The raw SQL escape hatch:**
 

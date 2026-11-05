@@ -69,6 +69,11 @@ L'identifiant représente 192 bits d'aléa OS-CSPRNG, encodés en base64url sur 
 caractères — bien au-dessus du plancher de 128 bits pour les jetons de session,
 et impossible à deviner.
 
+Sous tenancy, limitez le store à chaque requête avec
+`store.for_tenant(&TenantSlug::of(&t.org)?)` : l'identifiant ne porte aucun
+tenant, et avec un routage par apex et préfixe de chemin un cookie `Path=/`
+atteint chaque tenant.
+
 ---
 
 ## Sessions vs JWT

@@ -250,19 +250,17 @@ async fn restore_selected_refuses_when_a_row_hook_denies() {
 // #1805: a custom action needs the `change` hook and a hook named after it.
 static TOUCHED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
 
-fn record<'a>(
-    _: &'a mut rustango::sql::PoolTx<'static>,
-    pks: &'a [rustango::core::SqlValue],
-) -> rustango::admin::AdminActionFuture<'a> {
-    TOUCHED.lock().unwrap().extend_from_slice(pks);
+fn record(ctx: rustango::admin::ActionCtx<'_>) -> rustango::admin::AdminActionFuture<'_> {
+    TOUCHED.lock().unwrap().extend_from_slice(ctx.pks());
     Box::pin(async { Ok(()) })
 }
 
 async fn run_custom(pool: &Pool, form: &'static str) -> StatusCode {
+    use rustango::admin::ActionPerm;
     let app = rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
-        .register_tx_action("op_bulk", "touch_selected", record)
-        .register_tx_action("op_bulk", "stamp_selected", record)
+        .register_action("op_bulk", "touch_selected", ActionPerm::Change, record)
+        .register_action("op_bulk", "stamp_selected", ActionPerm::Change, record)
         .build();
     let req = Request::builder()
         .method(Method::POST)
@@ -290,6 +288,104 @@ async fn custom_action_refuses_when_a_row_hook_denies() {
         *TOUCHED.lock().unwrap(),
         vec![rustango::core::SqlValue::I64(1)]
     );
+}
+
+// An action's context holds the rows and the actor the checks approved.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_ctx", admin(actions = "note_selected"))]
+#[allow(dead_code)]
+pub struct OpCtx {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    pub owner_id: i64,
+}
+
+/// The actor each `view` hook call saw; owner 7's rows are hidden.
+static HOOK_ACTORS: std::sync::Mutex<Vec<rustango::object_permissions::Actor>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn ctx_view(parts: &axum::http::request::Parts, row: Option<&Value>) -> bool {
+    HOOK_ACTORS
+        .lock()
+        .unwrap()
+        .push(rustango::object_permissions::Actor::of(parts));
+    row.and_then(|r| r.get("owner_id").and_then(Value::as_i64)) != Some(7)
+}
+rustango::register_object_permission!("op_ctx", "view", ctx_view);
+
+type CtxSeen = (
+    Vec<rustango::core::SqlValue>,
+    rustango::object_permissions::Actor,
+    String,
+    String,
+    Option<std::net::IpAddr>,
+    bool,
+);
+static CTX_SEEN: std::sync::Mutex<Vec<CtxSeen>> = std::sync::Mutex::new(Vec::new());
+
+#[tokio::test]
+async fn action_ctx_has_the_checked_rows_and_actor() {
+    use rustango::admin::{ActionCtx, ActionPerm, AdminActionFuture};
+    fn note(ctx: ActionCtx<'_>) -> AdminActionFuture<'_> {
+        CTX_SEEN.lock().unwrap().push((
+            ctx.pks().to_vec(),
+            ctx.actor().clone(),
+            ctx.method().to_string(),
+            ctx.path().to_owned(),
+            ctx.client_ip(),
+            ctx.org().is_none(),
+        ));
+        Box::pin(async { Ok(()) })
+    }
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    for sql in [
+        "CREATE TABLE op_ctx (id INTEGER PRIMARY KEY, owner_id INTEGER NOT NULL)",
+        "INSERT INTO op_ctx (id, owner_id) VALUES (1, 42), (2, 7), (3, 42)",
+    ] {
+        rustango::sql::raw_execute_pool(&pool, sql, Vec::new())
+            .await
+            .expect(sql);
+    }
+    let app = rustango::admin::Builder::new(pool)
+        .admin_prefix("")
+        .register_action("op_ctx", "note_selected", ActionPerm::Change, note)
+        .build();
+    let addr: std::net::SocketAddr = "203.0.113.9:4000".parse().unwrap();
+    let mut req = Request::builder()
+        .method(Method::POST)
+        .uri("/op_ctx/__action")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from(
+            "action=note_selected&_selected=1&_selected=2&_selected=3&_selected=99",
+        ))
+        .unwrap();
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(addr));
+    let status = app.oneshot(req).await.unwrap().status();
+    assert_eq!(status, StatusCode::SEE_OTHER);
+
+    let seen = CTX_SEEN.lock().unwrap().clone();
+    let [(pks, actor, method, path, ip, no_org)] = seen.as_slice() else {
+        panic!("the handler ran once: {seen:?}");
+    };
+    use rustango::core::SqlValue::I64;
+    assert_eq!(
+        pks,
+        &vec![I64(1), I64(3)],
+        "hidden and missing rows are dropped"
+    );
+    let hooks = HOOK_ACTORS.lock().unwrap().clone();
+    assert!(
+        !hooks.is_empty() && hooks.iter().all(|a| a == actor),
+        "{hooks:?} vs {actor:?}"
+    );
+    assert_eq!(actor, &rustango::object_permissions::Actor::OpenAdmin);
+    assert_eq!(
+        (method.as_str(), path.as_str()),
+        ("POST", "/op_ctx/__action")
+    );
+    assert_eq!(*ip, Some(addr.ip()));
+    assert!(no_org, "a bare admin has no tenant");
 }
 
 // #2231: the "view" hook hides rows from the list, autocomplete and FK facet names.
@@ -379,11 +475,8 @@ rustango::register_object_permission!("op_purge", "delete", deny);
 
 static PURGED: std::sync::Mutex<Vec<rustango::core::SqlValue>> = std::sync::Mutex::new(Vec::new());
 
-fn purge<'a>(
-    _: &'a mut rustango::sql::PoolTx<'static>,
-    pks: &'a [rustango::core::SqlValue],
-) -> rustango::admin::AdminActionFuture<'a> {
-    PURGED.lock().unwrap().extend_from_slice(pks);
+fn purge(ctx: rustango::admin::ActionCtx<'_>) -> rustango::admin::AdminActionFuture<'_> {
+    PURGED.lock().unwrap().extend_from_slice(ctx.pks());
     Box::pin(async { Ok(()) })
 }
 
@@ -405,8 +498,8 @@ async fn run_purge(perms: Option<&[&str]>, form: &'static str) -> StatusCode {
         .expect("audit table");
     let mut b = rustango::admin::Builder::new(pool)
         .admin_prefix("")
-        .register_tx_action_with_perm("op_purge", "purge_selected", ActionPerm::Delete, purge)
-        .register_tx_action("op_purge", "tidy_selected", purge);
+        .register_action("op_purge", "purge_selected", ActionPerm::Delete, purge)
+        .register_action("op_purge", "tidy_selected", ActionPerm::Change, purge);
     if let Some(p) = perms {
         b = b.with_user_perms(p.iter().map(|s| (*s).to_owned()));
     }
@@ -461,4 +554,54 @@ async fn autocomplete_fills_past_denied_rows() {
     let body = get_body("/op_post/__autocomplete?q=&limit=2").await;
     assert!(body.contains("mine-row"), "allowed row not reached: {body}");
     assert!(!body.contains("aaa-"), "a denied row is offered: {body}");
+}
+
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "op_shared", display = "title")]
+#[allow(dead_code)]
+pub struct OpShared {
+    #[rustango(primary_key)]
+    pub id: rustango::Auto<i64>,
+    #[rustango(max_length = 200)]
+    pub title: String,
+}
+
+/// Visible only when the request is marked as no tenant's.
+fn only_global(parts: &axum::http::request::Parts, _row: Option<&Value>) -> bool {
+    rustango::tenancy::RequestTenant::get(&parts.extensions)
+        == Some(&rustango::tenancy::RequestTenant::Global)
+}
+rustango::register_object_permission!("op_shared", "view", only_global);
+
+/// The fixed-pool admin serves data every tenant shares: a tenant host's
+/// marker must not reach its hooks, so a tenant credential counts for nothing.
+#[tokio::test]
+async fn the_fixed_pool_admin_is_no_tenants() {
+    let pool = Pool::connect("sqlite::memory:").await.expect("sqlite pool");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "CREATE TABLE op_shared (id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL)",
+        Vec::new(),
+    )
+    .await
+    .expect("create");
+    rustango::sql::raw_execute_pool(
+        &pool,
+        "INSERT INTO op_shared (id, title) VALUES (1, 'Shared')",
+        Vec::new(),
+    )
+    .await
+    .expect("seed");
+    // Stands in for the Builder's dispatcher on a tenant host.
+    let app = build_app(pool).layer(axum::middleware::from_fn(
+        |mut req: Request<Body>, next: axum::middleware::Next| async move {
+            req.extensions_mut()
+                .insert(rustango::tenancy::RequestTenant::Tenant(
+                    rustango::tenancy::TenantSlug::new(1, "acme"),
+                ));
+            next.run(req).await
+        },
+    ));
+    let req = Request::get("/op_shared/1").body(Body::empty()).unwrap();
+    assert_eq!(app.oneshot(req).await.unwrap().status(), StatusCode::OK);
 }

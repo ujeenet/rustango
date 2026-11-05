@@ -217,6 +217,8 @@ Er zählt in festen Fenstern, also kann ein Burst über eine Fenstergrenze das D
 
 > **Nach einem geheimen Header zu keyen ist teilbar-sicher.** Bei `key_by(KeyBy::Header("authorization"))` oder `"x-api-key"` **hasht** der cache-gestützte Limiter den Header-Wert, bevor er ihn als Schlüssel verwendet — ein geteiltes Redis speichert also nie eine gültige Anmeldeinformation dort, wo jemand mit Schlüssel-Lesezugriff sie abgreifen könnte. `KeyBy::Ip` braucht `ConnectInfo` (oder ein vorgeschaltetes `RealIpLayer` mit `trust_proxies`); fehlt das, warnt der Limiter einmalig und fällt auf einen einzigen geteilten Bucket zurück.
 
+`key_by(KeyBy::Tenant)` gibt jedem Tenant einen eigenen Bucket, nach Org-ID, sodass ein lauter Tenant nicht das Kontingent eines anderen aufbraucht; `KeyBy::Global` bleibt ein Bucket für die ganze Plattform. Auf den Tenant-Routen mounten: außerhalb teilen sich alle Requests einen Bucket.
+
 
 ---
 
@@ -312,9 +314,9 @@ SQL-Injection tritt auf, wenn Benutzereingaben direkt in einen SQL-String eingef
 
 Es gibt zwei Stellen, bei denen du weiterhin vorsichtig sein solltest:
 
-**1. Tabellen- und Spaltennamen in `bulk_actions`:**
+**1. Tabellen- und Spaltennamen in Bulk Actions:**
 
-Platzhalter schützen Werte, können aber keinen Bezeichner (einen Tabellen- oder Spaltennamen) tragen, also benötigen diese ihren eigenen Schutz. Bulk Actions schreiben über das ORM, also erreicht kein roher Name das SQL. Eine eingebaute Aktion, die eine Spalte setzt, sucht sie im Modell-Schema; ein Name, den das Modell nicht hat, scheitert mit `BulkActionError::InvalidIdent`. Die gewählten Schlüssel sind ein `PkSet`, typisiert nach dem Primärschlüssel des Modells: ein Schlüssel vom falschen Typ scheitert mit `InvalidPk`, und ein Set hält höchstens 10.000 Schlüssel. Dieser Schutz läuft für dich — du rufst ihn nicht selbst auf.
+Platzhalter schützen Werte, können aber keinen Bezeichner (einen Tabellen- oder Spaltennamen) tragen, also benötigen diese ihren eigenen Schutz. Die Bulk Actions des Admins und von `ListView` schreiben über das ORM, also erreicht kein roher Name das SQL. Jeder gewählte Schlüssel wird mit dem Typ des Primärschlüssels geparst; ein Schlüssel vom falschen Typ wird abgelehnt. Dieser Schutz läuft für dich — du rufst ihn nicht selbst auf.
 
 **2. Der Raw-SQL-Notausgang:**
 

@@ -134,6 +134,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::i18n` | Übersetzungsschlüssel, die nicht in der Datenbank landen; fehlgeschlagenes Neuladen des Katalogs |
 | `rustango::jobs` | Hintergrund-Job-Queues |
+| `rustango::login` | Login-Drossel- und Sperrzustand, den ein Tenant-Purge nicht löschen konnte |
 | `rustango::logging` | Warnungen dieses Subsystems selbst |
 | `rustango::manage` | `manage`-Verben |
 | `rustango::media::auth` | Ablehnungen der Media-Router-Autorisierung |

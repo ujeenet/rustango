@@ -774,7 +774,7 @@ mod tests {
             .1
             .split('&')
             .find_map(|p| p.strip_prefix(&format!("{name}=")))
-            .map(|v| urlencoding::decode(v).unwrap().into_owned())
+            .map(crate::url_codec::percent_decode_path)
     }
 
     #[test]
@@ -1449,7 +1449,7 @@ mod tests {
                 .split(['?', '&', ' '])
                 .find_map(|p| p.strip_prefix("blockid="))
                 .unwrap();
-            let id = urlencoding::decode(id).unwrap().into_owned();
+            let id = crate::url_codec::percent_decode_path(id);
             assert!(
                 testing::header(&b.head, "if-none-match").is_none(),
                 "{}",

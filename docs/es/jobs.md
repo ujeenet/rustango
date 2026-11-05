@@ -544,7 +544,8 @@ use rustango::distributed_lock::DistributedLock;
 
 let tenant = TenantSlug::of(&org).expect("a registry org");
 let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
-lock.with_lock("nightly_prune", ttl, || async { /* … */ }).await;
+// Tick every minute; this runs once per UTC day across replicas.
+lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
 
 Sin acotar, todos los tenants compiten por un único `lock:nightly_prune`: el

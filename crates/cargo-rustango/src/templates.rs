@@ -146,7 +146,7 @@ pub fn env_example(name: &str, template: Template, backend: Backend) -> String {
     // Only a tenancy project has an operator console and tenant secrets.
     let (apex, reseal) = if template == Template::Tenant {
         (
-            "\n# Apex domain the operator console is served on.\nRUSTANGO_APEX_DOMAIN=localhost\n",
+            "\n# Apex domain the operator console is served on.\nRUSTANGO_APEX_DOMAIN=localhost\n# Port in tenant links (`create-tenant` output, redirects): the dev\n# server's. Unset or 443 behind a proxy that serves the default port.\nRUSTANGO_TENANT_PORT=8080\n",
             "\n# Rotation: old key here, new one above, then\n# `cargo run -- reseal-tenant-secrets --apply`.",
         )
     } else {
@@ -440,12 +440,27 @@ pub fn dockerfile_prod(name: &str, template: Template) -> String {
     } else {
         ""
     };
+    // Only a template with sessions (the admin, the consoles) needs a session key.
+    let (run_keys, keys_note) = if template == Template::Api {
+        (
+            "-e RUSTANGO_SECRET_KEY=...",
+            "# The image runs on the prod tier, which needs RUSTANGO_SECRET_KEY\n# (`openssl rand -base64 48`).",
+        )
+    } else {
+        (
+            "-e RUSTANGO_SESSION_SECRET=... -e RUSTANGO_SECRET_KEY=...",
+            "# The image runs on the prod tier, which needs RUSTANGO_SESSION_SECRET\n# (`openssl rand -base64 32`) and RUSTANGO_SECRET_KEY (`openssl rand -base64 48`).",
+        )
+    };
     format!(
         r#"# The deployable image. `Dockerfile.dev` is the hot-reload one
 # docker-compose.yml uses; this one is for shipping.
 #
 #   docker build -t {name}:latest .
-#   docker run --rm -p 8080:8080 -e DATABASE_URL=... {name}:latest
+#   docker run --rm -p 8080:8080 -e DATABASE_URL=... \
+#     {run_keys} {name}:latest
+#
+{keys_note}
 #
 # Pick a non-default backend at build time:
 #   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .
@@ -617,11 +632,18 @@ feature list.
 
 /// The verb that makes the first account a template's login accepts, and
 /// what it signs into. The bare admin lets only superusers in; the tenant
-/// console only operators.
+/// console only operators. A real name, not `<username>`: PowerShell
+/// reads `<` as an operator.
 fn first_account(template: Template) -> Option<(&'static str, &'static str)> {
     match template {
-        Template::Fullstack => Some(("create-admin <username> --superuser", "the admin login")),
-        Template::Tenant => Some(("create-operator <username>", "the operator console login")),
+        Template::Fullstack => Some((
+            "create-admin admin --superuser",
+            "the admin login (any username)",
+        )),
+        Template::Tenant => Some((
+            "create-operator ops",
+            "the operator console login (any username)",
+        )),
         Template::Api => None,
     }
 }
@@ -695,6 +717,14 @@ directory. The directory must be absolute and exist:
 mkdir -p var/tenants
 cargo run -- add-db-server files --sqlite-dir \"$PWD/var/tenants\"
 cargo run -- create-tenant <slug> --mode database --server files
+```
+
+In PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force var/tenants | Out-Null
+cargo run -- add-db-server files --sqlite-dir \"$PWD\\var\\tenants\"
+cargo run -- create-tenant <slug> --mode database --server files
 ```"
         }
     };
@@ -703,8 +733,9 @@ cargo run -- create-tenant <slug> --mode database --server files
 ## Tenants and database servers
 
 The operator console has **New tenant** and **Database servers** pages (see
-`src/main.rs`). Saving a server password needs `RUSTANGO_SECRET_KEY` in `.env`
-(see `.env.example`).
+`src/main.rs`). A saved server password is sealed with `RUSTANGO_SECRET_KEY`.
+In dev, an unset key is generated once into `var/.rustango_secret.key`; any
+other tier needs it set (see `.env.example`).
 
 {server}
 "
@@ -743,10 +774,6 @@ pub fn main_rs_for(template: Template, name: &str, features: &[String]) -> Strin
     if has("csrf") {
         extra
             .push_str("        .with_csrf() // `--features csrf`: form POSTs must carry `_csrf`\n");
-    }
-    // A tenancy app mounts MCP inside `urls::api()`; this one needs the pool.
-    if has("mcp") && template != Template::Tenant {
-        extra.push_str("        .nest_with(\"/mcp\", urls::mcp) // `--features mcp`\n");
     }
     main_rs(template, name).replacen(API_LINE, &format!("{API_LINE}{extra}"), 1)
 }
@@ -881,7 +908,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         // Built from the server's own pool, so other verbs need no database.
-        .nest_with(urls::admin_prefix(&settings), move |pool| {
+        .try_nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
         .with_health() // /health + /ready endpoints for load balancers
@@ -982,7 +1009,19 @@ pub struct Item {
 
 // ---------------- src/views.rs ----------------
 
-pub const VIEWS_RS: &str = "//! Project views — the request handlers this project mounts.
+/// `src/views.rs`. Only fullstack mounts an admin, so only its index links one.
+pub fn views_rs(template: Template) -> String {
+    match template {
+        Template::Fullstack => VIEWS_RS.to_owned(),
+        Template::Api | Template::Tenant => VIEWS_RS.replacen(ADMIN_LINK, "\",\n", 1),
+    }
+}
+
+/// The index's admin sentence, ending the `Html` literal.
+const ADMIN_LINK: &str =
+    "\\n\\\n         <p>The admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",\n";
+
+const VIEWS_RS: &str = "//! Project views — the request handlers this project mounts.
 
 use axum::response::Html;
 
@@ -991,7 +1030,7 @@ pub async fn index() -> Html<&'static str> {
         \"<!doctype html>\\n\\
          <title>rustango app</title>\\n\\
          <h1>Hello from Rustango!</h1>\\n\\
-         <p>The auto-admin (if enabled) is at <a href=\\\"/admin\\\">/admin</a>.</p>\",
+         <p>The admin is at <a href=\\\"/admin\\\">/admin</a>.</p>\",
     )
 }
 
@@ -1005,23 +1044,20 @@ pub async fn healthz() -> &'static str {
 /// `src/urls.rs`, plus the mounts the chosen `--features` need.
 pub fn urls_rs_for(template: Template, features: &[String]) -> String {
     let urls = urls_base(template);
-    if !features.iter().any(|f| f == "mcp") {
+    // `validate_features` keeps `mcp` to the tenant template.
+    if template != Template::Tenant || !features.iter().any(|f| f == "mcp") {
         return urls;
     }
-    match template {
-        Template::Tenant => urls
-            .replacen(
-                "pub fn api() -> Router<()> {\n    Router::new()",
-                "pub fn api() -> Router<()> {\n    let mcp = mcp_settings();\n    Router::new()",
-                1,
-            )
-            .replacen(
-                "        .route(\"/healthz\", get(views::healthz))\n}\n",
-                MCP_TENANT,
-                1,
-            ),
-        Template::Api | Template::Fullstack => format!("{urls}{MCP_SINGLE}"),
-    }
+    urls.replacen(
+        "pub fn api() -> Router<()> {\n    Router::new()",
+        "pub fn api() -> Router<()> {\n    let mcp = mcp_settings();\n    Router::new()",
+        1,
+    )
+    .replacen(
+        "        .route(\"/healthz\", get(views::healthz))\n}\n",
+        MCP_TENANT,
+        1,
+    )
 }
 
 /// `--features mcp` on the tenant template: agent auth, `[mcp]` settings.
@@ -1038,15 +1074,6 @@ fn mcp_settings() -> rustango::config::McpSettings {
     rustango::config::Settings::load_from_env()
         .map(|s| s.mcp)
         .unwrap_or_default()
-}
-";
-
-/// `--features mcp` on a single-database template, nested by `main.rs`.
-const MCP_SINGLE: &str = "
-/// `--features mcp`: the MCP endpoint at `/mcp`, on the serving pool.
-/// Transport only; agent tools need the tenant template's authed router.
-pub fn mcp(pool: rustango::sql::Pool) -> Router {
-    rustango::mcp::router(pool)
 }
 ";
 
@@ -1091,7 +1118,7 @@ use axum::routing::get;
 use axum::Router;
 use rustango::admin;
 use rustango::config::Settings;
-use rustango::session::{load_session_secret_for_tier, tier_from_env};
+use rustango::session::{tier_from_env, try_load_session_secret_for_tier, SessionSecretError};
 use rustango::sql::Pool;
 
 use crate::views;
@@ -1113,16 +1140,17 @@ pub fn admin_prefix(settings: &Settings) -> String {
 /// `cargo run -- create-admin <username> --superuser`.
 ///
 /// The signing key comes from `RUSTANGO_SESSION_SECRET`, else (off the
-/// prod tier) from `./var/`, so a restart keeps you signed in.
-pub fn admin_router(pool: Pool, settings: &Settings) -> Router {
-    let secret = load_session_secret_for_tier(
+/// prod tier) from `./var/`, so a restart keeps you signed in. On prod a
+/// missing key is an error `main` prints before it exits.
+pub fn admin_router(pool: Pool, settings: &Settings) -> Result<Router, SessionSecretError> {
+    let secret = try_load_session_secret_for_tier(
         &tier_from_env(),
         std::path::Path::new(\"./var/.rustango_session.key\"),
-    );
-    admin::Builder::from_settings(pool, settings)
+    )?;
+    Ok(admin::Builder::from_settings(pool, settings)
         .admin_prefix(admin_prefix(settings)) // the path main.rs nests it at
         .with_session_auth(secret)
-        .build()
+        .build())
 }
 "
             .to_owned()

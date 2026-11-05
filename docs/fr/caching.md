@@ -305,7 +305,10 @@ dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
 Le slug d'un tenant purgé peut être réutilisé par un nouveau tenant. Pour que
 `purge-tenant` supprime les clés `ScopedCache::for_tenant` de l'ancien tenant,
 appelez `rustango::tenancy::decommission::clear_on_purge(cache)` au démarrage
-pour chaque cache qui les contient.
+pour chaque cache qui les contient. La purge y supprime aussi les verrous, les
+sessions et les overrides de flags du tenant. Les entrées d'idempotence et du
+cache de page restent jusqu'à leur expiration : elles sont liées à l'id de l'org,
+donc le nouveau tenant ne peut pas les lire.
 
 ---
 

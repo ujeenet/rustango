@@ -32,10 +32,12 @@ status-level = "fail"
 final-status-level = "slow"
 
 [profile.live]
-# Run one test at a time. The live suites all point at the same
-# database and most create, truncate or drop the framework tables in
+# Run one test at a time. Most hand-rolled live suites still point at
+# the same database and create, truncate or drop the framework tables in
 # setup, so in parallel they fight over the catalog rather than test
-# anything. Measured on this workspace: 758 failures with the default
+# anything. `testkit::matrix::Backend::pool` suites already get a
+# database per nextest slot; the rest, and fixed-name tenant databases,
+# roles and schemas, keep this serial. Measured on this workspace: 758 failures with the default
 # profile against `postgres:16-alpine`, 0 here. MySQL: 95 vs 0 (#1624).
 #
 # The in-process `tokio::sync::Mutex` guards in those suites cannot
@@ -44,8 +46,8 @@ final-status-level = "slow"
 #
 #   cargo nextest run --profile live --workspace --all-features
 #
-# This makes the run correct, not fast. Per-process databases (#1624
-# option 2) are what buy back the parallelism.
+# This makes the run correct, not fast. Moving every suite onto the
+# per-slot database is what buys back the parallelism.
 test-threads = 1
 slow-timeout = { period = "60s", terminate-after = 10 }
 fail-fast = false

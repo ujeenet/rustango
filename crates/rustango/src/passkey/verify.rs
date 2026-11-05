@@ -3,7 +3,7 @@
 //! These are the security-critical building blocks the ceremonies use:
 //! parse `clientDataJSON` / `authenticatorData` / the `attestationObject`
 //! CBOR, decode a COSE ES256 public key, and verify an ES256 assertion
-//! signature with `p256`. All parsing is bounds-checked; all failures
+//! signature with `ring`. All parsing is bounds-checked; all failures
 //! return a [`PasskeyError`] rather than panicking.
 //!
 //! Scope: **ES256 (ECDSA P-256)** keys and **`none`/self attestation**
@@ -205,12 +205,25 @@ pub fn verify_rp_id(auth_data: &AuthenticatorData, rp_id: &str) -> Result<(), Pa
     }
 }
 
-/// Build a `p256` verifying key from a COSE EC2/ES256 public key.
+/// A passkey's ES256 public key: the uncompressed SEC1 point `0x04 || x || y`.
+/// Whether the point is on the curve is checked when a signature is verified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Es256Key([u8; 65]);
+
+impl Es256Key {
+    /// The uncompressed SEC1 point.
+    #[must_use]
+    pub fn to_sec1(&self) -> &[u8; 65] {
+        &self.0
+    }
+}
+
+/// Read a COSE EC2/ES256 public key.
 ///
 /// # Errors
 /// [`PasskeyError::CoseKey`] if the key isn't a P-256 ES256 EC2 key or is
 /// malformed.
-pub fn cose_es256_key(cose: &[u8]) -> Result<p256::ecdsa::VerifyingKey, PasskeyError> {
+pub fn cose_es256_key(cose: &[u8]) -> Result<Es256Key, PasskeyError> {
     use ciborium::value::Value;
     let v: Value =
         ciborium::de::from_reader(cose).map_err(|e| PasskeyError::Cbor(e.to_string()))?;
@@ -268,12 +281,11 @@ pub fn cose_es256_key(cose: &[u8]) -> Result<p256::ecdsa::VerifyingKey, PasskeyE
         }
     };
     // Uncompressed SEC1 point: 0x04 || X || Y.
-    let mut sec1 = Vec::with_capacity(65);
-    sec1.push(0x04);
-    sec1.extend_from_slice(&x);
-    sec1.extend_from_slice(&y);
-    p256::ecdsa::VerifyingKey::from_sec1_bytes(&sec1)
-        .map_err(|e| PasskeyError::CoseKey(format!("invalid P-256 point: {e}")))
+    let mut sec1 = [0u8; 65];
+    sec1[0] = 0x04;
+    sec1[1..33].copy_from_slice(&x);
+    sec1[33..].copy_from_slice(&y);
+    Ok(Es256Key(sec1))
 }
 
 /// Verify an ES256 assertion signature: the authenticator signs
@@ -288,7 +300,6 @@ pub fn verify_es256_assertion(
     client_data_json: &[u8],
     signature_der: &[u8],
 ) -> Result<(), PasskeyError> {
-    use p256::ecdsa::signature::Verifier as _;
     let key = cose_es256_key(cose_public_key)?;
     let mut client_hash = Sha256::new();
     client_hash.update(client_data_json);
@@ -298,10 +309,12 @@ pub fn verify_es256_assertion(
     signed.extend_from_slice(authenticator_data);
     signed.extend_from_slice(&client_hash);
 
-    let sig =
-        p256::ecdsa::Signature::from_der(signature_der).map_err(|_| PasskeyError::BadSignature)?;
-    key.verify(&signed, &sig)
-        .map_err(|_| PasskeyError::BadSignature)
+    let der = crate::crypto::Es256Encoding::Der;
+    if crate::crypto::es256_verifies(key.to_sec1(), &signed, signature_der, der) {
+        Ok(())
+    } else {
+        Err(PasskeyError::BadSignature)
+    }
 }
 
 /// Decode base64url (with or without padding). Returns `None` on invalid
@@ -322,26 +335,58 @@ pub(super) fn b64url_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
-    use p256::ecdsa::{signature::Signer as _, Signature, SigningKey};
+    /// A P-256 test key that signs as an authenticator does (DER).
+    pub(in crate::passkey) struct TestSigner {
+        pair: ring::signature::EcdsaKeyPair,
+        rng: ring::rand::SystemRandom,
+    }
 
-    /// Build a COSE EC2/ES256 key from a p256 verifying key.
-    fn cose_key_of(vk: &p256::ecdsa::VerifyingKey) -> Vec<u8> {
+    impl TestSigner {
+        pub(in crate::passkey) fn new() -> Self {
+            use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING as ALG};
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ALG, &rng).unwrap();
+            let pair = EcdsaKeyPair::from_pkcs8(&ALG, pkcs8.as_ref(), &rng).unwrap();
+            Self { pair, rng }
+        }
+
+        /// The uncompressed SEC1 public point.
+        pub(in crate::passkey) fn point(&self) -> &[u8] {
+            use ring::signature::KeyPair as _;
+            self.pair.public_key().as_ref()
+        }
+
+        pub(in crate::passkey) fn cose(&self) -> Vec<u8> {
+            cose_key_from_point(self.point())
+        }
+
+        pub(in crate::passkey) fn sign(&self, msg: &[u8]) -> Vec<u8> {
+            self.pair.sign(&self.rng, msg).unwrap().as_ref().to_vec()
+        }
+    }
+
+    /// A COSE EC2/ES256 key for an uncompressed SEC1 point.
+    fn cose_key_from_point(point: &[u8]) -> Vec<u8> {
+        cose_key_with(point, 2, -7, 1)
+    }
+
+    /// A COSE key with the given kty, alg and crv labels.
+    fn cose_key_with(point: &[u8], kty: i64, alg: i64, crv: i64) -> Vec<u8> {
         use ciborium::value::{Integer, Value};
-        let pt = vk.to_sec1_point(false); // uncompressed 0x04||x||y
-        let x = pt.x().unwrap().to_vec();
-        let y = pt.y().unwrap().to_vec();
+        let x = point[1..33].to_vec();
+        let y = point[33..65].to_vec();
         let map = Value::Map(vec![
             (
                 Value::Integer(Integer::from(1)),
-                Value::Integer(Integer::from(2)),
+                Value::Integer(Integer::from(kty)),
             ), // kty=EC2
             (
                 Value::Integer(Integer::from(3)),
-                Value::Integer(Integer::from(-7)),
+                Value::Integer(Integer::from(alg)),
             ), // alg=ES256
             (
                 Value::Integer(Integer::from(-1)),
-                Value::Integer(Integer::from(1)),
+                Value::Integer(Integer::from(crv)),
             ), // crv=P-256
             (Value::Integer(Integer::from(-2)), Value::Bytes(x)),
             (Value::Integer(Integer::from(-3)), Value::Bytes(y)),
@@ -364,18 +409,82 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn cose_key_round_trips_to_verifying_key() {
-        let sk = random_signing_key();
-        let vk = *sk.verifying_key();
-        let cose = cose_key_of(&vk);
-        let parsed = cose_es256_key(&cose).expect("parse COSE key");
-        assert_eq!(parsed.to_sec1_point(false), vk.to_sec1_point(false));
+    fn cose_key_round_trips_to_the_point() {
+        let key = TestSigner::new();
+        let parsed = cose_es256_key(&key.cose()).expect("parse COSE key");
+        assert_eq!(&parsed.to_sec1()[..], key.point());
+    }
+
+    fn hex(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    /// A vector the earlier `p256` verifier accepted still verifies.
+    #[test]
+    fn a_pinned_assertion_vector_verifies() {
+        let cose = hex(
+            "a50102032620012158201e18532fd4754c02f3041d9c75ceb33b83ffd81ac7ce4fe882ccb1c98bc5896e\
+             225820a46c311c4e2ff40dd96a3653e6e45445d32dfe486eced75c7a90c6a18881c0a3",
+        );
+        let ad = hex("a379a6f6eeafb9a55e378c118034e2751e682fab9f2d30ab13d2125586ce19470100000009");
+        let sig = hex(
+            "3045022100f5b9314775e152bb77fc2f0d6c21364d569b03656bbdab24df8c9b70e3c3196c022061620e3a\
+             3beb1b0a9d57f03d604b665b962ae8108e98244ab86bd842a34a0a01",
+        );
+        let client =
+            br#"{"type":"webauthn.get","challenge":"AAAA","origin":"https://example.com"}"#;
+        verify_es256_assertion(&cose, &ad, client, &sig).expect("pinned vector");
+        let mut bad = sig.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(matches!(
+            verify_es256_assertion(&cose, &ad, client, &bad),
+            Err(PasskeyError::BadSignature)
+        ));
+    }
+
+    /// Another curve, another algorithm or a short coordinate is refused.
+    #[test]
+    fn a_wrong_or_malformed_cose_key_is_refused() {
+        let point = TestSigner::new().point().to_vec();
+        for (kty, alg, crv) in [(2, -7, 2), (2, -35, 1), (1, -7, 1)] {
+            assert!(matches!(
+                cose_es256_key(&cose_key_with(&point, kty, alg, crv)),
+                Err(PasskeyError::CoseKey(_))
+            ));
+        }
+        let short = cose_key_from_point(&point)[..40].to_vec();
+        assert!(cose_es256_key(&short).is_err());
+        assert!(matches!(
+            cose_es256_key(b"\x01"),
+            Err(PasskeyError::CoseKey(_))
+        ));
+    }
+
+    /// A point off the curve parses, but no signature verifies under it.
+    #[test]
+    fn a_point_off_the_curve_verifies_nothing() {
+        let key = TestSigner::new();
+        let mut point = key.point().to_vec();
+        point[64] ^= 1;
+        let ad = auth_data("example.com", FLAG_UP, 1);
+        let client = br#"{"type":"webauthn.get"}"#;
+        let mut signed = ad.clone();
+        signed.extend_from_slice(&Sha256::digest(client));
+        let sig = key.sign(&signed);
+        assert!(matches!(
+            verify_es256_assertion(&cose_key_from_point(&point), &ad, client, &sig),
+            Err(PasskeyError::BadSignature)
+        ));
     }
 
     #[test]
     fn assertion_verifies_and_tamper_is_rejected() {
-        let sk = random_signing_key();
-        let cose = cose_key_of(sk.verifying_key());
+        let sk = TestSigner::new();
+        let cose = sk.cose();
 
         let ad = auth_data("example.com", FLAG_UP, 1);
         let client =
@@ -385,17 +494,16 @@ pub(super) mod tests {
         let ch: [u8; 32] = client_hash.finalize().into();
         let mut signed = ad.clone();
         signed.extend_from_slice(&ch);
-        let sig: Signature = sk.sign(&signed);
-        let der = sig.to_der();
+        let der = sk.sign(&signed);
 
         // Good signature verifies.
-        verify_es256_assertion(&cose, &ad, client, der.as_bytes()).expect("valid assertion");
+        verify_es256_assertion(&cose, &ad, client, &der).expect("valid assertion");
 
         // Tampered authenticatorData (bumped count) → rejected.
         let mut tampered = ad.clone();
         tampered[36] ^= 0xff;
         assert!(matches!(
-            verify_es256_assertion(&cose, &tampered, client, der.as_bytes()),
+            verify_es256_assertion(&cose, &tampered, client, &der),
             Err(PasskeyError::BadSignature)
         ));
     }
@@ -436,14 +544,5 @@ pub(super) mod tests {
             parse_and_verify_client_data(json, "webauthn.get", b"abc", &[]),
             Err(PasskeyError::BadOrigin(_))
         ));
-    }
-
-    /// Random test key from `rand` bytes; p256's own RNG API needs rand_core 0.10.
-    pub(in crate::passkey) fn random_signing_key() -> SigningKey {
-        loop {
-            if let Ok(sk) = SigningKey::from_slice(&rand::random::<[u8; 32]>()) {
-                return sk;
-            }
-        }
     }
 }

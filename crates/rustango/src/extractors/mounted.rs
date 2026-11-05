@@ -11,7 +11,7 @@ use sqlx::Database;
 
 use crate::sql::{sqlx, Pool};
 use crate::tenancy::middleware::SessionKeys;
-use crate::tenancy::{Org, OrgResolver as _, TenancyError};
+use crate::tenancy::{Org, OrgResolver as _, TenancyError, TenantRegistry};
 
 use super::{DatabaseTenantContext, TenantContext};
 
@@ -122,8 +122,8 @@ impl<'a> MountedTenantContext<'a> {
     /// Resolve the request's Org against this context's registry.
     pub(crate) async fn resolve(self, parts: &Parts) -> Result<Option<Org>, TenancyError> {
         each!(self, |c|
-            full => c.resolver.resolve(parts, &c.pools.registry_pool()).await,
-            db => c.resolver.resolve(parts, &c.registry).await)
+            full => c.resolver.resolve_in(parts, &TenantRegistry::new(c.pools.registry_pool())).await,
+            db => c.resolver.resolve_in(parts, &TenantRegistry::new(c.registry.clone())).await)
     }
 
     /// The signing keys and registry pool of this context.

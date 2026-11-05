@@ -289,6 +289,154 @@ pub struct Measure {
     pub extra: Option<serde_json::Value>,
 }
 
+/// The database computes `twice`; a load must leave it out.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_gen", app = "mdv")]
+pub struct Gen {
+    #[rustango(primary_key)]
+    pub id: Auto<i64>,
+    pub qty: i64,
+    #[rustango(generated_as = "qty * 2")]
+    pub twice: i64,
+}
+
+/// Declared text; the test makes the column an integer, as a hand edit would.
+#[derive(Model, Debug, Clone)]
+#[rustango(table = "mdv_drift", app = "mdv")]
+pub struct Drift {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 32)]
+    pub label: String,
+}
+
+/// A dump of a generated column loads back; the database recomputes it.
+async fn loaddata_skips_generated_columns(pool: &Pool) {
+    rustango::testkit::matrix::fresh_table::<Gen>(pool).await;
+    let mut g = Gen {
+        id: Auto::default(),
+        qty: 3,
+        twice: 0,
+    };
+    g.insert(pool).await.expect("gen");
+    let dumped = manage(pool, &["dumpdata", "--model", "mdv.Gen"])
+        .await
+        .expect("dumpdata");
+    assert!(dumped.contains("\"twice\": 6"), "{dumped}");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fixture = dir.path().join("gen.json");
+    std::fs::write(&fixture, &dumped).unwrap();
+    rustango::testkit::matrix::fresh_table::<Gen>(pool).await;
+    let out = manage(
+        pool,
+        &["loaddata", fixture.to_str().unwrap(), "--fail-fast"],
+    )
+    .await;
+    assert!(out.is_ok(), "loaddata: {out:?}");
+    let rows: Vec<(i64, i64)> = Gen::objects()
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|g| (g.qty, g.twice))
+        .collect();
+    assert_eq!(rows, [(3, 6)]);
+}
+
+/// A cell dumpdata cannot decode fails the dump instead of turning into
+/// `null`; the lenient reader the admin uses still shows the row.
+async fn dumpdata_refuses_an_undecodable_cell(pool: &Pool) {
+    rustango::testkit::matrix::drop_table(pool, Drift::SCHEMA.table).await;
+    for sql in [
+        "CREATE TABLE mdv_drift (id BIGINT PRIMARY KEY, label BIGINT NOT NULL)",
+        "INSERT INTO mdv_drift (id, label) VALUES (1, 7)",
+    ] {
+        raw_execute_pool(pool, sql, vec![]).await.expect(sql);
+    }
+    let err = manage(pool, &["dumpdata", "--model", "mdv.Drift"])
+        .await
+        .expect_err("an integer in a text field dumped as null");
+    assert!(err.contains("label"), "{err}");
+    let fields: Vec<_> = Drift::SCHEMA.scalar_fields().collect();
+    let rows = rustango::sql::select_rows_as_json(
+        pool,
+        &rustango::core::SelectQuery::new(Drift::SCHEMA),
+        &fields,
+    )
+    .await
+    .expect("the lenient read");
+    rustango::testkit::matrix::drop_table(pool, Drift::SCHEMA.table).await;
+    assert_eq!(rows, [serde_json::json!({"id": 1, "label": null})]);
+}
+
+/// NaN and infinity have no JSON form: dumpdata refuses them, not `null`.
+async fn dumpdata_refuses_a_non_finite_float(pool: &Pool) {
+    // MySQL stores neither.
+    let score = match pool.dialect().name() {
+        "postgres" => f64::NAN,
+        "sqlite" => f64::INFINITY,
+        _ => return,
+    };
+    rustango::testkit::matrix::fresh_table::<Measure>(pool).await;
+    let mut m = Measure {
+        id: Auto::default(),
+        score,
+        meta: serde_json::json!(1),
+        extra: None,
+    };
+    m.insert(pool).await.expect("measure");
+    let err = manage(pool, &["dumpdata", "--model", "mdv.Measure"])
+        .await
+        .expect_err("a non-finite float dumped as null");
+    assert!(
+        err.contains("score") && err.contains("no JSON form"),
+        "{err}"
+    );
+}
+
+/// `dumpdata -o` never writes through a link planted at its old temp
+/// name, and the dump is owner-only.
+async fn dumpdata_output_ignores_a_planted_link(pool: &Pool) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut root = Node {
+            id: Auto::default(),
+            parent_id: None,
+        };
+        root.insert(pool).await.expect("root");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("nodes.json");
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "KEEP").unwrap();
+        let planted = dir
+            .path()
+            .join(format!(".nodes.json.{}.tmp", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &planted).unwrap();
+        let res = manage(
+            pool,
+            &[
+                "dumpdata",
+                "--model",
+                "cli1911.Node",
+                "-o",
+                out.to_str().unwrap(),
+            ],
+        )
+        .await;
+        assert!(res.is_ok(), "dumpdata: {res:?}");
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "KEEP");
+        let meta = std::fs::symlink_metadata(&out).unwrap();
+        assert!(meta.is_file(), "the output is a link");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert!(std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("cli1911.Node"));
+    }
+    #[cfg(not(unix))]
+    let _ = pool;
+}
+
 /// A fixture key that is absent takes the column default, pk included.
 async fn loaddata_leaves_missing_keys_to_the_column_default(pool: &Pool) {
     rustango::testkit::matrix::fresh_table::<Counter>(pool).await;
@@ -380,6 +528,74 @@ async fn self_fk_child_before_parent_loads(pool: &Pool) {
     assert!(out.is_ok(), "loaddata: {out:?}");
     let n: Vec<Node> = Node::objects().fetch(pool).await.expect("fetch");
     assert_eq!(n.len(), 2);
+}
+
+/// `dumpdata --output` writes UTF-8; a copy PowerShell 5.1's `>` would make
+/// (UTF-16 LE with a BOM) and one with a UTF-8 BOM both load back.
+async fn a_utf16_or_bom_fixture_loads(pool: &Pool) {
+    let mut root = Node {
+        id: Auto::default(),
+        parent_id: None,
+    };
+    root.insert(pool).await.expect("root");
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("nodes.json");
+    manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1911.Node",
+            "--output",
+            out.to_str().unwrap(),
+        ],
+    )
+    .await
+    .expect("dumpdata");
+    let text = std::fs::read_to_string(&out).expect("UTF-8 output");
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let mut bom = vec![0xEF, 0xBB, 0xBF];
+    bom.extend(text.bytes());
+    for (name, bytes) in [("utf16.json", utf16), ("bom.json", bom)] {
+        let file = dir.path().join(name);
+        std::fs::write(&file, bytes).unwrap();
+        rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+        let res = manage(pool, &["loaddata", file.to_str().unwrap()]).await;
+        assert!(res.is_ok(), "{name}: {res:?}");
+        let n: Vec<Node> = Node::objects().fetch(pool).await.expect("fetch");
+        assert_eq!(n.len(), 1, "{name}");
+    }
+}
+
+/// A dump that fails part-way leaves an existing `--output` file as it was.
+async fn a_failed_dump_keeps_the_old_output(pool: &Pool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let out = dir.path().join("nodes.json");
+    std::fs::write(&out, "OLD").unwrap();
+    let table = <Node as rustango::core::Model>::SCHEMA.table;
+    rustango::sql::raw_execute_pool(pool, &format!("DROP TABLE {table}"), Vec::new())
+        .await
+        .expect("drop the table");
+    let res = manage(
+        pool,
+        &[
+            "dumpdata",
+            "--model",
+            "cli1911.Node",
+            "-o",
+            out.to_str().unwrap(),
+        ],
+    )
+    .await;
+    rustango::testkit::matrix::fresh_table::<Node>(pool).await;
+    assert!(res.is_err(), "the select fails: {res:?}");
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "OLD");
+    assert_eq!(
+        std::fs::read_dir(dir.path()).unwrap().count(),
+        1,
+        "no temp file left"
+    );
 }
 
 async fn manage(pool: &Pool, args: &[&str]) -> Result<String, String> {
@@ -1184,6 +1400,8 @@ tri_dialect_test! {
         dump_and_load_round_trip,
         dumpdata_refuses_columns_it_cannot_read,
         self_fk_child_before_parent_loads,
+        a_utf16_or_bom_fixture_loads,
+        a_failed_dump_keeps_the_old_output,
         fail_fast_still_resets_sequences,
         dumpdata_refuses_an_unknown_model_name,
         dumpdata_pages_rows_and_links,
@@ -1198,5 +1416,9 @@ tri_dialect_test! {
         loaddata_relinks_cycle_rows_with_a_null_pk,
         loaddata_fail_fast_relinks_the_rows_in,
         loaddata_keeps_an_orderable_fixture_inline,
+        loaddata_skips_generated_columns,
+        dumpdata_refuses_an_undecodable_cell,
+        dumpdata_refuses_a_non_finite_float,
+        dumpdata_output_ignores_a_planted_link,
     ],
 }

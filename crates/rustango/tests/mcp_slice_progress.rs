@@ -39,6 +39,7 @@ async fn ctx() -> McpContext {
     McpContext {
         pool,
         agent: McpAgent {
+            org_id: 1,
             agent_id: 1,
             tenant: "acme".into(),
             skills: vec![],
@@ -69,7 +70,10 @@ async fn progress_notifications_are_emitted_for_a_progress_token() {
     // agent (tenant "acme", agent_id 1 — see `ctx()`).
     let mut seen = 0;
     while let Ok(frame) = rx.try_recv() {
-        assert_eq!(frame.tenant, "acme");
+        assert_eq!(
+            frame.tenant,
+            rustango::tenancy::TenantSlug::new(1, "acme").namespace()
+        );
         assert_eq!(frame.agent_id, Some(1));
         let v: serde_json::Value = serde_json::from_str(&frame.body).unwrap();
         if v["method"] == "notifications/progress" && v["params"]["progressToken"] == "pt-1" {

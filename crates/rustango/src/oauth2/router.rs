@@ -170,9 +170,18 @@ type Attempt = crate::login_throttle::LoginAttempt;
 #[cfg(not(feature = "admin"))]
 type Attempt = ();
 
-/// This router's own SSO bucket per tenant.
+/// This router's own SSO bucket per tenant: the resolved registry org when
+/// the request has one, so a purge clears it; else the path's tenant label.
 #[cfg(feature = "admin")]
-fn throttle_scope(tenant: &str) -> crate::login_throttle::LoginScope {
+fn throttle_scope(
+    tenant: &str,
+    extensions: &axum::http::Extensions,
+) -> crate::login_throttle::LoginScope {
+    #[cfg(feature = "tenancy")]
+    if let Some(t) = crate::tenancy::RequestTenant::get(extensions).and_then(|t| t.tenant()) {
+        return crate::login_throttle::LoginScope::sso_tenant("app", t);
+    }
+    let _ = extensions;
     crate::login_throttle::LoginScope::Sso(format!("app/{tenant}"))
 }
 
@@ -187,7 +196,7 @@ async fn throttle_check(
     {
         let ip = crate::login_throttle::ClientIp::from_parts(extensions, headers);
         crate::login_throttle::shared()
-            .check(&throttle_scope(tenant), &ip, "")
+            .check(&throttle_scope(tenant, extensions), &ip, "")
             .await
             .map_err(|r| r.into_response())
     }
@@ -209,7 +218,7 @@ async fn throttle_begin(
     {
         let ip = crate::login_throttle::ClientIp::from_parts(extensions, headers);
         crate::login_throttle::shared()
-            .begin(&throttle_scope(tenant), &ip, "")
+            .begin(&throttle_scope(tenant, extensions), &ip, "")
             .await
             .map_err(|r| r.into_response())
     }
@@ -394,6 +403,23 @@ fn hook_error(msg: &str) -> (StatusCode, String) {
 
 #[cfg(test)]
 mod tests {
+    /// A request routed to a registry tenant counts in that org's bucket.
+    #[cfg(all(feature = "admin", feature = "tenancy"))]
+    #[test]
+    fn the_sso_bucket_binds_to_the_routed_org() {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        let mut ext = axum::http::Extensions::new();
+        assert_eq!(
+            super::throttle_scope("acme", &ext),
+            crate::login_throttle::LoginScope::Sso("app/acme".into())
+        );
+        ext.insert(RequestTenant::Tenant(TenantSlug::new(1, "acme")));
+        assert_eq!(
+            super::throttle_scope("acme", &ext),
+            crate::login_throttle::LoginScope::sso_tenant("app", &TenantSlug::new(1, "acme"))
+        );
+    }
+
     use super::*;
     use crate::oauth2::providers;
     use axum::body::Body;

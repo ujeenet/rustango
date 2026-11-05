@@ -16,8 +16,7 @@ abzusichern, und dem `CurrentUser`-Extraktor, um das Ergebnis zu lesen.
 > **Quelle:** `rustango::tenancy::auth_backends` (`AuthBackend`, `ModelBackend`,
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) und
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — hinter dem Feature
-> `tenancy`. Eine portable, datenbankunabhängige Registry lebt auch unter
-> `rustango::auth_backends` (immer kompiliert).
+> `tenancy`.
 >
 > **Ausführbare Version:** jeder Ausschnitt ist aus
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -29,7 +28,6 @@ abzusichern, und dem `CurrentUser`-Extraktor, um das Ergebnis zu lesen.
 - [Routen absichern: require_auth](#routen-absichern-require_auth)
 - [Den Benutzer lesen: CurrentUser](#den-benutzer-lesen-currentuser)
 - [Berechtigungen: require_perm](#berechtigungen-require_perm)
-- [Die portable Registry](#die-portable-registry)
 - [Siehe auch](#siehe-auch)
 
 ---
@@ -239,33 +237,6 @@ Benutzer gewinnt über Rollen-Erteilungen; andernfalls passiert jede Rolle, die
 der Benutzer hält und die den Codename erteilt. Erteilen Sie mit
 `set_user_perm_pool` / Rollen über `create_role_pool` + `assign_role_pool` (die
 Berechtigungstabellen werden von `ensure_tables_pool` erstellt).
-
----
-
-## Die portable Registry
-
-Separat davon ist `rustango::auth_backends` (Achtung: Crate-Wurzel, **nicht**
-`tenancy`) eine kleine **framework-unabhängige** Registry — eine
-`Credentials` → `Principal`-Kette mit ihrem eigenen `AuthBackend`-Trait. Sie hat
-keinerlei HTTP/axum-Verklebung; verwenden Sie sie, wenn Sie austauschbare
-Auth-Backends innerhalb Ihres eigenen Auth-Codes wünschen:
-
-```rust
-use std::sync::Arc;
-use rustango::auth_backends::{
-    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
-};
-
-async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
-    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-    chain.authenticate(&Credentials::remote(remote_user)).await
-}
-```
-
-Dieselbe Semantik „erster Erfolg gewinnt / erster Fehler stoppt" wie die
-HTTP-Kette. `chain.get_user(id)` läuft die Kette genauso ab, um einen Principal
-neu zu laden, etwa einen aus einer Session. Zum Absichern echter Routen verwenden Sie die `tenancy`-Middleware
-oben.
 
 ---
 

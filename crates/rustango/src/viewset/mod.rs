@@ -38,7 +38,7 @@
 //!
 //! The [`object_permissions`](crate::object_permissions) hooks and queryset
 //! scopes run as in the admin: a row `view` hides is a `404`, a refused
-//! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`].
+//! `add` / `change` / `delete` a `403`. See [`ViewSet::skip_object_permissions`](crate::viewset::ViewSet::skip_object_permissions).
 //! Update and delete judge the row locked in their transaction. One limit: a
 //! model whose hand-written `ModelEntry` audits updates only on a pool is
 //! updated there, unlocked and without the queryset-scope re-check.
@@ -2446,17 +2446,27 @@ async fn enter(
     // A credential bound to another tenant is refused outright, as
     // `require_auth` refuses it; the marker binds the hooks to this tenant.
     #[cfg(feature = "tenancy")]
-    if let Scope::Tenant(org) = &scope {
-        match crate::tenancy::Principal::from_parts(&parts).map(|p| p.tenant) {
-            Some(Some(t)) if t != org.slug => {
-                return Err(json_error(StatusCode::FORBIDDEN, "tenant mismatch"));
+    {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        let marker = match &scope {
+            Scope::Tenant(org) => {
+                let routed = TenantSlug::of(org);
+                // The org id too: a credential of a purged tenant is not the heir's.
+                let other_org = crate::object_permissions::credential_tenant(&parts)
+                    .is_some_and(|c| Some(c) != routed);
+                match crate::tenancy::Principal::from_parts(&parts).map(|p| p.tenant) {
+                    Some(Some(t)) if t != org.slug || other_org => {
+                        return Err(json_error(StatusCode::FORBIDDEN, "tenant mismatch"));
+                    }
+                    Some(None) => warn_untenanted(state.vs.schema.table),
+                    _ => {}
+                }
+                routed.map_or(RequestTenant::Unknown, RequestTenant::Tenant)
             }
-            Some(None) => warn_untenanted(state.vs.schema.table),
-            _ => {}
-        }
-        parts
-            .extensions
-            .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
+            // Shared data: the host's tenant must not make its credentials count here.
+            _ => RequestTenant::Global,
+        };
+        parts.extensions.insert(marker);
     }
     if let Some(resp) = check_throttle(state, action, &parts, &scope) {
         return Err(resp);

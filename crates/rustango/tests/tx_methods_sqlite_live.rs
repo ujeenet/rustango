@@ -126,3 +126,49 @@ async fn pool_tx_dialect_returns_sqlite() {
     assert_eq!(tx.dialect().placeholder(1), "?");
     tx.rollback().await.expect("rollback");
 }
+
+/// The `docs/orm.md` "Transactions" snippet: `fetch_on(&mut tx)` reads and
+/// `save_tx` writes in one `transaction_pool` transaction.
+#[tokio::test]
+async fn orm_md_transaction_snippet_moves_a_balance() {
+    let pool = fresh_pool().await;
+    for (label, count) in [("a", 500), ("b", 0)] {
+        let mut w = Widget {
+            id: Auto::default(),
+            label: label.to_owned(),
+            count,
+        };
+        w.insert(&pool).await.expect("seed");
+    }
+
+    let mut tx = transaction_pool(&pool).await.expect("begin");
+    let mut a = Widget::objects()
+        .where_(Widget::label.eq("a"))
+        .fetch_on(&mut tx)
+        .await
+        .expect("fetch_on a")
+        .pop()
+        .unwrap();
+    let mut b = Widget::objects()
+        .where_(Widget::label.eq("b"))
+        .fetch_on(&mut tx)
+        .await
+        .expect("fetch_on b")
+        .pop()
+        .unwrap();
+    a.count -= 100;
+    b.count += 100;
+    a.save_tx(&mut tx).await.expect("save_tx a");
+    b.save_tx(&mut tx).await.expect("save_tx b");
+    tx.commit().await.expect("commit");
+
+    let mut counts: Vec<i32> = Widget::objects()
+        .fetch(&pool)
+        .await
+        .expect("fetch")
+        .into_iter()
+        .map(|w| w.count)
+        .collect();
+    counts.sort_unstable();
+    assert_eq!(counts, [100, 400]);
+}

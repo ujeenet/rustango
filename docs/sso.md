@@ -221,9 +221,9 @@ auto-admin, so an end-user (member) login can build without pulling in
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.62", features = ["admin-sso"] }
+rustango = { version = "0.63", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.62", features = ["tenancy", "sso"] }
+rustango = { version = "0.63", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` and the historical `admin::sso::*` core paths are
@@ -257,6 +257,13 @@ feature emits an `AddColumn` / `DropColumn` migration for that column.
    applies.
 7. Otherwise the user is bounced back to the login page with a generic
    error (details go to the server log, never the browser).
+
+On the tenant admin, `GET <login>/sso/<slug>?next=/path` lands on `/path`
+after sign-in. The path rides in the signed flow cookie and passes the same
+check as the password login: same-origin only, and inside the tenant's path
+prefix. Anything else lands on `admin_url`. The login page passes its own
+`?next` on to the SSO buttons. The bare admin does the same without the prefix
+rule, keeps the path through the TOTP step, and falls back to its prefix.
 
 The link table is a normal migrated model: in the tenant's storage for
 tenant logins, and in the admin database for the bare admin. A link is

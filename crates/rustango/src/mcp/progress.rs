@@ -149,8 +149,12 @@ pub(crate) struct CancelGuard {
 
 impl CancelGuard {
     /// Register a new token for this tenant, agent and request.
-    pub(crate) fn register(tenant: &str, agent_id: i64, request_id: &str) -> Self {
-        let key = (tenant.to_owned(), agent_id, request_id.to_owned());
+    pub(crate) fn register(
+        tenant: &crate::tenancy::TenantSlug,
+        agent_id: i64,
+        request_id: &str,
+    ) -> Self {
+        let key = (tenant.namespace(), agent_id, request_id.to_owned());
         let token = CancelToken::never();
         registry_lock().insert(key.clone(), token.clone());
         Self { key, token }
@@ -179,8 +183,8 @@ impl Drop for CancelGuard {
 /// Cancel a call in flight, from a `notifications/cancelled`. An
 /// agent can only cancel **its own** calls. Does nothing when no
 /// matching call is still running.
-pub fn cancel(tenant: &str, agent_id: i64, request_id: &str) {
-    let key = (tenant.to_owned(), agent_id, request_id.to_owned());
+pub fn cancel(tenant: &crate::tenancy::TenantSlug, agent_id: i64, request_id: &str) {
+    let key = (tenant.namespace(), agent_id, request_id.to_owned());
     if let Some(token) = registry_lock().get(&key) {
         token.trip();
     }
@@ -200,9 +204,10 @@ mod tests {
 
     #[tokio::test]
     async fn progress_emits_when_token_present_and_silent_otherwise() {
-        let mut rx = super::super::notifications::subscribe("acme");
+        let acme = acme();
+        let mut rx = super::super::notifications::subscribe(&acme);
         ProgressReporter::disabled().report(0.5, Some(1.0), Some("half"));
-        ProgressReporter::for_agent(Some(json!("p1-unit")), "acme".into(), 5).report(
+        ProgressReporter::for_agent(Some(json!("p1-unit")), acme.namespace(), 5).report(
             0.5,
             Some(1.0),
             Some("half"),
@@ -214,7 +219,7 @@ mod tests {
             let v: Value = serde_json::from_str(&frame.body).unwrap();
             if v["method"] == "notifications/progress" && v["params"]["progressToken"] == "p1-unit"
             {
-                assert_eq!(frame.tenant, "acme");
+                assert_eq!(frame.tenant, acme.namespace());
                 assert_eq!(frame.agent_id, Some(5));
                 assert_eq!(v["params"]["progress"], 0.5);
                 return;
@@ -223,35 +228,41 @@ mod tests {
         panic!("did not observe the progress notification");
     }
 
+    fn acme() -> crate::tenancy::TenantSlug {
+        crate::tenancy::TenantSlug::new(1, "acme")
+    }
+
     #[test]
     fn cancel_is_agent_scoped_and_guard_deregisters_on_drop() {
-        let guard = CancelGuard::register("acme", 1, "req-42");
+        let guard = CancelGuard::register(&acme(), 1, "req-42");
         let token = guard.token();
         assert!(!token.is_cancelled());
 
         // The same request id under another agent or tenant must not
         // trip this token.
-        cancel("acme", 2, "req-42");
-        cancel("evil", 1, "req-42");
+        cancel(&acme(), 2, "req-42");
+        cancel(&crate::tenancy::TenantSlug::new(9, "evil"), 1, "req-42");
+        // A tenant that reuses the slug after a purge has another org id.
+        cancel(&crate::tenancy::TenantSlug::new(2, "acme"), 1, "req-42");
         assert!(!token.is_cancelled());
 
         // A full key match does cancel it.
-        cancel("acme", 1, "req-42");
+        cancel(&acme(), 1, "req-42");
         assert!(token.is_cancelled());
 
         // Dropping the guard removes the entry, so a second cancel
         // does nothing.
         drop(guard);
-        cancel("acme", 1, "req-42");
+        cancel(&acme(), 1, "req-42");
     }
 
     /// The first call's guard must not unregister a second call with the same id (#1963).
     #[test]
     fn earlier_guard_drop_keeps_a_reused_request_id() {
-        let first = CancelGuard::register("acme", 7, "dup");
-        let second = CancelGuard::register("acme", 7, "dup");
+        let first = CancelGuard::register(&acme(), 7, "dup");
+        let second = CancelGuard::register(&acme(), 7, "dup");
         drop(first);
-        cancel("acme", 7, "dup");
+        cancel(&acme(), 7, "dup");
         assert!(second.token().is_cancelled());
     }
 }

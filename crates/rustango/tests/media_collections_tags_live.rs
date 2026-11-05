@@ -2,7 +2,8 @@
     feature = "postgres",
     feature = "media",
     feature = "storage-s3",
-    feature = "testkit"
+    feature = "testkit",
+    feature = "admin"
 ))]
 //! Live integration tests for `MediaCollection` + `MediaTag` + the
 //! axum router. Same env-var contract as `media_live.rs` — skips

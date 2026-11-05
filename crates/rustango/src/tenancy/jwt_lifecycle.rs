@@ -174,6 +174,11 @@ pub(crate) fn check_tenant_claims(
 /// these.
 pub const RESERVED_CLAIM_NAMES: &[&str] = &["sub", "exp", "jti", "typ"];
 
+/// The JTI store did not record a revocation: the token stays valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the JTI store did not record the revocation")]
+pub struct RevokeFailed;
+
 /// Returned by [`JwtLifecycle::issue_pair_with`] when the custom payload
 /// tries to overwrite a reserved framework claim.
 #[derive(Debug, thiserror::Error)]
@@ -434,12 +439,38 @@ impl JwtLifecycle {
     /// Revoke a token by adding its JTI to the blacklist. Subsequent
     /// `verify_*` calls for this token will return `None` until the
     /// token's natural expiry passes.
+    ///
+    /// `false` when `token` is not signed here or the store did not record
+    /// it; [`Self::try_revoke`] tells the two apart.
     pub async fn revoke(&self, token: &str) -> bool {
+        matches!(self.try_revoke(token).await, Ok(true))
+    }
+
+    /// [`Self::revoke`]: `Ok(false)` for a token not signed here.
+    ///
+    /// # Errors
+    /// [`RevokeFailed`] when the JTI store did not record the revocation.
+    pub async fn try_revoke(&self, token: &str) -> Result<bool, RevokeFailed> {
         let Some(claims) = self.decode_signed(token) else {
-            return false;
+            return Ok(false);
         };
-        self.blacklist_jti(&claims.jti, claims.exp).await;
-        true
+        self.record_revoked(&claims.jti, claims.exp).await?;
+        Ok(true)
+    }
+
+    /// The one write of a revocation: `mark_used` is `false` both for "already
+    /// there" and for a failed write, so a store that also cannot read the key
+    /// back failed. An `exp` already past needs no entry: the token is dead,
+    /// and a TTL store refuses a TTL of zero or less.
+    async fn record_revoked(&self, key: &str, exp: i64) -> Result<(), RevokeFailed> {
+        if exp <= chrono::Utc::now().timestamp() {
+            return Ok(());
+        }
+        if self.jti_store.mark_used(key, exp).await || self.jti_store.is_used(key).await {
+            Ok(())
+        } else {
+            Err(RevokeFailed)
+        }
     }
 
     /// Approximate number of currently blacklisted JTIs (for tests
@@ -510,15 +541,15 @@ impl JwtLifecycle {
 
     /// Mark a refresh-token family dead until `exp` (#1854). Only as
     /// strong as the JTI store: a process-local one forgets on restart.
-    pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) {
-        let key = family_key(fam);
-        // `false` is "already there"; a store that also can't read it back failed.
-        if !self.jti_store.mark_used(&key, exp).await && !self.jti_store.is_used(&key).await {
+    pub(crate) async fn revoke_family(&self, fam: &str, exp: i64) -> Result<(), RevokeFailed> {
+        let r = self.record_revoked(&family_key(fam), exp).await;
+        if r.is_err() {
             tracing::warn!(
                 target: "rustango::tenancy",
-                "JTI store did not record a refresh-family revocation; the replayed chain stays live"
+                "JTI store did not record a refresh-family revocation; the chain stays live"
             );
         }
+        r
     }
 
     /// Record a refresh attempt on a token not yet redeemed, in a
@@ -582,20 +613,6 @@ impl JwtLifecycle {
             typ,
             custom: payload,
         })
-    }
-
-    async fn blacklist_jti(&self, jti: &str, expires_at: i64) {
-        // v0.48 — delegate to the pluggable JtiStore. Revocation only, so
-        // the returned `bool` is ignored: re-revoking is idempotent.
-        // Refresh rotation must not use this; see `redeem_refresh`. Pruning is
-        // the store's responsibility (`InMemoryJtiStore` does it
-        // opportunistically inside `mark_used`).
-        //
-        // v0.52 (#1191) — awaited, so a durable store writes the revocation
-        // before we return. Previously the trait was sync, which forced
-        // durable stores into a write-behind cache with a window where a
-        // revoked token was still accepted on another instance.
-        let _ = self.jti_store.mark_used(jti, expires_at).await;
     }
 
     pub(crate) async fn is_blacklisted(&self, jti: &str) -> bool {

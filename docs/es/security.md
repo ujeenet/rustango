@@ -217,6 +217,8 @@ Cuenta en ventanas fijas, así que una ráfaga a caballo de un borde de ventana 
 
 > **Keyear por una cabecera secreta es seguro de compartir.** Con `key_by(KeyBy::Header("authorization"))` o `"x-api-key"`, el limitador respaldado por caché **hashea** el valor de la cabecera antes de usarlo como clave, de modo que un Redis compartido nunca almacena una credencial viva donde alguien con acceso de lectura a las claves pudiera cosecharla. `KeyBy::Ip` necesita `ConnectInfo` (o un `RealIpLayer` con `trust_proxies` delante); sin ello, el limitador avisa una vez y recae en un único bucket compartido.
 
+`key_by(KeyBy::Tenant)` da a cada tenant su propio bucket, por id de org, así que un tenant con mucho tráfico no agota la cuota de otro; `KeyBy::Global` sigue siendo un único bucket para toda la plataforma. Móntalo en las rutas de tenant: fuera de ellas todas las peticiones comparten un bucket.
+
 
 ---
 
@@ -312,9 +314,9 @@ La inyección SQL ocurre cuando la entrada del usuario se pega directamente en u
 
 Hay dos puntos en los que hay que tener cuidado:
 
-**1. Nombres de tabla y columna en `bulk_actions`:**
+**1. Nombres de tabla y columna en las acciones masivas:**
 
-Los marcadores de posición protegen los valores, pero no pueden llevar un identificador (un nombre de tabla o columna), así que esos necesitan su propia protección. Las acciones masivas escriben a través del ORM, así que ningún nombre en bruto llega al SQL. Una acción incorporada que fija una columna la busca en el esquema del modelo; un nombre que el modelo no tiene falla con `BulkActionError::InvalidIdent`. Las claves elegidas son un `PkSet`, tipado según la clave primaria del modelo: una clave del tipo equivocado falla con `InvalidPk`, y un conjunto admite como mucho 10.000 claves. Esta protección se ejecuta por ti — no la llamas tú mismo.
+Los marcadores de posición protegen los valores, pero no pueden llevar un identificador (un nombre de tabla o columna), así que esos necesitan su propia protección. Las acciones masivas del admin y de `ListView` escriben a través del ORM, así que ningún nombre en bruto llega al SQL. Cada clave elegida se analiza con el tipo de la clave primaria del modelo, y una clave del tipo equivocado se rechaza. Esta protección se ejecuta por ti — no la llamas tú mismo.
 
 **2. La salida de emergencia de SQL en bruto:**
 

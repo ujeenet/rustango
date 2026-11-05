@@ -36,7 +36,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
         .api(urls::api())
         // Built from the server's own pool, so other verbs need no database.
-        .nest_with(urls::admin_prefix(&settings), move |pool| {
+        .try_nest_with(urls::admin_prefix(&settings), move |pool| {
             urls::admin_router(pool, &admin_settings)
         })
         // Step 12b: the ViewSet, on the server's pool like the admin.

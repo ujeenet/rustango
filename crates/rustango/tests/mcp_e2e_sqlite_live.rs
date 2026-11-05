@@ -94,9 +94,14 @@ async fn full_agent_loop() {
     .expect("resource");
 
     // 3. Grant the skill to the agent.
-    grant_skill_pool(&pool, "acme", "e2e-bot", "greeter")
-        .await
-        .expect("grant");
+    grant_skill_pool(
+        &pool,
+        &rustango::tenancy::TenantSlug::new(1, "acme"),
+        "e2e-bot",
+        "greeter",
+    )
+    .await
+    .expect("grant");
 
     // 4. Credential → identity (what the `/token` endpoint does).
     let agent_row = authenticate_agent_pool(&pool, "e2e-bot", &issued.token)

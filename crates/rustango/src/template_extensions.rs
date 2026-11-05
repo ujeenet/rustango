@@ -130,12 +130,27 @@ pub fn register_help_filter(tera: &mut Tera) {
     );
 }
 
-/// [`html_tera`] loaded from `glob`, e.g. `"templates/**/*"`.
+/// [`html_tera`] loaded from `glob`, e.g. `"templates/**/*"`. A template
+/// saved with a UTF-8 BOM is re-read without it, so the BOM is not rendered.
 ///
 /// # Errors
 /// The Tera error when a template does not parse or the glob is bad.
 pub fn html_tera_from_glob(glob: &str) -> tera::Result<Tera> {
     let mut tera = Tera::new(glob)?;
+    let with_bom: Vec<(String, String)> = tera
+        .templates
+        .values()
+        .filter_map(|t| {
+            let path = t.path.as_deref()?;
+            let bytes = std::fs::read(path).ok()?;
+            bytes.starts_with(&[0xEF, 0xBB, 0xBF]).then_some(())?;
+            let text = crate::text_file::read(std::path::Path::new(path)).ok()?;
+            Some((t.name.clone(), text))
+        })
+        .collect();
+    if !with_bom.is_empty() {
+        tera.add_raw_templates(with_bom)?;
+    }
     tera.autoescape_on(vec![ESCAPE_EVERY_TEMPLATE]);
     Ok(tera)
 }
@@ -209,6 +224,19 @@ macro_rules! register_template_function {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A template an editor saved with a UTF-8 BOM renders without it.
+    #[test]
+    fn a_bom_in_a_template_file_is_not_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend(b"<p>{{ x }}</p>");
+        std::fs::write(dir.path().join("page.html"), bytes).unwrap();
+        let tera = html_tera_from_glob(&format!("{}/*.html", dir.path().display())).unwrap();
+        let mut ctx = tera::Context::new();
+        ctx.insert("x", "hi");
+        assert_eq!(tera.render("page.html", &ctx).unwrap(), "<p>hi</p>");
+    }
 
     #[test]
     fn help_html_escapes_and_marks_code_spans() {

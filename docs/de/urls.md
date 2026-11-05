@@ -218,7 +218,7 @@ sichtbar fehlschlägt, statt einen kaputten Link zu rendern.
 
 ## Regex & typisierte Pfadmuster
 
-**Rustango hat kein `re_path` und erzwingt niemals einen Pfad-Konverter.** Ein
+**Rustango hat keine Regex-Routen und erzwingt niemals einen Pfad-Konverter.** Ein
 Mustersegment ist entweder ein Literal (`/posts/new`) oder ein
 `{name}`-Platzhalter, der genau ein Segment erfasst; `{*name}` erfasst den Rest des
 Pfades. Das ist das gesamte Vokabular — es gibt kein `r'(?P<year>[0-9]{4})'`, und

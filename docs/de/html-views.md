@@ -95,8 +95,9 @@ der View übernimmt Paginierung, Sortierung, Filterung und Suche aus den Query-P
 ```rust
 use rustango::template_views::ListView;
 use std::sync::Arc;
-use tera::Tera;
 
+// Escapes every template, not only `.html` ones.
+let tera = rustango::template_extensions::html_tera_from_glob("templates/**/*")?;
 let app = ListView::for_model(Post::SCHEMA)
     .page_size(20)                       // rows per page (?page=N to navigate)
     .order_by("published_at", true)      // default sort, true = DESC

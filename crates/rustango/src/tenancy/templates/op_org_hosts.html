@@ -17,9 +17,9 @@ one tenant only.</p>
 <table>
   <thead>
     <tr>
-      <th>hostname</th>
+      <th>{{ label.hostname }}</th>
       <th>source</th>
-      <th>serving</th>
+      <th>{{ label.enabled }}</th>
       <th class="actions-col">actions</th>
     </tr>
   </thead>
@@ -77,7 +77,7 @@ one tenant only.</p>
     <legend>Add a hostname</legend>
     <table>
       <tr>
-        <th><label for="hostname">hostname</label></th>
+        <th><label for="hostname">{{ label.hostname }}</label></th>
         <td>
           {#- Uppercase is allowed through and lowercased by the
               server, because that is what `normalize_hostname` does and
@@ -94,10 +94,9 @@ one tenant only.</p>
                  maxlength="255"
                  title="A bare hostname: no scheme, no port, no path."
                  placeholder="shop.example.com">
-          <div class="field-helper">Lowercase, no <code>https://</code>,
-          no <code>:port</code>, no trailing dot — the value is compared
-          byte-for-byte with the <code>Host</code> header. Added serving;
-          park it afterwards if DNS has not propagated yet.</div>
+          <div class="field-helper">{{ help.hostname | help_html | safe }}</div>
+          <div class="field-helper">No trailing dot. Added serving; park it
+          afterwards if DNS has not propagated yet.</div>
         </td>
       </tr>
     </table>

@@ -2,10 +2,10 @@
 //!
 //! Receivers register globally and run around two migrate paths:
 //!
-//! - [`crate::migrate::apply_all`] and
+//! - [`crate::migrate::apply_all_pool`] and
 //!   [`crate::migrate::apply_all_pool`], the bootstrap CREATE TABLE
 //!   walk
-//! - [`crate::migrate::migrate`], the file-based migrations
+//! - [`crate::migrate::migrate_pool`], the file-based migrations
 //!
 //! ## Quick start
 //!

@@ -230,9 +230,9 @@ Auto-Admin, sodass eine Endbenutzer-Anmeldung (Member) gebaut werden kann, ohne
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.62", features = ["admin-sso"] }
+rustango = { version = "0.63", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.62", features = ["tenancy", "sso"] }
+rustango = { version = "0.63", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` und die historischen `admin::sso::*`-Kernpfade sind
@@ -266,6 +266,14 @@ diese Spalte aus.
    Invalidierung) weiterhin gilt.
 7. Andernfalls wird der Benutzer mit einem generischen Fehler zur Anmeldeseite
    zurückgeschickt (Details gehen ins Server-Log, nie in den Browser).
+
+Im Tenant-Admin landet `GET <login>/sso/<slug>?next=/pfad` nach der Anmeldung
+auf `/pfad`. Der Pfad steckt im signierten Flow-Cookie und durchläuft dieselbe
+Prüfung wie bei der Passwort-Anmeldung: nur gleicher Origin und innerhalb des
+Pfadpräfixes des Tenants. Alles andere landet auf `admin_url`. Die Anmeldeseite
+gibt ihr eigenes `?next` an die SSO-Buttons weiter. Der Bare-Admin macht es
+ebenso, ohne die Präfix-Regel, behält den Pfad über den TOTP-Schritt und fällt
+auf sein Präfix zurück.
 
 Die Link-Tabelle ist ein normales migriertes Modell: im Speicher des Tenants für
 Tenant-Anmeldungen und in der Admin-Datenbank für den Bare-Admin. Eine

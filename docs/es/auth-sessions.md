@@ -70,6 +70,10 @@ El id son 192 bits de aleatoriedad OS-CSPRNG, codificados en base64url a 32
 caracteres — muy por encima del suelo de 128 bits para tokens de sesión, e
 inadivinable.
 
+Con tenancy, acota el store por petición con
+`store.for_tenant(&TenantSlug::of(&t.org)?)`: el id no lleva tenant, y con
+enrutado por apex y prefijo de ruta una cookie `Path=/` llega a todos los tenants.
+
 ---
 
 ## Sesiones vs. JWT

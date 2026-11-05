@@ -232,9 +232,9 @@ peut se compiler sans tirer `crate::admin` :
 ```toml
 [dependencies]
 # Connexion admin avec SSO :
-rustango = { version = "0.62", features = ["admin-sso"] }
+rustango = { version = "0.63", features = ["admin-sso"] }
 # SSO membre (utilisateur final) sans l'auto-admin :
-rustango = { version = "0.62", features = ["tenancy", "sso"] }
+rustango = { version = "0.63", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` et les anciens chemins du cœur `admin::sso::*` sont
@@ -272,6 +272,14 @@ nu reste derrière `admin-sso`. Activer ou désactiver la fonctionnalité
 7. Sinon, l'utilisateur est renvoyé vers la page de connexion avec une
    erreur générique (les détails vont dans le journal serveur, jamais dans
    le navigateur).
+
+Sur l'admin du tenant, `GET <login>/sso/<slug>?next=/chemin` mène à `/chemin`
+après la connexion. Le chemin voyage dans le cookie de flux signé et passe le
+même contrôle que la connexion par mot de passe : même origine uniquement, et
+dans le préfixe de chemin du tenant. Tout le reste mène à `admin_url`. La page
+de connexion transmet son propre `?next` aux boutons SSO. L'admin nu fait de
+même sans la règle du préfixe, garde le chemin pendant l'étape TOTP et revient
+à son préfixe.
 
 La table de liens est un modèle migré normal : dans le stockage du tenant
 pour les connexions tenant, et dans la base de l'admin pour le bare admin.

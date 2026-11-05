@@ -48,7 +48,7 @@ These follow standard Rust casing, the same as Python's PEP 8 split between clas
 ### Modules
 
 - **Singular** when the module holds ONE main type or concept: `cache`, `email`, `storage`, `signed_url`, `request_id`.
-- **Plural** when the module holds a COLLECTION of items: `bulk_actions`, `api_keys`, `passwords`, `forms`, `signals`.
+- **Plural** when the module holds a COLLECTION of items: `api_keys`, `passwords`, `forms`, `signals`.
 
 ---
 
@@ -173,7 +173,6 @@ You can **mix all three** in a single queryset.
 | Passwords | `passwords::*` | `PasswordError` |
 | Webhooks | `webhook::*` | `EmptySigningKey` from `sign`; `verify_*` returns `bool` |
 | Signed URLs | `signed_url::*` | `SignedUrlError` |
-| Bulk actions | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
 | IP filter | `ip_filter::*` | `IpFilterError` |
 | i18n | `i18n::*` | `I18nError` |
@@ -217,7 +216,6 @@ A module's name should let you **guess the type names inside it** without openin
 | `storage` | `Storage` trait, `*Storage` impls | high |
 | `signed_url` | `sign`, `verify` free fns | medium |
 | `text` | `slugify`, `html_escape`, `truncate` free fns | medium |
-| `bulk_actions` | `BulkActionRegistry`, `BulkAction`, `Bulk*Action` impls | high |
 | `api_keys` | `generate_key`, `verify_key`, `split_token` free fns | medium |
 
 **Avoid this:** a module that holds an unrelated grab-bag (`utils`, `helpers`, `common`). If you can't name the single concept it covers, it shouldn't be a module.
@@ -293,7 +291,7 @@ into `default`, means anyone opting out has to know all thirty-eight.
 To trim a binary that doesn't need everything, opt out of the defaults and list only what you use:
 
 ```toml
-rustango = { version = "0.62", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.63", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

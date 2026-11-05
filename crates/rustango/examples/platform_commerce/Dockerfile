@@ -2,7 +2,11 @@
 # docker-compose.yml uses; this one is for shipping.
 #
 #   docker build -t platform_commerce:latest .
-#   docker run --rm -p 8080:8080 -e DATABASE_URL=... platform_commerce:latest
+#   docker run --rm -p 8080:8080 -e DATABASE_URL=... \
+#     -e RUSTANGO_SESSION_SECRET=... -e RUSTANGO_SECRET_KEY=... platform_commerce:latest
+#
+# The image runs on the prod tier, which needs RUSTANGO_SESSION_SECRET
+# (`openssl rand -base64 32`) and RUSTANGO_SECRET_KEY (`openssl rand -base64 48`).
 #
 # Pick a non-default backend at build time:
 #   docker build --build-arg FEATURES=sqlite --build-arg NO_DEFAULT=1 .

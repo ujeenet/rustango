@@ -395,7 +395,7 @@ let app = axum::Router::new()
     .nest("/media", media_router_with(manager, MediaPerms::new(pool)));
 ```
 
-`media_router(manager)` — the old constructor — is deprecated and now
+`media_router(manager)` — the old constructor — is deprecated (removed in 0.64.0) and now
 answers `403` on every route. That is a deliberate behaviour change in
 0.57.7: before it, those routes took no authentication, authorization or
 tenant extractor at all, so `GET /media/{id}` returned the row **and a

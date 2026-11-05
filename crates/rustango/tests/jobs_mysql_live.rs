@@ -112,7 +112,10 @@ async fn reclaim_stuck_jobs_pool_resets_old_locks_on_mysql() {
     let Some(pool) = mysql_pool().await else {
         return;
     };
-    let Pool::Mysql(my) = &pool else {
+    // The only variant in a mysql-only build.
+    #[allow(irrefutable_let_patterns)]
+    let Pool::Mysql(my) = &pool
+    else {
         unreachable!()
     };
     // MySQL `rustango_jobs.locked_at` is `DATETIME(6)`; bind as

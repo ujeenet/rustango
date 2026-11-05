@@ -57,6 +57,60 @@ fn json_as_is(v: serde_json::Value) -> serde_json::Value {
     v
 }
 
+/// What a row decoder does with a cell it cannot read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnBadCell {
+    /// `null`, so a page still renders a dirty row.
+    Null,
+    /// The decode error: an export must not turn data into NULL.
+    Fail,
+}
+
+impl OnBadCell {
+    fn settle(
+        self,
+        cell: Result<serde_json::Value, sqlx::Error>,
+    ) -> Result<serde_json::Value, sqlx::Error> {
+        match (cell, self) {
+            (Err(_), Self::Null) => Ok(serde_json::Value::Null),
+            (cell, _) => cell,
+        }
+    }
+}
+
+/// How the `row_to_json` family reads each cell.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CellDecode {
+    pub(crate) json: JsonCell,
+    pub(crate) on_bad: OnBadCell,
+}
+
+impl CellDecode {
+    const LENIENT: Self = Self {
+        json: json_as_is,
+        on_bad: OnBadCell::Null,
+    };
+}
+
+/// A [`OnBadCell::Null`] decode, which has no error to return.
+fn lenient(row: Result<serde_json::Value, sqlx::Error>) -> serde_json::Value {
+    row.unwrap_or_else(|e| unreachable!("a lenient row decode failed: {e}"))
+}
+
+/// A float as JSON; NaN and infinity have no JSON form.
+fn finite(field: &crate::core::FieldSchema, n: f64) -> Result<serde_json::Value, sqlx::Error> {
+    serde_json::Number::from_f64(n)
+        .map(serde_json::Value::Number)
+        .ok_or_else(|| bad_cell(field, format!("{n} has no JSON form")))
+}
+
+fn bad_cell(field: &crate::core::FieldSchema, why: String) -> sqlx::Error {
+    sqlx::Error::ColumnDecode {
+        index: format!("{:?}", field.column),
+        source: why.into(),
+    }
+}
+
 /// Generic body for the PG + MySQL `row_to_json` variants — they
 /// emit byte-identical match-on-`FieldType` decode tables. Issue
 /// #562: extract into a generic-over-`sqlx::Row` function so the
@@ -73,10 +127,10 @@ fn json_as_is(v: serde_json::Value) -> serde_json::Value {
 fn row_to_json_generic<'r, R>(
     row: &'r R,
     fields: &[&'static crate::core::FieldSchema],
-    uuid_cell: fn(&'r R, &str) -> Option<uuid::Uuid>,
-    pg_only: fn(&'r R, &crate::core::FieldSchema) -> serde_json::Value,
-    json_cell: JsonCell,
-) -> serde_json::Value
+    uuid_cell: fn(&'r R, &str) -> Result<uuid::Uuid, sqlx::Error>,
+    pg_only: fn(&'r R, &crate::core::FieldSchema) -> Result<serde_json::Value, sqlx::Error>,
+    decode: CellDecode,
+) -> Result<serde_json::Value, sqlx::Error>
 where
     R: sqlx::Row,
     &'r str: sqlx::ColumnIndex<R>,
@@ -103,61 +157,36 @@ where
             continue;
         }
         let value = match field.ty {
-            FieldType::I16 => row
-                .try_get::<i16, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I32 => row
-                .try_get::<i32, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I64 => row
-                .try_get::<i64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
+            FieldType::I16 => row.try_get::<i16, _>(field.column).map(|n| json!(n)),
+            FieldType::I32 => row.try_get::<i32, _>(field.column).map(|n| json!(n)),
+            FieldType::I64 => row.try_get::<i64, _>(field.column).map(|n| json!(n)),
             FieldType::F32 => row
                 .try_get::<f32, _>(field.column)
-                .map(|n| crate::core::__json_value(&n))
-                .unwrap_or(Value::Null),
+                .and_then(|n| finite(field, f64::from(n)).map(|_| crate::core::__json_value(&n))),
             FieldType::F64 => row
                 .try_get::<f64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::Bool => row
-                .try_get::<bool, _>(field.column)
-                .map(|b| json!(b))
-                .unwrap_or(Value::Null),
-            FieldType::String => row
-                .try_get::<String, _>(field.column)
-                .map(|s| json!(s))
-                .unwrap_or(Value::Null),
+                .and_then(|n| finite(field, n)),
+            FieldType::Bool => row.try_get::<bool, _>(field.column).map(|b| json!(b)),
+            FieldType::String => row.try_get::<String, _>(field.column).map(|s| json!(s)),
             FieldType::Date => row
                 .try_get::<chrono::NaiveDate, _>(field.column)
-                .map(|d| json!(d.to_string()))
-                .unwrap_or(Value::Null),
+                .map(|d| json!(d.to_string())),
             FieldType::DateTime => row
                 .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
-                .map(|dt| json!(dt.to_rfc3339()))
-                .unwrap_or(Value::Null),
-            FieldType::Uuid => uuid_cell(row, field.column)
-                .map(|u| json!(u.to_string()))
-                .unwrap_or(Value::Null),
+                .map(|dt| json!(dt.to_rfc3339())),
+            FieldType::Uuid => uuid_cell(row, field.column).map(|u| json!(u.to_string())),
             FieldType::Json => row
                 .try_get::<serde_json::Value, _>(field.column)
-                .map(json_cell)
-                .unwrap_or(Value::Null),
+                .map(decode.json),
             FieldType::Decimal => row
                 .try_get::<rust_decimal::Decimal, _>(field.column)
-                .map(|d| json!(d.to_string()))
-                .unwrap_or(Value::Null),
+                .map(|d| json!(d.to_string())),
             FieldType::Binary => row
                 .try_get::<Vec<u8>, _>(field.column)
-                .map(|b| json!(hex_encode(&b)))
-                .unwrap_or(Value::Null),
+                .map(|b| json!(hex_encode(&b))),
             FieldType::Time => row
                 .try_get::<chrono::NaiveTime, _>(field.column)
-                .map(|t| json!(t.to_string()))
-                .unwrap_or(Value::Null),
+                .map(|t| json!(t.to_string())),
             // PG-only column types.
             FieldType::Array(_)
             | FieldType::Range(_)
@@ -165,9 +194,9 @@ where
             | FieldType::Vector(_)
             | FieldType::Geometry(_) => pg_only(row, field),
         };
-        map.insert(field.name.to_owned(), value);
+        map.insert(field.name.to_owned(), decode.on_bad.settle(value)?);
     }
-    Value::Object(map)
+    Ok(Value::Object(map))
 }
 
 #[must_use]
@@ -176,21 +205,21 @@ pub fn row_to_json(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_pg_with(row, fields, json_as_is)
+    lenient(row_to_json_pg_with(row, fields, CellDecode::LENIENT))
 }
 
 #[cfg(feature = "postgres")]
 fn row_to_json_pg_with(
     row: &sqlx::postgres::PgRow,
     fields: &[&'static crate::core::FieldSchema],
-    json_cell: JsonCell,
-) -> serde_json::Value {
+    decode: CellDecode,
+) -> Result<serde_json::Value, sqlx::Error> {
     row_to_json_generic(
         row,
         fields,
-        |row, col| sqlx::Row::try_get::<uuid::Uuid, _>(row, col).ok(),
+        |row, col| sqlx::Row::try_get::<uuid::Uuid, _>(row, col),
         pg_only_cell,
-        json_cell,
+        decode,
     )
 }
 
@@ -201,46 +230,54 @@ fn row_to_json_pg_with(
 fn pg_only_cell(
     row: &sqlx::postgres::PgRow,
     field: &crate::core::FieldSchema,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, sqlx::Error> {
     use crate::core::{ArrayElem, FieldType, RangeElem, SqlValue};
     use serde_json::Value;
     use sqlx::Row as _;
-    fn json<T: serde::Serialize, E>(r: Result<T, E>) -> Value {
-        r.ok()
-            .and_then(|v| serde_json::to_value(v).ok())
-            .unwrap_or(Value::Null)
-    }
-    fn literal<T, E>(r: Result<crate::sql::Range<T>, E>) -> Value
-    where
-        SqlValue: From<crate::sql::Range<T>>,
-    {
-        match r.map(SqlValue::from) {
-            Ok(SqlValue::RangeLiteral(s)) => Value::String(s),
-            _ => Value::Null,
-        }
-    }
+    let json = |r: Result<Value, serde_json::Error>| r.map_err(|e| bad_cell(field, e.to_string()));
+    let literal = |v: SqlValue| match v {
+        SqlValue::RangeLiteral(s) => Ok(Value::String(s)),
+        other => Err(bad_cell(field, format!("not a range literal: {other:?}"))),
+    };
     let col = field.column;
     match field.ty {
-        FieldType::Array(ArrayElem::Text) => json(row.try_get::<Vec<Option<String>>, _>(col)),
-        FieldType::Array(ArrayElem::Int) => json(row.try_get::<Vec<Option<i32>>, _>(col)),
-        FieldType::Array(ArrayElem::BigInt) => json(row.try_get::<Vec<Option<i64>>, _>(col)),
-        FieldType::Range(RangeElem::Int) => literal(row.try_get::<crate::sql::Range<i32>, _>(col)),
+        FieldType::Array(ArrayElem::Text) => json(serde_json::to_value(
+            row.try_get::<Vec<Option<String>>, _>(col)?,
+        )),
+        FieldType::Array(ArrayElem::Int) => json(serde_json::to_value(
+            row.try_get::<Vec<Option<i32>>, _>(col)?,
+        )),
+        FieldType::Array(ArrayElem::BigInt) => json(serde_json::to_value(
+            row.try_get::<Vec<Option<i64>>, _>(col)?,
+        )),
+        FieldType::Range(RangeElem::Int) => {
+            literal(row.try_get::<crate::sql::Range<i32>, _>(col)?.into())
+        }
         FieldType::Range(RangeElem::BigInt) => {
-            literal(row.try_get::<crate::sql::Range<i64>, _>(col))
+            literal(row.try_get::<crate::sql::Range<i64>, _>(col)?.into())
         }
-        FieldType::Range(RangeElem::Numeric) => {
-            literal(row.try_get::<crate::sql::Range<rust_decimal::Decimal>, _>(col))
-        }
-        FieldType::Range(RangeElem::Date) => {
-            literal(row.try_get::<crate::sql::Range<chrono::NaiveDate>, _>(col))
-        }
-        FieldType::Range(RangeElem::DateTime) => {
-            literal(row.try_get::<crate::sql::Range<chrono::DateTime<chrono::Utc>>, _>(col))
-        }
-        FieldType::HStore => json(row.try_get::<crate::sql::HStore, _>(col)),
-        FieldType::Vector(_) => json(row.try_get::<crate::sql::Vector, _>(col)),
-        FieldType::Geometry(_) => json(row.try_get::<crate::sql::Point, _>(col)),
-        _ => Value::Null,
+        FieldType::Range(RangeElem::Numeric) => literal(
+            row.try_get::<crate::sql::Range<rust_decimal::Decimal>, _>(col)?
+                .into(),
+        ),
+        FieldType::Range(RangeElem::Date) => literal(
+            row.try_get::<crate::sql::Range<chrono::NaiveDate>, _>(col)?
+                .into(),
+        ),
+        FieldType::Range(RangeElem::DateTime) => literal(
+            row.try_get::<crate::sql::Range<chrono::DateTime<chrono::Utc>>, _>(col)?
+                .into(),
+        ),
+        FieldType::HStore => json(serde_json::to_value(
+            row.try_get::<crate::sql::HStore, _>(col)?,
+        )),
+        FieldType::Vector(_) => json(serde_json::to_value(
+            row.try_get::<crate::sql::Vector, _>(col)?,
+        )),
+        FieldType::Geometry(_) => json(serde_json::to_value(
+            row.try_get::<crate::sql::Point, _>(col)?,
+        )),
+        _ => Ok(Value::Null),
     }
 }
 
@@ -255,22 +292,22 @@ pub fn row_to_json_my(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_my_with(row, fields, json_as_is)
+    lenient(row_to_json_my_with(row, fields, CellDecode::LENIENT))
 }
 
 #[cfg(feature = "mysql")]
 fn row_to_json_my_with(
     row: &sqlx::mysql::MySqlRow,
     fields: &[&'static crate::core::FieldSchema],
-    json_cell: JsonCell,
-) -> serde_json::Value {
+    decode: CellDecode,
+) -> Result<serde_json::Value, sqlx::Error> {
     row_to_json_generic(
         row,
         fields,
-        |row, col| crate::sql::try_get_flat_my::<uuid::Uuid>(row, col).ok(),
+        crate::sql::try_get_flat_my::<uuid::Uuid>,
         // PG-only types never live on MySQL.
-        |_, _| serde_json::Value::Null,
-        json_cell,
+        |_, _| Ok(serde_json::Value::Null),
+        decode,
     )
 }
 
@@ -286,132 +323,89 @@ pub fn row_to_json_sqlite(
     row: &sqlx::sqlite::SqliteRow,
     fields: &[&'static crate::core::FieldSchema],
 ) -> serde_json::Value {
-    row_to_json_sqlite_with(row, fields, json_as_is)
+    lenient(row_to_json_sqlite_with(row, fields, CellDecode::LENIENT))
 }
 
 #[cfg(feature = "sqlite")]
 fn row_to_json_sqlite_with(
     row: &sqlx::sqlite::SqliteRow,
     fields: &[&'static crate::core::FieldSchema],
-    json_cell: JsonCell,
-) -> serde_json::Value {
+    decode: CellDecode,
+) -> Result<serde_json::Value, sqlx::Error> {
     use crate::core::FieldType;
     use serde_json::{json, Value};
     use sqlx::Row as _;
+    // SQLite often stores DATE / TIME as TEXT: fall back to what is there.
+    let or_text = |cell: Result<Value, sqlx::Error>, col: &str| {
+        cell.or_else(|_| row.try_get::<String, _>(col).map(|s| json!(s)))
+    };
     let mut map = serde_json::Map::new();
     for field in fields {
         if cell_is_null(row, field.column) {
             map.insert(field.name.to_owned(), Value::Null);
             continue;
         }
+        let col = field.column;
         let value = match field.ty {
-            FieldType::I16 => row
-                .try_get::<i16, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I32 => row
-                .try_get::<i32, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::I64 => row
-                .try_get::<i64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
+            FieldType::I16 => row.try_get::<i16, _>(col).map(|n| json!(n)),
+            FieldType::I32 => row.try_get::<i32, _>(col).map(|n| json!(n)),
+            FieldType::I64 => row.try_get::<i64, _>(col).map(|n| json!(n)),
             FieldType::F32 => row
-                .try_get::<f32, _>(field.column)
-                .map(|n| crate::core::__json_value(&n))
-                .unwrap_or(Value::Null),
-            FieldType::F64 => row
-                .try_get::<f64, _>(field.column)
-                .map(|n| json!(n))
-                .unwrap_or(Value::Null),
-            FieldType::Bool => row
-                .try_get::<bool, _>(field.column)
-                .map(|b| json!(b))
-                .unwrap_or(Value::Null),
-            FieldType::String => row
-                .try_get::<String, _>(field.column)
-                .map(|s| json!(s))
-                .unwrap_or(Value::Null),
-            FieldType::Date => row
-                .try_get::<chrono::NaiveDate, _>(field.column)
-                .map(|d| json!(d.to_string()))
-                .unwrap_or_else(|_| {
-                    // SQLite often stores DATE as TEXT — fall back to
-                    // a raw string decode so callers see what's there
-                    // instead of `null`.
-                    row.try_get::<String, _>(field.column)
-                        .map(|s| json!(s))
-                        .unwrap_or(Value::Null)
-                }),
-            FieldType::DateTime => row
-                .try_get::<chrono::DateTime<chrono::Utc>, _>(field.column)
-                .map(|dt| json!(dt.to_rfc3339()))
-                .unwrap_or_else(|_| {
-                    row.try_get::<String, _>(field.column)
-                        .map(|s| json!(s))
-                        .unwrap_or(Value::Null)
-                }),
+                .try_get::<f32, _>(col)
+                .and_then(|n| finite(field, f64::from(n)).map(|_| crate::core::__json_value(&n))),
+            FieldType::F64 => row.try_get::<f64, _>(col).and_then(|n| finite(field, n)),
+            FieldType::Bool => row.try_get::<bool, _>(col).map(|b| json!(b)),
+            FieldType::String => row.try_get::<String, _>(col).map(|s| json!(s)),
+            FieldType::Date => or_text(
+                row.try_get::<chrono::NaiveDate, _>(col)
+                    .map(|d| json!(d.to_string())),
+                col,
+            ),
+            FieldType::DateTime => or_text(
+                row.try_get::<chrono::DateTime<chrono::Utc>, _>(col)
+                    .map(|dt| json!(dt.to_rfc3339())),
+                col,
+            ),
             // sqlx binds a Uuid as a 16-byte BLOB; older rows may be TEXT.
-            FieldType::Uuid => row
-                .try_get::<uuid::Uuid, _>(field.column)
-                .map(|u| json!(u.to_string()))
-                .or_else(|_| row.try_get::<String, _>(field.column).map(|u| json!(u)))
-                .unwrap_or(Value::Null),
-            FieldType::Json => {
-                // SQLite stores JSON as TEXT; try parsing back to
-                // Value, else surface the raw string.
-                match row.try_get::<String, _>(field.column) {
-                    Ok(s) => json_cell(serde_json::from_str(&s).unwrap_or(Value::String(s))),
-                    Err(_) => Value::Null,
+            FieldType::Uuid => or_text(
+                row.try_get::<uuid::Uuid, _>(col)
+                    .map(|u| json!(u.to_string())),
+                col,
+            ),
+            // SQLite stores JSON as TEXT; text that does not parse is kept
+            // as a string, or refused by a strict decode.
+            FieldType::Json => row.try_get::<String, _>(col).and_then(|s| {
+                match (serde_json::from_str(&s), decode.on_bad) {
+                    (Ok(v), _) => Ok((decode.json)(v)),
+                    (Err(_), OnBadCell::Null) => Ok(Value::String(s)),
+                    (Err(e), OnBadCell::Fail) => Err(bad_cell(field, format!("not JSON: {e}"))),
                 }
-            }
-            FieldType::Decimal => {
-                // SQLite has no `rust_decimal::Decimal: Decode<Sqlite>`
-                // impl, so we read NUMERIC-affinity columns as TEXT.
-                // The `bind_match_sqlite!` macro round-trips via
-                // `.to_string()` so the stored representation lines up.
-                row.try_get::<String, _>(field.column)
-                    .map(|s| json!(s))
-                    // NUMERIC affinity stores `1` as INTEGER, `1.5` as REAL.
-                    .or_else(|_| {
-                        row.try_get::<i64, _>(field.column)
-                            .map(|n| json!(n.to_string()))
-                    })
-                    .or_else(|_| {
-                        row.try_get::<f64, _>(field.column)
-                            .map(|n| json!(n.to_string()))
-                    })
-                    .unwrap_or(Value::Null)
-            }
+            }),
+            // No `Decimal: Decode<Sqlite>`: read TEXT, as the binder writes it.
+            // NUMERIC affinity stores `1` as INTEGER, `1.5` as REAL.
+            FieldType::Decimal => row
+                .try_get::<String, _>(col)
+                .map(|s| json!(s))
+                .or_else(|_| row.try_get::<i64, _>(col).map(|n| json!(n.to_string())))
+                .or_else(|_| row.try_get::<f64, _>(col).map(|n| json!(n.to_string()))),
             FieldType::Binary => row
-                .try_get::<Vec<u8>, _>(field.column)
-                .map(|b| json!(hex_encode(&b)))
-                .unwrap_or(Value::Null),
-            FieldType::Time => row
-                .try_get::<chrono::NaiveTime, _>(field.column)
-                .map(|t| json!(t.to_string()))
-                .unwrap_or_else(|_| {
-                    // SQLite stores TIME as TEXT — fall back to raw
-                    // string decode for non-`HH:MM:SS` shapes.
-                    row.try_get::<String, _>(field.column)
-                        .map(|s| json!(s))
-                        .unwrap_or(Value::Null)
-                }),
-            // #341 — arrays are PG-only; never present on SQLite.
-            FieldType::Array(_) => Value::Null,
-            // #343 — ranges are PG-only; never present on SQLite.
-            FieldType::Range(_) => Value::Null,
-            // #342 — hstore is PG-only; never present on SQLite.
-            FieldType::HStore => Value::Null,
-            // #824 — pgvector is PG-only; typed fetch decodes via `Vector`.
-            FieldType::Vector(_) => Value::Null,
-            // #443 — PostGIS geometry is PG-only; never present on SQLite.
-            FieldType::Geometry(_) => Value::Null,
+                .try_get::<Vec<u8>, _>(col)
+                .map(|b| json!(hex_encode(&b))),
+            FieldType::Time => or_text(
+                row.try_get::<chrono::NaiveTime, _>(col)
+                    .map(|t| json!(t.to_string())),
+                col,
+            ),
+            // PG-only types never live on SQLite.
+            FieldType::Array(_)
+            | FieldType::Range(_)
+            | FieldType::HStore
+            | FieldType::Vector(_)
+            | FieldType::Geometry(_) => Ok(Value::Null),
         };
-        map.insert(field.name.to_owned(), value);
+        map.insert(field.name.to_owned(), decode.on_bad.settle(value)?);
     }
-    Value::Object(map)
+    Ok(Value::Object(map))
 }
 
 /// Tri-dialect SELECT → JSON: run `query` against `pool` and return
@@ -433,15 +427,15 @@ pub async fn select_rows_as_json(
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
 ) -> Result<Vec<serde_json::Value>, ExecError> {
-    select_rows_as_json_with(pool, query, fields, json_as_is).await
+    select_rows_as_json_with(pool, query, fields, CellDecode::LENIENT).await
 }
 
-/// [`select_rows_as_json`] with each JSON column value passed through `json_cell`.
+/// [`select_rows_as_json`] reading each cell as `decode` says.
 pub(crate) async fn select_rows_as_json_with(
     pool: &Pool,
     query: &SelectQuery,
     fields: &[&'static crate::core::FieldSchema],
-    json_cell: JsonCell,
+    decode: CellDecode,
 ) -> Result<Vec<serde_json::Value>, ExecError> {
     crate::test_assertions::query_counter::bump();
     let stmt = pool.dialect().compile_select(query)?;
@@ -456,11 +450,11 @@ pub(crate) async fn select_rows_as_json_with(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let mut json = row_to_json_pg_with(r, fields, json_cell);
+                    let mut json = row_to_json_pg_with(r, fields, decode)?;
                     augment_joined_columns_pg(&mut json, r, &query.joins);
-                    json
+                    Ok(json)
                 })
-                .collect())
+                .collect::<Result<_, sqlx::Error>>()?)
         }
         #[cfg(feature = "mysql")]
         Pool::Mysql(my) => {
@@ -473,11 +467,11 @@ pub(crate) async fn select_rows_as_json_with(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let mut json = row_to_json_my_with(r, fields, json_cell);
+                    let mut json = row_to_json_my_with(r, fields, decode)?;
                     augment_joined_columns_my(&mut json, r, &query.joins);
-                    json
+                    Ok(json)
                 })
-                .collect())
+                .collect::<Result<_, sqlx::Error>>()?)
         }
         #[cfg(feature = "sqlite")]
         Pool::Sqlite(sq) => {
@@ -490,11 +484,11 @@ pub(crate) async fn select_rows_as_json_with(
             Ok(rows
                 .iter()
                 .map(|r| {
-                    let mut json = row_to_json_sqlite_with(r, fields, json_cell);
+                    let mut json = row_to_json_sqlite_with(r, fields, decode)?;
                     augment_joined_columns_sqlite(&mut json, r, &query.joins);
-                    json
+                    Ok(json)
                 })
-                .collect())
+                .collect::<Result<_, sqlx::Error>>()?)
         }
     }
 }

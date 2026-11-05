@@ -1444,3 +1444,126 @@ async fn console_pages_speak_to_operators_and_impersonate_flashes_refusals() {
     let location = missing.headers()["location"].to_str().unwrap();
     assert!(location.starts_with("/orgs?error="), "{location}");
 }
+
+/// A tenant row a bulk action stamps; the `view` hook hides id 2.
+#[derive(rustango::Model, Debug, Clone)]
+#[rustango(table = "ta_ctx", admin(actions = "stamp_selected"))]
+#[allow(dead_code)]
+pub struct TaCtx {
+    #[rustango(primary_key)]
+    pub id: i64,
+    #[rustango(max_length = 20)]
+    pub note: String,
+}
+
+static CTX_HOOK_ACTORS: std::sync::Mutex<Vec<Actor>> = std::sync::Mutex::new(Vec::new());
+
+fn ta_ctx_view(parts: &axum::http::request::Parts, row: Option<&serde_json::Value>) -> bool {
+    CTX_HOOK_ACTORS.lock().unwrap().push(Actor::of(parts));
+    row.and_then(|r| r.get("id").and_then(serde_json::Value::as_i64)) != Some(2)
+}
+rustango::register_object_permission!("ta_ctx", "view", ta_ctx_view);
+
+type TaSeen = (Vec<rustango::core::SqlValue>, Actor, Option<String>);
+static TA_SEEN: std::sync::Mutex<Vec<TaSeen>> = std::sync::Mutex::new(Vec::new());
+
+/// Under the tenant admin, an action writes in the tenant's transaction
+/// with the checked rows, the signed-in user and the tenant.
+#[tokio::test]
+async fn a_tenant_action_gets_the_tenant_tx_rows_user_and_org() {
+    use rustango::admin::{ActionCtx, ActionPerm, AdminActionFuture};
+    use rustango::core::{Assignment, Filter, Model as _, Op, SqlValue, UpdateQuery, WhereExpr};
+    fn stamp(mut ctx: ActionCtx<'_>) -> AdminActionFuture<'_> {
+        TA_SEEN.lock().unwrap().push((
+            ctx.pks().to_vec(),
+            ctx.actor().clone(),
+            ctx.org().map(|o| o.slug.clone()),
+        ));
+        Box::pin(async move {
+            let q = UpdateQuery::new(
+                TaCtx::SCHEMA,
+                vec![Assignment::new("note", SqlValue::String("done".into()))],
+                WhereExpr::Predicate(Filter::new(
+                    "id",
+                    Op::In,
+                    SqlValue::List(ctx.pks().to_vec()),
+                )),
+            );
+            rustango::sql::update_tx(ctx.tx(), &q).await?;
+            Ok(())
+        })
+    }
+    let env = boot().await;
+    rustango::testkit::create_tables_for::<TaCtx>(&env.tenant)
+        .await
+        .expect("ta_ctx table");
+    for id in 1..=3 {
+        TaCtx {
+            id,
+            note: "new".into(),
+        }
+        .insert(&env.tenant)
+        .await
+        .expect("seed");
+    }
+    let mut user = User {
+        is_superuser: true,
+        ..rustango::testkit::user()
+    };
+    user.insert(&env.tenant).await.expect("seed user");
+    let uid = user.id.get().copied().unwrap();
+    let login = TenantSessionPayload::new(
+        uid,
+        &env.bound,
+        3600,
+        PasswordFingerprint::of(&env.secret, &user.password_hash),
+    );
+    let cookie = format!("{COOKIE_NAME}={}", encode(&env.secret, &login));
+    let admin = TenantAdminBuilder::new(
+        env.pools.clone(),
+        env.reg_url.clone(),
+        ChainResolver::new().push(SubdomainResolver::new("app.test")),
+    )
+    .routes(RouteConfig::legacy())
+    .with_session(env.secret.clone())
+    .register_action("ta_ctx", "stamp_selected", ActionPerm::Change, stamp)
+    .build();
+    let env = Env { admin, ..env };
+    let resp = env
+        .post(
+            "/__admin/ta_ctx/__action",
+            &cookie,
+            "action=stamp_selected&_selected=1&_selected=2&_selected=3",
+        )
+        .await;
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let seen = TA_SEEN.lock().unwrap().clone();
+    let [(pks, actor, org)] = seen.as_slice() else {
+        panic!("the handler ran once: {seen:?}");
+    };
+    assert_eq!(pks, &vec![SqlValue::I64(1), SqlValue::I64(3)]);
+    let Actor::TenantUser { id, tenant, .. } = actor else {
+        panic!("the signed-in user, got {actor:?}");
+    };
+    assert_eq!((*id, tenant.as_deref()), (uid, Some(env.slug.as_str())));
+    let hooks = CTX_HOOK_ACTORS.lock().unwrap().clone();
+    assert!(
+        !hooks.is_empty() && hooks.iter().all(|a| a == actor),
+        "{hooks:?}"
+    );
+    assert_eq!(org.as_deref(), Some(env.slug.as_str()));
+    let notes: Vec<String> = TaCtx::objects()
+        .order_by(&[("id", false)])
+        .fetch(&env.tenant)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.note)
+        .collect();
+    assert_eq!(
+        notes,
+        ["done", "new", "done"],
+        "written in the tenant's transaction"
+    );
+}

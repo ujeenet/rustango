@@ -3,11 +3,6 @@
 
 use axum::http::request::Parts;
 
-/// The tenant the request was routed to, set by the tenant-mounted admin
-/// and ViewSet. A credential pinned to another tenant counts for nothing.
-#[derive(Clone, Debug)]
-pub(crate) struct RequestTenant(pub(crate) String);
-
 /// The identity behind a request, as a hook sees it.
 ///
 /// Built only from extensions a verifying middleware set: the admin's
@@ -49,6 +44,44 @@ pub enum Actor {
     Anonymous,
 }
 
+#[cfg(feature = "tenancy")]
+type Routed = crate::tenancy::TenantSlug;
+
+/// Stands in for the routed tenant when there is no tenancy: never present.
+#[cfg(not(feature = "tenancy"))]
+#[allow(dead_code)]
+struct Routed {
+    slug: String,
+}
+
+/// Whether a credential for `slug` belongs on the `routed` tenant: the org id
+/// must match too, so a credential of a purged tenant is nobody under the
+/// tenant that reused its slug.
+#[cfg_attr(not(feature = "tenancy"), allow(unused_variables))]
+fn bound_to(parts: &Parts, slug: Option<&str>, routed: Option<&Routed>) -> bool {
+    match (slug, routed) {
+        (None, None) => true,
+        #[cfg(feature = "tenancy")]
+        (Some(slug), Some(routed)) => {
+            credential_tenant(parts).is_some_and(|t| t.slug == slug && t == *routed)
+        }
+        _ => false,
+    }
+}
+
+/// The tenant, with its org id, an auth layer bound the credential to.
+#[cfg(feature = "tenancy")]
+pub(crate) fn credential_tenant(parts: &Parts) -> Option<crate::tenancy::TenantSlug> {
+    if let Some(t) = parts.extensions.get::<crate::tenancy::TenantSlug>() {
+        return Some(t.clone());
+    }
+    #[cfg(feature = "mcp")]
+    if let Some(a) = parts.extensions.get::<crate::mcp::auth::McpAgent>() {
+        return Some(crate::tenancy::TenantSlug::new(a.org_id, a.tenant.clone()));
+    }
+    None
+}
+
 impl Actor {
     /// Resolve the actor of an admin or ViewSet request, the two that mark
     /// the routed tenant. A credential bound to another tenant, a credential
@@ -56,16 +89,18 @@ impl Actor {
     /// untenanted route resolves to `Anonymous`.
     #[must_use]
     pub fn of(parts: &Parts) -> Self {
-        let routed = parts
-            .extensions
-            .get::<RequestTenant>()
-            .map(|t| t.0.as_str());
+        // The tenant the request was routed to: a credential pinned to another counts for nothing.
+        #[cfg(feature = "tenancy")]
+        let routed = crate::tenancy::RequestTenant::get(&parts.extensions)
+            .and_then(crate::tenancy::RequestTenant::tenant);
+        #[cfg(not(feature = "tenancy"))]
+        let routed: Option<&Routed> = None;
         // The admin router marks its requests: only its session counts there.
         if let Some(scoped) = parts.extensions.get::<crate::admin::session::PermsScoped>() {
-            return Self::admin(parts, scoped.0, routed);
+            return Self::admin(parts, scoped.0, routed.map(|t| t.slug.as_str()));
         }
         let actor = Self::api(parts);
-        if actor.tenant() == routed {
+        if bound_to(parts, actor.tenant(), routed) {
             actor
         } else {
             Self::Anonymous
@@ -183,6 +218,12 @@ mod tests {
         p
     }
 
+    /// The marker the dispatcher, the tenant admin and ViewSets set.
+    #[cfg(feature = "tenancy")]
+    fn routed_to(slug: &str) -> crate::tenancy::RequestTenant {
+        crate::tenancy::RequestTenant::Tenant(crate::tenancy::TenantSlug::new(1, slug))
+    }
+
     #[test]
     fn nothing_is_anonymous_and_never_superuser() {
         assert_eq!(Actor::of(&parts()), Actor::Anonymous);
@@ -211,6 +252,7 @@ mod tests {
     }
 
     /// Impersonation is superuser only in the tenant the request was routed to.
+    #[cfg(feature = "tenancy")]
     #[test]
     fn impersonation_counts_only_for_the_routed_tenant() {
         let imp = |routed: Option<&str>| {
@@ -218,7 +260,7 @@ mod tests {
                 e.insert(PermsScoped(false));
                 e.insert(AdminSession::impersonation(9));
                 if let Some(t) = routed {
-                    e.insert(RequestTenant(t.to_owned()));
+                    e.insert(routed_to(t));
                 }
             })
         };
@@ -238,6 +280,7 @@ mod tests {
         assert_eq!(Actor::of(&api), Actor::Anonymous);
     }
 
+    #[cfg(feature = "tenancy")]
     #[test]
     fn an_admin_session_outside_the_admin_is_its_user() {
         let p = with(|e| {
@@ -247,7 +290,7 @@ mod tests {
         // A tenant route does not take an untenanted session.
         let routed = with(|e| {
             e.insert(AdminSession::new(4, "b", true));
-            e.insert(RequestTenant("acme".into()));
+            e.insert(routed_to("acme"));
         });
         assert_eq!(Actor::of(&routed), Actor::Anonymous);
     }
@@ -264,7 +307,7 @@ mod tests {
                     is_superuser: true,
                 });
                 e.insert(TenantSlug::new(1, slug));
-                e.insert(RequestTenant(routed.to_owned()));
+                e.insert(routed_to(routed));
             })
         };
         assert_eq!(
@@ -278,6 +321,19 @@ mod tests {
         // A credential for one tenant on the other's route is nobody.
         assert_eq!(Actor::of(&user("acme", "beta")), Actor::Anonymous);
         assert!(!is_superuser(&user("acme", "beta")));
+        // Nor on the route of the tenant that reused its slug (org 2).
+        let heir = with(|e| {
+            e.insert(AuthenticatedUser {
+                id: 7,
+                username: "ada".into(),
+                is_superuser: true,
+            });
+            e.insert(TenantSlug::new(1, "acme"));
+            e.insert(crate::tenancy::RequestTenant::Tenant(TenantSlug::new(
+                2, "acme",
+            )));
+        });
+        assert_eq!(Actor::of(&heir), Actor::Anonymous);
     }
 
     /// A tenant credential on a route with no tenant counts for nothing.
@@ -303,6 +359,7 @@ mod tests {
         let agent = |owner| {
             with(|e| {
                 e.insert(crate::mcp::auth::McpAgent {
+                    org_id: 1,
                     agent_id: 5,
                     tenant: "acme".into(),
                     skills: vec![],
@@ -311,9 +368,16 @@ mod tests {
                     jti: "j".into(),
                     secret_prefix: "p".into(),
                 });
-                e.insert(RequestTenant("acme".into()));
+                e.insert(routed_to("acme"));
             })
         };
+        // A token of org 1 is nobody under org 2 that reused the slug.
+        let mut heir = agent(Some(7));
+        heir.extensions
+            .insert(crate::tenancy::RequestTenant::Tenant(
+                crate::tenancy::TenantSlug::new(2, "acme"),
+            ));
+        assert_eq!(Actor::of(&heir), Actor::Anonymous);
         for owner in [Some(7), None] {
             let p = agent(owner);
             assert_eq!(

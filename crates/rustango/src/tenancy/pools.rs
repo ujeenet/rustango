@@ -108,11 +108,11 @@ pub struct TenantPoolsConfig {
     /// `None` disables. Default: `Some(30 minutes)`.
     pub database_pool_max_lifetime: Option<std::time::Duration>,
 
-    /// When `true`, [`TenantPools`] eagerly builds pools for every
-    /// active database-mode tenant at construction time (`new()` /
-    /// `with_secrets()`). Bounded by `max_cached_database_pools`.
-    /// Schema-mode tenants are never pre-warmed (they share the
-    /// registry pool which is already up). Default: `false`.
+    /// When `true`, the server builder (`Builder::into_router`) builds
+    /// pools for every active database-mode tenant before it serves,
+    /// through [`TenantPools::prewarm_database_tenants`]. Bounded by
+    /// `max_cached_database_pools`. Schema-mode tenants are not
+    /// pre-warmed: their pools are built on first use. Default: `false`.
     pub prewarm_active_tenants: bool,
 
     // v0.53 — schema-mode scoped-pool caching (#1235).
@@ -544,6 +544,10 @@ pub(super) fn evict_to_fit<DB: Database>(
     evicted
 }
 
+/// How long [`TenantPools::close_tenant`] waits for connections in use: a
+/// long query must not stall a decommission.
+pub const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct TenantPools<DB: Database = DefaultTenantDb> {
     registry: sqlx::Pool<DB>,
     config: TenantPoolsConfig,
@@ -864,10 +868,47 @@ impl<DB: Database> TenantPools<DB> {
     /// otherwise keep being served a pool pointing at the old schema —
     /// a cross-tenant read, and the exact failure #1224 was about.
     pub async fn invalidate(&self, slug: &str) {
-        self.cache.write().await.remove(slug);
-        self.scoped_cache.write().await.remove(slug);
-        self.held_cache.write().await.remove(slug);
-        self.held_database_cache.write().await.remove(slug);
+        drop(self.take_cached(slug).await);
+    }
+
+    /// [`Self::invalidate`], then close those pools, waiting up to
+    /// [`CLOSE_WAIT`] for connections in use: before a tenant's database is
+    /// removed, as Windows refuses to delete a file that is still open.
+    /// `false` when one was still in use; it closes once returned.
+    pub async fn close_tenant(&self, slug: &str) -> bool {
+        let mut all = true;
+        for pool in self.take_cached(slug).await {
+            if tokio::time::timeout(CLOSE_WAIT, pool.close())
+                .await
+                .is_err()
+            {
+                all = false;
+                tracing::warn!(
+                    target: "rustango::tenancy::pools",
+                    slug,
+                    "a tenant connection was still in use after {}s; going on without it",
+                    CLOSE_WAIT.as_secs()
+                );
+            }
+        }
+        all
+    }
+
+    /// Remove `slug`'s pools from every cache, handing them back.
+    async fn take_cached(&self, slug: &str) -> Vec<Arc<sqlx::Pool<DB>>> {
+        let caches = [
+            &self.cache,
+            &self.scoped_cache,
+            &self.held_cache,
+            &self.held_database_cache,
+        ];
+        let mut out = Vec::new();
+        for cache in caches {
+            if let Some(entry) = cache.write().await.remove(slug) {
+                out.push(entry.pool);
+            }
+        }
+        out
     }
 }
 
@@ -2266,10 +2307,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("registry.db");
         let url = format!("sqlite:{}", file.display());
-        // First call wins; nextest runs each test in its own process.
+        // First call wins, and under `cargo test` another test may win
+        // without a size; either way the tuning is sealed from here on.
         let mut tuning = crate::sql::PoolTuning::default();
         tuning.max_connections = Some(3);
         crate::sql::configure_pools(tuning);
+        let want = crate::sql::pool_tuning()
+            .max_connections
+            .unwrap_or_else(|| sqlx::sqlite::SqlitePoolOptions::new().get_max_connections());
         let pool = <sqlx::Sqlite as RegistryConnect>::connect_registry(&url)
             .await
             .expect("a missing registry file is created");
@@ -2279,7 +2324,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(mode.to_ascii_lowercase(), "wal");
-        let want = crate::sql::pool_tuning().max_connections.expect("tuned");
         assert_eq!(
             pool.options().get_max_connections(),
             want,

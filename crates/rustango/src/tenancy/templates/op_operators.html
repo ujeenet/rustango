@@ -129,12 +129,11 @@ reach every tenant, so this list is the console's access control.</p>
     <legend>Add an operator</legend>
     <table>
       <tr>
-        <th><label for="username">username</label></th>
+        <th><label for="username">{{ label.username }}</label></th>
         <td>
           <input type="text" id="username" name="username" required
                  maxlength="64" autocomplete="off" placeholder="jordan">
-          <div class="field-helper">Their login handle, unique across
-          the registry.</div>
+          <div class="field-helper">{{ help.username | help_html | safe }}</div>
         </td>
       </tr>
       <tr>

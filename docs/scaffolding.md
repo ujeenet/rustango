@@ -142,7 +142,7 @@ A template turns on a sensible set; `--features` adds the opt-ins none of them r
 | `jobs` / `jobs-postgres` | Background job queue, in-process / database-backed so it survives restarts |
 | `scheduler` | Fixed-interval background tasks |
 | `email-smtp` | SMTP transport for the email framework |
-| `mcp` | Model Context Protocol server for AI agents |
+| `mcp` | Model Context Protocol server for AI agents (tenant template only) |
 | `http2` | Serve cleartext HTTP/2 (h2c) next to HTTP/1 |
 | `testkit` / `test_utils` | Test-only schema builders, factories, and constructors |
 
@@ -158,7 +158,7 @@ cargo rgo new shop --alias rgo
 
 ```toml
 [dependencies]
-rgo = { package = "rustango", version = "0.62", default-features = false, features = ["batteries"] }
+rgo = { package = "rustango", version = "0.63", default-features = false, features = ["batteries"] }
 
 [features]
 postgres = ["rgo/postgres"]
@@ -234,7 +234,7 @@ So `cargo run` starts the server, and `cargo run -- <verb>` runs migrations, gen
 How the templates differ inside `main.rs` / `urls.rs`:
 
 - **api** — no admin; `urls::api()` simply aggregates your own routes.
-- **fullstack** — same `urls.rs`, plus `admin_prefix(&settings)` and an `admin_router(pool, &settings)` helper that `main.rs` mounts with `Cli::nest_with(urls::admin_prefix(&settings), …)`, built from the server's pool. The prefix is `[admin] url_prefix` (or `[routes] admin_url`), else `/admin`. `main.rs` loads the settings once and passes them to the `Cli` with `with_loaded_settings`. It takes `rustango::sql::Pool`, so it names no driver, and sits behind a login: create the account with `cargo run -- create-admin <username> --superuser` (see [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin)).
+- **fullstack** — same `urls.rs`, plus `admin_prefix(&settings)` and an `admin_router(pool, &settings)` helper that `main.rs` mounts with `Cli::try_nest_with(urls::admin_prefix(&settings), …)`, built from the server's pool. The prefix is `[admin] url_prefix` (or `[routes] admin_url`), else `/admin`. `main.rs` loads the settings once and passes them to the `Cli` with `with_loaded_settings`. It takes `rustango::sql::Pool`, so it names no driver, and sits behind a login: create the account with `cargo run -- create-admin <username> --superuser` (see [getting started, Step 11](getting-started.md#step-11-turn-on-the-auto-admin)).
 - **tenant** — `main.rs` adds `.tenancy()`, serving the operator console at the apex domain and each tenant under its own subdomain, and `.with_tenant_provisioning("migrations")` for the console's **New tenant** and **Database servers** pages (delete it to turn them off; saving a server needs `RUSTANGO_SECRET_KEY`). The framework's own tables are generated into a **`system/migrations/`** folder from the compiled models on the first `cargo run -- migrate` — no hand-shipped bootstrap JSON, so the very first migrate works with no extra setup.
 
 ### Layered configuration
@@ -262,7 +262,8 @@ cp .env.example .env                     # then change `postgres` -> `localhost`
 docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
 cargo run -- makemigrations              # generate the framework's (and your) tables
 cargo run -- migrate                     # apply them
-cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run -- create-admin admin --superuser  # fullstack: the admin login (any username)
+cargo run -- create-operator ops              # tenant: the operator console login
 cargo run                                # serve
 cargo run -- --help                      # see every manage verb
 ```

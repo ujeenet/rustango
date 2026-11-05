@@ -100,9 +100,9 @@ fn client_ip(parts: &Parts) -> ClientIp {
         .unwrap_or_else(|| ClientIp::from_parts(&parts.extensions, &parts.headers))
 }
 
-fn tenant_slug(parts: &Parts) -> Result<&str, AuthError> {
+fn request_tenant(parts: &Parts) -> Result<&super::TenantSlug, AuthError> {
     match parts.extensions.get::<super::TenantSlug>() {
-        Some(t) => Ok(&t.slug),
+        Some(t) => Ok(t),
         None => {
             tracing::error!(
                 "auth backend ran without a TenantSlug; use require_auth / optional_auth"
@@ -243,8 +243,9 @@ impl AuthBackend for ModelBackend {
         // Own lock scope, apart from the login forms; only failures count.
         // Sent on every request: admitted before the lookup, so a locked or
         // spent caller is refused first and a burst holds slots, not checks.
-        let slug = tenant_slug(parts)?;
-        let scope = LoginScope::TenantBasic(slug.to_owned());
+        let tenant = request_tenant(parts)?;
+        let slug = tenant.slug.as_str();
+        let scope = LoginScope::TenantBasic(tenant.clone());
         let refused = AuthError::Refused;
         let mut attempt = crate::login_throttle::shared()
             .begin_per_request(&scope, &client_ip(parts), &username)
@@ -358,6 +359,10 @@ pub struct ApiKey {
     pub id: crate::sql::Auto<i64>,
     /// `rustango_users.id`
     #[rustango(fk = "rustango_users", on = "id", on_delete = "cascade")]
+    #[rustango(
+        help_text = "The user the key signs in as. Security: requests with the key get this user's permissions."
+    )]
+    #[rustango(verbose_name = "User")]
     pub user_id: i64,
     /// 8-char hex prefix — public, used to look up the row. Stored in
     /// plaintext by design (it's the lookup index). Audit L4: this is an
@@ -370,20 +375,34 @@ pub struct ApiKey {
     /// at 100k keys against 0.025 ms indexed, growing with every key
     /// ever issued (#1647).
     #[rustango(max_length = 8, index)]
+    #[rustango(
+        help_text = "First 8 hex characters of the key, used to find it. Public by design: it does not reveal the secret."
+    )]
+    #[rustango(verbose_name = "Key prefix")]
     pub key_prefix: String,
     /// `hmac-sha256v2$<hex>` under a sub-key of the server secret;
     /// `hmac-sha256$` (the secret itself) still verifies; argon2id rows are
     /// rewritten on first use.
     /// Never returned to callers.
     #[rustango(secret, max_length = 255)]
+    #[rustango(
+        help_text = "One-way hash of the secret part; the key itself is shown once at creation and never stored."
+    )]
+    #[rustango(verbose_name = "Key hash")]
     pub key_hash: String,
     /// Human-readable label (e.g. "CI pipeline key").
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "What the key is for, e.g. `CI pipeline`.")]
+    #[rustango(verbose_name = "Label")]
     pub label: String,
     /// Optional expiry. `None` = never expires.
+    #[rustango(help_text = "After this time the key is refused. Empty means it never expires.")]
+    #[rustango(verbose_name = "Expires at")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Set on INSERT via `DEFAULT NOW()`.
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -403,7 +422,8 @@ crate::register_admin_superuser_fields!(ApiKey, Add, [user_id]);
 #[cfg(feature = "admin")]
 crate::register_admin_superuser_fields!(ApiKey, Change, [user_id]);
 
-/// v0.38 — tri-dialect counterpart of [`ensure_api_keys_table`].
+/// Create the API keys table if missing, on every backend.
+///
 /// Picks the per-dialect DDL constant based on `pool.dialect().name()`
 /// and runs each statement separately (sqlx's simple-prepare rejects
 /// multi-statement strings).
@@ -454,7 +474,7 @@ impl AuthBackend for ApiKeyBackend {
         // Two indexed ORM round-trips: the key by prefix, then its user.
         // Failures per IP and per tenant; no lock, the prefix is no account.
         // Sent on every request: admitted before the lookup, only a miss counts.
-        let scope = LoginScope::TenantApiKey(tenant_slug(parts)?.to_owned());
+        let scope = LoginScope::TenantApiKey(request_tenant(parts)?.clone());
         let mut attempt = crate::login_throttle::shared()
             .begin_per_request(&scope, &client_ip(parts), "")
             .await
@@ -1195,7 +1215,7 @@ mod tests {
     async fn a_locked_basic_account_is_refused_before_the_lookup() {
         use crate::login_throttle::LoginRefused;
         use base64::Engine as _;
-        let scope = LoginScope::TenantBasic("t-prelock".into());
+        let scope = LoginScope::TenantBasic(crate::tenancy::TenantSlug::new(1, "t-prelock"));
         for _ in 0..crate::account_lockout::DEFAULT_MAX_ATTEMPTS {
             let a = crate::login_throttle::shared()
                 .begin(&scope, &ClientIp::default(), "locked-user")

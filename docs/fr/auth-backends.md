@@ -17,10 +17,7 @@ liste de configuration, câblée à axum. Associez-la à
 > **Source :** `rustango::tenancy::auth_backends` (`AuthBackend`, `ModelBackend`,
 > `ApiKeyBackend`, `JwtBackend`, `AuthUser`, `AuthError`) et
 > `rustango::tenancy::{RouterAuthExt, CurrentUser}` — derrière la fonctionnalité
-> `tenancy`. Un registre portable et indépendant de la base de données vit aussi
-> à `rustango::auth_backends`, qui demande la feature interne `_async_trait` —
-> activée par `cache`, `email`, `jobs` et `oauth2`, donc la plupart des builds
-> l'ont, mais pas un build minimal.
+> `tenancy`.
 >
 > **Version exécutable :** chaque extrait est copié depuis
 > [`auth_backends_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/auth_backends_doc.rs)
@@ -32,7 +29,6 @@ liste de configuration, câblée à axum. Associez-la à
 - [Verrouiller les routes : require_auth](#verrouiller-les-routes--require_auth)
 - [Lire l'utilisateur : CurrentUser](#lire-lutilisateur--currentuser)
 - [Permissions : require_perm](#permissions--require_perm)
-- [Le registre portable](#le-registre-portable)
 - [Voir aussi](#voir-aussi)
 
 ---
@@ -239,33 +235,6 @@ utilisateur l'emporte sur les octrois de rôle ; sinon, tout rôle détenu par
 l'utilisateur qui octroie le codename passe. Octroyez avec
 `set_user_perm_pool` / les rôles via `create_role_pool` + `assign_role_pool` (les
 tables de permissions sont créées par `ensure_tables_pool`).
-
----
-
-## Le registre portable
-
-Séparément, `rustango::auth_backends` (à noter : racine de crate, **et non**
-`tenancy`) est un petit registre **indépendant du framework** — une chaîne
-`Credentials` → `Principal` dotée de son propre trait `AuthBackend`. Il n'a aucune
-glu HTTP/axum ; utilisez-le lorsque vous voulez des backends d'authentification
-interchangeables au sein de votre propre code d'authentification :
-
-```rust
-use std::sync::Arc;
-use rustango::auth_backends::{
-    AuthBackendChain, AuthError, Credentials, Principal, RemoteUserBackend,
-};
-
-async fn who(remote_user: &str) -> Result<Option<Principal>, AuthError> {
-    let chain = AuthBackendChain::new().with(Arc::new(RemoteUserBackend::trust_username()));
-    chain.authenticate(&Credentials::remote(remote_user)).await
-}
-```
-
-Mêmes sémantiques « le premier succès l'emporte / la première erreur arrête » que
-la chaîne HTTP. `chain.get_user(id)` parcourt la chaîne de la même façon pour
-recharger un principal, par exemple celui gardé en session. Pour verrouiller de vraies routes, utilisez le middleware
-`tenancy` ci-dessus.
 
 ---
 

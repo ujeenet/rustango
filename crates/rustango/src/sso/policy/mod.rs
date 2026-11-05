@@ -1262,13 +1262,23 @@ pub(crate) async fn recent_audit_rows(pool: &Pool, table: &'static str, entity_p
         .unwrap_or(0)
 }
 
-/// The SSO throttle scope of a tenant (or the bare admin, `None`).
+/// The SSO throttle scope of a tenant slug (or the bare admin, `None`).
+/// Use [`org_throttle_scope`] when the org is known.
 #[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 pub(crate) fn throttle_scope(tenant: Option<&str>) -> crate::login_throttle::LoginScope {
     crate::login_throttle::LoginScope::Sso(match tenant {
         Some(t) => format!("tenant/{t}"),
         None => "admin".to_owned(),
     })
+}
+
+/// The SSO throttle scope of `org`, bound to its id; the slug only for an org with none.
+#[cfg(all(feature = "tenancy", any(feature = "admin-sso", feature = "sso")))]
+pub(crate) fn org_throttle_scope(org: &crate::tenancy::Org) -> crate::login_throttle::LoginScope {
+    match crate::tenancy::TenantSlug::of(org) {
+        Some(t) => crate::login_throttle::LoginScope::sso_tenant("tenant", &t),
+        None => throttle_scope(Some(&org.slug)),
+    }
 }
 
 /// Refuse an SSO start from an IP whose SSO failures are spent. Reserves nothing.

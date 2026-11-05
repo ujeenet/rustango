@@ -175,7 +175,10 @@ macro_rules! register_queryset_scope {
 }
 
 /// The old name of [`register_queryset_scope!`].
-#[deprecated(since = "0.62.0", note = "use `register_queryset_scope!`")]
+#[deprecated(
+    since = "0.62.0",
+    note = "use `register_queryset_scope!`; removed in 0.64.0"
+)]
 #[macro_export]
 macro_rules! register_admin_queryset {
     ($table:expr, $hook:expr $(,)?) => {
