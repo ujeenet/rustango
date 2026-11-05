@@ -220,11 +220,33 @@ impl TableRebuild {
             inline.extend(names.into_iter().filter(|n| !keep.contains(n)));
         }
         let before = self.orphans(tx).await?;
+        let views = working_views(tx).await?;
+        // Else RENAME TO fails on a view or trigger naming the dropped table.
+        sqlx::query("PRAGMA legacy_alter_table = ON")
+            .execute(&mut *tx.tx)
+            .await?;
+        let mut ran = Ok(());
         for stmt in self.statements(&crate::sql::Sqlite) {
-            sqlx::query(&stmt).execute(&mut *tx.tx).await?;
+            ran = sqlx::query(&stmt).execute(&mut *tx.tx).await.map(drop);
+            if ran.is_err() {
+                break;
+            }
         }
+        // A connection setting that sqlx never resets, so restore it on every path.
+        sqlx::query("PRAGMA legacy_alter_table = OFF")
+            .execute(&mut *tx.tx)
+            .await?;
+        ran?;
         for (_, sql) in saved.iter().filter(|(n, _)| !inline.contains(n)) {
             sqlx::query(sql).execute(&mut *tx.tx).await?;
+        }
+        for view in &views {
+            if let Err(e) = probe_view(tx, view).await {
+                return Err(super::MigrateError::Validation(format!(
+                    "rebuilding `{}` breaks the view `{view}` ({e}); drop or change the view first",
+                    self.table()
+                )));
+            }
         }
         // Step 10, for this table and its referrers: only a row the rebuild
         // orphaned refuses it, not an old one elsewhere.
@@ -274,6 +296,32 @@ impl TableRebuild {
         }
         Ok(out)
     }
+}
+
+/// The views that compile now, so a rebuild can tell the ones it broke.
+#[cfg(feature = "sqlite")]
+async fn working_views(tx: &mut RebuildTx<'_>) -> Result<Vec<String>, sqlx::Error> {
+    let all: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type = 'view' ORDER BY rowid")
+            .fetch_all(&mut *tx.tx)
+            .await?;
+    let mut out = Vec::with_capacity(all.len());
+    for view in all {
+        if probe_view(tx, &view).await.is_ok() {
+            out.push(view);
+        }
+    }
+    Ok(out)
+}
+
+/// Compile `view`'s query without reading a row.
+#[cfg(feature = "sqlite")]
+async fn probe_view(tx: &mut RebuildTx<'_>, view: &str) -> Result<(), sqlx::Error> {
+    let probe = format!(
+        "SELECT * FROM {} LIMIT 0",
+        crate::sql::quote_with(view, '"')
+    );
+    sqlx::query(&probe).execute(&mut *tx.tx).await.map(drop)
 }
 
 /// `after` with `table` as it is after the op that `later` follows: its
@@ -625,6 +673,112 @@ impl std::ops::DerefMut for RebuildTx<'_> {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    use serde_json::{json, Value};
+
+    fn step(dir: &std::path::Path, name: &str, prev: Option<&str>, fields: &[Value], op: Value) {
+        let snap =
+            json!({ "tables": [{ "name": "widgets", "model": "Widget", "fields": fields }] });
+        let mig: crate::migrate::file::Migration = serde_json::from_value(json!({
+            "name": name, "created_at": "2026-01-01T00:00:00Z", "prev": prev,
+            "snapshot": snap, "forward": [{ "schema": op }],
+        }))
+        .unwrap();
+        crate::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+    }
+
+    /// The pragma on both pooled connections, held at once so each is read.
+    async fn legacy_alter_table(sq: &sqlx::SqlitePool) -> i64 {
+        let mut conns = [sq.acquire().await.unwrap(), sq.acquire().await.unwrap()];
+        let mut on = 0;
+        for c in &mut conns {
+            let v: i64 = sqlx::query_scalar("PRAGMA legacy_alter_table")
+                .fetch_one(&mut **c)
+                .await
+                .unwrap();
+            on = on.max(v);
+        }
+        on
+    }
+
+    /// A rebuild keeps a view and another table's trigger naming the table
+    /// working, leaves `legacy_alter_table` off, and refuses to break a view.
+    #[tokio::test]
+    async fn rebuild_keeps_views_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let url = format!("sqlite:{}?mode=rwc", tmp.path().join("v.db").display());
+        let sq = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .unwrap();
+        let pool = crate::sql::Pool::from(sq.clone());
+        let dir = tmp.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = json!({ "name": "id", "column": "id", "ty": "i64",
+                         "nullable": false, "primary_key": true });
+        // A table-level UNIQUE makes SQLite's DROP COLUMN a rebuild too.
+        let code = json!({ "name": "code", "column": "code", "ty": "string",
+                           "nullable": true, "primary_key": false, "unique": true });
+        let name = |default: Option<&str>| {
+            json!({ "name": "name", "column": "name", "ty": "string",
+                    "nullable": true, "primary_key": false, "default": default })
+        };
+        let all = [id.clone(), code.clone(), name(None)];
+        step(
+            &dir,
+            "0001_initial",
+            None,
+            &all,
+            json!({ "CreateTable": "widgets" }),
+        );
+        crate::migrate::migrate_pool(&pool, &dir).await.unwrap();
+        for sql in [
+            "INSERT INTO widgets (code, name) VALUES ('a', 'first')",
+            "CREATE VIEW wv AS SELECT id, name FROM widgets",
+            "CREATE TABLE log (id INTEGER)",
+            "CREATE TRIGGER lt AFTER INSERT ON log BEGIN \
+             INSERT INTO widgets (code) VALUES ('t'); END",
+        ] {
+            sqlx::query(sql).execute(&sq).await.unwrap();
+        }
+
+        let defaulted = [id.clone(), code.clone(), name(Some("'x'"))];
+        let alter = json!({ "AlterColumnDefault": { "table": "widgets", "column": "name",
+                                                    "from": null, "to": "'x'" } });
+        step(
+            &dir,
+            "0002_default",
+            Some("0001_initial"),
+            &defaulted,
+            alter,
+        );
+        crate::migrate::migrate_pool(&pool, &dir)
+            .await
+            .expect("a view and a trigger naming the table do not block the rebuild");
+        let names: Vec<String> = sqlx::query_scalar("SELECT name FROM wv")
+            .fetch_all(&sq)
+            .await
+            .unwrap();
+        assert_eq!(names, ["first"]);
+        sqlx::query("INSERT INTO log VALUES (1)")
+            .execute(&sq)
+            .await
+            .expect("the trigger still finds the table");
+        assert_eq!(legacy_alter_table(&sq).await, 0);
+
+        let drop = json!({ "DropColumn": { "table": "widgets", "column": "name" } });
+        step(&dir, "0003_drop", Some("0002_default"), &[id, code], drop);
+        let err = crate::migrate::migrate_pool(&pool, &dir)
+            .await
+            .expect_err("dropping the view's column breaks it");
+        assert!(err.to_string().contains("breaks the view `wv`"), "{err}");
+        assert_eq!(legacy_alter_table(&sq).await, 0);
+        sqlx::query("SELECT name FROM wv")
+            .fetch_all(&sq)
+            .await
+            .expect("the failed rebuild rolled back");
+    }
+
     /// A pooled connection idle while another one changed the schema still
     /// sees the new column in its migration transaction.
     #[tokio::test]

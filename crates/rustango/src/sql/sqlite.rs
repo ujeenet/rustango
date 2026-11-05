@@ -123,6 +123,21 @@ impl Dialect for Sqlite {
 
     // SQLite uses the trait defaults for quoting and placeholders.
 
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT MIN(ii.name) FROM pragma_index_list(?) il, pragma_index_info(il.name) ii \
+             WHERE il.\"unique\" = 1 AND il.origin <> 'pk' AND il.partial = 0 \
+             GROUP BY il.name HAVING COUNT(*) = 1 AND MIN(ii.name) IS NOT NULL",
+        )
+    }
+
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT MIN(f.\"from\"), MIN(f.on_delete) FROM pragma_foreign_key_list(?) f \
+             GROUP BY f.id HAVING COUNT(*) = 1",
+        )
+    }
+
     /// A write transaction on the runner's lock file; BUSY means held.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         Some("BEGIN IMMEDIATE".into())

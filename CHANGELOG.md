@@ -58,6 +58,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - Items announced as removed in 0.64.0 stay deprecated until 0.65.0, and their notes say so.
 - Guides: cookbook, orm, caching, models, api-conventions, manage, migrations, sso, security, auth, mcp and email match the code; `cache::from_settings` documents that a bad backend panics.
 - Template views' `tenant_router()`, `require_bearer`, `JwtAuth::router()` and the MCP routers (`secure_tenant_router`, `secure_tenant_router_from_settings`, `tenant_router_authed`) serve the backend of the mounted tenant context, so SQLite and MySQL tenants work under a build that also enables `postgres`; they answered 500 there. The `_for::<DB>` variants are unchanged. `require_bearer` now takes `TenantScope` instead of `Tenant`.
+- System migrations stage their files in a fresh, owner-only temp dir; a leftover or planted dir under the old guessable name is never read.
+- A regenerated system chain refuses, listing each column, when the database differs from it in nullability, `max_length`, having a DEFAULT, UNIQUE or ON DELETE; it used to record itself as applied.
+- PostgreSQL: drops, alters, renames and index drops name the table in the migration's schema, so a schema-mode tenant migration never reaches a same-named table in `public`.
+- SQLite: a table rebuild no longer fails when a view or another table's trigger names the table; it refuses one that would break a view.
 
 ## [0.63.0] — 2026-11-04
 
