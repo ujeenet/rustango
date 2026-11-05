@@ -1642,6 +1642,7 @@ jobs:
           binary(=prefetch_related_tri) |
           binary(=orm_relation_edges_tri) |
           binary(=orm_query_edges_tri) |
+          binary(=orm_query_shapes_tri) |
           binary(=orm_claim_lock_tri) |
           binary(=orm_core_counts_tri) |
           binary(=pool_conn_tri) |

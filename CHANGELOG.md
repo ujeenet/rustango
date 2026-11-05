@@ -74,6 +74,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - SQLite: a table rebuild no longer fails when a view or another table's trigger names the table; it refuses one that would break a view.
 - `HmacAuthLayer` signs the URL the client sent (`OriginalUri`): under a path-prefix tenant it checked the stripped path, so real signatures failed and one tenant's signature passed on another tenant's path.
 - The login throttle lets a client that signed in to an account lately (same username and IP) past that account's lock, so a guesser's bad passwords no longer lock its owner out; the lock stays on for everyone else.
+- ORM: `.aggregate().annotate(..)` with no `.values()` returns one summary row, not one row per record; `QuerySet::annotate` and relation aggregates still keep each row.
+- ORM: `last()` under `distinct_on` keeps the row each group picked; `flip_order_by` flips only the DISTINCT ON keys there.
+- ORM: `count()` / `exists()` over `distinct()` with a relation `order_by` and a `limit`, and `distinct()` with `order_by_expr`, no longer fail on PostgreSQL and MySQL.
+- ORM: an empty `IN` list matches no row and an empty `NOT IN` every row, also inside a `Q` OR branch, instead of failing the query.
+- ORM: SQLite refuses a case-sensitive `LIKE` against a non-literal pattern, which it matched ignoring case.
+- ORM: `where_raw` and `Q` predicates are checked at `compile()` (unknown column, wrong value type), as documented.
+- ORM: `refresh_from_db` and `fresh` reload the row by key outside the model's global scopes, like `save()`.
+- MySQL: a generated id too wide for an `i32` / `i16` key returns `GeneratedPkUnreadable` instead of wrapping.
 
 ## [0.63.0] — 2026-11-04
 

@@ -909,6 +909,7 @@ You rarely write `GROUP BY` yourself — **Rustango** infers it from the query's
 |---|---|---|
 | **2 — values + aggregate** | `.values(&["author_id"]).annotate("n", count_all().into())` | `GROUP BY "author_id"` |
 | **3 — bare aggregate** | `.annotate("n", count_all().into())` | `GROUP BY` every non-aggregate scalar column on the model |
+| **Summary row** | `.aggregate().annotate("n", count_all().into())` | (no `GROUP BY` — one row for the whole queryset) |
 | **Window-only** | `.aggregate().annotate("rn", row_number()…)` | (no `GROUP BY` — window funcs are per-row) |
 | **Explicit override** | `.aggregate().group_by("month").annotate(...)` | `GROUP BY "month"` — explicit wins |
 
@@ -946,6 +947,7 @@ Count or sum only the rows that match a condition, supply a fallback for empty r
 use rustango::core::aggregates::{avg, count, count_all, stddev, sum};
 use rustango::core::Column as _;
 
+// `.aggregate()` adds no GROUP BY: one summary row for the whole queryset.
 let rows = Post::objects()
     .aggregate()
     // COUNT(*) FILTER (WHERE is_active AND status = 'published')

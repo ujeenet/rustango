@@ -277,9 +277,8 @@ fn sqlite_shape3_includes_all_cols() {
 // ---------- QuerySet::annotate shortcut ----------
 
 #[test]
-fn queryset_annotate_promotes_to_aggregate_builder() {
-    // Calling `.annotate()` directly on QuerySet (without `.aggregate()`)
-    // should produce the same SQL as the explicit two-step form.
+fn queryset_annotate_groups_per_row_and_aggregate_sums_up() {
+    // `.annotate()` on a queryset keeps each row; `.aggregate()` is one row.
     let q1 = Post::objects()
         .annotate("n", count_all().into())
         .compile()
@@ -289,7 +288,14 @@ fn queryset_annotate_promotes_to_aggregate_builder() {
         .annotate("n", count_all().into())
         .compile()
         .unwrap();
-    let s1 = Postgres.compile_aggregate(&q1).unwrap().sql;
-    let s2 = Postgres.compile_aggregate(&q2).unwrap().sql;
-    assert_eq!(s1, s2, "shortcut SQL must match explicit aggregate path");
+    assert!(Postgres
+        .compile_aggregate(&q1)
+        .unwrap()
+        .sql
+        .contains("GROUP BY"));
+    assert!(!Postgres
+        .compile_aggregate(&q2)
+        .unwrap()
+        .sql
+        .contains("GROUP BY"));
 }

@@ -182,6 +182,12 @@ untouched.
 - `startapp --into <dir>` now means `src/<dir>/`, in the tenancy CLI too (it used to be relative to the project root). Run it from a workspace member's directory instead of `--into crates/web`.
 - `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is now applied; a value that is not a whole number of seconds of at least 1 stops the server.
 - `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
+- `.aggregate().annotate(..)` with no `.values()` / `.group_by()` now returns one summary row. For a row per record with its columns, call `.annotate(..)` on the queryset.
+- `flip_order_by()` under `distinct_on` flips only the DISTINCT ON keys.
+- An empty `IN` list no longer returns `SqlError::EmptyInList`; it matches no row (`NOT IN`: every row).
+- `where_raw`, `where_(Q::..)` and their nested predicates now fail at `compile()` with `UnknownField` / `TypeMismatch` on a bad column or value type. `Q` takes column names (`author_id`, not `author`).
+- On SQLite, `LIKE` against a column or expression returns `OpNotSupportedInDialect`; match a literal pattern instead.
+- `refresh_from_db` and `fresh` now find a row outside the model's global scopes.
 
 ## 0.63.0
 

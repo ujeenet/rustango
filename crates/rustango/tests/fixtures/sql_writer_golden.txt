@@ -170,11 +170,14 @@ SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`
 SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "views" NOT IN (?, ?)
 [I64(4), I64(5)]
 == views__in / postgres ==
-ERR empty `IN` list is not supported
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE 1 = 0
+[]
 == views__in / mysql ==
-ERR empty `IN` list is not supported
+SELECT `id`, `author`, `category`, `title`, `slug`, `body`, `views`, `published`, `created`, `data` FROM `gold_post` WHERE 1 = 0
+[]
 == views__in / sqlite ==
-ERR empty `IN` list is not supported
+SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE 1 = 0
+[]
 == category__isnull / postgres ==
 SELECT "id", "author", "category", "title", "slug", "body", "views", "published", "created", "data" FROM "gold_post" WHERE "category" IS NULL
 []
