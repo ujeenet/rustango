@@ -4,6 +4,11 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Fixed
+
+- MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
+- A filtered `AnyValue` on a backend without `FILTER` uses `MIN`, so it no longer returns a NULL from a row outside the filter.
+
 ## [0.63.0] — 2026-11-04
 
 ### Added

@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
+
 ## 0.63.0
 
 - `dumpdata` now errors on a cell it cannot decode (a column whose type no longer matches the model) and on NaN or infinite floats; it used to write `null`. Fix the column or `--exclude` the model. A `dumpdata -o` file is now owner-only on Unix.

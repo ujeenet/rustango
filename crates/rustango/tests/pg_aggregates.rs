@@ -146,8 +146,8 @@ fn any_value_emits_per_dialect() {
             .compile_aggregate(&q)
             .unwrap()
             .sql
-            .contains("ANY_VALUE(`tag`)"),
-        "MySQL ANY_VALUE"
+            .contains("/*!80000 ANY_VALUE(`tag`) */ /*M! MIN(`tag`) */"),
+        "MySQL ANY_VALUE, MariaDB MIN"
     );
     assert!(
         Sqlite

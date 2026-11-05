@@ -35,6 +35,8 @@ pub(super) enum Cell {
     UuidText,
     String,
     Json,
+    /// JSON kept as text (MariaDB's `JSON` is `LONGTEXT`).
+    JsonText,
     Binary,
     DateTime,
     /// A timestamp without zone, read as UTC.
@@ -291,6 +293,11 @@ impl DecodeRow for sqlx::mysql::MySqlRow {
             Some(FieldType::Uuid) if <String as sqlx::Type<sqlx::MySql>>::compatible(ty) => {
                 return Cell::UuidText
             }
+            Some(FieldType::Json)
+                if ty.name() != "JSON" && <Vec<u8> as sqlx::Type<sqlx::MySql>>::compatible(ty) =>
+            {
+                return Cell::JsonText
+            }
             _ => {}
         }
         // sqlx's i64 and bool decode every integer width, so the name sets
@@ -329,6 +336,8 @@ impl DecodeRow for sqlx::mysql::MySqlRow {
             }),
             Cell::UuidText => get::<_, String>(self, i)
                 .map(|s| uuid::Uuid::parse_str(&s).map_or(SqlValue::String(s), SqlValue::Uuid)),
+            Cell::JsonText => get::<_, Vec<u8>>(self, i)
+                .map(|b| serde_json::from_slice(&b).map_or(SqlValue::Binary(b), SqlValue::Json)),
             other => decode_common(self, i, other),
         }
         .unwrap_or(SqlValue::Null)

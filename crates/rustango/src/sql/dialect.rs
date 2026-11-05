@@ -1082,6 +1082,17 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
         None
     }
 
+    /// The `GENERATED ALWAYS AS (…) STORED [NOT NULL]` after a generated
+    /// column's type; every column-definition writer goes through it.
+    fn write_generated_column(&self, sql: &mut String, expr: &str, nullable: bool) {
+        sql.push_str(" GENERATED ALWAYS AS (");
+        sql.push_str(expr);
+        sql.push_str(") STORED");
+        if !nullable {
+            sql.push_str(" NOT NULL");
+        }
+    }
+
     /// A `COMMENT ON COLUMN` statement to run after `CREATE TABLE`.
     /// Only Postgres needs one; MySQL writes its comment inline in
     /// [`Self::write_inline_column_comment`].

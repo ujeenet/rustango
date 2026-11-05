@@ -406,10 +406,7 @@ fn write_column_def(s: &mut String, dialect: &dyn Dialect, field: &FieldSchema) 
     // A generated column takes no DEFAULT, PRIMARY KEY, UNIQUE or
     // CHECK: Postgres rejects all of them here. NOT NULL is allowed.
     if let Some(expr) = field.generated_as {
-        let _ = write!(s, " GENERATED ALWAYS AS ({expr}) STORED");
-        if !field.nullable {
-            s.push_str(" NOT NULL");
-        }
+        dialect.write_generated_column(s, expr, field.nullable);
         return;
     }
     if let Some(expr) = field.default {

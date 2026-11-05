@@ -529,6 +529,30 @@ fn partitioned_jobs_run_the_archive_serially() {
     }
 }
 
+/// `live_parallel` is the one job whose tests land on more than slot 0;
+/// a serial profile there would leave the per-slot databases untested.
+#[test]
+fn live_parallel_runs_more_than_one_slot_on_both_servers() {
+    let path = repo_root().join(".github/workflows/ci.yml");
+    let yaml = std::fs::read_to_string(&path).expect("read ci.yml");
+    let block = job_block(&yaml, "live_parallel");
+    for var in ["DATABASE_URL:", "MYSQL_TEST_URL:"] {
+        assert!(block.contains(var), "`live_parallel` sets no `{var}`");
+    }
+    let cmds = run_commands(&block);
+    let run = cmds
+        .iter()
+        .find(|c| is_archive_run(c))
+        .expect("`live_parallel` runs the archive");
+    assert!(!run.contains("--profile live"), "serial profile:\n{run}");
+    let threads = run
+        .split_whitespace()
+        .skip_while(|w| *w != "--test-threads" && *w != "-j")
+        .nth(1)
+        .and_then(|n| n.parse::<u32>().ok());
+    assert!(threads.is_some_and(|n| n > 1), "not parallel:\n{run}");
+}
+
 /// A `cargo nextest run` from an archive: it builds nothing, it runs what
 /// `tests_compile` built with `--workspace --all-features`.
 fn is_archive_run(cmd: &str) -> bool {
