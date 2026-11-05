@@ -329,13 +329,17 @@ Beide Queues rufen `Job::run_with(&self, ctx: &JobCtx)` auf. Standardmäßig ruf
 `run()` auf, also laufen Jobs, die nur `run` implementieren, unverändert. Überschreibe
 es, um Folgendes zu lesen:
 
-- `ctx.id()` — die ID des Jobs, bei jedem Retry dieselbe. Eindeutig in ihrer Queue.
+- `ctx.id()` — die ID des Jobs, bei jedem Retry dieselbe. Nur in ihrer Queue eindeutig.
+- `ctx.idempotency_key(scope)` — die ID unter deinem Scope, für ein externes System.
 - `ctx.attempt()` — 1 beim ersten Lauf, 2 beim ersten Retry.
 - `ctx.stopping()` / `ctx.is_stopping()` — die Queue fährt herunter; beende den Job
   innerhalb von `shutdown_grace`, sonst wird der Lauf abgebrochen und neu eingereiht.
 
-Nutze die ID als Idempotenzschlüssel, damit eine wiederholte Abbuchung nicht doppelt
-abbucht:
+Nutze `idempotency_key` als Schlüssel für ein externes System, damit eine
+wiederholte Abbuchung nicht doppelt abbucht. Die ID der Datenbank-Queue ist die
+Zeilen-ID plus ihr Einreihungszeitpunkt, eine neu angelegte Tabelle wiederholt sie
+also nicht. Tenants mit eigener Job-Tabelle beginnen trotzdem bei Zeile 1; übergib
+daher einen Scope, der die Tabellen unterscheidet, etwa den Tenant-Slug:
 
 ```rust
 use rustango::jobs::{Job, JobCtx, JobError};
@@ -349,7 +353,7 @@ impl Job for ChargeCard {
     }
 
     async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
-        let key = format!("charge-{}", ctx.id());   // bei jedem Retry derselbe Schlüssel
+        let key = ctx.idempotency_key(&self.tenant);   // bei jedem Retry derselbe Schlüssel
         stripe_charge(self.order_id, self.cents, &key)
             .await
             .map_err(|e| JobError::Retryable(e.to_string()))

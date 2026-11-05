@@ -143,12 +143,22 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
 
 // ------------------------------------------------------------------ JobCtx
 
-/// A queued job's id: the same on every run of it, so it can serve as an
-/// idempotency key. Unique on its queue, not across queues.
+/// A queued job's id, the same on every run of it. Unique on its queue only:
+/// for an outside system use [`JobCtx::idempotency_key`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JobId(Arc<str>);
 
 impl JobId {
+    /// A database row's id: the row id and its enqueue time in µs, so a
+    /// recreated table, whose ids restart at 1, does not repeat one.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn of_row(id: i64, created_at: Option<chrono::DateTime<chrono::Utc>>) -> Self {
+        match created_at {
+            Some(at) => Self(format!("{id}-{}", at.timestamp_micros()).into()),
+            None => Self(id.to_string().into()),
+        }
+    }
+
     /// The id as text, e.g. for an idempotency-key header.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -180,6 +190,14 @@ impl JobCtx {
     #[must_use]
     pub fn id(&self) -> &JobId {
         &self.id
+    }
+
+    /// [`Self::id`] under `scope`, for an outside system such as a payment
+    /// API. Pass what tells this queue's table apart from others, e.g. the
+    /// tenant slug when each tenant has its own job table.
+    #[must_use]
+    pub fn idempotency_key(&self, scope: &str) -> String {
+        format!("{scope}:{}", self.id)
     }
 
     /// This run's number: 1 for the first run, 2 for the first retry.
@@ -1783,6 +1801,26 @@ mod tests {
         assert_eq!(one[0].0, one[1].0, "same id on the retry");
         assert_eq!((one[0].1, one[1].1), (1, 2));
         assert_ne!(one[0].0, two[0].0, "each job has its own id");
+    }
+
+    /// The key carries the caller's scope, so two tenants' tables, whose
+    /// first rows share an id, give different keys.
+    #[test]
+    fn the_idempotency_key_is_scoped() {
+        let ctx = first_run();
+        assert_eq!(ctx.idempotency_key("acme"), "acme:t");
+        assert_ne!(ctx.idempotency_key("acme"), ctx.idempotency_key("globex"));
+    }
+
+    /// A row id alone repeats once a table is recreated; its enqueue time does not.
+    #[cfg(feature = "jobs-postgres")]
+    #[test]
+    fn a_row_id_is_told_apart_by_its_enqueue_time() {
+        let at = chrono::DateTime::from_timestamp_micros(1_700_000_000_123_456).unwrap();
+        let later = at + chrono::Duration::microseconds(1);
+        assert_eq!(JobId::of_row(1, Some(at)).as_str(), "1-1700000000123456");
+        assert_ne!(JobId::of_row(1, Some(at)), JobId::of_row(1, Some(later)));
+        assert_eq!(JobId::of_row(1, None).as_str(), "1");
     }
 
     static STOP_SEEN: AtomicUsize = AtomicUsize::new(0);

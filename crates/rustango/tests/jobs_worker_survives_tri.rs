@@ -1013,6 +1013,64 @@ async fn a_retry_keeps_the_job_id_and_counts_the_attempt(pool: &Pool) {
     assert_eq!(job_rows(pool).await, 0);
 }
 
+/// `(id, idempotency key)` of each tenant's run, per token.
+fn keys() -> &'static Mutex<HashMap<String, (String, String)>> {
+    static K: OnceLock<Mutex<HashMap<String, (String, String)>>> = OnceLock::new();
+    K.get_or_init(Mutex::default)
+}
+
+/// Records its id and its key under `tenant`.
+#[derive(Serialize, Deserialize)]
+struct KeyProbe {
+    token: String,
+    tenant: String,
+}
+
+#[async_trait::async_trait]
+impl Job for KeyProbe {
+    const NAME: &'static str = "tri:key_probe";
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("the queue calls run_with".into()))
+    }
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let seen = (ctx.id().to_string(), ctx.idempotency_key(&self.tenant));
+        keys().lock().unwrap().insert(self.token.clone(), seen);
+        Ok(())
+    }
+}
+
+/// The first job on a fresh table, as a new tenant's queue runs it.
+async fn first_job_on_a_fresh_table(pool: &Pool, tenant: &str) -> (String, String) {
+    setup(pool).await;
+    let tok = token(pool, &format!("key_{tenant}"));
+    let q = queue(pool, 1, Duration::from_secs(60)).await;
+    q.register::<KeyProbe>().await;
+    let job = KeyProbe {
+        token: tok.clone(),
+        tenant: tenant.to_owned(),
+    };
+    q.dispatch(&job).await.unwrap();
+    q.start().await;
+    wait_for("the key probe", || {
+        keys().lock().unwrap().contains_key(&tok)
+    })
+    .await;
+    q.shutdown().await;
+    let seen = keys().lock().unwrap()[&tok].clone();
+    seen
+}
+
+/// Two tenants' first jobs share a row id but not an id or a key.
+async fn two_tenants_first_jobs_get_different_keys(pool: &Pool) {
+    let (a_id, a_key) = first_job_on_a_fresh_table(pool, "acme").await;
+    let (b_id, b_key) = first_job_on_a_fresh_table(pool, "globex").await;
+    let row = |id: &str| id.split('-').next().unwrap().to_owned();
+    assert_eq!(row(&a_id), row(&b_id), "both are row 1 of a fresh table");
+    assert_ne!(a_id, b_id, "a recreated table does not repeat an id");
+    assert_ne!(a_key, b_key);
+    assert!(a_key.starts_with("acme:"), "{a_key}");
+}
+
 /// Waits for the queue to stop, then finishes.
 #[derive(Serialize, Deserialize)]
 struct UntilStop {
@@ -1431,6 +1489,7 @@ tri_dialect_test! {
         an_older_table_gets_the_queue_index,
         a_retry_keeps_the_job_id_and_counts_the_attempt,
         shutdown_fires_a_running_jobs_stop_signal,
+        two_tenants_first_jobs_get_different_keys,
     ],
 }
 

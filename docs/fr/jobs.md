@@ -331,13 +331,17 @@ Les deux files appellent `Job::run_with(&self, ctx: &JobCtx)`. Par défaut, il
 appelle `run()` : les tâches qui n'implémentent que `run` fonctionnent sans
 changement. Surchargez-le pour lire :
 
-- `ctx.id()` — l'id de la tâche, le même à chaque nouvelle tentative. Unique dans sa file.
+- `ctx.id()` — l'id de la tâche, le même à chaque nouvelle tentative. Unique dans sa file seulement.
+- `ctx.idempotency_key(scope)` — l'id sous votre portée, pour un système externe.
 - `ctx.attempt()` — 1 à la première exécution, 2 à la première nouvelle tentative.
 - `ctx.stopping()` / `ctx.is_stopping()` — la file s'arrête ; terminez dans le
   délai `shutdown_grace`, sinon l'exécution est interrompue et remise en file.
 
-Utilisez l'id comme clé d'idempotence, pour qu'un débit relancé ne soit pas débité
-deux fois :
+Utilisez `idempotency_key` comme clé vue par un système externe, pour qu'un débit
+relancé ne soit pas débité deux fois. L'id de la file en base est l'id de la ligne
+plus son heure de mise en file : une table recréée ne le répète pas. Les tenants
+qui ont leur propre table de tâches repartent tout de même de la ligne 1 ; passez
+une portée qui distingue les tables, comme le slug du tenant :
 
 ```rust
 use rustango::jobs::{Job, JobCtx, JobError};
@@ -351,7 +355,7 @@ impl Job for ChargeCard {
     }
 
     async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
-        let key = format!("charge-{}", ctx.id());   // la même clé à chaque nouvelle tentative
+        let key = ctx.idempotency_key(&self.tenant);   // la même clé à chaque nouvelle tentative
         stripe_charge(self.order_id, self.cents, &key)
             .await
             .map_err(|e| JobError::Retryable(e.to_string()))
