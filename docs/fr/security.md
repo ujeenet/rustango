@@ -48,6 +48,10 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Les tenants à préfixe de chemin partagent une origine avec la console
+opérateur : voir [Noms d'hôte](operator-console.md). En production, préférez un
+hôte par tenant.
+
 ---
 
 ## Définir les en-têtes de sécurité

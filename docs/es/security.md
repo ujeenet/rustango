@@ -48,6 +48,9 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Los tenants con prefijo de ruta comparten origen con la consola de operador:
+ver [Hostnames](operator-console.md). En producción, mejor un host por tenant.
+
 ---
 
 ## Establecer cabeceras de seguridad

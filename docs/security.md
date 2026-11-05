@@ -48,6 +48,9 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Path-prefix tenants share one origin with the operator console: see
+[Hostnames](operator-console.md#hostnames). Prefer a host per tenant in production.
+
 ---
 
 ## Setting security headers

@@ -368,14 +368,38 @@ impl Buckets {
         let Some(ip) = ip.0.as_deref().filter(|_| scope.locks_accounts()) else {
             return false;
         };
-        let key = known_key(&account_key(&scope.key(), username), ip);
-        matches!(self.known.get(&key).await, Ok(Some(_)))
+        self.knows(&account_key(&scope.key(), username), ip).await
+    }
+
+    /// `true` when the account `account_key` signed in from `ip` lately.
+    async fn knows(&self, account_key: &str, ip: &str) -> bool {
+        matches!(
+            self.known.get(&known_key(account_key, ip)).await,
+            Ok(Some(_))
+        )
+    }
+
+    /// The lock an attempt at `account_key` from `ip` counts on: a client the
+    /// account signed in from lately has its own, so a guesser elsewhere
+    /// cannot lock it out, and its own misses stay bounded the same way.
+    async fn lock_key(&self, account_key: &str, ip: Option<&str>) -> String {
+        match ip {
+            Some(ip) if self.knows(account_key, ip).await => known_lock_key(account_key, ip),
+            _ => account_key.to_owned(),
+        }
     }
 }
 
 fn known_key(account_key: &str, ip: &str) -> String {
     format!("login-known:{account_key}:{ip}")
 }
+
+/// A known client's own lock: under the account's prefix, so a purge clears it.
+fn known_lock_key(account_key: &str, ip: &str) -> String {
+    format!("{account_key}{KNOWN_LOCK_SEP}{ip}")
+}
+
+const KNOWN_LOCK_SEP: &str = ":known:";
 
 fn ip_gate(ip: &str) -> String {
     format!("ip:{ip}")
@@ -656,8 +680,10 @@ impl LoginThrottle {
             },
         };
         if scope.locks_accounts() {
-            held.reserve_lock(account_key(&held.scope_key, username))
-                .await?;
+            let key = b
+                .lock_key(&account_key(&held.scope_key, username), held.ip.as_deref())
+                .await;
+            held.reserve_lock(key).await?;
         }
         if let Some(ip) = held.ip_bucket.clone() {
             match b.ip.take(&ip).await {
@@ -708,7 +734,11 @@ impl LoginThrottle {
         let scope_key = scope.key();
         if scope.locks_accounts() {
             let lockout = self.0.lockout();
-            if lockout.is_locked(&account_key(&scope_key, username)).await {
+            let key = self
+                .0
+                .lock_key(&account_key(&scope_key, username), ip.0.as_deref())
+                .await;
+            if lockout.is_locked(&key).await {
                 return Err(LoginRefused::Throttled {
                     retry_after_secs: lockout.lock_duration().as_secs().max(1),
                 });
@@ -791,7 +821,8 @@ impl LoginThrottle {
             held: Vec::with_capacity(1),
         };
         let counted = if scope.locks_accounts() {
-            let key = account_key(&scope_key, username);
+            // Only a known client gets here, so it counts on its own lock.
+            let key = known_lock_key(&account_key(&scope_key, username), ip.0.as_deref()?);
             let slot = b.lockout().reserve_sole(&key).await?;
             gates.enter(key.clone());
             Counted::Account(key, slot)
@@ -901,12 +932,17 @@ impl LoginAttempt {
         if held.locks.is_empty() {
             return Ok(());
         }
-        let key = account_key(&held.scope_key, stored_username);
+        let buckets = Arc::clone(&held.buckets);
+        let key = buckets
+            .lock_key(
+                &account_key(&held.scope_key, stored_username),
+                held.ip.as_deref(),
+            )
+            .await;
         if held.locks.iter().any(|(k, _)| *k == key) {
             return Ok(());
         }
         // Waits only on attempts past `resolve`, which never wait again.
-        let buckets = Arc::clone(&held.buckets);
         let deadline = tokio::time::Instant::now() + crate::passwords::hash_wait();
         loop {
             match held.reserve_lock(key.clone()).await {
@@ -1125,7 +1161,7 @@ impl Held {
     async fn right(mut self, clears_failures: bool) {
         let lockout = self.buckets.lockout();
         for (key, slot) in std::mem::take(&mut self.locks) {
-            if let Some(ip) = &self.ip {
+            if let (Some(ip), false) = (&self.ip, key.contains(KNOWN_LOCK_SEP)) {
                 // Written once per pair: an existing marker is left alone.
                 let (cache, known) = (&self.buckets.known, known_key(&key, ip));
                 if !matches!(cache.get(&known).await, Ok(Some(_))) {
@@ -1620,6 +1656,34 @@ mod tests {
         let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
         let t = on_cache(&cache, limits);
         known_client_passes_a_spent_global_limit(t, "t-known-c", 31).await;
+    }
+
+    #[cfg(feature = "tenancy")]
+    /// Bad passwords lock an account for everyone but a client the user
+    /// signed in from lately; the lock stays on for the rest.
+    #[tokio::test]
+    async fn a_known_client_passes_an_account_lock() {
+        let t = LoginThrottle::new(LoginLimits::default());
+        let s = tenant("t-lock-known");
+        let home = ip("10.50.1.1");
+        t.begin(&s, &home, "alice").await.unwrap().succeeded().await;
+        let attacker = ip("10.50.2.1");
+        for _ in 0..5 {
+            t.begin(&s, &attacker, "alice")
+                .await
+                .expect("the lock engaged early")
+                .failed()
+                .await;
+        }
+        let stranger = ip("10.50.3.1");
+        assert!(t.begin(&s, &stranger, "alice").await.is_err(), "not locked");
+        assert!(t.check(&s, &home, "alice").await.is_ok(), "check refused");
+        let a = t.begin(&s, &home, "alice").await;
+        a.expect("a known client was locked out").succeeded().await;
+        assert!(
+            t.begin(&s, &stranger, "alice").await.is_err(),
+            "its sign-in lifted the lock for everyone"
+        );
     }
 
     #[cfg(feature = "tenancy")]
@@ -2185,7 +2249,8 @@ mod tests {
         let wrong = t.begin(&s, &client, "carol").await.unwrap();
         wrong.failed().await;
         right.settle(true).await;
-        let key = account_key(&s.key(), "carol");
+        // A known client's misses count on its own lock.
+        let key = known_lock_key(&account_key(&s.key(), "carol"), "10.9.70.3");
         assert_eq!(
             crate::account_lockout::shared().attempt_count(&key).await,
             1
@@ -2581,6 +2646,9 @@ mod tests {
         let t = with_lockout(on_cache(&cache, LoginLimits::default()), calls.clone());
         let (s, client) = (LoginScope::TenantBasic(ts("t-six")), ip("10.9.70.8"));
         t.begin(&s, &client, "gil").await.unwrap().succeeded().await;
+        // The first one opens the known client's own lock window.
+        let warm = t.begin_per_request(&s, &client, "gil").await.unwrap();
+        warm.settle(true).await;
         let before = calls.calls();
         let a = t.begin_per_request(&s, &client, "gil").await.unwrap();
         assert!(matches!(a.held, PerRequestHeld::Quiet(_)));

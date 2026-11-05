@@ -152,6 +152,8 @@ untouched.
 
 ## 0.64.0
 
+- `tenancy::server::run` is deprecated (removed in 0.66.0): it skips the `[security]` / `[server]` layers. Serve through `manage::Cli` (`run-server`) or `server::Builder`.
+- HMAC clients of a path-prefix tenant sign the full URL path, prefix included (`/acme/webhooks`), as they see it.
 - Tenancy apps: `[admin] read_only_tables` now makes those tables read-only in the tenant admin, and `allowed_tables` hides the others. Check both lists before you deploy.
 - `RouteConfig::operator_session_ttl` now ends operator-console sessions; its default is 12 h (it said 7 days and did nothing). Values above 12 h are cut to 12 h.
 - `tenancy::manage::run` no longer serves `run-server`: serve with `manage::Cli::new().tenancy()`.

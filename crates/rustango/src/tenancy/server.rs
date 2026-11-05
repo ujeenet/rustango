@@ -278,10 +278,18 @@ fn pick_tenant_scheme(setting: Option<String>, secure: bool, host: &str) -> Stri
 /// from the manage CLI see "open http://acme.localhost:8080/" and
 /// know where to go.
 ///
+/// It serves without the `[security]` and `[server]` layers (allowed hosts,
+/// TLS redirect, security headers, body limits); `manage::Cli` and
+/// `server::Builder` apply them.
+///
 /// # Errors
 ///
 /// Returns [`TenancyError::Driver`] for connection / bind failures,
 /// or [`TenancyError::Validation`] for malformed config.
+#[deprecated(
+    since = "0.64.0",
+    note = "serves without the [security]/[server] layers; use `manage::Cli` or `server::Builder` (removed in 0.66.0)"
+)]
 pub async fn run<DB: Database, W: Write + Send>(
     pools: Arc<TenantPools<DB>>,
     registry_url: String,
@@ -291,6 +299,11 @@ pub async fn run<DB: Database, W: Write + Send>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    tracing::warn!(
+        target: "rustango::server",
+        "tenancy::server::run serves without the [security]/[server] layers and is \
+         removed in 0.66.0; serve through manage::Cli or server::Builder"
+    );
     if !no_operators_warn(&pools.registry_pool(), writer).await? {
         // No operator accounts — the user can still bring up the
         // server, but they can't log in. Loud warning, then proceed

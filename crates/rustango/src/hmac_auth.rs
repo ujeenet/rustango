@@ -330,8 +330,11 @@ async fn verify_request(
         );
     }
     let method = req.method().clone();
-    let path = req.uri().path().to_owned();
-    let query = req.uri().query().unwrap_or("").to_owned();
+    // The URL the client signed: a path-prefix tenant's prefix is cut from
+    // `req.uri()` before the app's routes, never from `OriginalUri`.
+    let signed = crate::urls::original_uri(req.uri(), req.extensions());
+    let path = signed.path().to_owned();
+    let query = signed.query().unwrap_or("").to_owned();
 
     let (parts, body) = req.into_parts();
     let bytes = match to_bytes(body, cfg.body_limit).await {

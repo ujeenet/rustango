@@ -149,6 +149,13 @@ llevan el prefijo también.
 El enrutado por host es la opción más fuerte en producción. Los prefijos de
 ruta son útiles en desarrollo, donde tienes un solo host.
 
+Los tenants con prefijo de ruta comparten además el origen del apex con la
+consola de operador. Un script en una página del tenant corre entonces en el
+origen de la consola y puede actuar allí como un operador con sesión, o en el
+admin de otro tenant con prefijo. El servidor avisa al arrancar cuando sirve
+ambos. En producción, da a cada tenant su propio host, o no abras páginas de
+tenants en el navegador que usas para la consola.
+
 ## Modos de almacenamiento
 
 Cada tenant tiene un `storage_mode`: `schema` o `database`.

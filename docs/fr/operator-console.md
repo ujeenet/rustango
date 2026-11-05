@@ -105,6 +105,14 @@ Les noms d'hôte sont normalisés à l'entrée : minuscules, sans schéma, sans 
 
 Depuis la CLI : [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#noms-dhôte).
 
+**Les tenants à préfixe de chemin partagent l'origine de la console.** La
+console et chaque tenant à préfixe vivent sur l'apex, donc un script sur une
+page du tenant peut envoyer à la console des requêtes avec les cookies d'un
+opérateur. Le serveur journalise un avertissement au démarrage dès qu'un tenant
+a un préfixe. En production, servez les tenants sur leurs propres hôtes, ou
+connectez-vous à la console depuis un profil de navigateur qui n'ouvre jamais
+de pages de tenant.
+
 ---
 
 ## Hôtes inconnus

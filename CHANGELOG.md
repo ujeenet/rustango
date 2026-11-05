@@ -28,11 +28,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
 - The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply to a sign-in started at the login page.
 - **Breaking:** without the `tenancy` feature, mounting a ViewSet that sets permission codenames panics with the fix, instead of answering 403 forever; the open-writes warning and `make:viewset` name only what the build has.
+- `server::Builder` warns at boot when path-prefix tenants share the apex origin with the operator console.
 
 ### Deprecated
 
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` (removed in 0.66.0): use `CacheScope::for_tenant(..).app()` / `.locks()`.
 - **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
+- `tenancy::server::run` (removed in 0.66.0): it serves without the `[security]` / `[server]` layers; use `manage::Cli` or `server::Builder`.
 
 ### Fixed
 
@@ -66,6 +68,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `[errors] enabled` without `template_views`, and tenancy-only `[routes]` keys on a single-database app, now warn; `check-settings` marks those keys "tenancy apps only".
 - `RouteConfig::basic_auth_realm` and `tenancy::server::ServerConfig::operator_show_only`, which nothing read, are removed; the `save_quietly` docs say ORM writes send no signals.
 - Migrations: `makemigrations` refuses a model whose `table =` changed with its columns kept (it wrote a drop + create that emptied the table) and names the `RenameTable` route; every `DropTable` now warns. `migrate <target>` refuses a target an applied squash replaces, `unapply` refuses a migration that is not applied, and `migrate_embedded` reconciles squashes like `migrate`. On SQLite a migration whose ledger row committed is no longer reported as failed when only the FK restore failed.
+- `HmacAuthLayer` signs the URL the client sent (`OriginalUri`): under a path-prefix tenant it checked the stripped path, so real signatures failed and one tenant's signature passed on another tenant's path.
+- The login throttle lets a client that signed in to an account lately (same username and IP) past that account's lock, so a guesser's bad passwords no longer lock its owner out; the lock stays on for everyone else.
 
 ## [0.63.0] — 2026-11-04
 

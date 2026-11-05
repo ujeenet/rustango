@@ -48,6 +48,9 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Tenants mit Pfad-Präfix teilen einen Origin mit der Betreiberkonsole: siehe
+[Hostnamen](operator-console.md#hostnamen). In Produktion besser ein Host pro Tenant.
+
 ---
 
 ## Security-Header setzen
