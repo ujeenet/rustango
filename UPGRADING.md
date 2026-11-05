@@ -150,6 +150,9 @@ untouched.
 
 ## Unreleased
 
+- New tenant table `rustango_sso_landing_rules`: run `makemigrations` and `migrate`. Until then sign-ins land as before.
+- Opening the tenant home or admin root signed out no longer adds `?next`; with no landing rule a password sign-in from there lands on the tenant home (`/` or `/<prefix>/`), not `admin_url`. Add an `any` rule to pick the default.
+
 ## 0.63.0
 
 - `dumpdata` now errors on a cell it cannot decode (a column whose type no longer matches the model) and on NaN or infinite floats; it used to write `null`. Fix the column or `--exclude` the model. A `dumpdata -o` file is now owner-only on Unix.

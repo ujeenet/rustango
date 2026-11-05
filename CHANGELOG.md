@@ -4,6 +4,14 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Added
+
+- SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in without `?next` lands, by role, claim or `any`, in `position` order. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
+
+### Changed
+
+- The tenant login gate no longer adds `?next` for the tenant home or the admin root, and the password form leaves its hidden `next` empty without one, so landing rules can apply.
+
 ## [0.63.0] — 2026-11-04
 
 ### Added

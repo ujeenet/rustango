@@ -179,6 +179,22 @@ Die tenantweiten Einstellungen, eine Zeile.
 | `default_provider` | Slug des Anbieters, den die Anmeldeseite sofort öffnet, außer bei `?local=1` oder nach einem Fehler. |
 | `signups_per_hour` | Höchstens so viele SSO-Registrierungen pro Stunde. Leer: 100; `0`: keine Grenze. |
 
+### `SsoLandingRule`
+
+Wohin eine Anmeldung ohne `?next=` führt. Die Regeln laufen nach `position`, die
+erste passende gewinnt. Sie gelten für SSO- und Passwort-Anmeldungen im
+Tenant-Admin und im Bare-Admin; die Mitglieder-Anmeldung ignoriert sie. Eine
+Regel, deren Pfad die `next`-Prüfung nicht besteht (etwa die Anmeldeseite), wird
+übersprungen. Fehlt die Tabelle, gibt es keine Regeln.
+
+| Feld | Was eintragen |
+|---|---|
+| `position` | Die Regeln werden von der kleinsten Zahl an geprüft, die erste passende gewinnt. Bei gleicher Zahl entscheidet die ID. |
+| `match_kind` | `role`: der Benutzer hat die Rolle aus `match_value` (nie im Bare-Admin, der keine Rollen hat). `claim`: die SSO-Anmeldung trägt den Claim `match_name` mit `match_value`, gelesen wie ein Claim der Rollenzuordnung. `any`: jede Anmeldung; als Standard ans Ende stellen. |
+| `match_name` | Der Claim-Name, nur für `claim`-Regeln. Sonst leer. |
+| `match_value` | Der Rollenname (`role`) oder der Claim-Wert (`claim`), exakt verglichen. Für `any` leer. |
+| `landing_url` | Ein Pfad auf dieser Seite, der mit `/` beginnt, wie auf dem eigenen Host des Tenants, z. B. `/admin/reports`. Ein Pfadpräfix wird ergänzt. Keine Zugriffskontrolle: die Seite muss die Rechte selbst prüfen. |
+
 ### `SsoSharedOverride`
 
 Die Einschränkung eines geteilten Anbieters durch einen Tenant. Leere
@@ -270,10 +286,12 @@ diese Spalte aus.
 Im Tenant-Admin landet `GET <login>/sso/<slug>?next=/pfad` nach der Anmeldung
 auf `/pfad`. Der Pfad steckt im signierten Flow-Cookie und durchläuft dieselbe
 Prüfung wie bei der Passwort-Anmeldung: nur gleicher Origin und innerhalb des
-Pfadpräfixes des Tenants. Alles andere landet auf `admin_url`. Die Anmeldeseite
-gibt ihr eigenes `?next` an die SSO-Buttons weiter. Der Bare-Admin macht es
-ebenso, ohne die Präfix-Regel, behält den Pfad über den TOTP-Schritt und fällt
-auf sein Präfix zurück.
+Pfadpräfixes des Tenants. Ohne brauchbares `next` entscheiden die
+[Landing-Regeln](#ssolandingrule) des Tenants, und ohne Treffer landet die
+Anmeldung auf `admin_url`. Die Anmeldeseite gibt ihr eigenes `?next` an die
+SSO-Buttons weiter und erfindet nie eines: wer die Admin-Startseite öffnet,
+schickt kein `next`. Der Bare-Admin macht es ebenso, ohne die Präfix-Regel,
+behält den Pfad über den TOTP-Schritt und fällt auf sein Präfix zurück.
 
 Die Link-Tabelle ist ein normales migriertes Modell: im Speicher des Tenants für
 Tenant-Anmeldungen und in der Admin-Datenbank für den Bare-Admin. Eine

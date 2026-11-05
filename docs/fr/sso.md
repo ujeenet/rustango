@@ -181,6 +181,22 @@ Les réglages de tout le tenant, une ligne.
 | `default_provider` | Slug du provider que la page de connexion ouvre directement, sauf à `?local=1` ou après une erreur. |
 | `signups_per_hour` | Nombre maximal d'inscriptions SSO par heure. Vide : 100 ; `0` : pas de limite. |
 
+### `SsoLandingRule`
+
+Où mène une connexion sans `?next=`. Les règles passent dans l'ordre de
+`position` et la première qui correspond gagne. Elles valent pour les connexions
+SSO et par mot de passe sur l'admin du tenant et l'admin nu ; la connexion des
+membres les ignore. Une règle dont le chemin échoue au contrôle de `next` (par
+exemple la page de connexion) est sautée. Sans la table, il n'y a pas de règle.
+
+| Champ | Quoi saisir |
+|---|---|
+| `position` | Les règles sont essayées du plus petit nombre au plus grand et la première qui correspond gagne. À nombre égal, l'id décide. |
+| `match_kind` | `role` : l'utilisateur a le rôle de `match_value` (jamais sur l'admin nu, qui n'a pas de rôles). `claim` : la connexion SSO porte le claim `match_name` avec `match_value`, lu comme un claim du mappage de rôles. `any` : toute connexion ; à mettre en dernier comme valeur par défaut. |
+| `match_name` | Le nom du claim, pour les règles `claim` seulement. Vide pour les autres. |
+| `match_value` | Le nom du rôle (`role`) ou la valeur du claim (`claim`), comparé exactement. Vide pour `any`. |
+| `landing_url` | Un chemin de ce site qui commence par `/`, tel que sur l'hôte propre du tenant, p. ex. `/admin/reports`. Le préfixe de chemin est ajouté pour vous. Pas un contrôle d'accès : la page doit vérifier les droits elle-même. |
+
 ### `SsoSharedOverride`
 
 La restriction d'un provider partagé par un tenant. Les champs vides
@@ -276,10 +292,12 @@ nu reste derrière `admin-sso`. Activer ou désactiver la fonctionnalité
 Sur l'admin du tenant, `GET <login>/sso/<slug>?next=/chemin` mène à `/chemin`
 après la connexion. Le chemin voyage dans le cookie de flux signé et passe le
 même contrôle que la connexion par mot de passe : même origine uniquement, et
-dans le préfixe de chemin du tenant. Tout le reste mène à `admin_url`. La page
-de connexion transmet son propre `?next` aux boutons SSO. L'admin nu fait de
-même sans la règle du préfixe, garde le chemin pendant l'étape TOTP et revient
-à son préfixe.
+dans le préfixe de chemin du tenant. Sans `next` valable, les
+[règles d'arrivée](#ssolandingrule) du tenant décident, et sans correspondance la
+connexion mène à `admin_url`. La page de connexion transmet son propre `?next`
+aux boutons SSO et n'en invente jamais : ouvrir la racine de l'admin n'envoie pas
+de `next`. L'admin nu fait de même sans la règle du préfixe, garde le chemin
+pendant l'étape TOTP et revient à son préfixe.
 
 La table de liens est un modèle migré normal : dans le stockage du tenant
 pour les connexions tenant, et dans la base de l'admin pour le bare admin.
