@@ -1,4 +1,6 @@
-//! The one place cache keys get their tenant: `tenant:#org:<id>:<slug>:<area>:<rest>`.
+//! Tenant keys of the app cache, locks, idempotency, pages, rate limits,
+//! sessions and flags: `tenant:#org:<id>:<slug>:<area>:<rest>`. Login throttle,
+//! lockout and the MCP key cache keep their own layout.
 //!
 //! Global keys keep their old bytes, and none of them can start with `tenant:`.
 
@@ -54,19 +56,21 @@ impl KeySpace {
     pub(crate) fn key(&self, area: Area, rest: &str) -> String {
         match self {
             Self::Global => {
-                let key = if area.bare() {
-                    rest.to_owned()
-                } else {
-                    format!("{}:{rest}", area.name())
-                };
-                // Injective: `~` keys get one more, so no two keys meet.
-                let tenant_like = key
+                // The name is escaped in every area: a global lock named
+                // `tenant:<ns>:j` would be that tenant's 0.63 lock key.
+                // Injective: `~` names get one more, so no two keys meet.
+                let tenant_like = rest
                     .strip_prefix(TENANT_PREFIX)
                     .is_some_and(|r| r.starts_with(':'));
-                if tenant_like || key.starts_with(ESCAPE) {
-                    format!("{ESCAPE}{key}")
+                let rest = if tenant_like || rest.starts_with(ESCAPE) {
+                    format!("{ESCAPE}{rest}")
                 } else {
-                    key
+                    rest.to_owned()
+                };
+                if area.bare() {
+                    rest
+                } else {
+                    format!("{}:{rest}", area.name())
                 }
             }
             #[cfg(feature = "tenancy")]
@@ -91,13 +95,16 @@ impl KeySpace {
         }
     }
 
-    /// The 0.63 key of `rest`, still read (locks: also taken) so a pod on 0.63
-    /// and one on this release never both run it. Remove in 0.65.0.
+    /// The 0.63 key of `rest`, still used beside the new one so a pod on 0.63
+    /// and one on this release never both run it (locks, idempotency) and see
+    /// each other's page invalidations. Remove in 0.65.0.
     pub(crate) fn legacy_key(&self, area: Area, rest: &str) -> Option<String> {
         let ns = self.namespace()?;
         match area {
             Area::Lock => Some(format!("lock:{TENANT_PREFIX}:{ns}:{rest}")),
             Area::Idem => Some(format!("idem:{rest}")),
+            // A page key held the namespace inside; the rest is the 0.63 key.
+            Area::Page => Some(rest.to_owned()),
             _ => None,
         }
     }
@@ -165,6 +172,10 @@ mod tests {
         assert_eq!(app("~tenant:x"), "~~tenant:x");
         assert_eq!(app("~"), "~~");
         assert_eq!(app("tenantx"), "tenantx");
+        // A global lock never takes a tenant's 0.63 lock key.
+        let lock = KeySpace::Global.key(Area::Lock, "tenant:#org:1:acme:j");
+        assert_eq!(lock, "lock:~tenant:#org:1:acme:j");
+        assert_eq!(KeySpace::Global.key(Area::Lock, "~j"), "lock:~~j");
         assert_eq!(KeySpace::Global.key(Area::Page, "tenant|p"), "tenant|p");
     }
 
@@ -195,6 +206,7 @@ mod tests {
             Some("idem:ab")
         );
         assert_eq!(acme.legacy_key(Area::App, "k"), None);
+        assert_eq!(acme.legacy_key(Area::Page, "p|x").as_deref(), Some("p|x"));
         assert!(KeySpace::Global.purge_prefixes().is_empty());
         assert_eq!(
             acme.purge_prefixes(),

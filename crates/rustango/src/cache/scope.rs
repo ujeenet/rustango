@@ -69,7 +69,9 @@ impl CacheScope {
     }
 
     /// App keys: `tenant:#org:<id>:<slug>:app:<key>`, or bare for global.
-    /// Its `clear()` keeps the tenant's locks, sessions and markers.
+    /// A tenant's `clear()` keeps its locks, sessions and markers. A global
+    /// scope's `clear()` is refused (`CacheError::Refused`): it would delete
+    /// every tenant's keys; call the root cache's `clear()` on purpose.
     #[must_use]
     pub fn app(&self) -> BoxedCache {
         ScopedCache::in_space(self.root.clone(), self.space.clone(), Area::App).boxed()
@@ -106,7 +108,8 @@ impl CacheScope {
         if prefixes.is_empty() {
             return Ok(());
         }
-        self.root.delete_prefixes(&prefixes).await
+        let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+        self.root.delete_prefixes(&refs).await
     }
 }
 

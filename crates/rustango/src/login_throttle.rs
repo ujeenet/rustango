@@ -577,7 +577,8 @@ impl LoginThrottle {
         // Best-effort: one failed cache must not keep the rest.
         let mut first = Ok(());
         for (cache, prefixes) in batches {
-            if let Err(e) = cache.delete_prefixes(&prefixes).await {
+            let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
+            if let Err(e) = cache.delete_prefixes(&refs).await {
                 tracing::warn!(target: "rustango::login", tenant = %tenant.slug, error = %e, "purge: login state not cleared");
                 if first.is_ok() {
                     first = Err(e);
@@ -2491,7 +2492,7 @@ mod tests {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.delete_prefix(p).await
         }
-        async fn delete_prefixes(&self, ps: &[String]) -> Result<(), crate::cache::CacheError> {
+        async fn delete_prefixes(&self, ps: &[&str]) -> Result<(), crate::cache::CacheError> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             self.inner.delete_prefixes(ps).await
         }

@@ -8,7 +8,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Added
 
-- `Cache::delete_prefixes` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.
+- `Cache::delete_prefixes(&[&str])` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.
 - `CacheScope::for_tenant(root, &tenant)` and `CacheScope::global(root)` for jobs; `locks()` gives the scope's `DistributedLock`, `purge()` deletes every key of its tenant.
 - `Job::run_with(&JobCtx)` defaults to `run()`; both queues call it. `JobCtx` gives the job id (stable across retries; the database queue's is row id plus enqueue time), `idempotency_key(scope)` for outside systems, the attempt number and a shutdown signal.
 - `Org::new(slug)` and `testkit::org_with(|o| …)` build an `Org` with its defaults.
@@ -17,8 +17,10 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 - `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
 - The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply.
-- Every tenant cache key is `tenant:#org:<id>:<slug>:<area>:<rest>` (areas `app`, `lock`, `idem`, `page`, `rl`, `session`, `flag`); global keys keep their bytes, and a global app, page or rate-limit key starting with `tenant:` or `~` gets a `~` in front.
-- Until 0.65.0, tenant locks also take the 0.63 key and idempotency also reads and writes the 0.63 entry and marker, so a rolling deploy never runs a request or a job twice.
+- Tenant keys of the app cache, locks, idempotency, page cache, `KeyBy::Tenant` rate limits, sessions and flag overrides are `tenant:#org:<id>:<slug>:<area>:<rest>`; login throttle, account lockout and the MCP key cache keep their layout. Global keys keep their bytes, except a name starting with `tenant:` or `~`, which gets a `~` in front.
+- Until 0.65.0, tenant locks also take the 0.63 key, idempotency also reads and writes the 0.63 entry and marker (`IdempotencyLayer::legacy_keys(false)` turns that off), and a page invalidation also bumps the 0.63 counter.
+- The global app view's `clear()` returns the new `CacheError::Refused` instead of clearing every tenant.
+- `RedisCache::delete_prefixes` scans once per prefix when the prefixes share under 8 bytes.
 - A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
 
 ### Deprecated

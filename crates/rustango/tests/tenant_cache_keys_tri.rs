@@ -113,7 +113,7 @@ impl Cache for Recording {
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         self.inner.delete_prefix(prefix).await
     }
-    async fn delete_prefixes(&self, prefixes: &[String]) -> Result<(), CacheError> {
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
         self.inner.delete_prefixes(prefixes).await
     }
 }
@@ -190,6 +190,12 @@ async fn fill(app: &Router, pages: &CachePageLayer, t: &TenantSlug) {
     send(Request::builder().uri("/page")).await;
 }
 
+/// The 0.63 page generation counter of `t`, bumped beside the new one.
+/// Remove in 0.65.0.
+fn legacy_page_counter(key: &str, t: &TenantSlug) -> bool {
+    key.starts_with("rustango.cache_page|#gen|") && key.ends_with(&format!("{}|", t.namespace()))
+}
+
 /// The area of a tenant key: `tenant:<ns>:<area>:…`.
 fn area<'a>(key: &'a str, t: &TenantSlug) -> &'a str {
     let rest = key.strip_prefix(&prefix(t)).expect("a tenant key");
@@ -224,6 +230,7 @@ async fn a_tenant_request_writes_only_tenant_keys(pool: &Pool) {
                 key.starts_with(&prefix(&t))
                     || key.starts_with(&legacy_lock)
                     || key.starts_with("idem:")
+                    || legacy_page_counter(&key, &t)
                     || GLOBAL_ALLOW.iter().any(|g| key.starts_with(g)),
                 "{} wrote `{key}`",
                 t.slug
@@ -250,9 +257,9 @@ async fn purge_removes_one_tenant_only(pool: &Pool) {
     for t in [acme(), acme2()] {
         fill(&app, &pages, &t).await;
         for key in rec.take() {
-            // The 0.63 idempotency copy has no tenant prefix and expires
-            // instead. Remove in 0.65.0.
-            if key.starts_with("idem:") {
+            // The 0.63 idempotency copy and page counter have no tenant
+            // prefix, so the purge cannot reach them. Remove in 0.65.0.
+            if key.starts_with("idem:") || legacy_page_counter(&key, &t) {
                 continue;
             }
             if root.exists(&key).await.unwrap() {

@@ -150,11 +150,14 @@ impl Cache for ScopedCache {
     }
 
     /// Clears **only this namespace**, via [`Cache::delete_prefix`]
-    /// on the inner cache.
+    /// on the inner cache. The global app view has no namespace, so it
+    /// refuses: that clear would wipe every tenant's keys.
     async fn clear(&self) -> Result<(), CacheError> {
         if self.prefix.is_empty() {
-            // The global app view: bare keys, so the whole root.
-            return self.inner.clear().await;
+            return Err(CacheError::Refused(
+                "the global app cache has no prefix, so clear() would delete every                  tenant's sessions, locks and markers; call clear() on the root cache                  if that is what you mean"
+                    .to_owned(),
+            ));
         }
         self.inner.delete_prefix(&self.prefix).await
     }
@@ -220,9 +223,10 @@ impl Cache for ScopedCache {
         self.inner.delete_prefix(&self.k(prefix)).await
     }
 
-    async fn delete_prefixes(&self, prefixes: &[String]) -> Result<(), CacheError> {
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
         let scoped: Vec<String> = prefixes.iter().map(|p| self.k(p)).collect();
-        self.inner.delete_prefixes(&scoped).await
+        let refs: Vec<&str> = scoped.iter().map(String::as_str).collect();
+        self.inner.delete_prefixes(&refs).await
     }
 }
 
@@ -320,8 +324,8 @@ mod tests {
         assert!(shared.exists("tenant:#org:1:acme:app:k").await.unwrap());
     }
 
-    /// A global app view keeps keys bare but escapes `tenant:`, and its clear
-    /// is the root's.
+    /// A global app view keeps keys bare but escapes `tenant:`, and refuses a
+    /// clear that would wipe every tenant.
     #[cfg(feature = "tenancy")]
     #[tokio::test]
     async fn the_global_app_view_cannot_write_a_tenant_key() {
@@ -340,8 +344,11 @@ mod tests {
                 .as_deref(),
             Some("forged")
         );
-        app.clear().await.unwrap();
-        assert!(!shared.exists("stats").await.unwrap());
+        assert!(matches!(app.clear().await, Err(CacheError::Refused(_))));
+        assert!(
+            shared.exists("stats").await.unwrap(),
+            "a global clear wiped the root"
+        );
     }
 
     /// Clearing `acme:` must not hit `acme-corp:`.

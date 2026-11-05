@@ -235,8 +235,9 @@ key the leaky key: a handler — or worse a background task, which has no
 ambient tenant to borrow from — writes `"stats:monthly"` for one tenant and
 every other tenant reads it back.
 
-Wrap the shared cache in a **`ScopedCache`** so the namespace is applied for
-you and the call site cannot forget:
+Take the tenant's view with **`CacheScope::for_tenant(..).app()`** (a
+`ScopedCache` under the hood), so the namespace is applied for you and the call
+site cannot forget:
 
 ```rust
 use rustango::cache::CacheScope;
@@ -250,7 +251,7 @@ cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` is itself a `Cache`, so it drops into anything taking a
+The view is itself a `Cache`, so it drops into anything taking a
 `BoxedCache` — `cache_page`, `cache_fragment`, the rate limiters,
 `DistributedLock`. It forwards to the inner backend with mapped keys rather
 than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`)
@@ -281,9 +282,10 @@ Two things worth knowing:
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.
 
-Every tenant key is `tenant:#org:<id>:<slug>:<area>:<rest>`, one area each
-for app keys, locks, idempotency, pages, rate limits, sessions and flag
-overrides. A tenant app `clear()` drops only the `app` area, so it never frees
+Tenant keys are `tenant:#org:<id>:<slug>:<area>:<rest>`, one area each for
+app keys, locks, idempotency, pages, `KeyBy::Tenant` rate limits, sessions and
+flag overrides. Login throttle, account lockout and the MCP key cache keep
+their own layout and their own purge. A tenant app `clear()` drops only the `app` area, so it never frees
 a running job's lock.
 
 A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`

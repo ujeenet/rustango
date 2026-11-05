@@ -152,12 +152,15 @@ untouched.
 
 ## 0.64.0
 
-- `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
+- `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
 - New tenant table `rustango_sso_landing_rules`: run `makemigrations` and `migrate`. Until then sign-ins land as before.
-- Tenant cache keys move to `tenant:#org:<id>:<slug>:<area>:<rest>`. Tenant app (`ScopedCache`) entries move to the `app` area and miss once; rename keys if you use it as a durable store. Page-cache and `KeyBy::Tenant` counters restart once; sessions and flag overrides keep their keys.
+- Tenant keys of the app cache, locks, idempotency, page cache, `KeyBy::Tenant` rate limits, sessions and flag overrides move to `tenant:#org:<id>:<slug>:<area>:<rest>`; login throttle, lockout and MCP key-cache keys do not. Tenant app (`ScopedCache`) entries move to the `app` area and miss once; rename keys if you use it as a durable store. Page-cache and `KeyBy::Tenant` counters restart once; sessions and flag overrides keep their keys.
 - Tenant locks move to `tenant:<ns>:lock:<name>` and idempotency entries to `tenant:<ns>:idem:<sha>`. Until 0.65.0 this release also takes the old lock key and reads and writes the old idempotency entries and markers, so a 0.63 and a 0.64 pod never run one request or job twice; deploy 0.64 everywhere before 0.65.0. The purge cannot reach the hashed old idempotency copies; they expire with their TTL.
-- A global app, page or rate-limit key starting with `tenant:` or `~` is stored with a `~` in front, so it can never land in a tenant's keyspace.
+- A global key name (app, lock, idempotency, page, rate limit, session, flag) starting with `tenant:` or `~` is stored with a `~` in front, so it can never land in a tenant's keyspace or its 0.63 lock key.
+- Tenant idempotency entries take 2x cache memory and twice the round trips until 0.65.0 (the 0.63 copy). Once every pod runs 0.64 and one TTL has passed, `IdempotencyLayer::legacy_keys(false)` drops the copy.
+- During a rolling deploy, `KeyBy::Tenant` limits count per version (a tenant has two budgets), and a page invalidation on a 0.63 pod is not seen by 0.64 pods until the entry's TTL. A 0.64 invalidation also bumps the 0.63 counter. The purge cannot reach the 0.63 idempotency copies and page counters; they keep their TTL.
+- `CacheScope::global(root).app().clear()` (and a global request's `app().clear()`) returns `CacheError::Refused`: it would wipe every tenant. Call the root cache's `clear()` if you mean it. `CacheError` gains `Refused`.
 - `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` are deprecated (removed in 0.66.0): use `CacheScope::for_tenant(cache, &tenant).app()` or `.locks()`; for `scoped`, put the namespace in the lock name.
 - `Org` is `#[non_exhaustive]`, so `Org { .. }` literals and `..testkit::org()` no longer compile outside rustango. Use `let mut o = Org::new(slug); o.field = …;` or `testkit::org_with(|o| o.field = …)`. Fields stay public.
 - Jobs can override `Job::run_with(&self, ctx: &JobCtx)` to read the job id, attempt and stop signal; jobs with only `run` need no change.

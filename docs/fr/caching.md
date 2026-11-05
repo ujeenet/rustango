@@ -253,8 +253,9 @@ la clé naturelle la clé qui fuit : un handler — ou pire une tâche d'arrièr
 qui n'a aucun tenant ambiant où puiser — écrit `"stats:monthly"` pour un tenant
 et tous les autres le relisent.
 
-Enveloppez le cache partagé dans un **`ScopedCache`** pour que l'espace de noms
-soit appliqué à votre place et que le site d'appel ne puisse pas l'oublier :
+Prenez la vue du tenant avec **`CacheScope::for_tenant(..).app()`** (un
+`ScopedCache` en interne) pour que l'espace de noms soit appliqué à votre place
+et que le site d'appel ne puisse pas l'oublier :
 
 ```rust
 use rustango::cache::CacheScope;
@@ -268,9 +269,9 @@ cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` est lui-même un `Cache`, il se glisse donc partout où un
+La vue est elle-même un `Cache`, elle se glisse donc partout où un
 `BoxedCache` est attendu — `cache_page`, `cache_fragment`, les rate limiters,
-`DistributedLock`. Il transmet au backend interne avec les clés remappées plutôt
+`DistributedLock`. Elle transmet au backend interne avec les clés remappées plutôt
 que de réimplémenter quoi que ce soit, si bien que les primitives natives (Redis
 `INCRBY`, `SET NX`) gardent leur atomicité. `get_many` / `set_many` / `delete_many`
 sont aussi transmis, mais aucun backend fourni ne les regroupe encore : chaque clé
@@ -302,9 +303,11 @@ Deux choses à savoir :
 Le `Cache::clear()` non cadré reste global au processus : utilisez la vue cadrée
 dès que c'est le changement d'un seul tenant qui a déclenché l'invalidation.
 
-Chaque clé de tenant est `tenant:#org:<id>:<slug>:<area>:<rest>`, avec une zone
+Les clés de tenant sont `tenant:#org:<id>:<slug>:<area>:<rest>`, avec une zone
 pour les clés de l'app, les verrous, l'idempotence, les pages, les limites de
-débit, les sessions et les overrides de flags. Un `clear()` du cache d'app du
+débit `KeyBy::Tenant`, les sessions et les overrides de flags. Le throttle de
+login, le verrouillage de compte et le cache de clés MCP gardent leur propre
+format et leur propre purge. Un `clear()` du cache d'app du
 tenant ne supprime que la zone `app` : il ne libère donc jamais le verrou d'un
 job en cours.
 
