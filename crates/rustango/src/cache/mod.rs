@@ -80,6 +80,10 @@ pub enum CacheError {
     Connection(String),
     #[error("cache serialization error: {0}")]
     Serialization(String),
+    /// The call would do more than its view allows, such as a global app
+    /// view's `clear()` wiping every tenant.
+    #[error("cache operation refused: {0}")]
+    Refused(String),
 }
 
 /// The error every backend returns when `incr` would leave the i64 range.
@@ -328,7 +332,7 @@ pub trait Cache: Send + Sync + 'static {
 
     /// [`Self::delete_prefix`] for each of `prefixes`. `RedisCache` does it
     /// in one keyspace scan; the default deletes one prefix at a time.
-    async fn delete_prefixes(&self, prefixes: &[String]) -> Result<(), CacheError> {
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
         for p in prefixes {
             self.delete_prefix(p).await?;
         }

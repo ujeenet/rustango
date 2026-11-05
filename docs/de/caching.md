@@ -251,8 +251,9 @@ Multi-Tenancy den naheliegenden Key zum undichten Key: ein Handler (oder
 schlimmer ein Background-Task, der gar keinen ambienten Tenant hat) schreibt
 `"stats:monthly"` für einen Tenant, und jeder andere Tenant liest es zurück.
 
-Wickle den gemeinsamen Cache in einen **`ScopedCache`**, damit der Namespace
-für dich angewendet wird und die Aufrufstelle es nicht vergessen kann:
+Nimm die Sicht des Tenants mit **`CacheScope::for_tenant(..).app()`** (intern
+ein `ScopedCache`), damit der Namespace für dich angewendet wird und die
+Aufrufstelle es nicht vergessen kann:
 
 ```rust
 use rustango::cache::CacheScope;
@@ -266,9 +267,9 @@ cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` ist selbst ein `Cache` und passt damit überall hinein, wo ein
+Die Sicht ist selbst ein `Cache` und passt damit überall hinein, wo ein
 `BoxedCache` erwartet wird — `cache_page`, `cache_fragment`, die Rate-Limiter,
-`DistributedLock`. Er leitet mit gemappten Keys an das innere Backend weiter,
+`DistributedLock`. Sie leitet mit gemappten Keys an das innere Backend weiter,
 statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
 `SET NX`) ihre Atomarität behalten. `get_many` / `set_many` / `delete_many` werden
 auch weitergeleitet, aber kein mitgeliefertes Backend bündelt sie bisher: jeder
@@ -301,9 +302,10 @@ Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
 Invalidierung ausgelöst hat.
 
-Jeder Tenant-Key ist `tenant:#org:<id>:<slug>:<area>:<rest>`, mit je einem
-Bereich für App-Keys, Locks, Idempotency, Seiten, Rate-Limits, Sessions und
-Flag-Overrides. Ein `clear()` des Tenant-App-Caches löscht nur den Bereich
+Tenant-Keys sind `tenant:#org:<id>:<slug>:<area>:<rest>`, mit je einem
+Bereich für App-Keys, Locks, Idempotency, Seiten, `KeyBy::Tenant`-Rate-Limits,
+Sessions und Flag-Overrides. Login-Throttle, Account-Lockout und der
+MCP-Key-Cache behalten ihr eigenes Layout und ihren eigenen Purge. Ein `clear()` des Tenant-App-Caches löscht nur den Bereich
 `app` und gibt also nie den Lock eines laufenden Jobs frei.
 
 Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet

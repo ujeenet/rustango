@@ -393,6 +393,12 @@ impl CachePageLayer {
             // A long TTL, not `None`: a backend may give `None` its short
             // default, and a counter that expired would bring older entries back.
             let now = self.cache.incr(&counter, 1, Some(GENERATION_TTL)).await?;
+            // Remove in 0.65.0: bump the 0.63 counter too, so pods still on 0.63
+            // stop serving the page. Their own invalidations are not seen here.
+            let rest = generation_rest(&self.key_prefix, &p.path, &p.host, &space);
+            if let Some(old) = space.legacy_key(Area::Page, &rest) {
+                self.cache.incr(&old, 1, Some(GENERATION_TTL)).await?;
+            }
             let before = u64::try_from(now.saturating_sub(1)).unwrap_or(0);
             keys.push(self.key_for(p, before));
         }
@@ -872,11 +878,16 @@ const GENERATION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 
 /// The key of a path's generation counter, which every page key of the
 /// path carries. `#` never starts a page key's method part.
 fn generation_key(prefix: &str, path: &str, host: &str, space: &KeySpace) -> String {
+    space.key(Area::Page, &generation_rest(prefix, path, host, space))
+}
+
+/// [`generation_key`] before its key space: the 0.63 tenant counter.
+fn generation_rest(prefix: &str, path: &str, host: &str, space: &KeySpace) -> String {
     let mut k = format!("{prefix}|#gen|");
     write_lp(&mut k, path);
     write_lp(&mut k, host);
     write_lp(&mut k, &space.namespace().unwrap_or_default());
-    space.key(Area::Page, &k)
+    k
 }
 
 /// The path's current generation; 0 when it was never invalidated.
@@ -1375,6 +1386,26 @@ fn _trait_check(_h: &HeaderMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Until 0.65.0 a tenant invalidation also bumps the 0.63 counter, so pods
+    /// still on 0.63 stop serving the page.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn invalidate_bumps_the_old_counter_too() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let layer = CachePageLayer::new(cache.clone());
+        let acme = crate::tenancy::TenantSlug::new(1, "acme");
+        let page = PageKey::new("/p", "h").tenant(&acme);
+        layer.invalidate([&page]).await.unwrap();
+        let old = "rustango.cache_page|#gen|2:/p|1:h|11:#org:1:acme|";
+        let new = format!("tenant:#org:1:acme:page:{old}");
+        assert_eq!(cache.get(&new).await.unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            cache.get(old).await.unwrap().as_deref(),
+            Some("1"),
+            "0.63 counter"
+        );
+    }
 
     fn sample_page() -> CachedPage {
         let mut headers = HeaderMap::new();

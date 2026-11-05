@@ -219,7 +219,7 @@ async fn delete_prefixes_deletes_exactly_each_prefix() {
     for k in gone.iter().chain(&kept) {
         redis.set(k, "v", None).await.unwrap();
     }
-    let prefixes = ["a:#org:1:x:".to_owned(), "b:#org:1:x:".to_owned()];
+    let prefixes = ["a:#org:1:x:", "b:#org:1:x:"];
     redis.delete_prefixes(&prefixes).await.expect("delete");
     for k in gone {
         assert_eq!(redis.get(k).await.unwrap(), None, "{k} kept");

@@ -248,8 +248,9 @@ convierte la clave natural en la clave que se filtra: un handler — o peor, una
 tarea de fondo, que no tiene ningún tenant ambiental del que tirar — escribe
 `"stats:monthly"` para un tenant y todos los demás lo leen.
 
-Envuelve la caché compartida en un **`ScopedCache`** para que el namespace se
-aplique por ti y el sitio de llamada no pueda olvidarlo:
+Toma la vista del tenant con **`CacheScope::for_tenant(..).app()`** (por
+dentro un `ScopedCache`) para que el namespace se aplique por ti y el sitio de
+llamada no pueda olvidarlo:
 
 ```rust
 use rustango::cache::CacheScope;
@@ -263,7 +264,7 @@ cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` es en sí mismo un `Cache`, así que encaja en cualquier cosa que
+La vista es en sí misma un `Cache`, así que encaja en cualquier cosa que
 tome un `BoxedCache` — `cache_page`, `cache_fragment`, los rate limiters,
 `DistributedLock`. Reenvía al backend interno con las claves mapeadas en lugar
 de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
@@ -298,9 +299,11 @@ El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la
 invalidación.
 
-Cada clave de tenant es `tenant:#org:<id>:<slug>:<area>:<rest>`, con un área
+Las claves de tenant son `tenant:#org:<id>:<slug>:<area>:<rest>`, con un área
 para las claves de la app, los locks, la idempotencia, las páginas, los límites
-de tasa, las sesiones y los overrides de flags. Un `clear()` de la caché de app
+de tasa de `KeyBy::Tenant`, las sesiones y los overrides de flags. El throttle
+de login, el bloqueo de cuentas y la caché de claves MCP mantienen su propio
+formato y su propia purga. Un `clear()` de la caché de app
 del tenant borra solo el área `app`, así que nunca libera el lock de un job en
 marcha.
 

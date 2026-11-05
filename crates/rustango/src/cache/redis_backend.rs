@@ -181,8 +181,8 @@ fn glob_escape(s: &str) -> String {
 
 /// A glob matching every key under any of `prefixes`: their common prefix,
 /// or their longest common substring when that is longer.
-fn shared_pattern(prefixes: &[String]) -> String {
-    let first = prefixes[0].as_str();
+fn shared_pattern(prefixes: &[&str]) -> Option<String> {
+    let first = prefixes[0];
     let lcp = prefixes[1..].iter().fold(first, |acc, p| {
         let n = acc
             .char_indices()
@@ -194,7 +194,8 @@ fn shared_pattern(prefixes: &[String]) -> String {
     let shortest = prefixes
         .iter()
         .min_by_key(|p| p.len())
-        .map_or("", String::as_str);
+        .copied()
+        .unwrap_or("");
     let mut at: Vec<usize> = shortest.char_indices().map(|(i, _)| i).collect();
     at.push(shortest.len());
     let chars = at.len() - 1;
@@ -207,12 +208,19 @@ fn shared_pattern(prefixes: &[String]) -> String {
                 .find(|sub| prefixes.iter().all(|p| p.contains(sub)))
         })
         .unwrap_or("");
-    if lcp.len() >= lcs.len() {
+    // A short shared part would make Redis send most key names to the client.
+    if lcp.len().max(lcs.len()) < MIN_SHARED_PATTERN {
+        return None;
+    }
+    Some(if lcp.len() >= lcs.len() {
         format!("{}*", glob_escape(lcp))
     } else {
         format!("*{}*", glob_escape(lcs))
-    }
+    })
 }
+
+/// Shortest shared part worth one scan for several prefixes (`#org:1:` is 7).
+const MIN_SHARED_PATTERN: usize = 8;
 
 #[async_trait]
 impl Cache for RedisCache {
@@ -350,15 +358,23 @@ impl Cache for RedisCache {
 
     /// One `SCAN` for all of `prefixes`: `MATCH` on the substring they
     /// share, then only keys starting with one of them are deleted.
-    async fn delete_prefixes(&self, prefixes: &[String]) -> Result<(), CacheError> {
+    /// Prefixes that share too little scan one at a time instead.
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
         match prefixes {
             [] => Ok(()),
             [one] => self.delete_prefix(one).await,
-            many => {
-                let pattern = shared_pattern(many);
-                self.scan_delete(&pattern, |k| many.iter().any(|p| k.starts_with(p.as_str())))
-                    .await
-            }
+            many => match shared_pattern(many) {
+                Some(pattern) => {
+                    self.scan_delete(&pattern, |k| many.iter().any(|p| k.starts_with(p)))
+                        .await
+                }
+                None => {
+                    for p in many {
+                        self.delete_prefix(p).await?;
+                    }
+                    Ok(())
+                }
+            },
         }
     }
 
@@ -513,8 +529,10 @@ mod tests {
     async fn delete_prefixes_scans_once() {
         let (url, seen) = ok_server().await;
         let cache = RedisCache::new(&url).await.expect("connect");
-        let prefixes = ["a:#org:1:x:".to_owned(), "b:#org:1:x:".to_owned()];
-        cache.delete_prefixes(&prefixes).await.expect("delete");
+        cache
+            .delete_prefixes(&["a:#org:1:x:", "b:#org:1:x:"])
+            .await
+            .expect("delete");
         let seen = seen.lock().unwrap();
         let scans: Vec<_> = seen
             .iter()
@@ -526,11 +544,33 @@ mod tests {
 
     #[test]
     fn shared_pattern_picks_the_longer_match() {
-        let p = |v: &[&str]| shared_pattern(&v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>());
-        assert_eq!(p(&["ab:x", "ab:y"]), "ab:*");
-        assert_eq!(p(&["a:#o:1:", "bb:#o:1:"]), "*:#o:1:*");
-        assert_eq!(p(&["k[1]*", "k[1]?"]), "k\\[1\\]*");
-        assert_eq!(p(&["x", "y"]), "*");
+        let p = |v: &[&str]| shared_pattern(v);
+        assert_eq!(p(&["abcdefg:x", "abcdefg:y"]).as_deref(), Some("abcdefg:*"));
+        assert_eq!(
+            p(&["a:#org:1:", "bb:#org:1:"]).as_deref(),
+            Some("*:#org:1:*")
+        );
+        assert_eq!(
+            p(&["kk[1]*:ab", "kk[1]*:ac"]).as_deref(),
+            Some("kk\\[1\\]\\*:a*")
+        );
+        assert_eq!(p(&["x", "y"]), None);
+        assert_eq!(p(&["ab:x", "ab:y"]), None);
+    }
+
+    /// Prefixes sharing too little get one selective scan each, never `MATCH *`.
+    #[tokio::test]
+    async fn unrelated_prefixes_scan_one_at_a_time() {
+        let (url, seen) = ok_server().await;
+        let cache = RedisCache::new(&url).await.expect("connect");
+        cache.delete_prefixes(&["a:", "b:"]).await.expect("delete");
+        let seen = seen.lock().unwrap();
+        let patterns: Vec<&str> = seen
+            .iter()
+            .filter(|c| c[0].eq_ignore_ascii_case("SCAN"))
+            .map(|c| c[3].as_str())
+            .collect();
+        assert_eq!(patterns, ["a:*", "b:*"], "{seen:?}");
     }
 
     /// A server that accepts but never answers fails the connect, not hangs it.
