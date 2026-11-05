@@ -1340,48 +1340,23 @@ impl MediaManager {
     }
 
     async fn collect_descendant_ids(&self, root: i64) -> Result<Vec<i64>, MediaError> {
-        // Recursive CTE over the parent_id chain. The same syntax
-        // works on PG, MySQL 8+ and SQLite 3.8+.
-        let p = self.pool.dialect().placeholder(1);
-        // MariaDB plans the step for a 2-row `sub` and scans every
-        // collection per row; reading `sub` first through the `parent_id`
-        // index keeps it linear.
-        const STEP_FROM: &str = "FROM rustango_media_collections c JOIN sub";
-        let from = if self.pool.dialect().name() == "mysql" {
-            use crate::core::Model as _;
-            let index = MediaCollection::SCHEMA
-                .indexes
-                .iter()
-                .find(|i| i.columns == ["parent_id"])
-                .map(|i| i.name)
-                .expect("parent_id is indexed");
-            let mut from = String::new();
-            crate::sql::ByServer {
-                mysql: STEP_FROM,
-                mariadb: &format!(
-                    "FROM sub STRAIGHT_JOIN rustango_media_collections c \
-                     FORCE INDEX FOR JOIN (`{index}`)"
-                ),
-            }
-            .write(&mut from);
-            from
-        } else {
-            STEP_FROM.to_owned()
-        };
-        let sql = format!(
-            "WITH RECURSIVE sub AS ( \
-                 SELECT id FROM rustango_media_collections \
-                  WHERE id = {p} AND deleted_at IS NULL \
-                 UNION \
-                 SELECT c.id {from} \
-                   ON c.parent_id = sub.id \
-                  WHERE c.deleted_at IS NULL \
-             ) SELECT id FROM sub"
-        );
-        let rows: Vec<(i64,)> =
-            crate::sql::raw_query_pool(&sql, vec![crate::core::SqlValue::I64(root)], &self.pool)
+        let run = |hint| {
+            let sql = descendant_walk_sql(self.pool.dialect(), hint);
+            async move {
+                crate::sql::raw_query_pool::<(i64,)>(
+                    &sql,
+                    vec![crate::core::SqlValue::I64(root)],
+                    &self.pool,
+                )
                 .await
-                .map_err(media_err_from_exec)?;
+            }
+        };
+        let rows = match run(true).await {
+            // An unmigrated table lacks the hinted index (MariaDB 1176).
+            Err(e) if is_mysql_missing_key(&e) => run(false).await,
+            other => other,
+        }
+        .map_err(media_err_from_exec)?;
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
@@ -1949,6 +1924,58 @@ fn tag_ids_of(tags: &[MediaTag]) -> Vec<i64> {
 fn is_deadlock(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(d)
         if matches!(d.code().as_deref(), Some("40001" | "40P01")))
+}
+
+/// The recursive CTE over the `parent_id` chain; PG, MySQL 8+ and SQLite
+/// 3.8+ share it. MariaDB plans the step for a 2-row `sub` and scans every
+/// collection per row, so with `hint` it reads `sub` first through the
+/// `parent_id` index.
+fn descendant_walk_sql(d: &dyn crate::sql::Dialect, hint: bool) -> String {
+    const STEP_FROM: &str = "FROM rustango_media_collections c JOIN sub";
+    let from = if hint && d.name() == "mysql" {
+        use crate::core::Model as _;
+        let index = MediaCollection::SCHEMA
+            .indexes
+            .iter()
+            .find(|i| i.columns == ["parent_id"])
+            .map(|i| i.name)
+            .expect("parent_id is indexed");
+        let mut from = String::new();
+        crate::sql::ByServer {
+            mysql: STEP_FROM,
+            mariadb: &format!(
+                "FROM sub STRAIGHT_JOIN rustango_media_collections c \
+                 FORCE INDEX FOR JOIN (`{index}`)"
+            ),
+        }
+        .write(&mut from);
+        from
+    } else {
+        STEP_FROM.to_owned()
+    };
+    let p = d.placeholder(1);
+    format!(
+        "WITH RECURSIVE sub AS ( \
+             SELECT id FROM rustango_media_collections \
+              WHERE id = {p} AND deleted_at IS NULL \
+             UNION \
+             SELECT c.id {from} \
+               ON c.parent_id = sub.id \
+              WHERE c.deleted_at IS NULL \
+         ) SELECT id FROM sub"
+    )
+}
+
+/// MySQL 1176: a `FORCE INDEX` names a key the table does not have.
+fn is_mysql_missing_key(e: &crate::sql::ExecError) -> bool {
+    #[cfg(feature = "mysql")]
+    if let crate::sql::ExecError::Driver(sqlx::Error::Database(d)) = e {
+        return d
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| m.number() == 1176);
+    }
+    let _ = e;
+    false
 }
 
 /// MySQL 1869 (a skip-on-conflict insert met a row it inserted itself)
