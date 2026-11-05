@@ -36,6 +36,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- The SSO idle sweep skips a provider whose `auto_deactivate_after_days` is past the calendar instead of panicking and stopping for every later tenant; stored values read as at most 36500 days and the operator console refuses more.
+- A server or `check --deploy` with a sealed (`EncryptedString`) field and no `RUSTANGO_SECRET_KEY` now refuses up front, not with a panic at the first write.
+- `text::dedent`, the `add` and `divisibleby` template filters, and the SSO `exp`/`nbf` check no longer panic on a split UTF-8 indent or on `i64` overflow.
 - MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()`, `inspectdb` and the jobs queue read a JSON column as JSON; `inspectdb` reads quoted defaults and unsigned lengths; `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
 - MySQL / MariaDB: a filtered `AnyValue` is written as `MIN(CASE WHEN …)`, so a row the filter rejects can no longer turn the result NULL.
 - `make:viewset` mounts the ViewSet at the model's table (`/api/posts`), not the module name (`/api/post_view_set`), and prints the URL it answers at.

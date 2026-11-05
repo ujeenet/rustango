@@ -270,13 +270,13 @@ fn check_claims(
         .get("exp")
         .and_then(Value::as_i64)
         .ok_or(IdTokenError::Malformed("no exp"))?;
-    if now > exp + LEEWAY_SECS {
+    if now > exp.saturating_add(LEEWAY_SECS) {
         return Err(IdTokenError::Expired);
     }
     if claims
         .get("nbf")
         .and_then(Value::as_i64)
-        .is_some_and(|nbf| now + LEEWAY_SECS < nbf)
+        .is_some_and(|nbf| now.saturating_add(LEEWAY_SECS) < nbf)
     {
         return Err(IdTokenError::NotYetValid);
     }
@@ -510,6 +510,20 @@ mod tests {
 
     fn now() -> i64 {
         chrono::Utc::now().timestamp()
+    }
+
+    /// Times at the edge of `i64` are compared, not overflowed.
+    #[test]
+    fn extreme_exp_and_nbf_do_not_overflow() {
+        let mut c = claims(0).as_object().unwrap().clone();
+        c.insert("exp".into(), i64::MAX.into());
+        assert_eq!(check_claims(&c, CID, &issuer(), 0), Ok(()));
+        c.insert("nbf".into(), i64::MAX.into());
+        assert_eq!(check_claims(&c, CID, &issuer(), i64::MAX), Ok(()));
+        assert_eq!(
+            check_claims(&c, CID, &issuer(), 0),
+            Err(IdTokenError::NotYetValid)
+        );
     }
 
     #[test]

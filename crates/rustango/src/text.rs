@@ -1636,11 +1636,15 @@ pub fn dedent(text: &str) -> String {
                 // at the beginning of `line` and contain only
                 // whitespace (which is ASCII or non-ASCII
                 // whitespace; we only care about identity here).
-                let n = prev
+                let mut n = prev
                     .bytes()
                     .zip(leading.bytes())
                     .take_while(|(a, b)| a == b)
                     .count();
+                // Two whitespace chars can share leading bytes (U+2002, U+2003).
+                while !prev.is_char_boundary(n) {
+                    n -= 1;
+                }
                 &prev[..n]
             }
         });
@@ -4196,6 +4200,13 @@ mod tests {
     }
 
     // -------- dedent --------
+
+    /// Indents sharing leading UTF-8 bytes cut at a char boundary, not inside one.
+    #[test]
+    fn dedent_does_not_cut_inside_a_char() {
+        let input = "\u{2003}a\n\u{2002}b";
+        assert_eq!(dedent(input), input);
+    }
 
     #[test]
     fn dedent_strips_common_4_space_indent() {

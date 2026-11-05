@@ -814,6 +814,11 @@ impl<DB: Database> Builder<DB> {
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
         self.routes = self.routes.with_env_overrides()?;
+        // A sealed field's first write would panic instead.
+        #[cfg(feature = "casts")]
+        if let Some(problem) = crate::casts::sealed_key_problem() {
+            return Err(problem.into());
+        }
         #[cfg(feature = "postgres")]
         crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let resolver_for_admin = self.resolver();

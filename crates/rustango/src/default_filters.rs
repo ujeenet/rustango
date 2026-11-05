@@ -201,8 +201,13 @@ fn add(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Value> {
         return Ok(value.clone());
     };
     // Numeric path: both sides read as numbers.
-    if let (Some(a), Some(b)) = (value.as_i64(), rhs.as_i64()) {
-        return Ok(to_value(a + b)?);
+    // An i64 overflow falls through to the float sum.
+    if let Some(sum) = value
+        .as_i64()
+        .zip(rhs.as_i64())
+        .and_then(|(a, b)| a.checked_add(b))
+    {
+        return Ok(to_value(sum)?);
     }
     if let (Some(a), Some(b)) = (value.as_f64(), rhs.as_f64()) {
         return Ok(to_value(a + b)?);
@@ -267,7 +272,8 @@ fn divisibleby(value: &Value, args: &HashMap<String, Value>) -> tera::Result<Val
     if divisor == 0 {
         return Ok(Value::Bool(false));
     }
-    Ok(Value::Bool(n % divisor == 0))
+    // `wrapping_rem`: `i64::MIN % -1` is 0, where `%` panics.
+    Ok(Value::Bool(n.wrapping_rem(divisor) == 0))
 }
 
 // ------------------------------------------------------------------ floatformat
@@ -1398,6 +1404,13 @@ mod tests {
 
     // -------- add --------
 
+    /// An `i64` overflow adds as floats instead of panicking.
+    #[test]
+    fn add_overflowing_integers_falls_back_to_float() {
+        let out = add(&json!(i64::MAX), &args_pos(json!(1))).unwrap();
+        assert_eq!(out.as_f64(), Some(i64::MAX as f64 + 1.0));
+    }
+
     #[test]
     fn add_sums_two_integers() {
         let out = add(&json!(4), &args_pos(json!(5))).unwrap();
@@ -1459,6 +1472,13 @@ mod tests {
     }
 
     // -------- divisibleby --------
+
+    /// `i64::MIN % -1` would panic; every integer divides by -1.
+    #[test]
+    fn divisibleby_min_by_minus_one_is_true() {
+        let out = divisibleby(&json!(i64::MIN), &args_pos(json!(-1))).unwrap();
+        assert_eq!(out, json!(true));
+    }
 
     #[test]
     fn divisibleby_true_when_evenly_divisible() {

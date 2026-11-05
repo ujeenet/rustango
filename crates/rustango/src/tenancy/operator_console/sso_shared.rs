@@ -179,8 +179,14 @@ impl SharedSsoForm {
             s => serde_json::from_str(s).map_err(|e| format!("required claims: {e}"))?,
         };
         crate::sso::policy::RequiredClaims::parse(&claims).map_err(|e| e.to_string())?;
+        let max = crate::sso::policy::MAX_DEACTIVATE_DAYS;
         let days = positive("deactivate after days", &self.auto_deactivate_after_days)?
-            .map(|d| i32::try_from(d).map_err(|_| "deactivate after days is too large".to_owned()))
+            .map(|d| {
+                i32::try_from(d)
+                    .ok()
+                    .filter(|_| d <= max)
+                    .ok_or_else(|| format!("deactivate after days must be at most {max}"))
+            })
             .transpose()?;
         let ttl = positive("session seconds", &self.session_ttl_secs)?;
         let su_ttl = positive(
@@ -682,5 +688,22 @@ mod tests {
         let err = form.apply(&mut row, true, false).unwrap_err();
         assert!(err.contains("RUSTANGO_SECRET_KEY"), "{err}");
         assert!(form.apply(&mut row, true, true).is_ok());
+    }
+
+    /// A day count past the cap is refused: the idle sweep's date math stays in range.
+    #[test]
+    fn deactivate_days_are_capped() {
+        let form = |days: &str| SharedSsoForm {
+            label: "Corp".into(),
+            kind: "google".into(),
+            client_id: "cid".into(),
+            client_secret: "cs".into(),
+            auto_deactivate_after_days: days.into(),
+            ..SharedSsoForm::blank()
+        };
+        let mut row = new_row("corp".into());
+        let err = form("36501").apply(&mut row, true, true).unwrap_err();
+        assert!(err.contains("at most 36500"), "{err}");
+        assert!(form("36500").apply(&mut row, true, true).is_ok());
     }
 }
