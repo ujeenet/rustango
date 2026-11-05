@@ -262,7 +262,8 @@ On the tenant admin, `GET <login>/sso/<slug>?next=/path` lands on `/path`
 after sign-in. The path rides in the signed flow cookie and passes the same
 check as the password login: same-origin only, and inside the tenant's path
 prefix. Anything else lands on `admin_url`. The login page passes its own
-`?next` on to the SSO buttons.
+`?next` on to the SSO buttons. The bare admin does the same without the prefix
+rule, keeps the path through the TOTP step, and falls back to its prefix.
 
 The link table is a normal migrated model: in the tenant's storage for
 tenant logins, and in the admin database for the bare admin. A link is

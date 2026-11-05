@@ -558,6 +558,9 @@ pub(crate) struct PendingSecondFactor {
     /// The session lifetime the sign-in earned, when shorter than the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) session_ttl: Option<i64>,
+    /// Where the sign-in lands once the code is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) next: Option<String>,
 }
 
 #[cfg(all(feature = "totp", any(feature = "admin-sso", feature = "tenancy")))]
@@ -572,6 +575,7 @@ impl PendingSecondFactor {
             exp: chrono::Utc::now().timestamp() + Self::TTL_SECS,
             upgrade: None,
             session_ttl: None,
+            next: None,
         }
     }
 

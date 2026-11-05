@@ -277,7 +277,9 @@ Sur l'admin du tenant, `GET <login>/sso/<slug>?next=/chemin` mène à `/chemin`
 après la connexion. Le chemin voyage dans le cookie de flux signé et passe le
 même contrôle que la connexion par mot de passe : même origine uniquement, et
 dans le préfixe de chemin du tenant. Tout le reste mène à `admin_url`. La page
-de connexion transmet son propre `?next` aux boutons SSO.
+de connexion transmet son propre `?next` aux boutons SSO. L'admin nu fait de
+même sans la règle du préfixe, garde le chemin pendant l'étape TOTP et revient
+à son préfixe.
 
 La table de liens est un modèle migré normal : dans le stockage du tenant
 pour les connexions tenant, et dans la base de l'admin pour le bare admin.

@@ -78,8 +78,12 @@ async fn login_form(
     State(state): State<AppState>,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
 ) -> Response {
-    login_response(&state, &extensions, &headers, None).await
+    let query: std::collections::HashMap<String, String> =
+        serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
+    let next = crate::auth_decorators::extract_next(&query);
+    login_page(&state, &extensions, &headers, None, false, next.as_deref()).await
 }
 
 /// Render the login page and seed a double-submit CSRF token. The GET
@@ -92,7 +96,7 @@ async fn login_response(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
-    login_page(state, extensions, headers, error, false).await
+    login_page(state, extensions, headers, error, false, None).await
 }
 
 /// The authenticator-code step an SSO sign-in owes (#2249).
@@ -103,7 +107,7 @@ pub(super) async fn sso_totp_response(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
-    login_page(state, extensions, headers, error, true).await
+    login_page(state, extensions, headers, error, true, None).await
 }
 
 /// `totp_step` renders only the code field, posting to the SSO step.
@@ -113,6 +117,7 @@ async fn login_page(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
     totp_step: bool,
+    next: Option<&str>,
 ) -> Response {
     use crate::forms::csrf;
     // Under `protect_with_csrf` the outer layer already chose the token (#2131).
@@ -120,7 +125,8 @@ async fn login_page(
         Some(token) => (token, None),
         None => csrf::ensure_token_under_layer(headers, extensions),
     };
-    let html = render_login_form(state, error, &csrf::csrf_input_html(&token), totp_step).await;
+    let csrf_input = csrf::csrf_input_html(&token);
+    let html = render_login_form(state, error, &csrf_input, totp_step, next).await;
     let mut resp = Html(html).into_response();
     if let Some(cookie) = set_cookie {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -135,12 +141,23 @@ async fn render_login_form(
     error: Option<&str>,
     csrf_input: &str,
     totp_step: bool,
+    next: Option<&str>,
 ) -> String {
     let admin_prefix = &state.config.admin_prefix;
     // One SSO button per enabled `SsoProvider` row.
     #[cfg(feature = "admin-sso")]
-    let sso_providers =
+    let mut sso_providers =
         super::sso_provider::list_enabled(&state.pool, &format!("{admin_prefix}/login")).await;
+    // The SSO start seals the landing; pass on only one it accepts.
+    #[cfg(feature = "admin-sso")]
+    if let Some(n) = super::sso::admin_next(state, next) {
+        let q = format!("?next={}", crate::url_codec::url_encode(&n));
+        for b in &mut sso_providers {
+            b.login_url.push_str(&q);
+        }
+    }
+    #[cfg(not(feature = "admin-sso"))]
+    let _ = next;
     #[cfg(feature = "admin-sso")]
     let sso_enabled = !sso_providers.is_empty();
     #[cfg(feature = "admin-sso")]

@@ -2116,6 +2116,154 @@ async fn a_bare_admin_sso_login_lands_after_the_logout_cutoff() {
     assert_eq!(home.status(), StatusCode::OK, "the SSO session must work");
 }
 
+/// [`bare_admin`] with `root` linked to `sub-root` at `corp`; root's id too.
+async fn bare_admin_linked() -> (Router, Pool, Idp, i64) {
+    use rustango::admin::AdminUser;
+    let (app, pool, idp) = bare_admin().await;
+    let uid = AdminUser::objects()
+        .filter("username", "root")
+        .fetch(&pool)
+        .await
+        .unwrap()
+        .remove(0)
+        .id
+        .get()
+        .copied()
+        .unwrap();
+    let key = rustango::sso::resolve_by_slug(&pool, "corp", String::new())
+        .await
+        .unwrap()
+        .unwrap()
+        .key(LinkSource::Admin);
+    rustango::sso::link::create_link(&pool, &key, "sub-root", uid)
+        .await
+        .unwrap();
+    idp.assert("sub-root", "root@example.com");
+    (app, pool, idp, uid)
+}
+
+/// A bare-admin SSO sign-in lands on the `?next` its start carried; any
+/// other shape lands on the admin prefix, and a rewritten flow cookie fails.
+#[tokio::test]
+async fn a_bare_admin_sso_login_lands_on_a_safe_next() {
+    let _g = SUITE.lock().await;
+    let (app, _pool, _idp, _) = bare_admin_linked().await;
+    let land = |next: &str| {
+        let app = app.clone();
+        let begin = format!("/login/sso/corp?next={next}");
+        async move {
+            let resp = handshake_with(&app, "admin.test", &begin, None, |c| c).await;
+            assert!(signed_in(&resp), "{begin}: {}", location(&resp));
+            location(&resp)
+        }
+    };
+    assert_eq!(
+        land("%2Fcms-admin%2Fposts%3Fpage%3D2").await,
+        "/cms-admin/posts?page=2"
+    );
+    for hostile in [
+        "//evil.example",
+        "%2F%2Fevil.example",
+        "%2F%5Cevil.example",
+        "https%3A%2F%2Fevil.example",
+        "%252F%252Fevil.example",
+        "%2F__admin%2Flogin",
+        "%2F__admin%2Flogout",
+        "",
+    ] {
+        assert_eq!(land(hostile).await, "/__admin", "{hostile}");
+    }
+    let resp = handshake_with(
+        &app,
+        "admin.test",
+        "/login/sso/corp?next=%2Fcms-admin",
+        None,
+        |c| {
+            let forged = forge_next(&c, "//evil.example");
+            assert_ne!(forged, c, "no sealed flow cookie in {c:?}");
+            forged
+        },
+    )
+    .await;
+    assert_eq!(location(&resp), "/__admin/login?sso_error=expired");
+    assert!(!signed_in(&resp));
+}
+
+/// The bare admin's login page hands a safe `?next` on to its SSO buttons.
+#[tokio::test]
+async fn the_bare_admin_login_page_passes_next_to_sso() {
+    let _g = SUITE.lock().await;
+    let (app, _pool, _idp) = bare_admin().await;
+    let page = |q: &'static str| {
+        let app = app.clone();
+        async move {
+            body_of(
+                send(
+                    &app,
+                    Request::builder()
+                        .uri(format!("/login{q}"))
+                        .header(header::HOST, "admin.test")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await,
+            )
+            .await
+        }
+    };
+    // The template escapes `/` in the href.
+    let html = page("?next=%2Fcms-admin").await;
+    assert!(html.contains("corp?next=%2Fcms-admin\""), "{html}");
+    let html = page("?next=%2F%2Fevil.example").await;
+    assert!(
+        html.contains("corp\"") && !html.contains("corp?next="),
+        "{html}"
+    );
+}
+
+/// The landing survives the TOTP step an SSO sign-in owes.
+#[cfg(feature = "totp")]
+#[tokio::test]
+async fn a_bare_admin_sso_next_survives_the_totp_step() {
+    use rustango::admin::totp_store;
+    let _g = SUITE.lock().await;
+    let (app, pool, _idp, uid) = bare_admin_linked().await;
+    let device = rustango::totp::TotpSecret::generate();
+    totp_store::start_enrollment(&pool, uid, &device)
+        .await
+        .unwrap();
+    totp_store::confirm(&pool, uid).await.unwrap();
+    let resp = handshake_with(
+        &app,
+        "admin.test",
+        "/login/sso/corp?next=%2Fcms-admin",
+        None,
+        |c| c,
+    )
+    .await;
+    let pending = set_cookies(&resp)
+        .into_iter()
+        .find(|c| c.starts_with("rustango_admin_sso_totp="))
+        .expect("pending cookie");
+    let done = send(
+        &app,
+        Request::builder()
+            .method("POST")
+            .uri("/login/sso-totp")
+            .header(header::HOST, "admin.test")
+            .header(header::COOKIE, format!("rustango_csrf=t; {pending}"))
+            .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "_csrf=t&totp_code={}",
+                rustango::totp::generate(&device, 30, 6)
+            )))
+            .unwrap(),
+    )
+    .await;
+    assert!(signed_in(&done), "{}", location(&done));
+    assert_eq!(location(&done), "/cms-admin");
+}
+
 /// #2249 — SSO for a user with a confirmed TOTP device asks for the code first.
 #[cfg(feature = "totp")]
 #[tokio::test]

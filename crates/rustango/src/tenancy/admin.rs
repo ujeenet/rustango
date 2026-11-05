@@ -2079,16 +2079,9 @@ pub(super) fn tenant_next(
     routes: &super::routes::RouteConfig,
     cookie_path: &str,
 ) -> Option<String> {
-    // `auth_decorators::safe_next` owns the shape check: it
-    // percent-decodes, requires both the raw and decoded form to look
-    // like a path, and rejects `/\`, which a browser rewrites into a
-    // protocol-relative URL. Do not hand-roll it here.
-    let s = next.and_then(crate::auth_decorators::safe_next)?;
-    // Bouncing back to login/logout would loop. Not a safety check —
-    // that is `safe_next`'s job — so it stays here.
-    if s.starts_with(&routes.login_url) || s.starts_with(&routes.logout_url) {
-        return None;
-    }
+    // `auth_decorators::login_next` owns the shape check (`safe_next`)
+    // and the login/logout loop guard. Do not hand-roll them here.
+    let s = crate::auth_decorators::login_next(next, &routes.login_url, &routes.logout_url)?;
     // A prefix tenant shares its host: `/` is the console, `/t2/` another tenant.
     if cookie_path != "/" && !stays_under(&s, cookie_path) {
         return None;

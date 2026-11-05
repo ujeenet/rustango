@@ -268,7 +268,9 @@ En el admin del tenant, `GET <login>/sso/<slug>?next=/ruta` lleva a `/ruta`
 tras iniciar sesión. La ruta viaja en la cookie de flujo firmada y pasa la
 misma comprobación que el inicio de sesión con contraseña: solo mismo origen y
 dentro del prefijo de ruta del tenant. Cualquier otra cosa lleva a `admin_url`.
-La página de inicio de sesión pasa su propio `?next` a los botones SSO.
+La página de inicio de sesión pasa su propio `?next` a los botones SSO. El
+admin básico hace lo mismo sin la regla del prefijo, conserva la ruta durante
+el paso TOTP y vuelve a su prefijo.
 
 La tabla de enlaces es un modelo migrado normal: en el almacenamiento del tenant
 para los inicios de sesión de tenant, y en la base de datos del admin para el

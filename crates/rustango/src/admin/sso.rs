@@ -43,6 +43,12 @@ struct CallbackParams {
     error: Option<String>,
 }
 
+/// SSO start params: where to land after sign-in, sealed into the flow.
+#[derive(serde::Deserialize, Default)]
+struct BeginParams {
+    next: Option<String>,
+}
+
 /// Routes for the bare-admin SSO flow, mounted next to `/login`.
 /// `GET /login/sso/{slug}` starts the handshake for one configured
 /// [`SsoProvider`](super::sso_provider::SsoProvider), and
@@ -67,6 +73,12 @@ fn login_path(state: &AppState) -> String {
     } else {
         format!("{p}/login")
     }
+}
+
+/// A `next` this admin's sign-in may land on, as on the tenant admin.
+pub(super) fn admin_next(state: &AppState, next: Option<&str>) -> Option<String> {
+    let logout = format!("{}/logout", state.config.admin_prefix);
+    crate::auth_decorators::login_next(next, &login_path(state), &logout)
 }
 
 /// Per-provider callback URL built from the request host:
@@ -125,6 +137,7 @@ async fn sso_begin(
     Path(slug): Path<String>,
     headers: HeaderMap,
     extensions: axum::http::Extensions,
+    uri: axum::http::Uri,
 ) -> Response {
     let Some(secret) = state.config.session_secret.as_ref() else {
         return login_error(&state, "disabled");
@@ -151,7 +164,10 @@ async fn sso_begin(
             return login_error(&state, "config");
         }
     };
-    let (url, flow) = provider.begin();
+    let (url, mut flow) = provider.begin();
+    let params: BeginParams =
+        serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
+    flow.next = admin_next(&state, params.next.as_deref());
     let sealed = seal_flow(
         &flow,
         FlowScope::new(FlowPurpose::Admin, "", &slug),
@@ -294,7 +310,9 @@ async fn sso_callback(
     match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
         Ok(None) => {}
         Ok(Some(_)) => {
-            return second_factor::prompt(&state, &extensions, &headers, secret, &user, ttl).await
+            let next = flow.next.clone();
+            return second_factor::prompt(&state, &extensions, &headers, secret, &user, ttl, next)
+                .await;
         }
         Err(e) => {
             // Fail closed: an unreadable device is not "no second factor" (#1644).
@@ -302,7 +320,7 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     }
-    mint_session(&state, secret, &user, meta(), ttl).await
+    mint_session(&state, secret, &user, meta(), ttl, flow.next.as_deref()).await
 }
 
 /// Mint the normal admin session, bound to the user's stored password
@@ -313,6 +331,7 @@ async fn mint_session(
     user: &AdminUser,
     request: AuthRequestMeta,
     ttl_secs: i64,
+    next: Option<&str>,
 ) -> Response {
     let uid = user.id.get().copied().unwrap_or_default();
     let auth_hash = crate::session::PasswordFingerprint::of(secret, &user.password_hash);
@@ -327,11 +346,13 @@ async fn mint_session(
         "{SESSION_COOKIE}={cookie_value}; Path=/; HttpOnly; SameSite=Lax{s}",
         s = cookie_attrs(state.config.secure_cookies),
     );
-    let redirect_to = if state.config.admin_prefix.is_empty() {
-        "/".to_owned()
-    } else {
-        state.config.admin_prefix.clone()
-    };
+    let redirect_to = admin_next(state, next).unwrap_or_else(|| {
+        if state.config.admin_prefix.is_empty() {
+            "/".to_owned()
+        } else {
+            state.config.admin_prefix.clone()
+        }
+    });
     let mut resp = Redirect::to(&redirect_to).into_response();
     if let Ok(v) = HeaderValue::from_str(&session_cookie) {
         resp.headers_mut().append(header::SET_COOKIE, v);
@@ -399,6 +420,7 @@ mod second_factor {
         secret: &session::AdminSessionSecret,
         user: &AdminUser,
         session_ttl: i64,
+        next: Option<String>,
     ) -> Response {
         let mut pending = Pending::new(
             secret,
@@ -407,6 +429,7 @@ mod second_factor {
         );
         // Signed with the rest, so the code step keeps the provider's lifetime.
         pending.session_ttl = Some(session_ttl);
+        pending.next = next;
         let cookie = format!(
             "{PENDING_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={TTL_SECS}{s}",
             seal(secret, &pending),
@@ -518,7 +541,8 @@ mod second_factor {
         let ttl = pending.session_ttl.map_or(session::DEFAULT_TTL_SECS, |t| {
             t.min(session::DEFAULT_TTL_SECS)
         });
-        let mut resp = mint_session(&state, secret, &user, meta, ttl).await;
+        let mut resp =
+            mint_session(&state, secret, &user, meta, ttl, pending.next.as_deref()).await;
         clear_cookie(&mut resp, PENDING_COOKIE);
         resp
     }
