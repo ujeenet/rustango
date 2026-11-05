@@ -39,19 +39,18 @@ async fn seed_org(
     schema_name: Option<&str>,
     database_url: Option<&str>,
 ) -> Org {
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.into(),
-        display_name: slug.to_uppercase(),
-        storage_mode: mode.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: database_url.map(str::to_owned),
-        schema_name: schema_name.map(str::to_owned),
-        host_pattern: Some(format!("{slug}.app.test")),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.into();
+        o.display_name = slug.to_uppercase();
+        o.storage_mode = mode.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = database_url.map(str::to_owned);
+        o.schema_name = schema_name.map(str::to_owned);
+        o.host_pattern = Some(format!("{slug}.app.test"));
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     org
 }
@@ -795,13 +794,12 @@ fn tenant_parts(pools: std::sync::Arc<TenantPools>, org: Org) -> axum::http::req
 }
 
 fn schema_org(schema: &str) -> Org {
-    Org {
-        slug: schema.into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        schema_name: Some(schema.to_owned()),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.slug = schema.into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.schema_name = Some(schema.to_owned());
+    })
 }
 
 /// A schema-mode `Tenant` takes no connection until `conn()`: more live
@@ -919,13 +917,12 @@ async fn database_mode_tenants_using_pool_do_not_starve_it() {
     };
     let n = cfg.database_pool_max_connections as usize;
     let pools = Arc::new(TenantPools::new(registry).config(cfg));
-    let org = Org {
-        slug: "dbm_tp_many".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(url),
-        ..rustango::testkit::org()
-    };
+    let org = rustango::testkit::org_with(|o| {
+        o.slug = "dbm_tp_many".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(url);
+    });
     let barrier = Arc::new(tokio::sync::Barrier::new(n));
     let tasks: Vec<_> = (0..n)
         .map(|_| {

@@ -436,7 +436,6 @@ async fn no_operators_warn<W: Write + Send>(
 #[cfg(all(test, feature = "sqlite"))]
 mod app_tests {
     use super::*;
-    use crate::sql::Auto;
     use crate::tenancy::branding;
     use axum::http::StatusCode;
 
@@ -461,26 +460,12 @@ mod app_tests {
         .await
         .expect("migrate-registry");
         let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
-        let mut org = super::super::Org {
-            id: Auto::default(),
-            slug: "pfx-acme".into(),
-            display_name: "Acme".into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some(tenant_url),
-            schema_name: None,
-            host_pattern: None,
-            port: None,
-            path_prefix: Some("/acme".into()),
-            active: true,
-            created_at: chrono::Utc::now(),
-            brand_name: None,
-            brand_tagline: None,
-            logo_path,
-            favicon_path: None,
-            primary_color: None,
-            theme_mode: None,
-        };
+        let mut org = super::super::Org::new("pfx-acme");
+        org.display_name = "Acme".into();
+        org.backend_kind = "sqlite".into();
+        org.database_url = Some(tenant_url);
+        org.path_prefix = Some("/acme".into());
+        org.logo_path = logo_path;
         org.insert(&pools.registry_pool()).await.unwrap();
         let secret = crate::session::SessionSecret::from_bytes(vec![9; 32]);
         let keys = crate::tenancy::session::ServerKeys {
@@ -626,27 +611,22 @@ mod apex_tests {
     #[test]
     fn an_unroutable_org_gets_no_link() {
         let apex = LinkApex::default();
-        let bare = crate::tenancy::Org {
-            slug: "acme".into(),
-            host_pattern: None,
-            path_prefix: None,
-            port: None,
-            ..crate::testkit::org()
-        };
+        let bare = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+            o.host_pattern = None;
+            o.path_prefix = None;
+            o.port = None;
+        });
         assert!(matches!(
             tenant_link(&bare, "/x", None, &apex),
             Err(crate::tenancy::TenancyError::Validation(_))
         ));
-        let prefixed = crate::tenancy::Org {
-            path_prefix: Some("acme".into()),
-            ..bare.clone()
-        };
+        let mut prefixed = bare.clone();
+        prefixed.path_prefix = Some("acme".into());
         assert!(tenant_link(&prefixed, "/x", None, &apex).is_ok());
         // The built-in server does not route by port, so a port alone gets no link.
-        let ported = crate::tenancy::Org {
-            port: Some(8081),
-            ..bare
-        };
+        let mut ported = bare;
+        ported.port = Some(8081);
         assert!(tenant_link(&ported, "/x", None, &apex).is_err());
     }
 

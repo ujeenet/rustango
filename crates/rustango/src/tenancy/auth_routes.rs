@@ -1186,10 +1186,9 @@ mod tests {
 
     /// `testkit::org()` with an id, as a registry row has.
     fn org() -> crate::tenancy::Org {
-        crate::tenancy::Org {
-            id: crate::sql::Auto::Set(1),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::Set(1);
+        })
     }
 
     fn tenant() -> TenantSlug {
@@ -1283,10 +1282,9 @@ mod tests {
     async fn a_purged_tenants_tokens_are_refused_by_its_slug_heir() {
         let (auth, pool, user) = verify_env("jwt_slug_heir").await;
         let id = *user.id.get().unwrap();
-        let heir = crate::tenancy::Org {
-            id: crate::sql::Auto::Set(2),
-            ..org()
-        };
+        let heir = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::Set(2);
+        });
         let t = Tenant::for_test_sqlite(heir.clone(), pool.as_sqlite().unwrap().clone());
         let scope = || TenantScope::for_test(heir.clone(), pool.clone());
         let unbound = {

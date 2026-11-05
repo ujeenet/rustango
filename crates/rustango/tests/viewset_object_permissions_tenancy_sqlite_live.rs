@@ -49,15 +49,14 @@ fn org_id(slug: &str) -> i64 {
 }
 
 fn org(slug: &str) -> Org {
-    Org {
-        id: Auto::Set(org_id(slug)),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: None,
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = Auto::Set(org_id(slug));
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = None;
+    })
 }
 
 /// `<slug>.localhost` is a tenant's own host; `/<slug>/…` on the apex is a path prefix.

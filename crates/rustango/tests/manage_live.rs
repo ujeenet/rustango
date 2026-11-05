@@ -1405,13 +1405,12 @@ async fn create_tenant_refuses_a_schema_another_tenant_uses() {
 
     // A NULL `schema_name` claims the slug.
     let null_slug = unique("nullschema");
-    let mut org = Org {
-        slug: null_slug.clone(),
-        display_name: null_slug.clone(),
-        storage_mode: "schema".into(),
-        schema_name: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = null_slug.clone();
+        o.display_name = null_slug.clone();
+        o.storage_mode = "schema".into();
+        o.schema_name = None;
+    });
     org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
@@ -1471,13 +1470,12 @@ async fn console_create_refuses_a_schema_another_tenant_uses() {
 
     let shared = unique("cshared");
     drop_schema(&pool, &shared).await;
-    let mut org = Org {
-        slug: unique("clegacy"),
-        display_name: "legacy".into(),
-        storage_mode: "schema".into(),
-        schema_name: Some(shared.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = unique("clegacy");
+        o.display_name = "legacy".into();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(shared.clone());
+    });
     org.save(&registry).await.unwrap();
 
     let username = unique("op");
@@ -1573,22 +1571,20 @@ async fn create_tenant_allows_a_schema_no_tenant_lives_in() {
     let registry = rustango::sql::Pool::from(pool.clone());
 
     let db_slug = unique("dbmode");
-    let mut db_org = Org {
-        slug: db_slug.clone(),
-        display_name: db_slug.clone(),
-        database_url: Some("postgres://example@db.example.com/x".into()),
-        ..rustango::testkit::org()
-    };
+    let mut db_org = rustango::testkit::org_with(|o| {
+        o.slug = db_slug.clone();
+        o.display_name = db_slug.clone();
+        o.database_url = Some("postgres://example@db.example.com/x".into());
+    });
     db_org.save(&registry).await.unwrap();
     let moved = unique("moved");
     let elsewhere = unique("elsewhere");
-    let mut schema_org = Org {
-        slug: moved.clone(),
-        display_name: moved.clone(),
-        storage_mode: "schema".into(),
-        schema_name: Some(elsewhere.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut schema_org = rustango::testkit::org_with(|o| {
+        o.slug = moved.clone();
+        o.display_name = moved.clone();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(elsewhere.clone());
+    });
     schema_org.save(&registry).await.unwrap();
 
     for taken_slug in [&db_slug, &moved] {
@@ -1645,12 +1641,11 @@ async fn check_deploy_does_not_wait_on_silent_tenants() {
         .map(unique)
         .collect();
     for slug in &slugs {
-        let mut org = Org {
-            slug: slug.clone(),
-            display_name: slug.clone(),
-            database_url: Some(format!("postgres://u:p@127.0.0.1:{port}/x")),
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.clone();
+            o.display_name = slug.clone();
+            o.database_url = Some(format!("postgres://u:p@127.0.0.1:{port}/x"));
+        });
         org.save(&rustango::sql::Pool::from(pool.clone()))
             .await
             .unwrap();
@@ -1702,13 +1697,12 @@ async fn check_deploy_reads_a_schema_mode_tenant_in_its_schema() {
 
     let slug = unique("ssoschema");
     drop_schema(&pool, &slug).await;
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        storage_mode: "schema".into(),
-        schema_name: Some(slug.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = slug.clone();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(slug.clone());
+    });
     org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();
@@ -1802,13 +1796,12 @@ async fn check_deploy_skips_a_schema_mode_tenant_without_its_schema() {
     rmig::apply_all_pool(&pool.clone().into()).await.unwrap();
     let ghost = unique("ghost");
     drop_schema(&pool, &ghost).await;
-    let mut org = Org {
-        slug: ghost.clone(),
-        display_name: ghost.clone(),
-        storage_mode: "schema".into(),
-        schema_name: Some(ghost.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = ghost.clone();
+        o.display_name = ghost.clone();
+        o.storage_mode = "schema".into();
+        o.schema_name = Some(ghost.clone());
+    });
     org.save(&rustango::sql::Pool::from(pool.clone()))
         .await
         .unwrap();

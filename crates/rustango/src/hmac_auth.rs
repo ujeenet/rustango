@@ -1013,11 +1013,10 @@ mod tests {
                     "acme" => ("acme", 1),
                     other => (other, 3),
                 };
-                crate::tenancy::Org {
-                    id: crate::sql::Auto::Set(id),
-                    slug: slug.to_owned(),
-                    ..crate::testkit::org()
-                }
+                crate::testkit::org_with(|o| {
+                    o.id = crate::sql::Auto::Set(id);
+                    o.slug = slug.to_owned();
+                })
             }))
         }
     }

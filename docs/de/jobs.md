@@ -34,6 +34,7 @@ vollständig in Rust.
 - [Schritt 4 — In deine App verdrahten](#schritt-4--in-deine-app-verdrahten) — das vollständige Beispiel
 - [Die Worker laufen lassen (CLI + Produktion)](#die-worker-laufen-lassen-cli--produktion)
 - [Retries und Backoff](#retries-und-backoff)
+- [Der Job-Kontext: ID, Versuch, Stopp](#der-job-kontext-id-versuch-stopp)
 - [Der Dead-Letter-Handler](#der-dead-letter-handler)
 - [Die persistente Queue (Produktion)](#die-persistente-queue-produktion)
 - [Jobs unter Multi-Tenancy](#jobs-unter-multi-tenancy)
@@ -115,7 +116,8 @@ queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 bricht sie dann ab und stellt sie zurück in die Queue. Wartende Jobs und
 geparkte Retries bleiben in der Queue, und ein erneutes `start()` nimmt sie auf.
 
-Jobs sind **at-least-once**. Kein Stoppsignal erreicht einen laufenden Job, und
+Jobs sind **at-least-once**. Ein laufender Job sieht den Stopp über
+[`JobCtx::stopping`](#der-job-kontext-id-versuch-stopp), und
 ein abgebrochener Job läuft wieder von vorn (die DB-Queue gibt ihre Zeile frei,
 auch wenn der Job gerade fertig war). Der Abbruch verbraucht einen Versuch.
 Mache jeden Job idempotent.
@@ -318,6 +320,45 @@ liefern sie `MAX_ATTEMPTS` und `retry_backoff`. Die Obergrenze wird beim
 Dispatch gelesen. `jobs::exponential_backoff(base, failed_attempt)` ist die
 Standardkurve mit eigener Basis: `base`, pro Fehlschlag verdoppelt, gedeckelt bei
 `base · 1024`.
+
+---
+
+## Der Job-Kontext: ID, Versuch, Stopp
+
+Beide Queues rufen `Job::run_with(&self, ctx: &JobCtx)` auf. Standardmäßig ruft es
+`run()` auf, also laufen Jobs, die nur `run` implementieren, unverändert. Überschreibe
+es, um Folgendes zu lesen:
+
+- `ctx.id()` — die ID des Jobs, bei jedem Retry dieselbe. Eindeutig in ihrer Queue.
+- `ctx.attempt()` — 1 beim ersten Lauf, 2 beim ersten Retry.
+- `ctx.stopping()` / `ctx.is_stopping()` — die Queue fährt herunter; beende den Job
+  innerhalb von `shutdown_grace`, sonst wird der Lauf abgebrochen und neu eingereiht.
+
+Nutze die ID als Idempotenzschlüssel, damit eine wiederholte Abbuchung nicht doppelt
+abbucht:
+
+```rust
+use rustango::jobs::{Job, JobCtx, JobError};
+
+#[async_trait::async_trait]
+impl Job for ChargeCard {
+    const NAME: &'static str = "charge_card";
+
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("ChargeCard runs through run_with".into()))
+    }
+
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let key = format!("charge-{}", ctx.id());   // bei jedem Retry derselbe Schlüssel
+        stripe_charge(self.order_id, self.cents, &key)
+            .await
+            .map_err(|e| JobError::Retryable(e.to_string()))
+    }
+}
+```
+
+Ein Handler, der an `register_with` übergeben wird, bekommt nur den Payload, nicht den
+Kontext.
 
 ---
 
@@ -579,7 +620,8 @@ nichts geloggt. Das ist eine bekannte Lücke.
 
 **`JobQueue`-Methoden:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
 `register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (Jobs, die
-auf Aufnahme warten). Beide Queues haben `on_dead_letter` und `shutdown_grace`.
+auf Aufnahme warten). `Job::run_with` bekommt einen `JobCtx` (`id`, `attempt`,
+`stopping`). Beide Queues haben `on_dead_letter` und `shutdown_grace`.
 `DatabaseJobQueue` ergänzt `ensure_table_pool`, `with_workers_pool`, `new_pool`,
 `poll_interval`, `heartbeat_interval`, `queue_name`, `reclaim_stuck_after` und
 `reclaim_stuck_jobs_pool`. `jobs::inmemory_from_settings(&settings.jobs)` baut eine

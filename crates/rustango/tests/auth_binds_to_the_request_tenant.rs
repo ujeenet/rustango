@@ -46,15 +46,14 @@ impl OrgResolver for HostResolver {
         if slug.is_empty() || !host.contains('.') {
             return Ok(None);
         }
-        Ok(Some(Org {
-            id: rustango::sql::Auto::Set(1),
-            slug: slug.to_owned(),
-            display_name: slug.to_owned(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: None,
-            ..rustango::testkit::org()
-        }))
+        Ok(Some(rustango::testkit::org_with(|o| {
+            o.id = rustango::sql::Auto::Set(1);
+            o.slug = slug.to_owned();
+            o.display_name = slug.to_owned();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = None;
+        })))
     }
 }
 
@@ -237,15 +236,14 @@ impl OrgResolver for PortSlugResolver {
         let Some(rustango::tenancy::ListenerPort(8001)) = parts.extensions.get().copied() else {
             return Ok(None);
         };
-        Ok(Some(Org {
-            id: rustango::sql::Auto::Set(1),
-            slug: "alpha".to_owned(),
-            display_name: "alpha".to_owned(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: None,
-            ..rustango::testkit::org()
-        }))
+        Ok(Some(rustango::testkit::org_with(|o| {
+            o.id = rustango::sql::Auto::Set(1);
+            o.slug = "alpha".to_owned();
+            o.display_name = "alpha".to_owned();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = None;
+        })))
     }
 }
 

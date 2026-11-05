@@ -1085,11 +1085,10 @@ mod tests {
 
     #[cfg(feature = "tenancy")]
     fn org(slug: &str, id: i64) -> crate::tenancy::Org {
-        crate::tenancy::Org {
-            id: crate::sql::Auto::Set(id),
-            slug: slug.into(),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::Set(id);
+            o.slug = slug.into();
+        })
     }
 
     /// #2472 — a tenant scope names the org id, so a slug reused after a

@@ -13,15 +13,14 @@ use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{Org, TenantPools};
 
 fn fake_db_org(slug: &str, url: &str) -> Org {
-    Org {
-        id: Auto::default(),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(url.to_owned()),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(url.to_owned());
+    })
 }
 
 #[tokio::test]

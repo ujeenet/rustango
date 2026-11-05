@@ -34,6 +34,7 @@ cola de tareas, íntegramente en Rust.
 - [Paso 4 — Cablearlo en tu aplicación](#paso-4--cablearlo-en-tu-aplicación) — el ejemplo completo
 - [Ejecutar los workers (CLI + producción)](#ejecutar-los-workers-cli--producción)
 - [Reintentos y backoff](#reintentos-y-backoff)
+- [El contexto del trabajo: id, intento, parada](#el-contexto-del-trabajo-id-intento-parada)
 - [El handler dead-letter](#el-handler-dead-letter)
 - [La cola persistente (producción)](#la-cola-persistente-producción)
 - [Trabajos con multi-tenancy](#trabajos-con-multi-tenancy)
@@ -114,8 +115,9 @@ queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 5 s por defecto), y luego los aborta y los vuelve a encolar. Los trabajos en cola
 y los reintentos aparcados siguen en cola, y un nuevo `start()` los recoge.
 
-Los trabajos son **at-least-once**. Ninguna señal de parada llega a un trabajo en
-curso, y un trabajo abortado vuelve a ejecutarse desde el principio (la cola en BD
+Los trabajos son **at-least-once**. Un trabajo en curso ve la parada con
+[`JobCtx::stopping`](#el-contexto-del-trabajo-id-intento-parada), y un trabajo
+abortado vuelve a ejecutarse desde el principio (la cola en BD
 libera su fila aunque el trabajo acabara de terminar). El aborto gasta un intento.
 Haz que cada trabajo sea idempotente.
 
@@ -316,6 +318,44 @@ sobrescribe `fn max_attempts(&self) -> u32` o
 `MAX_ATTEMPTS` y `retry_backoff`. El límite se lee al despachar.
 `jobs::exponential_backoff(base, failed_attempt)` es la curva por defecto con tu
 propia base: `base`, doblada por cada fallo, con tope en `base · 1024`.
+
+---
+
+## El contexto del trabajo: id, intento, parada
+
+Ambas colas llaman a `Job::run_with(&self, ctx: &JobCtx)`. Por defecto llama a
+`run()`, así que los trabajos que solo implementan `run` funcionan sin cambios.
+Sobrescríbelo para leer:
+
+- `ctx.id()` — el id del trabajo, el mismo en cada reintento. Único en su cola.
+- `ctx.attempt()` — 1 en la primera ejecución, 2 en el primer reintento.
+- `ctx.stopping()` / `ctx.is_stopping()` — la cola se está deteniendo; termina
+  dentro de `shutdown_grace` o la ejecución se aborta y vuelve a la cola.
+
+Usa el id como clave de idempotencia, para que un cobro reintentado no se cobre dos
+veces:
+
+```rust
+use rustango::jobs::{Job, JobCtx, JobError};
+
+#[async_trait::async_trait]
+impl Job for ChargeCard {
+    const NAME: &'static str = "charge_card";
+
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("ChargeCard runs through run_with".into()))
+    }
+
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let key = format!("charge-{}", ctx.id());   // la misma clave en cada reintento
+        stripe_charge(self.order_id, self.cents, &key)
+            .await
+            .map_err(|e| JobError::Retryable(e.to_string()))
+    }
+}
+```
+
+Un handler pasado a `register_with` recibe solo el payload, no el contexto.
 
 ---
 
@@ -573,7 +613,8 @@ rechazado es el resultado esperado, así que no se registra nada. Es una carenci
 
 **Métodos de `JobQueue`:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
 `register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (trabajos
-esperando a ser recogidos). Ambas colas tienen `on_dead_letter` y
+esperando a ser recogidos). `Job::run_with` recibe un `JobCtx` (`id`, `attempt`,
+`stopping`). Ambas colas tienen `on_dead_letter` y
 `shutdown_grace`. `DatabaseJobQueue` añade `ensure_table_pool`,
 `with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
 `queue_name`, `reclaim_stuck_after` y `reclaim_stuck_jobs_pool`.

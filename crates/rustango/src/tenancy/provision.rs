@@ -2161,34 +2161,25 @@ fn new_org_row(
     database_url: Option<String>,
 ) -> Org {
     let request = &checked.request;
-    Org {
-        id: Auto::default(),
-        slug: request.slug.clone(),
-        display_name: request
-            .display_name
-            .clone()
-            .unwrap_or_else(|| request.slug.clone()),
-        storage_mode: request.mode().as_str().into(),
-        backend_kind: checked.backend.as_str().into(),
-        database_url,
-        schema_name,
-        // `validate_fields` already filled in the `<slug>.<APEX>` default.
-        host_pattern: request.host_pattern.clone(),
-        port: request.port,
-        path_prefix: request.path_prefix.clone(),
-        // Inactive until the schema is in place. The resolver already
-        // filters on this column, so it costs nothing on the hot path
-        // and is the only signal that keeps a half-provisioned tenant
-        // from serving. `ProvisionStep::Activate` flips it.
-        active: false,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    }
+    let mut o = Org::new(request.slug.clone());
+    o.display_name = request
+        .display_name
+        .clone()
+        .unwrap_or_else(|| request.slug.clone());
+    o.storage_mode = request.mode().as_str().into();
+    o.backend_kind = checked.backend.as_str().into();
+    o.database_url = database_url;
+    o.schema_name = schema_name;
+    // `validate_fields` already filled in the `<slug>.<APEX>` default.
+    o.host_pattern = request.host_pattern.clone();
+    o.port = request.port;
+    o.path_prefix = request.path_prefix.clone();
+    // Inactive until the schema is in place. The resolver already
+    // filters on this column, so it costs nothing on the hot path
+    // and is the only signal that keeps a half-provisioned tenant
+    // from serving. `ProvisionStep::Activate` flips it.
+    o.active = false;
+    o
 }
 
 /// `CREATE SCHEMA` on the registry. An existing schema is refused, not

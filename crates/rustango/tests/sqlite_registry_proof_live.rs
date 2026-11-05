@@ -44,15 +44,14 @@ async fn sqlite_registry() -> Pool {
 }
 
 fn fake_sqlite_org(slug: &str) -> Org {
-    Org {
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!(
-            "sqlite:file:tenant_{slug}?mode=memory&cache=shared"
-        )),
-        ..rustango::testkit::org()
-    }
+    let mut o = rustango::testkit::org();
+    o.slug = slug.to_owned();
+    o.display_name = slug.to_owned();
+    o.backend_kind = "sqlite".into();
+    o.database_url = Some(format!(
+        "sqlite:file:tenant_{slug}?mode=memory&cache=shared"
+    ));
+    o
 }
 
 #[tokio::test]

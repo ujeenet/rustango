@@ -1744,10 +1744,11 @@ mod tests {
                 .headers
                 .get("x-org")
                 .and_then(|v| v.to_str().ok())
-                .map(|slug| crate::tenancy::Org {
-                    id: crate::sql::Auto::Set(i64::from(slug == "globex") + 1),
-                    slug: slug.to_owned(),
-                    ..crate::testkit::org()
+                .map(|slug| {
+                    crate::testkit::org_with(|o| {
+                        o.id = crate::sql::Auto::Set(i64::from(slug == "globex") + 1);
+                        o.slug = slug.to_owned();
+                    })
                 }))
         }
     }

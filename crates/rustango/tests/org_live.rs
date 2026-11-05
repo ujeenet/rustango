@@ -44,19 +44,18 @@ async fn org_round_trip_insert_and_fetch() {
     migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
     migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
-    let mut acme = Org {
-        id: Auto::default(),
-        slug: "acme".into(),
-        display_name: "ACME Corp".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("acme".into()),
-        host_pattern: Some("acme.app.test".into()),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut acme = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "acme".into();
+        o.display_name = "ACME Corp".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("acme".into());
+        o.host_pattern = Some("acme.app.test".into());
+        o.port = None;
+        o.path_prefix = None;
+    });
     acme.insert(&pool.clone().into()).await.unwrap();
     let acme_id = *acme.id.get().unwrap();
     assert!(acme_id > 0, "BIGSERIAL should assign a positive id");
@@ -81,19 +80,18 @@ async fn org_filter_by_slug_returns_single_match() {
     migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
     for slug in ["acme", "globex", "initech"] {
-        let mut org = Org {
-            id: Auto::default(),
-            slug: slug.into(),
-            display_name: slug.to_uppercase(),
-            storage_mode: StorageMode::Database.as_str().into(),
-            backend_kind: "postgres".to_owned(),
-            database_url: Some(format!("env://TENANT_{}_DB_URL", slug.to_uppercase())),
-            schema_name: None,
-            host_pattern: Some(format!("{slug}.app.test")),
-            port: None,
-            path_prefix: None,
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.id = Auto::default();
+            o.slug = slug.into();
+            o.display_name = slug.to_uppercase();
+            o.storage_mode = StorageMode::Database.as_str().into();
+            o.backend_kind = "postgres".to_owned();
+            o.database_url = Some(format!("env://TENANT_{}_DB_URL", slug.to_uppercase()));
+            o.schema_name = None;
+            o.host_pattern = Some(format!("{slug}.app.test"));
+            o.port = None;
+            o.path_prefix = None;
+        });
         org.insert(&pool.clone().into()).await.unwrap();
     }
 
@@ -133,20 +131,19 @@ async fn org_inactive_orgs_are_persistable_and_queryable() {
     migrate::drop_all_pool(&pool.clone().into()).await.unwrap();
     migrate::apply_all_pool(&pool.clone().into()).await.unwrap();
 
-    let mut frozen = Org {
-        id: Auto::default(),
-        slug: "frozen".into(),
-        display_name: "Frozen Tenant".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("frozen".into()),
-        host_pattern: Some("frozen.app.test".into()),
-        port: None,
-        path_prefix: None,
-        active: false,
-        ..rustango::testkit::org()
-    };
+    let mut frozen = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "frozen".into();
+        o.display_name = "Frozen Tenant".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("frozen".into());
+        o.host_pattern = Some("frozen.app.test".into());
+        o.port = None;
+        o.path_prefix = None;
+        o.active = false;
+    });
     frozen.insert(&pool.clone().into()).await.unwrap();
 
     let fetched: Vec<Org> = Org::objects()

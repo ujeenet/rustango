@@ -205,26 +205,11 @@ async fn api_app(url: &str, backend: &str) -> axum::Router {
     use rustango::tenancy::session::SessionSecret;
     use rustango::tenancy::{ChainResolver, DefaultTenantDb, Org, TenantPools};
 
-    let org = Org {
-        id: rustango::sql::Auto::Set(1),
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: backend.into(),
-        database_url: Some(url.to_owned()),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = Org::new("acme");
+    org.id = rustango::sql::Auto::Set(1);
+    org.display_name = "Acme".into();
+    org.backend_kind = backend.into();
+    org.database_url = Some(url.to_owned());
     let registry = rustango::sql::sqlx::Pool::<DefaultTenantDb>::connect(url)
         .await
         .expect("connect");

@@ -85,13 +85,12 @@ async fn send(pool: &Pool, method: Method, uri: &str, body: String) -> (StatusCo
 }
 
 async fn org(pool: &Pool, slug: &str) -> i64 {
-    let mut org = Org {
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+    });
     org.save(pool).await.expect("insert org");
     *org.id.get().expect("org id")
 }

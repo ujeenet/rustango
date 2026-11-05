@@ -1232,11 +1232,10 @@ mod tests {
     /// A reference that resolves to a bare secret is named, never echoed.
     #[test]
     fn an_unparsable_url_names_the_reference_not_the_secret() {
-        let org = Org {
-            slug: "acme".into(),
-            database_url: Some("env://ACME_DB".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+            o.database_url = Some("env://ACME_DB".into());
+        });
         let err = parse_pg_url(&org, "hunter2-leak").unwrap_err().to_string();
         assert!(!err.contains("hunter2"), "{err}");
         assert!(

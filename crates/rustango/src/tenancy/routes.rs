@@ -276,10 +276,9 @@ mod tests {
     /// Cookies scope to the prefix only when the request is under it.
     #[test]
     fn cookie_path_follows_the_request() {
-        let org = crate::tenancy::Org {
-            path_prefix: Some("/acme".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.path_prefix = Some("/acme".into());
+        });
         assert_eq!(cookie_path(&org, "/acme/__login"), "/acme");
         assert_eq!(cookie_path(&org, "/acmecorp/__login"), "/");
         assert_eq!(cookie_path(&crate::testkit::org(), "/acme/x"), "/");

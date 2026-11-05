@@ -660,12 +660,11 @@ mod tests {
 
     /// Org `id`'s registry row in `pool`, `active` or not.
     async fn seed_org(pool: &crate::sql::Pool, id: i64, active: bool) {
-        let mut org = crate::tenancy::Org {
-            id: crate::sql::Auto::Set(id),
-            slug: format!("live-{id}"),
-            active,
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::Set(id);
+            o.slug = format!("live-{id}");
+            o.active = active;
+        });
         org.insert(pool).await.unwrap();
     }
 

@@ -13,7 +13,6 @@ use std::time::Duration;
 use rustango::auth_flows::{confirm_password_reset_pool, AuthFlowError, LinkScope, PasswordReset};
 use rustango::extractors::Tenant;
 use rustango::sql::{Auto, Pool};
-use rustango::tenancy::Org;
 
 const SECRET: &[u8] = b"a-strong-32-byte-secret-key-here";
 const STRONG: &str = "brand-new-strong-password-7!";
@@ -61,11 +60,10 @@ fn tenant(slug: &str, id: i64, pool: &Pool) -> Tenant<sqlx::Sqlite> {
         #[allow(unreachable_patterns)]
         _ => unreachable!("connected to sqlite"),
     };
-    let org = Org {
-        id: Auto::Set(id),
-        slug: slug.into(),
-        ..rustango::testkit::org()
-    };
+    let org = rustango::testkit::org_with(|o| {
+        o.id = Auto::Set(id);
+        o.slug = slug.into();
+    });
     Tenant::for_test_sqlite(org, sq.clone())
 }
 

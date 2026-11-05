@@ -1490,10 +1490,10 @@ async fn tenant_project_table_converges(backend: Backend) {
     rustango::tenancy::migrate_registry_pool(&registry, &boot)
         .await
         .expect("registry tables");
-    let mut org = rustango::tenancy::Org {
-        slug: "t1".into(),
-        display_name: "t1".into(),
-        backend_kind: match backend {
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "t1".into();
+        o.display_name = "t1".into();
+        o.backend_kind = match backend {
             #[cfg(feature = "postgres")]
             Backend::Postgres => "postgres",
             #[cfg(feature = "mysql")]
@@ -1501,10 +1501,9 @@ async fn tenant_project_table_converges(backend: Backend) {
             #[cfg(feature = "sqlite")]
             Backend::Sqlite => "sqlite",
         }
-        .into(),
-        database_url: Some(tenant_url.clone()),
-        ..rustango::testkit::org()
-    };
+        .into();
+        o.database_url = Some(tenant_url.clone());
+    });
     org.insert(&registry).await.unwrap();
 
     let (table, column) = ("rustango_users", "password_changed_at");
@@ -1556,15 +1555,14 @@ async fn schema_mode_tenant_converges() {
     rustango::tenancy::migrate_registry_pool(&registry, &boot)
         .await
         .expect("registry tables");
-    let mut org = rustango::tenancy::Org {
-        slug: "t1".into(),
-        display_name: "t1".into(),
-        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".into(),
-        schema_name: Some("t1".into()),
-        database_url: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "t1".into();
+        o.display_name = "t1".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".into();
+        o.schema_name = Some("t1".into());
+        o.database_url = None;
+    });
     org.insert(&registry).await.unwrap();
     let (table, column) = ("rustango_users", "password_changed_at");
     let dir = tmp.path().join("app/migrations");
@@ -1609,15 +1607,14 @@ async fn schema_mode_fk_stays_in_the_tenant_schema() {
     rustango::tenancy::migrate_registry_pool(&registry, &boot)
         .await
         .expect("registry tables");
-    let mut org = rustango::tenancy::Org {
-        slug: "t1".into(),
-        display_name: "t1".into(),
-        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".into(),
-        schema_name: Some("t1".into()),
-        database_url: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "t1".into();
+        o.display_name = "t1".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".into();
+        o.schema_name = Some("t1".into());
+        o.database_url = None;
+    });
     org.insert(&registry).await.unwrap();
     let pg = registry.as_postgres().expect("a Postgres pool");
     rustango::sql::sqlx::query("CREATE TABLE fkq_parent (id BIGINT PRIMARY KEY)")
@@ -1703,15 +1700,14 @@ async fn post_migrate_receiver_can_migrate() {
     rustango::tenancy::migrate_registry_pool(&registry, &boot)
         .await
         .expect("registry tables");
-    let mut org = rustango::tenancy::Org {
-        slug: "t1".into(),
-        display_name: "t1".into(),
-        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".into(),
-        schema_name: Some("t1".into()),
-        database_url: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "t1".into();
+        o.display_name = "t1".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".into();
+        o.schema_name = Some("t1".into());
+        o.database_url = None;
+    });
     org.insert(&registry).await.unwrap();
     let dir = tmp.path().join("app/migrations");
     std::fs::create_dir_all(&dir).unwrap();

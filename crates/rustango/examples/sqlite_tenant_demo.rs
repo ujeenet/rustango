@@ -59,28 +59,14 @@ impl OrgResolver for HostResolver {
         if slug.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Org {
-            id: rustango::sql::Auto::default(),
-            slug: slug.to_owned(),
-            display_name: slug.to_owned(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
+        Ok(Some({
+            let mut o = Org::new(slug.to_owned());
+            o.backend_kind = "sqlite".into();
             // The pool registry handles `database_url=None` by
             // expanding the configured `{slug}` template. The demo
             // template lives in memory keyed per slug.
-            database_url: None,
-            schema_name: None,
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            active: true,
-            created_at: chrono::Utc::now(),
-            brand_name: None,
-            brand_tagline: None,
-            logo_path: None,
-            favicon_path: None,
-            primary_color: None,
-            theme_mode: None,
+            o.database_url = None;
+            o
         }))
     }
 }

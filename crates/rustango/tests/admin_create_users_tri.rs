@@ -277,7 +277,7 @@ async fn deactivating_a_user_ends_its_sessions(pool: &Pool) {
 /// The registry admin shows neither an operator's hash nor a
 /// tenant's database URL; neither model has a `password` widget.
 async fn registry_admin_hides_credentials(pool: &Pool) {
-    use rustango::tenancy::{Operator, Org};
+    use rustango::tenancy::Operator;
     let mut op = Operator {
         id: rustango::sql::Auto::default(),
         username: unique("op"),
@@ -288,11 +288,10 @@ async fn registry_admin_hides_credentials(pool: &Pool) {
         sessions_revoked_at: None,
     };
     op.insert(pool).await.expect("seed operator");
-    let mut org = Org {
-        slug: unique("o"),
-        database_url: Some("postgres://app:URL1158MARK@db/t".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = unique("o");
+        o.database_url = Some("postgres://app:URL1158MARK@db/t".into());
+    });
     org.insert(pool).await.expect("seed org");
     let op_pk = op.id.get().copied().unwrap();
     let org_pk = org.id.get().copied().unwrap();

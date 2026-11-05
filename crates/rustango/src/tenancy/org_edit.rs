@@ -389,13 +389,12 @@ mod tests {
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
         crate::testkit::migrate_framework(&pool).await.unwrap();
         let first = "sqlite:///tmp/first.db?mode=rwc";
-        let mut org = Org {
-            slug: "cas".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some(first.into()),
-            host_pattern: Some("cas.localhost".into()),
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.slug = "cas".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some(first.into());
+            o.host_pattern = Some("cas.localhost".into());
+        });
         org.save(&pool).await.unwrap();
         let secrets = TenantSecrets::standard();
         let tmp = tempfile::tempdir().unwrap();

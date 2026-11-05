@@ -152,6 +152,8 @@ untouched.
 
 - `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
 - On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
+- `Org` is `#[non_exhaustive]`, so `Org { .. }` literals and `..testkit::org()` no longer compile outside rustango. Use `let mut o = Org::new(slug); o.field = …;` or `testkit::org_with(|o| o.field = …)`. Fields stay public.
+- Jobs can override `Job::run_with(&self, ctx: &JobCtx)` to read the job id, attempt and stop signal; jobs with only `run` need no change.
 
 ## 0.63.0
 

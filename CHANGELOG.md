@@ -7,10 +7,13 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Added
 
 - `Cache::delete_prefixes` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.
+- `Job::run_with(&JobCtx)` defaults to `run()`; both queues call it. `JobCtx` gives the job id (stable across retries, an idempotency key), the attempt number and a shutdown signal.
+- `Org::new(slug)` and `testkit::org_with(|o| …)` build an `Org` with its defaults.
 
 ### Changed
 
 - `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
+- **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
 ### Fixed
 
 - MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
