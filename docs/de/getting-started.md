@@ -502,7 +502,7 @@ Führe es aus:
 cargo run
 ```
 
-Du solltest die ID deines neuen Beitrags und die zurückgelesenen Zeilen sehen. Stelle `src/main.rs` wieder in seine gescaffoldete Server-Form zurück, sobald du bestätigt hast, dass es funktioniert — der nächste Schritt baut darauf auf.
+Du solltest die ID deines neuen Beitrags und die zurückgelesenen Zeilen sehen. Stelle `src/main.rs` wieder in seine gescaffoldete Server-Form zurück, sobald du bestätigt hast, dass es funktioniert — der nächste Schritt baut darauf auf. Entferne auch die drei `use`-Zeilen oben: Die Server-Form nutzt sie nicht, und der Compiler warnt vor ungenutzten Imports.
 
 ---
 
@@ -626,7 +626,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-Das ViewSet antwortet jetzt unter `/api/posts` und `/api/posts/{id}`.
+Das ViewSet antwortet jetzt unter `/api/posts` und `/api/posts/{id}`. Der Pfad ist die Tabelle des Modells; der Kommentar am Ende von `src/post_view_set.rs` zeigt dieselbe Zeile, und `make:viewset` gibt die URL aus.
 
 ### 12c. Die Endpunkte ausprobieren
 

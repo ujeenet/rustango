@@ -3171,12 +3171,67 @@ fn make_viewset_cmd<W: Write>(
         model.as_deref().unwrap_or("Post"),
         std::path::Path::new("src"),
     );
+    let app_crate = project_crate_name();
+    let table = registered_table(
+        &model,
+        &app_crate,
+        inventory::iter::<crate::core::ModelEntry>
+            .into_iter()
+            .map(|e| (e.module_path, e.schema.name, e.schema.table)),
+    );
+    let route = format!(
+        "/{}",
+        table.map_or_else(|| pascal_to_snake(&model.name), str::to_owned)
+    );
     let body = if tenant_aware {
-        viewset_template_tenant(&name, &model, &snake, &crate_root)
+        viewset_template_tenant(&name, &model, &snake, &route, &crate_root)
     } else {
-        viewset_template_pool(&name, &model, &snake, &crate_root, &project_crate_name())
+        viewset_template_pool(&name, &model, &snake, &route, &crate_root, &app_crate)
     };
-    write_generated(w, &format!("{snake}.rs"), body)
+    write_generated(w, &format!("{snake}.rs"), body)?;
+    writeln!(
+        w,
+        "  answers at /api{route} after you mount it as the end of the file shows"
+    )?;
+    if table.is_none() {
+        writeln!(
+            w,
+            "  `{}` is not compiled in yet, so the route is guessed from its name; use its `table` if it sets one",
+            model.name
+        )?;
+    }
+    Ok(())
+}
+
+/// The table of the project's model `model`, from the registered inventory
+/// of `(module_path, name, table)`. The ViewSet route follows it, as the
+/// admin does. Framework models of the same name are not the project's.
+fn registered_table<'a>(
+    model: &ModelRef,
+    app_crate: &str,
+    entries: impl IntoIterator<Item = (&'a str, &'a str, &'a str)>,
+) -> Option<&'a str> {
+    let rel = model.path.strip_prefix("crate::").unwrap_or(&model.path);
+    let module = rel.rsplit_once("::").map_or("", |(m, _)| m);
+    let own: Vec<(&str, &str)> = entries
+        .into_iter()
+        .filter(|(_, name, _)| *name == model.name)
+        .filter_map(|(path, _, table)| {
+            let rest = path.strip_prefix(app_crate)?;
+            let module = if rest.is_empty() {
+                ""
+            } else {
+                rest.strip_prefix("::")?
+            };
+            Some((module, table))
+        })
+        .collect();
+    match own.iter().find(|(m, _)| *m == module) {
+        Some((_, table)) => Some(table),
+        // `--model Post` resolved by guess: one project model of that name.
+        None if own.len() == 1 => Some(own[0].1),
+        None => None,
+    }
 }
 
 /// Template emitted by `make:viewset <Name>` (default). Uses the
@@ -3187,6 +3242,7 @@ fn viewset_template_pool(
     name: &str,
     model: &ModelRef,
     snake: &str,
+    route: &str,
     crate_root: &str,
     app_crate: &str,
 ) -> String {
@@ -3218,7 +3274,7 @@ pub struct {name};
 // Mount in src/main.rs: `urls::api()` has no pool, `nest_with` passes
 // the server's. Nest a prefix once; merge more viewsets in one closure.
 //
-//   .nest_with("/api", |pool| {app_crate}::{snake}::{name}::router("/{snake}", pool))
+//   .nest_with("/api", |pool| {app_crate}::{snake}::{name}::router("{route}", pool))
 "#
     )
 }
@@ -3233,7 +3289,13 @@ pub struct {name};
 /// chain (filter / search / ordering / pagination / permissions) so
 /// the scaffold demonstrates each knob, with `// uncomment to enable`
 /// markers next to each one.
-fn viewset_template_tenant(name: &str, model: &ModelRef, snake: &str, crate_root: &str) -> String {
+fn viewset_template_tenant(
+    name: &str,
+    model: &ModelRef,
+    snake: &str,
+    route: &str,
+    crate_root: &str,
+) -> String {
     let ModelRef {
         path: model_path,
         name: model,
@@ -3268,7 +3330,7 @@ pub fn router() -> Router<()> {{
         // .page_size(20)
         .permissions_for_model::<{model}>()          // CRUD codenames
         // .read_only()                               // GET only
-        .tenant_router("/api/{snake}")
+        .tenant_router("/api{route}")
         // The permission check needs a tenant user. `ModelBackend` is HTTP
         // Basic only; a browser session from `/login` is not read here (401).
         // Token clients: add `ApiKeyBackend` or a `JwtBackend` to the list.
@@ -7785,12 +7847,20 @@ mod gen_tests {
     #[test]
     fn pool_templates_import_their_model() {
         let post = ModelRef::bare("Post");
-        let vs = viewset_template_pool("PostViewSet", &post, "post_view_set", "rustango", "app");
+        let vs = viewset_template_pool(
+            "PostViewSet",
+            &post,
+            "post_view_set",
+            "/posts",
+            "rustango",
+            "app",
+        );
         let ser = serializer_template("PostSerializer", &post, "rustango");
         for body in [&vs, &ser] {
             assert!(body.contains("use crate::models::Post;"), "{body}");
         }
-        let tenant = viewset_template_tenant("PostViewSet", &post, "post_view_set", "rustango");
+        let tenant =
+            viewset_template_tenant("PostViewSet", &post, "post_view_set", "/posts", "rustango");
         assert!(
             tenant.contains(".merge(crate::post_view_set::router())"),
             "{tenant}"
@@ -7821,13 +7891,55 @@ mod gen_tests {
             ("crate::shop::models::Item", "Item")
         );
         let post = ModelRef::resolve("Post", &src);
-        let vs = viewset_template_pool("PostViewSet", &post, "post_view_set", "rustango", "my_app");
+        let vs = viewset_template_pool(
+            "PostViewSet",
+            &post,
+            "post_view_set",
+            "/posts",
+            "rustango",
+            "my_app",
+        );
         assert!(vs.contains("use crate::blog::models::Post;"), "{vs}");
         assert!(vs.contains("model        = Post,"), "{vs}");
         // `urls::api()` takes no pool; main.rs's `nest_with` hands one over.
         assert!(
-            vs.contains(r#".nest_with("/api", |pool| my_app::post_view_set::PostViewSet::router("/post_view_set", pool))"#),
+            vs.contains(r#".nest_with("/api", |pool| my_app::post_view_set::PostViewSet::router("/posts", pool))"#),
             "{vs}"
+        );
+    }
+
+    /// The mount hint serves the model's table, not the viewset's module:
+    /// `/api/posts`, as the guide curls, not `/api/post_view_set`.
+    #[test]
+    fn viewset_route_is_the_model_table() {
+        let post = ModelRef {
+            path: "crate::blog::models::Post".into(),
+            name: "Post".into(),
+        };
+        let entries = [
+            ("rustango::core", "Post", "rustango_posts"),
+            ("my_app::shop::models", "Post", "shop_posts"),
+            ("my_app::blog::models", "Post", "posts"),
+            ("my_app::blog::models", "Comment", "comments"),
+        ];
+        assert_eq!(registered_table(&post, "my_app", entries), Some("posts"));
+        // A guessed path still finds the one project model of that name.
+        let bare = ModelRef::bare("Post");
+        assert_eq!(
+            registered_table(&bare, "my_app", [entries[0], entries[2]]),
+            Some("posts")
+        );
+        // Ambiguous or framework-only: no table, the caller guesses.
+        assert_eq!(registered_table(&bare, "my_app", entries), None);
+        assert_eq!(
+            registered_table(&post, "my_app", entries[..1].iter().copied()),
+            None
+        );
+        let tenant =
+            viewset_template_tenant("PostViewSet", &post, "post_view_set", "/posts", "rustango");
+        assert!(
+            tenant.contains(r#".tenant_router("/api/posts")"#),
+            "{tenant}"
         );
     }
 
@@ -8029,6 +8141,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango",
         );
         assert!(
@@ -8669,6 +8782,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango",
             "app",
         );
@@ -8701,6 +8815,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango",
         );
         assert!(
@@ -8711,6 +8826,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango",
             "app",
         );
@@ -8735,6 +8851,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango_orm",
             "app",
         );
@@ -8758,6 +8875,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango_orm",
         );
         assert!(body.contains("use rustango_orm::core::Model as _;"));
@@ -8782,6 +8900,7 @@ mod gen_tests {
             "PostViewSet",
             &ModelRef::bare("Post"),
             "post_view_set",
+            "/posts",
             "rustango",
         );
         assert!(
@@ -8797,8 +8916,8 @@ mod gen_tests {
             "tenant template must NOT use the derive macro (pool-coupled), got: {body}"
         );
         assert!(
-            body.contains("/api/post_view_set"),
-            "expected snake-cased path, got: {body}"
+            body.contains(r#".tenant_router("/api/posts")"#),
+            "expected the table route, got: {body}"
         );
         // The hint comment in the template should match the actual
         // function call site Devs will copy from it.

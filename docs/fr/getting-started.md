@@ -506,7 +506,7 @@ Exécutez-le :
 cargo run
 ```
 
-Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lues en retour. Restaurez `src/main.rs` à sa forme de serveur générée par le squelette une fois que vous avez confirmé que cela fonctionne — l'étape suivante s'appuie sur cette forme.
+Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lues en retour. Restaurez `src/main.rs` à sa forme de serveur générée par le squelette une fois que vous avez confirmé que cela fonctionne — l'étape suivante s'appuie sur cette forme. Supprimez aussi les trois lignes `use` ci-dessus : la forme serveur ne les utilise pas, et le compilateur signale des imports inutilisés.
 
 ---
 
@@ -630,7 +630,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{id}`.
+Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{id}`. Le chemin est la table du modèle ; le commentaire à la fin de `src/post_view_set.rs` montre cette même ligne, et `make:viewset` affiche l'URL.
 
 ### 12c. Essayer les points de terminaison
 

@@ -497,7 +497,7 @@ Run it:
 cargo run
 ```
 
-You should see your new post id and the rows read back. Restore `src/main.rs` to its scaffolded server shape once you've confirmed it works — the next step builds on that.
+You should see your new post id and the rows read back. Restore `src/main.rs` to its scaffolded server shape once you've confirmed it works — the next step builds on that. Remove the three `use` lines above as well: the server shape doesn't use them, and the compiler warns about unused imports.
 
 ---
 
@@ -621,7 +621,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-The ViewSet now answers at `/api/posts` and `/api/posts/{id}`.
+The ViewSet now answers at `/api/posts` and `/api/posts/{id}`. The path is the model's table; the comment at the end of `src/post_view_set.rs` shows this same line, and `make:viewset` prints the URL.
 
 ### 12c. Try the endpoints
 

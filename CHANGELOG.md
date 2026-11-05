@@ -29,6 +29,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
 - MySQL / MariaDB: a filtered `AnyValue` is written as `MIN(CASE WHEN …)`, so a row the filter rejects can no longer turn the result NULL.
 - SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in without `?next` lands, by role, claim or `any`, in `position` order. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
+- `make:viewset` mounts the ViewSet at the model's table (`/api/posts`), not the module name (`/api/post_view_set`), and prints the URL it answers at.
 ## [0.63.0] — 2026-11-04
 
 ### Added
