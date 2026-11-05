@@ -1010,7 +1010,17 @@ fn write_subquery_joins(
                     dialect: b.d.name(),
                 });
             }
-            b.sql.push_str(" LATERAL");
+            if b.d.name() == "mysql" {
+                // MariaDB has no LATERAL: its syntax error names the reason.
+                b.sql.push(' ');
+                super::mysql::ByServer {
+                    mysql: "LATERAL",
+                    mariadb: "~ LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB",
+                }
+                .write(&mut b.sql);
+            } else {
+                b.sql.push_str(" LATERAL");
+            }
         }
         b.sql.push_str(" (");
         // The subquery writers push their own scope frame, so an
@@ -2709,6 +2719,77 @@ fn write_sqlite_json_value_eq(
 /// is standard SQL, accepted as-is by PG 9.0+, MySQL 8.0+ and
 /// SQLite 3.25+.
 fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(), SqlError> {
+    let start = b.sql.len();
+    let p0 = b.params.len();
+    write_window_call(b, w)?;
+    if b.d.name() == "mysql" {
+        write_mariadb_lag_default(b, w, start, p0)?;
+    }
+    Ok(())
+}
+
+/// MariaDB's LAG / LEAD take no default, so its arm picks the default by
+/// row position. Only when the default holds the call's one bind: both
+/// arms must bind the same values in the same order.
+fn write_mariadb_lag_default(
+    b: &mut Sql<'_>,
+    w: &crate::core::WindowExpr,
+    start: usize,
+    p0: usize,
+) -> Result<(), SqlError> {
+    use crate::core::{Expr, WindowFn};
+    let (Some(x), Some(Expr::Literal(SqlValue::I64(n))), Some(d), 3) =
+        (w.args.first(), w.args.get(1), w.args.get(2), w.args.len())
+    else {
+        return Ok(());
+    };
+    if !matches!(w.kind, WindowFn::Lag | WindowFn::Lead) || *n < 0 {
+        return Ok(());
+    }
+    let call_params = b.params.len() - p0;
+    let piece = |b: &mut Sql<'_>, write: &dyn Fn(&mut Sql<'_>) -> Result<(), SqlError>| {
+        let (at, pm) = (b.sql.len(), b.params.len());
+        write(b)?;
+        let text = b.sql[at..].to_owned();
+        let binds = b.params.len() - pm;
+        b.sql.truncate(at);
+        b.params.truncate(pm);
+        Ok::<_, SqlError>((text, binds))
+    };
+    let (x, x_binds) = piece(b, &|b| write_expr(b, x, None))?;
+    let (d, d_binds) = piece(b, &|b| write_expr(b, d, None))?;
+    let (spec, _) = piece(b, &|b| {
+        write_window_spec(b, w, true, false);
+        Ok(())
+    })?;
+    let (part, _) = piece(b, &|b| {
+        write_window_spec(b, w, false, false);
+        Ok(())
+    })?;
+    let mysql = b.sql[start..].to_owned();
+    if x_binds != 0 || d_binds != call_params || mysql.contains("*/") || x.contains("*/") {
+        return Ok(());
+    }
+    let maria = match w.kind {
+        WindowFn::Lag => format!(
+            "(CASE WHEN ROW_NUMBER() OVER ({spec}) > {n} \
+             THEN LAG({x}, {n}) OVER ({spec}) ELSE {d} END)"
+        ),
+        _ => format!(
+            "(CASE WHEN COUNT(*) OVER ({part}) - ROW_NUMBER() OVER ({spec}) >= {n} \
+             THEN LEAD({x}, {n}) OVER ({spec}) ELSE {d} END)"
+        ),
+    };
+    b.sql.truncate(start);
+    super::mysql::ByServer {
+        mysql: &mysql,
+        mariadb: &maria,
+    }
+    .write(&mut b.sql);
+    Ok(())
+}
+
+fn write_window_call(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(), SqlError> {
     use crate::core::{Expr, WindowFn};
     let fn_name = match w.kind {
         WindowFn::RowNumber => "ROW_NUMBER",
@@ -2755,6 +2836,13 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         write_expr(b, arg, None)?;
     }
     b.sql.push_str(") OVER (");
+    write_window_spec(b, w, true, true);
+    b.sql.push(')');
+    Ok(())
+}
+
+/// `PARTITION BY … [ORDER BY …] [frame]`, the inside of `OVER (…)`.
+fn write_window_spec(b: &mut Sql<'_>, w: &crate::core::WindowExpr, order: bool, frame: bool) {
     let mut first_clause = true;
     if !w.partition_by.is_empty() {
         b.sql.push_str("PARTITION BY ");
@@ -2767,7 +2855,7 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         }
         first_clause = false;
     }
-    if !w.order_by.is_empty() {
+    if order && !w.order_by.is_empty() {
         if !first_clause {
             b.sql.push(' ');
         }
@@ -2783,14 +2871,12 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         }
         first_clause = false;
     }
-    if let Some(frame) = &w.frame {
+    if let Some(f) = w.frame.as_ref().filter(|_| frame) {
         if !first_clause {
             b.sql.push(' ');
         }
-        write_window_frame(b, frame);
+        write_window_frame(b, f);
     }
-    b.sql.push(')');
-    Ok(())
 }
 
 fn write_window_frame(b: &mut Sql<'_>, frame: &crate::core::WindowFrame) {
