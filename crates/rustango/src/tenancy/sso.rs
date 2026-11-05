@@ -708,8 +708,16 @@ pub(super) async fn tenant_sso_callback(
         tenant_console::COOKIE_NAME,
         secure_suffix()
     );
-    let landing = super::admin::tenant_next(flow.next.as_deref(), routes, cookie_path)
-        .unwrap_or_else(|| routes.admin_url.clone());
+    // An explicit `next` wins; then the landing rules, on the scoped identity.
+    let landing = match super::admin::tenant_next(flow.next.as_deref(), routes, cookie_path) {
+        Some(next) => next,
+        None => {
+            let scoped = policy.scope(&identity);
+            super::admin::rule_landing(tenant_pool, org, uid, Some(&scoped), routes, cookie_path)
+                .await
+                .unwrap_or_else(|| routes.admin_url.clone())
+        }
+    };
     let mut resp = Redirect::to(&landing).into_response();
     set_cookie(&mut resp, &session_cookie);
     for c in flow_cookie(cookie_path).clear() {

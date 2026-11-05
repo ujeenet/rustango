@@ -276,21 +276,26 @@ impl RequiredClaims {
     /// The first claim `identity` lacks a wanted value for.
     pub(crate) fn check(&self, identity: &Identity) -> Result<(), Refusal> {
         for (name, want) in &self.0 {
-            let has = |v: &Value| match v {
-                Value::String(s) => want.contains(s),
-                Value::Bool(_) | Value::Number(_) => want.contains(&v.to_string()),
-                _ => false,
-            };
-            let ok = match identity.directory_claim(name) {
-                Some(Value::Array(list)) => list.iter().any(has),
-                Some(v) => has(v),
-                None => false,
-            };
-            if !ok {
+            if !claim_matches(identity.directory_claim(name), want) {
                 return Err(Refusal::Claim { name: name.clone() });
             }
         }
         Ok(())
+    }
+}
+
+/// Whether `claim` holds one of `want`: a string, bool or number, or a
+/// list with one. The caller picks how far the claim is trusted.
+pub(crate) fn claim_matches(claim: Option<&Value>, want: &[String]) -> bool {
+    let has = |v: &Value| match v {
+        Value::String(s) => want.contains(s),
+        Value::Bool(_) | Value::Number(_) => want.contains(&v.to_string()),
+        _ => false,
+    };
+    match claim {
+        Some(Value::Array(list)) => list.iter().any(has),
+        Some(v) => has(v),
+        None => false,
     }
 }
 

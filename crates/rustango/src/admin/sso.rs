@@ -298,13 +298,20 @@ async fn sso_callback(
         return login_error(&state, "nouser");
     }
     attempt.succeeded().await;
+    // Chosen now: the TOTP step no longer has the identity, so it carries the landing.
+    let next = match flow.next.clone() {
+        Some(n) => Some(n),
+        None => {
+            let scoped = policy.scope(&identity);
+            super::login_view::admin_rule_landing(&state, Some(&scoped)).await
+        }
+    };
     let ttl = policy.session_ttl(session::DEFAULT_TTL_SECS, user.is_superuser);
     // A confirmed device owes its code first, as on the password login (#2249).
     #[cfg(feature = "totp")]
     match super::totp_store::confirmed_secret_checked(&state.pool, uid).await {
         Ok(None) => {}
         Ok(Some(_)) => {
-            let next = flow.next.clone();
             return second_factor::prompt(&state, &extensions, &headers, secret, &user, ttl, next)
                 .await;
         }
@@ -314,7 +321,7 @@ async fn sso_callback(
             return login_error(&state, "config");
         }
     }
-    mint_session(&state, secret, &user, meta(), ttl, flow.next.as_deref()).await
+    mint_session(&state, secret, &user, meta(), ttl, next.as_deref()).await
 }
 
 /// Mint the normal admin session, bound to the user's stored password
