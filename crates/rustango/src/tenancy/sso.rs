@@ -50,6 +50,12 @@ struct CallbackParams {
     error: Option<String>,
 }
 
+/// SSO start params: where to land after sign-in, sealed into the flow.
+#[derive(serde::Deserialize, Default)]
+struct BeginParams {
+    next: Option<String>,
+}
+
 use super::member_auth;
 use super::org::Org;
 use super::routes::RouteConfig;
@@ -80,76 +86,184 @@ pub struct SharedSsoProvider {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
     #[rustango(max_length = 64, unique)]
+    #[rustango(
+        help_text = "Short id in this provider's URLs, e.g. `google`: the IdP sends users back to `<login>/sso/<slug>/callback`. Unique; a new slug means a new callback URL at the IdP."
+    )]
+    #[rustango(verbose_name = "Slug")]
     pub slug: String,
     #[rustango(max_length = 150)]
+    #[rustango(help_text = "Text on the sign-in button, e.g. `Sign in with Google`.")]
+    #[rustango(verbose_name = "Button label")]
     pub label: String,
     #[rustango(max_length = 32)]
+    #[rustango(
+        help_text = "`google`, `microsoft`, `github`, `gitlab` or `discord` for a built-in provider, or `oidc` for any other OpenID Connect provider (then fill in the issuer URL)."
+    )]
+    #[rustango(verbose_name = "Provider kind")]
     pub kind: String,
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Only for `oidc`: the issuer URL, e.g. `https://<org>.okta.com` or `https://<host>/realms/<realm>`. The endpoints are read from `<issuer>/.well-known/openid-configuration`; for Microsoft Entra ID use the `microsoft` kind."
+    )]
+    #[rustango(verbose_name = "Issuer URL")]
     pub issuer_url: Option<String>,
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Client ID (application ID) from your identity provider's app registration."
+    )]
+    #[rustango(verbose_name = "Client ID")]
     pub client_id: String,
     /// The OAuth2 client secret, **encrypted at rest** (see
     /// [`crate::admin::sso_provider::SsoProvider::client_secret`]).
     #[rustango(max_length = 1024)]
+    #[rustango(
+        help_text = "Client secret from the same app registration. Stored encrypted with `RUSTANGO_SECRET_KEY`."
+    )]
+    #[rustango(verbose_name = "Client secret")]
     pub client_secret: crate::casts::Cast<crate::casts::EncryptedString>,
     #[rustango(default = "true")]
+    #[rustango(help_text = "Show this provider's button on the sign-in page.")]
+    #[rustango(verbose_name = "Enabled")]
     pub enabled: bool,
     #[rustango(default = "0")]
+    #[rustango(help_text = "Button order on the sign-in page; lower numbers come first.")]
+    #[rustango(verbose_name = "Sort order")]
     pub sort_order: i32,
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "OAuth scopes, space separated, e.g. `openid email profile`. Empty: the kind's default scopes."
+    )]
+    #[rustango(verbose_name = "Scopes")]
     pub scopes: Option<String>,
     /// See [`SsoProvider::allow_email_link`].
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Security: in every tenant, link a first-time sign-in to the existing account with the same verified email; that account's password stops working, its sessions end, its API keys are deleted and its agent keys are turned off. Never a superuser or a user with any role or permission."
+    )]
+    #[rustango(verbose_name = "Allow email linking")]
     pub allow_email_link: bool,
     // The access policy: see the same fields on `SsoProvider`.
     #[rustango(max_length = 2000)]
+    #[rustango(
+        help_text = "Security: only users whose verified email is in these domains may sign in. Comma or newline list: `client.org` is that domain only, `*.client.org` its subdomains only. Empty: any domain."
+    )]
+    #[rustango(verbose_name = "Allowed email domains")]
     pub allowed_email_domains: Option<String>,
     #[rustango(max_length = 2000)]
+    #[rustango(
+        help_text = "Users with an email in these domains never sign in, even if the allowed list has them. Same format as the allowed list."
+    )]
+    #[rustango(verbose_name = "Blocked email domains")]
     pub blocked_email_domains: Option<String>,
     #[rustango(max_length = 1000)]
+    #[rustango(
+        help_text = "Microsoft Entra directory (tenant) IDs allowed to sign in, comma separated, read from a verified id_token. Empty: any Entra directory can sign in through a `microsoft` provider."
+    )]
+    #[rustango(verbose_name = "Allowed Microsoft directories")]
     pub allowed_idp_tenants: Option<String>,
     #[rustango(max_length = 1000)]
+    #[rustango(
+        help_text = "Google Workspace domains (the `hd` claim) allowed to sign in, comma separated, e.g. `client.org`."
+    )]
+    #[rustango(verbose_name = "Allowed Google Workspace domains")]
     pub allowed_hosted_domains: Option<String>,
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "JSON object of claims a sign-in must carry, each holding one of its values: `{\"roles\": [\"App.User\"]}`. `{}`: no claim is required."
+    )]
+    #[rustango(verbose_name = "Required claims")]
     pub required_claims: serde_json::Value,
     #[rustango(
         max_length = 16,
         choices = "closed:Closed, invite_only:Invite only, allowlist:Allowlist, open:Open"
     )]
+    #[rustango(
+        help_text = "Security: who gets a new account at first sign-in: `closed` (no one), `invite_only` (an invite for the email), `allowlist` (an invite for the email or its domain) or `open` (anyone the sign-in rules let in). Empty: the sign-in page's default."
+    )]
+    #[rustango(verbose_name = "Sign-up mode")]
     pub signup_mode: Option<String>,
     #[rustango(max_length = 1000)]
+    #[rustango(
+        help_text = "Tenant roles a new user gets, comma separated, e.g. `Viewer`. An invite with roles replaces them."
+    )]
+    #[rustango(verbose_name = "Default roles")]
     pub default_roles: Option<String>,
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "JSON object from an IdP group or app role to tenant roles: `{\"Admins\": \"Editor\"}` or `{\"Admins\": [\"Editor\", \"Viewer\"]}`."
+    )]
+    #[rustango(verbose_name = "Role map")]
     pub role_map: serde_json::Value,
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "Claims the role map reads, comma separated. Empty: `groups,roles`.")]
+    #[rustango(verbose_name = "Role claims")]
     pub role_claims: Option<String>,
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Apply the role map at every sign-in, not only the first. Only roles named in the role map are added or removed."
+    )]
+    #[rustango(verbose_name = "Sync roles at every sign-in")]
     pub sync_roles_on_login: bool,
     #[rustango(
         max_length = 24,
         default = "'email_local'",
         choices = "email_local:Email local part, email:Email, preferred_username:Preferred username"
     )]
+    #[rustango(
+        help_text = "Where a new user's username comes from: the email's local part, the whole email, or the IdP's `preferred_username` (falls back to the local part)."
+    )]
+    #[rustango(verbose_name = "Username from")]
     pub username_from: String,
     #[rustango(
         max_length = 16,
         default = "'suffix'",
         choices = "suffix:Add a suffix, refuse:Refuse"
     )]
+    #[rustango(
+        help_text = "What happens when that username is taken: add a short suffix, or refuse the sign-up."
+    )]
+    #[rustango(verbose_name = "When the username is taken")]
     pub username_clash: String,
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Update the user's name and email from the IdP at every sign-in. Never for a superuser."
+    )]
+    #[rustango(verbose_name = "Sync name and email")]
     pub sync_profile: bool,
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Security: with email linking on, also link users who hold any role or permission. A superuser is never linked by email."
+    )]
+    #[rustango(verbose_name = "Allow email linking for staff")]
     pub allow_email_link_staff: bool,
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Users linked through this provider may not sign in with a password, even while the provider is off."
+    )]
+    #[rustango(verbose_name = "Sign-in only through SSO")]
     pub sso_only: bool,
+    #[rustango(
+        help_text = "After this many days without use, `sso-deactivate-idle` turns off the users this provider signed up who cannot use a password: SSO only here, or password login off for the tenant. Empty: never."
+    )]
+    #[rustango(verbose_name = "Deactivate after idle days")]
     pub auto_deactivate_after_days: Option<i32>,
+    #[rustango(
+        help_text = "Longest session, in seconds, after a sign-in through this provider. Empty: the normal session length."
+    )]
+    #[rustango(verbose_name = "Session length (seconds)")]
     pub session_ttl_secs: Option<i64>,
+    #[rustango(
+        help_text = "Longest session, in seconds, for a superuser who signs in through this provider. Empty: the normal session length."
+    )]
+    #[rustango(verbose_name = "Superuser session length (seconds)")]
     pub superuser_session_ttl_secs: Option<i64>,
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
+    #[rustango(help_text = "When the row last changed. Set on every save.")]
+    #[rustango(verbose_name = "Updated at")]
     pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -420,7 +534,7 @@ pub(super) async fn tenant_sso_begin(
     cookie_path: &str,
     parts: &Parts,
 ) -> Response {
-    let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
+    let scope = crate::sso::policy::org_throttle_scope(org);
     if let Err(refused) =
         crate::sso::policy::throttle_check(&scope, &parts.extensions, &parts.headers).await
     {
@@ -447,7 +561,10 @@ pub(super) async fn tenant_sso_begin(
     let Some(tenant) = super::TenantSlug::of(org) else {
         return login_error(routes, "config");
     };
-    let (url, flow) = provider.begin();
+    let (url, mut flow) = provider.begin();
+    let params: BeginParams =
+        serde_urlencoded::from_str(parts.uri.query().unwrap_or("")).unwrap_or_default();
+    flow.next = super::admin::tenant_next(params.next.as_deref(), routes, cookie_path);
     let sealed = seal_flow(
         &flow,
         FlowScope::for_tenant(FlowPurpose::TenantAdmin, &tenant, slug),
@@ -492,7 +609,7 @@ pub(super) async fn tenant_sso_callback(
         Ok(f) => f,
         Err(_) => return login_error(routes, "expired"),
     };
-    let scope = crate::sso::policy::throttle_scope(Some(&org.slug));
+    let scope = crate::sso::policy::org_throttle_scope(org);
     let attempt =
         match crate::sso::policy::throttle_begin(&scope, &parts.extensions, &parts.headers).await {
             Ok(a) => a,
@@ -591,7 +708,9 @@ pub(super) async fn tenant_sso_callback(
         tenant_console::COOKIE_NAME,
         secure_suffix()
     );
-    let mut resp = Redirect::to(routes.admin_url.as_str()).into_response();
+    let landing = super::admin::tenant_next(flow.next.as_deref(), routes, cookie_path)
+        .unwrap_or_else(|| routes.admin_url.clone());
+    let mut resp = Redirect::to(&landing).into_response();
     set_cookie(&mut resp, &session_cookie);
     for c in flow_cookie(cookie_path).clear() {
         set_cookie(&mut resp, &c);

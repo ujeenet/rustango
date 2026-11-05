@@ -10,6 +10,9 @@ login propio con contraseña aleatoria, con permisos solo sobre esa base de
 datos. Registra ambos en `rustango_tenant_databases`. rustango solo elimina,
 o cambia la contraseña de, una base de datos registrada.
 
+Cómo encajan los dos modos de almacenamiento, los pools y el enrutado está en
+[Multi-tenancy](tenancy.md).
+
 ## Tabla de contenidos
 
 - [Antes de empezar](#antes-de-empezar)
@@ -91,11 +94,32 @@ o más bytes aleatorios:
 export RUSTANGO_SECRET_KEY="$(openssl rand -base64 48)"
 ```
 
+En PowerShell:
+
+```powershell
+$bytes = New-Object byte[] 48
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SECRET_KEY = [Convert]::ToBase64String($bytes)
+```
+
 Sin clave, o con una en blanco, la contraseña de un servidor se rechaza y la
 URL de un tenant se guarda sin sellar con una advertencia (se rechaza con
 `RUSTANGO_REQUIRE_SEALED_SECRETS=1`). Las páginas de servidores de bases de
 datos de la consola y su página **New tenant** muestran un aviso mientras la
 clave falta o es corta.
+
+En los tiers dev y test (`RUSTANGO_ENV` sin definir, `dev` o `test`) una clave
+sin definir recurre a una guardada en `var/.rustango_secret.key`, en cada binario
+que sella o abre. El archivo se busca desde el directorio de trabajo hacia arriba
+hasta la raíz del workspace de Cargo (el directorio más cercano con `Cargo.lock`);
+uno nuevo se crea en esa raíz, o en el directorio de trabajo fuera de un proyecto
+Cargo. Cuando definas `RUSTANGO_SECRET_KEY`, abre los valores que el archivo selló:
+
+```bash
+export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+y luego vuelve a sellarlos como en [rotación](#la-clave-secreta-copia-de-seguridad-y-rotación).
 
 ## 2. Guardar el servidor
 

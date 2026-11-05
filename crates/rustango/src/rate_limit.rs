@@ -144,6 +144,7 @@ pub(crate) fn ip_bucket(ip: std::net::IpAddr) -> String {
 
 /// Strategy for picking the bucket key per request.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum KeyBy {
     /// Use the connecting client's IP address (`ConnectInfo<SocketAddr>`).
     ///
@@ -158,9 +159,51 @@ pub enum KeyBy {
     /// cache never holds a raw credential. Requests without the header
     /// share one bucket and log a warning, as with `Ip`.
     Header(&'static str),
-    /// One bucket for everything. Coarse, but fine for "max N
-    /// requests/sec on this endpoint".
+    /// One bucket for everything, across every tenant. Coarse, but fine
+    /// for "max N requests/sec on this endpoint".
     Global,
+    /// One bucket per tenant, from `tenancy::RequestTenant`. Global requests,
+    /// requests no tenant matched and requests whose resolution failed each
+    /// share one fixed bucket. With no tenant context mounted it warns once
+    /// and counts every request in the failed-resolution bucket. Without
+    /// `tenancy` it is [`Self::Global`].
+    Tenant,
+}
+
+/// The [`KeyBy::Tenant`] bucket of `req`.
+pub(crate) async fn tenant_key(req: Request<Body>) -> (Request<Body>, String) {
+    #[cfg(feature = "tenancy")]
+    {
+        use crate::tenancy::RequestTenant;
+        // Nothing to tell tenants apart by: never the `Global` bucket by mistake.
+        if RequestTenant::unmounted(req.extensions()) {
+            warn_unmounted_tenant_key();
+            return (req, "<unknown-tenant>".to_owned());
+        }
+        let (req, tenant) = RequestTenant::resolve_request(req).await;
+        let key = match tenant {
+            RequestTenant::Tenant(t) => t.namespace(),
+            RequestTenant::Global => "<global>".to_owned(),
+            RequestTenant::Unmatched => "<no-tenant>".to_owned(),
+            _ => "<unknown-tenant>".to_owned(),
+        };
+        (req, key)
+    }
+    #[cfg(not(feature = "tenancy"))]
+    (req, "<global>".to_owned())
+}
+
+/// Log once per process: a misplaced `KeyBy::Tenant` limiter counts everyone together.
+#[cfg(feature = "tenancy")]
+fn warn_unmounted_tenant_key() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        tracing::warn!(
+            target: "rustango::rate_limit",
+            "KeyBy::Tenant with no tenant context on the request; every request shares one \
+             bucket. Mount the limiter inside the tenancy layer"
+        );
+    });
 }
 
 /// Rate-limit configuration.
@@ -366,8 +409,17 @@ impl RateLimitLayer {
                     warn_missing_discriminator(name);
                     "<no-header>".to_owned()
                 }),
-            KeyBy::Global => "<global>".to_owned(),
+            KeyBy::Global | KeyBy::Tenant => "<global>".to_owned(),
         }
+    }
+
+    /// The bucket key; [`KeyBy::Tenant`] may resolve the tenant first.
+    async fn bucket_key(&self, req: Request<Body>) -> (Request<Body>, String) {
+        if matches!(self.key_by, KeyBy::Tenant) {
+            return tenant_key(req).await;
+        }
+        let key = self.extract_key(&req);
+        (req, key)
     }
 }
 
@@ -391,7 +443,7 @@ impl<S: Clone + Send + Sync + 'static> RateLimitRouterExt for Router<S> {
 }
 
 async fn handle(cfg: Arc<RateLimitLayer>, req: Request<Body>, next: Next) -> Response<Body> {
-    let key = cfg.extract_key(&req);
+    let (req, key) = cfg.bucket_key(req).await;
     match cfg.take(&key).await {
         Ok((remaining, _)) => {
             let mut response = next.run(req).await;
@@ -420,6 +472,14 @@ async fn handle(cfg: Arc<RateLimitLayer>, req: Request<Body>, next: Next) -> Res
 
 #[cfg(test)]
 mod tests {
+    /// No tenant context: never the platform-wide `Global` bucket.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn key_by_tenant_without_a_context_is_the_unknown_bucket() {
+        let req = Request::builder().body(Body::empty()).unwrap();
+        assert_eq!(super::tenant_key(req).await.1, "<unknown-tenant>");
+    }
+
     use super::*;
 
     #[tokio::test]

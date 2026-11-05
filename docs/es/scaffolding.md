@@ -142,7 +142,7 @@ Una plantilla enciende un conjunto razonable; `--features` añade las opciones q
 | `jobs` / `jobs-postgres` | Cola de trabajos en segundo plano, en proceso / respaldada por la base de datos y por tanto resistente a reinicios |
 | `scheduler` | Tareas en segundo plano a intervalos fijos |
 | `email-smtp` | Transporte SMTP para el framework de email |
-| `mcp` | Servidor Model Context Protocol para agentes de IA |
+| `mcp` | Servidor Model Context Protocol para agentes de IA (solo plantilla tenant) |
 | `http2` | Servir HTTP/2 sin cifrar (h2c) junto a HTTP/1 |
 | `testkit` / `test_utils` | Constructores de esquema, factorías y constructores solo para tests |
 
@@ -158,7 +158,7 @@ cargo rgo new shop --alias rgo
 
 ```toml
 [dependencies]
-rgo = { package = "rustango", version = "0.62", default-features = false, features = ["batteries"] }
+rgo = { package = "rustango", version = "0.63", default-features = false, features = ["batteries"] }
 
 [features]
 postgres = ["rgo/postgres"]
@@ -234,7 +234,7 @@ Así que `cargo run` arranca el servidor, y `cargo run -- <verb>` ejecuta migrac
 Cómo difieren las plantillas dentro de `main.rs` / `urls.rs`:
 
 - **api** — sin admin; `urls::api()` simplemente agrega tus propias rutas.
-- **fullstack** — el mismo `urls.rs`, más `admin_prefix(&settings)` y un ayudante `admin_router(pool, &settings)` que `main.rs` monta con `Cli::nest_with(urls::admin_prefix(&settings), …)`, construido a partir del pool del servidor. El prefijo es `[admin] url_prefix` (o `[routes] admin_url`), si no `/admin`. `main.rs` carga los ajustes una vez y los pasa al `Cli` con `with_loaded_settings`. Recibe un `rustango::sql::Pool`, así que no nombra ningún driver, y queda detrás de un inicio de sesión: crea la cuenta con `cargo run -- create-admin <username> --superuser` (consulta [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin)).
+- **fullstack** — el mismo `urls.rs`, más `admin_prefix(&settings)` y un ayudante `admin_router(pool, &settings)` que `main.rs` monta con `Cli::try_nest_with(urls::admin_prefix(&settings), …)`, construido a partir del pool del servidor. El prefijo es `[admin] url_prefix` (o `[routes] admin_url`), si no `/admin`. `main.rs` carga los ajustes una vez y los pasa al `Cli` con `with_loaded_settings`. Recibe un `rustango::sql::Pool`, así que no nombra ningún driver, y queda detrás de un inicio de sesión: crea la cuenta con `cargo run -- create-admin <username> --superuser` (consulta [Primeros pasos, Paso 11](getting-started.md#paso-11-activar-el-auto-admin)).
 - **tenant** — `main.rs` añade `.tenancy()`, sirviendo la consola de operador en el dominio ápice y cada tenant bajo su propio subdominio, y `.with_tenant_provisioning("migrations")` para las páginas **New tenant** y **Database servers** de la consola (bórralo para desactivarlas; guardar un servidor necesita `RUSTANGO_SECRET_KEY`). Las propias tablas del framework se generan en una carpeta **`system/migrations/`** a partir de los modelos compilados en el primer `cargo run -- migrate` — sin JSON de bootstrap entregado a mano, así que la primerísima migración funciona sin configuración adicional.
 
 ### Configuración por capas
@@ -262,7 +262,8 @@ cp .env.example .env                     # then change `postgres` -> `localhost`
 docker compose up -d --no-deps postgres  # only the database: the rust service holds 8080
 cargo run -- makemigrations              # generate the framework's (and your) tables
 cargo run -- migrate                     # apply them
-cargo run -- create-admin <username> --superuser  # fullstack: the admin login
+cargo run -- create-admin admin --superuser  # fullstack: the admin login (any username)
+cargo run -- create-operator ops              # tenant: the operator console login
 cargo run                                # serve
 cargo run -- --help                      # see every manage verb
 ```

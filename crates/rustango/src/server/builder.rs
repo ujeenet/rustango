@@ -130,7 +130,7 @@ struct PendingAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminTxActionFn,
+    handler: crate::admin::ActionFn,
 }
 
 #[cfg(feature = "postgres")]
@@ -601,13 +601,41 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
-    /// Register a user-defined bulk admin action that runs against the
+    /// Register a custom bulk admin action that runs against the
     /// tenant pool of whichever tenant the request resolves to. The
     /// action name must also appear in the model's
     /// `#[rustango(admin(actions = "..."))]` allowlist.
     ///
-    /// Mirrors [`crate::admin::Builder::register_tx_action`]; the
+    /// Mirrors [`crate::admin::Builder::register_action`]; the
     /// transaction is on the tenant-scoped pool.
+    #[must_use]
+    pub fn admin_register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: crate::admin::ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(crate::admin::ActionCtx<'a>) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.admin_actions.push(PendingAction {
+            table: model_table,
+            name: action_name,
+            perm,
+            handler: std::sync::Arc::new(handler),
+        });
+        self
+    }
+
+    /// [`Self::admin_register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
+    #[deprecated(
+        since = "0.63.0",
+        note = "use `admin_register_action(table, name, ActionPerm::Change, handler)`; removed in 0.64.0"
+    )]
     #[must_use]
     pub fn admin_register_tx_action<F>(
         self,
@@ -624,19 +652,22 @@ impl<DB: Database> Builder<DB> {
             + Sync
             + 'static,
     {
-        self.admin_register_tx_action_with_perm(
+        self.admin_register_action(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
-            handler,
+            crate::admin::from_tx_handler(handler),
         )
     }
 
-    /// [`Self::admin_register_tx_action`] checked against `perm`.
-    /// See [`crate::admin::Builder::register_tx_action_with_perm`].
+    /// [`Self::admin_register_action`] with a `(tx, pks)` handler.
+    #[deprecated(
+        since = "0.63.0",
+        note = "use `admin_register_action`, whose handler takes an `ActionCtx`; removed in 0.64.0"
+    )]
     #[must_use]
     pub fn admin_register_tx_action_with_perm<F>(
-        mut self,
+        self,
         model_table: &'static str,
         action_name: &'static str,
         perm: crate::admin::ActionPerm,
@@ -651,13 +682,12 @@ impl<DB: Database> Builder<DB> {
             + Sync
             + 'static,
     {
-        self.admin_actions.push(PendingAction {
-            table: model_table,
-            name: action_name,
+        self.admin_register_action(
+            model_table,
+            action_name,
             perm,
-            handler: std::sync::Arc::new(handler),
-        });
-        self
+            crate::admin::from_tx_handler(handler),
+        )
     }
 
     /// Run a first-run hook with full access to pools + registry.
@@ -823,7 +853,7 @@ impl<DB: Database> Builder<DB> {
         // tenant cookie and an operator cookie can't be confused.
         // Audit M2 — prod tier requires a valid RUSTANGO_SESSION_SECRET
         // and fails closed; dev/staging keep the disk-persisted keys.
-        let keys = crate::tenancy::session::ServerKeys::load();
+        let keys = crate::tenancy::session::ServerKeys::load()?;
         let (session_secret_for_tenant, operator_secret) = (keys.tenant, keys.operator);
         let ctx = Arc::new(TenantContext {
             pools: self.pools.clone(),
@@ -854,11 +884,11 @@ impl<DB: Database> Builder<DB> {
         }
         for action in self.admin_actions {
             let handler = action.handler;
-            tenant_admin_builder = tenant_admin_builder.register_tx_action_with_perm(
+            tenant_admin_builder = tenant_admin_builder.register_action(
                 action.table,
                 action.name,
                 action.perm,
-                move |tx, pks| handler(tx, pks),
+                move |ctx| handler(ctx),
             );
         }
         let tenant_admin = tenant_admin_builder
@@ -1045,7 +1075,7 @@ impl<DB: Database> Builder<DB> {
                     let mut resp = if resolution == Resolution::PrefixTenant {
                         prefixed.as_service().oneshot(req).await?
                     } else if let Some(mut unresolved) = unresolved {
-                        unresolved.as_service().oneshot(req).await?
+                        unresolved.as_service().oneshot(global(req)).await?
                     } else {
                         axum::response::IntoResponse::into_response(
                             axum::http::StatusCode::NOT_FOUND,
@@ -1076,7 +1106,7 @@ impl<DB: Database> Builder<DB> {
                 async move {
                     if crate::tenancy::host_is_apex(req.headers(), req.uri(), &apex) {
                         let path = req.uri().path().to_owned();
-                        let resp = operator.as_service().oneshot(req).await;
+                        let resp = operator.as_service().oneshot(global(req)).await;
                         if let Ok(r) = &resp {
                             if r.extensions().get::<ConsoleUnmatched>().is_none() {
                                 spawn_shadow_check(&shadow_checked, &path, &registry);
@@ -1092,7 +1122,7 @@ impl<DB: Database> Builder<DB> {
                     } else if let (Resolution::None, Some(mut unresolved)) =
                         (resolution, unresolved)
                     {
-                        unresolved.as_service().oneshot(req).await
+                        unresolved.as_service().oneshot(global(req)).await
                     } else {
                         tenants.as_service().oneshot(req).await
                     };
@@ -1342,13 +1372,15 @@ pub(crate) async fn resolve(
     registry: &crate::sql::Pool,
 ) -> (axum::http::Request<axum::body::Body>, Resolution) {
     use crate::tenancy::OrgResolver as _;
-    let (parts, body) = req.into_parts();
-    let resolution = match resolver.resolve(&parts, registry).await {
+    let (mut parts, body) = req.into_parts();
+    let found = resolver.resolve(&parts, registry).await;
+    let resolution = match &found {
         Ok(None) => Resolution::None,
         Ok(Some(org)) => {
             if org
                 .path_prefix
-                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), &p))
+                .as_deref()
+                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), p))
             {
                 Resolution::PrefixTenant
             } else {
@@ -1360,7 +1392,18 @@ pub(crate) async fn resolve(
             Resolution::Failed
         }
     };
+    // Layers further in read this answer instead of resolving again.
+    parts
+        .extensions
+        .insert(crate::tenancy::RequestTenant::from_resolution(found));
     (axum::http::Request::from_parts(parts, body), resolution)
+}
+
+/// Mark a request the console or the unresolved router serves: no tenant.
+fn global(mut req: axum::http::Request<axum::body::Body>) -> axum::http::Request<axum::body::Body> {
+    req.extensions_mut()
+        .insert(crate::tenancy::RequestTenant::Global);
+    req
 }
 
 #[cfg(feature = "_http_layers")]

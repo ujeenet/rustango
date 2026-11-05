@@ -63,7 +63,8 @@ pub struct StartAppReport {
 
 /// What to run after `startapp`: it registers the module itself, or lists
 /// that edit as a manual step.
-pub(crate) const STARTAPP_NEXT: &str = "cargo run -- makemigrations && cargo run -- migrate";
+/// One command per line: PowerShell 5.1 has no `&&`.
+pub(crate) const STARTAPP_NEXT: &[&str] = &["cargo run -- makemigrations", "cargo run -- migrate"];
 
 /// Write an app module into `project_root/src/<app>/`.
 ///
@@ -647,7 +648,7 @@ fn starter_model_registered_in_inventory() {{
         .map(|e| e.schema.table)
         .collect();
     assert!(
-        tables.iter().any(|t| *t == \"{singular_table}\"),
+        tables.contains(&\"{singular_table}\"),
         \"`{singular_table}` missing from inventory; tables: {{tables:?}}\",
     );
 }}
@@ -668,7 +669,8 @@ pub const SINGLE_TENANT_MANAGE_BIN: &str =
 //   use my_app as _;
 
 // Errors print with Display, so a multi-line CLI error reads as lines.
-#[tokio::main]
+// `rustango::main` runs on an 8 MiB stack: Windows' main thread has 1 MiB.
+#[rustango::main]
 async fn main() -> std::process::ExitCode {
     if let Err(e) = rustango::manage::Cli::new().run().await {
         eprintln!(\"Error: {e}\");

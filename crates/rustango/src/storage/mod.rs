@@ -32,7 +32,7 @@
 //!
 //! They all share one trait, so you can pick a backend at startup
 //! without changing the code that uses it. Several can run side by side
-//! as named disks in a [`StorageRegistry`], built in code or from the
+//! as named disks in a [`StorageRegistry`](crate::storage::StorageRegistry), built in code or from the
 //! `[storage]` config section.
 //!
 //! [`LocalStorage`]: crate::storage::LocalStorage

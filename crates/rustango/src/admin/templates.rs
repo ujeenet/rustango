@@ -11,6 +11,7 @@ fn templates() -> &'static tera::Tera {
     static T: OnceLock<tera::Tera> = OnceLock::new();
     T.get_or_init(|| {
         let mut tera = crate::template_extensions::html_tera();
+        crate::template_extensions::register_help_filter(&mut tera);
         tera.add_raw_templates([
             (
                 "_theme_tokens.html",

@@ -6,7 +6,7 @@
 //!
 //! Set `max_bytes` and `allowed_extensions` on every upload route. With
 //! no extension list any type is accepted except those a browser runs
-//! script in ([`ACTIVE_EXTENSIONS`]); list one to accept it. The
+//! script in ([`ACTIVE_EXTENSIONS`](crate::uploads::ACTIVE_EXTENSIONS)); list one to accept it. The
 //! client's `Content-Type` is never trusted: it is stored for reference
 //! only, so sniff or re-encode the bytes yourself if the type matters.
 //! Filenames are stripped to a basename, so a client-sent path such as

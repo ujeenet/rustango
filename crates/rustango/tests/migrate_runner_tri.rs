@@ -10,7 +10,7 @@ use rustango::migrate::{
     DataOp, Migration, Operation, SchemaChange,
 };
 use rustango::sql::{raw_execute_pool, Pool};
-use rustango::testkit::matrix::{drop_table, fresh_table};
+use rustango::testkit::matrix::{drop_table, fresh_table, Backend};
 use rustango::{tri_dialect_test, Model};
 use serde_json::{json, Value};
 
@@ -1318,8 +1318,8 @@ async fn unique_key_over_duplicates_is_refused(pool: &Pool) {
 /// The URL of `pool`'s server, or a fresh SQLite file.
 fn url_of(pool: &Pool, file: &std::path::Path) -> String {
     match pool.dialect().name() {
-        "postgres" => std::env::var("DATABASE_URL").expect("DATABASE_URL"),
-        "mysql" => std::env::var("MYSQL_TEST_URL").expect("MYSQL_TEST_URL"),
+        "postgres" => Backend::Postgres.url().expect("DATABASE_URL"),
+        "mysql" => Backend::MySql.url().expect("MYSQL_TEST_URL"),
         _ => format!("sqlite://{}?mode=rwc", file.display()),
     }
 }

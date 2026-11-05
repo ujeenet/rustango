@@ -11,6 +11,9 @@ L'écart à connaître : la console peut migrer **un seul** tenant
 (`POST /orgs/{slug}/migrate`), alors que `migrate-tenants` en CLI ne prend pas de slug
 et traite tout le registry. Il n'y a pas de migration par tenant en ligne de commande.
 
+Comment le registry, les tenants, les modes de stockage et le routage
+s'assemblent : voir [Multi-tenancy](tenancy.md).
+
 [![La liste des tenants de la console opérateur — chaque tenant du registry avec son mode de stockage, son motif d'hôte et son état actif, plus les actions pour provisionner, migrer et préchauffer](../img/operator-console.png)](../img/operator-console.png)
 
 ## Table des matières

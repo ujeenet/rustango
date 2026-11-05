@@ -126,7 +126,7 @@ impl Lockout {
     }
 
     /// Attempts counted per window before the account locks.
-    #[cfg(all(test, feature = "admin"))]
+    #[cfg(all(test, feature = "admin", feature = "tenancy"))]
     pub(crate) fn attempt_limit(&self) -> u32 {
         self.max_attempts
     }

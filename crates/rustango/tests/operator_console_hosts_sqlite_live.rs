@@ -14,6 +14,9 @@
 //!
 //! SQLite, because the console is tri-dialect and this needs no server.
 
+#[path = "support/field_text.rs"]
+mod field_text;
+
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -218,6 +221,8 @@ async fn the_page_lists_the_base_host_and_marks_it_undeletable() {
         "the base host should be listed: {html}"
     );
     assert!(html.contains("base"), "and flagged as the base: {html}");
+    let host = <rustango::tenancy::OrgHost as rustango::core::Model>::SCHEMA;
+    field_text::assert_shows(&html, host, "hostname", "hostname");
     // The base has no row in `rustango_org_hosts`, so it must not offer
     // controls that would 500 or silently do nothing.
     assert!(

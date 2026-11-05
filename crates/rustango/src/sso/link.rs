@@ -147,28 +147,50 @@ pub struct SsoLink {
     pub id: Auto<i64>,
     /// [`LinkSource::as_str`].
     #[rustango(max_length = 16)]
+    #[rustango(
+        help_text = "Which provider table the link belongs to: the app's own, a tenant's, or a shared one."
+    )]
+    #[rustango(verbose_name = "Provider source")]
     pub provider_source: String,
     /// Provider row id (`0` for [`LinkSource::App`]).
+    #[rustango(help_text = "Id of the provider row; `0` for the app's own provider.")]
+    #[rustango(verbose_name = "Provider")]
     pub provider_id: i64,
     /// `kind` or `kind|issuer_url` (no trailing slash) of the provider.
     #[rustango(max_length = 300)]
+    #[rustango(help_text = "The provider as `kind` or `kind|issuer_url`, e.g. `google`.")]
+    #[rustango(verbose_name = "Issuer")]
     pub issuer: String,
     /// The IdP's stable subject (`sub`, or the provider's user id).
     #[rustango(max_length = 255)]
+    #[rustango(help_text = "The IdP's stable id for the person (`sub`).")]
+    #[rustango(verbose_name = "Subject")]
     pub subject: String,
     /// [`key_sha256`] of `issuer` and `subject`: the exact, collation-proof
     /// key. Computed on every write, the admin's included.
     #[rustango(max_length = 64)]
+    #[rustango(help_text = "Hash of issuer and subject that finds the link. Computed on save.")]
+    #[rustango(verbose_name = "Key")]
     pub key_sha256: String,
     /// Local user id, in the user table [`LinkSource`] names.
     #[rustango(index)]
+    #[rustango(
+        help_text = "The local account this IdP identity signs in as. Security: whoever holds the IdP account signs in as this user."
+    )]
+    #[rustango(verbose_name = "User")]
     pub user_id: i64,
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
     /// Sign-up made this link along with its user.
     #[rustango(default = "false")]
+    #[rustango(help_text = "On when sign-up created the user along with this link.")]
+    #[rustango(verbose_name = "Provisioned")]
     pub provisioned: bool,
     /// The last sign-in through this link.
+    #[rustango(help_text = "The last sign-in through this link.")]
+    #[rustango(verbose_name = "Last used at")]
     pub last_used_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -775,7 +797,7 @@ impl std::fmt::Display for LinkRefusal {
 
 /// Send `user_login_failed` for a refused SSO sign-in, naming the IdP's
 /// verified email, else its subject (#2559).
-#[cfg(feature = "signals")]
+#[cfg(any(feature = "admin-sso", all(feature = "tenancy", feature = "sso")))]
 pub(crate) async fn signal_refused(
     source: &'static str,
     profile: &NormalizedUser,

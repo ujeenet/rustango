@@ -43,7 +43,7 @@
 //!
 //! ## On a saved server
 //!
-//! [`DatabaseSource::Server`] makes storage three steps: create the
+//! [`DatabaseSource::Server`](crate::tenancy::provision::DatabaseSource::Server) makes storage three steps: create the
 //! database named as the slug, create its own login, grant it that
 //! database. The connection check probes the server's admin rights first.
 //! The database is recorded in [`TenantDatabase`](crate::tenancy::TenantDatabase).
@@ -1317,15 +1317,27 @@ fn validate_fields(request: &ProvisionRequest) -> Result<ProvisionRequest, Strin
 
 /// Whether a resolver can reach a tenant with these routing keys.
 pub(crate) fn is_routable(host: Option<&str>, prefix: Option<&str>, port: Option<i32>) -> bool {
-    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
-    set(host) || set(prefix) || port.is_some()
+    routable(
+        host,
+        prefix,
+        port,
+        crate::tenancy::server::port_routing_setting(),
+    )
 }
 
-/// Why a tenant with no host, path prefix or port is refused.
+/// A port alone counts only when the app routes ports: the built-in chain has no
+/// `PortResolver`, as its one listener would hand every unmatched request to that tenant.
+fn routable(host: Option<&str>, prefix: Option<&str>, port: Option<i32>, ports: bool) -> bool {
+    let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+    set(host) || set(prefix) || (ports && port.is_some())
+}
+
+/// Why a tenant with no host or path prefix is refused.
 pub(crate) fn unroutable(slug: &str) -> String {
     format!(
-        "tenant `{slug}` needs a host, a path prefix or a port: no resolver routes \
-         `<slug>.<apex>`, so nothing would reach it"
+        "tenant `{slug}` needs a host or a path prefix: no resolver routes `<slug>.<apex>`, \
+         and the built-in server does not route by port (an app that mounts `PortResolver` \
+         on its own listeners sets RUSTANGO_TENANT_PORT_ROUTING=1)"
     )
 }
 
@@ -2059,8 +2071,12 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
             return None;
         }
         // A bare filename is relative to the working directory, which
-        // is where the sibling belongs.
-        let dir = path.rsplit_once('/').map_or(".", |(d, _)| d);
+        // is where the sibling belongs. Either separator: `C:\data\reg.db`
+        // is a Windows path whichever OS reads the URL.
+        let (dir, sep) = match path.rfind(['/', '\\']) {
+            Some(i) => (&path[..i], &path[i..=i]),
+            None => (".", "/"),
+        };
         // A sqlite database is a file, so `acme` becomes `acme.db` and
         // `acme.db` is left as-is. The check ignores case: `acme.DB` is
         // the same file on a case-insensitive filesystem.
@@ -2072,7 +2088,7 @@ pub fn tenant_url_on_registry_server(registry_url: &str, database: &str) -> Opti
         } else {
             format!("{database}.db")
         };
-        return Some(format!("sqlite://{dir}/{file}?mode=rwc"));
+        return Some(format!("sqlite://{dir}{sep}{file}?mode=rwc"));
     }
 
     let (scheme, rest) = registry_url.split_once("://")?;
@@ -2785,7 +2801,7 @@ impl ServerDatabase {
         };
         if let Some(org) = org {
             // Its pool holds sessions in the database about to go.
-            pools.invalidate(&org.slug).await;
+            pools.close_tenant(&org.slug).await;
         }
         let dropped = self.admin.roll_back(self.created).await;
         self.admin.close().await;
@@ -3217,6 +3233,26 @@ mod validation_tests {
         assert!(err.contains("hostname"), "should say why: {err}");
     }
 
+    /// A Windows registry path, whichever OS parses it: the sibling lands
+    /// beside it, not in `.`.
+    #[test]
+    fn a_sibling_of_a_windows_registry_path_lands_beside_it() {
+        let url = |reg: &str| tenant_url_on_registry_server(reg, "acme").unwrap();
+        assert_eq!(
+            url("sqlite://C:\\Data\\REG.DB?mode=rwc"),
+            "sqlite://C:\\Data\\acme.db?mode=rwc"
+        );
+        assert_eq!(
+            url("sqlite://C:/data\\sub\\reg.db"),
+            "sqlite://C:/data\\sub\\acme.db?mode=rwc"
+        );
+        assert_eq!(
+            url("sqlite:///srv/reg.db"),
+            "sqlite:///srv/acme.db?mode=rwc"
+        );
+        assert_eq!(url("sqlite://reg.db"), "sqlite://./acme.db?mode=rwc");
+    }
+
     /// A request that leaves the tenant with no host, path prefix or port
     /// is refused: nothing would route to it.
     #[test]
@@ -3234,6 +3270,14 @@ mod validation_tests {
         assert!(routable(&r));
         r.path_prefix = Some("  ".into());
         assert!(!routable(&r), "a blank prefix routes nothing");
+    }
+
+    /// A port alone routes only when the app opted in to port routing.
+    #[test]
+    fn a_port_alone_routes_only_with_port_routing() {
+        assert!(!routable(None, None, Some(8443), false));
+        assert!(routable(None, None, Some(8443), true));
+        assert!(routable(Some("a.example.com"), None, Some(8443), false));
     }
 
     #[test]

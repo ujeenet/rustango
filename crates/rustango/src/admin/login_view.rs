@@ -78,8 +78,12 @@ async fn login_form(
     State(state): State<AppState>,
     extensions: axum::http::Extensions,
     headers: axum::http::HeaderMap,
+    uri: axum::http::Uri,
 ) -> Response {
-    login_response(&state, &extensions, &headers, None).await
+    let query: std::collections::HashMap<String, String> =
+        serde_urlencoded::from_str(uri.query().unwrap_or("")).unwrap_or_default();
+    let next = crate::auth_decorators::extract_next(&query);
+    login_page(&state, &extensions, &headers, None, false, next.as_deref()).await
 }
 
 /// Render the login page and seed a double-submit CSRF token. The GET
@@ -91,8 +95,26 @@ async fn login_response(
     extensions: &axum::http::Extensions,
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
+    next: Option<&str>,
 ) -> Response {
-    login_page(state, extensions, headers, error, false).await
+    login_page(state, extensions, headers, error, false, next).await
+}
+
+/// A `next` this admin's sign-in may land on, as on the tenant admin.
+pub(super) fn admin_next(state: &AppState, next: Option<&str>) -> Option<String> {
+    let p = &state.config.admin_prefix;
+    crate::auth_decorators::login_next(next, &format!("{p}/login"), &format!("{p}/logout"))
+}
+
+/// Where a sign-in lands: a safe `next`, else the admin prefix.
+pub(super) fn admin_landing(state: &AppState, next: Option<&str>) -> String {
+    admin_next(state, next).unwrap_or_else(|| {
+        if state.config.admin_prefix.is_empty() {
+            "/".to_owned()
+        } else {
+            state.config.admin_prefix.clone()
+        }
+    })
 }
 
 /// The authenticator-code step an SSO sign-in owes (#2249).
@@ -103,7 +125,7 @@ pub(super) async fn sso_totp_response(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
 ) -> Response {
-    login_page(state, extensions, headers, error, true).await
+    login_page(state, extensions, headers, error, true, None).await
 }
 
 /// `totp_step` renders only the code field, posting to the SSO step.
@@ -113,6 +135,7 @@ async fn login_page(
     headers: &axum::http::HeaderMap,
     error: Option<&str>,
     totp_step: bool,
+    next: Option<&str>,
 ) -> Response {
     use crate::forms::csrf;
     // Under `protect_with_csrf` the outer layer already chose the token (#2131).
@@ -120,7 +143,8 @@ async fn login_page(
         Some(token) => (token, None),
         None => csrf::ensure_token_under_layer(headers, extensions),
     };
-    let html = render_login_form(state, error, &csrf::csrf_input_html(&token), totp_step).await;
+    let csrf_input = csrf::csrf_input_html(&token);
+    let html = render_login_form(state, error, &csrf_input, totp_step, next).await;
     let mut resp = Html(html).into_response();
     if let Some(cookie) = set_cookie {
         if let Ok(v) = HeaderValue::from_str(&cookie) {
@@ -135,12 +159,21 @@ async fn render_login_form(
     error: Option<&str>,
     csrf_input: &str,
     totp_step: bool,
+    next: Option<&str>,
 ) -> String {
     let admin_prefix = &state.config.admin_prefix;
     // One SSO button per enabled `SsoProvider` row.
     #[cfg(feature = "admin-sso")]
-    let sso_providers =
+    let mut sso_providers =
         super::sso_provider::list_enabled(&state.pool, &format!("{admin_prefix}/login")).await;
+    // The SSO start seals the landing; pass on only one it accepts.
+    #[cfg(feature = "admin-sso")]
+    if let Some(n) = admin_next(state, next) {
+        let q = format!("?next={}", crate::url_codec::url_encode(&n));
+        for b in &mut sso_providers {
+            b.login_url.push_str(&q);
+        }
+    }
     #[cfg(feature = "admin-sso")]
     let sso_enabled = !sso_providers.is_empty();
     #[cfg(feature = "admin-sso")]
@@ -157,6 +190,7 @@ async fn render_login_form(
             format!("{admin_prefix}/login")
         },
         "totp_step": totp_step,
+        "next": admin_next(state, next),
         "error": error,
         "csrf_input": csrf_input,
         "sso_enabled": sso_enabled,
@@ -195,6 +229,9 @@ struct LoginInput {
     #[cfg_attr(not(feature = "totp"), allow(dead_code))]
     #[serde(default)]
     totp_code: Option<String>,
+    /// Where to land after sign-in; carried by the form's hidden field.
+    #[serde(default)]
+    next: Option<String>,
 }
 
 async fn login_submit(
@@ -232,6 +269,7 @@ async fn login_submit(
             &extensions,
             &headers,
             Some("Your session expired or the form was invalid. Please try again."),
+            form.next.as_deref(),
         )
         .await;
     }
@@ -287,7 +325,14 @@ async fn login_submit(
             tenant: state.config.tenant.clone(),
         })
         .await;
-        return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
+        return login_response(
+            &state,
+            &extensions,
+            &headers,
+            Some("Invalid credentials."),
+            form.next.as_deref(),
+        )
+        .await;
     };
     let stored_name = row
         .get("username")
@@ -333,7 +378,14 @@ async fn login_submit(
         // Use the same generic message as unknown user or wrong
         // password, so the form cannot be used to enumerate accounts.
         // The signal above still records the real reason.
-        return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
+        return login_response(
+            &state,
+            &extensions,
+            &headers,
+            Some("Invalid credentials."),
+            form.next.as_deref(),
+        )
+        .await;
     }
     if !password_ok {
         attempt.failed().await;
@@ -345,7 +397,14 @@ async fn login_submit(
             tenant: state.config.tenant.clone(),
         })
         .await;
-        return login_response(&state, &extensions, &headers, Some("Invalid credentials.")).await;
+        return login_response(
+            &state,
+            &extensions,
+            &headers,
+            Some("Invalid credentials."),
+            form.next.as_deref(),
+        )
+        .await;
     }
 
     // Two-factor challenge. A user with a confirmed TOTP device must
@@ -375,8 +434,14 @@ async fn login_submit(
                     tenant: state.config.tenant.clone(),
                 })
                 .await;
-                return login_response(&state, &extensions, &headers, Some("Invalid credentials."))
-                    .await;
+                return login_response(
+                    &state,
+                    &extensions,
+                    &headers,
+                    Some("Invalid credentials."),
+                    form.next.as_deref(),
+                )
+                .await;
             }
         };
         if let Some(totp_secret) = enrolled {
@@ -410,6 +475,7 @@ async fn login_submit(
                     &extensions,
                     &headers,
                     Some("Enter the 6-digit code from your authenticator app."),
+                    form.next.as_deref(),
                 )
                 .await;
             }
@@ -446,11 +512,7 @@ async fn login_submit(
             ""
         },
     );
-    let redirect_to = if state.config.admin_prefix.is_empty() {
-        "/".to_owned()
-    } else {
-        state.config.admin_prefix.clone()
-    };
+    let redirect_to = admin_landing(&state, form.next.as_deref());
     let mut resp = Redirect::to(&redirect_to).into_response();
     if let Ok(v) = HeaderValue::from_str(&cookie) {
         resp.headers_mut().insert(header::SET_COOKIE, v);
@@ -1125,7 +1187,7 @@ pub(crate) async fn require_session(
         // access at once, not at cookie expiry.
         match live_check(&gate.pool, &gate.secret, session.user_id, &cookie_auth).await {
             // Password changed / logged out / user deleted / deactivated → force re-login.
-            GateCheck::Reject => return Redirect::to(&gate.login_path).into_response(),
+            GateCheck::Reject => return gate.login_redirect(&request),
             // Row found + fingerprint matches: trust the LIVE flag.
             GateCheck::Live { is_superuser, .. } => session.is_superuser = is_superuser,
             // DB error: fail closed, but keep the cookie for a retry.
@@ -1154,7 +1216,37 @@ pub(crate) async fn require_session(
 
     // No valid session: bounce to the login form with a 303 See Other,
     // so the browser follows with a GET.
-    Redirect::to(&gate.login_path).into_response()
+    gate.login_redirect(&request)
+}
+
+impl SessionGate {
+    /// The login page, with the requested GET as `?next` when a sign-in may land there.
+    fn login_redirect(&self, request: &Request<Body>) -> Response {
+        let prefix = self.login_path.strip_suffix("/login").unwrap_or_default();
+        let uri = request.uri();
+        let wanted = format!(
+            "{prefix}{}",
+            uri.path_and_query().map_or(uri.path(), |pq| pq.as_str())
+        );
+        let next = (request.method() == axum::http::Method::GET)
+            .then(|| {
+                crate::auth_decorators::login_next(
+                    Some(&wanted),
+                    &self.login_path,
+                    &self.logout_path,
+                )
+            })
+            .flatten();
+        match next {
+            Some(n) => Redirect::to(&format!(
+                "{}?next={}",
+                self.login_path,
+                crate::url_codec::url_encode(&n)
+            )),
+            None => Redirect::to(&self.login_path),
+        }
+        .into_response()
+    }
 }
 
 /// Minimal 403 page for a non-superuser session. Plain HTML with no

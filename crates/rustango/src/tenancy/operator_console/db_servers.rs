@@ -132,6 +132,10 @@ fn render_list(
     ctx.insert("prefill", &prefill(form));
     ctx.insert("error", &error);
     ctx.insert("notice", &notice);
+    super::insert_field_text(
+        &mut ctx,
+        <crate::tenancy::DbServer as crate::core::Model>::SCHEMA,
+    );
     render(state, "op_db_servers.html", &ctx)
 }
 
@@ -301,6 +305,10 @@ fn render_edit(
     ctx.insert("prefill", &form.map(prefill));
     ctx.insert("error", &error);
     ctx.insert("notice", &notice);
+    super::insert_field_text(
+        &mut ctx,
+        <crate::tenancy::DbServer as crate::core::Model>::SCHEMA,
+    );
     render(state, "op_db_server_edit.html", &ctx)
 }
 

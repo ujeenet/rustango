@@ -2,6 +2,8 @@
 //!
 //! Shared by the `EncryptedString` cast and sealed tenant secrets, so the
 //! two cannot drift. Stored form: base64(`nonce(24) ‖ ciphertext+tag`).
+// `_aead` alone seals nothing; only `casts` and `tenancy` call it.
+#![cfg_attr(not(any(feature = "casts", feature = "tenancy")), allow(dead_code))]
 
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, Payload};

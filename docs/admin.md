@@ -268,27 +268,28 @@ ct = "content_type_id", pk = "object_pk", …)` — same options otherwise.
 ## Bulk actions
 
 Name the actions in `admin(actions = "...")`, then register a handler per action
-on the `Builder`. The handler receives the admin's write transaction and the
-selected rows' primary keys:
+on the `Builder`. The handler receives an `ActionCtx`: the admin's write
+transaction, the primary keys of the selected rows that passed the permission
+checks, the user those checks ran for, and (under tenancy) the tenant:
 
 ```rust
-use rustango::admin::AdminError;
+use rustango::admin::{ActionPerm, AdminError};
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_tx_action("posts", "publish", |tx, pks| {
+    .register_action("posts", "publish", ActionPerm::Change, |mut ctx| {
         Box::pin(async move {
             let query = Post::objects()
-                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .filter("id__in", SqlValue::List(ctx.pks().to_vec()))
                 .update()
                 .set("status", "published")
                 .compile()
                 .map_err(|e| AdminError::Internal(e.to_string()))?;
-            rustango::sql::update_tx(tx, &query).await?;
+            rustango::sql::update_tx(ctx.tx(), &query).await?;
             Ok(())
         })
     })
-    .register_tx_action("posts", "archive", /* … */)
+    .register_action("posts", "archive", ActionPerm::Change, /* … */)
     .build();
 ```
 
@@ -297,15 +298,21 @@ Pick rows with the checkboxes, choose the action in the picker, and submit
 register it. An action name listed in `admin(actions = ...)` without a
 registered handler simply won't appear.
 
-A custom action is checked like an edit: `{table}.change` plus an object hook
-named after the action. An action that deletes should say so with
-`register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)`, so it
-needs `{table}.delete` and runs the `delete` hook instead. It still needs
-`{table}.change`, and it is audited and signalled as an edit.
+`ActionPerm::Change` checks the action like an edit: `{table}.change` plus an
+object hook named after the action. An action that deletes should pass
+`ActionPerm::Delete`, so it needs `{table}.delete` and runs the `delete` hook
+instead. It still needs `{table}.change`, and it is audited and signalled as an
+edit.
 
-The handler writes through that `&mut PoolTx`, so its writes and their audit
-rows commit or roll back together. Write only through that transaction: a second
-connection can deadlock a single-connection SQLite pool.
+The handler writes through `ctx.tx()`, so its writes and their audit rows commit
+or roll back together. Write only through that transaction: a second connection
+can deadlock a single-connection SQLite pool. `ctx.actor()` is who ran the
+action, and `ctx.method()`, `ctx.path()` and `ctx.client_ip()` describe the
+request; the raw request (cookies included) is behind
+`ctx.raw_request_parts_with_credentials()`, so keep it out of logs.
+
+`register_tx_action` and `register_tx_action_with_perm`, whose handler takes
+`(tx, pks)`, are deprecated.
 
 ---
 
@@ -561,8 +568,7 @@ Every method on `admin::Builder` (each returns `Self` for chaining unless noted)
 | `skip_count_for([tables])` | Skip `COUNT(*)` on huge tables (pager shows "Page N"). |
 | `view_hook_scan_cap(rows)` | How many rows the list scans through `view` hooks before it withholds the rest. Default 10 000. |
 | `with_user_perms([codenames])` | Gate tables on `{table}.view/add/change/delete`. |
-| `register_tx_action(table, name, handler)` | Register a bulk-action handler; it gets the write transaction, so audit rows commit with it. |
-| `register_tx_action_with_perm(table, name, perm, handler)` | Same, checked against `ActionPerm::Delete` instead of `change`. |
+| `register_action(table, name, perm, handler)` | Register a bulk-action handler; its `ActionCtx` holds the write transaction (audit rows commit with it), the checked rows and the user. |
 | `with_session_auth(secret)` | Require cookie login (`/login` + `/logout`). |
 | `logout_url(u)` | POST target for the sidebar Logout button. Default `{admin_prefix}/logout`; tenant admins set it to their tenancy logout route. |
 | `secure_cookies(bool)` | Set the `Secure` (HTTPS-only) flag on the session cookie. `new` follows `[security].secure_cookies`, else secure on the prod tier. |
@@ -623,6 +629,15 @@ cd crates/rustango/examples/admin_demo
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/admin_demo
 cargo run -- migrate     # tables + the audit-log table
 cargo run                # seeds demo data, serves the admin at /admin
+```
+
+In PowerShell:
+
+```powershell
+cd crates/rustango/examples/admin_demo
+$env:DATABASE_URL = "postgres://rustango:rustango@localhost:5432/admin_demo"
+cargo run -- migrate
+cargo run
 ```
 
 Then open <http://localhost:8080/admin> and click into **Posts** to see the

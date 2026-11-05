@@ -18,18 +18,22 @@ async fn pool() -> Pool {
 }
 
 fn admin_app(pool: Pool) -> axum::Router {
-    urls::api().nest("/admin", urls::admin_router(pool, &rustango::config::Settings::default()))
+    urls::api().nest("/admin", urls::admin_router(pool, &rustango::config::Settings::default()).expect("admin"))
 }
 
 /// A client signed in as a fresh superuser.
 async fn signed_in() -> TestClient {
     let pool = pool().await;
+    // A per-process counter, so parallel tests never share a name.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let name = format!(
-        "smoke{}",
+        "smoke{}-{}-{}",
+        std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
     let mut user = AdminUser::new_with_password(&name, "smoke-pass-123", true).unwrap();
     user.insert(&pool).await.unwrap();

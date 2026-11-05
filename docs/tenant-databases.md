@@ -9,6 +9,9 @@ own with a random password, granted that database only. It records both in
 `rustango_tenant_databases`. Only a recorded database is ever dropped or has
 its password changed by rustango.
 
+How the two storage modes, pools and routing fit together is on
+[Multi-tenancy](tenancy.md).
+
 ## Table of contents
 
 - [Before you start](#before-you-start)
@@ -86,6 +89,14 @@ derived from `RUSTANGO_SECRET_KEY`. Use 32 or more random bytes:
 export RUSTANGO_SECRET_KEY="$(openssl rand -base64 48)"
 ```
 
+In PowerShell:
+
+```powershell
+$bytes = New-Object byte[] 48
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SECRET_KEY = [Convert]::ToBase64String($bytes)
+```
+
 Without a key, or with a blank one, a server password is refused and a tenant
 URL is stored unsealed with a warning (refused under
 `RUSTANGO_REQUIRE_SEALED_SECRETS=1`). The console's database server pages and
@@ -100,6 +111,12 @@ in that root, or in the working directory outside a Cargo project. Once you set
 
 ```bash
 export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+In PowerShell:
+
+```powershell
+$env:RUSTANGO_SECRET_KEY_PREVIOUS = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Resolve-Path "var/.rustango_secret.key")))
 ```
 
 then re-seal them as in [rotation](#the-secret-key-backup-and-rotation).

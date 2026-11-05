@@ -85,6 +85,14 @@ impl OrgResolver for HostOrPrefix {
 
 /// One router: the host mount at `/api/notes`, the prefix mounts at `/<slug>/api/notes`.
 fn app(ns: &str, outer: Option<(AuthenticatedUser, &str)>) -> (Router, String) {
+    app_bound(
+        ns,
+        outer.map(|(u, slug)| (u, TenantSlug::new(org_id(slug), slug))),
+    )
+}
+
+/// [`app`] with the outer credential bound to any `TenantSlug`.
+fn app_bound(ns: &str, outer: Option<(AuthenticatedUser, TenantSlug)>) -> (Router, String) {
     let template = format!("sqlite:file:vopt_{ns}_{{slug}}?mode=memory&cache=shared");
     let pools = Arc::new(
         DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite).with_url_template(&template),
@@ -109,9 +117,9 @@ fn app(ns: &str, outer: Option<(AuthenticatedUser, &str)>) -> (Router, String) {
         .merge(users().tenant_router("/beta/api/users"));
     router = match outer {
         // An app layer that already decided who the caller is, for one tenant.
-        Some((user, slug)) => router
+        Some((user, tenant)) => router
             .layer(axum::Extension(user))
-            .layer(axum::Extension(TenantSlug::new(org_id(slug), slug))),
+            .layer(axum::Extension(tenant)),
         None => {
             let backends: Vec<Arc<dyn AuthBackend>> = vec![Arc::new(ModelBackend)];
             router.require_auth(backends)
@@ -263,4 +271,64 @@ async fn an_authenticated_superuser_sees_its_tenants_rows() {
         count(&app, "apex.test", "/alpha/api/notes", basic).await,
         Ok(1)
     );
+}
+
+/// Stands in for the Builder's dispatcher: the host's tenant marks the request.
+fn dispatched(router: Router, slug: &'static str) -> Router {
+    router.layer(axum::middleware::from_fn(
+        move |mut req: Request<Body>, next: axum::middleware::Next| async move {
+            req.extensions_mut()
+                .insert(rustango::tenancy::RequestTenant::Tenant(TenantSlug::new(
+                    org_id(slug),
+                    slug,
+                )));
+            next.run(req).await
+        },
+    ))
+}
+
+/// A ViewSet on a fixed pool serves data every tenant shares: a tenant's
+/// superuser is nobody there, though the host marks the request with its tenant.
+#[tokio::test]
+async fn a_tenant_superuser_is_nobody_on_a_shared_pool() {
+    let shared = tenant("sqlite:file:vopt_shared?mode=memory&cache=shared").await;
+    let su = AuthenticatedUser {
+        id: 1,
+        username: "ann".into(),
+        is_superuser: true,
+    };
+    let router = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
+        .router("/shared/notes", shared)
+        .layer(axum::Extension(su))
+        .layer(axum::Extension(TenantSlug::new(org_id("alpha"), "alpha")));
+    let app = dispatched(router, "alpha");
+    assert_eq!(
+        count(&app, "alpha.localhost", "/shared/notes", None).await,
+        Ok(0),
+        "alpha's superuser saw shared rows as superuser"
+    );
+}
+
+/// A credential of a purged `alpha` (another org id) is refused on the
+/// tenant that reused the slug, as `require_auth` refuses it.
+#[tokio::test]
+async fn a_credential_of_a_purged_tenant_is_refused_on_its_heir() {
+    let su = AuthenticatedUser {
+        id: 1,
+        username: "ann".into(),
+        is_superuser: true,
+    };
+    let (app, template) = app_bound("heir", Some((su, TenantSlug::new(99, "alpha"))));
+    let _alpha = tenant(&template.replace("{slug}", "alpha")).await;
+    for (host, path) in [
+        ("alpha.localhost", "/api/notes"),
+        ("apex.test", "/alpha/api/notes"),
+    ] {
+        assert_eq!(
+            count(&app, host, path, None).await,
+            Err(StatusCode::FORBIDDEN),
+            "{host}{path}"
+        );
+    }
 }

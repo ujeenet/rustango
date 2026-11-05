@@ -10,6 +10,9 @@ propre avec un mot de passe aléatoire, autorisé sur cette base seulement. Il
 enregistre les deux dans `rustango_tenant_databases`. rustango ne supprime ou
 ne change le mot de passe que d'une base enregistrée.
 
+Comment les deux modes de stockage, les pools et le routage s'assemblent :
+voir [Multi-tenancy](tenancy.md).
+
 ## Table des matières
 
 - [Avant de commencer](#avant-de-commencer)
@@ -91,11 +94,33 @@ octets aléatoires ou plus :
 export RUSTANGO_SECRET_KEY="$(openssl rand -base64 48)"
 ```
 
+Dans PowerShell :
+
+```powershell
+$bytes = New-Object byte[] 48
+[Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+$env:RUSTANGO_SECRET_KEY = [Convert]::ToBase64String($bytes)
+```
+
 Sans clé, ou avec une clé vide, un mot de passe de serveur est refusé et une
 URL de tenant est stockée non scellée avec un avertissement (refusée sous
 `RUSTANGO_REQUIRE_SEALED_SECRETS=1`). Les pages serveurs de bases de données de
 la console et sa page **New tenant** affichent une bannière tant que la clé
 manque ou est trop courte.
+
+Sur les tiers dev et test (`RUSTANGO_ENV` non défini, `dev` ou `test`), une clé
+non définie se rabat sur celle enregistrée dans `var/.rustango_secret.key`, dans
+chaque binaire qui scelle ou ouvre. Le fichier est cherché depuis le répertoire de
+travail jusqu'à la racine du workspace Cargo (le répertoire le plus proche avec
+`Cargo.lock`) ; un nouveau est créé dans cette racine, ou dans le répertoire de
+travail hors d'un projet Cargo. Une fois `RUSTANGO_SECRET_KEY` défini, ouvrez les
+valeurs que le fichier a scellées :
+
+```bash
+export RUSTANGO_SECRET_KEY_PREVIOUS="$(base64 < var/.rustango_secret.key | tr -d "\n")"
+```
+
+puis rescellez-les comme dans [rotation](#la-clé-secrète--sauvegarde-et-rotation).
 
 ## 2. Enregistrer le serveur
 

@@ -226,10 +226,6 @@ pub enum RustangoError {
     #[cfg(feature = "auth_flows")]
     AuthFlow(crate::auth_flows::AuthFlowError),
 
-    /// Bulk-action runner error.
-    #[cfg(feature = "tenancy")]
-    BulkAction(crate::bulk_actions::BulkActionError),
-
     /// IP filter could not be parsed, such as a bad CIDR.
     #[cfg(feature = "admin")]
     IpFilter(crate::ip_filter::IpFilterError),
@@ -302,8 +298,6 @@ impl fmt::Display for RustangoError {
             Self::SignedUrl(e) => write!(f, "signed_url: {e}"),
             #[cfg(feature = "auth_flows")]
             Self::AuthFlow(e) => write!(f, "auth_flow: {e}"),
-            #[cfg(feature = "tenancy")]
-            Self::BulkAction(e) => write!(f, "bulk_action: {e}"),
             #[cfg(feature = "admin")]
             Self::IpFilter(e) => write!(f, "ip_filter: {e}"),
             #[cfg(feature = "jobs")]
@@ -345,8 +339,6 @@ impl std::error::Error for RustangoError {
             Self::SignedUrl(e) => Some(e),
             #[cfg(feature = "auth_flows")]
             Self::AuthFlow(e) => Some(e),
-            #[cfg(feature = "tenancy")]
-            Self::BulkAction(e) => Some(e),
             #[cfg(feature = "admin")]
             Self::IpFilter(e) => Some(e),
             #[cfg(feature = "jobs")]
@@ -450,13 +442,6 @@ impl From<crate::auth_flows::AuthFlowError> for RustangoError {
     }
 }
 
-#[cfg(feature = "tenancy")]
-impl From<crate::bulk_actions::BulkActionError> for RustangoError {
-    fn from(e: crate::bulk_actions::BulkActionError) -> Self {
-        Self::BulkAction(e)
-    }
-}
-
 #[cfg(feature = "admin")]
 impl From<crate::ip_filter::IpFilterError> for RustangoError {
     fn from(e: crate::ip_filter::IpFilterError) -> Self {
@@ -554,10 +539,6 @@ mod into_response {
             RustangoError::AuthFlow(crate::auth_flows::AuthFlowError::Database(_)) => {
                 server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err)
             }
-            #[cfg(feature = "tenancy")]
-            RustangoError::BulkAction(crate::bulk_actions::BulkActionError::Database(_)) => {
-                server_fault(StatusCode::INTERNAL_SERVER_ERROR, &err)
-            }
             #[cfg(feature = "passwords")]
             RustangoError::Password(crate::passwords::PasswordError::Busy) => {
                 server_fault(StatusCode::SERVICE_UNAVAILABLE, &err)
@@ -580,8 +561,6 @@ mod into_response {
             RustangoError::Auth(_) => ApiError::unauthorized(msg),
 
             // Bad input: 400
-            #[cfg(feature = "tenancy")]
-            RustangoError::BulkAction(_) => ApiError::bad_request(msg),
             #[cfg(feature = "admin")]
             RustangoError::IpFilter(_) => ApiError::bad_request(msg),
 
@@ -644,10 +623,6 @@ mod into_response {
                         sqlx::Error::Protocol(LEAK.into()),
                     ))
                     .into(),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                ),
-                (
-                    crate::bulk_actions::BulkActionError::Database(LEAK.into()).into(),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ),
                 (

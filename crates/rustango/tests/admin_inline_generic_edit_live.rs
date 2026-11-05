@@ -116,9 +116,9 @@ fn urlencode(form: &HashMap<&str, &str>) -> String {
         if i > 0 {
             out.push('&');
         }
-        out.push_str(&urlencoding::encode(k));
+        out.push_str(&rustango::url_codec::url_encode(k));
         out.push('=');
-        out.push_str(&urlencoding::encode(v));
+        out.push_str(&rustango::url_codec::url_encode(v));
     }
     out
 }

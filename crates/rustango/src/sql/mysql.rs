@@ -77,6 +77,8 @@ impl MySql {
     }
 }
 
+impl super::dialect::sealed::Sealed for MySql {}
+
 impl Dialect for MySql {
     fn name(&self) -> &'static str {
         "mysql"
@@ -119,8 +121,8 @@ impl Dialect for MySql {
 
     /// MySQL quotes with backticks, and an embedded backtick is
     /// doubled, so any name comes out valid.
-    fn quote_ident(&self, name: &str) -> String {
-        super::dialect::quote_with(name, '`')
+    fn push_quoted_ident(&self, out: &mut String, name: &str) {
+        super::dialect::push_quoted_with(out, name, '`');
     }
 
     /// MySQL reads `\` as an escape inside a string literal under the

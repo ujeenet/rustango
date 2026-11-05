@@ -4,6 +4,88 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.63.0] — 2026-11-04
+
+### Added
+
+- `admin::Builder::register_action` (and `TenantAdminBuilder::register_action`, `server::Builder::admin_register_action`): the handler takes an `ActionCtx` with the transaction, the rows that passed the permission checks, the actor, the tenant, and the request's method, path and client IP.
+- `OrgResolver::resolve_in` takes a `TenantRegistry` and defaults to `resolve`; the framework calls it. `TenantRegistry::new` is public.
+- `tenancy::RequestTenant` (`Global`, `Tenant`, `Unmatched`, `Unknown`): `server::Builder` resolves the tenant once per request and stores it; idempotency, the page cache, rate limits and object-permission hooks read it.
+- `cache::CacheScope::from_request(&root, &mut parts)` gives the request's tenant-scoped app cache, `sessions()` and `flags()`; `None` with no tenant context mounted.
+- `KeyBy::Tenant` counts each tenant in its own bucket; `KeyBy::Global` stays platform-wide. With no tenant context mounted it warns once and counts everyone in one unknown-tenant bucket, never the `Global` one.
+- SSO admin fields (providers, tenant policy, shared overrides, invites) show help text, and the operator console's shared-provider form reads the same text; `docs/sso.md` opens with a setup guide, callback URLs and per-provider steps.
+- Tenant and bare-admin SSO sign-in honour `?next` on `<login>/sso/<slug>`: sealed in the flow cookie (and kept through the TOTP step), checked like the password login's, else the admin home; the login page passes its `?next` on. The bare admin's login gate now sends the requested page as `?next`, and its password login lands back there (through the TOTP prompt too).
+
+### Changed
+
+- Passkey ES256 verification uses `ring`, through the same helper as the SSO JWKS check; `p256` and its second crypto stack (32 crates) are gone. `passkey::verify::cose_es256_key` returns `passkey::Es256Key`.
+- Every framework model field has a label and help text (meaning, an example, defaults, security effect), and the operator console's tenant, host, database-server and operator forms read the same schema text.
+- Framework models show readable labels in admin column headers and forms (e.g. `Display name`, not `display_name`).
+- The `urlencoding` dependency is gone: OAuth URLs and tests use the crate's own `url_codec::url_encode`, which escapes the same characters.
+- The SQL writer quotes identifiers and numbers placeholders straight into one pre-sized buffer: about 60% less time per query compile, same SQL.
+- **Breaking:** `Dialect` is sealed, and `drop_check_constraint_sql` / `drop_foreign_key_sql` are required methods instead of panicking defaults. `InsertReturningPool` is `#[doc(hidden)]`.
+- **Breaking:** `FeatureFlags` writes (`enable`, `disable`, `clear`, `set_percentage`, `*_for_user`) return `Result<(), CacheError>` instead of dropping cache errors; see UPGRADING.md.
+- **Breaking:** duplicate implementations removed: `rustango::bulk_actions` (and `RustangoError::BulkAction`), the crate-root `rustango::auth_backends` registry, and the public `mcp::pagination` module; see UPGRADING.md.
+- The in-memory and database job queues decide retry or dead letter through one shared rule.
+- **Breaking:** `cargo rustango new -F mcp` is tenant-only: elsewhere `/mcp` refused every tool call, since agents live in tenant databases.
+- **Breaking:** `KeyBy` is `#[non_exhaustive]`; a `match` on it needs a `_` arm.
+- **Breaking:** `LoginScope::Tenant`, `TenantBasic`, `TenantApiKey` and `TenantAgent` take a `TenantSlug`; tenant login counters and locks reset once.
+- **Breaking:** the MCP `notify_*_list_changed`, `subscribe`, `frame_visible`, `cancel`, `grant_skill_pool` and `revoke_skill_pool` take a `&TenantSlug`; `McpAgent` gains `org_id`.
+- **Breaking:** tenant sessions and per-user flag overrides move to org-id keys, so they reset once.
+- **Breaking:** on a tenant route an app-built `Principal` with no `TenantSlug` next to it is `Anonymous` to object-permission hooks.
+- **Breaking:** a request with an `Idempotency-Key` gets `503` when tenant resolution fails, instead of running unkeyed.
+- **Breaking:** requests on the Builder's unresolved router are `Global`, so `CachePageLayer` there now caches them.
+- `manage` suggests the nearest verb for a typo, e.g. `createsuperuser` → `create-admin` (`create-superuser` on tenancy).
+- Scaffolded next steps use real usernames, so they paste into PowerShell 5.1.
+- `startapp` prints its next steps one command per line instead of joining them with `&&`.
+- `create-operator` help lists `--password-stdin`.
+- Only the fullstack template's index links `/admin`.
+
+### Deprecated
+
+- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`. Removed in 0.64.0.
+- `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay one more minor; removed in 0.64.0.
+
+### Fixed
+
+- An idempotency replay no longer re-sends stored framing or hop-by-hop headers (`Content-Length`, `Transfer-Encoding`, `Connection`, ...), including entries cached by 0.62.0.
+- A panic while the i18n translator's lock is held no longer makes every later translation panic.
+- `contenttypes::ensure_seeded` retries a deadlocked insert up to three times, so several processes booting at once all start.
+- `dumpdata` fails on a cell it cannot decode, and on a NaN or infinite float, instead of writing `null` for it.
+- `loaddata` leaves generated columns out of its inserts, so a dump of a model with one loads back.
+- `dumpdata -o` creates its temp file with a random name, owner-only (0600 on Unix), and never through an existing file or link.
+- `ModelFormError::Database` displays only `database error`; the driver text, which could name tables and hosts, moved to `source()`.
+- Purging a tenant also deletes its distributed locks, sessions, flag overrides, known login clients, API-key, agent and SSO login counters. SSO login limits are keyed by org id.
+- A ViewSet on a fixed (shared) pool, and the fixed-pool admin, mark the request as no tenant's, so a tenant's superuser is not a superuser on data every tenant shares. A ViewSet refuses a credential bound to another org id with the same slug.
+- An open MCP notification stream re-checks its tenant through the resolver's org cache, not one registry query per stream. Idempotency and page-cache entries stay until they expire; they are bound to the org id, so a tenant reusing the slug cannot read them.
+- Object-permission hooks match a credential to the routed tenant by org id too, so a credential of a purged tenant is nobody under the tenant that reused its slug.
+- Login throttle and account-lock keys carry the org id, so a tenant that reuses a purged slug starts clean.
+- `SessionStore::for_tenant` and `FeatureFlags::for_tenant` bind sessions and per-user flag overrides to the tenant's org id and slug; unscoped, a session or override from one tenant applied in another.
+- A tenant routed by port alone is refused at create and edit, and `check --deploy` names existing ones: the built-in server has no port resolver, so they were never reached. `RUSTANGO_TENANT_PORT_ROUTING=1` allows them for apps that mount `PortResolver`.
+- Decommissioning or rolling back a SQLite tenant closes this process's pools for it (waiting at most 5 s for a connection in use) and retries the delete for 0.5 s. A running app server still holds the file open on Windows, so stop it, or the delete fails with os error 32.
+- On Windows the check that a tenant's SQLite file is not the registry compares canonical, case-folded paths, so a different case, a junction, a symlink or an 8.3 name no longer slips through; a hard link still does (Unix compares inodes).
+- A tenant file made beside a SQLite registry at a backslash path (`C:\data\reg.db`) lands in that directory, not in the working directory.
+- MCP: notification streams, stream caps and progress are keyed by the tenant's org id, so a tenant that reuses a purged slug never gets the old tenant's frames; a stream ends when its org is deactivated or gone or after repeated failed re-checks, and list cursors and cancellation are bound to the org id too.
+- JWT logout answers 503 instead of 204 when the JTI store did not record the revocation; `JwtLifecycle::revoke` returns `false` then.
+- `Cli::try_nest_with` mounts a router whose builder can fail; the error stops `runserver` and `check` with main's `Error:` line. `session::try_load_session_secret_for_tier` is the non-panicking key loader.
+- `startapp --with-manage-bin` generates `#[rustango::main]` instead of `#[tokio::main]`, so the manage binary gets the 8 MiB stack instead of overflowing Windows' 1 MiB main thread.
+- A new tenant project's `.env.example` sets `RUSTANGO_TENANT_PORT=8080`, so `create-tenant --admin-email` prints a link with the dev server's port.
+- The `startapp` tests template uses `contains` and passes `clippy::manual_contains`.
+- Fullstack and tenant projects on the prod tier without `RUSTANGO_SESSION_SECRET` exit with `Error:` instead of panicking (`run-server` and `server::Builder` return the error); the prod Dockerfile header names the keys each template needs.
+- `dumpdata --output <file>` (`-o`) writes the fixture as UTF-8, for shells whose `>` writes UTF-16, and replaces an existing file only once the dump is complete.
+- `loaddata`, `Fixture::from_file`, migration files (`embed_migrations!` too), i18n catalogs, settings TOML, `DB_PASSWORD_FILE` and the `.env` peek at startup read UTF-16 (BOM-detected) and drop a UTF-8 BOM, so a fixture redirected by Windows PowerShell 5.1 loads. `html_tera_from_glob` drops a template's UTF-8 BOM; a UTF-16 template still fails to load.
+- Static files refuse a name that resolves to a hidden file (a link, or a Windows 8.3 name such as `ENV~1` for `.env`), not only one whose requested path starts with a dot.
+- On Windows the server and `migrate-tenant-storage` also stop gracefully on Ctrl-Break, a closed console window and logoff / shutdown, not only Ctrl-C.
+- `manage docs` opens the browser on Windows instead of starting a stray `cmd`.
+- Ctrl-C inside `dbshell` on Windows reaches the database client and no longer kills rustango, leaving the client orphaned.
+- The docs and the scaffolded tenant README give a PowerShell line next to each bash-only `export` / `openssl` / `mkdir -p` command.
+- The internal `_tera` and `_aead` features build alone under `-D warnings`.
+- `#[rustango::main]` runs its body on a thread named `main` with an 8 MiB stack (`stack_size = <bytes>` overrides), so a debug build no longer overflows Windows' 1 MiB main thread; exit codes and panics pass through.
+- API docs: no dead intra-doc links (they now fail CI), and the examples no longer name removed PgPool-only functions.
+- `testkit::matrix::Backend::pool` runs each nextest slot on its own database (`<db>-s<slot>`), so `tri_dialect_test!` suites no longer collide when run in parallel; `Backend::url` gives that database's URL.
+- CI's SQLite job runs every `*_sqlite_live` and `*_tri` suite without `postgres` (it named under half), and a guard keeps its feature set and the example `deny`/lockfile lists in step with the tree.
+
 ## [0.62.0] — 2026-11-02
 
 ### Added

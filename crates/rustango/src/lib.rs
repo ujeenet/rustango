@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.62"                                        # Postgres (the default backend)
+//! rustango = "0.63"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.62", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.62", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.63", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.63", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -144,7 +144,7 @@
 //! - Admin — [`admin`]
 //! - REST — [`viewset`], [`serializer`]
 //! - Multi-tenancy — [`tenancy`]
-//! - Auth — [`auth_backends`], [`jwt`], [`sso`]
+//! - Auth — [`tenancy::auth_backends`], [`jwt`], [`sso`]
 //! - Background work — [`jobs`], [`scheduler`]
 //! - Caching — [`cache`]
 //!
@@ -407,6 +407,8 @@ macro_rules! __impl_sqlite_load_related {
 }
 
 pub mod audit;
+/// The built-in `manage` verbs and the did-you-mean hint, for both CLIs.
+pub(crate) mod cli_verbs;
 /// ContentType framework — a runtime handle for "any registered model".
 /// Used by permissions, generic foreign keys, soft-FK prefetch and
 /// audit-history admin panels.
@@ -564,6 +566,10 @@ pub mod casts;
 /// [`crate::crypto`] so always-on callers (pagination cursors,
 /// `row_to_json` binary arms) can use it without the crypto deps.
 pub(crate) mod hex;
+/// Owner-only files created without following a link.
+pub(crate) mod private_file;
+/// UTF-8 / UTF-16 text a user wrote or redirected.
+pub(crate) mod text_file;
 
 /// The credential word list, and its matcher for log and audit redaction.
 pub(crate) mod secret_keys;
@@ -621,7 +627,7 @@ pub(crate) mod panic_guard;
 #[cfg(feature = "auth_flows")]
 pub mod auth_flows;
 /// Typed front end for the `tenancy::permissions` engine —
-/// `has_perm_for_model::<T>` / `grant_role_perm_for_model::<T>` /
+/// `has_perm_for_model_pool::<T>` / `grant_role_perm_for_model_pool::<T>` /
 /// `model_codenames_for::<T>`. Ask for a permission by model type instead
 /// of typing the codename string. Needs `tenancy`, which owns the tables.
 #[cfg(feature = "tenancy")]
@@ -706,12 +712,6 @@ pub mod tenant_log;
 /// Test fixture loader — seed a database from JSON files.
 /// See [`fixtures::Fixture`].
 pub mod fixtures;
-
-/// Bulk-action runner — apply one operation to a set of selected PKs.
-/// Works on all three backends. See [`bulk_actions::BulkActionRegistry`]
-/// and the built-in actions.
-#[cfg(feature = "tenancy")]
-pub mod bulk_actions;
 
 /// TOTP — RFC 6238 time-based one-time passwords for 2FA.
 /// See [`totp::generate`] / [`totp::verify`] / [`totp::otpauth_url`].
@@ -1043,7 +1043,8 @@ pub mod template_debug;
 
 /// Sitewide template context processors — see
 /// [`template_context_processors`].
-#[cfg(feature = "_tera")]
+// Its hooks read request `Parts`, which come from axum.
+#[cfg(all(feature = "_tera", feature = "_axum"))]
 pub mod template_context_processors;
 
 /// Custom template filters and functions — see
@@ -1183,12 +1184,6 @@ pub mod messages;
 #[cfg(feature = "_axum")]
 pub mod auth_decorators;
 
-/// Pluggable `AUTHENTICATION_BACKENDS` chain — register an ordered list of
-/// [`auth_backends::AuthBackend`] impls; the chain returns the first
-/// non-`None` result. Ships `RemoteUserBackend` for SSO proxy setups.
-#[cfg(feature = "_async_trait")]
-pub mod auth_backends;
-
 /// Pluggable `AUTH_PASSWORD_VALIDATORS` chain — run an ordered list of
 /// [`password_validators::PasswordValidator`]s at signup and password
 /// change. Built-ins: `MinimumLengthValidator`, `MaximumLengthValidator`,
@@ -1319,6 +1314,27 @@ pub mod __private_runtime {
     /// facade, so apps need no direct `tokio` dependency.
     pub use tokio;
 
+    /// Stack of the thread `#[rustango::main]` runs on: Windows gives the
+    /// real main thread only 1 MiB, too little for a debug build.
+    pub const MAIN_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+    /// Run `body` on a thread named `main` with `stack_size` bytes of
+    /// stack, and pass its exit code through; a panic in it resumes here.
+    pub fn run_on_main_thread<F>(stack_size: usize, body: F) -> std::process::ExitCode
+    where
+        F: FnOnce() -> std::process::ExitCode + Send + 'static,
+    {
+        let thread = std::thread::Builder::new()
+            .name("main".to_owned())
+            .stack_size(stack_size)
+            .spawn(body)
+            .expect("failed to spawn the main thread");
+        match thread.join() {
+            Ok(code) => code,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
     /// `#[rustango::main]`'s default filter: `RUST_LOG` from `./.env`, else
     /// `info,sqlx=warn` (#2204). Sets no env vars, searches no parent dirs.
     pub fn main_default_filter() -> String {
@@ -1343,14 +1359,16 @@ pub mod __private_runtime {
     /// First `key` in `./.env`; none if the file is missing or has a
     /// bad line, so a broken `.env` never stops startup.
     fn dotenv_value(key: &str) -> Option<String> {
-        let iter = match dotenvy::from_path_iter(".env") {
-            Ok(iter) => iter,
-            Err(e) if e.not_found() => return None,
+        // Through the shared reader: dotenvy drops a UTF-8 BOM but not UTF-16.
+        let text = match crate::text_file::read(std::path::Path::new(".env")) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
             Err(e) => {
                 eprintln!("rustango: ignoring {key} in .env: {e}");
                 return None;
             }
         };
+        let iter = dotenvy::from_read_iter(std::io::Cursor::new(text));
         let mut found = None;
         for item in iter {
             match item {
@@ -1529,7 +1547,7 @@ pub mod prelude {
 
 /// Bake every migration file in a directory into the binary at
 /// compile time, for shipping a single-binary distribution. Pair
-/// with [`migrate::migrate_embedded`].
+/// with [`migrate::migrate_embedded_pool`].
 ///
 /// A directory that does not exist still builds, with a `deprecated`
 /// warning naming it:

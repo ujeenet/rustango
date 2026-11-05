@@ -42,6 +42,8 @@ pub struct Postgres;
 #[cfg(feature = "postgres")]
 pub static DIALECT: &Postgres = &Postgres;
 
+impl super::dialect::sealed::Sealed for Postgres {}
+
 impl Dialect for Postgres {
     fn name(&self) -> &'static str {
         "postgres"
@@ -50,8 +52,9 @@ impl Dialect for Postgres {
     // Postgres uses ANSI-style double-quoted identifiers — same as the
     // trait default, no override needed for `quote_ident`.
 
-    fn placeholder(&self, n: usize) -> String {
-        format!("${n}")
+    fn push_placeholder(&self, out: &mut String, n: usize) {
+        use std::fmt::Write as _;
+        let _ = write!(out, "${n}");
     }
 
     // PostgreSQL drops any constraint — CHECK, FOREIGN KEY, UNIQUE —

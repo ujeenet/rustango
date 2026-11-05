@@ -26,18 +26,30 @@ pub struct AdminTotp {
     pub user_id: i64,
     /// Base32-encoded shared secret (RFC 4648, no padding).
     #[rustango(secret, max_length = 64)]
+    #[rustango(help_text = "The shared TOTP secret.")]
+    #[rustango(verbose_name = "Secret")]
     pub secret_base32: String,
     /// `true` once the user has verified a code against the secret.
     #[rustango(default = "false")]
+    #[rustango(help_text = "On once a code was verified; then sign-in asks for codes.")]
+    #[rustango(verbose_name = "Confirmed")]
     pub confirmed: bool,
     #[rustango(default = "now()")]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Time step of the last accepted code. A code is accepted only for
     /// a later step, so each code works once.
+    #[rustango(help_text = "Time step of the last accepted code, so each code works once.")]
+    #[rustango(verbose_name = "Last used step")]
     pub last_used_step: Option<i64>,
     /// A re-enrollment's new secret. The confirmed one above keeps
     /// gating login until a code for this one promotes it (#1756).
     #[rustango(secret, max_length = 64)]
+    #[rustango(
+        help_text = "A new secret being enrolled; the old one stays until a code confirms it."
+    )]
+    #[rustango(verbose_name = "Pending secret")]
     pub pending_secret_base32: Option<String>,
 }
 

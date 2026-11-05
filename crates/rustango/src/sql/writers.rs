@@ -64,6 +64,8 @@ pub(super) struct Sql<'d> {
     pub derive_dml_target: Option<usize>,
     /// Shallowest scope depth a correlated reference read since cleared.
     pub outer_reach: Option<usize>,
+    /// Reused for labels built from parts, so each skips an allocation.
+    scratch: String,
 }
 
 /// The FROM name of a correlated subquery over its enclosing query's
@@ -125,11 +127,14 @@ pub(super) struct DerivedJoins {
     aliases: Vec<&'static str>,
 }
 
+/// The text buffer's first size: most statements fit, so it rarely regrows.
+const SQL_CAPACITY: usize = 512;
+
 impl<'d> Sql<'d> {
     pub(super) fn new(d: &'d dyn Dialect) -> Self {
         Self {
             d,
-            sql: String::new(),
+            sql: String::with_capacity(SQL_CAPACITY),
             params: Vec::new(),
             scope_stack: Vec::new(),
             qualifier: None,
@@ -144,13 +149,14 @@ impl<'d> Sql<'d> {
             read_dml_target: false,
             derive_dml_target: None,
             outer_reach: None,
+            scratch: String::new(),
         }
     }
 
     pub(super) fn with_capacity(d: &'d dyn Dialect, cap: usize) -> Self {
         Self {
             d,
-            sql: String::new(),
+            sql: String::with_capacity(SQL_CAPACITY),
             params: Vec::with_capacity(cap),
             scope_stack: Vec::new(),
             qualifier: None,
@@ -165,6 +171,7 @@ impl<'d> Sql<'d> {
             read_dml_target: false,
             derive_dml_target: None,
             outer_reach: None,
+            scratch: String::new(),
         }
     }
 
@@ -218,6 +225,15 @@ impl<'d> Sql<'d> {
         self.write_ident(&crate::core::joins::sql_label(alias));
     }
 
+    /// The `alias__col` label of a joined column, quoted. Built in a
+    /// reused scratch buffer: a select-related list writes one per column.
+    fn write_joined_label(&mut self, alias: &str, col: &str) {
+        self.scratch.clear();
+        crate::core::joins::push_joined_key(&mut self.scratch, alias, col);
+        let label = crate::core::joins::sql_label(&self.scratch);
+        self.d.push_quoted_ident(&mut self.sql, &label);
+    }
+
     /// `alias` in an `<alias>.<col>` reference: shortened like
     /// [`Self::write_alias`] when it names a model join.
     fn alias_ref<'a>(&self, alias: &'a str) -> std::borrow::Cow<'a, str> {
@@ -239,13 +255,13 @@ impl<'d> Sql<'d> {
 
     /// Append a quoted identifier using the dialect's quoting rules.
     pub(super) fn write_ident(&mut self, name: &str) {
-        self.sql.push_str(&self.d.quote_ident(name));
+        self.d.push_quoted_ident(&mut self.sql, name);
     }
 
     /// A column of the current scope, under its qualifier if one is set.
     fn write_scope_col(&mut self, col: &str) {
-        let s = render_qualified_col(self, col);
-        self.sql.push_str(&s);
+        let table = self.qualify_alias(col);
+        push_qualified(self.d, &mut self.sql, table.as_deref(), col);
     }
 
     /// [`Self::write_ident`] for a table a query reads: every FROM and JOIN
@@ -301,8 +317,7 @@ impl<'d> Sql<'d> {
     /// for every value.
     pub(super) fn push_param_typed(&mut self, value: SqlValue, cast: Option<BindCast>) {
         let untyped = matches!(value, SqlValue::Null | SqlValue::RangeLiteral(_));
-        let p = self.bind(value);
-        self.sql.push_str(&p);
+        self.write_bind(value);
         let ty = match cast {
             Some(BindCast::Always(ty)) => Some(ty),
             Some(BindCast::Untyped(ty)) if untyped => Some(ty),
@@ -317,19 +332,24 @@ impl<'d> Sql<'d> {
     /// Add `value` to the bind list and return its placeholder, which
     /// a JSON or Decimal value gets wrapped in by the dialect.
     pub(super) fn bind(&mut self, value: SqlValue) -> String {
+        let start = self.sql.len();
+        self.write_bind(value);
+        self.sql.split_off(start)
+    }
+
+    /// [`Self::bind`], written straight into the buffer.
+    fn write_bind(&mut self, value: SqlValue) {
         let wrap: Option<fn(&dyn Dialect, &mut String, &str)> = match value {
             SqlValue::Json(_) => Some(|d, s, p| d.write_json_param(s, p)),
             SqlValue::Decimal(_) => Some(|d, s, p| d.write_decimal_param(s, p)),
             _ => None,
         };
         self.params.push(value);
-        let p = self.d.placeholder(self.params.len());
-        let Some(wrap) = wrap else {
-            return p;
-        };
-        let mut wrapped = String::new();
-        wrap(self.d, &mut wrapped, &p);
-        wrapped
+        let n = self.params.len();
+        match wrap {
+            None => self.d.push_placeholder(&mut self.sql, n),
+            Some(wrap) => wrap(self.d, &mut self.sql, &self.d.placeholder(n)),
+        }
     }
 
     /// [`Self::push_param_typed`] with no cast, for values whose
@@ -395,8 +415,7 @@ fn write_in_list(b: &mut Sql<'_>, op: Op, elements: &[SqlValue], cast: Option<Bi
     let negated = matches!(op, Op::NotIn);
     if binds_as_array(b.d, elements) {
         b.sql.push_str(if negated { " <> ALL(" } else { " = ANY(" });
-        let p = b.bind(SqlValue::Array(elements.to_vec()));
-        b.sql.push_str(&p);
+        b.write_bind(SqlValue::Array(elements.to_vec()));
         if let Some(BindCast::Always(ty)) = cast {
             b.sql.push_str("::");
             b.sql.push_str(ty);
@@ -794,7 +813,7 @@ fn write_joined_projection(b: &mut Sql<'_>, col: &str) -> bool {
     b.sql.push('.');
     b.write_ident(c);
     b.sql.push_str(" AS ");
-    b.write_ident(&crate::core::joins::joined_label(alias, c));
+    b.write_joined_label(alias, c);
     true
 }
 
@@ -834,7 +853,7 @@ fn write_distinct_on_via_window(
             }
             first_col = false;
             match col.split_once('.') {
-                Some((alias, c)) => b.write_ident(&crate::core::joins::joined_label(alias, c)),
+                Some((alias, c)) => b.write_joined_label(alias, c),
                 None => b.write_ident(col),
             }
         }
@@ -850,7 +869,7 @@ fn write_distinct_on_via_window(
     for join in &query.joins {
         for col in &join.project {
             b.sql.push_str(", ");
-            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+            b.write_joined_label(join.alias, col);
         }
     }
     // Counted over the survivors, which `sub` exposes.
@@ -888,7 +907,7 @@ fn write_distinct_on_via_window(
             b.sql.push('.');
             b.write_ident(col);
             b.sql.push_str(" AS ");
-            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+            b.write_joined_label(join.alias, col);
         }
     }
     // Each sort key, so the outer ORDER BY can read relation and unprojected ones.
@@ -1131,7 +1150,7 @@ fn write_select_body_qualified(
             b.sql.push('.');
             b.write_ident(col);
             b.sql.push_str(" AS ");
-            b.write_ident(&crate::core::joins::joined_label(join.alias, col));
+            b.write_joined_label(join.alias, col);
         }
     }
     let needs_helpers = query.distinct.is_some() && distinct_order_helpers(query).next().is_some();
@@ -1282,7 +1301,7 @@ fn write_lock_clause(b: &mut Sql<'_>, lock: &crate::core::LockMode) {
                 b.sql.push_str(", ");
             }
             first = false;
-            b.sql.push_str(&b.d.quote_ident(t));
+            b.d.push_quoted_ident(&mut b.sql, t);
         }
     }
     if lock.skip_locked {
@@ -1602,7 +1621,7 @@ fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> St
         if i > 0 {
             s.push_str(", ");
         }
-        s.push_str(&render_qualified_col(b, o.column));
+        push_qualified_col(b, &mut s, o.column);
         if o.desc {
             s.push_str(" DESC");
         }
@@ -2184,12 +2203,7 @@ fn write_expr(
             Ok(())
         }
         Expr::Column(name) => {
-            if let Some(alias) = b.qualify_alias(name) {
-                let qualified = format!("{}.{}", b.d.quote_ident(&alias), b.d.quote_ident(name),);
-                b.sql.push_str(&qualified);
-            } else {
-                b.write_ident(name);
-            }
+            b.write_scope_col(name);
             Ok(())
         }
         Expr::BinOp { left, op, right } => {
@@ -2344,32 +2358,24 @@ fn write_expr(
             }
             let outer = b.scope_stack[len - 2];
             b.read_outer(len - 1);
-            let qualified = format!("{}.{}", b.d.quote_ident(outer.name), b.d.quote_ident(col),);
-            b.sql.push_str(&qualified);
+            push_qualified(b.d, &mut b.sql, Some(outer.name), col);
             Ok(())
         }
         Expr::AliasedColumn { alias, column } => {
             // An explicit `<alias>.<col>`, written as given unless the
             // join lives inside a derived table.
-            let qualified = match &b.derived_joins {
+            match &b.derived_joins {
                 Some(dj) if dj.depth == b.scope_stack.len() && dj.aliases.contains(alias) => {
-                    format!(
-                        "{}.{}",
-                        b.d.quote_ident(dj.table),
-                        b.d.quote_ident(&crate::core::joins::joined_label(alias, column))
-                    )
+                    let label = crate::core::joins::joined_label(alias, column);
+                    push_qualified(b.d, &mut b.sql, Some(dj.table), &label);
                 }
                 _ => {
                     // The current table, written under its FROM name.
                     let alias = b.scope_stack.last().map_or(*alias, |s| s.rename(alias));
-                    format!(
-                        "{}.{}",
-                        b.d.quote_ident(&b.alias_ref(alias)),
-                        b.d.quote_ident(column)
-                    )
+                    let alias = b.alias_ref(alias);
+                    push_qualified(b.d, &mut b.sql, Some(&alias), column);
                 }
-            };
-            b.sql.push_str(&qualified);
+            }
             Ok(())
         }
         Expr::Window(w) => write_window_expr(b, w),
@@ -2479,8 +2485,7 @@ fn write_json_path(
             match step {
                 JsonPathStep::Key(k) => {
                     b.params.push(SqlValue::String(k.clone()));
-                    let p = b.d.placeholder(b.params.len());
-                    b.sql.push_str(&p);
+                    b.d.push_placeholder(&mut b.sql, b.params.len());
                 }
                 JsonPathStep::Index(n) => {
                     // Inline the integer. Bound as a parameter, PG
@@ -4456,12 +4461,7 @@ pub(super) fn write_where_with_search(
             }
             b.params.push(SqlValue::String(pattern.clone()));
             let placeholder = b.d.placeholder(b.params.len());
-            let mut qualified = String::new();
-            if let Some(table) = b.qualify_alias(col) {
-                qualified.push_str(&b.d.quote_ident(&table));
-                qualified.push('.');
-            }
-            qualified.push_str(&b.d.quote_ident(col));
+            let qualified = render_qualified_col(b, col);
             let ty = model.and_then(|m| m.field_by_column(col)).map(|f| f.ty);
             b.d.write_ilike_typed(&mut b.sql, &qualified, ty, &placeholder, false);
             b.sql.push_str(LIKE_ESCAPE_CLAUSE);
@@ -5323,12 +5323,22 @@ fn simple_op(
 /// example in `LOWER(…)`, without editing the buffer afterwards.
 fn render_qualified_col(b: &Sql<'_>, column: &str) -> String {
     let mut s = String::new();
-    if let Some(table) = b.qualify_alias(column) {
-        s.push_str(&b.d.quote_ident(&table));
-        s.push('.');
-    }
-    s.push_str(&b.d.quote_ident(column));
+    push_qualified_col(b, &mut s, column);
     s
+}
+
+/// [`render_qualified_col`] appended to `out`.
+fn push_qualified_col(b: &Sql<'_>, out: &mut String, column: &str) {
+    push_qualified(b.d, out, b.qualify_alias(column).as_deref(), column);
+}
+
+/// `[<table>.]<column>` quoted and appended to `out`.
+fn push_qualified(d: &dyn Dialect, out: &mut String, table: Option<&str>, column: &str) {
+    if let Some(table) = table {
+        d.push_quoted_ident(out, table);
+        out.push('.');
+    }
+    d.push_quoted_ident(out, column);
 }
 
 /// Bind each value as a param without writing to `b.sql`, and return

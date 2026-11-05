@@ -1,0 +1,21 @@
+# One line ending everywhere, so byte-compare tests pass on Windows checkouts.
+* text=auto eol=lf
+
+# Binary: never normalised.
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.der binary
+*.zip binary
+*.gz binary
+*.db binary
+*.sqlite binary
+*.wasm binary

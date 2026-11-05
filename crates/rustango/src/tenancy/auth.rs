@@ -15,7 +15,7 @@
 //!   `/operator` even with that flag.
 //!
 //! The hard wall is enforced by middleware: operator routes call
-//! [`authenticate_operator`] against the registry; tenant routes
+//! [`authenticate_operator_pool`] against the registry; tenant routes
 //! call [`authenticate_user_pool`] against the resolved tenant's pool.
 //! An operator's `Authorization: Basic …` header sent to a tenant
 //! URL won't authenticate (the username doesn't exist in the
@@ -60,21 +60,43 @@ pub struct Operator {
     pub id: rustango::sql::Auto<i64>,
     /// Login handle. Globally unique within the registry.
     #[rustango(max_length = 64, unique)]
+    #[rustango(
+        help_text = "Login for the operator console, e.g. `ops`. Unique across the registry."
+    )]
+    #[rustango(verbose_name = "Username")]
     pub username: String,
     /// PHC-format Argon2id hash. NEVER stored as plaintext.
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Argon2id hash of the password; the password itself is never stored. Set by `create-operator` and the password pages."
+    )]
+    #[rustango(verbose_name = "Password hash")]
     pub password_hash: String,
     /// Soft-disable — `false` rejects login without dropping the row.
+    #[rustango(
+        help_text = "Off: the operator cannot sign in and their sessions end. The account stays."
+    )]
+    #[rustango(verbose_name = "Active")]
     pub active: bool,
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Timestamp of the last password rotation (v0.28.4, #77).
     /// Set on every reset / change-password verb. Sessions whose
     /// `iat` (issued-at) is strictly less than this value are
     /// rejected by `validate_session`. `None` for accounts that
     /// haven't rotated since v0.28.4 — those sessions stay valid.
+    #[rustango(
+        help_text = "When the password last changed. Security: sessions issued before it are refused."
+    )]
+    #[rustango(verbose_name = "Password changed at")]
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Stamped on logout: sessions issued at or before it are refused, on
     /// every device (#1855).
+    #[rustango(
+        help_text = "Set on logout. Security: sessions issued at or before it are refused on every device."
+    )]
+    #[rustango(verbose_name = "Sessions revoked at")]
     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -101,9 +123,15 @@ pub struct User {
     pub id: rustango::sql::Auto<i64>,
     /// Login handle. Unique within this tenant.
     #[rustango(max_length = 64, unique)]
+    #[rustango(help_text = "Login name, e.g. `alice`. Unique within the tenant.")]
+    #[rustango(verbose_name = "Username")]
     pub username: String,
     /// PHC-format Argon2id hash.
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Argon2id hash of the password; the password itself is never stored. Set with `create-user`, the password pages or a set-password link."
+    )]
+    #[rustango(verbose_name = "Password hash")]
     pub password_hash: String,
     /// Email used to link an external SSO identity (OIDC / social
     /// OAuth) to this tenant user. Both the admin/tenant-console login
@@ -116,18 +144,36 @@ pub struct User {
     /// an Add/DropColumn migration for this column.
     #[cfg(feature = "sso")]
     #[rustango(max_length = 254, unique)]
+    #[rustango(
+        help_text = "Address that links an SSO sign-in to this account: the IdP's verified email must match. Empty means the account cannot use SSO. Unique within the tenant."
+    )]
+    #[rustango(verbose_name = "Email")]
     pub email: Option<String>,
     /// Org-admin within this tenant. Renders write-buttons, allows
     /// edit/delete; non-superusers see read-only views (admin
     /// authorization is the v0.6.x story; slice 6 stores the flag).
+    #[rustango(
+        help_text = "Security: a superuser passes every permission check in this tenant, whatever their roles say."
+    )]
+    #[rustango(verbose_name = "Superuser")]
     pub is_superuser: bool,
     /// Soft-disable.
+    #[rustango(
+        help_text = "Off: the user cannot sign in and their sessions end. The account stays."
+    )]
+    #[rustango(verbose_name = "Active")]
     pub active: bool,
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: chrono::DateTime<chrono::Utc>,
     /// Flexible per-user metadata bag. Store preferences, onboarding
     /// state, app-specific attributes — anything that doesn't need its
     /// own column. Never read by the framework itself.
     #[rustango(default = "'{}'")]
+    #[rustango(
+        help_text = "Free-form JSON for your app, e.g. `{\"theme\": \"dark\"}`. The framework never reads it. Default `{}`."
+    )]
+    #[rustango(verbose_name = "Data")]
     pub data: serde_json::Value,
     /// Timestamp of the last password rotation (v0.28.4, #77).
     /// Set on every reset / change-password verb. Sessions whose
@@ -135,9 +181,17 @@ pub struct User {
     /// `validate_session`. `None` for accounts that haven't
     /// rotated since v0.28.4 — those sessions stay valid until
     /// they expire normally.
+    #[rustango(
+        help_text = "When the password last changed. Security: sessions issued before it are refused."
+    )]
+    #[rustango(verbose_name = "Password changed at")]
     pub password_changed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Stamped on logout: sessions issued at or before it are refused, on
     /// every device (#1855).
+    #[rustango(
+        help_text = "Set on logout. Security: sessions issued at or before it are refused on every device."
+    )]
+    #[rustango(verbose_name = "Sessions revoked at")]
     pub sessions_revoked_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -336,14 +390,14 @@ impl PasswordVerified<Operator> {
     }
 }
 
-/// Backend-agnostic counterpart of [`authenticate_operator`]. Routes
-/// the Operator lookup through [`crate::sql::FetcherPool`] so the same
+/// Check an operator's username and password, on every backend.
+///
+/// Routes the Operator lookup through [`crate::sql::FetcherPool`] so the same
 /// auth path works against `Pool::Postgres` / `Pool::Mysql` /
-/// `Pool::Sqlite`. Preferred for new code; the PG-typed wrapper above
-/// keeps existing callers compiling.
+/// `Pool::Sqlite`.
 ///
 /// # Errors
-/// As [`authenticate_operator`].
+/// A database error.
 pub async fn authenticate_operator_pool(
     registry: &crate::sql::Pool,
     username: &str,
@@ -395,7 +449,7 @@ pub(crate) async fn check_operator_password(
 /// `search_path`; database mode is naturally scoped to the tenant
 /// DB).
 ///
-/// Same return semantics as [`authenticate_operator`]: `Ok(None)`
+/// Same return semantics as [`authenticate_operator_pool`]: `Ok(None)`
 /// for unknown user, wrong password, or inactive row; `Ok(Some(_))`
 /// only on a successful match.
 ///
@@ -411,7 +465,7 @@ pub(crate) async fn check_operator_password(
 /// through SSO gets in with a password. Use [`authenticate_user_pool`].
 ///
 /// # Errors
-/// As [`authenticate_operator`].
+/// A database error.
 #[cfg(feature = "postgres")]
 #[deprecated(
     since = "0.61.15",
@@ -443,7 +497,7 @@ pub async fn authenticate_user(
 ///   typically built via
 ///   [`super::TenantPools::scoped_pool_dyn`].
 ///
-/// Same return semantics as [`authenticate_operator`]: `Ok(None)`
+/// Same return semantics as [`authenticate_operator_pool`]: `Ok(None)`
 /// for unknown user, wrong password, or inactive row; `Ok(Some(_))`
 /// only on a successful match.
 ///

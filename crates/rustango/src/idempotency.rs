@@ -44,7 +44,9 @@
 //! `idem:<sha256>` over the [`IdempotencyLayer::scope`], host, the tenant
 //! the tenancy layer resolves for the request, the caller, method, path
 //! and query, and the client's key. The same key from another caller, tenant
-//! or route is a different entry.
+//! or route is a different entry. When tenant resolution fails, a keyed
+//! request gets `503` instead of running unprotected; a request no tenant
+//! matched is keyed globally.
 //!
 //! The caller is the resolved principal when there is one, else the
 //! `Authorization`, `Cookie` and `X-Api-Key` headers. Add the auth layer
@@ -64,9 +66,9 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::extract::Request;
-use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE};
+use axum::http::header::{CONTENT_LENGTH, HOST, SET_COOKIE, TRANSFER_ENCODING};
 use axum::http::request::Parts;
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Response, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Method, Response, StatusCode};
 use axum::middleware::Next;
 use axum::response::IntoResponse;
 use axum::Router;
@@ -217,7 +219,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
         // handler, which may answer with its own 4xx.
         return next.run(req).await;
     }
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
     let declared_len = parts
         .headers
         .get(CONTENT_LENGTH)
@@ -240,11 +242,9 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             .into_response()
         }
     };
-    let Ok(tenant) = request_tenant(&parts).await else {
-        // Unkeyable without a tenant; the handler reports the error.
-        return next
-            .run(Request::from_parts(parts, Body::from(req_bytes)))
-            .await;
+    let Ok(tenant) = request_tenant(&mut parts).await else {
+        // Running it unkeyed could charge twice; the client retries later.
+        return unknown_tenant();
     };
     let cache_key = cache_key(&cfg.scope, &parts, tenant.as_deref(), &key);
     let request_sha256 = hex(&Sha256::digest(&req_bytes));
@@ -328,6 +328,7 @@ async fn handle(cfg: Arc<IdempotencyLayer>, req: Request<Body>, next: Next) -> R
             headers: parts
                 .headers
                 .iter()
+                .filter(|(k, _)| !is_hop_by_hop(k))
                 .filter_map(|(k, v)| {
                     let k = k.as_str().to_owned();
                     v.to_str().ok().map(|s| (k, s.to_owned()))
@@ -506,6 +507,15 @@ fn too_large() -> Response<Body> {
     .into_response()
 }
 
+fn unknown_tenant() -> Response<Body> {
+    let mut resp = ApiError::service_unavailable("tenant could not be resolved").into_response();
+    resp.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("1"),
+    );
+    resp
+}
+
 /// Cache key for who sent the request, where, and with which client key.
 fn cache_key(scope: &str, parts: &Parts, tenant: Option<&str>, key: &str) -> String {
     let mut h = KeyHasher(Sha256::new());
@@ -556,32 +566,21 @@ fn principal_fields(h: &mut KeyHasher, _parts: &Parts) -> bool {
 }
 
 /// The request's `#org:<id>:<slug>`, not its slug alone: a tenant that reuses a purged slug
-/// must not replay the old one's responses. `Err` when it cannot be resolved.
+/// must not replay the old one's responses. `Err` when resolution failed; no match is global.
 #[cfg(feature = "tenancy")]
-async fn request_tenant(parts: &Parts) -> Result<Option<String>, ()> {
-    use crate::tenancy::TenantSlug;
-    if let Some(t) = parts.extensions.get::<TenantSlug>() {
-        return Ok(Some(t.namespace()));
-    }
-    match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
-        None => Ok(None),
-        Some(Ok(None)) => Ok(None),
-        Some(Ok(Some(org))) => match TenantSlug::of(&org) {
-            Some(t) => Ok(Some(t.namespace())),
-            None => {
-                tracing::warn!(slug = %org.slug, "idempotency: org has no id, key not used");
-                Err(())
-            }
-        },
-        Some(Err(e)) => {
-            tracing::warn!(error = %e, "idempotency: tenant resolution failed, key not used");
-            Err(())
-        }
+async fn request_tenant(parts: &mut Parts) -> Result<Option<String>, ()> {
+    use crate::tenancy::RequestTenant;
+    match RequestTenant::resolve(parts).await {
+        RequestTenant::Tenant(t) => Ok(Some(t.namespace())),
+        RequestTenant::Unknown => Err(()),
+        // Global, or no tenant matched (an apex webhook): keyed globally, as before.
+        _ => Ok(None),
     }
 }
 
 #[cfg(not(feature = "tenancy"))]
-async fn request_tenant(_parts: &Parts) -> Result<Option<String>, ()> {
+#[allow(clippy::unused_async)]
+async fn request_tenant(_parts: &mut Parts) -> Result<Option<String>, ()> {
     Ok(None)
 }
 
@@ -598,6 +597,25 @@ async fn read_stored(cache: &BoxedCache, cache_key: &str) -> Option<StoredRespon
     serde_json::from_str(&raw).ok()
 }
 
+/// Framing and hop-by-hop headers: they describe the original connection, not the replay.
+fn is_hop_by_hop(name: &HeaderName) -> bool {
+    use axum::http::header::{
+        CONNECTION, PROXY_AUTHENTICATE, PROXY_AUTHORIZATION, TE, TRAILER, UPGRADE,
+    };
+    [
+        CONTENT_LENGTH,
+        TRANSFER_ENCODING,
+        CONNECTION,
+        PROXY_AUTHENTICATE,
+        PROXY_AUTHORIZATION,
+        TE,
+        TRAILER,
+        UPGRADE,
+    ]
+    .contains(name)
+        || name.as_str() == "keep-alive"
+}
+
 fn rebuild(stored: StoredResponse) -> Response<Body> {
     let body_bytes = base64::Engine::decode(
         &base64::engine::general_purpose::STANDARD,
@@ -610,7 +628,10 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
     for (k, v) in &stored.headers {
         if let (Ok(name), Ok(value)) = (HeaderName::try_from(k.as_str()), HeaderValue::from_str(v))
         {
-            builder = builder.header(name, value);
+            // Entries stored before the filter at store time may still hold these.
+            if !is_hop_by_hop(&name) {
+                builder = builder.header(name, value);
+            }
         }
     }
     let mut resp = builder
@@ -621,15 +642,7 @@ fn rebuild(stored: StoredResponse) -> Response<Body> {
         HeaderName::from_static("idempotent-replayed"),
         HeaderValue::from_static("true"),
     );
-    let _ = headers_align_content_length(resp.headers_mut());
     resp
-}
-
-/// Hook for fixing up `Content-Length` on a replayed response. It does
-/// nothing today: the cached body is already in memory, so axum works
-/// the length out on the way out.
-fn headers_align_content_length(_headers: &mut HeaderMap) -> Result<(), ()> {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -735,6 +748,70 @@ mod tests {
 
         // Handler ran exactly once.
         assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replay_drops_stored_framing_headers() {
+        let app = Router::new()
+            .route(
+                "/",
+                post(|| async {
+                    (
+                        [("content-length", "999"), ("transfer-encoding", "chunked")],
+                        "ok",
+                    )
+                }),
+            )
+            .idempotency(IdempotencyLayer::new(cache()));
+        let req = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/")
+                .header("idempotency-key", "framing")
+                .body(Body::empty())
+                .unwrap()
+        };
+        let _ = app.clone().oneshot(req()).await.unwrap();
+        let r2 = app.clone().oneshot(req()).await.unwrap();
+        assert!(r2.headers().contains_key("idempotent-replayed"));
+        // axum sets the real length of the replayed body, not the stored 999.
+        assert_ne!(
+            r2.headers().get("content-length").map(|v| v.as_bytes()),
+            Some(&b"999"[..])
+        );
+        assert!(r2.headers().get("transfer-encoding").is_none());
+        assert_eq!(body_string(r2).await, "ok");
+    }
+
+    #[tokio::test]
+    async fn replay_of_an_old_entry_drops_its_hop_by_hop_headers() {
+        // An entry cached before the store-time filter still holds them.
+        let h = |k: &str, v: &str| (k.to_owned(), v.to_owned());
+        let stored = StoredResponse {
+            request_sha256: String::new(),
+            status: 200,
+            headers: vec![
+                h("content-length", "999"),
+                h("transfer-encoding", "chunked"),
+                h("connection", "close"),
+                h("keep-alive", "timeout=5"),
+                h("upgrade", "websocket"),
+                h("x-kept", "1"),
+            ],
+            body_b64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"ok"),
+        };
+        let resp = rebuild(stored);
+        for name in [
+            "content-length",
+            "transfer-encoding",
+            "connection",
+            "keep-alive",
+            "upgrade",
+        ] {
+            assert!(resp.headers().get(name).is_none(), "{name} replayed");
+        }
+        assert_eq!(resp.headers().get("x-kept").unwrap(), "1");
+        assert_eq!(body_string(resp).await, "ok");
     }
 
     #[tokio::test]
@@ -1705,6 +1782,123 @@ mod tests {
         assert_eq!(body_string(r).await, "call-1:");
         let r = app.oneshot(send("acme")).await.unwrap();
         assert_eq!(body_string(r).await, "call-0:", "own tenant still replays");
+    }
+
+    /// The dispatcher's `RequestTenant` keys the replay; nothing is resolved again.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn a_marked_tenant_keys_the_replay_without_a_context() {
+        use crate::tenancy::{RequestTenant, TenantSlug};
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = counting_app(counter.clone(), IdempotencyLayer::new(cache())).layer(
+            axum::middleware::from_fn(|mut req: Request<Body>, next: Next| async move {
+                let id: i64 = req.headers()["x-org-id"].to_str().unwrap().parse().unwrap();
+                req.extensions_mut()
+                    .insert(RequestTenant::Tenant(TenantSlug::new(id, "t")));
+                next.run(req).await
+            }),
+        );
+        let send = |id: &'static str| {
+            keyed("/a")
+                .header("x-org-id", id)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let r = app.clone().oneshot(send("1")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:");
+        let r = app.clone().oneshot(send("2")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-1:", "org 2 replayed org 1");
+        let r = app.oneshot(send("1")).await.unwrap();
+        assert_eq!(body_string(r).await, "call-0:", "own tenant still replays");
+    }
+
+    /// `x-org: fail` makes the resolver error.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    struct FailOrX;
+
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[async_trait::async_trait]
+    impl crate::tenancy::OrgResolver for FailOrX {
+        async fn resolve(
+            &self,
+            parts: &Parts,
+            registry: &crate::sql::Pool,
+        ) -> Result<Option<crate::tenancy::Org>, crate::tenancy::TenancyError> {
+            if parts.headers.get("x-org").is_some_and(|v| v == "fail") {
+                return Err(crate::tenancy::TenancyError::Validation("down".into()));
+            }
+            XOrgResolver.resolve(parts, registry).await
+        }
+    }
+
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    fn with_failing_context(app: Router) -> Router {
+        use crate::extractors::DatabaseTenantContext;
+        use crate::tenancy::{session::SessionSecret, BackendKind, ChainResolver, DatabasePools};
+        app.layer(axum::Extension(StdArc::new(DatabaseTenantContext {
+            pools: StdArc::new(DatabasePools::<sqlx::Sqlite>::new(BackendKind::Sqlite)),
+            resolver: ChainResolver::new().push(FailOrX),
+            session_secret: SessionSecret::from_bytes(vec![1; 32]),
+            operator_secret: SessionSecret::from_bytes(vec![2; 32]),
+            registry: crate::sql::Pool::Sqlite(
+                sqlx::SqlitePool::connect_lazy("sqlite::memory:").unwrap(),
+            ),
+        })))
+    }
+
+    /// No tenant matched (an apex webhook on a hand-built stack): keyed
+    /// globally, as before, so it runs and replays.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn no_matched_tenant_keys_the_request_globally() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = with_failing_context(counting_app(
+            counter.clone(),
+            IdempotencyLayer::new(cache()),
+        ));
+        for _ in 0..2 {
+            let r = app
+                .clone()
+                .oneshot(keyed("/a").body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(r.status(), StatusCode::OK);
+            assert_eq!(body_string(r).await, "call-0:");
+        }
+    }
+
+    /// A resolver error: a keyed request gets 503 instead of running
+    /// unprotected; an unkeyed one still runs.
+    #[cfg(all(feature = "tenancy", feature = "sqlite"))]
+    #[tokio::test]
+    async fn a_failed_resolution_refuses_a_keyed_request() {
+        let counter = StdArc::new(AtomicUsize::new(0));
+        let app = with_failing_context(counting_app(
+            counter.clone(),
+            IdempotencyLayer::new(cache()),
+        ));
+        let r = app
+            .clone()
+            .oneshot(
+                keyed("/a")
+                    .header("x-org", "fail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(counter.load(Ordering::SeqCst), 0, "ran unprotected");
+        let r = app
+            .oneshot(
+                Request::post("/a")
+                    .header("x-org", "fail")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
     }
 
     #[tokio::test]

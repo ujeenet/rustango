@@ -1,0 +1,57 @@
+name: Semver
+
+# A patch release must not break the public API. Blocking on `main` and
+# on PRs into `release/**`; on other PRs it labels a break `semver:breaking`
+# so the change waits for the next minor.
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: semver-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semver:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      BLOCKING: ${{ github.event_name != 'pull_request' || github.base_ref == 'main' || startsWith(github.base_ref, 'release/') }}
+    steps:
+      - uses: actions/checkout@v7
+      # The newest release on crates.io is the baseline (pre-releases skipped).
+      - name: Baseline version
+        id: baseline
+        run: |
+          v=$(curl -sf --retry 3 --retry-delay 5 -A "rustango-ci (github.com/ujeenet/rustango)" \
+            https://crates.io/api/v1/crates/rustango | jq -r .crate.max_stable_version)
+          test -n "$v" && test "$v" != null
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # Its own stable toolchain, whatever rust-toolchain.toml pins.
+      - name: cargo semver-checks
+        id: check
+        continue-on-error: ${{ env.BLOCKING != 'true' }}
+        uses: obi1kenobi/cargo-semver-checks-action@6b69fcf40e9b5fb17adeb57e4b6ecd020649a239 # v2.9
+        with:
+          package: rustango
+          feature-group: all-features
+          baseline-version: ${{ steps.baseline.outputs.version }}
+          # A PR into develop is judged as the next patch; one into a
+          # `release/vX.Y.0` branch as a minor (its bump commit lands last);
+          # main and patch release branches take the bump from Cargo.toml.
+          release-type: ${{ env.BLOCKING != 'true' && 'patch' || (startsWith(github.base_ref, 'release/') && endsWith(github.base_ref, '.0') && 'minor') || '' }}
+          rust-toolchain: stable
+      - name: Label a breaking PR
+        if: steps.check.outcome == 'failure' && env.BLOCKING != 'true'
+        # A fork's token cannot label; the check's own output still shows the break.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" -f 'labels[]=semver:breaking'

@@ -48,7 +48,7 @@ Diese folgen der Standard-Groß-/Kleinschreibung von Rust, genau wie die Aufteil
 ### Module
 
 - **Singular**, wenn das Modul EINEN Haupttyp oder ein Hauptkonzept enthält: `cache`, `email`, `storage`, `signed_url`, `request_id`.
-- **Plural**, wenn das Modul eine SAMMLUNG von Elementen enthält: `bulk_actions`, `api_keys`, `passwords`, `forms`, `signals`.
+- **Plural**, wenn das Modul eine SAMMLUNG von Elementen enthält: `api_keys`, `passwords`, `forms`, `signals`.
 
 ---
 
@@ -173,7 +173,6 @@ Sie können **alle drei mischen** in einem einzigen Queryset.
 | Passwörter | `passwords::*` | `PasswordError` |
 | Webhooks | `webhook::*` | `EmptySigningKey` aus `sign`; `verify_*` gibt `bool` zurück |
 | Signierte URLs | `signed_url::*` | `SignedUrlError` |
-| Bulk-Aktionen | `bulk_actions::*` | `BulkActionError` |
 | Fixtures | `fixtures::*` | `FixtureError` |
 | IP-Filter | `ip_filter::*` | `IpFilterError` |
 | i18n | `i18n::*` | `I18nError` |
@@ -217,7 +216,6 @@ Der Name eines Moduls sollte Sie **die darin enthaltenen Typnamen erraten** lass
 | `storage` | den `Storage`-Trait, die `*Storage`-Impls | hoch |
 | `signed_url` | die freien Funktionen `sign`, `verify` | mittel |
 | `text` | die freien Funktionen `slugify`, `html_escape`, `truncate` | mittel |
-| `bulk_actions` | `BulkActionRegistry`, `BulkAction`, die `Bulk*Action`-Impls | hoch |
 | `api_keys` | die freien Funktionen `generate_key`, `verify_key`, `split_token` | mittel |
 
 **Vermeiden Sie dies:** ein Modul, das ein zusammenhangloses Sammelsurium enthält (`utils`, `helpers`, `common`). Wenn Sie das einzige Konzept, das es abdeckt, nicht benennen können, sollte es kein Modul sein.
@@ -293,7 +291,7 @@ anderes Backend zu wählen: `default-features = false, features = ["batteries", 
 Um ein Binary zu verschlanken, das nicht alles braucht, deaktivieren Sie die Standardwerte und listen Sie nur auf, was Sie verwenden:
 
 ```toml
-rustango = { version = "0.62", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.63", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

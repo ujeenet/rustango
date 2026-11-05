@@ -62,17 +62,23 @@ pub struct ContentType {
     /// after the crate root, or the explicit `#[rustango(app = "...")]`
     /// override from the model's container attr.
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "The app the model belongs to, e.g. `blog`.")]
+    #[rustango(verbose_name = "App")]
     pub app_label: String,
     /// Lowercase Rust-side model name. Conventionally matches the
     /// `#[derive(Model)]` struct ident lowercased (e.g. `User` →
     /// `user`).
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "Lowercase model name, e.g. `post`.")]
+    #[rustango(verbose_name = "Model")]
     pub model_name: String,
     /// SQL table name (`#[rustango(table = "…")]` value or the
     /// auto-derived snake-case fallback). Carried alongside
     /// `model_name` so callers reading the audit log don't have to
     /// reconstruct it from the registry every time.
     #[rustango(max_length = 100)]
+    #[rustango(help_text = "The model's SQL table, e.g. `blog_post`.")]
+    #[rustango(verbose_name = "Table")]
     pub table: String,
 }
 
@@ -1064,11 +1070,33 @@ pub async fn ensure_seeded(pool: &crate::sql::Pool) -> Result<usize, ExecError> 
             table: table.to_owned(),
         };
         // Another process seeding at the same time may have won the row.
-        if row.insert_or_ignore(pool).await? {
+        if insert_retrying_deadlocks(&mut row, pool).await? {
             inserted += 1;
         }
     }
     Ok(inserted)
+}
+
+/// Concurrent boots can deadlock on the unique index; a jittered retry sees the winner's row.
+async fn insert_retrying_deadlocks(
+    row: &mut ContentType,
+    pool: &crate::sql::Pool,
+) -> Result<bool, ExecError> {
+    const ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    loop {
+        match row.insert_or_ignore(pool).await {
+            Err(e) if e.is_deadlock() && attempt < ATTEMPTS => {
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.subsec_nanos());
+                let ms = 10 + u64::from(nanos % 40);
+                tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+                attempt += 1;
+            }
+            r => return r,
+        }
+    }
 }
 
 #[cfg(test)]

@@ -69,7 +69,7 @@
     <table>
       {% for row in locked_rows %}
       <tr>
-        <th>{{ row.name }}</th>
+        <th>{{ row.label }}</th>
         <td>{% if row.value %}<code>{{ row.value }}</code>{% else %}<span class="empty">None</span>{% endif %}</td>
       </tr>
       {% endfor %}
@@ -81,9 +81,10 @@
     <table>
       {% for row in editable_rows %}
       <tr>
-        <th><label for="{{ row.name }}">{{ row.name }}</label></th>
+        <th><label for="{{ row.name }}">{{ row.label }}</label></th>
         <td>
           {{ row.input | safe }}
+          {% if row.help %}<div class="field-helper">{{ row.help | help_html | safe }}</div>{% endif %}
           {% if row.helper %}<div class="field-helper">{{ row.helper }}</div>{% endif %}
         </td>
       </tr>

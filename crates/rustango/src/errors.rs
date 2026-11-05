@@ -17,11 +17,11 @@
 //!
 //! - a browser navigating (`Accept: text/html`) gets a full page;
 //! - htmx (`HX-Request`) gets a fragment, with `HX-Retarget` / `HX-Reswap`;
-//! - any other client gets the body unchanged, or the [`Message`] as plain
+//! - any other client gets the body unchanged, or the [`Message`](crate::errors::Message) as plain
 //!   text when the body is empty.
 //!
-//! JSON bodies pass through unless they carry a [`Message`] and a browser
-//! asked. `HEAD`, non-text bodies and responses marked [`KeepBody`] always
+//! JSON bodies pass through unless they carry a [`Message`](crate::errors::Message) and a browser
+//! asked. `HEAD`, non-text bodies and responses marked [`KeepBody`](crate::errors::KeepBody) always
 //! pass through. A 5xx shows generic text unless `RUSTANGO_DISCLOSE_ERRORS`
 //! is set, the same policy as every other 5xx body.
 //!

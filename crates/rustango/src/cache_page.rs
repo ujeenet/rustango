@@ -765,39 +765,31 @@ fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
 /// The tenant a page is cached for.
 #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
 enum PageTenant {
-    /// No tenant: tenancy is off, or the route is tenant-agnostic.
+    /// No tenant: tenancy is off, the route is tenant-agnostic, or the request is marked `Global`.
     NoTenant,
     /// The resolved tenant's `#org:<id>:<slug>`: a reused slug gets new keys.
     Org(String),
-    /// No tenant context, no match, or resolution failed: never share a page.
+    /// Nothing mounted, no match, or resolution failed: never share a page.
     Unknown,
 }
 
-/// The request's tenant: a `TenantSlug` already set, else the mounted
-/// tenant context's resolver.
+/// The request's [`RequestTenant`](crate::tenancy::RequestTenant). Nothing
+/// mounted or stored is `Unknown` here: a misplaced layer must not share pages.
 #[cfg(feature = "tenancy")]
 async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
-    if let Some(t) = req.extensions().get::<crate::tenancy::TenantSlug>() {
-        let ns = t.namespace();
-        return (req, PageTenant::Org(ns));
+    use crate::tenancy::RequestTenant;
+    if RequestTenant::unmounted(req.extensions()) {
+        warn_no_tenant_context();
+        return (req, PageTenant::Unknown);
     }
-    let (parts, body) = req.into_parts();
-    let tenant = match crate::tenancy::middleware::request_org(&parts, &parts.extensions).await {
-        // An org without an id cannot be told from a later one: never share its page.
-        Some(Ok(Some(org))) => crate::tenancy::TenantSlug::of(&org)
-            .map_or(PageTenant::Unknown, |t| PageTenant::Org(t.namespace())),
-        // The route may still vary on an input the resolver ignored (#2045).
-        Some(Ok(None)) => PageTenant::Unknown,
-        Some(Err(e)) => {
-            tracing::warn!(target: "rustango::cache_page", error = %e, "tenant resolution failed; not caching");
-            PageTenant::Unknown
-        }
-        None => {
-            warn_no_tenant_context();
-            PageTenant::Unknown
-        }
+    let (req, tenant) = RequestTenant::resolve_request(req).await;
+    let tenant = match tenant {
+        RequestTenant::Tenant(t) => PageTenant::Org(t.namespace()),
+        RequestTenant::Global => PageTenant::NoTenant,
+        // No match: the route may still vary on an input the resolver ignored.
+        _ => PageTenant::Unknown,
     };
-    (Request::from_parts(parts, body), tenant)
+    (req, tenant)
 }
 
 #[cfg(not(feature = "tenancy"))]

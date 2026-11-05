@@ -109,6 +109,8 @@ pub struct Sqlite;
 #[cfg(feature = "sqlite")]
 pub static DIALECT: &Sqlite = &Sqlite;
 
+impl super::dialect::sealed::Sealed for Sqlite {}
+
 impl Dialect for Sqlite {
     fn name(&self) -> &'static str {
         "sqlite"

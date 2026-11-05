@@ -453,6 +453,16 @@ pub fn urlsafe_base64_decode(s: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
+    /// Every byte outside the unreserved set is escaped, as form and
+    /// OAuth query values need.
+    #[test]
+    fn url_encode_escapes_all_but_unreserved() {
+        assert_eq!(url_encode("aZ09-._~"), "aZ09-._~");
+        assert_eq!(url_encode("a b+c/d?e=f&g"), "a%20b%2Bc%2Fd%3Fe%3Df%26g");
+        assert_eq!(url_encode("*'()!#%"), "%2A%27%28%29%21%23%25");
+        assert_eq!(url_encode("é☃"), "%C3%A9%E2%98%83");
+    }
+
     #[test]
     fn url_decode_strict_refuses_what_url_decode_passes_through() {
         for bad in ["%2", "%ZZ", "%+5", "%FF"] {

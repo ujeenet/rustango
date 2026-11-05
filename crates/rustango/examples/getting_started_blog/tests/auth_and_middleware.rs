@@ -43,7 +43,7 @@ async fn secure_app() -> axum::Router {
         .unwrap();
 
     urls::api()
-        .nest("/admin", urls::admin_router(pool.clone(), &rustango::config::Settings::default()))
+        .nest("/admin", urls::admin_router(pool.clone(), &rustango::config::Settings::default()).expect("admin"))
         .merge(PostViewSet::router("/api/posts", pool.clone()))
         .merge(health_router(pool.clone())) // /health, /ready
         .request_id(RequestIdLayer::default())

@@ -133,7 +133,10 @@ async fn a_refused_upgrade_only_warns(pool: &Pool) {
     ] {
         exec(pool, &sql, Vec::new()).await.expect(&sql);
     }
-    let url = std::env::var("MYSQL_TEST_URL").expect("mysql url");
+    // The slot database under nextest, the one `db` names.
+    let url = rustango::testkit::matrix::Backend::MySql
+        .url()
+        .expect("mysql url");
     let (scheme, rest) = url.split_once("://").expect("scheme");
     let host = rest.rsplit_once('@').map_or(rest, |(_, h)| h);
     let url = format!("{scheme}://rg_noalter:noalter@{host}");

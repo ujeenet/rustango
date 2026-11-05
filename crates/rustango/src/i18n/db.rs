@@ -49,15 +49,29 @@ pub struct Translation {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
     #[rustango(max_length = 16)]
+    #[rustango(help_text = "Language code, e.g. `de` or `pt-BR`.")]
+    #[rustango(verbose_name = "Locale")]
     pub locale: String,
     #[rustango(max_length = 200)]
+    #[rustango(
+        help_text = "The message id being translated, e.g. `nav.home`. One value per key and locale."
+    )]
+    #[rustango(verbose_name = "Key")]
     pub key: String,
+    #[rustango(help_text = "The translated text. Overrides the file translation for this key.")]
+    #[rustango(verbose_name = "Value")]
     pub value: String,
     #[rustango(max_length = 200, default = "")]
+    #[rustango(help_text = "Who last changed it. Empty when unknown.")]
+    #[rustango(verbose_name = "Updated by")]
     pub updated_by: String,
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
+    #[rustango(help_text = "When the row last changed. Set on every save.")]
+    #[rustango(verbose_name = "Updated at")]
     pub updated_at: Auto<chrono::DateTime<chrono::Utc>>,
 }
 

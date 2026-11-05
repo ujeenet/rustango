@@ -46,7 +46,7 @@
 //! [`crate::sql::atomic`] commits on `Ok`. A test wants the rollback
 //! every time, so [`with_rollback`] rolls back instead and still
 //! hands back the closure's value. It is an `atomic` block otherwise:
-//! the closure gets the same [`AtomicTx`], and an `atomic()` on the same
+//! the closure gets the same [`AtomicTx`](crate::sql::AtomicTx), and an `atomic()` on the same
 //! pool inside it runs in a savepoint that rolls back with it.
 //!
 //! ## Limits

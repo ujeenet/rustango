@@ -276,27 +276,28 @@ object-pk) en lugar de una única columna FK, usa
 ## Acciones masivas
 
 Nombra las acciones en `admin(actions = "...")`, luego registra un manejador por acción
-en el `Builder`. El manejador recibe la transacción de escritura del admin y las claves
-primarias de las filas seleccionadas:
+en el `Builder`. El manejador recibe un `ActionCtx`: la transacción de escritura del
+admin, las claves primarias de las filas seleccionadas que pasaron las comprobaciones
+de permisos, el usuario para el que corrieron y (con tenancy) el inquilino:
 
 ```rust
-use rustango::admin::AdminError;
+use rustango::admin::{ActionPerm, AdminError};
 use rustango::core::SqlValue;
 
 let admin_router = admin::Builder::new(pool)
-    .register_tx_action("posts", "publish", |tx, pks| {
+    .register_action("posts", "publish", ActionPerm::Change, |mut ctx| {
         Box::pin(async move {
             let query = Post::objects()
-                .filter("id__in", SqlValue::List(pks.to_vec()))
+                .filter("id__in", SqlValue::List(ctx.pks().to_vec()))
                 .update()
                 .set("status", "published")
                 .compile()
                 .map_err(|e| AdminError::Internal(e.to_string()))?;
-            rustango::sql::update_tx(tx, &query).await?;
+            rustango::sql::update_tx(ctx.tx(), &query).await?;
             Ok(())
         })
     })
-    .register_tx_action("posts", "archive", /* … */)
+    .register_action("posts", "archive", ActionPerm::Change, /* … */)
     .build();
 ```
 
@@ -305,15 +306,21 @@ Selecciona filas con las casillas, elige la acción en el selector y envía
 registras. Un nombre de acción listado en `admin(actions = ...)` sin un manejador
 registrado simplemente no aparecerá.
 
-Una acción personalizada se comprueba como una edición: `{table}.change` más un hook de
-objeto con el nombre de la acción. Una acción que borra debe decirlo con
-`register_tx_action_with_perm(table, name, ActionPerm::Delete, handler)`, para que necesite
+`ActionPerm::Change` comprueba la acción como una edición: `{table}.change` más un hook de
+objeto con el nombre de la acción. Una acción que borra debe pasar
+`ActionPerm::Delete`, para que necesite
 `{table}.delete` y ejecute en su lugar el hook `delete`. Sigue necesitando
 `{table}.change`, y se audita y se señala como una edición.
 
-El manejador escribe a través de ese `&mut PoolTx`, de modo que sus escrituras y sus
+El manejador escribe a través de `ctx.tx()`, de modo que sus escrituras y sus
 filas de auditoría se confirman o se revierten juntas. Escribe solo a través de esa transacción: una segunda
-conexión puede bloquear un pool SQLite de una sola conexión.
+conexión puede bloquear un pool SQLite de una sola conexión. `ctx.actor()` es quien lanzó
+la acción; `ctx.method()`, `ctx.path()` y `ctx.client_ip()` describen la petición. La
+petición en bruto (con cookies) está tras `ctx.raw_request_parts_with_credentials()`:
+mantenla fuera de los logs.
+
+`register_tx_action` y `register_tx_action_with_perm`, cuyo manejador recibe
+`(tx, pks)`, están obsoletos.
 
 ---
 
@@ -575,8 +582,7 @@ indique lo contrario):
 | `skip_count_for([tables])` | Omite `COUNT(*)` en tablas enormes (el paginador muestra "Page N"). |
 | `view_hook_scan_cap(rows)` | Cuántas filas recorre la lista con los hooks `view` antes de retener el resto. Por defecto 10 000. |
 | `with_user_perms([codenames])` | Condiciona tablas a `{table}.view/add/change/delete`. |
-| `register_tx_action(table, name, handler)` | Registra un manejador de acción masiva; recibe la transacción de escritura, así que las filas de auditoría se confirman con ella. |
-| `register_tx_action_with_perm(table, name, perm, handler)` | Igual, comprobado contra `ActionPerm::Delete` en lugar de `change`. |
+| `register_action(table, name, perm, handler)` | Registra un manejador de acción masiva; su `ActionCtx` lleva la transacción de escritura (las filas de auditoría se confirman con ella), las filas comprobadas y el usuario. |
 | `with_session_auth(secret)` | Requiere inicio de sesión por cookie (`/login` + `/logout`). |
 | `logout_url(u)` | Destino POST del botón Logout de la barra lateral. Por defecto `{admin_prefix}/logout`; los admins de inquilino lo ajustan a su ruta de logout de tenancy. |
 | `secure_cookies(bool)` | Establece el flag `Secure` (solo HTTPS) en la cookie de sesión. `new` sigue a `[security].secure_cookies`, o si no es segura en el nivel prod. |
@@ -637,6 +643,15 @@ cd crates/rustango/examples/admin_demo
 export DATABASE_URL=postgres://rustango:rustango@localhost:5432/admin_demo
 cargo run -- migrate     # tables + the audit-log table
 cargo run                # seeds demo data, serves the admin at /admin
+```
+
+En PowerShell:
+
+```powershell
+cd crates/rustango/examples/admin_demo
+$env:DATABASE_URL = "postgres://rustango:rustango@localhost:5432/admin_demo"
+cargo run -- migrate
+cargo run
 ```
 
 Luego abre <http://localhost:8080/admin> y entra en **Posts** para ver los filtros, la

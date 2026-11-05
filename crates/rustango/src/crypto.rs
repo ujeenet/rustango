@@ -352,3 +352,28 @@ mod tests {
         assert_eq!(tag.len(), 32);
     }
 }
+
+/// How an ES256 signature is encoded: ASN.1 DER (WebAuthn) or the fixed
+/// `r || s` of a JWS.
+#[cfg(any(feature = "sso", feature = "passkey"))]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Es256Encoding {
+    #[cfg_attr(not(feature = "passkey"), allow(dead_code))]
+    Der,
+    #[cfg_attr(not(feature = "sso"), allow(dead_code))]
+    Fixed,
+}
+
+/// Whether `sig` signs `msg` under the uncompressed SEC1 P-256 `point`.
+/// The one ES256 check: JWKS tokens and passkey assertions both use it.
+#[cfg(any(feature = "sso", feature = "passkey"))]
+pub(crate) fn es256_verifies(point: &[u8], msg: &[u8], sig: &[u8], enc: Es256Encoding) -> bool {
+    use ring::signature as s;
+    let alg = match enc {
+        Es256Encoding::Der => &s::ECDSA_P256_SHA256_ASN1,
+        Es256Encoding::Fixed => &s::ECDSA_P256_SHA256_FIXED,
+    };
+    s::UnparsedPublicKey::new(alg, point)
+        .verify(msg, sig)
+        .is_ok()
+}

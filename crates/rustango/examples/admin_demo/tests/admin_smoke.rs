@@ -18,7 +18,7 @@ async fn admin_renders_list_filters_and_inline() {
     seed(&pool).await.expect("seed");
 
     // The router the server mounts, so this pins its login.
-    let app = axum::Router::new().nest("/admin", admin_router(pool.clone()));
+    let app = axum::Router::new().nest("/admin", admin_router(pool.clone()).expect("admin"));
     let client = TestClient::new(app);
 
     // Anonymous: sent to the login page.

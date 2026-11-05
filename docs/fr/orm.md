@@ -14,7 +14,7 @@ Modèles d'utilisation de l'ORM **Rustango** au-delà des bases. Si vous avez d�
 > **Un terme vous est inconnu ?** Le [glossaire](glossary.md) définit *model*, *queryset*,
 > *pool* et *migration* en langage simple.
 
-Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers un pool de connexions — il y en a **deux** et cette page utilise les deux. `rustango::sql::Pool` est l'énumération multi-backends que prennent `fetch`, `count` et les writers `_pool`. `sqlx::PgPool` est le pool Postgres spécifique au pilote que prennent la famille `_on` et les exemples de transaction. `sql::Pool` n'a pas de `begin()` ; ses points d'entrée de transaction sont `transaction_pool` et `atomic`. à la base de données ; vous le passez aux méthodes qui exécutent réellement du SQL. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
+Quelques termes Rust reviennent tout au long du document. `&pool` est une référence partagée vers un pool de connexions — ici un `rustango::sql::Pool`, l'énumération multi-backends que prennent `fetch`, `count` et les writers (`save`, `insert`, `delete`). Les méthodes `_on` prennent n'importe quel `SqlExecutor` : ce `&pool`, une connexion tenue ou une transaction ouverte. `sql::Pool` n'a pas de `begin()` ; ses points d'entrée de transaction sont `transaction_pool` et `atomic`. `.await` lance un appel asynchrone et attend le résultat. `Option<T>` est une valeur qui peut être présente (`Some`) ou absente (`None`) — le null de Rust. `Result` représente un succès ou une erreur ; le `?` en fin d'appel provoque un retour anticipé en cas d'erreur. `Auto<i64>` est une clé primaire à incrémentation automatique qui est soit `Set` (chargée depuis la base) soit `Unset` (pas encore insérée).
 
 ## Ajouts récents
 
@@ -244,7 +244,7 @@ let by_isbn: HashMap<String, Book> = Book::objects()
 
 Se compose avec les filtres `.where_()` précédents — la liste `IN` se joint par AND au WHERE existant. Une liste `ids` vide court-circuite avec une map vide (aucun SQL n'est émis). La closure gère explicitement le déballage de `Auto<T>` / `ForeignKey<T, K>`, donnant aux appelants le contrôle sur la matérialisation de la clé.
 
-Variante limitée au tenant : `in_bulk_on(column, ids, extract, &executor)` prend n'importe quel exécuteur sqlx — à combiner avec `tenant.conn()` pour les tenants en mode schéma.
+Variante limitée au tenant : `in_bulk_on(column, ids, extract, &executor)` prend n'importe quel `SqlExecutor` — à combiner avec `tenant.conn().await?` pour les tenants en mode schéma.
 
 ### Verrouillage de lignes pour mise à jour
 
@@ -254,14 +254,14 @@ Verrouille les lignes que vous sélectionnez pour qu'aucune autre transaction ne
 // Canonical "claim next available row" pattern. Worker A grabs the
 // lowest-priority pending job; concurrent worker B with SKIP LOCKED
 // skips A's row and grabs the next instead — no blocking.
-let mut tx = pool.begin().await?;
+let mut tx = rustango::sql::write_transaction(&pool).await?;
 let claim: Vec<Job> = Job::objects()
     .where_(Job::status.eq("pending"))
     .order_by(&[("priority", false)])
     .limit(1)
     .select_for_update()
     .skip_locked()
-    .fetch_on(&mut *tx).await?;
+    .fetch_on(&mut tx).await?;
 // ... mark claim[0] as in-progress, do work ...
 tx.commit().await?;
 ```
@@ -284,7 +284,7 @@ Appeler `.skip_locked()` / `.nowait()` / `.no_key()` / `.of(…)` sans un `.sele
 | MySQL 8.0.1+ | Prend tout en charge sauf `NO KEY` — cette option retombe sur un simple `FOR UPDATE` (le verrou plus strict). |
 | SQLite | Aucune syntaxe de verrou au niveau ligne ; le writer n'émet aucune clause. Ouvrez la transaction avec `rustango::sql::write_transaction(&pool)` : elle prend le verrou d'écriture de la base dès le `BEGIN`, donc un second worker attend puis voit la ligne réclamée. Une transaction `transaction_pool` ne verrouille rien avant d'écrire, et le second écrivain échoue avec `SQLITE_BUSY`. Pour un bloc `atomic`, utilisez `rustango::sql::atomic_immediate(&pool, …)` : son bloc SQLite de premier niveau démarre par `BEGIN IMMEDIATE` ; sur PG et MySQL c'est un `atomic` ordinaire. |
 
-**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Sur Postgres, associez-le à `pool.begin()` (un `sqlx::PgPool`) ; pour une transaction indépendante du backend, utilisez `rustango::sql::write_transaction(&pool)` et `.fetch_on(&mut tx)`.
+**Doit s'exécuter à l'intérieur d'une transaction.** `FOR UPDATE` hors transaction est une opération sans effet sur PostgreSQL (la transaction implicite à instruction unique libère le verrou immédiatement) et une erreur sur MySQL. Ouvrez-la avec `rustango::sql::write_transaction(&pool)` et lisez avec `.fetch_on(&mut tx)` ; cela fonctionne sur chaque backend.
 
 ### Combinaison de requêtes (union, intersection, différence)
 
@@ -357,7 +357,7 @@ while let Some(post) = iter.next_row(&pool).await? {
 
 **Définissez un `order_by`.** Un `OFFSET` sur une requête sans tri stable renvoie des lignes imprévisibles d'un chunk à l'autre — typiquement `.order_by(&[("pk", false)])` afin que chaque chunk s'enchaîne proprement. La méthode n'impose pas de tri (certaines requêtes veulent légitimement ne pas trier, p. ex. une vidange en une seule passe), mais une itération non triée est un piège.
 
-**Compromis face aux curseurs côté serveur.** Il s'agit d'un simple découpage LIMIT/OFFSET. Sur une colonne de tri indexée par btree, PostgreSQL balaie les N premières lignes avant de renvoyer la (N+1)ᵉ — donc la pagination profonde représente un travail total en `O(n²)`. Pour une vidange de 10 M de lignes, cela compte ; pour 100 k lignes, généralement non. Le découpeur l'emporte sur la portabilité (fonctionne sur tous les backends sans surcoût de transaction) et la simplicité (aucune gestion du cycle de vie d'un curseur). Pour des lectures véritablement en flux sur PG, passez directement à l'API Stream `pool.begin()` + `sqlx::query(...).fetch(&mut *tx)` brut — le protocole étendu diffuse depuis le serveur sans re-recherche par offset.
+**Compromis face aux curseurs côté serveur.** Il s'agit d'un simple découpage LIMIT/OFFSET. Sur une colonne de tri indexée par btree, PostgreSQL balaie les N premières lignes avant de renvoyer la (N+1)ᵉ — donc la pagination profonde représente un travail total en `O(n²)`. Pour une vidange de 10 M de lignes, cela compte ; pour 100 k lignes, généralement non. Le découpeur l'emporte sur la portabilité (fonctionne sur tous les backends sans surcoût de transaction) et la simplicité (aucune gestion du cycle de vie d'un curseur). Pour des lectures véritablement en flux sur PG, passez à sqlx brut sur une connexion tenue (`pool.acquire()`, puis `sqlx::query(...).fetch(...)` sur la branche Postgres de `conn.conn()`) — le protocole étendu diffuse depuis le serveur sans re-recherche par offset.
 
 **Mélanger `next_chunk` et `next_row` sur le même itérateur est sûr.** Le tampon interne `VecDeque` se vide dans l'ordre des lignes avant toute nouvelle récupération en base, donc un `next_chunk` après une vidange partielle par `next_row` renvoie d'abord les lignes restantes en tampon, puis continue avec de nouveaux chunks.
 
@@ -366,11 +366,11 @@ while let Some(post) = iter.next_row(&pool).await? {
 **Risque d'écriture concurrente.** Chaque chunk est une requête distincte, donc les lignes insérées/supprimées entre les chunks peuvent être omises ou dupliquées (le problème classique de « fenêtrage » de la pagination par OFFSET). Pour les tables en lecture seule / en ajout uniquement — le cas d'usage typique d'export — ce n'est pas un souci. Pour les tables écrites en concurrence, vous avez besoin d'une transaction en isolation par instantané afin que chaque chunk voie la même vue. **`ChunkedIter` prend un `&Pool`, pas un `&mut Transaction`, donc l'API du découpeur ne peut pas être utilisée directement à l'intérieur de la transaction** — écrivez plutôt le SELECT découpé à la main contre la transaction :
 
 ```rust
-let mut tx = pool.begin().await?;
-sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-    .execute(&mut *tx).await?;
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
+rustango::sql::raw_execute_tx(&mut tx, "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", vec![])
+    .await?;
 
-// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut *tx)`,
+// Hand-loop LIMIT/OFFSET chunks against the tx with `.fetch_on(&mut tx)`,
 // so every chunk reads from the same snapshot.
 let chunk_size = 2_000_i64;
 let mut offset = 0_i64;
@@ -379,7 +379,7 @@ loop {
         .order_by(&[("id", false)])
         .limit(chunk_size)
         .offset(offset)
-        .fetch_on(&mut *tx)
+        .fetch_on(&mut tx)
         .await?;
     if rows.is_empty() { break; }
     for post in &rows { /* … */ }
@@ -391,7 +391,7 @@ tx.commit().await?;
 
 **`select_for_update()` ne se propage pas d'un chunk à l'autre.** Les verrous de ligne détenus par `.select_for_update()` sont libérés à la fin de la transaction implicite de chaque chunk. Il n'existe pas de correctif au niveau du découpeur : le builder `.iterator()` prend un `&Pool`, les variantes de verrouillage ont besoin d'un `&mut Transaction`, et les deux ne se composent pas. Pour une vidange verrouillée, vous avez deux chemins, chacun avec un compromis :
 
-- **`.fetch_on(&mut *tx)` sur tout le résultat** — un seul aller-retour, un `Vec<T>` complet en mémoire. Convient quand le résultat tient.
+- **`.fetch_on(&mut tx)` sur tout le résultat** — un seul aller-retour, un `Vec<T>` complet en mémoire. Convient quand le résultat tient.
 - **LIMIT/OFFSET écrit à la main à l'intérieur de la transaction** — même forme que l'extrait d'isolation par instantané ci-dessus ; les chunks restent en flux mais vous sortez de l'API `ChunkedIter`.
 
 **`chunk_size` doit être > 0.** Les valeurs nulles ou négatives paniquent. Choisissez une valeur adaptée à votre budget de taille de ligne (`2000` est un bon point de départ pour des lignes étroites, à baisser pour des colonnes TEXT/JSONB larges).
@@ -1457,42 +1457,30 @@ Post::bulk_upsert_pool(
 
 ## Transactions
 
-> **Ces exemples sont Postgres.** `pool.begin()` est `sqlx::PgPool::begin` —
-> `rustango::sql::Pool` n'a pas de `begin()` du tout. Et les méthodes que vous
-> exécuteriez dans une transaction (`fetch_on`, `save_on`, `delete_on`) sont
-> elles-mêmes `#[cfg(feature = "postgres")]`.
->
-> Les points d'entrée multi-backends sont `rustango::sql::transaction_pool(&pool)`
-> et `rustango::sql::atomic(&pool, …)` (via `tx.lock().await?`). Tous deux renvoient un `PoolTx` ; vous
-> faites un `match` sur son `tx.conn()` (un `TxConn`) par backend — plutôt qu'une
-> transaction de pilote : une transaction tri-dialecte s'écrit donc par branche,
-> pas en changeant le type de pool.
+> **Ne mélangez pas les appels `&pool` dans une transaction.** Chaque appel entre
+> `transaction_pool` et `commit` doit cibler la transaction (`&mut tx`). Un
+> `&pool` / `fetch()` / `save(&pool)` égaré emprunte une *seconde* connexion et
+> peut provoquer un interblocage du pool sous charge. Faites passer le `tx`, ou
+> utilisez `rustango::sql::atomic`.
 
-
-> **Piège — ne mélangez pas les appels `&pool` à l'intérieur d'une transaction.** Chaque appel
-> entre `pool.begin()` et `commit` doit cibler le handle de la transaction
-> (`&mut *tx`). Un `&pool` / `fetch()` / `save_on(&pool)` égaré emprunte une
-> *seconde* connexion et peut provoquer un interblocage du pool sous charge. Faites passer le `tx`
-> à travers, ou utilisez `rustango::sql::atomic`.
-
-Exécute plusieurs écritures comme une unité qui réussit toute entière ou est entièrement annulée — une transaction. Ouvrez-en une avec `pool.begin()` et exécutez chaque instruction contre la connexion de la transaction via les méthodes `_on` (`fetch_on`, `save_on`), afin que le travail atterrisse sur la transaction en cours plutôt que sur une nouvelle connexion du pool.
+Exécutez plusieurs écritures comme une unité qui réussit toute entière ou est entièrement annulée. Ouvrez-en une avec `rustango::sql::transaction_pool(&pool)` : cela fonctionne sur chaque backend. Lisez avec `fetch_on(&mut tx)` et écrivez avec les méthodes `_tx` (`save_tx`, `insert_tx`, `delete_tx`), pour que le travail atterrisse dans la transaction ouverte et non sur une nouvelle connexion du pool.
 
 ```rust
-let mut tx = pool.begin().await?;
+let mut tx = rustango::sql::transaction_pool(&pool).await?;
 
 let mut a = Account::objects()
     .where_(Account::id.eq(1))
-    .fetch_on(&mut *tx).await?
+    .fetch_on(&mut tx).await?
     .pop().unwrap();
 let mut b = Account::objects()
     .where_(Account::id.eq(2))
-    .fetch_on(&mut *tx).await?
+    .fetch_on(&mut tx).await?
     .pop().unwrap();
 
 a.balance -= 100;
 b.balance += 100;
-a.save_on(&mut *tx).await?;
-b.save_on(&mut *tx).await?;
+a.save_tx(&mut tx).await?;
+b.save_tx(&mut tx).await?;
 
 tx.commit().await?;
 ```
@@ -1525,7 +1513,7 @@ post.tags_m2m().clear(&pool).await?;
 let has = post.tags_m2m().contains(42, &pool).await?;
 ```
 
-`all` renvoie des ids `i64` ; pour des clés `String` ou `Uuid`, utilisez `all_as::<K>(&pool)`.
+`all` renvoie des ids `i64` ; pour des clés `String` ou `Uuid`, utilisez `all::<K>(&pool)`.
 
 La table de jonction (`post_tags`) est créée automatiquement par `make_migrations` avec une PK composite + deux FK `ON DELETE CASCADE`. Actuellement, la jonction n'a que les deux colonnes FK — pour des colonnes supplémentaires (added_by, order, created_at), vous définirez un modèle séparé et le parcourrez manuellement jusqu'à ce que le « modèle through personnalisé » arrive.
 
@@ -1773,7 +1761,7 @@ Dans une application multi-tenant, exécute chaque requête contre la connexion 
 use rustango::extractors::Tenant;
 
 async fn handler(mut t: Tenant) -> Result<...> {
-    let conn = t.conn();        // &mut PgConnection for this tenant
+    let conn = t.conn().await?; // &mut PgConnection for this tenant
     let posts = Post::objects().fetch_on(&mut *conn).await?;
     Ok(...)
 }

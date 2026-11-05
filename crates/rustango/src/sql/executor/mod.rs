@@ -455,16 +455,16 @@ pub use row_to_json::row_to_json;
 pub use row_to_json::row_to_json_my;
 #[cfg(feature = "sqlite")]
 pub use row_to_json::row_to_json_sqlite;
-pub(crate) use row_to_json::select_rows_as_json_with;
 pub use row_to_json::{select_one_row_as_json, select_rows_as_json};
 #[cfg(feature = "admin")]
 pub(crate) use row_to_json::{select_one_row_as_json_tx, select_rows_as_json_tx};
+pub(crate) use row_to_json::{select_rows_as_json_with, CellDecode, OnBadCell};
 
-/// [`annotate_count_children`] on a [`SqlExecutor`], e.g. `Tenant::conn()`
-/// whose connection holds the tenant's `search_path`.
+/// Each parent row with its count of `child_table` rows, on a [`SqlExecutor`],
+/// e.g. `Tenant::conn()` whose connection holds the tenant's `search_path`.
 ///
 /// # Errors
-/// As [`annotate_count_children`].
+/// [`ExecError`] when the statement fails to build or run.
 pub async fn annotate_count_children_on<'c, P, E>(
     parent_qs: crate::query::QuerySet<P>,
     child_table: &'static str,
@@ -547,7 +547,7 @@ pub trait HasPkValue {
 impl<T: Model + Send> QuerySet<T> {}
 
 impl<T: Model + Send> QuerySet<T> {
-    /// [`Self::explain`] with your own [`SqlExecutor`] and [`ExplainOptions`],
+    /// EXPLAIN for this query on your own [`SqlExecutor`] with [`ExplainOptions`],
     /// on any backend (see [`explain_pool`] for each one's syntax).
     /// `analyze = true` really runs the query, side effects included,
     /// so it is opt-in.
@@ -1062,6 +1062,8 @@ pub async fn insert_returning_pool(
 
 /// What [`insert_returning_pool`] gives back: a full row on Postgres
 /// and SQLite, or just the auto-assigned `i64` PK on MySQL.
+/// Plumbing for the derive, not a stable API.
+#[doc(hidden)]
 pub enum InsertReturningPool {
     #[cfg(feature = "postgres")]
     PgRow(PgRow),

@@ -185,14 +185,14 @@ async fn a_value_the_resolver_could_never_match_is_refused() {
 async fn clear_empties_a_field_that_was_set() {
     let b = boot().await;
     b.tenant("acme").await;
-    // A port keeps the tenant routable once its host is gone.
+    // A path prefix keeps the tenant routable once its host is gone.
     b.run(&[
         "edit-tenant",
         "acme",
         "--host-pattern",
         "shop.example.com",
-        "--port",
-        "8081",
+        "--path-prefix",
+        "/acme",
     ])
     .await
     .expect("set");
@@ -206,7 +206,7 @@ async fn clear_empties_a_field_that_was_set() {
     );
 }
 
-/// No resolver routes a tenant without a host, path prefix or port.
+/// No resolver routes a tenant without a host or path prefix.
 #[tokio::test]
 async fn clearing_the_last_routing_key_is_refused() {
     let b = boot().await;
@@ -218,10 +218,7 @@ async fn clearing_the_last_routing_key_is_refused() {
         .run(&["edit-tenant", "acme", "--clear", "host-pattern"])
         .await
         .expect_err("an unroutable tenant must be refused");
-    assert!(
-        err.contains("needs a host, a path prefix or a port"),
-        "{err}"
-    );
+    assert!(err.contains("needs a host or a path prefix"), "{err}");
     assert_eq!(b.org("acme").await.host_pattern, before, "row unchanged");
 }
 
@@ -541,4 +538,104 @@ async fn no_path_points_a_tenant_at_the_registry_database() {
         !b.has_org("initech").await,
         "no Org row for a refused create"
     );
+}
+
+/// Purging a tenant made on a saved server closes its cached pool before
+/// its file goes: Windows will not delete a file that is still open.
+#[tokio::test]
+async fn purge_closes_the_tenant_pool() {
+    let b = boot().await;
+    let dir = b._tmp.path().join("srv");
+    std::fs::create_dir_all(&dir).unwrap();
+    b.run(&[
+        "add-db-server",
+        "files",
+        "--sqlite-dir",
+        &dir.display().to_string(),
+    ])
+    .await
+    .expect("add server");
+    b.run(&[
+        "create-tenant",
+        "acme",
+        "--mode",
+        "database",
+        "--backend",
+        "sqlite",
+        "--server",
+        "files",
+        "--no-migrate",
+    ])
+    .await
+    .expect("create");
+    let org = b.org("acme").await;
+    #[allow(irrefutable_let_patterns)]
+    let rustango::tenancy::TenantPool::Database { pool } =
+        b.pools.database_pool_for_org(&org).await.expect("pool")
+    else {
+        unreachable!("a database-mode tenant")
+    };
+    let files = || std::fs::read_dir(&dir).unwrap().count();
+    assert!(files() > 0, "the tenant has a file");
+    b.run(&[
+        "purge-tenant",
+        "acme",
+        "--confirm",
+        "acme",
+        "--purge-database",
+    ])
+    .await
+    .expect("purge");
+    assert!(pool.is_closed(), "the cached pool stayed open");
+    assert_eq!(files(), 0, "the tenant's file survived");
+}
+
+/// A connection still in use does not stall the purge: the pool close is
+/// bounded, and the drop goes on.
+#[tokio::test]
+async fn purge_finishes_while_a_connection_is_held() {
+    let b = boot().await;
+    let dir = b._tmp.path().join("srv");
+    std::fs::create_dir_all(&dir).unwrap();
+    b.run(&[
+        "add-db-server",
+        "files",
+        "--sqlite-dir",
+        &dir.display().to_string(),
+    ])
+    .await
+    .expect("add server");
+    b.run(&[
+        "create-tenant",
+        "acme",
+        "--mode",
+        "database",
+        "--backend",
+        "sqlite",
+        "--server",
+        "files",
+        "--no-migrate",
+    ])
+    .await
+    .expect("create");
+    let org = b.org("acme").await;
+    #[allow(irrefutable_let_patterns)]
+    let rustango::tenancy::TenantPool::Database { pool } =
+        b.pools.database_pool_for_org(&org).await.expect("pool")
+    else {
+        unreachable!("a database-mode tenant")
+    };
+    let held = pool.acquire().await.expect("held connection");
+    let purge = b.run(&[
+        "purge-tenant",
+        "acme",
+        "--confirm",
+        "acme",
+        "--purge-database",
+    ]);
+    let done = tokio::time::timeout(std::time::Duration::from_secs(30), purge)
+        .await
+        .expect("purge stalled on the held connection");
+    done.expect("purge");
+    drop(held);
 }

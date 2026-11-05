@@ -76,11 +76,11 @@
   {% if first_admin %}
   <table>
     <tr>
-      <th><label for="admin_email">first admin email</label></th>
+      <th><label for="admin_email">{{ user_label.email | default(value="Email") }}</label></th>
       <td><input type="email" id="admin_email" name="admin_email" maxlength="254" placeholder="optional"></td>
     </tr>
     <tr>
-      <th><label for="admin_username">username</label></th>
+      <th><label for="admin_username">{{ user_label.username }}</label></th>
       <td><input type="text" id="admin_username" name="admin_username" maxlength="64" placeholder="optional"></td>
     </tr>
   </table>

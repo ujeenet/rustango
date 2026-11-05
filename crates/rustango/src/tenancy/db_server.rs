@@ -26,31 +26,73 @@ pub struct DbServer {
     pub id: crate::sql::Auto<i64>,
     /// `[a-z0-9-]`, unique.
     #[rustango(max_length = 64, unique)]
+    #[rustango(
+        help_text = "Unique name tenants are created on, e.g. `eu-primary`: lowercase letters, digits and `-`."
+    )]
+    #[rustango(verbose_name = "Name")]
     pub name: String,
     /// `postgres`, `mysql` or `sqlite`; always the registry's backend.
     #[rustango(max_length = 16)]
+    #[rustango(help_text = "`postgres`, `mysql` or `sqlite`. Always the registry's backend.")]
+    #[rustango(verbose_name = "Backend")]
     pub backend: String,
     #[rustango(max_length = 255)]
+    #[rustango(
+        help_text = "Hostname or IP of the database server, e.g. `db.internal`. Not used for SQLite."
+    )]
+    #[rustango(verbose_name = "Host")]
     pub host: Option<String>,
+    #[rustango(
+        help_text = "TCP port. Empty means the backend's default: 5432 for Postgres, 3306 for MySQL."
+    )]
+    #[rustango(verbose_name = "Port")]
     pub port: Option<i32>,
     #[rustango(max_length = 128)]
+    #[rustango(
+        help_text = "Login that creates and drops tenant databases and logins, e.g. `postgres`. Security: it needs CREATE DATABASE and CREATE ROLE (or MySQL's CREATE USER) rights, so keep it off the app's own login."
+    )]
+    #[rustango(verbose_name = "Admin user")]
     pub admin_user: Option<String>,
     /// `enc:v1:` only. Private, so no caller can store a plain one.
     #[rustango(secret)]
+    #[rustango(
+        help_text = "Password of the admin user. Security: stored encrypted with `RUSTANGO_SECRET_KEY` and never shown again."
+    )]
+    #[rustango(verbose_name = "Admin password")]
     admin_password: Option<String>,
     /// A [`TlsMode`] name.
     #[rustango(max_length = 16)]
+    #[rustango(
+        help_text = "TLS for the admin connection: `disable`, `prefer`, `require`, `verify-ca` or `verify-full`. New servers default to `require`. Security: empty means the driver default, which may send the password in clear."
+    )]
+    #[rustango(verbose_name = "TLS mode")]
     pub tls_mode: Option<String>,
     /// Postgres only: where DDL runs instead of `postgres`.
     #[rustango(max_length = 63)]
+    #[rustango(
+        help_text = "Postgres only: the database the admin connects to for DDL. Empty means `postgres`."
+    )]
+    #[rustango(verbose_name = "Maintenance database")]
     pub maintenance_db: Option<String>,
     #[rustango(max_length = 1024)]
+    #[rustango(
+        help_text = "SQLite only: absolute path of the directory where tenant database files are created, e.g. `/srv/app/tenants`."
+    )]
+    #[rustango(verbose_name = "SQLite directory")]
     pub sqlite_dir: Option<String>,
     #[rustango(default = "true")]
+    #[rustango(
+        help_text = "Off: no new tenant can be created on this server. Tenants already on it keep working."
+    )]
+    #[rustango(verbose_name = "Active")]
     pub active: bool,
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
     #[rustango(auto_now)]
+    #[rustango(help_text = "When the row last changed. Set on every save.")]
+    #[rustango(verbose_name = "Updated at")]
     pub updated_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -67,21 +109,41 @@ pub struct TenantDatabase {
     #[rustango(primary_key)]
     pub id: crate::sql::Auto<i64>,
     #[rustango(max_length = 63)]
+    #[rustango(
+        help_text = "Slug of the tenant this database was created for. Written before the tenant row exists."
+    )]
+    #[rustango(verbose_name = "Tenant slug")]
     pub org_slug: String,
     /// Set once the tenant row exists.
+    #[rustango(help_text = "The tenant, once its row exists.")]
+    #[rustango(verbose_name = "Tenant")]
     pub org_id: Option<i64>,
     #[rustango(max_length = 64)]
+    #[rustango(help_text = "The database server the database was created on.")]
+    #[rustango(verbose_name = "Server")]
     pub server_name: String,
     #[rustango(max_length = 63)]
+    #[rustango(help_text = "Name of the created database, or the file name on SQLite.")]
+    #[rustango(verbose_name = "Database")]
     pub database_name: String,
     /// `None` on SQLite, which has no logins.
     #[rustango(max_length = 32)]
+    #[rustango(
+        help_text = "The tenant's own database login. Empty on SQLite, which has no logins."
+    )]
+    #[rustango(verbose_name = "Login")]
     pub login_name: Option<String>,
     /// Written before the `CREATE`, set once it succeeded. A row still
     /// `false` may name a database that exists but is not ours.
     #[rustango(default = "false")]
+    #[rustango(
+        help_text = "Set once the database was really created. A row still off may name a database that exists but was not made by this run, so it is never dropped."
+    )]
+    #[rustango(verbose_name = "Created")]
     pub created: bool,
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the row was created. Set by the database.")]
+    #[rustango(verbose_name = "Created at")]
     pub created_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 

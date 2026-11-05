@@ -96,7 +96,7 @@ struct RegisteredAction {
     table: &'static str,
     name: &'static str,
     perm: crate::admin::ActionPerm,
-    handler: crate::admin::AdminTxActionFn,
+    handler: crate::admin::ActionFn,
 }
 
 struct TenantSessionConfig {
@@ -267,10 +267,39 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         self
     }
 
-    /// Register a user-defined bulk action handler. Same semantics as
-    /// [`crate::admin::Builder::register_tx_action`]. The handler writes in
+    /// Register a custom bulk action. Same semantics as
+    /// [`crate::admin::Builder::register_action`]; the handler writes in
     /// a transaction on the resolved tenant's pool, search_path already
-    /// scoped to the tenant's schema.
+    /// scoped to the tenant's schema, and [`ActionCtx::org`](crate::admin::ActionCtx::org)
+    /// is that tenant.
+    #[must_use]
+    pub fn register_action<F>(
+        mut self,
+        model_table: &'static str,
+        action_name: &'static str,
+        perm: crate::admin::ActionPerm,
+        handler: F,
+    ) -> Self
+    where
+        F: for<'a> Fn(crate::admin::ActionCtx<'a>) -> crate::admin::AdminActionFuture<'a>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.actions.push(RegisteredAction {
+            table: model_table,
+            name: action_name,
+            perm,
+            handler: Arc::new(handler),
+        });
+        self
+    }
+
+    /// [`Self::register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
+    #[deprecated(
+        since = "0.63.0",
+        note = "use `register_action(table, name, ActionPerm::Change, handler)`; removed in 0.64.0"
+    )]
     #[must_use]
     pub fn register_tx_action<F>(
         self,
@@ -287,19 +316,22 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             + Sync
             + 'static,
     {
-        self.register_tx_action_with_perm(
+        self.register_action(
             model_table,
             action_name,
             crate::admin::ActionPerm::Change,
-            handler,
+            crate::admin::from_tx_handler(handler),
         )
     }
 
-    /// [`Self::register_tx_action`] checked against `perm`. Same
-    /// semantics as [`crate::admin::Builder::register_tx_action_with_perm`].
+    /// [`Self::register_action`] with a `(tx, pks)` handler.
+    #[deprecated(
+        since = "0.63.0",
+        note = "use `register_action`, whose handler takes an `ActionCtx`; removed in 0.64.0"
+    )]
     #[must_use]
     pub fn register_tx_action_with_perm<F>(
-        mut self,
+        self,
         model_table: &'static str,
         action_name: &'static str,
         perm: crate::admin::ActionPerm,
@@ -314,13 +346,12 @@ impl<DB: Database> TenantAdminBuilder<DB> {
             + Sync
             + 'static,
     {
-        self.actions.push(RegisteredAction {
-            table: model_table,
-            name: action_name,
+        self.register_action(
+            model_table,
+            action_name,
             perm,
-            handler: Arc::new(handler),
-        });
-        self
+            crate::admin::from_tx_handler(handler),
+        )
     }
 }
 
@@ -444,7 +475,8 @@ where
     }
 
     let (mut parts, body) = req.into_parts();
-    let org = match resolver.resolve(&parts, &pools.registry_pool()).await {
+    let registry = super::TenantRegistry::new(pools.registry_pool());
+    let org = match resolver.resolve_in(&parts, &registry).await {
         Ok(Some(o)) => o,
         Ok(None) => return (StatusCode::NOT_FOUND, "tenant not found").into_response(),
         Err(e) => {
@@ -826,9 +858,10 @@ where
     }
     parts.extensions.insert(admin_state);
     // Hooks bind the session, and an impersonation, to this tenant.
-    parts
-        .extensions
-        .insert(crate::object_permissions::RequestTenant(org.slug.clone()));
+    parts.extensions.insert(
+        super::TenantSlug::of(&org)
+            .map_or(super::RequestTenant::Unknown, super::RequestTenant::Tenant),
+    );
     let inner_req = Request::from_parts(parts, body);
     // Dispatch inside an `audit::with_source` scope so audited writes
     // pick up the signed-in user. With no session the source stays
@@ -1143,7 +1176,14 @@ async fn login_form(
             .unwrap_or_else(|_| crate::sso::policy::TenantSettings::break_glass());
         let local = query.is_some_and(|q| q.split('&').any(|p| p == "local=1"));
         ctx.insert("password_form", &settings.shows_password_form(local));
-        let providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
+        let mut providers = super::sso::list_enabled(tenant_pool, registry_pool, routes).await;
+        // The SSO start seals the landing; pass on only one this tenant accepts.
+        if let Some(n) = tenant_next(next.as_deref(), routes, cookie_path) {
+            let q = format!("?next={}", crate::url_codec::url_encode(&n));
+            for b in &mut providers {
+                b.login_url.push_str(&q);
+            }
+        }
         let marked =
             crate::cookies::cookie_from_headers(headers, super::sso::AUTO_COOKIE).is_some();
         if let Some(to) =
@@ -1268,10 +1308,14 @@ async fn login_submit(
         return (StatusCode::FORBIDDEN, "CSRF token missing or mismatched").into_response();
     }
 
+    // Locks bind to the org id: a registry org always has one.
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     // Rate limits and the account lock, before the lookup (#1609).
     let mut attempt = match crate::login_throttle::shared()
         .begin(
-            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &crate::login_throttle::LoginScope::Tenant(tenant),
             &ip,
             &form.username,
         )
@@ -1612,11 +1656,7 @@ fn end_impersonation_response(cookie_path: &str, apex: &super::server::LinkApex)
         })
         .collect();
     let apex = apex.get();
-    let port_suffix = std::env::var("RUSTANGO_TENANT_PORT")
-        .ok()
-        .filter(|s| !s.is_empty() && s != "80" && s != "443")
-        .map(|p| format!(":{p}"))
-        .unwrap_or_default();
+    let port_suffix = crate::tenancy::server::tenant_port_suffix(None, None);
     let target = format!(
         "{}/orgs",
         crate::tenancy::server::tenant_origin(&apex, &port_suffix)
@@ -1792,9 +1832,12 @@ async fn change_password_submit(
             Err(_) => Ok(false),
         }
     };
+    let Some(tenant) = super::TenantSlug::of(org) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "tenant has no id").into_response();
+    };
     let ok = match crate::login_throttle::shared()
         .verify_current_password(
-            &crate::login_throttle::LoginScope::Tenant(org.slug.clone()),
+            &crate::login_throttle::LoginScope::Tenant(tenant),
             ip,
             super::login_key(super::login_field(), &user),
             verify,
@@ -2027,23 +2070,23 @@ fn sanitize_next_with_routes(
     routes: &super::routes::RouteConfig,
     cookie_path: &str,
 ) -> String {
-    // `auth_decorators::safe_next` owns the shape check: it
-    // percent-decodes, requires both the raw and decoded form to look
-    // like a path, and rejects `/\`, which a browser rewrites into a
-    // protocol-relative URL. Do not hand-roll it here.
-    let Some(s) = next.and_then(crate::auth_decorators::safe_next) else {
-        return tenant_home(cookie_path);
-    };
-    // Bouncing back to login/logout would loop. Not a safety check —
-    // that is `safe_next`'s job — so it stays here.
-    if s.starts_with(&routes.login_url) || s.starts_with(&routes.logout_url) {
-        return tenant_home(cookie_path);
-    }
+    tenant_next(next, routes, cookie_path).unwrap_or_else(|| tenant_home(cookie_path))
+}
+
+/// A post-login `next` this tenant may land on (password or SSO sign-in).
+pub(super) fn tenant_next(
+    next: Option<&str>,
+    routes: &super::routes::RouteConfig,
+    cookie_path: &str,
+) -> Option<String> {
+    // `auth_decorators::login_next` owns the shape check (`safe_next`)
+    // and the login/logout loop guard. Do not hand-roll them here.
+    let s = crate::auth_decorators::login_next(next, &routes.login_url, &routes.logout_url)?;
     // A prefix tenant shares its host: `/` is the console, `/t2/` another tenant.
     if cookie_path != "/" && !stays_under(&s, cookie_path) {
-        return tenant_home(cookie_path);
+        return None;
     }
-    s
+    Some(s)
 }
 
 /// Is `next` under `prefix` once the browser resolves `\`, `%2e` and dot segments?
@@ -2079,7 +2122,7 @@ fn inner_admin_state(
     // admin can't surface cross-tenant data.
     let mut builder = crate::admin::Builder::new(pool)
         .tenant_mode()
-        .tenant(&org.slug)
+        .tenant(org)
         // The tenancy session layer gates every route of this admin.
         .gated_upstream()
         // v0.28.0 (#74) — pass the configurable admin prefix
@@ -2146,12 +2189,11 @@ fn inner_admin_state(
     }
 
     for action in actions {
-        let handler = action.handler.clone();
-        builder = builder.register_tx_action_with_perm(
+        builder = builder.insert_action(
             action.table,
             action.name,
             action.perm,
-            move |tx, pks| handler(tx, pks),
+            action.handler.clone(),
         );
     }
     builder.into_request_state()
@@ -2233,8 +2275,38 @@ mod resolver_error_tests {
         }
     }
 
+    /// Overrides only `resolve_in`, which the tenant admin calls.
+    struct FailingIn;
+
+    #[async_trait::async_trait]
+    impl OrgResolver for FailingIn {
+        async fn resolve(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::sql::Pool,
+        ) -> Result<Option<Org>, TenancyError> {
+            unreachable!("the tenant admin calls resolve_in")
+        }
+
+        async fn resolve_in(
+            &self,
+            _parts: &axum::http::request::Parts,
+            _registry: &crate::tenancy::TenantRegistry,
+        ) -> Result<Option<Org>, TenancyError> {
+            Err(TenancyError::Resolution(
+                "could not reach registry-db:5432".into(),
+            ))
+        }
+    }
+
     #[tokio::test]
     async fn the_500_withholds_the_resolver_text() {
+        for resolver in [&Failing as &dyn OrgResolver, &FailingIn] {
+            the_500_withholds_the_text_of(resolver).await;
+        }
+    }
+
+    async fn the_500_withholds_the_text_of(resolver: &dyn OrgResolver) {
         let _env = crate::error::test_env::lock();
         let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         let pools = TenantPools::<sqlx::Sqlite>::new(registry);
@@ -2245,7 +2317,7 @@ mod resolver_error_tests {
             crate::admin::per_request_router("/__audit"),
             &pools,
             "",
-            &Failing,
+            resolver,
             &None,
             &[],
             None,

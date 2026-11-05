@@ -634,20 +634,25 @@ fn stamping_admin(pool: &Pool) -> axum::Router {
     use rustango::core::{Assignment, Filter, Op, SqlValue, UpdateQuery, WhereExpr};
     rustango::admin::Builder::new(pool.clone())
         .admin_prefix("")
-        .register_tx_action("aaw_card", "stamp", |tx, pks| {
-            let pks = pks.to_vec();
-            Box::pin(async move {
-                let q = UpdateQuery::new(
-                    Card::SCHEMA,
-                    vec![Assignment::new("body", SqlValue::String("stamped".into()))],
-                    WhereExpr::Predicate(Filter::new("code", Op::In, SqlValue::List(pks))),
-                );
-                rustango::sql::update_tx(tx, &q)
-                    .await
-                    .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
-                Ok(())
-            })
-        })
+        .register_action(
+            "aaw_card",
+            "stamp",
+            rustango::admin::ActionPerm::Change,
+            |mut ctx| {
+                let pks = ctx.pks().to_vec();
+                Box::pin(async move {
+                    let q = UpdateQuery::new(
+                        Card::SCHEMA,
+                        vec![Assignment::new("body", SqlValue::String("stamped".into()))],
+                        WhereExpr::Predicate(Filter::new("code", Op::In, SqlValue::List(pks))),
+                    );
+                    rustango::sql::update_tx(ctx.tx(), &q)
+                        .await
+                        .map_err(|e| rustango::admin::AdminError::Internal(e.to_string()))?;
+                    Ok(())
+                })
+            },
+        )
         .build()
 }
 

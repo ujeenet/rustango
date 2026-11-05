@@ -81,6 +81,18 @@ fn create_tenant_help_lists_server() {
     assert!(h.contains("--server <name>"), "{h}");
 }
 
+/// `create-operator` reads `--password-stdin`; help must list it.
+#[cfg(all(feature = "tenancy", feature = "manage"))]
+#[test]
+fn create_operator_help_lists_password_stdin() {
+    let h = help();
+    let line = h
+        .lines()
+        .find(|l| l.trim_start().starts_with("create-operator "))
+        .expect("create-operator is listed");
+    assert!(line.contains("--password-stdin"), "{line}");
+}
+
 /// The parser takes two positionals and then **flags only** — a third
 /// positional is rejected with "unexpected argument". Help used to
 /// advertise `create-user-key <slug> <username> [label]`.

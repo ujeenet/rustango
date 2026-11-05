@@ -828,7 +828,7 @@ Affiche la version du framework **Rustango**.
 
 ```bash
 $ cargo run -- version
-rustango 0.62.0
+rustango 0.63.0
 ```
 
 ### `about`
@@ -841,7 +841,7 @@ support en cas de problème.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.62.0
+  version:        0.63.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1077,7 +1077,7 @@ cargo run -- create-tenant gamma --mode database --server main
 | `--no-migrate` | Ignore l'application des migrations à scope tenant après le provisionnement |
 | `--backend postgres \| mysql \| sqlite` | Doit être le backend du registre, qui est la valeur par défaut |
 | `--schema-name <s>` | Remplace le nom de schéma généré en mode schéma |
-| `--port <n>` | Port sur lequel le tenant est joignable, pour le routage |
+| `--port <n>` | Port dans les liens du tenant ; seul, il ne route rien (voir plus bas) |
 | `--path-prefix <s>` | Préfixe de chemin sous lequel le tenant est joignable, pour le routage |
 | `--admin-email <e>` / `--admin-username <u>` | Crée le premier superutilisateur du tenant (voir **Premier administrateur** plus haut) |
 | `--resume` | Termine un tenant qu'un run précédent a laissé inactif après l'échec de ses migrations ; redonnez les mêmes options |
@@ -1125,7 +1125,7 @@ cargo run -- edit-tenant acme --clear host-pattern
 | `--display-name <name>` | Libellé lisible par un humain |
 | `--host-pattern <host>` | Nom d'hôte nu auquel le tenant répond |
 | `--path-prefix <path>` | Un segment avec slash initial, p. ex. `/acme` |
-| `--port <n>` | Port sur lequel le tenant est apparié |
+| `--port <n>` | Port dans les liens du tenant |
 | `--database-url <url>` | Fait tourner l'URL de connexion du tenant |
 | `--activate` / `--deactivate` | Met le tenant en service ou hors service |
 | `--clear <field>` | Vide `host-pattern`, `path-prefix` ou `port` |
@@ -1139,6 +1139,14 @@ Les valeurs sont validées comme `create-tenant` les valide : un motif
 d'hôte portant un port, ou un préfixe de chemin que le résolveur ne
 pourrait jamais produire, est refusé plutôt que stocké pour n'apparier
 silencieusement jamais rien.
+
+Un tenant a besoin d'un hôte ou d'un préfixe de chemin. Le serveur intégré ne
+route pas par port : une modification qui ne laisse qu'un port est refusée,
+comme une création avec seulement un port quand aucun apex n'est défini ; avec
+un apex, la création reçoit l'hôte par défaut `<slug>.<apex>`. Pour router par
+port, construisez votre propre chaîne de résolveurs avec `PortResolver` et
+servez votre propre routeur, un listener par port (le builder du serveur n'a
+pas de hook pour cela), puis définissez `RUSTANGO_TENANT_PORT_ROUTING=1`.
 
 Faire tourner `--database-url` change l'URL stockée. Chaque serveur bascule
 en 30 s, quand son cache de tenants se rafraîchit ; les autres modifications

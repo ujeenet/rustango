@@ -156,6 +156,8 @@ pub struct ProvisioningRun {
     /// so they share a table; without this a migrate run reads as a
     /// provisioning run that skipped most of its steps.
     #[rustango(max_length = 16, index, default = "'provision'")]
+    #[rustango(help_text = "What the run did: create a tenant, or migrate one.")]
+    #[rustango(verbose_name = "Kind")]
     pub kind: String,
 
     /// The tenant this run is for. Not a foreign key: the row is
@@ -164,31 +166,45 @@ pub struct ProvisioningRun {
     /// `ON DELETE CASCADE` would erase exactly the history someone
     /// comes looking for.
     #[rustango(max_length = 100, index)]
+    #[rustango(help_text = "The tenant the run is for. Kept after the tenant is purged.")]
+    #[rustango(verbose_name = "Tenant slug")]
     pub slug: String,
 
     /// Set once the `Org` row lands. `None` while a run is still before
     /// that step, or if it failed before reaching it.
+    #[rustango(help_text = "The tenant, once its row was created.")]
+    #[rustango(verbose_name = "Tenant")]
     pub org_id: Option<i64>,
 
     /// `pending` / `running` / `succeeded` / `failed`. See [`RunState`].
     #[rustango(max_length = 16, index)]
+    #[rustango(help_text = "`pending`, `running`, `succeeded` or `failed`.")]
+    #[rustango(verbose_name = "State")]
     pub state: String,
 
     #[rustango(max_length = 16)]
+    #[rustango(help_text = "The tenant's storage mode.")]
+    #[rustango(verbose_name = "Storage mode")]
     pub storage_mode: String,
 
     #[rustango(max_length = 16)]
+    #[rustango(help_text = "The tenant's backend.")]
+    #[rustango(verbose_name = "Backend")]
     pub backend_kind: String,
 
     /// **Redacted.** The password is replaced before this is stored;
     /// see the module docs.
     #[rustango(max_length = 500)]
+    #[rustango(help_text = "The tenant's database URL, with the password removed.")]
+    #[rustango(verbose_name = "Database URL")]
     pub database_url: Option<String>,
 
     /// Who asked for this run — an operator username, a webhook's
     /// caller id, or `cli`. Free text on purpose: the sources are not
     /// one namespace.
     #[rustango(max_length = 150)]
+    #[rustango(help_text = "Who asked for it: an operator, a webhook caller or `cli`.")]
+    #[rustango(verbose_name = "Requested by")]
     pub requested_by: Option<String>,
 
     /// The caller-supplied key that makes a retried request return this
@@ -196,14 +212,22 @@ pub struct ProvisioningRun {
     /// not the handler, is what wins a race between two simultaneous
     /// deliveries of one event.
     #[rustango(max_length = 200, unique)]
+    #[rustango(help_text = "The caller's key; a retry with it returns this run.")]
+    #[rustango(verbose_name = "Idempotency key")]
     pub idempotency_key: Option<String>,
 
     /// Why it failed, if it did. Already rendered for display.
+    #[rustango(help_text = "Why the run failed, if it did.")]
+    #[rustango(verbose_name = "Error")]
     pub error: Option<String>,
 
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the run started.")]
+    #[rustango(verbose_name = "Started at")]
     pub started_at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 
+    #[rustango(help_text = "When the run ended.")]
+    #[rustango(verbose_name = "Finished at")]
     pub finished_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -224,27 +248,39 @@ pub struct ProvisioningEvent {
     pub id: crate::sql::Auto<i64>,
 
     #[rustango(fk = "rustango_provisioning_runs", on = "id", index)]
+    #[rustango(help_text = "The run this step belongs to.")]
+    #[rustango(verbose_name = "Run")]
     pub run_id: i64,
 
     /// Monotonic within a run, from 1. **This is what `Last-Event-ID`
     /// resumes from**, so it has to be dense and ordered — an
     /// autoincrement `id` would be globally ordered but not per-run,
     /// and a reconnecting client would have nothing to count from.
+    #[rustango(help_text = "Step number within the run, from 1.")]
+    #[rustango(verbose_name = "Sequence")]
     pub seq: i64,
 
     /// Which provisioning step, or `migration` for a forwarded
     /// migration event.
     #[rustango(max_length = 32)]
+    #[rustango(help_text = "The step, or `migration` for a migration event.")]
+    #[rustango(verbose_name = "Step")]
     pub step: String,
 
     /// `started` / `ok` / `skipped` / `failed` / `info`.
     #[rustango(max_length = 16)]
+    #[rustango(help_text = "`started`, `ok`, `skipped`, `failed` or `info`.")]
+    #[rustango(verbose_name = "Status")]
     pub status: String,
 
     /// Human-readable detail. Empty for a bare transition.
+    #[rustango(help_text = "Detail of the step.")]
+    #[rustango(verbose_name = "Message")]
     pub message: String,
 
     #[rustango(auto_now_add)]
+    #[rustango(help_text = "When the step was recorded.")]
+    #[rustango(verbose_name = "At")]
     pub at: crate::sql::Auto<chrono::DateTime<chrono::Utc>>,
 }
 

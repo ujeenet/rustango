@@ -2,6 +2,7 @@
 name = "platform_commerce_saas"
 version = "0.1.0"
 edition = "2021"
+publish = false
 # Two binaries (the server and the worker `make:worker` added),
 # so plain `cargo run` needs to be told which one — otherwise
 # `cargo run -- migrate` fails as ambiguous.

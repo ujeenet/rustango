@@ -69,29 +69,38 @@ pub(crate) struct ServerKeys {
 }
 
 impl ServerKeys {
-    /// Panics on the prod tier without a valid `RUSTANGO_SESSION_SECRET`.
-    pub(crate) fn load() -> Self {
+    /// The keys for this tier; the prod tier refuses to start without a
+    /// valid `RUSTANGO_SESSION_SECRET`.
+    pub(crate) fn load() -> Result<Self, crate::session::SessionSecretError> {
         let tier = crate::session::tier_from_env();
         let env = std::env::var(crate::session::SESSION_SECRET_ENV).ok();
         if let Some(msg) = per_pod_key_warning(&tier, env.as_deref()) {
             tracing::warn!(target: "rustango::server", "{msg}");
         }
-        Self::from_files(|p| crate::session::load_session_secret_for_tier(&tier, p))
+        Self::from_files(|p| crate::session::try_load_session_secret_for_tier(&tier, p))
     }
 
     /// Each key from its dev file path, through `load`.
-    fn from_files(load: impl Fn(&std::path::Path) -> SessionSecret) -> Self {
+    fn from_files<E>(
+        load: impl Fn(&std::path::Path) -> Result<SessionSecret, E>,
+    ) -> Result<Self, E> {
         use crate::session::{OPERATOR_SESSION_KEY_PATH, TENANT_SESSION_KEY_PATH};
-        Self {
-            tenant: load(std::path::Path::new(TENANT_SESSION_KEY_PATH)),
-            operator: load(std::path::Path::new(OPERATOR_SESSION_KEY_PATH)),
-        }
+        Ok(Self {
+            tenant: load(std::path::Path::new(TENANT_SESSION_KEY_PATH))?,
+            operator: load(std::path::Path::new(OPERATOR_SESSION_KEY_PATH))?,
+        })
     }
 
     /// Off prod, under `root`, with the env value passed in.
     #[cfg(test)]
     fn dev_at(env: Option<&str>, root: &std::path::Path) -> Self {
-        Self::from_files(|p| SessionSecret::from_raw_or_disk(env, &root.join(p)))
+        let keys = Self::from_files(|p| {
+            Ok::<_, std::convert::Infallible>(SessionSecret::from_raw_or_disk(env, &root.join(p)))
+        });
+        match keys {
+            Ok(keys) => keys,
+            Err(never) => match never {},
+        }
     }
 }
 

@@ -682,6 +682,7 @@ fn router_unlogged(
     tenant_login_url: String,
 ) -> Router {
     let mut tera = crate::template_extensions::html_tera();
+    crate::template_extensions::register_help_filter(&mut tera);
     tera.add_raw_templates([
         (
             "_theme_tokens.html",
@@ -2026,6 +2027,8 @@ async fn org_edit_form(
         if LOCKED_ORG_FIELDS.contains(&field.name) {
             locked_rows.push(serde_json::json!({
                 "name": field.name,
+                "label": field.display_label(),
+                "help": field.help_text,
                 "value": prefill,
             }));
             continue;
@@ -2043,6 +2046,8 @@ async fn org_edit_form(
         };
         editable_rows.push(serde_json::json!({
             "name": field.name,
+            "label": field.display_label(),
+            "help": field.help_text,
             "input": input_html,
             "helper": helper,
         }));
@@ -2493,6 +2498,41 @@ async fn static_rustango_png() -> Response<Body> {
 
 // ----------------------------- helpers
 
+/// A model's field labels and help texts as `label` / `help` maps, so a
+/// console form reads the same schema text as the admin.
+pub(super) fn insert_field_text(ctx: &mut Context, schema: &'static crate::core::ModelSchema) {
+    insert_field_text_as(ctx, "", schema);
+}
+
+/// [`insert_field_text`] under `{prefix}_label` / `{prefix}_help`, for a
+/// form that also shows another model's fields. Every field has a key, so a
+/// field without help renders empty rather than failing the page.
+pub(super) fn insert_field_text_as(
+    ctx: &mut Context,
+    prefix: &str,
+    schema: &'static crate::core::ModelSchema,
+) {
+    let help: std::collections::BTreeMap<&str, &str> = schema
+        .fields
+        .iter()
+        .map(|f| (f.name, f.help_text.unwrap_or_default()))
+        .collect();
+    let label: std::collections::BTreeMap<&str, &str> = schema
+        .fields
+        .iter()
+        .map(|f| (f.name, f.display_label()))
+        .collect();
+    let key = |k: &str| {
+        if prefix.is_empty() {
+            k.to_owned()
+        } else {
+            format!("{prefix}_{k}")
+        }
+    };
+    ctx.insert(key("help"), &help);
+    ctx.insert(key("label"), &label);
+}
+
 // The crate's one query-value encoder; it also escapes `/`.
 use crate::url_codec::url_encode as urlencoding_lite;
 
@@ -2714,6 +2754,29 @@ mod withheld_tests {
 }
 
 #[cfg(test)]
+mod field_text_tests {
+    /// The first-admin email row renders whether or not `User` has an
+    /// `email` column (it exists only with `sso`).
+    #[test]
+    fn the_email_label_renders_without_the_column() {
+        let mut ctx = tera::Context::new();
+        super::insert_field_text_as(
+            &mut ctx,
+            "user",
+            <crate::tenancy::User as crate::core::Model>::SCHEMA,
+        );
+        let line = r#"{{ user_label.email | default(value="Email") }}"#;
+        let out = tera::Tera::one_off(line, &ctx, false).expect("renders");
+        assert!(!out.is_empty());
+        #[cfg(not(feature = "sso"))]
+        {
+            assert_eq!(out, "Email");
+            assert!(tera::Tera::one_off("{{ user_label.email }}", &ctx, false).is_err());
+        }
+    }
+}
+
+#[cfg(test)]
 mod database_url_hint_tests {
     use super::database_url_hint;
 
@@ -2738,7 +2801,7 @@ mod database_url_hint_tests {
 #[cfg(test)]
 mod handoff_port_tests {
     use crate::tenancy::server::{
-        tenant_path_prefix as handoff_prefix, tenant_port_suffix as handoff_port_suffix,
+        port_suffix_from as handoff_port_suffix, tenant_path_prefix as handoff_prefix,
     };
 
     #[test]
