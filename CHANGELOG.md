@@ -11,6 +11,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 ### Changed
 
 - `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
+### Fixed
+
+- MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()` reads a JSON column as `Json`; `inspectdb` reads MariaDB's quoted defaults and unsigned lengths.
 
 ## [0.63.0] — 2026-11-04
 

@@ -1182,13 +1182,15 @@ fn column_definition(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> St
         sql_type_with_dialect(f, dialect)
     );
     if let Some(expr) = &f.generated_as {
-        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
-    } else if let Some(expr) = &f.default {
-        let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
-        let _ = write!(sql, " DEFAULT {rendered}");
-    }
-    if !f.nullable {
-        sql.push_str(" NOT NULL");
+        dialect.write_generated_column(&mut sql, expr, f.nullable);
+    } else {
+        if let Some(expr) = &f.default {
+            let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
+            let _ = write!(sql, " DEFAULT {rendered}");
+        }
+        if !f.nullable {
+            sql.push_str(" NOT NULL");
+        }
     }
     if let Some(comment) = &f.db_comment {
         if let Some(inline) = dialect.write_inline_column_comment(comment) {
@@ -2121,10 +2123,7 @@ pub(super) fn create_table_sql_as(
         // Mirrors the live-registry behavior in
         // `migrate::ddl::write_column_def`.
         if let Some(expr) = &f.generated_as {
-            let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
-            if !f.nullable {
-                sql.push_str(" NOT NULL");
-            }
+            dialect.write_generated_column(&mut sql, expr, f.nullable);
             // db_comment still applies on MySQL even for generated columns.
             if let Some(comment) = &f.db_comment {
                 if let Some(inline) = dialect.write_inline_column_comment(comment) {
@@ -2627,10 +2626,7 @@ fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dial
     );
     // As CREATE TABLE: no DEFAULT, CHECK or FK beside the expression.
     if let Some(expr) = &f.generated_as {
-        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
-        if !f.nullable {
-            sql.push_str(" NOT NULL");
-        }
+        dialect.write_generated_column(&mut sql, expr, f.nullable);
         sql.push_str(&inline_comment(f, dialect));
         return sql;
     }

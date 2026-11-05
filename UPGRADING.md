@@ -151,6 +151,7 @@ untouched.
 ## Unreleased
 
 - `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
+- On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
 
 ## 0.63.0
 

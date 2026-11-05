@@ -1827,8 +1827,9 @@ async fn migrate_lock_held(backend: Backend, url: &str) -> bool {
         #[cfg(feature = "mysql")]
         Backend::Mysql => {
             let mut c = sqlx::MySqlConnection::connect(url).await.unwrap();
-            let held: (Option<u64>,) = sqlx::query_as(
-                "SELECT IS_USED_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE())))",
+            // SIGNED: MySQL types the id BIGINT UNSIGNED, MariaDB INT.
+            let held: (Option<i64>,) = sqlx::query_as(
+                "SELECT CAST(IS_USED_LOCK(CONCAT('rustango_migrate_', SHA1(DATABASE()))) AS SIGNED)",
             )
             .fetch_one(&mut c)
             .await

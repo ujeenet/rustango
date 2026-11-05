@@ -1645,11 +1645,19 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         AggregateExpr::Max(col) => format!("MAX({})", col_sql(col)),
         AggregateExpr::Min(col) => format!("MIN({})", col_sql(col)),
         AggregateExpr::AnyValue(col) => {
-            // PG 16+ and MySQL have `any_value()`. SQLite does not,
-            // so use `min()`: any value satisfies the contract.
+            // PG 16+ and MySQL have `any_value()`. SQLite and MariaDB do
+            // not, so use `min()`: any value satisfies the contract.
             let ident = col_sql(col);
             match b.d.name() {
-                "mysql" => format!("ANY_VALUE({ident})"),
+                "mysql" => {
+                    let mut sql = String::new();
+                    super::mysql::ByServer {
+                        mysql: &format!("ANY_VALUE({ident})"),
+                        mariadb: &format!("MIN({ident})"),
+                    }
+                    .write(&mut sql);
+                    sql
+                }
                 "sqlite" => format!("min({ident})"),
                 _ => format!("any_value({ident})"),
             }

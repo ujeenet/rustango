@@ -323,6 +323,21 @@ impl Dialect for MySql {
         Some(format!(" COMMENT {}", self.quote_literal(comment)))
     }
 
+    /// MariaDB refuses `NULL` / `NOT NULL` on a generated column.
+    fn write_generated_column(&self, sql: &mut String, expr: &str, nullable: bool) {
+        sql.push_str(" GENERATED ALWAYS AS (");
+        sql.push_str(expr);
+        sql.push_str(") STORED");
+        if !nullable {
+            sql.push(' ');
+            ByServer {
+                mysql: "NOT NULL",
+                mariadb: "",
+            }
+            .write(sql);
+        }
+    }
+
     /// MySQL writes a table comment as a `COMMENT='…'` trailer after
     /// the closing paren.
     fn write_inline_table_comment(&self, comment: &str) -> Option<String> {
@@ -618,14 +633,20 @@ impl Dialect for MySql {
         None
     }
 
+    /// MariaDB ignores the `SET_VAR` hint and takes `SET STATEMENT` instead.
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
         tables
             .iter()
             .map(|t| {
-                format!(
-                    "DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM {}",
-                    self.quote_ident(t)
-                )
+                let mut sql = String::new();
+                ByServer {
+                    mysql: "",
+                    mariadb: "SET STATEMENT foreign_key_checks=0 FOR",
+                }
+                .write(&mut sql);
+                sql.push_str(" DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM ");
+                sql.push_str(&self.quote_ident(t));
+                sql
             })
             .collect()
     }
@@ -1387,6 +1408,32 @@ mod tests {
             MySql.ci_text_type(None),
             "LONGTEXT CHARACTER SET utf8mb4 /*!80000 COLLATE utf8mb4_0900_as_ci */ \
              /*M!101000 COLLATE utf8mb4_uca1400_nopad_as_ci */"
+        );
+    }
+
+    /// MariaDB refuses `NOT NULL` on a generated column; MySQL keeps it.
+    #[test]
+    fn generated_not_null_is_mysql_only() {
+        let mut sql = String::new();
+        MySql.write_generated_column(&mut sql, "a + 1", false);
+        assert_eq!(
+            sql,
+            " GENERATED ALWAYS AS (a + 1) STORED /*!80000 NOT NULL */ /*M!  */"
+        );
+        let mut sql = String::new();
+        MySql.write_generated_column(&mut sql, "a + 1", true);
+        assert_eq!(sql, " GENERATED ALWAYS AS (a + 1) STORED");
+    }
+
+    /// MariaDB has no `SET_VAR` hint, so it takes `SET STATEMENT … FOR`.
+    #[test]
+    fn clear_tables_drops_fk_checks_on_both_servers() {
+        assert_eq!(
+            MySql.clear_tables_sql(&["t"]),
+            [
+                "/*!80000  */ /*M! SET STATEMENT foreign_key_checks=0 FOR */ \
+              DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM `t`"
+            ]
         );
     }
 
