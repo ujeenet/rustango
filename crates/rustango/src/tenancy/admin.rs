@@ -1097,13 +1097,12 @@ fn redirect_to_tenant_login(
     routes: &super::routes::RouteConfig,
     cookie_path: &str,
 ) -> Redirect {
-    // Home is where a password sign-in lands anyway: a `next` there would
-    // outrank the tenant's landing rules. The admin root is a real request.
-    let home = next_path.trim_end_matches('/') == cookie_path.trim_end_matches('/');
-    if home || next_path == routes.login_url || next_path.starts_with(&routes.logout_url) {
-        return Redirect::to(&routes.login_url);
-    }
-    let location = format!("{}?next={}", routes.login_url, urlencoding_lite(next_path));
+    let next = if next_path == routes.login_url || next_path.starts_with(&routes.logout_url) {
+        tenant_home(cookie_path)
+    } else {
+        next_path.to_string()
+    };
+    let location = format!("{}?next={}", routes.login_url, urlencoding_lite(&next));
     Redirect::to(&location)
 }
 
@@ -2478,9 +2477,10 @@ mod sanitize_next_tests {
         }
     }
 
-    /// The gate leaves `next` out where a sign-in lands anyway, so landing rules can fire.
+    /// The gate keeps every requested path as `next`; only login and logout,
+    /// which would loop, become the tenant home.
     #[test]
-    fn the_gate_sends_no_next_for_home_only() {
+    fn the_gate_keeps_next_but_for_login_and_logout() {
         let loc = |path: &str, routes: &RouteConfig, cp: &str| {
             let r = axum::response::IntoResponse::into_response(super::redirect_to_tenant_login(
                 path, routes, cp,
@@ -2488,26 +2488,21 @@ mod sanitize_next_tests {
             r.headers()["location"].to_str().unwrap().to_owned()
         };
         let host = RouteConfig::default();
-        for p in ["/", "/login", "/logout"] {
-            assert_eq!(loc(p, &host, "/"), "/login", "{p}");
+        for (p, next) in [
+            ("/", "%2F"),
+            ("/admin", "%2Fadmin"),
+            ("/admin/posts", "%2Fadmin%2Fposts"),
+        ] {
+            assert_eq!(loc(p, &host, "/"), format!("/login?next={next}"), "{p}");
         }
-        assert_eq!(loc("/admin", &host, "/"), "/login?next=%2Fadmin");
-        assert_eq!(
-            loc("/admin/posts", &host, "/"),
-            "/login?next=%2Fadmin%2Fposts"
-        );
+        for p in ["/login", "/logout"] {
+            assert_eq!(loc(p, &host, "/"), "/login?next=%2F", "{p}");
+        }
         let pre = RouteConfig::default().under_prefix("/t1");
-        for p in ["/t1", "/t1/"] {
-            assert_eq!(loc(p, &pre, "/t1"), "/t1/login", "{p}");
+        for (p, next) in [("/t1/", "%2Ft1%2F"), ("/t1/admin", "%2Ft1%2Fadmin")] {
+            assert_eq!(loc(p, &pre, "/t1"), format!("/t1/login?next={next}"), "{p}");
         }
-        assert_eq!(
-            loc("/t1/admin", &pre, "/t1"),
-            "/t1/login?next=%2Ft1%2Fadmin"
-        );
-        assert_eq!(
-            loc("/t1/admin/x", &pre, "/t1"),
-            "/t1/login?next=%2Ft1%2Fadmin%2Fx"
-        );
+        assert_eq!(loc("/t1/login", &pre, "/t1"), "/t1/login?next=%2Ft1%2F");
     }
 
     /// A rule path joins under a prefix, and never as `//` on a host.

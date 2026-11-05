@@ -1251,10 +1251,7 @@ impl SessionGate {
             "{prefix}{}",
             uri.path_and_query().map_or(uri.path(), |pq| pq.as_str())
         );
-        // The admin root is where a sign-in lands anyway: a `next` there
-        // would outrank the landing rules.
-        let root = uri.query().is_none() && wanted.trim_end_matches('/') == prefix;
-        let next = (request.method() == axum::http::Method::GET && !root)
+        let next = (request.method() == axum::http::Method::GET)
             .then(|| {
                 crate::auth_decorators::login_next(
                     Some(&wanted),

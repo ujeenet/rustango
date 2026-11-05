@@ -4259,14 +4259,13 @@ async fn landing_rules_lead_a_tenant_password_sign_in() {
                     .unwrap(),
             )
         };
-        let home = if pre.is_empty() { "/" } else { pre };
-        assert_eq!(
-            location(&get(home.to_owned()).await),
-            format!("{pre}/__login")
-        );
+        // The gate keeps a requested home as `next`; only the form invents none.
         assert_eq!(
             location(&get(format!("{pre}/")).await),
-            format!("{pre}/__login")
+            format!(
+                "{pre}/__login?next={}",
+                rustango::url_codec::url_encode(&format!("{pre}/"))
+            )
         );
         assert_eq!(
             location(&get(format!("{pre}/__admin/x")).await),
@@ -4375,5 +4374,40 @@ async fn a_signed_out_admin_visit_lands_back_on_the_admin() {
             .password_landing(h, &login, "ann", &format!("&next={next}"))
             .await;
         assert_eq!(landed, format!("{pre}/__admin"), "{pre}");
+    }
+}
+
+/// With no rules, an SSO sign-in from a signed-out `/` lands back on it, on
+/// the host and under the apex prefix, as before landing rules.
+#[tokio::test]
+async fn a_signed_out_home_visit_lands_back_home_through_sso() {
+    let _g = SUITE.lock().await;
+    let env = boot().await;
+    env.tenant_provider("corp", false).await;
+    env.linked_user("ann", false).await;
+    env.prefix_acme().await;
+    let host = env.tenants[0].host.clone();
+    for (h, pre) in [(host.as_str(), ""), ("app.test", "/acme")] {
+        let gate = send(
+            &env.admin,
+            Request::builder()
+                .uri(format!("{pre}/"))
+                .header(header::HOST, h)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let to = location(&gate);
+        let next = to
+            .split_once("?next=")
+            .unwrap_or_else(|| panic!("{pre}: the gate kept no next: {to}"))
+            .1;
+        // The login page hands its `next` to the SSO button.
+        let begin = format!("{pre}/__login/sso/corp?next={next}");
+        assert_eq!(
+            env.sso_landing(h, &begin, "ann").await,
+            format!("{pre}/"),
+            "{pre}"
+        );
     }
 }

@@ -10,7 +10,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Changed
 
-- The tenant login gate no longer adds `?next` for the tenant home, and the password form leaves its hidden `next` empty without one, so landing rules can apply.
+- The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply.
 
 ## [0.63.0] — 2026-11-04
 
