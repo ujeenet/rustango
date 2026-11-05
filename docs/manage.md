@@ -1852,7 +1852,7 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 
 | Field | Default | Purpose |
 |---|---|---|
-| `max_cached_database_pools` | 64 | Pool cache cap. Once full, the next uncached tenant errors out (no silent eviction). |
+| `max_cached_database_pools` | 64 | Pool cache cap. Once full, the least recently used tenant pool is closed to make room. |
 | `database_pool_max_connections` | 16 | Per-pool `max_connections`. Keep small so a tenant fan-out doesn't exhaust PG `max_connections`. |
 | `database_pool_min_connections` | 0 | Keeps N connections warm at all times. `≥1` drops first-request latency by paying the TCP/TLS/auth round-trip at boot. |
 | `database_pool_acquire_timeout` | 30s | How long `pool.acquire()` waits before erroring `PoolTimedOut`. |

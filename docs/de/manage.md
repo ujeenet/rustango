@@ -1907,7 +1907,7 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 
 | Feld | Standard | Zweck |
 |---|---|---|
-| `max_cached_database_pools` | 64 | Obergrenze für den Pool-Cache. Ist er voll, scheitert der nächste nicht-gecachte Tenant (keine stille Verdrängung). |
+| `max_cached_database_pools` | 64 | Obergrenze für den Pool-Cache. Ist er voll, wird der am längsten nicht genutzte Tenant-Pool geschlossen. |
 | `database_pool_max_connections` | 16 | `max_connections` pro Pool. Halten Sie es klein, damit ein Tenant-Fan-out PGs `max_connections` nicht erschöpft. |
 | `database_pool_min_connections` | 0 | Hält jederzeit N Verbindungen warm. `≥1` senkt die Latenz des ersten Requests, indem der TCP/TLS/Auth-Roundtrip beim Boot bezahlt wird. |
 | `database_pool_acquire_timeout` | 30s | Wie lange `pool.acquire()` wartet, bevor es mit `PoolTimedOut` scheitert. |

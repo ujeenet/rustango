@@ -1951,7 +1951,7 @@ sur `TenantPoolsConfig` :
 
 | Champ | Défaut | Objet |
 |---|---|---|
-| `max_cached_database_pools` | 64 | Plafond du cache de pools. Une fois plein, le prochain tenant non mis en cache échoue (pas d'éviction silencieuse). |
+| `max_cached_database_pools` | 64 | Plafond du cache de pools. Une fois plein, le pool du tenant le moins récemment utilisé est fermé. |
 | `database_pool_max_connections` | 16 | `max_connections` par pool. À garder petit pour qu'un éparpillement de tenants n'épuise pas le `max_connections` de PG. |
 | `database_pool_min_connections` | 0 | Garde N connexions chaudes en permanence. `≥1` réduit la latence de la première requête en payant l'aller-retour TCP/TLS/auth au démarrage. |
 | `database_pool_acquire_timeout` | 30s | Durée d'attente de `pool.acquire()` avant l'erreur `PoolTimedOut`. |
