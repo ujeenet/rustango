@@ -386,13 +386,14 @@ mod b_91153489 {
 }
 
 // use rustango::core::aggregates::{avg, count, count_all, stddev, sum};
-mod b_b046362a {
+mod b_5996fc88 {
     use crate::prelude::*;
     pub async fn run(pool: Pool) -> Result<(), BoxError> {
         let _ = {
             use rustango::core::aggregates::{avg, count, count_all, stddev, sum};
             use rustango::core::Column as _;
 
+            // `.aggregate()` adds no GROUP BY: one summary row for the whole queryset.
             let rows = Post::objects()
                 .aggregate()
                 // COUNT(*) FILTER (WHERE is_active AND status = 'published')

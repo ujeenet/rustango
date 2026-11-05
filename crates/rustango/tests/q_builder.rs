@@ -190,14 +190,12 @@ fn unknown_field_in_q_does_not_panic_at_compile() {
     // on statically-known field names, reach for `Q!()` (issue #269)
     // or the typed `User::field.eq()` path.
     //
-    // This test pins that the queryset still *compiles to SQL*
-    // without panicking — the DB would reject at exec.
+    // `compile()` checks the column and returns an error, never a panic.
     let q = Q::eq("no_such_field", 1_i64);
     let qs: QuerySet<User> = QuerySet::default().where_raw(q.into());
-    let select = qs
-        .compile()
-        .expect("compile should not panic on unknown field");
-    let sql = Postgres.compile_select(&select).unwrap().sql;
-    // Unknown field is rendered verbatim; the DB layer rejects it.
-    assert!(sql.contains(r#""no_such_field""#));
+    let err = qs.compile().unwrap_err();
+    assert!(
+        matches!(err, rustango::core::QueryError::UnknownField { ref field, .. } if field == "no_such_field"),
+        "{err:?}"
+    );
 }

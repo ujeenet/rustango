@@ -189,6 +189,12 @@ untouched.
 - `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` with every `Auto` PK set now write the PK (it was dropped and the rows inserted again); a mix of set and unset is refused.
 - A filter, search or autocomplete value with a NUL byte now gets a 400 on MySQL and SQLite too (it matched nothing). An admin computed-field `link` that is not a `/` path or an `http(s):` URL renders as plain text.
 - `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
+- `.aggregate().annotate(..)` with no `.values()` / `.group_by()` now returns one summary row. For a row per record with its columns, call `.annotate(..)` on the queryset.
+- `flip_order_by()` under `distinct_on` flips only the DISTINCT ON keys.
+- An empty `IN` list no longer returns `SqlError::EmptyInList`; it matches no row (`NOT IN`: every row).
+- `where_raw`, `where_(Q::..)` and their nested predicates now fail at `compile()` with `UnknownField` / `TypeMismatch` on a bad column or value type. `Q` takes column names (`author_id`, not `author`).
+- On SQLite, `LIKE` against a column or expression returns `OpNotSupportedInDialect`; match a literal pattern instead.
+- `refresh_from_db` and `fresh` now find a row outside the model's global scopes.
 
 ## 0.63.0
 

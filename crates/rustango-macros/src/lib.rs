@@ -4448,17 +4448,7 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                use #root::sql::FetcherPool as _;
-                let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
-                    ::core::clone::Clone::clone(&self.#pk_ident),
-                );
-                let mut _rows: ::std::vec::Vec<Self> =
-                    #root::query::QuerySet::<Self>::default()
-                        .filter(::core::stringify!(#pk_ident), _pk_val)
-                        .limit(1)
-                        .fetch(pool)
-                        .await?;
-                match _rows.into_iter().next() {
+                match self.fresh(pool).await? {
                     ::core::option::Option::Some(_fresh) => {
                         *self = _fresh;
                         ::core::result::Result::Ok(())
@@ -4633,8 +4623,10 @@ fn inherent_impl_tokens(
                 let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
                     ::core::clone::Clone::clone(&self.#pk_ident),
                 );
+                // By key alone, as `save()` and `delete()` write it.
                 let _rows: ::std::vec::Vec<Self> =
                     #root::query::QuerySet::<Self>::default()
+                        .without_global_scopes()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
                         .fetch(pool)

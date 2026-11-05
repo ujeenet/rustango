@@ -1179,10 +1179,15 @@ fn generated_pk(
                 })
             }
             #[cfg(feature = "mysql")]
+            // An id too wide for the key is unreadable, never wrapped.
             crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
                 T::I64 => Ok(SqlValue::I64(*id)),
-                T::I32 => Ok(SqlValue::I32(*id as i32)),
-                T::I16 => Ok(SqlValue::I16(*id as i16)),
+                T::I32 => i32::try_from(*id)
+                    .map(SqlValue::I32)
+                    .map_err(|_| unreadable()),
+                T::I16 => i16::try_from(*id)
+                    .map(SqlValue::I16)
+                    .map_err(|_| unreadable()),
                 _ => Err(unreadable()),
             },
             #[cfg(feature = "sqlite")]
@@ -3432,6 +3437,26 @@ mod in_chunk_tests {
         // A row wider than the cap still gets a batch of its own.
         assert_eq!(rows_per_batch(pg, 70_000, usize::MAX), 1);
         assert_eq!(rows_per_batch(pg, 0, 0), 1);
+    }
+}
+
+#[cfg(all(test, feature = "mysql"))]
+mod generated_pk_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+
+    #[test]
+    fn a_mysql_id_too_wide_for_the_pk_is_refused() {
+        let id = |n| crate::sql::InsertReturningPool::MySqlAutoId(n);
+        let small = FieldSchema::new("id", "id", FieldType::I16);
+        let int = FieldSchema::new("id", "id", FieldType::I32);
+        assert_eq!(generated_pk(&id(7), &small, "t").unwrap(), SqlValue::I16(7));
+        for (n, f) in [(70_000, &small), (3_000_000_000, &int)] {
+            assert!(matches!(
+                generated_pk(&id(n), f, "t"),
+                Err(ExecError::GeneratedPkUnreadable { table: "t", .. })
+            ));
+        }
     }
 }
 

@@ -952,10 +952,15 @@ impl<T: Model> QuerySet<T> {
     /// the first row of the reversed sort, which avoids `OFFSET` plus
     /// `COUNT(*)` and works on every dialect. It also swaps
     /// `NullsOrder::First` and `NullsOrder::Last`, so NULLs stay at the
-    /// same logical end.
+    /// same logical end. Under `.distinct_on(cols)` only the leading
+    /// `cols` keys flip, so each group keeps the row it picked.
     #[must_use]
     pub fn flip_order_by(mut self) -> Self {
-        for entry in &mut self.order_by {
+        let keys = match &self.distinct {
+            Some(crate::core::DistinctMode::On(cols)) => cols.len(),
+            _ => self.order_by.len(),
+        };
+        for entry in self.order_by.iter_mut().take(keys) {
             match entry {
                 PendingOrderItem::Field { desc, nulls, .. }
                 | PendingOrderItem::Expr { desc, nulls, .. } => {
@@ -1765,7 +1770,7 @@ impl<T: Model> QuerySet<T> {
     /// [`QueryError::UnknownField`] at `compile()` time.
     #[must_use]
     pub fn annotate_exists(self, name: &str) -> AggregateBuilder<T> {
-        let mut builder = self.aggregate();
+        let mut builder = self.aggregate_by(Grouping::PerRow);
         builder.push_relation_exists(name);
         builder
     }
@@ -1790,7 +1795,7 @@ impl<T: Model> QuerySet<T> {
         // The resolve-and-push worker lives on `AggregateBuilder` so a
         // query can chain more than one relation aggregate. Here we
         // just open a builder and delegate.
-        let mut builder = self.aggregate();
+        let mut builder = self.aggregate_by(Grouping::PerRow);
         builder.push_relation_aggregate(name, column, agg, suffix);
         builder
     }
@@ -2271,8 +2276,15 @@ impl<T: Model> QuerySet<T> {
     /// Start an [`AggregateBuilder`] carrying this queryset's filters as the
     /// WHERE clause. Chain `.group_by`, `.annotate`, `.having`, `.order_by`,
     /// `.limit`, `.offset` then call `.compile()` to get an [`AggregateQuery`].
+    ///
+    /// With no `.values()` or `.group_by()` it emits no GROUP BY, so the
+    /// aggregates sum up the whole queryset in one row.
     #[must_use]
     pub fn aggregate(self) -> AggregateBuilder<T> {
+        self.aggregate_by(Grouping::Whole)
+    }
+
+    fn aggregate_by(self, grouping: Grouping) -> AggregateBuilder<T> {
         AggregateBuilder {
             qs: self,
             group_by: Vec::new(),
@@ -2283,7 +2295,7 @@ impl<T: Model> QuerySet<T> {
             limit: None,
             offset: None,
             deferred_error: None,
-            values: None,
+            grouping,
         }
     }
 
@@ -2323,18 +2335,7 @@ impl<T: Model> QuerySet<T> {
     /// is **shape 1** — a pure projection, with no GROUP BY emitted.
     #[must_use]
     pub fn values(self, columns: &[&'static str]) -> AggregateBuilder<T> {
-        AggregateBuilder {
-            qs: self,
-            group_by: Vec::new(),
-            aggregates: Vec::new(),
-            aliases: Vec::new(),
-            having: None,
-            order_by: Vec::new(),
-            limit: None,
-            offset: None,
-            deferred_error: None,
-            values: Some(columns.to_vec()),
-        }
+        self.aggregate_by(Grouping::Values(columns.to_vec()))
     }
 
     /// Add a derived column without calling `.aggregate()`.
@@ -2360,9 +2361,10 @@ impl<T: Model> QuerySet<T> {
     /// | 1     | `.values_dict(&[cols])`                  | (none)          |
     /// | 2     | `.values(&[cols]).annotate(alias, agg)`  | the values cols |
     /// | 3     | `.annotate(alias, agg)` (alone)          | every scalar    |
+    /// | 4     | `.aggregate().annotate(alias, agg)`      | (none), one row |
     #[must_use]
     pub fn annotate(self, alias: &'static str, expr: AggregateExpr) -> AggregateBuilder<T> {
-        self.aggregate().annotate(alias, expr)
+        self.aggregate_by(Grouping::PerRow).annotate(alias, expr)
     }
 
     /// Project a correlated scalar subquery under `alias`, promoting to
@@ -2377,7 +2379,7 @@ impl<T: Model> QuerySet<T> {
         alias: &'static str,
         inner: crate::core::SelectQuery,
     ) -> AggregateBuilder<T> {
-        self.aggregate()
+        self.aggregate_by(Grouping::PerRow)
             .annotate(alias, crate::core::subquery::scalar_subquery(inner))
     }
 }
@@ -3237,8 +3239,16 @@ fn resolve_one_pending(
     Ok(match entry {
         PendingFilter::Raw(raw) => WhereExpr::Predicate(resolve_filter(model, raw)?),
         PendingFilter::DateTransform(dt) => resolve_date_transform(model, dt)?,
-        PendingFilter::Resolved(filter) => WhereExpr::Predicate(filter),
-        PendingFilter::Expr(expr) => expr,
+        // `where_raw` and `Q` take column names as given, so check them here.
+        PendingFilter::Resolved(filter) => {
+            let expr = WhereExpr::Predicate(filter);
+            expr.validate(model)?;
+            expr
+        }
+        PendingFilter::Expr(expr) => {
+            expr.validate(model)?;
+            expr
+        }
         PendingFilter::Negated(inner) => {
             WhereExpr::Not(Box::new(resolve_one_pending(model, *inner)?))
         }
@@ -3266,32 +3276,7 @@ fn resolve_filter(model: &'static ModelSchema, raw: RawFilter) -> Result<Filter,
             model: model.name,
             field: raw.field.clone(),
         })?;
-
-    // `IsNull` carries a Bool flag, not a value to compare with the
-    // field, so skip the type check. `In` carries a List, whose
-    // elements are not checked one by one. `JsonHasKey` binds a text key
-    // against a JSON column.
-    // A text pattern on a JSON column matches its text, as `Column::contains`.
-    let json_text = field.ty == crate::core::FieldType::Json
-        && matches!(raw.value, SqlValue::String(_))
-        && matches!(
-            raw.op,
-            Op::Like | Op::NotLike | Op::LikeEscaped | Op::ILike | Op::NotILike | Op::ILikeEscaped
-        );
-    let skip_type_check = json_text || matches!(raw.op, Op::IsNull | Op::In | Op::JsonHasKey);
-
-    if !skip_type_check {
-        if let Some(value_ty) = raw.value.field_type() {
-            if value_ty != field.ty {
-                return Err(QueryError::TypeMismatch {
-                    model: model.name,
-                    field: raw.field,
-                    expected: field.ty,
-                    actual: value_ty,
-                });
-            }
-        }
-    }
+    crate::core::check_value_type(model, field, raw.op, &raw.value)?;
 
     Ok(Filter {
         column: field.column,
@@ -3787,12 +3772,19 @@ pub struct AggregateBuilder<T: Model> {
     /// that do not work against an aggregate on the left. Only the
     /// first error is kept, so later calls cannot mask the cause.
     deferred_error: Option<crate::core::QueryError>,
-    /// Projection columns from [`Self::values`] or [`QuerySet::values`].
-    /// With `Some(cols)` and no explicit `.group_by(...)`, `compile()`
-    /// derives `GROUP BY cols`. With `None` and an aggregating
-    /// annotation, it groups by every non-aggregate scalar column
-    /// (shape 3).
-    values: Option<Vec<&'static str>>,
+    /// The GROUP BY `compile()` infers when `.group_by(...)` is not called.
+    grouping: Grouping,
+}
+
+/// The GROUP BY an [`AggregateBuilder`] infers, set by how it was opened.
+enum Grouping {
+    /// `.aggregate()`: no GROUP BY, one summary row.
+    Whole,
+    /// `.annotate(..)` or a relation aggregate: GROUP BY every scalar
+    /// column, so each row keeps its own columns (shape 3).
+    PerRow,
+    /// `.values(cols)`: GROUP BY those columns (shape 2).
+    Values(Vec<&'static str>),
 }
 
 impl<T: Model> AggregateBuilder<T> {
@@ -3811,7 +3803,7 @@ impl<T: Model> AggregateBuilder<T> {
     /// but usable mid-chain when you started from `.aggregate()`.
     #[must_use]
     pub fn values(mut self, columns: &[&'static str]) -> Self {
-        self.values = Some(columns.to_vec());
+        self.grouping = Grouping::Values(columns.to_vec());
         self
     }
 
@@ -3832,6 +3824,14 @@ impl<T: Model> AggregateBuilder<T> {
         self.annotate(alias, crate::core::subquery::scalar_subquery(inner))
     }
 
+    /// A relation aggregate is per parent row, so `.aggregate()` keeps
+    /// each row's own columns once one is added.
+    fn keep_rows(&mut self) {
+        if matches!(self.grouping, Grouping::Whole) {
+            self.grouping = Grouping::PerRow;
+        }
+    }
+
     /// Resolve a relation `name` (reverse-FK, M2M or generic-FK) into
     /// a correlated `RelatedAggregate` and stage it on this builder.
     /// Shared with [`QuerySet::annotate_count`] and friends, so a
@@ -3845,6 +3845,7 @@ impl<T: Model> AggregateBuilder<T> {
         suffix: &str,
     ) {
         use crate::core::{subquery, RelAggKind};
+        self.keep_rows();
         // `<name>_count` (no column) or `<name>_<suffix>_<column>`.
         let alias = || match column {
             Some(col) => std::borrow::Cow::Owned(format!("{name}_{suffix}_{col}")),
@@ -3929,6 +3930,7 @@ impl<T: Model> AggregateBuilder<T> {
     /// resolver, so the reverse-FK / M2M / GFK logic lives in one
     /// place.
     fn push_relation_exists(&mut self, name: &str) {
+        self.keep_rows();
         match QuerySet::<T>::resolve_rel_exists(name, /*negated=*/ false) {
             Some(exists) => {
                 let expr = AggregateExpr::RelatedAggregate(Box::new(
@@ -4257,7 +4259,7 @@ impl<T: Model> AggregateBuilder<T> {
                 }
             }
             self.group_by
-        } else if let Some(cols) = self.values.as_ref() {
+        } else if let Grouping::Values(cols) = &self.grouping {
             // `.values(cols)` set. Without an aggregating annotation
             // we'd produce a degenerate `SELECT cols GROUP BY cols`
             // (distinct-projection) — refuse and point the user at
@@ -4274,13 +4276,16 @@ impl<T: Model> AggregateBuilder<T> {
                 }
             }
             cols.clone()
-        } else if has_aggregating {
+        } else if has_aggregating
+            // With only `.alias()` entries a summary row has no columns.
+            && (matches!(self.grouping, Grouping::PerRow) || self.aggregates.is_empty())
+        {
             // Shape 3: an implicit GROUP BY over every non-aggregate
             // scalar column.
             model.scalar_fields().map(|f| f.column).collect()
         } else {
-            // No aggregating annotation and no values: a pure window
-            // annotation or an empty builder. No GROUP BY.
+            // `.aggregate()` sums up the whole set; a pure window
+            // annotation or an empty builder needs no GROUP BY either.
             Vec::new()
         };
 

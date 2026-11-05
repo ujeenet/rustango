@@ -423,6 +423,15 @@ pub(super) fn null_cast_for(
     d.null_cast(field.ty).map(BindCast::Untyped)
 }
 
+/// SQL has no `IN ()`: an empty `IN` matches no row, an empty `NOT IN` every row.
+fn write_empty_in(b: &mut Sql<'_>, op: Op) {
+    b.sql.push_str(if matches!(op, Op::NotIn) {
+        "1 = 1"
+    } else {
+        "1 = 0"
+    });
+}
+
 /// The right side of `IN` / `NOT IN`. Where arrays bind, a list of one
 /// array-bindable type is `= ANY($1)` / `<> ALL($1)`, so every list length
 /// shares one statement; NULLs keep the same meaning either way.
@@ -487,20 +496,25 @@ fn array_bindable(elements: &[SqlValue]) -> bool {
 /// A SELECT that may correlate to the enclosing query through `OuterRef`.
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     let scope = b.correlated_scope(query.model);
-    write_select_as(b, query, scope)
+    // Only the outermost SELECT may widen its select list (#2567).
+    let top_level = b.scope_stack.is_empty();
+    write_select_as(b, query, scope, top_level)
 }
 
 /// A derived-table SELECT, which cannot see the query it feeds.
 fn write_derived_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    write_select_as(b, query, Scope::plain(query.model))
+    write_select_as(b, query, Scope::plain(query.model), false)
 }
 
-fn write_select_as(b: &mut Sql<'_>, query: &SelectQuery, scope: Scope) -> Result<(), SqlError> {
-    // Only the outermost SELECT may widen its select list (#2567).
-    let top_level = b.scope_stack.is_empty();
+fn write_select_as(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    scope: Scope,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
     b.scope_stack.push(scope);
     let result = if query.compound.is_empty() {
-        write_select_inner(b, query, top_level)
+        write_select_inner(b, query, order_helpers)
     } else {
         write_compound_select(b, query)
     };
@@ -1215,7 +1229,20 @@ fn write_select_body_qualified(
         } else {
             &query.order_by
         };
-    write_order_limit_offset(b, order_by, query.limit, query.offset)?;
+    if order_helpers && needs_helpers {
+        // PG matches an expression to its helper by text, which differs
+        // once it binds a value, so sort by the helper's name.
+        write_order_limit_offset_with(b, order_by, query.limit, query.offset, |b, i, item| {
+            if helper_expr(item).is_some() {
+                b.write_ident(&format!("__rustango_order{i}"));
+                Ok(())
+            } else {
+                write_order_target(b, item)
+            }
+        })?;
+    } else {
+        write_order_limit_offset(b, order_by, query.limit, query.offset)?;
+    }
 
     if let Some(lock) = &query.lock_mode {
         write_lock_clause(b, lock);
@@ -1273,15 +1300,34 @@ fn distinct_order_helpers(
                     .any(|j| j.alias == *alias && j.project.contains(column));
                 (!projected).then(|| (i, expr.clone()))
             }
-            OrderItem::Column { column, .. } => {
+            OrderItem::Column { column, .. }
+            | OrderItem::Expr {
+                expr: Expr::Column(column),
+                ..
+            } => {
                 let projected = query
                     .projection
                     .as_ref()
                     .is_none_or(|cols| cols.contains(column));
                 (!projected).then_some((i, Expr::Column(column)))
             }
-            _ => None,
+            _ => helper_expr(item).map(|expr| (i, expr.clone())),
         })
+}
+
+/// An ORDER BY expression that is not a plain column: under DISTINCT it
+/// always gets a helper, and the ORDER BY names that helper.
+fn helper_expr(item: &crate::core::OrderItem) -> Option<&crate::core::Expr> {
+    use crate::core::{Expr, OrderItem};
+    match item {
+        OrderItem::Expr {
+            expr: Expr::Column(_) | Expr::AliasedColumn { .. },
+            ..
+        }
+        | OrderItem::Column { .. }
+        | OrderItem::Random => None,
+        OrderItem::Expr { expr, .. } => Some(expr),
+    }
 }
 
 /// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` for
@@ -1366,7 +1412,8 @@ fn write_from_source(
     b.sql.push_str(" FROM ");
     if let Some(sub) = source {
         b.sql.push('(');
-        write_derived_select(b, sub)?;
+        // The outer query reads named columns, so DISTINCT's helpers are safe.
+        write_select_as(b, sub, Scope::plain(sub.model), true)?;
         b.sql.push_str(") AS ");
         b.write_ident(scope.name);
     } else {
@@ -4922,6 +4969,13 @@ fn write_expr_compare(
             write_like(b, &lhs_str, ty, v.clone(), negated, escaped);
             return Ok(());
         }
+        // SQLite's LIKE ignores case, and only a literal can become a GLOB.
+        if b.d.name() == "sqlite" {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "case-sensitive LIKE with non-literal RHS",
+                dialect: b.d.name(),
+            });
+        }
         let p_start = b.sql.len();
         write_expr(b, rhs, None)?;
         let p = b.sql.split_off(p_start);
@@ -4980,7 +5034,8 @@ fn write_expr_compare(
                 return Err(SqlError::InRequiresList);
             };
             if elements.is_empty() {
-                return Err(SqlError::EmptyInList);
+                write_empty_in(b, op);
+                return Ok(());
             }
             write_expr(b, lhs, None)?;
             write_in_list(b, op, elements, None);
@@ -5341,10 +5396,11 @@ fn write_filter(
                 return Err(SqlError::InRequiresList);
             };
             if elements.is_empty() {
-                return Err(SqlError::EmptyInList);
+                write_empty_in(b, filter.op);
+            } else {
+                b.sql.push_str(&qualified_col);
+                write_in_list(b, filter.op, elements, cast);
             }
-            b.sql.push_str(&qualified_col);
-            write_in_list(b, filter.op, elements, cast);
         }
         Op::Between | Op::NotBetween => {
             let SqlValue::List(bounds) = &filter.value else {
