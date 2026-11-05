@@ -18,8 +18,9 @@
 //!   a token while they are checked. Only failures lock an account.
 //! - **Known clients**: a username that signed in from an IP within
 //!   [`KNOWN_CLIENT_TTL`](crate::login_throttle::KNOWN_CLIENT_TTL) skips a spent global limit from that IP, so a
-//!   spray from many IPs cannot lock every user out. Its per-IP limit and
-//!   account lock still apply.
+//!   spray from many IPs cannot lock every user out. From that IP it counts
+//!   on its own account lock, so a guesser elsewhere cannot lock it out;
+//!   its per-IP limit still applies.
 //!
 //! Shared across scopes: the per-IP buckets (agent secrets have their
 //! own), the account-lock store and the password-hashing queue
