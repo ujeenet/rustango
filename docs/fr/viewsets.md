@@ -277,7 +277,15 @@ fois : un chemin de ViewSet qui le répète servirait `/api/api/posts`.
 
 ### Étape 7 — Le lancer et exercer chaque endpoint
 
+Les posts pointent vers un auteur (`author_id` est une clé étrangère) : chargez-en
+d'abord un. Enregistrez ceci sous `fixtures/authors.json` :
+
+```json
+[{"model": "Author", "pk": 1, "fields": {"name": "Ada", "email": "ada@example.com"}}]
+```
+
 ```bash
+cargo run -- loaddata fixtures/authors.json
 cargo run            # listening on http://127.0.0.1:8080
 ```
 
@@ -369,25 +377,36 @@ sans démarrer de serveur :
 
 ```rust
 // tests/post_api.rs
-use rustango::test_client::TestClient;
+use myblog::blog::models::Author;
 use myblog::blog::post_view_set::PostViewSet;
 use rustango::sql::Pool;
+use rustango::test_client::TestClient;
+use rustango::Auto;
 use serde_json::json;
 
-async fn app() -> axum::Router {
+/// The router, and a fresh author for the posts to point at (`author_id`
+/// is a foreign key, so an id with no row fails the insert).
+async fn app() -> (TestClient, i64) {
     // `cargo test` does not read `.env`; load it as main.rs does.
     let _ = dotenvy::dotenv();
     // `Pool::connect` picks the backend from the URL scheme, so the
     // same test runs against sqlite, Postgres or MySQL.
     let pool = Pool::connect(&std::env::var("DATABASE_URL").unwrap()).await.unwrap();
-    PostViewSet::router("/api/posts", pool)
+    let mut author = Author {
+        id: Auto::default(),
+        name: "Test author".into(),
+        email: "author@example.com".into(),
+    };
+    author.save(&pool).await.unwrap();
+    let author_id = *author.id.get().unwrap();
+    (TestClient::new(PostViewSet::router("/api/posts", pool)), author_id)
 }
 
 #[tokio::test]
 async fn rejects_short_title() {
-    let client = TestClient::new(app().await);
+    let (client, author_id) = app().await;
     let res = client.post("/api/posts")
-        .json(&json!({"title":"hi","content":"x","author_id":1}))
+        .json(&json!({"title":"hi","content":"x","author_id":author_id}))
         .send().await;
     assert_eq!(res.status, 422);
     assert!(res.json_value()["details"]["title"].is_array());   // field-keyed error shape
@@ -395,9 +414,9 @@ async fn rejects_short_title() {
 
 #[tokio::test]
 async fn create_then_list() {
-    let client = TestClient::new(app().await);
+    let (client, author_id) = app().await;
     let created = client.post("/api/posts")
-        .json(&json!({"title":"Hello","content":"b","status":"published","author_id":1}))
+        .json(&json!({"title":"Hello","content":"b","status":"published","author_id":author_id}))
         .send().await;
     assert_eq!(created.status, 201);
     let list = client.get("/api/posts").send().await;

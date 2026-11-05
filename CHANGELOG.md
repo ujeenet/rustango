@@ -49,6 +49,8 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The fullstack index links the admin at its configured prefix, not a fixed `/admin`.
 - Guides: viewsets, getting-started, scaffolding, manage and the cookbook match what the generators write.
 - `member_sso_router()` serves the backend of the mounted tenant context, so a SQLite or MySQL tenant signs in under a build that also enables `postgres`; it answered 500 there.
+- The viewsets guide loads an author before posting, and its test creates its own, so the `author_id` foreign key holds; the fullstack `check --deploy` sample drops the tenancy-only apex warning.
+- `make:notification` no longer says the notifications layer is still to come; it points at `notifications::Notification` for several channels.
 
 ## [0.63.0] — 2026-11-04
 

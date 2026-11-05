@@ -4005,8 +4005,9 @@ fn make_notification_cmd<W: Write>(args: &[String], w: &mut W) -> Result<(), Mig
     let body = format!(
         r#"//! Auto-scaffolded by `manage make:notification {name}`.
 //!
-//! User-facing notification. For now this just builds an Email; once the
-//! `{crate_root}::notifications` layer ships you'll add `via()` for multi-channel.
+//! User-facing notification, sent as an email. To reach several channels
+//! (email, broadcast, a database row), implement
+//! `{crate_root}::notifications::Notification` instead.
 
 use {crate_root}::email::Email;
 
@@ -8070,6 +8071,23 @@ mod gen_tests {
             "{body}"
         );
         assert!(!body.contains(r#""/post_view_set""#), "{body}");
+    }
+
+    /// The notification template points at the shipped multi-channel trait.
+    #[test]
+    fn notification_template_names_the_notification_trait() {
+        let (_, files) = run_make(
+            "make:notification",
+            &["WelcomeNote"],
+            &["src"],
+            &["src/welcome_note.rs"],
+        );
+        let body = &files[0];
+        assert!(
+            body.contains("rustango::notifications::Notification"),
+            "{body}"
+        );
+        assert!(!body.contains("ships"), "{body}");
     }
 
     /// A `make:*` verb whose output needs a feature the build lacks says so.

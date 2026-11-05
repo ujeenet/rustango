@@ -874,10 +874,9 @@ running rustango system check (deploy mode)...
   [info]    config tier resolved to `dev`
   [warning] RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier
   [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
-  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to (…)
 ```
 
-(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces trois avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod`, un `DATABASE_URL` de base de données géré, un domaine apex défini — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
+(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces deux avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod` et un `DATABASE_URL` de base de données géré — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
 
 ---
 
