@@ -719,6 +719,9 @@ where
 /// rows per request, a fifth of the admin's default.
 const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 
+/// Default [`ViewSet::max_offset`]: deeper pages scan too many rows per request.
+pub const DEFAULT_MAX_OFFSET: usize = 10_000;
+
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
@@ -758,6 +761,10 @@ pub struct ViewSet {
     /// Largest page a client may request via `?page_size=` / `?limit=`.
     /// Defaults to 100. See [`ViewSet::max_page_size`].
     max_page_size: usize,
+    /// Deepest row a list may skip to. See [`ViewSet::max_offset`].
+    max_offset: usize,
+    /// Whether lists run `COUNT(*)`. See [`ViewSet::count`].
+    count: bool,
     /// Name of the path capture for the detail routes — `pk` by default,
     /// giving `/{pk}`. See [`ViewSet::pk_param`].
     pk_param: String,
@@ -813,6 +820,8 @@ impl ViewSet {
             throttle: ViewSetThrottle::default(),
             serializer: None,
             max_page_size: 100,
+            max_offset: DEFAULT_MAX_OFFSET,
+            count: true,
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
             hooks: crate::object_permissions::Hooks::All,
@@ -1068,6 +1077,35 @@ impl ViewSet {
     pub fn max_page_size(mut self, n: usize) -> Self {
         self.max_page_size = n.max(1);
         self
+    }
+
+    /// Deepest row `?offset=` or `?page=` may skip to (default
+    /// [`DEFAULT_MAX_OFFSET`]); past it a `400` points to cursor pagination.
+    /// `0` lifts the cap.
+    #[must_use]
+    pub fn max_offset(mut self, n: usize) -> Self {
+        self.max_offset = n;
+        self
+    }
+
+    /// `false` skips the `COUNT(*)` each page-number or limit/offset list
+    /// runs; `count` (and `last_page`) are then `null`. Default `true`.
+    #[must_use]
+    pub fn count(mut self, on: bool) -> Self {
+        self.count = on;
+        self
+    }
+
+    /// The `400` for an `offset` past [`Self::max_offset`], if it is.
+    fn offset_refused(&self, offset: i64) -> Option<Response> {
+        let max = i64::try_from(self.max_offset).unwrap_or(i64::MAX);
+        let over = self.max_offset > 0 && offset > max;
+        over.then(|| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "this page is too deep; narrow the list with filters or use cursor pagination",
+            )
+        })
     }
 
     /// Most rows a bulk create (JSON array body) may carry; more is a
@@ -1712,7 +1750,7 @@ impl ViewSetState {
                 match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
                     Some(Ok(Some(org))) => Ok(Scope::Tenant(Box::new(org))),
                     Some(Ok(None)) => Ok(Scope::Unknown),
-                    Some(Err(e)) => Err(TenantRejection::Internal(e.to_string()).into_response()),
+                    Some(Err(e)) => Err(TenantRejection::from(e).into_response()),
                     None => Err(TenantRejection::MissingContext.into_response()),
                 }
             }
@@ -1737,9 +1775,7 @@ impl ViewSetState {
                 };
                 match crate::tenancy::middleware::request_pool(&parts.extensions, org).await {
                     Some(Ok(pool)) => pool,
-                    Some(Err(e)) => {
-                        return Err(TenantRejection::Internal(e.to_string()).into_response())
-                    }
+                    Some(Err(e)) => return Err(TenantRejection::from(e).into_response()),
                     None => return Err(TenantRejection::MissingContext.into_response()),
                 }
             }
@@ -3025,6 +3061,9 @@ async fn run_list(
         PaginationStyle::PageNumber => {
             let page = crate::list_params::parse_page(&params);
             let offset = crate::list_params::page_offset(page, page_size);
+            if let Some(refused) = state.vs.offset_refused(offset) {
+                return refused;
+            }
 
             // Struct-update over `SelectQuery::new` for the
             // paginated list query.
@@ -3055,8 +3094,12 @@ async fn run_list(
             } else {
                 or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
             };
-            let count = or_500!(acq.count_rows(&count_q).await);
-            let last_page = ((count - 1).max(0) / page_size) + 1;
+            let (count, last_page) = if state.vs.count {
+                let count = or_500!(acq.count_rows(&count_q).await);
+                (Some(count), Some(((count - 1).max(0) / page_size) + 1))
+            } else {
+                (None, None)
+            };
             json_response(json!({
                 "count": count,
                 "page": page,
@@ -3098,6 +3141,9 @@ async fn run_list(
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(0)
                 .max(0);
+            if let Some(refused) = state.vs.offset_refused(offset) {
+                return refused;
+            }
 
             let select_q = SelectQuery {
                 where_clause: where_clause.clone(),
@@ -3118,7 +3164,11 @@ async fn run_list(
             } else {
                 or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
             };
-            let count = or_500!(acq.count_rows(&count_q).await);
+            let count = if state.vs.count {
+                Some(or_500!(acq.count_rows(&count_q).await))
+            } else {
+                None
+            };
             json_response(json!({
                 "count": count,
                 "limit": limit,

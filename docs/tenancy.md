@@ -259,6 +259,10 @@ To open every active database-mode tenant's pool up front, run
 [`prewarm-pools`](manage.md#prewarm-pools), use the console button, or set
 `prewarm_active_tenants: true`.
 
+Cold pool builds are bounded: at most 16 at once (`max_concurrent_pool_builds`)
+and 600 a minute (`max_pool_builds_per_minute`); past either a request gets a
+503 with `Retry-After`. `0` lifts a limit.
+
 ## Migrations
 
 Each migration file has a scope, `registry` or `tenant`. `makemigrations` in

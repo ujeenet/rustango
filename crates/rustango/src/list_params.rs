@@ -72,12 +72,17 @@ pub fn is_reserved_list_key(key: &str) -> bool {
 ///
 /// The result is empty when nothing survives, and the caller should
 /// then fall back to its default ordering.
+///
+/// A column is kept at its first mention only, and at most
+/// [`MAX_ORDERING_TERMS`] columns are kept, so a long query string
+/// cannot build a huge `ORDER BY`.
 #[must_use]
 pub fn parse_ordering(
     raw: &str,
     allowlist: &[String],
     schema: &'static ModelSchema,
 ) -> Vec<OrderItem> {
+    let mut seen: Vec<&'static str> = Vec::new();
     raw.split(',')
         .filter(|s| !s.is_empty())
         .filter_map(|part| {
@@ -89,12 +94,20 @@ pub fn parse_ordering(
             if !allowlist.iter().any(|f| f == field_name) {
                 return None;
             }
-            schema
-                .field(field_name)
-                .map(|f| OrderItem::column(f.column, desc))
+            let column = schema.field(field_name)?.column;
+            // A later term on the same column cannot change the order.
+            if seen.contains(&column) {
+                return None;
+            }
+            seen.push(column);
+            Some(OrderItem::column(column, desc))
         })
+        .take(MAX_ORDERING_TERMS)
         .collect()
 }
+
+/// Most `?ordering=` columns [`parse_ordering`] keeps.
+pub const MAX_ORDERING_TERMS: usize = 8;
 
 /// Work out the page size from `?page_size=N`.
 ///
@@ -225,6 +238,40 @@ mod tests {
         assert!(parse_ordering("secret,-secret", &[], schema).is_empty());
         let allowed = parse_ordering("-secret", &["secret".to_owned()], schema);
         assert_eq!(allowed.len(), 1);
+    }
+
+    /// Repeats collapse to the first mention, and at most eight columns sort.
+    #[test]
+    fn parse_ordering_dedups_and_caps() {
+        static FIELDS: &[crate::core::FieldSchema] = &[
+            crate::core::FieldSchema::new("a", "a", crate::core::FieldType::String),
+            crate::core::FieldSchema::new("b", "b", crate::core::FieldType::String),
+        ];
+        let mut schema = ModelSchema::new("lp_d", "lp_d");
+        schema.fields = FIELDS;
+        let schema: &'static ModelSchema = Box::leak(Box::new(schema));
+        let allow = ["a".to_owned(), "b".to_owned()];
+        let raw = ["-a"; 10_000].join(",") + ",b";
+        let got = parse_ordering(&raw, &allow, schema);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], OrderItem::column("a", true));
+        assert_eq!(got[1], OrderItem::column("b", false));
+
+        let many: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        let fields: &'static [crate::core::FieldSchema] = Box::leak(
+            many.iter()
+                .map(|n| {
+                    let n: &'static str = Box::leak(n.clone().into_boxed_str());
+                    crate::core::FieldSchema::new(n, n, crate::core::FieldType::String)
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let mut wide = ModelSchema::new("lp_w", "lp_w");
+        wide.fields = fields;
+        let wide: &'static ModelSchema = Box::leak(Box::new(wide));
+        let got = parse_ordering(&many.join(","), &many, wide);
+        assert_eq!(got.len(), MAX_ORDERING_TERMS);
     }
 
     #[test]

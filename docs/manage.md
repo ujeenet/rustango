@@ -1637,6 +1637,10 @@ ping, so a traffic spike does not fail every replica at once. After 30 seconds
 it pings again, so a hung database still gives `503`. Each process tracks its
 own last ping.
 
+One `/ready` answer is reused for 1 second, so a probe flood runs the checks once
+a second; `HealthRouter::ready_cache(d)` changes it. The server holds at most
+`RUSTANGO_MAX_CONNECTIONS` (10 000) connections; the next waits in the backlog.
+
 For a single-database app, turn off `migrate_on_boot` and run `migrate` once
 as a pre-deploy job (see `runserver` above).
 
@@ -1857,6 +1861,8 @@ on pre-warming. The settings live on `TenantPoolsConfig`:
 | `prewarm_active_tenants` | false | When true, `Server::Builder::serve` calls `prewarm_database_tenants()` at boot. |
 | `max_cached_scoped_pools` | 64 | Cap on the cached per-tenant pools for schema-mode tenants. |
 | `scoped_pool_max_connections` | 8 | `max_connections` of each schema-mode tenant pool. |
+| `max_concurrent_pool_builds` | 16 | Database-mode pools built at once; a build waits up to `database_pool_acquire_timeout`, then 503. `0` = no limit. |
+| `max_pool_builds_per_minute` | 600 | Database-mode pools built per minute; past it 503. `0` = no limit. |
 
 With `Cli`, pass the config through `Cli::with_tenant_pools(config)`.
 

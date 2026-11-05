@@ -13,6 +13,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `Job::run_with(&JobCtx)` defaults to `run()`; both queues call it. `JobCtx` gives the job id (stable across retries; the database queue's is row id plus enqueue time), `idempotency_key(scope)` for outside systems, the attempt number and a shutdown signal.
 - `Org::new(slug)` and `testkit::org_with(|o| …)` build an `Org` with its defaults.
 - SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in with no `?next` lands, by role, claim or `any`, in `position` order. The login gate keeps `next` for every page it bounces, so rules apply to a sign-in started at the login page itself. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
+- `FileCache::max_entries` / `max_bytes` (defaults 100 000 entries, 1 GiB; `[cache] file_cache_max_entries` / `file_cache_max_bytes`): past a cap the sweep drops the oldest entries.
+- `DatabaseCache::purge_every(n)`: one batch of expired rows is deleted every 256 writes by default.
+- `auth_routes::Config::refresh_per_minute` (default 30) throttles `/refresh` per user with a 429; `InMemoryJtiStore::with_capacity` (default 1 000 000) refuses new entries when full.
+- `TenantPoolsConfig::max_concurrent_pool_builds` (16) and `max_pool_builds_per_minute` (600) bound cold database-mode pool builds; past them a 503 with `Retry-After` (`TenancyError::PoolBusy`).
+- `ViewSet::max_offset(n)` (default 10 000; deeper is a 400) and `ViewSet::count(false)` to skip `COUNT(*)`.
+- `WsHub::max_connections(n)`, `HealthRouter::ready_cache(d)` (default 1 s), `MediaManager::with_max_subtree(n)` (default 100 000) and `RUSTANGO_MAX_CONNECTIONS` (default 10 000) for the serve loop.
 
 ### Changed
 
@@ -46,6 +52,12 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - The operator console's audit "only this record" link URL-encodes the table and pk; the debug panel HTML-escapes the request method.
 - `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` keep a set `Auto` PK, so an upsert by id updates instead of inserting copies; a mix of set and unset PKs is `BulkAutoMixed`, as in `bulk_insert`.
 - A single-statement `save`, `insert`, `delete` or update on a `&Pool` inside `atomic` no longer commits outside the block.
+- `DatabaseCache` rows nobody read again (page cache, rate limits, throttles) are now purged on write instead of staying forever.
+- `RateLimitLayer::per_header` keys buckets by a hash of the header value, not the raw value.
+- MCP audit rows keep at most 8 KiB of redacted arguments, plus their size and SHA-256.
+- Brand assets stream from storage instead of being read whole per request.
+- `?ordering=` keeps a column once and at most 8 columns.
+- HTTP/2 connections get a timer and keep-alive pings.
 - The SSO idle sweep skips a provider whose `auto_deactivate_after_days` is past the calendar instead of panicking and stopping for every later tenant; stored values read as at most 36500 days and the operator console refuses more.
 - A server or `check --deploy` with a sealed (`EncryptedString`) field and no `RUSTANGO_SECRET_KEY` now refuses up front, not with a panic at the first write.
 - `text::dedent`, the `add` and `divisibleby` template filters, and the SSO `exp`/`nbf` check no longer panic on a split UTF-8 indent or on `i64` overflow.

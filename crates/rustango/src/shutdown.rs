@@ -233,29 +233,38 @@ struct ConnLimits {
     /// Idle time plus head of every later request. Must exceed the
     /// proxy's idle timeout (ALB and nginx use 60 s), or it sees 502s.
     keep_alive: std::time::Duration,
+    /// Open connections at most; the next waits in the listen backlog.
+    max_connections: usize,
 }
 
 #[cfg(feature = "_axum")]
 impl ConnLimits {
-    /// `RUSTANGO_HEADER_READ_TIMEOUT_SECS` (30) and `RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS` (75).
+    /// `RUSTANGO_HEADER_READ_TIMEOUT_SECS` (30), `RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS` (75)
+    /// and `RUSTANGO_MAX_CONNECTIONS` (10 000).
     fn from_env() -> Self {
         Self {
             first_head: env_secs("RUSTANGO_HEADER_READ_TIMEOUT_SECS", 30),
             keep_alive: env_secs("RUSTANGO_KEEP_ALIVE_TIMEOUT_SECS", 75),
+            max_connections: usize::try_from(env_u64("RUSTANGO_MAX_CONNECTIONS", 10_000))
+                .unwrap_or(usize::MAX),
         }
     }
 }
 
 #[cfg(feature = "_axum")]
 fn env_secs(name: &str, default: u64) -> std::time::Duration {
-    let secs = match std::env::var(name) {
+    std::time::Duration::from_secs(env_u64(name, default))
+}
+
+#[cfg(feature = "_axum")]
+fn env_u64(name: &str, default: u64) -> u64 {
+    match std::env::var(name) {
         Err(_) => default,
         Ok(v) => v.trim().parse::<u64>().ok().filter(|n| *n > 0).unwrap_or_else(|| {
-            tracing::warn!(target: "rustango::shutdown", var = name, value = ?v, default, "not a positive number of seconds; using the default");
+            tracing::warn!(target: "rustango::shutdown", var = name, value = ?v, default, "not a positive number; using the default");
             default
         }),
-    };
-    std::time::Duration::from_secs(secs)
+    }
 }
 
 #[cfg(feature = "_axum")]
@@ -280,8 +289,14 @@ fn conn_builder(
         .http1()
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(limits.keep_alive);
+    // Pings find a dead HTTP/2 peer; the timer makes them run.
     #[cfg(feature = "http2")]
-    builder.http2().enable_connect_protocol();
+    builder
+        .http2()
+        .enable_connect_protocol()
+        .timer(hyper_util::rt::TokioTimer::new())
+        .keep_alive_interval(Some(std::time::Duration::from_secs(20)))
+        .keep_alive_timeout(std::time::Duration::from_secs(20));
     builder
 }
 
@@ -301,7 +316,18 @@ async fn serve_with(
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(());
     // Each connection holds a receiver; all dropped means all closed.
     let (open_tx, open_rx) = tokio::sync::watch::channel(());
+    let slots = std::sync::Arc::new(tokio::sync::Semaphore::new(
+        limits
+            .max_connections
+            .clamp(1, tokio::sync::Semaphore::MAX_PERMITS),
+    ));
     loop {
+        // At the cap, stop accepting: the kernel backlog queues the rest.
+        let slot = tokio::select! {
+            slot = std::sync::Arc::clone(&slots).acquire_owned() => slot,
+            () = &mut signal => break,
+        };
+        let Ok(slot) = slot else { break };
         // `Listener::accept` retries accept errors (EMFILE) like `axum::serve`.
         let (io, addr) = tokio::select! {
             conn = axum::serve::Listener::accept(&mut listener) => conn,
@@ -344,6 +370,7 @@ async fn serve_with(
                 }
             }
             drop(open);
+            drop(slot);
         });
     }
     drop(listener);
@@ -433,6 +460,13 @@ mod tests {
 
     /// Serve `/` with a 300 ms first-head and 1.5 s keep-alive limit; the stop sender keeps it up.
     async fn slow_client_server() -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
+        capped_server(10_000).await
+    }
+
+    /// [`slow_client_server`] with at most `max_connections` open.
+    async fn capped_server(
+        max_connections: usize,
+    ) -> (std::net::SocketAddr, tokio::sync::oneshot::Sender<()>) {
         let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -447,9 +481,38 @@ mod tests {
             ConnLimits {
                 first_head: std::time::Duration::from_millis(300),
                 keep_alive: std::time::Duration::from_millis(1500),
+                max_connections,
             },
         ));
         (addr, stop)
+    }
+
+    /// Past `max_connections` a new connection waits until one closes; under it, none waits.
+    #[tokio::test]
+    async fn connections_past_the_cap_wait_for_a_slot() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        for (cap, waits) in [(1, true), (2, false)] {
+            let (addr, _stop) = capped_server(cap).await;
+            let mut first = tokio::net::TcpStream::connect(addr).await.unwrap();
+            first
+                .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+                .await
+                .unwrap();
+            let mut buf = [0u8; 256];
+            assert!(first.read(&mut buf).await.unwrap() > 0, "first served");
+            let mut second = tokio::spawn(get(addr, "/"));
+            let early =
+                tokio::time::timeout(std::time::Duration::from_millis(300), &mut second).await;
+            assert_eq!(early.is_err(), waits, "cap {cap}");
+            drop(first);
+            if waits {
+                let resp = tokio::time::timeout(std::time::Duration::from_secs(3), second)
+                    .await
+                    .expect("served once a slot frees")
+                    .unwrap();
+                assert!(resp.starts_with("HTTP/1.1 200"), "{resp}");
+            }
+        }
     }
 
     /// `drain_on` serving `app` until the returned sender fires.

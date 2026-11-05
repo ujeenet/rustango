@@ -2481,20 +2481,13 @@ async fn serve_brand_asset(
     State(state): State<ConsoleState>,
     axum::extract::Path((slug, filename)): axum::extract::Path<(String, String)>,
 ) -> Response<Body> {
-    match branding::load_brand_asset(&slug, &filename, &state.brand_storage).await {
-        Ok((bytes, ct)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, ct)
-            .header(header::CACHE_CONTROL, "public, max-age=300")
-            .body(Body::from(bytes))
-            .expect("response builds"),
-        Err(
-            branding::BrandError::NotFound
-            | branding::BrandError::InvalidSlug
-            | branding::BrandError::InvalidFilename,
-        ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => server_error("operator_console::brand_asset", &e),
-    }
+    branding::brand_asset_response(
+        &slug,
+        &filename,
+        &state.brand_storage,
+        "operator_console::brand_asset",
+    )
+    .await
 }
 
 // ----------------------------- static asset

@@ -108,9 +108,18 @@ pub trait JtiStore: Send + Sync {
 /// In-process JTI store. The default for every shipped JWT / handoff
 /// consumer. Its entries are lost on restart and not shared with other
 /// processes, so a revoked `jti` can still be replayed there.
+///
+/// Holds at most [`Self::with_capacity`] live entries (default
+/// [`JTI_STORE_CAPACITY`]). When full, `mark_used` fails closed: it
+/// returns `false`, so a refresh or handoff is refused and a revocation
+/// reports an error.
 pub struct InMemoryJtiStore {
     inner: Mutex<JtiMap>,
+    capacity: usize,
 }
+
+/// Default [`InMemoryJtiStore::with_capacity`]: about 100 MB of entries.
+pub const JTI_STORE_CAPACITY: usize = 1_000_000;
 
 /// `jti -> exp` plus a min-heap on `exp`, so a prune pops only the
 /// expired entries instead of scanning the whole map (#2514).
@@ -146,8 +155,15 @@ impl JtiMap {
 impl InMemoryJtiStore {
     #[must_use]
     pub fn new() -> Self {
+        Self::with_capacity(JTI_STORE_CAPACITY)
+    }
+
+    /// A store that holds at most `capacity` unexpired entries.
+    #[must_use]
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: Mutex::new(JtiMap::default()),
+            capacity,
         }
     }
 
@@ -189,6 +205,10 @@ impl JtiStore for InMemoryJtiStore {
             if inner.map.contains_key(jti) {
                 return false;
             }
+            if inner.map.len() >= self.capacity {
+                warn_full(self.capacity);
+                return false;
+            }
             inner.insert(jti, exp_unix);
             true
         })
@@ -207,9 +227,40 @@ impl JtiStore for InMemoryJtiStore {
     }
 }
 
+/// Once per process: a full store refuses every new entry until some expire.
+fn warn_full(capacity: usize) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            target: "rustango::jti_store",
+            capacity,
+            "InMemoryJtiStore is full; refreshes and revocations fail until entries expire"
+        );
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A full store refuses new entries, and takes them again once some expire.
+    #[tokio::test]
+    async fn a_full_store_fails_closed() {
+        let store = InMemoryJtiStore::with_capacity(2);
+        let now = chrono::Utc::now().timestamp();
+        assert!(store.mark_used("short", now + 1).await);
+        assert!(store.mark_used("long", now + 3600).await);
+        assert!(!store.mark_used("third", now + 3600).await, "over capacity");
+        assert!(
+            !store.is_used("third").await,
+            "a refused entry is not recorded"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        assert!(
+            store.mark_used("third", now + 3600).await,
+            "room after expiry"
+        );
+    }
 
     #[tokio::test]
     async fn fresh_jti_is_not_used() {

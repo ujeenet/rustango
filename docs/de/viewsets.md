@@ -608,6 +608,8 @@ Felder, die Antworten zeigen und Bodies schreiben dürfen. Jede weitere Methode 
 | `ordering_fields(&["…"])` | Festlegen, welche Felder `?ordering=` verwenden darf. |
 | `page_size(n)` | Standard-Seitengröße (≤ 100). |
 | `max_page_size(n)` | Hebt oder senkt das Client-Limit selbst (Default 100). |
+| `max_offset(n)` | Tiefste Zeile für `?offset=` / `?page=`; darüber ein 400 (Default 10 000, `0` hebt es auf). |
+| `count(false)` | Lässt das `COUNT(*)` weg; `count` ist dann `null`. |
 | `max_bulk_create(n)` | Höchstzahl an Zeilen, die ein Bulk-Create tragen darf (Default 1000). |
 | `pk_param(name)` | Benennt den Pfadparameter der Detail-Routen um (`pk_param_name()` liest ihn zurück). |
 | `openapi_query(bool)` | Beschreibt die `QUERY`-Route im erzeugten OpenAPI-Dokument (braucht OpenAPI-3.2-Tooling). Standardmäßig aus; die Route wird in jedem Fall eingehängt. |

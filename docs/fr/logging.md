@@ -139,6 +139,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::humanize` | Filtres humanize |
 | `rustango::i18n` | Clés de traduction non stockées en base, rechargements du catalogue échoués |
 | `rustango::jobs` | Files de tâches de fond |
+| `rustango::jti_store` | Le magasin en mémoire des révocations JWT est plein |
 | `rustango::login` | État de limitation et de verrouillage de connexion qu'une purge de tenant n'a pas pu effacer |
 | `rustango::logging` | Avertissements de ce sous-système lui-même |
 | `rustango::manage` | Verbes `manage` |

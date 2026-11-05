@@ -615,6 +615,8 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `ordering_fields(&["…"])` | Lista blanca de qué campos puede usar `?ordering=`. |
 | `page_size(n)` | Tamaño de página por defecto (≤ 100). |
 | `max_page_size(n)` | Sube o baja el propio tope del cliente (100 por defecto). |
+| `max_offset(n)` | Fila más profunda para `?offset=` / `?page=`; por encima un 400 (10 000 por defecto, `0` lo quita). |
+| `count(false)` | Omite el `COUNT(*)`; `count` es entonces `null`. |
 | `pk_param(name)` | Renombra el parámetro de ruta de las rutas de detalle (`pk_param_name()` lo lee). |
 | `openapi_query(bool)` | Describe la ruta `QUERY` en el documento OpenAPI generado (necesita herramientas de OpenAPI 3.2). Apagado por defecto; la ruta se monta igualmente. |
 | `related_filter(fk_field, backend)` | Limita qué filas destino puede nombrar una FK del cuerpo; cualquier otra es un `422`. |

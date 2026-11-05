@@ -54,15 +54,31 @@ pub enum TenancyError {
     /// No password-hashing slot freed up in time. Answer 503.
     #[error("password hashing is busy")]
     Busy,
+
+    /// Too many tenant pools are being built; see
+    /// [`super::TenantPoolsConfig::max_pool_builds_per_minute`]. Answer 503.
+    #[error("tenant pool builds are busy")]
+    PoolBusy,
 }
 
 impl TenancyError {
+    /// The 503 for [`Self::PoolBusy`], with `Retry-After`.
+    pub(crate) fn pool_busy_response() -> axum::response::Response {
+        use axum::response::IntoResponse as _;
+        let mut resp =
+            crate::api_errors::ApiError::service_unavailable("tenant is starting up, try again")
+                .into_response();
+        resp.headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, 1u64.into());
+        resp
+    }
+
     /// The text of an error the operator can act on; `None` for a cause to withhold (#2171).
     pub(crate) fn user_facing(&self) -> Option<String> {
         match self {
             // The variant's prefix is for logs, not for the operator.
             Self::Validation(m) => Some(m.clone()),
-            Self::Busy => Some(self.to_string()),
+            Self::Busy | Self::PoolBusy => Some(self.to_string()),
             _ => None,
         }
     }

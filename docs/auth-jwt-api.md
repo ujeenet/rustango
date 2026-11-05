@@ -93,6 +93,7 @@ server refuses to start. The `Config` fields:
 | `refresh_ttl_secs` | 7 days | refresh token lifetime |
 | `refresh_absolute_ttl_secs` | 30 days | longest a login lasts across refreshes; must be > 0 |
 | `refresh_reuse_grace_secs` | `10` | retry window after a rotation; `0` treats every reuse as theft |
+| `refresh_per_minute` | `30` | refreshes per user per minute in this process; past it a 429; `0` turns it off |
 | `session_secret` | `None` | explicit signing key instead of `RUSTANGO_SESSION_SECRET` |
 | `jti_store` | `None` | revocation store; `None` is the in-memory one |
 | `extra_claims` | `None` | hook that adds claims to both tokens at login and on every refresh |

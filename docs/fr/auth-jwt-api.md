@@ -98,6 +98,7 @@ champs de `Config` :
 | `refresh_ttl_secs` | 7 jours | durée de vie du token de rafraîchissement |
 | `refresh_absolute_ttl_secs` | 30 jours | durée maximale d'un login à travers les rafraîchissements ; doit être > 0 |
 | `refresh_reuse_grace_secs` | `10` | fenêtre de nouvel essai après une rotation ; `0` traite toute réutilisation comme un vol |
+| `refresh_per_minute` | `30` | rafraîchissements par utilisateur et par minute dans ce processus ; au-delà un 429 ; `0` le désactive |
 | `session_secret` | `None` | clé de signature explicite au lieu de `RUSTANGO_SESSION_SECRET` |
 | `jti_store` | `None` | magasin de révocation ; `None` est celui en mémoire |
 | `extra_claims` | `None` | hook qui ajoute des claims aux deux tokens au login et à chaque rafraîchissement |

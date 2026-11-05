@@ -367,6 +367,10 @@ Con tenancy, monta la capa dentro de la capa de tenancy; consulta
 
 **Mantenimiento:** `DatabaseCache::purge_expired()` y
 `FileCache::purge_expired()` borran las entradas caducadas; llámalos periódicamente.
+`DatabaseCache` además borra un lote de filas caducadas cada 256 escrituras
+(`.purge_every(n)`, `0` lo desactiva). `FileCache` guarda como máximo 100 000 entradas
+y 1 GiB (`.max_entries(n)`, `.max_bytes(n)`, o `file_cache_max_entries` /
+`file_cache_max_bytes` en `[cache]`; `0` quita un límite) y borra primero las más antiguas.
 
 **Qué está construido sobre la caché:** las [sesiones](auth-sessions.md) del lado
 del servidor, la [limitación de tasa](middleware.md) distribuida

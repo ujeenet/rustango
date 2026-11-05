@@ -365,7 +365,12 @@ pub struct MediaManager {
     pool: crate::sql::Pool,
     registry: StorageRegistry,
     max_upload_bytes: u64,
+    max_subtree: usize,
 }
+
+/// Default [`MediaManager::with_max_subtree`]: above both bind caps, so a
+/// wide tree still lists, yet a recursive listing's id list stays bounded.
+pub const DEFAULT_MAX_SUBTREE: usize = 100_000;
 
 impl MediaManager {
     /// A manager over `pool`, on any backend.
@@ -375,6 +380,7 @@ impl MediaManager {
             pool: pool.into(),
             registry,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            max_subtree: DEFAULT_MAX_SUBTREE,
         }
     }
 
@@ -390,6 +396,14 @@ impl MediaManager {
     #[must_use]
     pub fn with_max_upload_bytes(mut self, bytes: u64) -> Self {
         self.max_upload_bytes = bytes;
+        self
+    }
+
+    /// Refuse a recursive listing whose subtree has more than `n`
+    /// collections, root included. Default [`DEFAULT_MAX_SUBTREE`].
+    #[must_use]
+    pub fn with_max_subtree(mut self, n: usize) -> Self {
+        self.max_subtree = n;
         self
     }
 
@@ -1340,8 +1354,13 @@ impl MediaManager {
     }
 
     async fn collect_descendant_ids(&self, root: i64) -> Result<Vec<i64>, MediaError> {
+        // One row past the cap says it is over without reading the rest.
+        let limit = self
+            .max_subtree
+            .saturating_add(1)
+            .min(usize::try_from(i64::MAX).unwrap_or(usize::MAX));
         let run = |hint| {
-            let sql = descendant_walk_sql(self.pool.dialect(), hint);
+            let sql = descendant_walk_sql(self.pool.dialect(), hint, limit);
             async move {
                 crate::sql::raw_query_pool::<(i64,)>(
                     &sql,
@@ -1357,6 +1376,12 @@ impl MediaManager {
             other => other,
         }
         .map_err(media_err_from_exec)?;
+        if rows.len() > self.max_subtree {
+            return Err(MediaError::Other(format!(
+                "collection {root} has more than {} collections below it",
+                self.max_subtree
+            )));
+        }
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
@@ -1930,7 +1955,7 @@ fn is_deadlock(e: &sqlx::Error) -> bool {
 /// 3.8+ share it. MariaDB plans the step for a 2-row `sub` and scans every
 /// collection per row, so with `hint` it reads `sub` first through the
 /// `parent_id` index.
-fn descendant_walk_sql(d: &dyn crate::sql::Dialect, hint: bool) -> String {
+fn descendant_walk_sql(d: &dyn crate::sql::Dialect, hint: bool, limit: usize) -> String {
     const STEP_FROM: &str = "FROM rustango_media_collections c JOIN sub";
     let from = if hint && d.name() == "mysql" {
         use crate::core::Model as _;
@@ -1962,7 +1987,7 @@ fn descendant_walk_sql(d: &dyn crate::sql::Dialect, hint: bool) -> String {
              SELECT c.id {from} \
                ON c.parent_id = sub.id \
               WHERE c.deleted_at IS NULL \
-         ) SELECT id FROM sub"
+         ) SELECT id FROM sub LIMIT {limit}"
     )
 }
 
