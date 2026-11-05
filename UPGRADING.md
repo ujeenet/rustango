@@ -150,6 +150,8 @@ untouched.
 
 ## Unreleased
 
+- `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
+
 ## 0.63.0
 
 - `dumpdata` now errors on a cell it cannot decode (a column whose type no longer matches the model) and on NaN or infinite floats; it used to write `null`. Fix the column or `--exclude` the model. A `dumpdata -o` file is now owner-only on Unix.

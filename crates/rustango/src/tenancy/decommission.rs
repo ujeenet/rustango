@@ -83,12 +83,11 @@ async fn forget_in(
     cache: &crate::cache::BoxedCache,
     tenant: &super::TenantSlug,
 ) -> Result<(), crate::cache::CacheError> {
-    use crate::cache::Cache as _;
-    crate::cache::ScopedCache::for_tenant(cache.clone(), tenant)
-        .clear()
-        .await?;
+    let scoped = crate::cache::ScopedCache::for_tenant(cache.clone(), tenant);
     let locks = crate::distributed_lock::DistributedLock::new(cache.clone()).for_tenant(tenant);
-    cache.delete_prefix(&locks.key_prefix()).await
+    cache
+        .delete_prefixes(&[scoped.prefix().to_owned(), locks.key_prefix()])
+        .await
 }
 
 /// What to do to the tenant.

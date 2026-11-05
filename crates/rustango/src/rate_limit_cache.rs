@@ -266,12 +266,10 @@ impl CacheRateLimitLayer {
         }
     }
 
-    /// Delete every window's counter of `key`.
+    /// The key prefix of every window's counter of `key`, in [`Self::cache`].
     #[cfg(all(feature = "admin", feature = "tenancy"))] // only `login_throttle` calls it
-    pub(crate) async fn forget(&self, key: &str) -> Result<(), crate::cache::CacheError> {
-        self.cache
-            .delete_prefix(&format!("{}:{key}:", self.key_prefix.as_str()))
-            .await
+    pub(crate) fn counter_prefix(&self, key: &str) -> String {
+        format!("{}:{key}:", self.key_prefix.as_str())
     }
 
     /// The cache the counters live in.

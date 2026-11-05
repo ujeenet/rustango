@@ -537,16 +537,18 @@ impl LoginThrottle {
         tenant: &crate::tenancy::TenantSlug,
     ) -> Result<(), crate::cache::CacheError> {
         let lockout = self.0.lockout();
-        let mut first = Ok(());
-        // Best-effort: one failed delete must not keep the rest.
-        let mut note = |step: &str, r: Result<(), crate::cache::CacheError>| {
-            if let Err(e) = r {
-                tracing::warn!(target: "rustango::login", tenant = %tenant.slug, step, error = %e, "purge: login state not cleared");
-                if first.is_ok() {
-                    first = Err(e);
-                }
+        // Prefixes grouped by cache: one `delete_prefixes` (one Redis scan) each.
+        let mut batches: Vec<(&BoxedCache, Vec<String>)> = Vec::new();
+        fn add<'c>(
+            batches: &mut Vec<(&'c BoxedCache, Vec<String>)>,
+            cache: &'c BoxedCache,
+            p: String,
+        ) {
+            match batches.iter_mut().find(|(c, _)| Arc::ptr_eq(c, cache)) {
+                Some((_, ps)) => ps.push(p),
+                None => batches.push((cache, vec![p])),
             }
-        };
+        }
         for scope in [
             LoginScope::Tenant(tenant.clone()),
             LoginScope::TenantBasic(tenant.clone()),
@@ -556,11 +558,30 @@ impl LoginThrottle {
             LoginScope::sso_tenant("app", tenant),
         ] {
             let accounts = account_key_prefix(&scope.key());
-            note("locks", lockout.clear_accounts_with_prefix(&accounts).await);
-            let known = format!("login-known:{accounts}");
-            note("known", self.0.known.delete_prefix(&known).await);
+            for p in lockout.account_prefixes(&accounts) {
+                add(&mut batches, lockout.cache(), p);
+            }
+            add(
+                &mut batches,
+                &self.0.known,
+                format!("login-known:{accounts}"),
+            );
             if let Limit::Cache { shared, .. } = &self.0.global {
-                note("global", shared.forget(&scope.key()).await);
+                add(
+                    &mut batches,
+                    shared.cache(),
+                    shared.counter_prefix(&scope.key()),
+                );
+            }
+        }
+        // Best-effort: one failed cache must not keep the rest.
+        let mut first = Ok(());
+        for (cache, prefixes) in batches {
+            if let Err(e) = cache.delete_prefixes(&prefixes).await {
+                tracing::warn!(target: "rustango::login", tenant = %tenant.slug, error = %e, "purge: login state not cleared");
+                if first.is_ok() {
+                    first = Err(e);
+                }
             }
         }
         first
@@ -2404,6 +2425,95 @@ mod tests {
         );
         assert!(t.0.is_known(&heir, &home, "alice").await);
         assert!(t.begin(&heir, &ip("10.8.0.3"), "carol").await.is_err());
+    }
+
+    /// Counts prefix deletes; everything else goes to an in-memory cache.
+    #[derive(Default)]
+    struct PrefixDeletes {
+        inner: crate::cache::InMemoryCache,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::cache::Cache for PrefixDeletes {
+        async fn get(&self, k: &str) -> Result<Option<String>, crate::cache::CacheError> {
+            self.inner.get(k).await
+        }
+        async fn set(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<(), crate::cache::CacheError> {
+            self.inner.set(k, v, ttl).await
+        }
+        async fn add(
+            &self,
+            k: &str,
+            v: &str,
+            ttl: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.add(k, v, ttl).await
+        }
+        async fn incr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.inner.incr(k, by, ttl).await
+        }
+        async fn decr(
+            &self,
+            k: &str,
+            by: i64,
+            ttl: Option<Duration>,
+        ) -> Result<i64, crate::cache::CacheError> {
+            self.inner.decr(k, by, ttl).await
+        }
+        async fn touch(
+            &self,
+            k: &str,
+            ttl: Option<Duration>,
+        ) -> Result<bool, crate::cache::CacheError> {
+            self.inner.touch(k, ttl).await
+        }
+        async fn delete(&self, k: &str) -> Result<(), crate::cache::CacheError> {
+            self.inner.delete(k).await
+        }
+        async fn exists(&self, k: &str) -> Result<bool, crate::cache::CacheError> {
+            self.inner.exists(k).await
+        }
+        async fn clear(&self) -> Result<(), crate::cache::CacheError> {
+            self.inner.clear().await
+        }
+        async fn delete_prefix(&self, p: &str) -> Result<(), crate::cache::CacheError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.delete_prefix(p).await
+        }
+        async fn delete_prefixes(&self, ps: &[String]) -> Result<(), crate::cache::CacheError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.delete_prefixes(ps).await
+        }
+    }
+
+    /// One cache behind every login store gets one batched delete, and the
+    /// tenant's state still goes.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn forget_tenant_deletes_once_per_cache() {
+        let counted = Arc::new(PrefixDeletes::default());
+        let cache: BoxedCache = counted.clone();
+        let mut t = LoginThrottle::with_cache(LoginLimits::default(), cache.clone());
+        let lockout: &'static _ = Box::leak(Box::new(crate::account_lockout::Lockout::new(cache)));
+        Arc::get_mut(&mut t.0).expect("unshared").lockout = Some(lockout);
+        let (acme, home) = (LoginScope::TenantBasic(ts("once")), ip("10.8.2.1"));
+        t.begin(&acme, &home, "bob").await.unwrap().failed().await;
+        let key = account_key(&acme.key(), "bob");
+        assert!(lockout.attempt_count(&key).await > 0);
+        t.forget_tenant(&ts("once")).await.unwrap();
+        assert_eq!(lockout.attempt_count(&key).await, 0, "account lock kept");
+        assert_eq!(counted.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     /// A known-client cache that cannot delete by prefix still lets the

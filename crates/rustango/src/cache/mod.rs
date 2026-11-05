@@ -324,6 +324,15 @@ pub trait Cache: Send + Sync + 'static {
              a safe fallback for a scoped delete."
         )))
     }
+
+    /// [`Self::delete_prefix`] for each of `prefixes`. `RedisCache` does it
+    /// in one keyspace scan; the default deletes one prefix at a time.
+    async fn delete_prefixes(&self, prefixes: &[String]) -> Result<(), CacheError> {
+        for p in prefixes {
+            self.delete_prefix(p).await?;
+        }
+        Ok(())
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
@@ -1383,14 +1392,7 @@ impl FileCache {
             .and_then(|n| n.get(..2))
             .unwrap_or("00");
         self.make_dir()?;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.create(true).truncate(false).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        opts.open(self.dir.join(format!(".lock-{stripe}")))
+        crate::private_file::open_or_create(&self.dir.join(format!(".lock-{stripe}")))
             .map_err(|e| CacheError::Connection(format!("open lock: {e}")))
     }
 

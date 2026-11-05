@@ -204,3 +204,28 @@ async fn bytes_are_stored_raw() {
 
     shared.clear().await.ok();
 }
+
+/// One batched delete removes exactly the keys each prefix would, not the
+/// other keys its shared `MATCH` pattern also returns.
+#[tokio::test]
+async fn delete_prefixes_deletes_exactly_each_prefix() {
+    let _g = live_lock().lock().await;
+    let Some(redis) = cache().await else {
+        return;
+    };
+    redis.clear().await.expect("start from an empty db");
+    let gone = ["a:#org:1:x:k", "b:#org:1:x:k", "b:#org:1:x:[*]"];
+    let kept = ["c:#org:1:x:k", "a:#org:1:xx", "#org:1:x:", "zz"];
+    for k in gone.iter().chain(&kept) {
+        redis.set(k, "v", None).await.unwrap();
+    }
+    let prefixes = ["a:#org:1:x:".to_owned(), "b:#org:1:x:".to_owned()];
+    redis.delete_prefixes(&prefixes).await.expect("delete");
+    for k in gone {
+        assert_eq!(redis.get(k).await.unwrap(), None, "{k} kept");
+    }
+    for k in kept {
+        assert!(redis.get(k).await.unwrap().is_some(), "{k} deleted");
+    }
+    redis.clear().await.ok();
+}
