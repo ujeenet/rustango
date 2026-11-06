@@ -720,8 +720,7 @@ where
 /// rows per request, a fifth of the admin's default.
 const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 
-/// Default [`ViewSet::max_offset`]: deeper pages scan too many rows per request.
-pub const DEFAULT_MAX_OFFSET: usize = 10_000;
+pub use crate::list_params::DEFAULT_MAX_OFFSET;
 
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
@@ -1099,14 +1098,9 @@ impl ViewSet {
 
     /// The `400` for an `offset` past [`Self::max_offset`], if it is.
     fn offset_refused(&self, offset: i64) -> Option<Response> {
-        let max = i64::try_from(self.max_offset).unwrap_or(i64::MAX);
-        let over = self.max_offset > 0 && offset > max;
-        over.then(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "this page is too deep; narrow the list with filters or use cursor pagination",
-            )
-        })
+        crate::list_params::check_offset(offset, self.max_offset)
+            .err()
+            .map(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))
     }
 
     /// Most rows a bulk create (JSON array body) may carry; more is a

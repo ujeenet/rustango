@@ -235,6 +235,8 @@ pub struct ListView {
     page_size: i64,
     /// Hard cap on `?page_size=N` URL overrides. Default 100.
     max_page_size: i64,
+    /// Deepest row `?page=N` may skip to; see [`Self::max_offset`].
+    max_offset: usize,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
     filter_fields: Vec<String>,
@@ -574,6 +576,7 @@ impl ListView {
             template: format!("{}_list.html", schema.table),
             page_size: 20,
             max_page_size: 100,
+            max_offset: crate::list_params::DEFAULT_MAX_OFFSET,
             fields: None,
             order_by: Vec::new(),
             filter_fields: Vec::new(),
@@ -611,6 +614,26 @@ impl ListView {
     pub fn max_page_size(mut self, n: usize) -> Self {
         self.max_page_size = i64::try_from(n).unwrap_or(100).max(1);
         self
+    }
+
+    /// Deepest row `?page=N` may skip to (default
+    /// [`DEFAULT_MAX_OFFSET`](crate::list_params::DEFAULT_MAX_OFFSET)); past
+    /// it the view answers `400`. `0` lifts the cap.
+    #[must_use]
+    pub fn max_offset(mut self, n: usize) -> Self {
+        self.max_offset = n;
+        self
+    }
+
+    /// `(page, page_size, offset)` for `params`, or the `400` for a page
+    /// past [`Self::max_offset`].
+    fn page_window(&self, params: &HashMap<String, String>) -> Result<(i64, i64, i64), Response> {
+        let page = crate::list_params::parse_page(params);
+        let page_size = resolve_page_size(self.page_size, self.max_page_size, params);
+        let offset = crate::list_params::page_offset(page, page_size);
+        crate::list_params::check_offset(offset, self.max_offset)
+            .map(|offset| (page, page_size, offset))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())
     }
 
     /// Add an `ORDER BY` clause. Call multiple times for tie-breakers.
@@ -1006,9 +1029,10 @@ async fn handle_list(
     csrf: CsrfCookie,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let page = crate::list_params::parse_page(&params);
-    let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-    let offset = crate::list_params::page_offset(page, page_size);
+    let (page, page_size, offset) = match state.vs.page_window(&params) {
+        Ok(w) => w,
+        Err(refused) => return refused,
+    };
 
     let (order_by, active_ordering) = match resolve_active_order(
         state.vs.schema,
@@ -4012,10 +4036,10 @@ mod tenant {
         Query(params): Query<HashMap<String, String>>,
         t: TenantScope,
     ) -> Response {
-        let page = crate::list_params::parse_page(&params);
-        let page_size =
-            super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-        let offset = crate::list_params::page_offset(page, page_size);
+        let (page, page_size, offset) = match state.vs.page_window(&params) {
+            Ok(w) => w,
+            Err(refused) => return refused,
+        };
 
         let (order_by, active_ordering) = match super::resolve_active_order(
             state.vs.schema,
@@ -4475,11 +4499,11 @@ mod tests {
     #[cfg(feature = "admin")]
     #[test]
     fn every_view_refuses_admin_only_and_never_served_tables() {
-        use crate::core::table_policy::{table_access, TableAccess};
+        use crate::core::{table_policy::table_access, TableAccess};
         let refused: Vec<&'static ModelSchema> = inventory::iter::<crate::core::ModelEntry>
             .into_iter()
             .map(|e| e.schema)
-            .filter(|s| table_access(s.table) != TableAccess::Open)
+            .filter(|s| table_access(s.table) != Some(TableAccess::Open))
             .collect();
         #[cfg(feature = "tenancy")]
         assert!(
@@ -4611,6 +4635,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
@@ -4733,6 +4758,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
@@ -5146,6 +5172,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }));
         assert!(resolve_order_by(no_pk, &[]).unwrap().is_empty());
     }
@@ -5607,6 +5634,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -5679,6 +5707,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 

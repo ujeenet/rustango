@@ -1,94 +1,39 @@
-//! Which generic surfaces may serve a framework table. The admin, the
-//! ViewSet and every template view ask here, so they cannot disagree.
+//! Which generic surfaces may serve a table. The admin, the ViewSet and every
+//! template view ask here, so they cannot disagree. Each model declares its
+//! level with `#[rustango(access = "...")]`; nothing here names a model.
 
-use super::ModelSchema;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
-/// Who may serve a table, for every operation: list, detail, create,
-/// update and delete alike.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TableAccess {
-    /// Any generic surface.
-    Open,
-    /// Only the admin: SSO configuration, credentials, agent grants, operator and admin users.
-    AdminOnly,
-    /// No generic surface, the admin included: only their own flows write them.
-    Never,
-}
+use super::{ModelEntry, ModelSchema, TableAccess};
 
-/// Tables only the admin (or the operator console's) or their own flows write:
-/// credentials, SSO configuration, agent grants, operator and admin users.
-const ADMIN_ONLY_TABLES: &[&str] = &[
-    #[cfg(feature = "admin")]
-    <crate::admin::user::AdminUser as super::Model>::SCHEMA.table,
-    #[cfg(feature = "tenancy")]
-    <crate::tenancy::Operator as super::Model>::SCHEMA.table,
-    #[cfg(feature = "tenancy")]
-    <crate::tenancy::auth_backends::ApiKey as super::Model>::SCHEMA.table,
-    #[cfg(all(feature = "tenancy", feature = "mcp"))]
-    <crate::tenancy::Agent as super::Model>::SCHEMA.table,
-    #[cfg(all(feature = "tenancy", feature = "mcp"))]
-    <crate::tenancy::AgentGrant as super::Model>::SCHEMA.table,
-    #[cfg(feature = "sso")]
-    <crate::sso::SsoProvider as super::Model>::SCHEMA.table,
-    #[cfg(feature = "sso")]
-    <crate::sso::SsoLink as super::Model>::SCHEMA.table,
-    #[cfg(feature = "sso")]
-    <crate::sso::policy::SsoInvite as super::Model>::SCHEMA.table,
-    #[cfg(feature = "sso")]
-    <crate::sso::policy::SsoSharedOverride as super::Model>::SCHEMA.table,
-    #[cfg(feature = "sso")]
-    <crate::sso::policy::SsoTenantPolicy as super::Model>::SCHEMA.table,
-    #[cfg(feature = "sso")]
-    <crate::sso::policy::SsoLandingRule as super::Model>::SCHEMA.table,
-    #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
-    <crate::tenancy::sso::SharedSsoProvider as super::Model>::SCHEMA.table,
-];
-
-/// The policy for `table`.
-pub(crate) fn table_access(table: &str) -> TableAccess {
-    if is_never_served(table) {
-        TableAccess::Never
-    } else if ADMIN_ONLY_TABLES.contains(&table) {
-        TableAccess::AdminOnly
-    } else {
-        TableAccess::Open
-    }
+/// The strictest level the models registered on `table` declare, so a proxy
+/// cannot open what its base closes. `None` when no model registers it:
+/// there are no rows to serve, only the admin's custom views use such names.
+pub(crate) fn table_access(table: &str) -> Option<TableAccess> {
+    static BY_TABLE: OnceLock<HashMap<&'static str, TableAccess>> = OnceLock::new();
+    BY_TABLE
+        .get_or_init(|| {
+            let mut by_table: HashMap<&'static str, TableAccess> = HashMap::new();
+            for e in inventory::iter::<ModelEntry> {
+                let level = by_table.entry(e.schema.table).or_insert(TableAccess::Open);
+                *level = (*level).max(e.schema.table_access());
+            }
+            by_table
+        })
+        .get(table)
+        .copied()
 }
 
 /// Panic unless a non-admin generic surface (`who`) may serve `schema`.
 pub(crate) fn assert_generic(schema: &ModelSchema, who: &str) {
+    let access =
+        table_access(schema.table).map_or(schema.table_access(), |r| r.max(schema.table_access()));
     assert!(
-        table_access(schema.table) == TableAccess::Open,
+        access == TableAccess::Open,
         "{who}: `{}` is admin only (or written by its own flow); a generic view cannot serve it",
         schema.table
     );
-}
-
-/// The TOTP stores hold raw secrets, a passkey row signs in as its
-/// `user_id`, a database server row holds the sealed admin password, and a
-/// purge drops what a tenant database row names. Enrollment has its own pages.
-fn is_never_served(table: &str) -> bool {
-    #[cfg(not(any(feature = "totp", feature = "passkey", feature = "tenancy")))]
-    let _ = table;
-    #[cfg(feature = "tenancy")]
-    if table == <crate::tenancy::DbServer as super::Model>::SCHEMA.table
-        || table == <crate::tenancy::TenantDatabase as super::Model>::SCHEMA.table
-    {
-        return true;
-    }
-    #[cfg(all(feature = "admin", feature = "totp"))]
-    if table == <crate::admin::totp_store::AdminTotp as super::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(all(feature = "tenancy", feature = "totp"))]
-    if table == <crate::tenancy::OperatorTotp as super::Model>::SCHEMA.table {
-        return true;
-    }
-    #[cfg(feature = "passkey")]
-    if table == <crate::passkey::WebauthnCredential as super::Model>::SCHEMA.table {
-        return true;
-    }
-    false
 }
 
 #[cfg(all(test, feature = "tenancy"))]
@@ -107,7 +52,107 @@ mod tests {
             #[cfg(feature = "mcp")]
             "rustango_agents",
         ] {
-            assert_eq!(table_access(t), TableAccess::AdminOnly, "{t}");
+            assert_eq!(table_access(t), Some(TableAccess::AdminOnly), "{t}");
         }
+    }
+
+    /// The tables the old hand-kept lists named keep their level.
+    #[test]
+    fn listed_tables_keep_their_level() {
+        use crate::core::Model;
+        let mut expect = vec![
+            (
+                <crate::tenancy::DbServer as Model>::SCHEMA,
+                TableAccess::Never,
+            ),
+            (
+                <crate::tenancy::TenantDatabase as Model>::SCHEMA,
+                TableAccess::Never,
+            ),
+            (
+                <crate::tenancy::Operator as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::tenancy::auth_backends::ApiKey as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::tenancy::UsedJti as Model>::SCHEMA,
+                TableAccess::Never,
+            ),
+        ];
+        #[cfg(feature = "admin")]
+        expect.push((
+            <crate::admin::user::AdminUser as Model>::SCHEMA,
+            TableAccess::AdminOnly,
+        ));
+        #[cfg(all(feature = "admin", feature = "totp"))]
+        expect.push((
+            <crate::admin::totp_store::AdminTotp as Model>::SCHEMA,
+            TableAccess::Never,
+        ));
+        #[cfg(feature = "totp")]
+        expect.push((
+            <crate::tenancy::OperatorTotp as Model>::SCHEMA,
+            TableAccess::Never,
+        ));
+        #[cfg(feature = "passkey")]
+        expect.push((
+            <crate::passkey::WebauthnCredential as Model>::SCHEMA,
+            TableAccess::Never,
+        ));
+        #[cfg(feature = "mcp")]
+        expect.extend([
+            (
+                <crate::tenancy::Agent as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::tenancy::AgentGrant as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+        ]);
+        #[cfg(feature = "sso")]
+        expect.extend([
+            (
+                <crate::sso::SsoProvider as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::sso::SsoLink as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::sso::policy::SsoInvite as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::sso::policy::SsoSharedOverride as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::sso::policy::SsoTenantPolicy as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+            (
+                <crate::sso::policy::SsoLandingRule as Model>::SCHEMA,
+                TableAccess::AdminOnly,
+            ),
+        ]);
+        #[cfg(feature = "admin-sso")]
+        expect.push((
+            <crate::tenancy::sso::SharedSsoProvider as Model>::SCHEMA,
+            TableAccess::AdminOnly,
+        ));
+        for (schema, level) in expect {
+            assert_eq!(table_access(schema.table), Some(level), "{}", schema.table);
+        }
+    }
+
+    /// A table no model registers has no declared level.
+    #[test]
+    fn an_unknown_table_has_no_level() {
+        assert_eq!(table_access("no_such_table_anywhere"), None);
     }
 }

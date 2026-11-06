@@ -1103,6 +1103,9 @@ pub mod manager;
 /// abstract bases, multi-table and proxy shapes. See [`inheritance`].
 pub mod inheritance;
 
+/// The wall clock in unix seconds; a broken clock fails expiry checks closed.
+pub mod clock;
+
 /// Composite-primary-key patterns — a multi-column key expressed as an
 /// `Auto<i64>` surrogate plus `unique_together`. See [`composite_pk`].
 pub mod composite_pk;

@@ -24,8 +24,6 @@
 //! 6) and `window`, the number of steps before and after now that are
 //! still accepted. A `window` of 1 allows about 30 seconds of drift.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 /// The shortest secret [`TotpSecret::from_base32`] accepts: 80 bits.
 pub const MIN_SECRET_BYTES: usize = 10;
 
@@ -77,10 +75,7 @@ impl TotpSecret {
 /// Generate the TOTP code for `secret` at the current time.
 #[must_use]
 pub fn generate(secret: &TotpSecret, step_secs: u64, digits: u32) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    generate_at(secret, now, step_secs, digits)
+    generate_at(secret, crate::clock::unix_now_or(0), step_secs, digits)
 }
 
 /// Generate the TOTP code for `secret` at a specific unix timestamp.
@@ -95,10 +90,7 @@ pub fn generate_at(secret: &TotpSecret, unix_secs: u64, step_secs: u64, digits: 
 /// steps before now to `window` steps after, to allow clock drift.
 #[must_use]
 pub fn verify(secret: &TotpSecret, code: &str, step_secs: u64, digits: u32, window: i64) -> bool {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
-    verify_at(secret, code, now, step_secs, digits, window)
+    matched_step(secret, code, step_secs, digits, window).is_some()
 }
 
 /// Verify at a specific unix timestamp — useful for tests.
@@ -124,9 +116,8 @@ pub fn matched_step(
     digits: u32,
     window: i64,
 ) -> Option<u64> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
+    // A clock that cannot be read accepts no code.
+    let now = crate::clock::unix_now().ok()?;
     matched_step_at(secret, code, now, step_secs, digits, window)
 }
 

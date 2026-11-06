@@ -67,7 +67,6 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, Response, StatusCode};
@@ -576,9 +575,10 @@ fn date_within_tolerance(date_str: &str, tolerance_secs: u64) -> bool {
         return false;
     };
     let then = parsed.timestamp();
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64);
+    // A clock that cannot be read accepts no date.
+    let Ok(now) = crate::clock::unix_now_i64() else {
+        return false;
+    };
     let delta = (now - then).abs();
     u64::try_from(delta).map_or(false, |d| d <= tolerance_secs)
 }

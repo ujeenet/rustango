@@ -102,21 +102,10 @@ struct RegisteredAction {
 struct TenantSessionConfig {
     secret: tenant_console::SessionSecret,
     tera: Tera,
-    /// Used handoff tokens and ended impersonations; `None` is the
-    /// per-process [`JtiBlacklist::shared`] (#2176).
-    ///
-    /// [`JtiBlacklist::shared`]: super::impersonation_handoff::JtiBlacklist::shared
-    jti: Option<super::impersonation_handoff::JtiBlacklist>,
+    /// Used handoff tokens and ended impersonations, in the registry by default.
+    jti: super::impersonation_handoff::JtiBlacklist,
     /// Where an ended impersonation goes back to.
     link_apex: super::server::LinkApex,
-}
-
-impl TenantSessionConfig {
-    fn jti(&self) -> &super::impersonation_handoff::JtiBlacklist {
-        self.jti
-            .as_ref()
-            .unwrap_or_else(|| super::impersonation_handoff::JtiBlacklist::shared())
-    }
 }
 
 impl<DB: Database> TenantAdminBuilder<DB> {
@@ -193,50 +182,10 @@ impl<DB: Database> TenantAdminBuilder<DB> {
         self
     }
 
-    /// Turn on per-tenant auth. Anonymous traffic goes to `/__login`,
-    /// which checks credentials against `rustango_users` in the
-    /// resolved tenant. Non-superusers get a read-only admin.
-    ///
-    /// You can share the `SessionSecret` with the operator console;
-    /// the two use different cookie names.
-    ///
-    /// Without this the tenant admin has no auth at all, which suits
-    /// demos and trusted intranets only.
-    #[must_use]
-    pub fn with_session(mut self, secret: tenant_console::SessionSecret) -> Self {
-        let mut tera = crate::template_extensions::html_tera();
-        // `tenant_login.html` includes `_theme_tokens.html`, so the
-        // partial must be in the same Tera registry or the render
-        // fails and the login page comes out blank.
-        tera.add_raw_template(
-            "_theme_tokens.html",
-            include_str!("../styles/theme_tokens.html"),
-        )
-        .expect("_theme_tokens.html parses");
-        tera.add_raw_template(
-            "tenant_login.html",
-            include_str!("templates/tenant_login.html"),
-        )
-        .expect("tenant_login.html parses");
-        // v0.28.2 (#77) — self-serve change-password page.
-        tera.add_raw_template(
-            "tenant_change_password.html",
-            include_str!("templates/tenant_change_password.html"),
-        )
-        .expect("tenant_change_password.html parses");
-        self.session = Some(TenantSessionConfig {
-            secret,
-            tera,
-            jti: None,
-            link_apex: super::server::LinkApex::default(),
-        });
-        self
-    }
-
     /// Where used impersonation handoff tokens and ended impersonations
-    /// are kept. The default is per-process; with several replicas pass
-    /// a shared store such as Redis or the database (#2176). Call it before
-    /// or after [`Self::with_session`]; without a session it has no use.
+    /// are kept. The default is [`DbJtiStore`](super::DbJtiStore) on the
+    /// registry; pass another shared store such as Redis to replace it.
+    /// Call it before or after [`Self::with_session`]; without a session it has no use.
     #[must_use]
     pub fn impersonation_jti_store(mut self, store: Arc<dyn crate::jti_store::JtiStore>) -> Self {
         self.jti_store = Some(store);
@@ -359,6 +308,50 @@ impl<DB: Database> TenantAdminBuilder<DB>
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    /// Turn on per-tenant auth. Anonymous traffic goes to `/__login`,
+    /// which checks credentials against `rustango_users` in the
+    /// resolved tenant. Non-superusers get a read-only admin.
+    ///
+    /// You can share the `SessionSecret` with the operator console;
+    /// the two use different cookie names.
+    ///
+    /// Without this the tenant admin has no auth at all, which suits
+    /// demos and trusted intranets only.
+    #[must_use]
+    pub fn with_session(mut self, secret: tenant_console::SessionSecret) -> Self {
+        let mut tera = crate::template_extensions::html_tera();
+        // `tenant_login.html` includes `_theme_tokens.html`, so the
+        // partial must be in the same Tera registry or the render
+        // fails and the login page comes out blank.
+        tera.add_raw_template(
+            "_theme_tokens.html",
+            include_str!("../styles/theme_tokens.html"),
+        )
+        .expect("_theme_tokens.html parses");
+        tera.add_raw_template(
+            "tenant_login.html",
+            include_str!("templates/tenant_login.html"),
+        )
+        .expect("tenant_login.html parses");
+        // v0.28.2 (#77) — self-serve change-password page.
+        tera.add_raw_template(
+            "tenant_change_password.html",
+            include_str!("templates/tenant_change_password.html"),
+        )
+        .expect("tenant_change_password.html parses");
+        self.session = Some(TenantSessionConfig {
+            secret,
+            tera,
+            // Shared and durable by default: an ended impersonation stays
+            // ended on every replica and after a restart.
+            jti: super::impersonation_handoff::JtiBlacklist::with_store(Arc::new(
+                super::used_jti::DbJtiStore::new(self.pools.registry_pool()),
+            )),
+            link_apex: super::server::LinkApex::default(),
+        });
+        self
+    }
+
     /// Build the tenant-aware `axum::Router`. Catches every request
     /// via a fallback handler — mount it under whatever prefix you
     /// want via `Router::nest`.
@@ -377,8 +370,17 @@ where
             );
         }
         let link_apex = self.link_apex;
+        if jti_store.as_ref().is_some_and(|s| s.is_process_local()) {
+            warn!(
+                target: "rustango::tenancy::admin",
+                "impersonation_jti_store is process-local: an ended impersonation works \
+                 again on other replicas and after a restart",
+            );
+        }
         let session = self.session.map(|mut s| {
-            s.jti = jti_store.map(super::impersonation_handoff::JtiBlacklist::with_store);
+            if let Some(store) = jti_store {
+                s.jti = super::impersonation_handoff::JtiBlacklist::with_store(store);
+            }
             s.link_apex = link_apex;
             Arc::new(s)
         });
@@ -1004,7 +1006,7 @@ async fn validate_session(
         let Some(sid) = payload.sid.as_deref() else {
             return SessionCheck::Anonymous;
         };
-        if cfg.jti().session_ended(sid).await {
+        if cfg.jti.session_ended(sid).await {
             return SessionCheck::Anonymous;
         }
         let ops: Vec<super::auth::Operator> = match super::auth::Operator::objects()
@@ -1545,7 +1547,7 @@ async fn redeem_impersonation_handoff(
     }) {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    if let Err(e) = cfg.jti().mark_used(&payload.jti, payload.exp).await {
+    if let Err(e) = cfg.jti.mark_used(&payload.jti, payload.exp).await {
         tracing::warn!(
             target: "rustango::tenancy::admin",
             slug = %org.slug,
@@ -1632,7 +1634,7 @@ async fn end_impersonation_session(headers: &HeaderMap, cfg: &TenantSessionConfi
         ..
     }) = tenant_console::decode(&cfg.secret, &tenant, &value)
     {
-        if !cfg.jti().end_session(&sid, exp).await {
+        if !cfg.jti.end_session(&sid, exp).await {
             // The cookie is still cleared, but a copy works until `exp`.
             tracing::error!(
                 target: "rustango::tenancy::admin",

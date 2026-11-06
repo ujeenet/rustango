@@ -139,6 +139,7 @@ impl RunKind {
 #[derive(crate::Model, Debug, Clone, Serialize)]
 #[rustango(
     table = "rustango_provisioning_runs",
+    access = "open",
     scope = "registry",
     display = "slug",
     admin(
@@ -239,6 +240,7 @@ pub struct ProvisioningRun {
 #[derive(crate::Model, Debug, Clone, Serialize)]
 #[rustango(
     table = "rustango_provisioning_events",
+    access = "open",
     scope = "registry",
     display = "message",
     admin(list_display = "run_id, seq, step, status", ordering = "run_id, seq")

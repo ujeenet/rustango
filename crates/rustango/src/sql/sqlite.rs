@@ -852,6 +852,7 @@ mod tests {
         get_latest_by: None,
         extra_permissions: &[],
         global_scopes: &[],
+        access: None,
     };
 
     /// #2416: SQLite has no `DEFAULT` in VALUES; NULL fills an integer PK.

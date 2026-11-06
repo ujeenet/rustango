@@ -21,7 +21,7 @@ use crate::sql::{Auto, ExecError, Pool};
 /// never stored or returned in the clear.
 #[derive(crate::Model, Clone)]
 #[rustango(
-    table = "rustango_agents",
+    table = "rustango_agents", access = "admin_only",
     display = "name",
     admin(
         list_display = "name, user_id, active, secret_prefix, created_at",
@@ -342,6 +342,7 @@ pub async fn authenticate_agent_by_prefix_pool(
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_agent_skills",
+    access = "open",
     display = "codename",
     admin(
         list_display = "codename, name, description",
@@ -381,7 +382,7 @@ pub struct AgentSkill {
 
 /// One tool name belonging to a skill.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_agent_skill_tools")]
+#[rustango(table = "rustango_agent_skill_tools", access = "open")]
 pub struct AgentSkillTool {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -401,6 +402,7 @@ pub struct AgentSkillTool {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_agent_grants",
+    access = "admin_only",
     unique_together = "agent_id, skill_id",
     admin(list_display = "agent_id, skill_id", ordering = "agent_id")
 )]
@@ -431,6 +433,7 @@ pub struct AgentGrant {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_agent_skill_permissions",
+    access = "open",
     unique_together = "skill_id, permission_codename",
     admin(list_display = "skill_id, permission_codename", ordering = "skill_id")
 )]
@@ -1326,7 +1329,7 @@ impl LiveAgent {
 /// A resource attached to a skill (epic #1013, Slice 5 / #1018). The body is
 /// carried in `data.text`; `mime` is the advertised MIME type.
 #[derive(crate::Model, Debug, Clone)]
-#[rustango(table = "rustango_agent_skill_resources")]
+#[rustango(table = "rustango_agent_skill_resources", access = "open")]
 pub struct AgentSkillResource {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

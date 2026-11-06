@@ -127,7 +127,7 @@ impl ProviderKey {
 /// superuser-only, and needs the admin's session auth.
 #[derive(Model, Debug, Clone)]
 #[rustango(
-    table = "rustango_sso_links",
+    table = "rustango_sso_links", access = "admin_only",
     unique_together = "provider_source, provider_id, key_sha256",
     // Sign-in looks a link up by subject.
     index("provider_source, provider_id, subject"),

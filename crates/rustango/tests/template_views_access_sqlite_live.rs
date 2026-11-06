@@ -148,6 +148,29 @@ async fn allow_anonymous_serves_anyone() {
     assert_eq!(rows(&p).await, 0);
 }
 
+/// A page past the shared offset cap is a 400, not a deep OFFSET scan.
+#[tokio::test]
+async fn list_view_refuses_a_page_past_the_offset_cap() {
+    let max = rustango::list_params::DEFAULT_MAX_OFFSET;
+    let status = |app: axum::Router, page: usize| async move {
+        let req = Request::get(format!("/posts?page={page}"))
+            .body(Body::empty())
+            .unwrap();
+        app.oneshot(req).await.unwrap().status()
+    };
+    let app = ListView::for_model(Post::SCHEMA)
+        .allow_anonymous()
+        .page_size(10)
+        .router("/posts", tera(), pool().await);
+    assert_eq!(status(app.clone(), max / 10 + 1).await, StatusCode::OK);
+    assert_eq!(status(app, max / 10 + 2).await, StatusCode::BAD_REQUEST);
+    let open = ListView::for_model(Post::SCHEMA)
+        .allow_anonymous()
+        .max_offset(0)
+        .router("/posts", tera(), pool().await);
+    assert_eq!(status(open, max).await, StatusCode::OK);
+}
+
 #[cfg(feature = "tenancy")]
 mod gated {
     use super::*;

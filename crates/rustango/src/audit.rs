@@ -519,6 +519,7 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_audit_log",
+    access = "open",
     index_together = "entity_table, entity_pk"
 )]
 #[allow(dead_code)]
@@ -657,6 +658,16 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
 pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     use crate::core::Model as _;
     crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA])
+}
+
+// Writes to `audit(track = ...)` models record from the first migrate.
+inventory::submit! {
+    crate::migrate::ensure::BootstrapTable {
+        table: <AuditLog as crate::core::Model>::SCHEMA.table,
+        holder: crate::migrate::ensure::BootstrapHolder::Shared,
+        ensure: |pool| Box::pin(ensure_table_pool(pool)),
+        ddl: |d| crate::migrate::ensure::idempotent_ddl(&bootstrap_snapshot(), d),
+    }
 }
 
 #[cfg(feature = "mysql")]

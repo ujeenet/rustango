@@ -1040,6 +1040,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.composite_fks,
         &container.generic_fks,
         container.scope.as_deref(),
+        container.access.as_deref(),
         container.is_view,
         container.verbose_name.as_deref(),
         container.verbose_name_plural.as_deref(),
@@ -2720,6 +2721,7 @@ fn model_impl_tokens(
     composite_fks: &[CompositeFkAttr],
     generic_fks: &[GenericFkAttr],
     scope: Option<&str>,
+    access: Option<&str>,
     is_view: bool,
     verbose_name: Option<&str>,
     verbose_name_plural: Option<&str>,
@@ -2768,6 +2770,15 @@ fn model_impl_tokens(
     let scope_tokens = match scope.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("registry") => quote!(#root::core::ModelScope::Registry),
         _ => quote!(#root::core::ModelScope::Tenant),
+    };
+    // The container-attr parser already validated the value.
+    let access_tokens = match access {
+        Some("admin_only") => {
+            quote!(::core::option::Option::Some(#root::core::TableAccess::AdminOnly))
+        }
+        Some("never") => quote!(::core::option::Option::Some(#root::core::TableAccess::Never)),
+        Some(_) => quote!(::core::option::Option::Some(#root::core::TableAccess::Open)),
+        None => quote!(::core::option::Option::None),
     };
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
@@ -3042,6 +3053,7 @@ fn model_impl_tokens(
                     extra_permissions: &[ #(#extra_permission_tokens),* ],
                     default_permissions: &[ #(#default_permission_tokens),* ],
                     global_scopes: #global_scope_slice,
+                    access: #access_tokens,
                 })
             };
 
@@ -8226,6 +8238,9 @@ struct ContainerAttrs {
     /// to partition diff output between registry-scoped and
     /// tenant-scoped migration files.
     scope: Option<String>,
+    /// `#[rustango(access = "open" | "admin_only" | "never")]`: which
+    /// generic surfaces may serve the table. Unset emits `None`.
+    access: Option<String>,
     /// Extra QuerySet accessor names from
     /// `#[rustango(manager_fn = "active")]`. Issue #289 / T2.6.
     /// Each value adds a `pub fn <name>() -> QuerySet<Self>` next to
@@ -8777,6 +8792,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         composite_fks: Vec::new(),
         generic_fks: Vec::new(),
         scope: None,
+        access: None,
         manager_fns: Vec::new(),
         default_order: Vec::new(),
         is_view: false,
@@ -8837,6 +8853,17 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     )));
                 }
                 out.scope = Some(val);
+                return Ok(());
+            }
+            if meta.path.is_ident("access") {
+                let s: LitStr = meta.value()?.parse()?;
+                let val = s.value();
+                if !matches!(val.as_str(), "open" | "admin_only" | "never") {
+                    return Err(meta.error(format!(
+                        "`access` must be \"open\", \"admin_only\" or \"never\", got {val:?}"
+                    )));
+                }
+                out.access = Some(val);
                 return Ok(());
             }
             if meta.path.is_ident("admin") {
@@ -10735,6 +10762,7 @@ const CONTAINER_ATTR_KEYS: &[&str] = &[
     "display",
     "app",
     "scope",
+    "access",
     "admin",
     "manager",
     "manager_fn",

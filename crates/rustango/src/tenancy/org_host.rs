@@ -16,6 +16,7 @@ use serde::Serialize;
 #[derive(crate::Model, Debug, Clone, Serialize)]
 #[rustango(
     table = "rustango_org_hosts",
+    access = "open",
     scope = "registry",
     display = "hostname",
     admin(

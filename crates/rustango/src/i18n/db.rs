@@ -44,7 +44,12 @@ use crate::Model;
 /// they arrived legacy-shaped forever on an upgraded SQLite file, whose
 /// `CURRENT_TIMESTAMP` default `ALTER TABLE` cannot replace.
 #[derive(Model, Debug, Clone, serde::Serialize)]
-#[rustango(table = "rustango_translations", managed = false, scope = "registry")]
+#[rustango(
+    table = "rustango_translations",
+    access = "open",
+    managed = false,
+    scope = "registry"
+)]
 pub struct Translation {
     #[rustango(primary_key)]
     pub id: Auto<i64>,
@@ -183,6 +188,23 @@ pub async fn ensure_table_pool(pool: &Pool) -> Result<(), sqlx::Error> {
         refused_pools().push(crate::sql::PoolId::of(pool));
     }
     Ok(())
+}
+
+// The admin lists translations wherever they live.
+inventory::submit! {
+    crate::migrate::ensure::BootstrapTable {
+        table: <Translation as crate::core::Model>::SCHEMA.table,
+        holder: crate::migrate::ensure::BootstrapHolder::Shared,
+        ensure: |pool| Box::pin(ensure_table_pool(pool)),
+        ddl: |d| {
+            Ok(ddl(d)
+                .split(';')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect())
+        },
+    }
 }
 
 fn refused_pools() -> std::sync::MutexGuard<'static, Vec<crate::sql::PoolId>> {
