@@ -212,6 +212,65 @@ async fn created_inside_the_block_commits(pool: &Pool) {
     assert_eq!(ids(pool).await, vec![5, 6]);
 }
 
+/// A caller holding the block's guard can still call `get_or_create`
+/// and write through that guard, as before the savepoint.
+async fn created_with_the_guard_held(pool: &Pool) {
+    let q = pool.clone();
+    let (_, created) = within(rustango::atomic!(pool, |tx| {
+        let mut g = tx.lock().await?;
+        let got = Note::objects()
+            .filter("id", 5_i64)
+            .get_or_create(
+                |_p| async {
+                    let row = Note {
+                        id: 5,
+                        label: "n5".into(),
+                    };
+                    row.insert_tx(&mut *g).await?;
+                    Ok(row)
+                },
+                &q,
+            )
+            .await?;
+        drop(g);
+        put(tx, 6).await?;
+        Ok(got)
+    }))
+    .await
+    .expect("the block commits");
+    assert!(created);
+    assert_eq!(ids(pool).await, vec![5, 6]);
+}
+
+/// A `get_or_create` cancelled mid-`create_fn` rolls its writes back; the
+/// block's other writes still commit.
+async fn cancelled_create_rolls_back(pool: &Pool) {
+    let q = pool.clone();
+    within(rustango::atomic!(pool, |tx| {
+        let cancelled = tokio::time::timeout(
+            Duration::from_secs(2),
+            Note::objects().filter("id", 5_i64).get_or_create(
+                |_p| async move {
+                    put(tx, 7).await?;
+                    std::future::pending::<()>().await;
+                    Ok(Note {
+                        id: 7,
+                        label: "n7".into(),
+                    })
+                },
+                &q,
+            ),
+        )
+        .await;
+        assert!(cancelled.is_err(), "create_fn should still be pending");
+        put(tx, 6).await?;
+        Ok(())
+    }))
+    .await
+    .expect("the block commits");
+    assert_eq!(ids(pool).await, vec![6]);
+}
+
 tri_dialect_test! {
     model: Note,
     sqlite: file,
@@ -220,5 +279,7 @@ tri_dialect_test! {
         lost_race_through_the_guard,
         update_or_create_lost_race_through_the_guard,
         created_inside_the_block_commits,
+        created_with_the_guard_held,
+        cancelled_create_rolls_back,
     ],
 }

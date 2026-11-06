@@ -131,10 +131,9 @@ where
     F: FnOnce(Pool) -> Fut,
     Fut: std::future::Future<Output = Result<T, ExecError>>,
 {
-    let Some(point) = atomic::retry_point(pool).await else {
+    let Some(point) = atomic::retry_point(pool).await? else {
         return create_fn(pool.clone()).await;
     };
-    let point = point?;
     let res = create_fn(pool.clone()).await;
     let ended = point.end(res.is_ok()).await;
     // `create_fn`'s own error wins over a failure to end the savepoint.

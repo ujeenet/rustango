@@ -16,7 +16,7 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 - `migrate --squash` sets the pending files aside and, on a failure or panic, deletes the files it wrote (`system/migrations` too) and puts them back; it refuses to run while an interrupted squash's `*.json.squash-bak` files remain.
 - A failed table probe in the migrate runner is an error, not "table missing" (which faked a squash over a table never dropped).
 - The translations editor saves a form in one transaction: a failure part-way writes nothing.
-- `get_or_create` / `update_or_create` inside `atomic` run `create_fn` in a savepoint, so losing a race on a unique key no longer aborts the block on PostgreSQL.
+- `get_or_create` / `update_or_create` inside `atomic` run `create_fn` in a savepoint, so losing a race on a unique key no longer aborts the block on PostgreSQL, and on MySQL and SQLite a failed or cancelled `create_fn` no longer keeps its partial writes.
 - **Breaking:** `ListView`, `DetailView`, `CreateView`, `UpdateView` and `DeleteView` refuse to mount without an access call: `allow_anonymous()`, or with `tenancy` `login_required()`, `permissions(..)` or `permissions_for_model()`. Each is checked per request: 401 anonymous, 403 missing codename or a credential bound to another tenant (or, on a fixed pool, to any tenant), 503 when the permission or session read fails.
 - **Breaking:** a `ViewSet` whose create, update or destroy has no codenames refuses to mount (it logged a warning) unless it is `read_only()` or `allow_anonymous()`.
 
