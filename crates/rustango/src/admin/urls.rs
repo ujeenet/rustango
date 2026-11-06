@@ -1060,9 +1060,7 @@ impl AppState {
         {
             return false;
         }
-        if crate::core::table_policy::table_access(table)
-            == crate::core::table_policy::TableAccess::Never
-        {
+        if crate::core::table_policy::table_access(table) == Some(crate::core::TableAccess::Never) {
             return false;
         }
         // `rustango_admin_users` is the bare admin's credential

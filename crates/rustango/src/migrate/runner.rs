@@ -1465,7 +1465,7 @@ async fn reconcile(
         if targets.is_empty() {
             return Ok(ReconcileAction::Run);
         }
-        let existing = count_existing_tables(pool, &targets).await;
+        let existing = count_existing_tables(pool, &targets).await?;
         if existing == targets.len() {
             // Its changes to other tables: run them if none ran, fake if all did.
             let outside: Vec<&super::SchemaChange> = mig
@@ -1534,7 +1534,7 @@ async fn reconcile(
             let existing: Vec<String> = {
                 let mut present = Vec::new();
                 for t in &tables {
-                    if count_existing_tables(pool, std::slice::from_ref(t)).await == 1 {
+                    if count_existing_tables(pool, std::slice::from_ref(t)).await? == 1 {
                         present.push(t.clone());
                     }
                 }
@@ -1612,10 +1612,10 @@ async fn applied_counts(
     for change in changes {
         let applied = match change {
             SC::CreateTable(t) | SC::CreateM2MTable { through: t, .. } => {
-                Some(table_exists_here(pool, t).await)
+                Some(try_table_exists_here(pool, t).await?)
             }
             SC::DropTable(t) | SC::DropM2MTable { through: t } => {
-                Some(!table_exists_here(pool, t).await)
+                Some(!try_table_exists_here(pool, t).await?)
             }
             SC::AddColumn { table, column } => Some(
                 super::ensure::live_columns(pool, table)
@@ -1887,7 +1887,7 @@ async fn converge_regenerated(
             SC::CreateM2MTable { through, .. } => through,
             _ => continue,
         };
-        if !table_exists_here(pool, table).await {
+        if !try_table_exists_here(pool, table).await? {
             let indexes = mig.forward.iter().filter_map(|op| match op {
                 Operation::Schema(c @ SC::CreateIndex { table: t, .. }) if t == table => {
                     Some(c.clone())
@@ -1962,19 +1962,19 @@ async fn warn_on_index_clash(pool: &crate::sql::Pool, mig: &Migration) -> Result
     Ok(())
 }
 
-/// How many of `tables` already exist in `pool`. Probes with
-/// `SELECT 1 FROM <t> LIMIT 1` so each name resolves through exactly the
-/// same search_path / current-database rules the migration's own
-/// `CREATE TABLE` would use (unqualified — correct for schema-mode
-/// tenants and single-DB alike).
-async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> usize {
+/// How many of `tables` exist in the schema this connection writes to
+/// ([`try_table_exists_here`]); a failed probe is an error.
+async fn count_existing_tables(
+    pool: &crate::sql::Pool,
+    tables: &[String],
+) -> Result<usize, MigrateError> {
     let mut n = 0;
     for t in tables {
-        if table_exists_here(pool, t).await {
+        if try_table_exists_here(pool, t).await? {
             n += 1;
         }
     }
-    n
+    Ok(n)
 }
 
 /// Does `table` exist **in the schema this connection writes to**?
@@ -1989,11 +1989,8 @@ async fn count_existing_tables(pool: &crate::sql::Pool, tables: &[String]) -> us
 /// * Postgres — `information_schema.tables` filtered to `current_schema()`
 /// * MySQL — filtered to `DATABASE()` (a schema is a database here)
 /// * SQLite — `sqlite_master`, which is inherently per-connection
-pub(crate) async fn table_exists_here(pool: &crate::sql::Pool, table: &str) -> bool {
-    try_table_exists_here(pool, table).await.unwrap_or(false)
-}
-
-/// [`table_exists_here`], with a failed probe as an error rather than "missing".
+///
+/// A failed probe is an error, never "missing".
 pub(crate) async fn try_table_exists_here(
     pool: &crate::sql::Pool,
     table: &str,
@@ -5130,6 +5127,21 @@ mod tests {
             failed(true).outcome("m", false, 1, 1, 2),
             Err(MigrateError::PartiallyApplied { applied: 1, .. })
         ));
+    }
+
+    /// A failed table probe is an error, never "dropped" (which fakes a squash).
+    #[tokio::test]
+    async fn a_failed_table_probe_is_an_error() {
+        use crate::testkit::matrix::Backend;
+        let drop = crate::migrate::SchemaChange::DropTable("gone".into());
+        for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
+            let Some(pool) = backend.pool().await else {
+                continue;
+            };
+            pool.close().await;
+            let got = super::applied_counts(&pool, &[&drop]).await;
+            assert!(got.is_err(), "{backend:?}: {got:?}");
+        }
     }
 
     /// SQLite finds `CaseT` under any case, so the check must too.

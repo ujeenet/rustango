@@ -236,6 +236,10 @@ l'utilisateur qui octroie le codename passe. Octroyez avec
 `set_user_perm_pool` / les rôles via `create_role_pool` + `assign_role_pool` (les
 tables de permissions sont créées par `ensure_tables_pool`).
 
+`ViewSet` et les vues de template lisent le même utilisateur pour leurs
+codenames, mais seulement sur `tenant_router`. Sur un `.router(..)` à pool fixe,
+ils refusent l'utilisateur résolu par ces backends (`403`) : ce pool ne contient les utilisateurs d'aucun tenant.
+
 ---
 
 ## Voir aussi

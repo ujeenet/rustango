@@ -68,28 +68,37 @@ fn app(pool: &Pool) -> axum::Router {
     .unwrap();
     let t = Arc::new(t);
     ViewSet::for_model(Author::SCHEMA, &["id", "name"])
+        .allow_anonymous()
         .router("/api/authors", pool.clone())
-        .merge(ViewSet::for_model(Tag::SCHEMA, &["code", "name"]).router("/api/tags", pool.clone()))
+        .merge(
+            ViewSet::for_model(Tag::SCHEMA, &["code", "name"])
+                .allow_anonymous()
+                .router("/api/tags", pool.clone()),
+        )
         .merge(
             DeleteView::for_model(Author::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .success_url("/authors")
                 .router("/authors", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Author::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .bulk_actions(true)
                 .router("/authors", t.clone(), pool.clone()),
         )
         .merge(
             CreateView::for_model(Post::SCHEMA, &["author_id", "title"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/posts")
                 .router("/posts", t.clone(), pool.clone()),
         )
         .merge(
             UpdateView::for_model(Post::SCHEMA, &["author_id", "title"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/posts")
                 .router("/posts", t, pool.clone()),

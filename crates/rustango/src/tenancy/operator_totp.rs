@@ -14,7 +14,12 @@ use crate::Model;
 /// One operator's TOTP device. `confirmed = false` is an enrollment not
 /// yet finished; only a confirmed device gates sign-in.
 #[derive(Model, Clone)]
-#[rustango(table = "rustango_operator_totp", managed = false, scope = "registry")]
+#[rustango(
+    table = "rustango_operator_totp",
+    access = "never",
+    managed = false,
+    scope = "registry"
+)]
 #[allow(dead_code)]
 pub struct OperatorTotp {
     #[rustango(primary_key)]
@@ -112,6 +117,16 @@ pub async fn ensure_table(pool: &Pool) -> Result<(), sqlx::Error> {
 pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     use crate::core::Model as _;
     crate::migrate::SchemaSnapshot::from_models_forced(&[OperatorTotp::SCHEMA])
+}
+
+// The console's sign-in reads it, and fails closed on a read error.
+inventory::submit! {
+    crate::migrate::ensure::BootstrapTable {
+        table: <OperatorTotp as crate::core::Model>::SCHEMA.table,
+        holder: crate::migrate::ensure::BootstrapHolder::Shared,
+        ensure: |pool| Box::pin(ensure_table(pool)),
+        ddl: |d| crate::migrate::ensure::idempotent_ddl(&bootstrap_snapshot(), d),
+    }
 }
 
 /// The operator's confirmed secret. A read failure is an error, never

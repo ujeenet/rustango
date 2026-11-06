@@ -250,15 +250,16 @@ async fn seen_rows(pool: &Pool) -> Vec<AuditLog> {
         .expect("seen rows")
 }
 
-/// `?page=i64::MAX` is an empty page in the feed and a model list, not an overflow (#1865).
-async fn huge_page_is_an_empty_page(pool: &Pool) {
+/// `?page=i64::MAX` is refused by the offset cap in the feed and a model list,
+/// not an overflow or a deep scan.
+async fn huge_page_is_refused(pool: &Pool) {
     let perms = [audit::VIEW_CODENAME, "audscope_seen.view", "audit.view"];
     let page = format!("page={}", i64::MAX);
     let (status, body) = get(pool, &perms, &format!("/__audit?{page}")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     assert!(!body.contains("mark-audscope_seen"), "{body}");
     let (status, body) = get(pool, &perms, &format!("/audit?{page}")).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
 }
 
 /// One row per new `audfacet_*` table, `n` rows for `audfacet_hot_*`.
@@ -343,6 +344,6 @@ tri_dialect_test! {
         feed_urls_carry_the_admin_prefix,
         audit_model_perms_do_not_open_the_feed,
         feed_perms_do_not_open_the_audit_model,
-        huge_page_is_an_empty_page,
+        huge_page_is_refused,
     ],
 }

@@ -7,6 +7,7 @@ use crate::sql::Auto;
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_sso_invites",
+    access = "admin_only",
     admin(
         list_display = "target, provider_slug, uses, max_uses, expires_at",
         search_fields = "target",
@@ -84,6 +85,7 @@ pub struct SsoInvite {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_sso_shared_overrides",
+    access = "admin_only",
     admin(
         list_display = "shared_slug, signup_mode, sso_only, allowed_roles",
         ordering = "shared_slug",
@@ -186,6 +188,7 @@ pub struct SsoSharedOverride {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_sso_tenant_policy",
+    access = "admin_only",
     admin(list_display = "name, password_login, sso_only, default_provider")
 )]
 #[allow(dead_code)]
@@ -233,6 +236,7 @@ pub struct SsoTenantPolicy {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_sso_landing_rules",
+    access = "admin_only",
     admin(
         list_display = "position, match_kind, match_name, match_value, landing_url",
         ordering = "position",

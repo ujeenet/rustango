@@ -4907,6 +4907,12 @@ async fn squash_refuses_models_ahead_of_the_files() {
             );
         } else {
             out.expect("the files match the models");
+            let left: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .filter(|p| p.extension().is_none_or(|x| x != "json"))
+                .collect();
+            assert!(left.is_empty(), "no squash leftovers: {left:?}");
         }
     }
 }

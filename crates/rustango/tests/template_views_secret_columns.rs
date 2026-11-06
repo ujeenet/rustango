@@ -50,26 +50,25 @@ fn app(pool: &Pool) -> axum::Router {
     .unwrap();
     let t = Arc::new(t);
     UpdateView::for_model(Account::SCHEMA, &["name"])
+        .allow_anonymous()
         .template("one.html")
         .router("/acc", t.clone(), pool.clone())
         .merge(
-            UpdateView::for_model(Account::SCHEMA, &["name", "password_hash", "recovery"])
-                .template("one.html")
-                .router("/listed", t.clone(), pool.clone()),
-        )
-        .merge(
             UpdateView::for_model(Account::SCHEMA, &["name"])
+                .allow_anonymous()
                 .context_fields(&["note"])
                 .template("one.html")
                 .router("/ctx", t.clone(), pool.clone()),
         )
         .merge(
             DetailView::for_model(Account::SCHEMA)
+                .allow_anonymous()
                 .template("one.html")
                 .router("/acc", t.clone(), pool.clone()),
         )
         .merge(
             ListView::for_model(Account::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .fields(&["name"])
                 .bulk_actions(true)
@@ -79,6 +78,7 @@ fn app(pool: &Pool) -> axum::Router {
         )
         .merge(
             ListView::for_model(Account::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .bulk_actions(true)
                 .with_delete_confirmation(true)
@@ -167,13 +167,6 @@ async fn credential_columns_stay_out_of_the_context() {
         all.contains("UNLISTED") && all.contains("ada") && !all.contains("SECRET"),
         "{all}"
     );
-    // A view that lists the column on purpose still gets it.
-    let out = send(&pool, Method::GET, &format!("/listed/{pk}/edit"), "").await;
-    assert!(
-        out.contains("argon2-SECRET") && out.contains("RECOVERY-SECRET"),
-        "{out}"
-    );
-    assert!(!out.contains("TOKEN-SECRET"), "{out}");
     // `.context_fields()` opts a read-only column in.
     let out = send(&pool, Method::GET, &format!("/ctx/{pk}/edit"), "").await;
     assert!(out.contains("UNLISTED") && !out.contains("SECRET"), "{out}");
@@ -191,5 +184,85 @@ fn the_secret_attribute_reaches_the_schema() {
 #[test]
 #[should_panic(expected = "UpdateView context_fields: `tvsecret_account` has no field [\"nope\"]")]
 fn context_fields_refuses_an_unknown_name() {
-    let _ = UpdateView::for_model(Account::SCHEMA, &["name"]).context_fields(&["note", "nope"]);
+    let _ = UpdateView::for_model(Account::SCHEMA, &["name"])
+        .allow_anonymous()
+        .context_fields(&["note", "nope"]);
+}
+
+fn refusal(mount: impl FnOnce() -> axum::Router) -> String {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(mount())))
+        .err()
+        .and_then(|e| e.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}
+
+/// No template view mounts with a credential in any of its field lists.
+#[tokio::test]
+async fn a_view_naming_a_credential_refuses_to_mount() {
+    let pool = Backend::Sqlite.pool().await.expect("sqlite");
+    let t = Arc::new(Tera::default());
+    let mounts: [(&str, Box<dyn FnOnce() -> axum::Router>); 6] = [
+        ("update", {
+            let (t, p) = (t.clone(), pool.clone());
+            Box::new(move || {
+                UpdateView::for_model(Account::SCHEMA, &["name", "password_hash"])
+                    .allow_anonymous()
+                    .router("/u", t, p)
+            })
+        }),
+        ("context", {
+            let (t, p) = (t.clone(), pool.clone());
+            Box::new(move || {
+                UpdateView::for_model(Account::SCHEMA, &["name"])
+                    .context_fields(&["recovery"])
+                    .allow_anonymous()
+                    .router("/u", t, p)
+            })
+        }),
+        ("create", {
+            let (t, p) = (t.clone(), pool.clone());
+            Box::new(move || {
+                rustango::template_views::CreateView::for_model(Account::SCHEMA, &["reset_token"])
+                    .allow_anonymous()
+                    .router("/c", t, p)
+            })
+        }),
+        ("detail", {
+            let (t, p) = (t.clone(), pool.clone());
+            Box::new(move || {
+                DetailView::for_model(Account::SCHEMA)
+                    .fields(&["password_hash"])
+                    .allow_anonymous()
+                    .router("/d", t, p)
+            })
+        }),
+        ("list search", {
+            let (t, p) = (t.clone(), pool.clone());
+            Box::new(move || {
+                ListView::for_model(Account::SCHEMA)
+                    .search_fields(&["password_hash"])
+                    .allow_anonymous()
+                    .router("/l", t, p)
+            })
+        }),
+        ("delete", {
+            let (t, p) = (t.clone(), pool.clone());
+            Box::new(move || {
+                rustango::template_views::DeleteView::for_model(Account::SCHEMA)
+                    .fields(&["recovery"])
+                    .allow_anonymous()
+                    .router("/x", t, p)
+            })
+        }),
+    ];
+    for (what, mount) in mounts {
+        assert!(refusal(mount).contains("hold credentials"), "{what}");
+    }
+    // `secret = false` is not a credential.
+    drop(
+        DetailView::for_model(Account::SCHEMA)
+            .fields(&["name", "share_token"])
+            .allow_anonymous()
+            .router("/d", t, pool),
+    );
 }

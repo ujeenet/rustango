@@ -55,13 +55,13 @@ fn app(pool: &Pool, superuser: bool) -> axum::Router {
     }))
 }
 
-/// `/users` with no `AuthenticatedUser` at all. The superuser-only fields
-/// are listed, so only the superuser rule keeps a member from writing them.
+/// `/users` with no `AuthenticatedUser` at all. `is_superuser` is listed, so
+/// only the superuser rule keeps a member from writing it; `password_hash`
+/// is a credential no ViewSet may list, so no body can set it.
 fn anonymous(pool: &Pool) -> axum::Router {
     let fields = &[
         "id",
         "username",
-        "password_hash",
         "is_superuser",
         "active",
         "created_at",
@@ -104,6 +104,17 @@ async fn send(
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// `true` when no user is named `username`. A ViewSet cannot create a user:
+/// the required hash is a credential it may not accept.
+async fn absent(pool: &Pool, username: &str) -> bool {
+    User::objects()
+        .where_(User::username.eq(username.to_owned()))
+        .fetch(pool)
+        .await
+        .expect("fetch")
+        .is_empty()
+}
+
 async fn by_name(pool: &Pool, username: &str) -> User {
     User::objects()
         .where_(User::username.eq(username.to_owned()))
@@ -144,8 +155,8 @@ async fn a_member_cannot_create_a_superuser(pool: &Pool) {
         "active": true, "created_at": "2024-01-01T00:00:00Z", "data": {}
     });
     let (status, res) = send(app(pool, false), "POST", "/users", body).await;
-    assert_eq!(status, StatusCode::CREATED, "{res}");
-    assert!(!by_name(pool, &name).await.is_superuser);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert!(absent(pool, &name).await);
 }
 
 async fn a_member_put_keeps_them(pool: &Pool) {
@@ -168,9 +179,8 @@ async fn a_member_bulk_create_keeps_them(pool: &Pool) {
     let (a, b) = (unique("vsba"), unique("vsbb"));
     let body = serde_json::json!([full_body(&a), full_body(&b)]);
     let (status, res) = send(app(pool, false), "POST", "/users", body).await;
-    assert!(status.is_success(), "{status}: {res}");
-    assert!(!by_name(pool, &a).await.is_superuser);
-    assert!(!by_name(pool, &b).await.is_superuser);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert!(absent(pool, &a).await && absent(pool, &b).await);
 }
 
 /// No principal at all fails closed.
@@ -183,8 +193,8 @@ async fn an_anonymous_write_keeps_them(pool: &Pool) {
     assert!(!by_name(pool, &renamed).await.is_superuser);
     let name = unique("vsnc");
     let (status, res) = send(anonymous(pool), "POST", "/users", full_body(&name)).await;
-    assert_eq!(status, StatusCode::CREATED, "{res}");
-    assert!(!by_name(pool, &name).await.is_superuser);
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{res}");
+    assert!(absent(pool, &name).await);
 }
 
 /// A body of only locked fields answers like an update that changed nothing.
@@ -206,7 +216,10 @@ async fn a_superuser_writes_them(pool: &Pool) {
     assert!(status.is_success(), "{status}: {res}");
     let u = by_name(pool, &name).await;
     assert!(u.is_superuser);
-    assert_eq!(u.password_hash, "new-hash");
+    assert_eq!(
+        u.password_hash, "old-hash",
+        "not even a superuser writes a hash here"
+    );
 }
 
 /// A create runs the `add` hooks: on the request, then on each written row,

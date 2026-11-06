@@ -166,6 +166,7 @@ A facet card shows up to 15 values; the rest collapse into a "+N more" link
 (`?sort=col&order=asc|desc`). The default comes from `ordering`.
 
 **Pagination.** `list_per_page` sets the page size; navigate with `?page=N`.
+A page past row 100 000 (list and audit log) answers 400; narrow it with search or filters.
 For very large tables, register them with `Builder::skip_count_for([...])` to
 skip the `SELECT COUNT(*)` (the pager then shows "Page N" without a grand
 total); a per-request `?count=skip` does the same ad hoc.

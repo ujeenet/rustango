@@ -53,7 +53,12 @@ use super::password;
 /// Registry-scoped operator. Single identity domain for the main app
 /// administrator(s); not visible to tenants.
 #[derive(Model, Clone)]
-#[rustango(table = "rustango_operators", display = "username", scope = "registry")]
+#[rustango(
+    table = "rustango_operators",
+    access = "admin_only",
+    display = "username",
+    scope = "registry"
+)]
 #[allow(dead_code)]
 pub struct Operator {
     #[rustango(primary_key)]
@@ -108,6 +113,7 @@ redacted_debug!(Operator { id, username, active, created_at, password_changed_at
 #[derive(Model, Clone)]
 #[rustango(
     table = "rustango_users",
+    access = "open",
     display = "username",
     admin(
         list_display = "username, is_superuser, active, created_at",

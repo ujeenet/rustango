@@ -31,6 +31,7 @@
 //! let app = ListView::for_model(Post::SCHEMA)
 //!     .page_size(20)
 //!     .order_by("created_at", true)   // DESC
+//!     .allow_anonymous()              // a public page; see "Access" below
 //!     .router("/posts", Arc::new(tera), pool);
 //! ```
 //!
@@ -47,6 +48,12 @@
 //! - `total_pages: i64`
 //! - `has_next: bool`
 //! - `has_prev: bool`
+//!
+//! ## Access
+//!
+//! A model view refuses to mount until one call says who may use it:
+//! `allow_anonymous()`, or with `tenancy` `login_required()`,
+//! `permissions(..)` or `permissions_for_model()`.
 //!
 //! ## Pool capture vs per-tenant resolution
 //!
@@ -83,6 +90,7 @@ use axum::Router;
 use serde_json::Value;
 use tera::{Context, Tera};
 
+use crate::access::Gate;
 use crate::core::{FieldSchema, Filter, ModelSchema, Op, SelectQuery, SqlValue, WhereExpr};
 use crate::sql::Pool;
 use crate::sql::{count_rows_pool, select_one_row_as_json, select_rows_as_json};
@@ -227,6 +235,8 @@ pub struct ListView {
     page_size: i64,
     /// Hard cap on `?page_size=N` URL overrides. Default 100.
     max_page_size: i64,
+    /// Deepest row `?page=N` may skip to; see [`Self::max_offset`].
+    max_offset: usize,
     fields: Option<Vec<String>>,
     order_by: Vec<(String, bool)>,
     filter_fields: Vec<String>,
@@ -273,6 +283,7 @@ pub struct ListView {
     /// default `object_list`. Empty (the default) skips the
     /// extra binding.
     context_object_name: String,
+    access: ViewAccess,
 }
 
 /// `cbv_setters!(name1, name2, …)` — declarative emitter for the
@@ -339,7 +350,231 @@ macro_rules! cbv_setters {
     };
 }
 
+// ============================================================== access
+
+/// The calls that decide who may use a view, in this build.
+#[cfg(feature = "tenancy")]
+const VIEW_ACCESS_FIX: &str = "call `.permissions_for_model()`, `.permissions(..)` or \
+     `.login_required()`, or `.allow_anonymous()` if this is intended";
+#[cfg(not(feature = "tenancy"))]
+const VIEW_ACCESS_FIX: &str =
+    "call `.allow_anonymous()` behind your own auth layer if this is intended";
+
+/// Who may use a view: `read` gates `GET`, `write` every other method.
+#[derive(Clone, Default)]
+struct ViewAccess {
+    read: Gate,
+    write: Gate,
+}
+
+impl ViewAccess {
+    fn both(gate: Gate) -> Self {
+        Self {
+            read: gate.clone(),
+            write: gate,
+        }
+    }
+
+    /// `<table>.<action>` codenames for the view's reads and writes.
+    #[cfg(feature = "tenancy")]
+    fn for_model(schema: &ModelSchema, read: &[&str], write: &[&str]) -> Self {
+        let codenames = |actions: &[&str]| {
+            actions
+                .iter()
+                .map(|a| format!("{}.{a}", schema.table))
+                .collect()
+        };
+        Self {
+            read: Gate::Codenames(codenames(read)),
+            write: Gate::Codenames(codenames(write)),
+        }
+    }
+}
+
+/// `cbv_access!(read actions, write actions)` — the access setters every
+/// view has; `permissions_for_model` names the codenames per method.
+macro_rules! cbv_access {
+    ([$($read:literal),+], [$($write:literal),+]) => {
+        /// Serve any caller that reaches this router, behind your own auth
+        /// layer if it needs one. Without an access call the view refuses to mount.
+        #[must_use]
+        pub fn allow_anonymous(mut self) -> Self {
+            self.access = ViewAccess::both(Gate::Anonymous);
+            self
+        }
+
+        /// Serve only a signed-in user: `401` otherwise. The user comes from
+        /// `require_auth` / `optional_auth`, or the session cookie.
+        #[cfg(feature = "tenancy")]
+        #[must_use]
+        pub fn login_required(mut self) -> Self {
+            self.access = ViewAccess::both(Gate::SignedIn);
+            self
+        }
+
+        /// Serve only a signed-in user holding every codename; superusers pass.
+        #[cfg(feature = "tenancy")]
+        #[must_use]
+        pub fn permissions(mut self, codenames: &[&str]) -> Self {
+            let codenames = codenames.iter().map(|&c| c.to_owned()).collect();
+            self.access = ViewAccess::both(Gate::Codenames(codenames));
+            self
+        }
+
+        #[doc = concat!(
+            "Require the model's codenames: `GET` needs ",
+            $("`<table>.", $read, "` "),+,
+            "and a write needs ",
+            $("`<table>.", $write, "` "),+,
+            "."
+        )]
+        #[cfg(feature = "tenancy")]
+        #[must_use]
+        pub fn permissions_for_model(mut self) -> Self {
+            self.access = ViewAccess::for_model(self.schema, &[$($read),+], &[$($write),+]);
+            self
+        }
+    };
+}
+
+/// Refuse a view nobody decided access for, then check its gate before
+/// every handler. `pool` is `None` on a tenant router: the request's
+/// tenant pool reads the codenames.
+fn guarded(
+    router: Router<()>,
+    surface: &str,
+    schema: &'static ModelSchema,
+    access: ViewAccess,
+    writes: bool,
+    pool: Option<Pool>,
+) -> Router<()> {
+    let mut routes = vec![("GET", &access.read)];
+    if writes {
+        routes.push(("POST", &access.write));
+    }
+    crate::access::require_decided(surface, schema.table, &routes, VIEW_ACCESS_FIX);
+    if access.read == Gate::Anonymous && (!writes || access.write == Gate::Anonymous) {
+        return router;
+    }
+    let state = Arc::new(GateState { access, pool });
+    router.route_layer(axum::middleware::from_fn_with_state(state, gate_request))
+}
+
+struct GateState {
+    access: ViewAccess,
+    pool: Option<Pool>,
+}
+
+async fn gate_request(
+    State(g): State<Arc<GateState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    use crate::access::Outcome;
+    let read = matches!(
+        *req.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD
+    );
+    let gate = if read {
+        &g.access.read
+    } else {
+        &g.access.write
+    };
+    if *gate == Gate::Anonymous {
+        return next.run(req).await;
+    }
+    let (mut parts, body) = req.into_parts();
+    let outcome = match view_outcome(gate, &mut parts, g.pool.as_ref()).await {
+        Ok(o) => o,
+        Err(resp) => return resp,
+    };
+    match outcome {
+        Outcome::Allow => {
+            next.run(axum::extract::Request::from_parts(parts, body))
+                .await
+        }
+        Outcome::Unauthenticated => {
+            (StatusCode::UNAUTHORIZED, "authentication required").into_response()
+        }
+        Outcome::Forbidden => (StatusCode::FORBIDDEN, "permission denied").into_response(),
+        Outcome::Unavailable(e) => {
+            tracing::error!(target: "rustango::template_views", error = %e, "permission read failed");
+            (StatusCode::SERVICE_UNAVAILABLE, "service unavailable").into_response()
+        }
+    }
+}
+
+/// The gate's answer for this request: the caller from an auth layer, or
+/// on a tenant route the session cookie; codenames from the pool the view reads.
+#[cfg(feature = "tenancy")]
+async fn view_outcome(
+    gate: &Gate,
+    parts: &mut Parts,
+    pool: Option<&Pool>,
+) -> Result<crate::access::Outcome, Response> {
+    use crate::access::Caller;
+    use axum::extract::FromRequestParts as _;
+    let (caller, pool) = match pool {
+        // No cookie fallback: a session belongs to a tenant, this pool to none.
+        Some(p) => (Caller::on_fixed(parts), p.clone()),
+        None => {
+            let t = crate::extractors::TenantScope::from_request_parts(parts, &())
+                .await
+                .map_err(IntoResponse::into_response)?;
+            let caller = match Caller::on_tenant(parts, &t.org) {
+                Ok(None) => session_caller(parts).await,
+                decided => decided,
+            };
+            (caller, t.pool().clone())
+        }
+    };
+    Ok(match caller {
+        Ok(caller) => gate.check(caller.as_ref(), &pool).await,
+        Err(refused) => refused,
+    })
+}
+
+/// The session cookie's user; a failed read is an outage (503), not anonymous.
+#[cfg(feature = "tenancy")]
+async fn session_caller(
+    parts: &Parts,
+) -> Result<Option<crate::access::Caller>, crate::access::Outcome> {
+    let user = crate::extractors::SessionUser::read(parts)
+        .await
+        .map_err(crate::access::Outcome::Unavailable)?;
+    Ok(user.and_then(|u| {
+        Some(crate::access::Caller {
+            id: *u.id.get()?,
+            is_superuser: u.is_superuser,
+        })
+    }))
+}
+
+/// Only `allow_anonymous` exists without `tenancy`, and it skips the gate.
+#[cfg(not(feature = "tenancy"))]
+async fn view_outcome(
+    _gate: &Gate,
+    _parts: &mut Parts,
+    _pool: Option<&Pool>,
+) -> Result<crate::access::Outcome, Response> {
+    Ok(crate::access::Outcome::Forbidden)
+}
+
 impl ListView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self
+            .fields
+            .iter()
+            .flatten()
+            .chain(&self.filter_fields)
+            .chain(&self.search_fields)
+            .chain(&self.ordering_fields)
+            .chain(self.order_by.iter().map(|(n, _)| n))
+            .map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `ListView` for the given schema. Defaults: template
     /// name `<table>_list.html`, page size 20, max page size 100,
     /// no `ORDER BY`, all fields included, no filters, no search,
@@ -355,6 +590,7 @@ impl ListView {
             template: format!("{}_list.html", schema.table),
             page_size: 20,
             max_page_size: 100,
+            max_offset: crate::list_params::DEFAULT_MAX_OFFSET,
             fields: None,
             order_by: Vec::new(),
             filter_fields: Vec::new(),
@@ -366,6 +602,7 @@ impl ListView {
             confirm_delete_template: None,
             fk_display: false,
             context_object_name: String::new(),
+            access: ViewAccess::default(),
         }
     }
 
@@ -373,6 +610,7 @@ impl ListView {
     // byte-identical setters across the CBV impls; emitted via
     // `cbv_setters!`.
     cbv_setters!(template, context_object_name, fields);
+    cbv_access!(["view"], ["view", "change", "delete"]);
 
     /// Default page size — clamped to `≥ 1`. Default 20. Users can
     /// override per-request via `?page_size=N`, clamped to
@@ -390,6 +628,26 @@ impl ListView {
     pub fn max_page_size(mut self, n: usize) -> Self {
         self.max_page_size = i64::try_from(n).unwrap_or(100).max(1);
         self
+    }
+
+    /// Deepest row `?page=N` may skip to (default
+    /// [`DEFAULT_MAX_OFFSET`](crate::list_params::DEFAULT_MAX_OFFSET)); past
+    /// it the view answers `400`. `0` lifts the cap.
+    #[must_use]
+    pub fn max_offset(mut self, n: usize) -> Self {
+        self.max_offset = n;
+        self
+    }
+
+    /// `(page, page_size, offset)` for `params`, or the `400` for a page
+    /// past [`Self::max_offset`].
+    fn page_window(&self, params: &HashMap<String, String>) -> Result<(i64, i64, i64), Response> {
+        let page = crate::list_params::parse_page(params);
+        let page_size = resolve_page_size(self.page_size, self.max_page_size, params);
+        let offset = crate::list_params::page_offset(page, page_size);
+        crate::list_params::check_offset(offset, self.max_offset)
+            .map(|offset| (page, page_size, offset))
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()).into_response())
     }
 
     /// Add an `ORDER BY` clause. Call multiple times for tie-breakers.
@@ -667,18 +925,21 @@ impl ListView {
     /// When [`Self::bulk_actions`] is on, also mounts `POST <prefix>`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("ListView");
         let bulk = self.bulk_actions_enabled;
+        let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(ListViewState {
             vs: self,
             tera,
-            pool,
+            pool: pool.clone(),
         });
         let route = if bulk {
             get(handle_list).post(handle_list_action)
         } else {
             get(handle_list)
         };
-        csrf_protected(Router::new().route(prefix, route).with_state(state))
+        let router = csrf_protected(Router::new().route(prefix, route).with_state(state));
+        guarded(router, "ListView", schema, access, bulk, Some(pool))
     }
 
     /// Tenant-aware variant — each request resolves its own
@@ -690,14 +951,17 @@ impl ListView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("ListView");
         let bulk = self.bulk_actions_enabled;
+        let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantListViewState { vs: self, tera });
         let route = if bulk {
             get(handle_list_tenant).post(handle_list_action_tenant)
         } else {
             get(handle_list_tenant)
         };
-        csrf_protected(Router::new().route(prefix, route).with_state(state))
+        let router = csrf_protected(Router::new().route(prefix, route).with_state(state));
+        guarded(router, "ListView", schema, access, bulk, None)
     }
 }
 
@@ -781,9 +1045,10 @@ async fn handle_list(
     csrf: CsrfCookie,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let page = crate::list_params::parse_page(&params);
-    let page_size = resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-    let offset = crate::list_params::page_offset(page, page_size);
+    let (page, page_size, offset) = match state.vs.page_window(&params) {
+        Ok(w) => w,
+        Err(refused) => return refused,
+    };
 
     let (order_by, active_ordering) = match resolve_active_order(
         state.vs.schema,
@@ -1040,9 +1305,16 @@ pub struct DetailView {
     /// `WHERE <lookup_field> = <captured>` instead of `WHERE pk =
     /// <captured>`. Useful for `/posts/{slug}` style URLs.
     lookup_field: Option<String>,
+    access: ViewAccess,
 }
 
 impl DetailView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().flatten().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// # Panics
     /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
@@ -1054,11 +1326,13 @@ impl DetailView {
             fields: None,
             context_object_name: String::new(),
             lookup_field: None,
+            access: ViewAccess::default(),
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, fields, context_object_name);
+    cbv_access!(["view"], ["view"]);
 
     /// Look up the row by a non-PK column. The captured URL segment
     /// matches against the named column instead of the model's
@@ -1082,26 +1356,32 @@ impl DetailView {
 
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("DetailView");
+        let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(DetailViewState {
             vs: self,
             tera,
-            pool,
+            pool: pool.clone(),
         });
         let path = mount_path(prefix, "/{pk}");
-        Router::new()
+        let router = Router::new()
             .route(&path, get(handle_detail))
-            .with_state(state)
+            .with_state(state);
+        guarded(router, "DetailView", schema, access, false, Some(pool))
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("DetailView");
+        let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantDetailViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}");
-        Router::new()
+        let router = Router::new()
             .route(&path, get(handle_detail_tenant))
-            .with_state(state)
+            .with_state(state);
+        guarded(router, "DetailView", schema, access, false, None)
     }
 }
 
@@ -1194,9 +1474,16 @@ pub struct DeleteView {
     template: String,
     success_url: String,
     fields: Option<Vec<String>>,
+    access: ViewAccess,
 }
 
 impl DeleteView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().flatten().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `DeleteView` for the given schema. Defaults: template
     /// `<table>_confirm_delete.html`, redirect on success to `/`.
     ///
@@ -1210,38 +1497,45 @@ impl DeleteView {
             template: format!("{}_confirm_delete.html", schema.table),
             success_url: "/".to_owned(),
             fields: None,
+            access: ViewAccess::default(),
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, success_url, fields);
+    cbv_access!(["delete"], ["delete"]);
 
     /// Mount as `GET`/`POST <prefix>/{pk}/delete`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("DeleteView");
+        let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(DeleteViewState {
             vs: self,
             tera,
-            pool,
+            pool: pool.clone(),
         });
         let path = mount_path(prefix, "/{pk}/delete");
-        csrf_protected(
+        let router = csrf_protected(
             Router::new()
                 .route(
                     &path,
                     axum::routing::get(handle_delete_confirm).post(handle_delete_submit),
                 )
                 .with_state(state),
-        )
+        );
+        guarded(router, "DeleteView", schema, access, true, Some(pool))
     }
 
     /// Tenant-aware variant — see [`ListView::tenant_router`].
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("DeleteView");
+        let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}/delete");
-        csrf_protected(
+        let router = csrf_protected(
             Router::new()
                 .route(
                     &path,
@@ -1249,7 +1543,8 @@ impl DeleteView {
                         .post(handle_delete_submit_tenant),
                 )
                 .with_state(state),
-        )
+        );
+        guarded(router, "DeleteView", schema, access, true, None)
     }
 }
 
@@ -1351,9 +1646,16 @@ pub struct CreateView {
     /// The write allow-list: the only fields the form renders and a POST sets.
     fields: Vec<String>,
     validator: Option<Validator>,
+    access: ViewAccess,
 }
 
 impl CreateView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `CreateView` that renders and writes only `fields` (names or
     /// columns); any other posted key is ignored. Defaults: template
     /// `<table>_form.html`, redirect to `/` on success.
@@ -1369,11 +1671,13 @@ impl CreateView {
             success_url: "/".to_owned(),
             fields: fields.iter().map(|s| (*s).to_owned()).collect(),
             validator: None,
+            access: ViewAccess::default(),
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, success_url);
+    cbv_access!(["add"], ["add"]);
 
     /// Install a closure-based validator that runs after schema-level
     /// type coercion + bounds checks but before the SQL INSERT.
@@ -1447,6 +1751,7 @@ impl CreateView {
     /// Mount as `GET`/`POST <prefix>/new`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("CreateView");
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1454,17 +1759,25 @@ impl CreateView {
             fields: self.fields.clone(),
             context_fields: Vec::new(),
             tera,
-            pool,
+            pool: pool.clone(),
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/new");
-        csrf_protected(
+        let router = csrf_protected(
             Router::new()
                 .route(
                     &path,
                     axum::routing::get(handle_create_get).post(handle_create_post),
                 )
                 .with_state(state),
+        );
+        guarded(
+            router,
+            "CreateView",
+            self.schema,
+            self.access,
+            true,
+            Some(pool),
         )
     }
 
@@ -1472,6 +1785,7 @@ impl CreateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("CreateView");
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
@@ -1482,14 +1796,15 @@ impl CreateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/new");
-        csrf_protected(
+        let router = csrf_protected(
             Router::new()
                 .route(
                     &path,
                     axum::routing::get(handle_create_get_tenant).post(handle_create_post_tenant),
                 )
                 .with_state(state),
-        )
+        );
+        guarded(router, "CreateView", self.schema, self.access, true, None)
     }
 }
 
@@ -1514,9 +1829,20 @@ pub struct UpdateView {
     /// Read-only columns `object` carries beyond `fields` and the pk.
     context_fields: Vec<String>,
     validator: Option<Validator>,
+    access: ViewAccess,
 }
 
 impl UpdateView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self
+            .fields
+            .iter()
+            .chain(&self.context_fields)
+            .map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start an `UpdateView` that renders and writes only `fields`; see
     /// [`CreateView::for_model`]. `object` holds `fields` and the primary key.
     ///
@@ -1532,11 +1858,13 @@ impl UpdateView {
             fields: fields.iter().map(|s| (*s).to_owned()).collect(),
             context_fields: Vec::new(),
             validator: None,
+            access: ViewAccess::default(),
         }
     }
 
     // #807 — byte-identical setters emitted via `cbv_setters!`.
     cbv_setters!(template, success_url);
+    cbv_access!(["change"], ["change"]);
 
     /// Extra columns `object` carries for the template to show; never written.
     ///
@@ -1585,6 +1913,7 @@ impl UpdateView {
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("UpdateView");
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1592,17 +1921,25 @@ impl UpdateView {
             fields: self.fields.clone(),
             context_fields: self.context_fields.clone(),
             tera,
-            pool,
+            pool: pool.clone(),
             validator: self.validator.clone(),
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        csrf_protected(
+        let router = csrf_protected(
             Router::new()
                 .route(
                     &path,
                     axum::routing::get(handle_update_get).post(handle_update_post),
                 )
                 .with_state(state),
+        );
+        guarded(
+            router,
+            "UpdateView",
+            self.schema,
+            self.access,
+            true,
+            Some(pool),
         )
     }
 
@@ -1610,6 +1947,7 @@ impl UpdateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("UpdateView");
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
@@ -1620,14 +1958,15 @@ impl UpdateView {
             validator: self.validator,
         });
         let path = mount_path(prefix, "/{pk}/edit");
-        csrf_protected(
+        let router = csrf_protected(
             Router::new()
                 .route(
                     &path,
                     axum::routing::get(handle_update_get_tenant).post(handle_update_post_tenant),
                 )
                 .with_state(state),
-        )
+        );
+        guarded(router, "UpdateView", self.schema, self.access, true, None)
     }
 }
 
@@ -3749,10 +4088,10 @@ mod tenant {
         Query(params): Query<HashMap<String, String>>,
         t: TenantScope,
     ) -> Response {
-        let page = crate::list_params::parse_page(&params);
-        let page_size =
-            super::resolve_page_size(state.vs.page_size, state.vs.max_page_size, &params);
-        let offset = crate::list_params::page_offset(page, page_size);
+        let (page, page_size, offset) = match state.vs.page_window(&params) {
+            Ok(w) => w,
+            Err(refused) => return refused,
+        };
 
         let (order_by, active_ordering) = match super::resolve_active_order(
             state.vs.schema,
@@ -4212,11 +4551,11 @@ mod tests {
     #[cfg(feature = "admin")]
     #[test]
     fn every_view_refuses_admin_only_and_never_served_tables() {
-        use crate::core::table_policy::{table_access, TableAccess};
+        use crate::core::{table_policy::table_access, TableAccess};
         let refused: Vec<&'static ModelSchema> = inventory::iter::<crate::core::ModelEntry>
             .into_iter()
             .map(|e| e.schema)
-            .filter(|s| table_access(s.table) != TableAccess::Open)
+            .filter(|s| table_access(s.table) != Some(TableAccess::Open))
             .collect();
         #[cfg(feature = "tenancy")]
         assert!(
@@ -4231,11 +4570,21 @@ mod tests {
         };
         for s in refused {
             let views: [(&str, &dyn Fn()); 5] = [
-                ("ListView", &|| drop(ListView::for_model(s))),
-                ("DetailView", &|| drop(DetailView::for_model(s))),
-                ("DeleteView", &|| drop(DeleteView::for_model(s))),
-                ("CreateView", &|| drop(CreateView::for_model(s, &["id"]))),
-                ("UpdateView", &|| drop(UpdateView::for_model(s, &["id"]))),
+                ("ListView", &|| {
+                    drop(ListView::for_model(s).allow_anonymous())
+                }),
+                ("DetailView", &|| {
+                    drop(DetailView::for_model(s).allow_anonymous())
+                }),
+                ("DeleteView", &|| {
+                    drop(DeleteView::for_model(s).allow_anonymous())
+                }),
+                ("CreateView", &|| {
+                    drop(CreateView::for_model(s, &["id"]).allow_anonymous())
+                }),
+                ("UpdateView", &|| {
+                    drop(UpdateView::for_model(s, &["id"]).allow_anonymous())
+                }),
             ];
             for (view, build) in views {
                 let msg = panics(build);
@@ -4338,6 +4687,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
@@ -4460,20 +4810,21 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
     /// Default template name is derived from the table name.
     #[test]
     fn list_view_default_template_matches_table() {
-        let lv = ListView::for_model(schema_two_fields());
+        let lv = ListView::for_model(schema_two_fields()).allow_anonymous();
         assert_eq!(lv.template, "posts_list.html");
         assert_eq!(lv.page_size, 20);
     }
 
     #[test]
     fn detail_view_default_template_matches_table() {
-        let dv = DetailView::for_model(schema_two_fields());
+        let dv = DetailView::for_model(schema_two_fields()).allow_anonymous();
         assert_eq!(dv.template, "posts_detail.html");
     }
 
@@ -4481,6 +4832,7 @@ mod tests {
     #[test]
     fn list_view_builder_chains() {
         let lv = ListView::for_model(schema_two_fields())
+            .allow_anonymous()
             .template("custom.html")
             .page_size(50)
             .order_by("title", false)
@@ -4495,7 +4847,9 @@ mod tests {
     /// `page_size(0)` clamps to 1 — empty pages are nonsensical.
     #[test]
     fn list_view_page_size_clamps_to_one() {
-        let lv = ListView::for_model(schema_two_fields()).page_size(0);
+        let lv = ListView::for_model(schema_two_fields())
+            .allow_anonymous()
+            .page_size(0);
         assert_eq!(lv.page_size, 1);
     }
 
@@ -4553,6 +4907,7 @@ mod tests {
     #[test]
     fn list_view_filter_and_search_chain() {
         let lv = ListView::for_model(schema_two_fields())
+            .allow_anonymous()
             .filter_fields(&["title"])
             .search_fields(&["title"]);
         assert_eq!(lv.filter_fields, vec!["title".to_owned()]);
@@ -4869,6 +5224,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }));
         assert!(resolve_order_by(no_pk, &[]).unwrap().is_empty());
     }
@@ -4897,7 +5253,7 @@ mod tests {
     /// (caller almost always overrides to the list URL).
     #[test]
     fn delete_view_default_template_and_success_url() {
-        let dv = DeleteView::for_model(schema_two_fields());
+        let dv = DeleteView::for_model(schema_two_fields()).allow_anonymous();
         assert_eq!(dv.template, "posts_confirm_delete.html");
         assert_eq!(dv.success_url, "/");
     }
@@ -4906,6 +5262,7 @@ mod tests {
     #[test]
     fn delete_view_builder_chains() {
         let dv = DeleteView::for_model(schema_two_fields())
+            .allow_anonymous()
             .template("custom_delete.html")
             .success_url("/posts")
             .fields(&["id", "title"]);
@@ -4922,7 +5279,7 @@ mod tests {
     /// CreateView default template + success_url.
     #[test]
     fn create_view_defaults() {
-        let cv = CreateView::for_model(schema_two_fields(), &["title"]);
+        let cv = CreateView::for_model(schema_two_fields(), &["title"]).allow_anonymous();
         assert_eq!(cv.template, "posts_form.html");
         assert_eq!(cv.success_url, "/");
         assert_eq!(cv.fields, ["title"]);
@@ -4932,7 +5289,7 @@ mod tests {
     /// interchangeable; templates branch on `is_create`/`is_update`).
     #[test]
     fn update_view_default_template_matches_create() {
-        let uv = UpdateView::for_model(schema_two_fields(), &["title"]);
+        let uv = UpdateView::for_model(schema_two_fields(), &["title"]).allow_anonymous();
         assert_eq!(uv.template, "posts_form.html");
     }
 
@@ -5329,6 +5686,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }));
         let pk = uuid_schema.primary_key().unwrap();
         let raw = "550e8400-e29b-41d4-a716-446655440000";
@@ -5401,6 +5759,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 
@@ -5805,13 +6164,17 @@ mod tests {
     #[test]
     fn validator_and_form_builders_set_validator_field() {
         // Closure form
-        let cv = CreateView::for_model(schema_two_fields(), &["title"]).validator(|_data| Ok(()));
+        let cv = CreateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
+            .validator(|_data| Ok(()));
         assert!(
             cv.validator.is_some(),
             ".validator(closure) must set the field"
         );
 
-        let uv = UpdateView::for_model(schema_two_fields(), &["title"]).validator(|_data| Ok(()));
+        let uv = UpdateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
+            .validator(|_data| Ok(()));
         assert!(uv.validator.is_some());
 
         // Typed Form trait
@@ -5821,7 +6184,9 @@ mod tests {
                 Ok(Tiny)
             }
         }
-        let cv2 = CreateView::for_model(schema_two_fields(), &["title"]).form::<Tiny>();
+        let cv2 = CreateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
+            .form::<Tiny>();
         assert!(
             cv2.validator.is_some(),
             ".form::<T>() must set the validator"
@@ -5835,7 +6200,7 @@ mod tests {
     #[test]
     fn bulk_actions_default_off_flag_flips_with_builder() {
         let s = schema_two_fields();
-        let lv = ListView::for_model(s);
+        let lv = ListView::for_model(s).allow_anonymous();
         assert!(!lv.bulk_actions_enabled, "default off");
         let lv2 = lv.bulk_actions(true);
         assert!(lv2.bulk_actions_enabled, "true after .bulk_actions(true)");
@@ -5848,6 +6213,7 @@ mod tests {
         let s = schema_two_fields();
         let h: BulkActionFn = Arc::new(|_pool, _pks| Box::pin(async { Ok(()) }));
         let lv = ListView::for_model(s)
+            .allow_anonymous()
             .action("publish", "Publish", h.clone())
             .action("archive", "Archive", h.clone())
             .action("publish", "Publish (renamed)", h);
@@ -5907,6 +6273,7 @@ mod tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         // No `posts` table, so the DELETE fails in the driver.
         let app = ListView::for_model(schema_two_fields())
+            .allow_anonymous()
             .bulk_actions(true)
             .router("/l", Arc::new(Tera::default()), pool);
         let res = app
@@ -5932,6 +6299,7 @@ mod tests {
         schema.soft_delete_column = Some("title");
         let h: BulkActionFn = Arc::new(|_p, _v| Box::pin(async { Ok(()) }));
         let app = ListView::for_model(Box::leak(Box::new(schema)))
+            .allow_anonymous()
             .bulk_actions(true)
             .action("publish", "Publish", h)
             .router("/l", Arc::new(Tera::default()), pool);
@@ -5952,6 +6320,7 @@ mod tests {
         let s = schema_two_fields();
         let h: BulkActionFn = Arc::new(|_p, _v| Box::pin(async { Ok(()) }));
         let lv = ListView::for_model(s)
+            .allow_anonymous()
             .bulk_actions(true)
             .action("publish", "Publish", h);
         let mut ctx = Context::new();
@@ -5969,18 +6338,22 @@ mod tests {
     #[test]
     fn with_delete_confirmation_flag_and_template_override() {
         let s = schema_two_fields();
-        let lv = ListView::for_model(s);
+        let lv = ListView::for_model(s).allow_anonymous();
         assert!(!lv.confirm_delete, "default off");
         assert!(lv.confirm_delete_template.is_none());
 
-        let lv2 = ListView::for_model(s).with_delete_confirmation(true);
+        let lv2 = ListView::for_model(s)
+            .allow_anonymous()
+            .with_delete_confirmation(true);
         assert!(lv2.confirm_delete);
         assert!(
             lv2.confirm_delete_template.is_none(),
             "no override → resolves at request time"
         );
 
-        let lv3 = ListView::for_model(s).with_delete_confirmation_template("custom.html");
+        let lv3 = ListView::for_model(s)
+            .allow_anonymous()
+            .with_delete_confirmation_template("custom.html");
         assert!(
             lv3.confirm_delete,
             "with_delete_confirmation_template implies the flag"
@@ -5993,13 +6366,15 @@ mod tests {
     #[test]
     fn confirm_delete_template_name_resolves_default_or_override() {
         let s = schema_two_fields();
-        let lv = ListView::for_model(s);
+        let lv = ListView::for_model(s).allow_anonymous();
         // Default — schema_two_fields() puts the table at "posts".
         assert_eq!(
             confirm_delete_template_name(&lv),
             "posts_confirm_bulk_delete.html"
         );
-        let lv2 = ListView::for_model(s).with_delete_confirmation_template("blog/confirm.html");
+        let lv2 = ListView::for_model(s)
+            .allow_anonymous()
+            .with_delete_confirmation_template("blog/confirm.html");
         assert_eq!(confirm_delete_template_name(&lv2), "blog/confirm.html");
     }
 
@@ -6009,9 +6384,11 @@ mod tests {
     #[test]
     fn with_fk_display_flag_default_off_then_on() {
         let s = schema_two_fields();
-        let lv = ListView::for_model(s);
+        let lv = ListView::for_model(s).allow_anonymous();
         assert!(!lv.fk_display, "default off");
-        let lv2 = ListView::for_model(s).with_fk_display(true);
+        let lv2 = ListView::for_model(s)
+            .allow_anonymous()
+            .with_fk_display(true);
         assert!(lv2.fk_display);
     }
 
@@ -6121,7 +6498,7 @@ mod tests {
     #[test]
     fn bulk_actions_context_empty_when_disabled() {
         let s = schema_two_fields();
-        let lv = ListView::for_model(s); // default off
+        let lv = ListView::for_model(s).allow_anonymous(); // default off
         let mut ctx = Context::new();
         insert_bulk_actions_context(&mut ctx, &lv);
         let v = ctx.into_json();
@@ -6139,16 +6516,22 @@ mod tests {
         let s = schema_two_fields();
         let tera = Arc::new(Tera::default());
         let _ = ListView::for_model(s)
+            .allow_anonymous()
             .page_size(10)
             .tenant_router("/posts", tera.clone());
-        let _ = DetailView::for_model(s).tenant_router("/posts", tera.clone());
+        let _ = DetailView::for_model(s)
+            .allow_anonymous()
+            .tenant_router("/posts", tera.clone());
         let _ = DeleteView::for_model(s)
+            .allow_anonymous()
             .success_url("/posts")
             .tenant_router("/posts", tera.clone());
         let _ = CreateView::for_model(s, &["title"])
+            .allow_anonymous()
             .success_url("/posts")
             .tenant_router("/posts", tera.clone());
         let _ = UpdateView::for_model(s, &["title"])
+            .allow_anonymous()
             .success_url("/posts")
             .tenant_router("/posts", tera);
     }
@@ -6424,6 +6807,7 @@ mod tests {
         tera.add_raw_template("f.html", "<p>my form</p>").unwrap();
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         let app = CreateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
             .template("f.html")
             .router("/c", Arc::new(tera), pool)
             .error_pages(ErrorPagesLayer::new());
@@ -6495,6 +6879,7 @@ mod tests {
             ..Default::default()
         };
         let app = CreateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
             .template("f.html")
             .router("/c", Arc::new(tera), pool)
             .layer(crate::forms::csrf::with_config(cfg));
@@ -6566,6 +6951,7 @@ mod tests {
             ),
         ] {
             let app = CreateView::for_model(schema_two_fields(), &["title"])
+                .allow_anonymous()
                 .template("f.html")
                 .router("/c", tera.clone(), pool.clone())
                 .layer(crate::forms::csrf::with_config(cfg));
@@ -6599,6 +6985,7 @@ mod tests {
         tera.add_raw_template("f.html", "{{ csrf_token }}").unwrap();
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         let app = CreateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
             .template("f.html")
             .router("/c", Arc::new(tera), pool);
         let req = Request::builder()
@@ -6626,6 +7013,7 @@ mod tests {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
         let cfg = crate::forms::csrf::CsrfConfig::default().exempt_prefix("/c");
         let app = CreateView::for_model(schema_two_fields(), &["title"])
+            .allow_anonymous()
             .template("f.html")
             .router("/c", Arc::new(tera), pool)
             .layer(crate::forms::csrf::with_config(cfg));
@@ -6666,23 +7054,30 @@ mod tests {
             ),
             (
                 "/c/new",
-                CreateView::for_model(schema, &["title"]).router("/c", tera.clone(), pool.clone()),
+                CreateView::for_model(schema, &["title"])
+                    .allow_anonymous()
+                    .router("/c", tera.clone(), pool.clone()),
             ),
             (
                 "/u/1/edit",
-                UpdateView::for_model(schema, &["title"]).router("/u", tera.clone(), pool.clone()),
+                UpdateView::for_model(schema, &["title"])
+                    .allow_anonymous()
+                    .router("/u", tera.clone(), pool.clone()),
             ),
             (
                 "/d/1/delete",
-                DeleteView::for_model(schema).router("/d", tera.clone(), pool.clone()),
-            ),
-            (
-                "/l",
-                ListView::for_model(schema).bulk_actions(true).router(
-                    "/l",
+                DeleteView::for_model(schema).allow_anonymous().router(
+                    "/d",
                     tera.clone(),
                     pool.clone(),
                 ),
+            ),
+            (
+                "/l",
+                ListView::for_model(schema)
+                    .allow_anonymous()
+                    .bulk_actions(true)
+                    .router("/l", tera.clone(), pool.clone()),
             ),
         ];
         for (uri, app) in routers {
@@ -6712,19 +7107,26 @@ mod tests {
             vec![
                 (
                     "/c/new",
-                    CreateView::for_model(schema, &["title"]).tenant_router("/c", tera.clone()),
+                    CreateView::for_model(schema, &["title"])
+                        .allow_anonymous()
+                        .tenant_router("/c", tera.clone()),
                 ),
                 (
                     "/u/1/edit",
-                    UpdateView::for_model(schema, &["title"]).tenant_router("/u", tera.clone()),
+                    UpdateView::for_model(schema, &["title"])
+                        .allow_anonymous()
+                        .tenant_router("/u", tera.clone()),
                 ),
                 (
                     "/d/1/delete",
-                    DeleteView::for_model(schema).tenant_router("/d", tera.clone()),
+                    DeleteView::for_model(schema)
+                        .allow_anonymous()
+                        .tenant_router("/d", tera.clone()),
                 ),
                 (
                     "/l",
                     ListView::for_model(schema)
+                        .allow_anonymous()
                         .bulk_actions(true)
                         .tenant_router("/l", tera.clone()),
                 ),

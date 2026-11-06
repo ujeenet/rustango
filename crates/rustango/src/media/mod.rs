@@ -175,7 +175,12 @@ impl MediaStatus {
 // `permissions` so `auto_create_permissions` seeds
 // `rustango_media.{add,change,delete,view}`, the codenames
 // `router::MediaPerms` checks. Not a column, so no migration.
-#[rustango(table = "rustango_media", index("disk, storage_key"), permissions)]
+#[rustango(
+    table = "rustango_media",
+    access = "open",
+    index("disk, storage_key"),
+    permissions
+)]
 pub struct Media {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

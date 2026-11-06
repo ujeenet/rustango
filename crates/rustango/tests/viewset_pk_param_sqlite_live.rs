@@ -50,6 +50,7 @@ async fn pool_with_row() -> Pool {
 async fn renamed_capture_still_resolves_the_detail_route() {
     let pool = pool_with_row().await;
     let app = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .pk_param("id")
         .router("/notes", pool);
 
@@ -73,6 +74,7 @@ async fn renamed_capture_still_resolves_the_detail_route() {
 async fn sibling_route_with_matching_capture_name_mounts() {
     let pool = pool_with_row().await;
     let vs = rustango::viewset::ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .pk_param("id")
         .router("/notes", pool);
 

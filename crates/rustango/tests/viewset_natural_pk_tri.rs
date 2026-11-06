@@ -53,10 +53,17 @@ async fn setup(pool: &Pool) {
 fn app(pool: &Pool) -> axum::Router {
     use rustango::viewset::ViewSet;
     ViewSet::for_model(Tag::SCHEMA, &["slug", "name"])
+        .allow_anonymous()
         .router("/tags", pool.clone())
-        .merge(ViewSet::for_model(Token::SCHEMA, &["id", "name"]).router("/tokens", pool.clone()))
         .merge(
-            ViewSet::for_model(Doc::SCHEMA, &["id", "qty", "twice"]).router("/docs", pool.clone()),
+            ViewSet::for_model(Token::SCHEMA, &["id", "name"])
+                .allow_anonymous()
+                .router("/tokens", pool.clone()),
+        )
+        .merge(
+            ViewSet::for_model(Doc::SCHEMA, &["id", "qty", "twice"])
+                .allow_anonymous()
+                .router("/docs", pool.clone()),
         )
 }
 
@@ -233,7 +240,11 @@ async fn sqlite_text_uuid_key_is_found_by_retrieve_update_and_delete() {
         .await
         .expect("sqlite");
     rustango::testkit::matrix::fresh_table::<TextKey>(&pool).await;
-    let app = || ViewSet::for_model(TextKey::SCHEMA, &["id", "name"]).router("/keys", pool.clone());
+    let app = || {
+        ViewSet::for_model(TextKey::SCHEMA, &["id", "name"])
+            .allow_anonymous()
+            .router("/keys", pool.clone())
+    };
     let seed = Request::builder()
         .method(Method::POST)
         .uri("/keys")

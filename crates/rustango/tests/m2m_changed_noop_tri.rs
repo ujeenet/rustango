@@ -220,8 +220,8 @@ async fn add_twice_on_a_keyless_through_model(pool: &Pool) {
     assert_eq!(p.all::<i32>(pool).await.expect("all"), [5]);
 }
 
-/// A unique key the link check does not cover skips the insert: no `Add`.
-async fn add_skipped_by_another_unique_key(pool: &Pool) {
+/// Only the link itself is a no-op: another unique key's refusal is an error, as in `set`.
+async fn add_refused_by_another_unique_key(pool: &Pool) {
     let (_signals, fired) = record().await;
     let p = M2MManager {
         src_pk: SqlValue::I64(1),
@@ -230,11 +230,31 @@ async fn add_skipped_by_another_unique_key(pool: &Pool) {
         dst_col: "tag_id",
     };
     p.add(5_i64, pool).await.expect("add");
+    p.add(5_i64, pool).await.expect("duplicate add");
     p.add(6_i64, pool)
         .await
-        .expect("add the unique post_id skips");
+        .expect_err("the unique post_id refuses a second tag");
+    p.set(&[5_i64, 6], pool)
+        .await
+        .expect_err("set refuses it too");
     assert_eq!(actions(&fired), [M2mAction::Add]);
     assert_eq!(p.all::<i64>(pool).await.expect("all"), [5]);
+    // A generic junction goes through the same check.
+    let t = tags(GENERIC_INT);
+    t.add(5_i64, pool).await.expect("generic add");
+    t.add(5_i64, pool).await.expect("generic duplicate add");
+    assert_eq!(actions(&fired), [M2mAction::Add]);
+    // A link this transaction added is seen as present.
+    let (inner, q) = (pool.clone(), post(4));
+    rustango::atomic!(pool, |_tx| {
+        q.add(5_i64, &inner).await?;
+        q.add(5_i64, &inner).await?;
+        Ok(())
+    })
+    .await
+    .expect("duplicate add in one block");
+    assert_eq!(post(4).all::<i64>(pool).await.expect("all"), [5]);
+    clear_all();
 }
 
 /// `add` on a keyed junction is one statement and takes no source lock, so
@@ -492,7 +512,7 @@ tri_dialect_test! {
         noop_set_and_clear_fire_nothing,
         set_on_an_i32_through_model,
         add_twice_on_a_keyless_through_model,
-        add_skipped_by_another_unique_key,
+        add_refused_by_another_unique_key,
         add_inside_atomic_that_updated_the_source,
         generic_noop_set_and_clear_fire_nothing,
         generic_set_with_string_keys,

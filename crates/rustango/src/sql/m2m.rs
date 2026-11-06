@@ -81,12 +81,14 @@ impl M2MManager {
     }
 
     /// Add `dst_id` to the junction table. No-op if already present; a
-    /// duplicate fires no signal. One insert-or-ignore when the junction has
-    /// a unique `(src, dst)` key; a keyless through model checks then inserts,
-    /// so two concurrent adds of one link on PG/MySQL can both insert.
+    /// duplicate fires no signal. A junction with a unique key over the link
+    /// runs one insert-or-ignore, plus a check for the link when it skips;
+    /// a keyless through model checks then inserts, so two concurrent adds
+    /// of one link on PG/MySQL can both insert.
     ///
     /// # Errors
-    /// Driver failures, or a key outside the through model's field bounds.
+    /// Driver failures (another unique key refusing the row among them), or a
+    /// key outside the through model's field bounds.
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
         let src = self.src_key()?;
@@ -299,7 +301,7 @@ impl M2MManager {
 /// How `add` keeps a link from being stored twice.
 #[derive(Clone, Copy)]
 enum LinkKey {
-    /// A unique key over `(src, dst)` or a subset: insert-or-ignore alone.
+    /// A unique key over `(src, dst)` or a subset: insert-or-ignore first.
     Unique,
     /// No such key: check for the link, then insert.
     Unkeyed,
@@ -430,17 +432,31 @@ pub(crate) fn source_lock(source: &'static ModelSchema, pk: &SqlValue) -> Option
     Some(q)
 }
 
-/// Insert `query` unless the link is present. `true` only when a row went
-/// in. No source lock: a caller holding that row in its own transaction
-/// would wait on itself.
+/// Insert `query` unless the `link` row is present. `true` only when a row
+/// went in; a unique key other than the link refusing it is an error. No
+/// source lock: a caller holding that row in its own transaction would
+/// wait on itself.
 async fn insert_link(
     key: LinkKey,
     link: Vec<Filter>,
     query: &InsertQuery,
     pool: &Pool,
 ) -> Result<bool, ExecError> {
+    // One statement when the row goes in; a skip may be another key's.
     if let LinkKey::Unique = key {
-        return super::executor::insert_or_ignore(pool, query).await;
+        if super::executor::insert_or_ignore(pool, query).await? {
+            return Ok(true);
+        }
+        // Outside a block the key orders the writers: a plain check, then
+        // the insert raises the other key's error. A block's rows only its
+        // own connection sees, so it checks through the block below.
+        if !crate::sql::in_block(pool) {
+            if exists(query.model, link, pool).await? {
+                return Ok(false);
+            }
+            super::executor::insert_pool(pool, query).await?;
+            return Ok(true);
+        }
     }
     query.validate()?;
     // SQLite serializes the check and insert at BEGIN; PG/MySQL can race.
@@ -450,10 +466,9 @@ async fn insert_link(
         tx.commit().await?;
         return Ok(false);
     }
-    // A unique key the check did not cover may still skip the row.
-    let inserted = super::executor::insert_or_ignore_tx(&mut tx, query).await?;
+    super::executor::insert_tx(&mut tx, query).await?;
     tx.commit().await?;
-    Ok(inserted)
+    Ok(true)
 }
 
 /// The destination keys a change linked and unlinked.
@@ -803,15 +818,14 @@ impl GenericM2MManager {
     /// Driver failures, or [`ExecError::ContentTypeNotRegistered`].
     pub async fn add(&self, dst_id: impl Into<SqlValue>, pool: &Pool) -> Result<(), ExecError> {
         let dst = dst_key(dst_id, self.through, self.dst_col)?;
-        let (owner, ct) = self.owner_ct(pool).await?;
-        let mut values: Vec<SqlValue> = owner.into_iter().map(|f| f.value).collect();
-        values.push(dst.clone());
+        let (mut link, ct) = self.owner_ct(pool).await?;
+        link.push(eq(self.dst_col, dst.clone()));
         let query = InsertQuery::new(
             self.junction(),
             vec![self.pk_col, self.ct_col, self.dst_col],
-            values,
+            link.iter().map(|f| f.value.clone()).collect(),
         );
-        if !super::executor::insert_or_ignore(pool, &query).await? {
+        if !insert_link(LinkKey::Unique, link, &query, pool).await? {
             return Ok(());
         }
         #[cfg(feature = "signals")]

@@ -8,6 +8,8 @@
 //! Postgres-specific NULL-cast table, the conflict-clause spelling,
 //! and `compile_*` methods that hand off to the writers.
 
+use std::borrow::Cow;
+
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
@@ -619,13 +621,19 @@ impl Dialect for Postgres {
         b.finish()
     }
 
-    fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_insert_cow(
+        &self,
+        query: Cow<'_, InsertQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.values.len());
         write_insert(&mut b, query)?;
         b.finish()
     }
 
-    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_insert_cow(
+        &self,
+        query: Cow<'_, BulkInsertQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.columns.len() * query.rows.len());
         write_bulk_insert(&mut b, query)?;
         b.finish()
@@ -643,7 +651,10 @@ impl Dialect for Postgres {
         b.finish()
     }
 
-    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_update_cow(
+        &self,
+        query: Cow<'_, BulkUpdateQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::new(self);
         write_bulk_update_pg(&mut b, query)?;
         b.finish()

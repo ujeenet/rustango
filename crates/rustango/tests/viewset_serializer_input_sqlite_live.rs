@@ -66,6 +66,7 @@ async fn router() -> axum::Router {
     .await
     .expect("create");
     rustango::viewset::ViewSet::for_model(Item::SCHEMA, &["id", "name", "slug", "internal_score"])
+        .allow_anonymous()
         .serializer::<ItemSerializer>()
         .router("/items", Pool::Sqlite(sq))
 }
@@ -253,6 +254,7 @@ async fn widget_router() -> axum::Router {
         Widget::SCHEMA,
         &["id", "code", "note", "priority", "status"],
     )
+    .allow_anonymous()
     .serializer::<WidgetSerializer>()
     .router("/widgets", Pool::Sqlite(sq))
 }
@@ -420,6 +422,7 @@ async fn doc_router() -> axum::Router {
     .await
     .expect("create");
     rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "body"])
+        .allow_anonymous()
         .serializer::<DocSerializer>()
         .router("/docs", Pool::Sqlite(sq))
 }
@@ -622,6 +625,7 @@ async fn span_router() -> axum::Router {
     .await
     .expect("create");
     rustango::viewset::ViewSet::for_model(Span::SCHEMA, &["id", "lo", "hi"])
+        .allow_anonymous()
         .serializer::<SpanSerializer>()
         .router("/spans", Pool::Sqlite(sq))
 }
@@ -680,7 +684,8 @@ pub struct Acct {
     pub id: Auto<i64>,
     #[rustango(max_length = 50)]
     pub name: String,
-    #[rustango(max_length = 50)]
+    /// Not a credential for the rule: a write-only test value.
+    #[rustango(secret = false, max_length = 50)]
     pub secret: String,
 }
 
@@ -716,6 +721,7 @@ async fn patch_skips_an_absent_write_only_field() {
     .await
     .expect("create");
     let app = rustango::viewset::ViewSet::for_model(Acct::SCHEMA, &["id", "name", "secret"])
+        .allow_anonymous()
         .serializer::<AcctSerializer>()
         .router("/accts", Pool::Sqlite(sq));
     let resp = app

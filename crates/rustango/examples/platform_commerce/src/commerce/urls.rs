@@ -108,28 +108,29 @@ fn gift_cards(pool: &Pool) -> Router<AppState> {
 const PROMO_FIELDS: &[&str] = &["code", "label", "amount_cents", "visible"];
 
 /// Server-rendered promotion pages. They apply the global scope like
-/// the API (#1746), and every POST needs the CSRF token (#1669).
+/// the API, and every POST needs the CSRF token. Open
+/// like the API: soak only, no single-database sign-in yet.
 fn promotion_pages(pool: &Pool) -> Router<AppState> {
     let tera = views::promotion_templates();
     let s = Promotion::SCHEMA;
     Router::new()
-        .merge(ListView::for_model(s).order_by("id", true).router(
+        .merge(ListView::for_model(s).allow_anonymous().order_by("id", true).router(
             "/promos",
             tera.clone(),
             pool.clone(),
         ))
-        .merge(CreateView::for_model(s, PROMO_FIELDS).success_url("/promos").router(
+        .merge(CreateView::for_model(s, PROMO_FIELDS).allow_anonymous().success_url("/promos").router(
             "/promos",
             tera.clone(),
             pool.clone(),
         ))
-        .merge(DetailView::for_model(s).router("/promos", tera.clone(), pool.clone()))
-        .merge(UpdateView::for_model(s, PROMO_FIELDS).success_url("/promos").router(
+        .merge(DetailView::for_model(s).allow_anonymous().router("/promos", tera.clone(), pool.clone()))
+        .merge(UpdateView::for_model(s, PROMO_FIELDS).allow_anonymous().success_url("/promos").router(
             "/promos",
             tera.clone(),
             pool.clone(),
         ))
-        .merge(DeleteView::for_model(s).success_url("/promos").router(
+        .merge(DeleteView::for_model(s).allow_anonymous().success_url("/promos").router(
             "/promos",
             tera,
             pool.clone(),

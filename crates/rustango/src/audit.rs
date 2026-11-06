@@ -375,7 +375,7 @@ fn audit_insert_stmt(
         .collect();
     let query = crate::core::BulkInsertQuery::new(AuditLog::SCHEMA, AUDIT_COLUMNS.to_vec(), rows);
     dialect
-        .compile_bulk_insert(&query)
+        .compile_bulk_insert_cow(std::borrow::Cow::Owned(query))
         .map_err(|e| sqlx::Error::Protocol(e.to_string()))
 }
 
@@ -519,6 +519,7 @@ fn audit_cleanup_keep_last_n_sql(dialect: &dyn crate::sql::Dialect) -> String {
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_audit_log",
+    access = "open",
     index_together = "entity_table, entity_pk"
 )]
 #[allow(dead_code)]
@@ -657,6 +658,16 @@ pub async fn ensure_table_pool(pool: &crate::sql::Pool) -> Result<(), sqlx::Erro
 pub(crate) fn bootstrap_snapshot() -> crate::migrate::SchemaSnapshot {
     use crate::core::Model as _;
     crate::migrate::SchemaSnapshot::from_models(&[AuditLog::SCHEMA])
+}
+
+// Writes to `audit(track = ...)` models record from the first migrate.
+inventory::submit! {
+    crate::migrate::ensure::BootstrapTable {
+        table: <AuditLog as crate::core::Model>::SCHEMA.table,
+        holder: crate::migrate::ensure::BootstrapHolder::Shared,
+        ensure: |pool| Box::pin(ensure_table_pool(pool)),
+        ddl: |d| crate::migrate::ensure::idempotent_ddl(&bootstrap_snapshot(), d),
+    }
 }
 
 #[cfg(feature = "mysql")]
@@ -2223,7 +2234,11 @@ where
     }
     let mut tx = crate::sql::write_tx(pool).await?;
     // Small pages also keep SQLite's per-row CTE lookup cheap.
-    let stmts = crate::sql::compile_bulk_update_batches(tx.dialect(), query, BULK_AUDIT_CHUNK)?;
+    let stmts = crate::sql::compile_bulk_update_batches(
+        tx.dialect(),
+        std::borrow::Cow::Borrowed(query),
+        BULK_AUDIT_CHUNK,
+    )?;
     let affected = crate::sql::execute_batches_tx(&mut tx, stmts).await?;
     // Each row is `[pk, …update cols]`.
     let pks: Vec<crate::core::SqlValue> = query

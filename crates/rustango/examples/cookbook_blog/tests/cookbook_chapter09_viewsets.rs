@@ -1,7 +1,7 @@
 //! Cookbook Chapter 9 — ViewSet (a REST CRUD API for any model).
 //!
 //! Live in-process tests via `tower::ServiceExt::oneshot` against
-//! a `ViewSet::for_model(...).router(...)` mounted on a real PG pool.
+//! a `ViewSet::for_model(...).allow_anonymous().router(...)` mounted on a real PG pool.
 //! Exercises list / retrieve / create / update / destroy routes.
 //!
 //! Run: `DATABASE_URL=... cargo test --test cookbook_chapter09_viewsets -- --test-threads=1`
@@ -36,7 +36,7 @@ async fn fresh_author_table(pool: &sqlx::PgPool) {
 }
 
 fn router(pool: sqlx::PgPool) -> axum::Router {
-    ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"])
+    ViewSet::for_model(Author::SCHEMA, &["id", "name", "email", "bio", "joined_at"]).allow_anonymous()
         .filter_fields(&["name", "email"])
         .search_fields(&["name", "email", "bio"])
         .ordering(&[("id", false)])

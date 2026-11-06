@@ -183,12 +183,17 @@ mod class_based_views {
     #[tokio::test]
     async fn list_detail_and_create_views_merge_processors() {
         let pool = pool().await;
-        let list = ListView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool.clone());
+        let list = ListView::for_model(CpPost::SCHEMA)
+            .allow_anonymous()
+            .router("/posts", tera(), pool.clone());
         assert_eq!(get(list, "/posts").await, "v=test-build p=/posts");
-        let detail = DetailView::for_model(CpPost::SCHEMA).router("/posts", tera(), pool.clone());
+        let detail = DetailView::for_model(CpPost::SCHEMA)
+            .allow_anonymous()
+            .router("/posts", tera(), pool.clone());
         assert_eq!(get(detail, "/posts/1").await, "v=test-build p=/posts/1");
-        let create =
-            CreateView::for_model(CpPost::SCHEMA, &["title"]).router("/posts", tera(), pool);
+        let create = CreateView::for_model(CpPost::SCHEMA, &["title"])
+            .allow_anonymous()
+            .router("/posts", tera(), pool);
         assert_eq!(get(create, "/posts/new").await, "v=test-build p=/posts/new");
     }
 
@@ -248,27 +253,27 @@ mod class_based_views {
     #[tokio::test]
     async fn view_keys_beat_extra_context_which_beats_processors() {
         let pool = pool().await;
-        let detail = with_extra(DetailView::for_model(CpPost::SCHEMA).router(
-            "/posts",
-            precedence_tera(),
-            pool.clone(),
-        ));
+        let detail = with_extra(
+            DetailView::for_model(CpPost::SCHEMA)
+                .allow_anonymous()
+                .router("/posts", precedence_tera(), pool.clone()),
+        );
         assert_eq!(get(detail, "/posts/1").await, "Hello|extra|test-build");
-        let delete = with_extra(DeleteView::for_model(CpPost::SCHEMA).router(
-            "/posts",
-            precedence_tera(),
-            pool.clone(),
-        ));
+        let delete = with_extra(
+            DeleteView::for_model(CpPost::SCHEMA)
+                .allow_anonymous()
+                .router("/posts", precedence_tera(), pool.clone()),
+        );
         assert_eq!(
             get(delete, "/posts/1/delete").await,
             "Hello|extra|test-build"
         );
         let update = || {
-            with_extra(UpdateView::for_model(CpPost::SCHEMA, &["title"]).router(
-                "/posts",
-                precedence_tera(),
-                pool.clone(),
-            ))
+            with_extra(
+                UpdateView::for_model(CpPost::SCHEMA, &["title"])
+                    .allow_anonymous()
+                    .router("/posts", precedence_tera(), pool.clone()),
+            )
         };
         assert_eq!(
             get(update(), "/posts/1/edit").await,

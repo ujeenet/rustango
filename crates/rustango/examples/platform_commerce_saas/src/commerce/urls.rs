@@ -153,29 +153,30 @@ fn gift_cards() -> Router {
 const PROMO_FIELDS: &[&str] = &["code", "label", "amount_cents", "visible"];
 
 /// Server-rendered promotion pages. They apply the global scope like
-/// the API (#1746), and every POST needs the CSRF token (#1669).
+/// the API, need the model's codenames like it, and every POST
+/// needs the CSRF token.
 fn promotion_pages() -> Router<AppState> {
     let tera = views::promotion_templates();
     let s = Promotion::SCHEMA;
     Router::new()
         .merge(
-            ListView::for_model(s)
+            ListView::for_model(s).permissions_for_model()
                 .order_by("id", true)
                 .tenant_router("/promos", tera.clone()),
         )
         .merge(
-            CreateView::for_model(s, PROMO_FIELDS)
+            CreateView::for_model(s, PROMO_FIELDS).permissions_for_model()
                 .success_url("/promos")
                 .tenant_router("/promos", tera.clone()),
         )
-        .merge(DetailView::for_model(s).tenant_router("/promos", tera.clone()))
+        .merge(DetailView::for_model(s).permissions_for_model().tenant_router("/promos", tera.clone()))
         .merge(
-            UpdateView::for_model(s, PROMO_FIELDS)
+            UpdateView::for_model(s, PROMO_FIELDS).permissions_for_model()
                 .success_url("/promos")
                 .tenant_router("/promos", tera.clone()),
         )
         .merge(
-            DeleteView::for_model(s)
+            DeleteView::for_model(s).permissions_for_model()
                 .success_url("/promos")
                 .tenant_router("/promos", tera),
         )

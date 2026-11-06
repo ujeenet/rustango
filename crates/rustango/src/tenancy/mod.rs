@@ -151,6 +151,7 @@ pub mod server_admin;
 pub mod server_tenant;
 pub mod tenant_console;
 mod unresolved;
+pub mod used_jti;
 
 #[cfg(feature = "mcp")]
 pub use agents::{
@@ -255,3 +256,4 @@ pub use sweep::{
     active_tenants, for_each_tenant, with_tenant, SweepError, TenantOutcome, TenantSweep,
 };
 pub use unresolved::TenantRegistry;
+pub use used_jti::{DbJtiStore, UsedJti};

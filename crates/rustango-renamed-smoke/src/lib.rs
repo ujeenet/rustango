@@ -102,6 +102,7 @@ mod gated {
         model         = RenamedDemo,
         fields        = "id, name, views",
         page_size     = 20,
+        allow_anonymous,
     )]
     #[allow(dead_code)]
     pub struct RenamedDemoViewSet;

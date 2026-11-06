@@ -77,7 +77,9 @@ async fn body_of(resp: axum::response::Response) -> String {
 #[tokio::test]
 async fn a_layout_variable_the_view_does_not_know_fails_without_it() {
     let pool = fresh_pool().await;
-    let app = ListView::for_model(XcPost::SCHEMA).router("/posts", tera_with_layout(), pool);
+    let app = ListView::for_model(XcPost::SCHEMA)
+        .allow_anonymous()
+        .router("/posts", tera_with_layout(), pool);
 
     let resp = app
         .oneshot(
@@ -101,6 +103,7 @@ async fn an_extension_supplies_what_the_layout_needs() {
     let mut extra = Context::new();
     extra.insert("signed_in_as", "ada");
     let app = ListView::for_model(XcPost::SCHEMA)
+        .allow_anonymous()
         .router("/posts", tera_with_layout(), pool)
         .layer(axum::Extension(ExtraContext(extra)));
 
@@ -127,6 +130,7 @@ async fn the_view_wins_on_a_key_collision() {
     extra.insert("signed_in_as", "ada");
     extra.insert("object_list", &Vec::<String>::new());
     let app = ListView::for_model(XcPost::SCHEMA)
+        .allow_anonymous()
         .router("/posts", tera_with_layout(), pool)
         .layer(axum::Extension(ExtraContext(extra)));
 
@@ -158,10 +162,10 @@ async fn the_list_exposes_an_elided_page_range() {
         "{% for m in page_marks %}{% if m.ellipsis %}…{% else %}[{{ m.number }}]{% endif %}{% endfor %}",
     )
     .unwrap();
-    let app =
-        ListView::for_model(XcPost::SCHEMA)
-            .page_size(1)
-            .router("/posts", Arc::new(tera), pool);
+    let app = ListView::for_model(XcPost::SCHEMA)
+        .allow_anonymous()
+        .page_size(1)
+        .router("/posts", Arc::new(tera), pool);
 
     let html = body_of(
         app.oneshot(

@@ -61,7 +61,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -518,9 +518,8 @@ impl OAuth2Provider {
         let state = random_token(32);
         let pkce_verifier = random_token(64);
         let pkce_challenge = pkce_s256_challenge(&pkce_verifier);
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs());
+        // A broken clock makes a flow that is already stale.
+        let now = crate::clock::unix_now_or(0);
 
         let mut params: Vec<(&str, String)> = vec![
             ("response_type", "code".into()),
@@ -1776,10 +1775,7 @@ mod tests {
 
     /// A `created_at` inside the flow's age limit.
     fn fresh() -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
+        crate::clock::unix_now().unwrap()
     }
 
     /// A sealed flow past its age limit does not open.

@@ -22,6 +22,8 @@ struct Slot {
     state: Arc<tokio::sync::Mutex<TxState>>,
     /// Shallowest savepoint whose block was dropped mid-flight (0 = none).
     cancelled: AtomicUsize,
+    /// Earliest [`RetryPoint`] dropped before its end: its number and depth.
+    cancelled_point: Mutex<Option<(usize, usize)>>,
     /// Live [`TxGuard`]s.
     guards: AtomicUsize,
     /// Background savepoint work whose caller still waits for it.
@@ -55,6 +57,8 @@ struct TxState {
     depth: usize,
     /// A savepoint statement failed; the transaction can only roll back.
     poisoned: bool,
+    /// [`RetryPoint`]s opened so far, so each gets its own name.
+    retry_points: usize,
 }
 
 impl TxState {
@@ -63,8 +67,13 @@ impl TxState {
     }
 
     async fn savepoint(&mut self, verb: &str, depth: usize) -> Result<(), ExecError> {
+        self.named_savepoint(verb, &format!("rustango_sp_{depth}"))
+            .await
+    }
+
+    async fn named_savepoint(&mut self, verb: &str, name: &str) -> Result<(), ExecError> {
         let tx = self.tx();
-        let name = tx.dialect().quote_ident(&format!("rustango_sp_{depth}"));
+        let name = tx.dialect().quote_ident(name);
         let r = tx.execute_unprepared(&format!("{verb} {name}")).await;
         if r.is_err() {
             self.poisoned = true;
@@ -104,6 +113,27 @@ impl TxState {
         if d != 0 && d <= self.depth {
             self.rollback_to(d).await?;
         }
+        let point = {
+            let mut cp = slot
+                .cancelled_point
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match *cp {
+                // Rolled back or released with its enclosing savepoint.
+                Some((_, depth)) if depth > self.depth => {
+                    *cp = None;
+                    None
+                }
+                Some((_, depth)) if depth == self.depth => cp.take(),
+                // A savepoint opened after it is still open: wait for it.
+                _ => None,
+            }
+        };
+        if let Some((n, _)) = point {
+            let name = retry_point_name(n);
+            self.named_savepoint("ROLLBACK TO SAVEPOINT", &name).await?;
+            self.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+        }
         Ok(())
     }
 }
@@ -137,6 +167,11 @@ async fn acquire(slot: &Arc<Slot>) -> Result<OwnedMutexGuard<TxState>, ExecError
     if !guard.poisoned
         && !slot.fatal.load(Ordering::SeqCst)
         && slot.cancelled.load(Ordering::SeqCst) == 0
+        && slot
+            .cancelled_point
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_none()
     {
         return Ok(guard);
     }
@@ -354,7 +389,6 @@ fn block_on(pool: &Pool) -> Option<Arc<Block>> {
 }
 
 /// Whether the running task is inside an [`atomic`] block on `pool`.
-#[cfg(feature = "jobs-postgres")]
 pub(crate) fn in_block(pool: &Pool) -> bool {
     block_on(pool).is_some()
 }
@@ -426,6 +460,102 @@ impl std::ops::Deref for JoinedWrite {
 impl std::ops::DerefMut for JoinedWrite {
     fn deref_mut(&mut self) -> &mut PoolTx<'static> {
         self.guard.tx()
+    }
+}
+
+/// A savepoint that undoes one step of the block on `pool` if it fails, so
+/// a PostgreSQL error inside it does not abort the block. Unlike
+/// [`JoinedWrite`] it holds no lock and opens no depth: the step may lock
+/// the block's guard or join writes to it. `None` outside a block, or while
+/// a guard or nested block is live there: the step then runs as is.
+pub(crate) async fn retry_point(pool: &Pool) -> Result<Option<RetryPoint>, ExecError> {
+    match block_on(pool) {
+        Some(block) => RetryPoint::open(&block).await,
+        None => Ok(None),
+    }
+}
+
+fn retry_point_name(n: usize) -> String {
+    format!("rustango_rp_{n}")
+}
+
+/// An open [`retry_point`]; finish it with [`RetryPoint::end`]. Dropped
+/// unfinished, it is rolled back on the block's next use.
+pub(crate) struct RetryPoint {
+    slot: Arc<Slot>,
+    depth: usize,
+    n: usize,
+    done: bool,
+}
+
+impl RetryPoint {
+    async fn open(block: &Block) -> Result<Option<Self>, ExecError> {
+        let slot = Arc::clone(&block.slot);
+        let mut guard = match acquire(&slot).await {
+            Ok(g) => g,
+            Err(ExecError::NestedAtomic) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if guard.depth != block.depth {
+            return Ok(None);
+        }
+        // Its own name: a nested retry point must not replace it (MySQL).
+        guard.retry_points += 1;
+        let n = guard.retry_points;
+        guard
+            .named_savepoint("SAVEPOINT", &retry_point_name(n))
+            .await?;
+        Ok(Some(Self {
+            slot,
+            depth: block.depth,
+            n,
+            done: false,
+        }))
+    }
+
+    /// Keep the step's writes, or roll them back.
+    pub(crate) async fn end(mut self, keep: bool) -> Result<(), ExecError> {
+        // Settles the step's cancelled savepoints first.
+        let mut guard = match acquire(&self.slot).await {
+            Ok(g) => g,
+            // A guard is live: a kept point stays open and commits with the
+            // block; a rollback is left to the next settle (`Drop`).
+            Err(ExecError::NestedAtomic) => {
+                self.done = keep;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        };
+        if guard.depth != self.depth {
+            self.done = keep;
+            return Ok(());
+        }
+        let name = retry_point_name(self.n);
+        if !keep {
+            guard
+                .named_savepoint("ROLLBACK TO SAVEPOINT", &name)
+                .await?;
+        }
+        guard.named_savepoint("RELEASE SAVEPOINT", &name).await?;
+        self.done = true;
+        Ok(())
+    }
+}
+
+impl Drop for RetryPoint {
+    fn drop(&mut self) {
+        if self.done {
+            return;
+        }
+        let mut cp = self
+            .slot
+            .cancelled_point
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        // Rolling back to the earliest point undoes the later ones too.
+        if cp.is_none_or(|(n, _)| self.n < n) {
+            *cp = Some((self.n, self.depth));
+        }
     }
 }
 
@@ -636,6 +766,7 @@ where
         tx: Some(tx),
         depth: 0,
         poisoned: false,
+        retry_points: 0,
     }));
     // The `PoolTx` never moves inside `state`, so its address identifies it.
     let tx_key = state
@@ -646,6 +777,7 @@ where
     let slot = Arc::new(Slot {
         state,
         cancelled: AtomicUsize::new(0),
+        cancelled_point: Mutex::new(None),
         guards: AtomicUsize::new(0),
         claims: AtomicUsize::new(0),
         fatal,

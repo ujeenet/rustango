@@ -180,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.64.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.65.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -604,13 +604,14 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
 
 Enregistrez le nouveau module en ajoutant `pub mod post_view_set;` à `src/lib.rs` (`make:viewset` affiche cette ligne pour vous).
 
-Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture ouvertes journalisent un avertissement au montage du routeur. Placez votre propre couche d'auth devant et ajoutez `allow_anonymous` pour indiquer que c'est voulu ; les codenames `permissions(...)` exigent la feature `tenancy` et refusent le montage sans elle.
+Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture ouvertes empêchent le montage du routeur. Placez votre propre couche d'auth devant et ajoutez `allow_anonymous`, comme ci-dessus, pour indiquer que c'est voulu ; les codenames `permissions(...)` exigent la feature `tenancy` et refusent le montage sans elle.
 
 ### 12b. Monter les routes
 
@@ -696,6 +697,7 @@ Branchez le serializer dans le ViewSet avec l'attribut `serializer` — les rép
     fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```

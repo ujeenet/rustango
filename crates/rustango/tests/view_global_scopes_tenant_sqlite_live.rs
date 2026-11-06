@@ -167,6 +167,7 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
     let t = Arc::new(t);
 
     let router = ListView::for_model(Note::SCHEMA)
+        .allow_anonymous()
         .template("list.html")
         .bulk_actions(true)
         .tenant_action_pool("retag", "Retag", retag_action())
@@ -175,40 +176,47 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
         .tenant_router("/notes", t.clone())
         .merge(
             DetailView::for_model(Note::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .tenant_router("/notes", t.clone()),
         )
         .merge(
             UpdateView::for_model(Note::SCHEMA, &["tag", "visible"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/notes")
                 .tenant_router("/notes", t.clone()),
         )
         .merge(
             DeleteView::for_model(Note::SCHEMA)
+                .allow_anonymous()
                 .template("confirm.html")
                 .success_url("/notes")
                 .tenant_router("/notes", t.clone()),
         )
         .merge(
             ListView::for_model(Memo::SCHEMA)
+                .allow_anonymous()
                 .template("list.html")
                 .bulk_actions(true)
                 .tenant_router("/memos", t.clone()),
         )
         .merge(
             DetailView::for_model(Memo::SCHEMA)
+                .allow_anonymous()
                 .template("detail.html")
                 .tenant_router("/memos", t.clone()),
         )
         .merge(
             UpdateView::for_model(Memo::SCHEMA, &["tag", "deleted_at"])
+                .allow_anonymous()
                 .template("form.html")
                 .success_url("/memos")
                 .tenant_router("/memos", t.clone()),
         )
         .merge(
             DeleteView::for_model(Memo::SCHEMA)
+                .allow_anonymous()
                 .template("confirm.html")
                 .success_url("/memos")
                 .tenant_router("/memos", t),

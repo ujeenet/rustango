@@ -12,6 +12,8 @@
 //!   overrides only what differs.
 //! * **Identity** — `name()`, for error messages and logs.
 
+use std::borrow::Cow;
+
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
     FieldType, InsertQuery, ModelSchema, Op, SelectQuery, UpdateQuery,
@@ -1359,7 +1361,16 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     /// [`SqlError::EmptyInsert`] with no columns, or
     /// [`SqlError::InsertShapeMismatch`] when `columns` and `values`
     /// are different lengths.
-    fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError>;
+    fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
+        self.compile_insert_cow(Cow::Borrowed(query))
+    }
+
+    /// [`Self::compile_insert`] that moves an owned query's values.
+    #[doc(hidden)]
+    fn compile_insert_cow(
+        &self,
+        query: Cow<'_, InsertQuery>,
+    ) -> Result<CompiledStatement, SqlError>;
 
     /// Compile a `BulkInsertQuery` into one statement with a VALUES
     /// tuple per row.
@@ -1369,7 +1380,16 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     /// [`SqlError::EmptyInsert`] when `columns` is empty and nothing
     /// is returned, or [`SqlError::InsertShapeMismatch`] when a row's
     /// length does not match `columns`.
-    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError>;
+    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
+        self.compile_bulk_insert_cow(Cow::Borrowed(query))
+    }
+
+    /// [`Self::compile_bulk_insert`] that moves an owned query's values.
+    #[doc(hidden)]
+    fn compile_bulk_insert_cow(
+        &self,
+        query: Cow<'_, BulkInsertQuery>,
+    ) -> Result<CompiledStatement, SqlError>;
 
     /// Compile an `UpdateQuery` for this dialect.
     ///
@@ -1405,7 +1425,16 @@ pub trait Dialect: Send + Sync + sealed::Sealed {
     /// [`SqlError::EmptyBulkInsert`] with no rows,
     /// [`SqlError::EmptyUpdateSet`] with no columns, or
     /// [`SqlError::MissingPrimaryKey`] when the model has no PK.
-    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError>;
+    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
+        self.compile_bulk_update_cow(Cow::Borrowed(query))
+    }
+
+    /// [`Self::compile_bulk_update`] that moves an owned query's values.
+    #[doc(hidden)]
+    fn compile_bulk_update_cow(
+        &self,
+        query: Cow<'_, BulkUpdateQuery>,
+    ) -> Result<CompiledStatement, SqlError>;
 }
 
 #[cfg(test)]

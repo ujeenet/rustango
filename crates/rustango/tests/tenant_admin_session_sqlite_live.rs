@@ -979,6 +979,41 @@ async fn ending_an_impersonation_revokes_a_copy_of_its_cookie() {
     );
 }
 
+/// By default the spent handoff and the ended impersonation live in the
+/// registry, so a restarted or second replica refuses the copied cookie.
+#[tokio::test]
+async fn an_ended_impersonation_stays_ended_on_another_replica() {
+    use rustango::sql::CounterPool as _;
+    let mut env = boot().await;
+    let (_, location) = start_impersonation(&env).await;
+    let handoff = &location[location
+        .find("/__impersonation_handoff")
+        .expect("handoff url")..];
+    let redeemed = env.get(handoff, "").await;
+    let cookie = redeemed.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned();
+    let ended = env.post("/__admin/__end-impersonation", &cookie, "").await;
+    assert!(ended.status().is_redirection(), "{}", ended.status());
+    let rows = rustango::tenancy::UsedJti::objects()
+        .count(&env.registry)
+        .await
+        .unwrap();
+    assert_eq!(rows, 2, "the handoff jti and the ended session");
+
+    // A fresh process: its own store instance, the same registry.
+    let fresh = rustango::tenancy::DbJtiStore::new(env.registry.clone());
+    env.admin = admin_with_jti(&env, Arc::new(fresh), false);
+    assert_eq!(
+        env.get("/__admin/", &cookie).await.status(),
+        StatusCode::SEE_OTHER
+    );
+}
+
 /// The tenant admin with its own handoff/revoke store, set before or
 /// after `with_session`.
 fn admin_with_jti(

@@ -15,6 +15,7 @@
 //!     .search_fields(&["title", "body"])
 //!     .ordering(&[("published_at", true)])  // DESC by default
 //!     .page_size(20)
+//!     .allow_anonymous()                     // writes open: put your auth layer in front
 //!     .router("/api/posts", pool.clone());
 //!
 //! // Merge into your app router:
@@ -719,8 +720,7 @@ where
 /// rows per request, a fifth of the admin's default.
 const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 
-/// Default [`ViewSet::max_offset`]: deeper pages scan too many rows per request.
-pub const DEFAULT_MAX_OFFSET: usize = 10_000;
+pub use crate::list_params::DEFAULT_MAX_OFFSET;
 
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
@@ -1098,14 +1098,9 @@ impl ViewSet {
 
     /// The `400` for an `offset` past [`Self::max_offset`], if it is.
     fn offset_refused(&self, offset: i64) -> Option<Response> {
-        let max = i64::try_from(self.max_offset).unwrap_or(i64::MAX);
-        let over = self.max_offset > 0 && offset > max;
-        over.then(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "this page is too deep; narrow the list with filters or use cursor pagination",
-            )
-        })
+        crate::list_params::check_offset(offset, self.max_offset)
+            .err()
+            .map(|e| json_error(StatusCode::BAD_REQUEST, &e.to_string()))
     }
 
     /// Most rows a bulk create (JSON array body) may carry; more is a
@@ -1153,8 +1148,8 @@ impl ViewSet {
         self
     }
 
-    /// Permission codenames required per action. Empty vec = allow all;
-    /// an open write action logs a warning at mount unless
+    /// Permission codenames required per action. An empty read is public;
+    /// an empty write refuses to mount unless [`Self::read_only`] or
     /// [`Self::allow_anonymous`] is set. Codenames need the `tenancy`
     /// feature: without it, mounting a ViewSet that sets any panics.
     pub fn permissions(mut self, perms: ViewSetPerms) -> Self {
@@ -1221,28 +1216,37 @@ impl ViewSet {
     }
 
     /// Say that write actions without codenames are meant to be open to
-    /// any caller that reaches this router. Silences the mount warning.
+    /// any caller that reaches this router; without it they refuse to mount.
     #[must_use]
     pub fn allow_anonymous(mut self) -> Self {
         self.allow_anonymous = true;
         self
     }
 
-    /// Write actions any caller may run, unless acknowledged (#1857).
-    fn open_write_actions(&self) -> Vec<&'static str> {
-        if self.read_only || self.allow_anonymous {
-            return Vec::new();
-        }
+    /// Each mounted action's rule. Reads without codenames are public; a
+    /// write without them is undecided unless acknowledged.
+    fn action_gates(&self) -> Vec<(&'static str, crate::access::Gate)> {
+        use crate::access::Gate;
         let p = &self.perms;
-        [
-            ("create", &p.create),
-            ("update", &p.update),
-            ("destroy", &p.destroy),
-        ]
-        .into_iter()
-        .filter(|(_, codenames)| codenames.is_empty())
-        .map(|(action, _)| action)
-        .collect()
+        let gate = |codenames: &[String], write: bool| {
+            if !codenames.is_empty() {
+                Gate::Codenames(codenames.to_vec())
+            } else if write && !self.allow_anonymous {
+                Gate::Undecided
+            } else {
+                Gate::Anonymous
+            }
+        };
+        let mut gates = vec![
+            ("list", gate(&p.list, false)),
+            ("retrieve", gate(&p.retrieve, false)),
+        ];
+        if !self.read_only {
+            gates.push(("create", gate(&p.create, true)));
+            gates.push(("update", gate(&p.update, true)));
+            gates.push(("destroy", gate(&p.destroy, true)));
+        }
+        gates
     }
 
     /// Describe the mounted RFC 10008 `QUERY` route in the generated
@@ -1271,6 +1275,10 @@ impl ViewSet {
     /// request resolves its own tenant connection.
     ///
     /// A trailing `/` on the prefix makes no difference.
+    ///
+    /// # Panics
+    /// If a write action has no codenames and neither [`Self::read_only`]
+    /// nor [`Self::allow_anonymous`] is set; [`Self::tenant_router`] too.
     pub fn router(self, prefix: &str, pool: impl Into<crate::sql::Pool>) -> Router {
         Self::router_with_source(self, prefix, PoolSource::StaticPool(pool.into()))
     }
@@ -1299,6 +1307,7 @@ impl ViewSet {
     ///     .filter_fields(&["author_id"])
     ///     .search_fields(&["title", "body"])
     ///     .ordering(&[("published_at", true)])
+    ///     .permissions_for_model::<Post>()
     ///     .tenant_router("/api/posts");
     ///
     /// // In `urls::api()`:
@@ -1322,18 +1331,11 @@ impl ViewSet {
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
         self.assert_cursor_is_rendered();
         self.assert_related_rows_are_unhooked();
-        self.assert_codenames_can_be_checked();
-        let open = self.open_write_actions();
-        if !open.is_empty() {
-            tracing::warn!(
-                target: "rustango::viewset",
-                model = self.schema.table,
-                prefix,
-                actions = ?open,
-                "ViewSet write actions need no permission, so any caller that reaches this \
-                 router can run them; {OPEN_WRITES_FIX}"
-            );
-        }
+        self.assert_no_credential_fields();
+        let gates = self.action_gates();
+        let routes: Vec<(&str, &crate::access::Gate)> =
+            gates.iter().map(|(a, g)| (*a, g)).collect();
+        crate::access::require_decided("ViewSet", self.schema.table, &routes, OPEN_WRITES_FIX);
         let state = Arc::new(ViewSetState {
             pool_source,
             vs: self.clone(),
@@ -1586,15 +1588,6 @@ impl AcquiredConn {
     async fn update(&mut self, q: &UpdateQuery) -> Result<u64, crate::sql::ExecError> {
         crate::audit::update(&self.pool, q).await
     }
-
-    #[cfg(feature = "tenancy")]
-    async fn has_perm(
-        &mut self,
-        uid: i64,
-        codename: &str,
-    ) -> Result<bool, crate::tenancy::TenancyError> {
-        crate::tenancy::permissions::has_perm_pool(uid, codename, &self.pool).await
-    }
 }
 
 impl ViewSet {
@@ -1652,22 +1645,23 @@ impl ViewSet {
         }
     }
 
-    /// Without `tenancy` no engine checks codenames, so every gated request
-    /// would get 403 forever: refuse at mount instead.
-    fn assert_codenames_can_be_checked(&self) {
-        if cfg!(feature = "tenancy") {
-            return;
-        }
-        let p = &self.perms;
-        let gated = [&p.list, &p.retrieve, &p.create, &p.update, &p.destroy]
+    /// No field list, nor the serializer, may name a credential column.
+    fn assert_no_credential_fields(&self) {
+        let mut names: Vec<&str> = self
+            .fields
             .iter()
-            .any(|codenames| !codenames.is_empty());
-        assert!(
-            !gated,
-            "ViewSet `{}`: permission codenames need the `tenancy` feature; on a \
-             single-database app use allow_anonymous behind your own auth layer, or read_only",
-            self.schema.table
-        );
+            .chain(&self.filter_fields)
+            .chain(&self.search_fields)
+            .chain(self.ordering_fields.iter().flatten())
+            .chain(self.default_ordering.iter().map(|(n, _)| n))
+            .chain(self.related_filters.iter().map(|(n, _)| n))
+            .map(String::as_str)
+            .collect();
+        if let Some(bridge) = &self.serializer {
+            names.extend(bridge.writable_model_fields());
+            names.extend(bridge.readable_model_fields());
+        }
+        crate::core::table_policy::assert_no_credentials(self.schema, "ViewSet", names);
     }
 
     /// A serializer must render the cursor column and the primary key.
@@ -1792,41 +1786,22 @@ impl ViewSetState {
         parts: &axum::http::request::Parts,
         conn: &mut AcquiredConn,
     ) -> PermOutcome {
+        // Empty is public: a read, or a write mount let through as anonymous.
         if codenames.is_empty() {
             return PermOutcome::Allow;
         }
-        #[cfg(feature = "tenancy")]
-        {
-            let Some(auth) = parts
-                .extensions
-                .get::<crate::tenancy::middleware::AuthenticatedUser>()
-            else {
-                // No principal at all: the client needs to
-                // authenticate, so 401 rather than 403.
-                return PermOutcome::Unauthenticated;
-            };
-            if auth.is_superuser {
-                return PermOutcome::Allow;
+        let caller = match &conn.scope {
+            Scope::Static => crate::access::Caller::on_fixed(parts),
+            #[cfg(feature = "tenancy")]
+            Scope::Tenant(org) => crate::access::Caller::on_tenant(parts, org),
+            #[cfg(feature = "tenancy")]
+            Scope::Unknown => Err(PermOutcome::Forbidden),
+        };
+        match caller {
+            Ok(caller) => {
+                crate::access::check_codenames(codenames, caller.as_ref(), &conn.pool).await
             }
-            // All of them: a second codename narrows, never widens (#2522).
-            for cn in codenames {
-                match conn.has_perm(auth.id, cn).await {
-                    Ok(true) => {}
-                    Ok(false) => return PermOutcome::Forbidden,
-                    // A failed read is an outage, not a missing permission.
-                    Err(e) => return PermOutcome::Unavailable(e.to_string()),
-                }
-            }
-            PermOutcome::Allow
-        }
-        #[cfg(not(feature = "tenancy"))]
-        {
-            // Mount refuses codenames without tenancy; should one get
-            // here anyway, there is no `has_perm` engine, so deny. 403,
-            // not 401: authenticating cannot satisfy it, and 401 would
-            // send a token client into a refresh loop.
-            let _ = (parts, conn);
-            PermOutcome::Forbidden
+            Err(refused) => refused,
         }
     }
 
@@ -2466,27 +2441,7 @@ fn narrow(expr: WhereExpr, extra: Vec<WhereExpr>) -> WhereExpr {
     WhereExpr::And(all)
 }
 
-/// Outcome of a per-action permission check.
-///
-/// "No principal", "principal without the permission" and "could not
-/// tell" are different answers to the client.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum PermOutcome {
-    /// Authorised — proceed.
-    Allow,
-    /// No authenticated principal → `401`.
-    ///
-    /// Only the `tenancy` permission engine builds this. Without that
-    /// feature every denial is `Forbidden`, so the variant is
-    /// unconstructed rather than dead.
-    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
-    Unauthenticated,
-    /// Authenticated, but lacks a required codename → `403`.
-    Forbidden,
-    /// The permission read failed → logged `503`; carries the cause.
-    #[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
-    Unavailable(String),
-}
+use crate::access::Outcome as PermOutcome;
 
 /// The preamble every REST handler runs. Splits the request into
 /// parts and body, resolves a connection through the [`PoolSource`],
@@ -2513,20 +2468,19 @@ async fn enter(
         use crate::tenancy::{RequestTenant, TenantSlug};
         let marker = match &scope {
             Scope::Tenant(org) => {
-                let routed = TenantSlug::of(org);
-                // The org id too: a credential of a purged tenant is not the heir's.
-                let other_org = crate::object_permissions::credential_tenant(&parts)
-                    .is_some_and(|c| Some(c) != routed);
-                match crate::tenancy::Principal::from_parts(&parts).map(|p| p.tenant) {
-                    Some(Some(t)) if t != org.slug || other_org => {
+                use crate::access::Binding;
+                match Binding::of(&parts, org) {
+                    Binding::Foreign => {
                         return Err(json_error(StatusCode::FORBIDDEN, "tenant mismatch"));
                     }
-                    Some(None) => warn_untenanted(state.vs.schema.table),
-                    _ => {}
+                    Binding::Untenanted => warn_untenanted(state.vs.schema.table),
+                    Binding::Fits => {}
                 }
-                routed.map_or(RequestTenant::Unknown, RequestTenant::Tenant)
+                TenantSlug::of(org).map_or(RequestTenant::Unknown, RequestTenant::Tenant)
             }
-            // Shared data: the host's tenant must not make its credentials count here.
+            // Shared data: the host's tenant must not make its credentials
+            // count here. A tenant-routed request keeps saying so (`Unknown`).
+            _ if crate::access::routed_to_tenant(&parts.extensions) => RequestTenant::Unknown,
             _ => RequestTenant::Global,
         };
         parts.extensions.insert(marker);
@@ -5702,7 +5656,7 @@ mod no_tenancy_tests {
         pub title: String,
     }
 
-    /// The open-writes warning names only fixes this build has.
+    /// The open-writes refusal names only fixes this build has.
     #[test]
     fn the_open_writes_fix_names_no_codenames() {
         assert!(!OPEN_WRITES_FIX.contains("permissions_for_model"));
@@ -5715,10 +5669,12 @@ mod no_tenancy_tests {
     #[tokio::test]
     async fn codenames_without_tenancy_refuse_to_mount() {
         let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
-        let vs = ViewSet::for_model(Note::SCHEMA, &["id", "title"]).permissions(ViewSetPerms {
-            list: vec!["vs_open_note.view".into()],
-            ..ViewSetPerms::default()
-        });
+        let vs = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+            .read_only()
+            .permissions(ViewSetPerms {
+                list: vec!["vs_open_note.view".into()],
+                ..ViewSetPerms::default()
+            });
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ = vs.router("/api/notes", pool);
         }))
@@ -5847,6 +5803,7 @@ mod tenant_router_tests {
     fn tenant_router_carries_over_full_builder_chain() {
         use crate::core::Model as _;
         let _r = ViewSet::for_model(crate::tenancy::auth::User::SCHEMA, &["id", "username"])
+            .allow_anonymous()
             .filter_fields(&["username"])
             .search_fields(&["username"])
             .ordering(&[("id", true)])
@@ -6384,6 +6341,7 @@ mod bulk_create_source_tests {
         crate::testkit::matrix::fresh_table::<Note>(&pool).await;
         audit::ensure_table_pool(&pool).await.unwrap();
         let app = super::ViewSet::for_model(<Note as crate::core::Model>::SCHEMA, &["id", "title"])
+            .allow_anonymous()
             .router("/notes", pool.clone());
         let req = Request::builder()
             .method(Method::POST)
@@ -6405,6 +6363,38 @@ mod bulk_create_source_tests {
                 .await
                 .unwrap();
             assert_eq!(rows.first().map(|e| e.source.as_str()), Some("user:7"));
+        }
+    }
+}
+
+#[cfg(all(test, feature = "tenancy", feature = "sqlite"))]
+mod credential_field_tests {
+    use super::ViewSet;
+    use crate::core::Model as _;
+    use crate::tenancy::User;
+
+    async fn mount(vs: ViewSet) -> String {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(vs.read_only().router("/u", pool));
+        }))
+        .err()
+        .and_then(|e| e.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+    }
+
+    /// Listing users works; naming the hash in any list refuses to mount.
+    #[tokio::test]
+    async fn a_viewset_naming_a_credential_refuses_to_mount() {
+        let fields = &["id", "username", "is_superuser"];
+        assert_eq!(mount(ViewSet::for_model(User::SCHEMA, fields)).await, "");
+        for vs in [
+            ViewSet::for_model(User::SCHEMA, &["id", "password_hash"]),
+            ViewSet::for_model(User::SCHEMA, fields).filter_fields(&["password_hash"]),
+            ViewSet::for_model(User::SCHEMA, fields).search_fields(&["password_hash"]),
+            ViewSet::for_model(User::SCHEMA, fields).ordering_fields(&["password_hash"]),
+        ] {
+            assert!(mount(vs).await.contains("hold credentials"));
         }
     }
 }

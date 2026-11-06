@@ -67,6 +67,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 ///     search_fields = "title, body",
 ///     ordering     = "-published_at",
 ///     page_size    = 20,
+///     allow_anonymous, // or `read_only` / `permissions(...)`
 /// )]
 /// pub struct PostViewSet;
 ///
@@ -87,7 +88,7 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 ///   at `ViewSet::max_page_size`, default 100).
 /// * `read_only` — flag; wires only `list` + `retrieve` (no mutations).
 /// * `allow_anonymous` — flag; write actions without codenames are
-///   intended, so the mount warning is skipped.
+///   intended. Without it (or `read_only`) they refuse to mount.
 /// * `serializer = SomeSerializer` — render list / retrieve / create
 ///   responses through a `#[derive(Serializer)]` type instead of the
 ///   default field-level projection (`read_only` / `source` / `method`
@@ -1039,6 +1040,7 @@ fn expand(input: &DeriveInput) -> syn::Result<TokenStream2> {
         &container.composite_fks,
         &container.generic_fks,
         container.scope.as_deref(),
+        container.access.as_deref(),
         container.is_view,
         container.verbose_name.as_deref(),
         container.verbose_name_plural.as_deref(),
@@ -2719,6 +2721,7 @@ fn model_impl_tokens(
     composite_fks: &[CompositeFkAttr],
     generic_fks: &[GenericFkAttr],
     scope: Option<&str>,
+    access: Option<&str>,
     is_view: bool,
     verbose_name: Option<&str>,
     verbose_name_plural: Option<&str>,
@@ -2767,6 +2770,15 @@ fn model_impl_tokens(
     let scope_tokens = match scope.map(|s| s.to_ascii_lowercase()).as_deref() {
         Some("registry") => quote!(#root::core::ModelScope::Registry),
         _ => quote!(#root::core::ModelScope::Tenant),
+    };
+    // The container-attr parser already validated the value.
+    let access_tokens = match access {
+        Some("admin_only") => {
+            quote!(::core::option::Option::Some(#root::core::TableAccess::AdminOnly))
+        }
+        Some("never") => quote!(::core::option::Option::Some(#root::core::TableAccess::Never)),
+        Some(_) => quote!(::core::option::Option::Some(#root::core::TableAccess::Open)),
+        None => quote!(::core::option::Option::None),
     };
     let verbose_name_tokens = optional_str(verbose_name);
     let verbose_name_plural_tokens = optional_str(verbose_name_plural);
@@ -3041,6 +3053,7 @@ fn model_impl_tokens(
                     extra_permissions: &[ #(#extra_permission_tokens),* ],
                     default_permissions: &[ #(#default_permission_tokens),* ],
                     global_scopes: #global_scope_slice,
+                    access: #access_tokens,
                 })
             };
 
@@ -6616,7 +6629,7 @@ fn inherent_impl_tokens(
                 &quote! {
                     let _query = self.__rustango_upsert_query();
                     let _row = #root::sql::__macro_internals::insert_returning_on(
-                        _executor, &_query,
+                        _executor, _query,
                     )
                     .await?;
                     #root::sql::apply_auto_pk(_row, self)
@@ -7156,10 +7169,10 @@ fn inherent_impl_tokens(
                 let _query = self.__rustango_insert_query();
                 // Every `Auto` filled Rust-side: nothing to read back.
                 if _query.returning.is_empty() {
-                    return #root::sql::__macro_internals::insert_on(_executor, &_query).await;
+                    return #root::sql::__macro_internals::insert_owned_on(_executor, _query).await;
                 }
                 let _row = #root::sql::__macro_internals::insert_returning_on(
-                    _executor, &_query,
+                    _executor, _query,
                 )
                 .await?;
                 #root::sql::apply_auto_pk(_row, self)
@@ -7220,8 +7233,11 @@ fn inherent_impl_tokens(
                 &self,
                 _executor: _E,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                #root::sql::__macro_internals::insert_on(_executor, &self.__rustango_insert_query())
-                    .await
+                #root::sql::__macro_internals::insert_owned_on(
+                    _executor,
+                    self.__rustango_insert_query(),
+                )
+                .await
             }
 
             /// The INSERT for this row.
@@ -7337,7 +7353,7 @@ fn inherent_impl_tokens(
                 )
                 .returning(::std::vec![ #( #returning_cols ),* ]);
                 let _returned =
-                    #root::sql::__macro_internals::bulk_insert_on(_executor, &_query).await?;
+                    #root::sql::__macro_internals::bulk_insert_owned_on(_executor, _query).await?;
                 if _returned.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
@@ -7442,7 +7458,7 @@ fn inherent_impl_tokens(
                     _columns,
                     _all_rows,
                 );
-                #root::sql::__macro_internals::bulk_insert_on(_executor, &_query)
+                #root::sql::__macro_internals::bulk_insert_owned_on(_executor, _query)
                     .await
                     .map(drop)
             }
@@ -8225,6 +8241,9 @@ struct ContainerAttrs {
     /// to partition diff output between registry-scoped and
     /// tenant-scoped migration files.
     scope: Option<String>,
+    /// `#[rustango(access = "open" | "admin_only" | "never")]`: which
+    /// generic surfaces may serve the table. Unset emits `None`.
+    access: Option<String>,
     /// Extra QuerySet accessor names from
     /// `#[rustango(manager_fn = "active")]`. Issue #289 / T2.6.
     /// Each value adds a `pub fn <name>() -> QuerySet<Self>` next to
@@ -8776,6 +8795,7 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
         composite_fks: Vec::new(),
         generic_fks: Vec::new(),
         scope: None,
+        access: None,
         manager_fns: Vec::new(),
         default_order: Vec::new(),
         is_view: false,
@@ -8836,6 +8856,17 @@ fn parse_container_attrs(input: &DeriveInput) -> syn::Result<ContainerAttrs> {
                     )));
                 }
                 out.scope = Some(val);
+                return Ok(());
+            }
+            if meta.path.is_ident("access") {
+                let s: LitStr = meta.value()?.parse()?;
+                let val = s.value();
+                if !matches!(val.as_str(), "open" | "admin_only" | "never") {
+                    return Err(meta.error(format!(
+                        "`access` must be \"open\", \"admin_only\" or \"never\", got {val:?}"
+                    )));
+                }
+                out.access = Some(val);
                 return Ok(());
             }
             if meta.path.is_ident("admin") {
@@ -10734,6 +10765,7 @@ const CONTAINER_ATTR_KEYS: &[&str] = &[
     "display",
     "app",
     "scope",
+    "access",
     "admin",
     "manager",
     "manager_fn",

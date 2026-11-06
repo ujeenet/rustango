@@ -180,14 +180,11 @@ impl TimestampSigner {
         self
     }
 
-    /// Sign `value` with the current time from `SystemTime::now()`.
-    ///
-    /// # Panics
-    /// Panics if the system clock reads before 1970-01-01. Only a
-    /// machine with no real-time clock is likely to hit this.
+    /// Sign `value` with the current time. A clock that cannot be read
+    /// stamps 1970, so the value fails any `max_age` check.
     #[must_use]
     pub fn sign(&self, value: &str) -> String {
-        self.sign_at(value, current_unix_seconds())
+        self.sign_at(value, crate::clock::unix_now_or(0))
     }
 
     /// [`Self::sign`] with an explicit `unix_seconds`. Used by tests
@@ -219,7 +216,8 @@ impl TimestampSigner {
     /// * [`SignError::BadTimestamp`] — timestamp is not base62.
     /// * [`SignError::Expired`] — value older than `max_age`.
     pub fn unsign(&self, signed: &str, max_age: Option<Duration>) -> Result<String, SignError> {
-        self.unsign_at(signed, max_age, current_unix_seconds())
+        // A clock that cannot be read makes every value too old.
+        self.unsign_at(signed, max_age, crate::clock::unix_now_or(u64::MAX))
     }
 
     /// [`Self::unsign`] with an explicit `now_secs`. Used by tests
@@ -333,15 +331,6 @@ pub enum LoadsError {
     /// The JSON did not parse into the target type.
     #[error("loads: JSON deserialize failed: {0}")]
     Deserialize(String),
-}
-
-/// Current Unix epoch seconds. Panics if the clock reads before
-/// 1970.
-fn current_unix_seconds() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .expect("system clock before 1970")
-        .as_secs()
 }
 
 #[cfg(test)]
@@ -459,6 +448,20 @@ mod tests {
         let signed = s.sign("user=42");
         // No max_age, so age does not matter.
         assert_eq!(s.unsign(&signed, None).unwrap(), "user=42");
+    }
+
+    /// A clock that cannot be read refuses a fresh value that has a `max_age`.
+    #[test]
+    fn timestamp_signer_broken_clock_is_expired() {
+        let s = TimestampSigner::new(b"secret");
+        let signed = s.sign("user=42");
+        let max = Some(Duration::from_secs(3600));
+        assert!(s.unsign(&signed, max).is_ok());
+        let refused = crate::clock::with_broken_clock(|| s.unsign(&signed, max));
+        assert!(
+            matches!(refused, Err(SignError::Expired { .. })),
+            "{refused:?}"
+        );
     }
 
     #[test]

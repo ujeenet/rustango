@@ -991,6 +991,10 @@ pub struct ModelSchema {
     /// not, so staff can reach every row; narrow it with
     /// `register_queryset_scope!`.
     pub global_scopes: &'static [GlobalScope],
+    /// Which generic surfaces may serve this table, from
+    /// `#[rustango(access = "open" | "admin_only" | "never")]`. `None`
+    /// (undeclared) serves as [`TableAccess::Open`]; see [`Self::table_access`].
+    pub access: Option<TableAccess>,
 }
 
 /// One auto-applied query filter, from
@@ -1110,6 +1114,7 @@ impl ModelSchema {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }
     }
 
@@ -1132,6 +1137,27 @@ impl ModelSchema {
         let base = self.verbose_name.unwrap_or(self.name);
         format!("{base}s")
     }
+}
+
+impl ModelSchema {
+    /// The declared [`Self::access`], or [`TableAccess::Open`] when undeclared.
+    #[must_use]
+    pub fn table_access(&self) -> TableAccess {
+        self.access.unwrap_or(TableAccess::Open)
+    }
+}
+
+/// Who may serve a model's table, for every operation: list, detail,
+/// create, update and delete alike. Ordered from least to most strict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
+pub enum TableAccess {
+    /// Any generic surface: the admin, a ViewSet, a template view.
+    Open,
+    /// Only the admin: credentials, SSO configuration, grants, operator and admin users.
+    AdminOnly,
+    /// No generic surface, the admin included: only the table's own flows touch it.
+    Never,
 }
 
 /// Where a model's table lives in a tenancy deployment. The
@@ -2057,6 +2083,7 @@ pub struct ModelSchemaParts {
     pub get_latest_by: Option<(&'static str, bool)>,
     pub extra_permissions: &'static [(&'static str, &'static str)],
     pub global_scopes: &'static [GlobalScope],
+    pub access: Option<TableAccess>,
 }
 
 impl ModelSchema {
@@ -2097,6 +2124,7 @@ impl ModelSchema {
             get_latest_by,
             extra_permissions,
             global_scopes,
+            access,
         } = parts;
         Self {
             name,
@@ -2131,6 +2159,7 @@ impl ModelSchema {
             get_latest_by,
             extra_permissions,
             global_scopes,
+            access,
         }
     }
 }

@@ -6,6 +6,8 @@
 //! An operator with no MySQL translation gets
 //! [`SqlError::OperatorNotSupportedInDialect`] from the writers.
 
+use std::borrow::Cow;
+
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, ConflictClause, CountQuery, DeleteQuery,
     FieldSchema, FieldType, InsertQuery, ModelSchema, SelectQuery, UpdateQuery,
@@ -98,7 +100,7 @@ impl MySql {
     /// INSERT naming no column is still a write (#2416).
     pub(crate) fn compile_insert_auto_id(
         &self,
-        query: &InsertQuery,
+        query: Cow<'_, InsertQuery>,
     ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.values.len());
         super::writers::write_insert_rows(&mut b, query)?;
@@ -1194,13 +1196,19 @@ impl Dialect for MySql {
         b.finish()
     }
 
-    fn compile_insert(&self, query: &InsertQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_insert_cow(
+        &self,
+        query: Cow<'_, InsertQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.values.len());
         write_insert(&mut b, query)?;
         b.finish()
     }
 
-    fn compile_bulk_insert(&self, query: &BulkInsertQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_insert_cow(
+        &self,
+        query: Cow<'_, BulkInsertQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         let mut b = Sql::with_capacity(self, query.columns.len() * query.rows.len());
         write_bulk_insert(&mut b, query)?;
         b.finish()
@@ -1218,7 +1226,10 @@ impl Dialect for MySql {
         b.finish()
     }
 
-    fn compile_bulk_update(&self, query: &BulkUpdateQuery) -> Result<CompiledStatement, SqlError> {
+    fn compile_bulk_update_cow(
+        &self,
+        query: Cow<'_, BulkUpdateQuery>,
+    ) -> Result<CompiledStatement, SqlError> {
         // Needs MySQL 8.0.19+, for the `VALUES ROW(…)` table
         // constructor. On anything older, update row by row.
         let mut b = Sql::new(self);
@@ -1342,18 +1353,9 @@ fn write_my_json_has_keys<P: AsRef<str>>(
 /// here rather than in `writers` because the syntax is MySQL's own.
 fn write_mysql_bulk_update(
     b: &mut crate::sql::writers::Sql<'_>,
-    query: &crate::core::BulkUpdateQuery,
+    query: Cow<'_, crate::core::BulkUpdateQuery>,
 ) -> Result<(), SqlError> {
-    if query.rows.is_empty() {
-        return Err(SqlError::EmptyBulkInsert);
-    }
-    if query.update_columns.is_empty() {
-        return Err(SqlError::EmptyUpdateSet);
-    }
-    let pk_field = query
-        .model
-        .primary_key()
-        .ok_or(SqlError::MissingPrimaryKey)?;
+    let (query, pk_field, rows) = crate::sql::writers::split_bulk_update(query)?;
     let columns: Vec<String> = std::iter::once(pk_field.column)
         .chain(query.update_columns.iter().copied())
         .map(|c| b.d.quote_ident(c))
@@ -1364,15 +1366,15 @@ fn write_mysql_bulk_update(
     b.sql.push_str(" INNER JOIN (");
     // Both spellings bind the rows in the same order.
     let (mut my, mut maria) = (String::from("VALUES "), String::new());
-    for (r, row) in query.rows.iter().enumerate() {
+    for (r, row) in rows.enumerate() {
         my.push_str(if r == 0 { "ROW(" } else { ", ROW(" });
         maria.push_str(if r == 0 {
             "SELECT "
         } else {
             " UNION ALL SELECT "
         });
-        for (i, val) in row.iter().enumerate() {
-            b.params.push(val.clone());
+        for (i, val) in row.enumerate() {
+            b.params.push(val);
             let p = b.d.placeholder(b.params.len());
             let sep = if i > 0 { ", " } else { "" };
             my.push_str(sep);
@@ -2292,6 +2294,7 @@ mod tests {
             get_latest_by: None,
             extra_permissions: &[],
             global_scopes: &[],
+            access: None,
         }))
     }
 }

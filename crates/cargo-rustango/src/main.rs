@@ -565,6 +565,8 @@ fn cmd_new(args: &[String]) -> Result<(), String> {
     for line in templates::next_steps(&parsed.name, parsed.template, parsed.backend).lines() {
         println!("  {line}");
     }
+    println!();
+    println!("{}", templates::STAR_NOTE);
     Ok(())
 }
 
