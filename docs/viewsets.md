@@ -755,10 +755,9 @@ your own handlers send:
 
 ## Permissions and throttling
 
-> **A ViewSet is public by default.** Mounting one exposes all six CRUD verbs
-> to anyone — there is no built-in authentication. Gate it with `permissions(...)`
-> (below), put it behind the [auth middleware](auth-backends.md) (`require_auth`),
-> or both, before exposing writes.
+> **Reads are public by default; writes are not.** A ViewSet with no codenames
+> serves list and retrieve to anyone, and refuses to mount while create, update
+> or destroy has none, unless it is `read_only` or `allow_anonymous`.
 
 **Permissions** gate each action on codenames. A user needs all of an action's codenames:
 
@@ -773,8 +772,13 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router("/api/posts", pool);
+    .tenant_router("/api/posts");
 ```
+
+On `tenant_router` the user must belong to the routed tenant. On a fixed-pool
+`.router(prefix, pool)` only a user your own single-database auth layer put on
+the request counts; a tenant's user (`require_auth`, a session) is refused with
+`403`. Under tenancy, mount gated ViewSets with `tenant_router`.
 
 An empty action list = no check. Enforcement reads an authenticated user from
 the request (the `tenancy` auth integration); superusers bypass, a missing user

@@ -99,8 +99,11 @@ ship open by accident. Call one of these on every view:
 | `.permissions(&["posts.change"])` | a signed-in user with every codename; superusers pass |
 | `.permissions_for_model()` | the model's codename: `view` for List and Detail, `add`, `change`, `delete` for the write views |
 
-The last three need the `tenancy` feature. The user comes from `require_auth` /
-`optional_auth` or the session cookie. With `permissions_for_model()`, a
+The last three need the `tenancy` feature and belong on `.tenant_router(..)`,
+where the user comes from `require_auth` / `optional_auth` or the session cookie
+and must belong to that tenant. On a fixed-pool `.router(prefix, tera, pool)`
+only a user your own single-database auth layer put on the request counts; a
+tenant's user is refused (403). With `permissions_for_model()`, a
 `ListView` with `.bulk_actions(true)` needs `view`, `change` and `delete` for its
 POST. To send anonymous visitors to a login page instead of a `401`, wrap the
 router in `auth_decorators::login_required("/login")`.
@@ -214,7 +217,7 @@ use rustango::template_views::CreateView;
 let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])  // the only fields a POST can set
     .success_url("/posts")         // where to send the browser after a save
     .permissions_for_model()       // `posts.add`
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 The field list is required. It is the write allow-list: the form renders only
@@ -274,7 +277,7 @@ CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     })
     .success_url("/posts")
     .permissions_for_model()
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 You can also reuse a `#[derive(Form)]` struct's validators with `.form::<F>()`
@@ -289,7 +292,7 @@ use rustango::template_views::UpdateView;
 UpdateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")
     .permissions_for_model()       // `posts.change`
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 A listed field the POST leaves out keeps its stored value. The one exception is
@@ -304,18 +307,18 @@ use rustango::template_views::DeleteView;
 DeleteView::for_model(Post::SCHEMA)
     .success_url("/posts")
     .permissions_for_model()       // `posts.delete`
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 Mount all five at the same prefix and you have full HTML CRUD:
 
 ```rust
 let app = axum::Router::new()
-    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).permissions_for_model().success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).permissions_for_model().success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model().success_url("/posts").router("/posts", tera, pool));
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().tenant_router("/posts", tera.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().tenant_router("/posts", tera.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).permissions_for_model().success_url("/posts").tenant_router("/posts", tera.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).permissions_for_model().success_url("/posts").tenant_router("/posts", tera.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model().success_url("/posts").tenant_router("/posts", tera));
 ```
 
 ---

@@ -100,8 +100,11 @@ página sale abierta por accidente. Llama a una de estas en cada vista:
 | `.permissions(&["posts.change"])` | un usuario con sesión que tenga cada codename; los superusuarios pasan |
 | `.permissions_for_model()` | el codename del modelo: `view` para List y Detail, `add`, `change`, `delete` para las vistas de escritura |
 
-Las tres últimas requieren la feature `tenancy`. El usuario viene de
-`require_auth` / `optional_auth` o de la cookie de sesión. Con
+Las tres últimas requieren la feature `tenancy` y van en `.tenant_router(..)`:
+allí el usuario viene de `require_auth` / `optional_auth` o de la cookie de
+sesión y debe pertenecer a ese tenant. En un `.router(prefix, tera, pool)` con
+pool fijo solo cuenta un usuario que tu propia capa de auth de base única puso
+en la petición; el usuario de un tenant recibe `403`. Con
 `permissions_for_model()`, un `ListView` con `.bulk_actions(true)` necesita
 `view`, `change` y `delete` para su POST. Para enviar a los visitantes anónimos a
 una página de login en vez de un `401`, envuelve el router en `auth_decorators::login_required("/login")`.
@@ -216,7 +219,7 @@ use rustango::template_views::CreateView;
 let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .success_url("/posts")         // where to send the browser after a save
     .permissions_for_model()       // `posts.add`
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 La lista de campos es obligatoria. Es la lista blanca de escritura: el formulario
@@ -278,7 +281,7 @@ CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     })
     .success_url("/posts")
     .permissions_for_model()
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 También puedes reutilizar los validadores de una estructura `#[derive(Form)]` con `.form::<F>()`
@@ -293,7 +296,7 @@ use rustango::template_views::UpdateView;
 UpdateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")
     .permissions_for_model()       // `posts.change`
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 **DeleteView** — `GET /posts/{pk}/delete` renderiza una página de confirmación
@@ -305,18 +308,18 @@ use rustango::template_views::DeleteView;
 DeleteView::for_model(Post::SCHEMA)
     .success_url("/posts")
     .permissions_for_model()       // `posts.delete`
-    .router("/posts", Arc::new(tera), pool);
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 Monta las cinco en el mismo prefijo y tienes un CRUD HTML completo:
 
 ```rust
 let app = axum::Router::new()
-    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).permissions_for_model().success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).permissions_for_model().success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model().success_url("/posts").router("/posts", tera, pool));
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().tenant_router("/posts", tera.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().tenant_router("/posts", tera.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).permissions_for_model().success_url("/posts").tenant_router("/posts", tera.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).permissions_for_model().success_url("/posts").tenant_router("/posts", tera.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model().success_url("/posts").tenant_router("/posts", tera));
 ```
 
 ---

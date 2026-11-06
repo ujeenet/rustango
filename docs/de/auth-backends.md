@@ -238,6 +238,10 @@ der Benutzer hält und die den Codename erteilt. Erteilen Sie mit
 `set_user_perm_pool` / Rollen über `create_role_pool` + `assign_role_pool` (die
 Berechtigungstabellen werden von `ensure_tables_pool` erstellt).
 
+`ViewSet` und die Template-Views lesen für ihre Codenamen-Prüfung denselben
+Benutzer, aber nur an `tenant_router`. An einem `.router(..)` mit festem Pool
+lehnen sie einen von diesen Backends aufgelösten Benutzer ab (`403`): Dieser Pool enthält keine Benutzer eines Tenants.
+
 ---
 
 ## Siehe auch

@@ -252,3 +252,27 @@ async fn tenant_superuser_is_refused_on_a_fixed_pool() {
     let res = app.oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::FORBIDDEN);
 }
+
+/// A request the dispatcher routed to a tenant carries that tenant's users,
+/// even with no `TenantSlug` on the credential: 403 on a fixed pool.
+#[tokio::test]
+async fn a_tenant_routed_request_is_refused_on_a_fixed_pool() {
+    let app = gated(pool().await);
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("/notes")
+        .body(Body::empty())
+        .unwrap();
+    req.extensions_mut()
+        .insert(rustango::tenancy::middleware::AuthenticatedUser {
+            id: 1,
+            username: "root".to_owned(),
+            is_superuser: true,
+        });
+    req.extensions_mut()
+        .insert(rustango::tenancy::RequestTenant::Tenant(
+            rustango::tenancy::TenantSlug::new(1, "acme"),
+        ));
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+}

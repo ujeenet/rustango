@@ -773,10 +773,9 @@ forma que envían tus propios handlers:
 
 ## Permisos y throttling
 
-> **Un ViewSet es público por defecto.** Montar uno expone los seis verbos CRUD a
-> cualquiera — no hay autenticación integrada. Protégelo con `permissions(...)`
-> (abajo), ponlo detrás del [middleware de autenticación](auth-backends.md)
-> (`require_auth`), o ambos, antes de exponer escrituras.
+> **Las lecturas son públicas por defecto; las escrituras no.** Un ViewSet sin
+> codenames sirve list y retrieve a cualquiera y no se monta mientras create,
+> update o destroy no tengan ninguno, salvo con `read_only` o `allow_anonymous`.
 
 **Los permisos** protegen cada acción con codenames (OR dentro de una acción):
 
@@ -791,8 +790,13 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router("/api/posts", pool);
+    .tenant_router("/api/posts");
 ```
+
+En `tenant_router` el usuario debe pertenecer al tenant enrutado. En un
+`.router(prefix, pool)` con pool fijo solo cuenta un usuario que tu propia capa
+de auth de base única puso en la petición; el usuario de un tenant (`require_auth`,
+una sesión) recibe `403`. Con tenancy, monta los ViewSets protegidos con `tenant_router`.
 
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
 autenticado de la petición (la integración de autenticación de `tenancy`); los

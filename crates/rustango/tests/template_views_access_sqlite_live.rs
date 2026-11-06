@@ -220,6 +220,24 @@ mod gated {
         assert_eq!(rows(&p).await, 1);
     }
 
+    /// Routed to a tenant, with no `TenantSlug` on the credential: still a
+    /// tenant's user, so refused on a fixed pool.
+    #[tokio::test]
+    async fn a_tenant_routed_request_is_refused_on_a_fixed_pool() {
+        let p = framework_pool().await;
+        let app = DeleteView::for_model(Post::SCHEMA)
+            .permissions_for_model()
+            .router("/posts", tera(), p.clone());
+        let mut req = signed_in(delete_post(), 5, true);
+        req.extensions_mut()
+            .insert(rustango::tenancy::RequestTenant::Tenant(
+                rustango::tenancy::TenantSlug::new(1, "acme"),
+            ));
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert_eq!(rows(&p).await, 1);
+    }
+
     /// An untenanted superuser passes every codename on a fixed pool.
     #[tokio::test]
     async fn a_superuser_passes() {
@@ -376,6 +394,34 @@ mod tenant {
         }
     }
 
+    async fn context(org: Org) -> Arc<TenantContext<sqlx::Sqlite>> {
+        let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        Arc::new(TenantContext::<sqlx::Sqlite> {
+            pools: Arc::new(TenantPools::new(registry)),
+            resolver: ChainResolver::new().push(Acme(org)),
+            session_secret: SessionSecret::from_bytes(CSRF.as_bytes().to_vec()),
+            operator_secret: SessionSecret::from_bytes(CSRF.as_bytes().to_vec()),
+        })
+    }
+
+    /// A fixed-pool view inside a tenancy app: its signed-in users are the
+    /// tenants', so a mounted tenant context alone makes them refused.
+    #[tokio::test]
+    async fn a_fixed_pool_view_under_a_tenant_context_refuses_users() {
+        let p = pool().await;
+        let ctx = context(rustango::testkit::org_with(|o| o.id = Auto::Set(1))).await;
+        let app = DeleteView::for_model(Post::SCHEMA)
+            .permissions_for_model()
+            .router("/posts", tera(), p.clone())
+            .layer(axum::Extension(ctx));
+        let res = app
+            .oneshot(signed_in(delete_post(), 5, true))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        assert_eq!(rows(&p).await, 1);
+    }
+
     /// A gated tenant DeleteView over acme's own file database, user 5 in it.
     async fn app() -> (axum::Router, Pool) {
         let path =
@@ -408,13 +454,7 @@ mod tenant {
             o.backend_kind = "sqlite".into();
             o.database_url = Some(url);
         });
-        let registry = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-        let ctx = Arc::new(TenantContext::<sqlx::Sqlite> {
-            pools: Arc::new(TenantPools::new(registry)),
-            resolver: ChainResolver::new().push(Acme(org)),
-            session_secret: SessionSecret::from_bytes(CSRF.as_bytes().to_vec()),
-            operator_secret: SessionSecret::from_bytes(CSRF.as_bytes().to_vec()),
-        });
+        let ctx = context(org).await;
         let router = DeleteView::for_model(Post::SCHEMA)
             .permissions_for_model()
             .tenant_router("/posts", tera())

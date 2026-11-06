@@ -2464,7 +2464,9 @@ async fn enter(
                 }
                 TenantSlug::of(org).map_or(RequestTenant::Unknown, RequestTenant::Tenant)
             }
-            // Shared data: the host's tenant must not make its credentials count here.
+            // Shared data: the host's tenant must not make its credentials
+            // count here. A tenant-routed request keeps saying so (`Unknown`).
+            _ if crate::access::routed_to_tenant(&parts.extensions) => RequestTenant::Unknown,
             _ => RequestTenant::Global,
         };
         parts.extensions.insert(marker);

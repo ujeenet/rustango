@@ -84,10 +84,7 @@ impl Caller {
             let principal = crate::tenancy::Principal::from_parts(parts);
             let tenant_bound = principal.as_ref().is_some_and(|p| p.tenant.is_some())
                 || crate::object_permissions::credential_tenant(parts).is_some()
-                || matches!(
-                    crate::tenancy::RequestTenant::get(&parts.extensions),
-                    Some(crate::tenancy::RequestTenant::Tenant(_))
-                );
+                || routed_to_tenant(&parts.extensions);
             if (caller.is_some() || principal.is_some()) && tenant_bound {
                 return Err(Outcome::Forbidden);
             }
@@ -110,6 +107,19 @@ impl Caller {
             Binding::Fits => Ok(Self::authenticated(parts)),
         }
     }
+}
+
+/// Whether the request came through tenant routing: a dispatched org, a
+/// mounted tenant context, or any marker but `Global`. Its users are a
+/// tenant's, never a fixed pool's.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub(crate) fn routed_to_tenant(ext: &axum::http::Extensions) -> bool {
+    use crate::tenancy::RequestTenant;
+    ext.get::<crate::tenancy::request_tenant::DispatchedOrg>()
+        .is_some()
+        || crate::extractors::MountedTenantContext::of(ext).is_some()
+        || RequestTenant::get(ext).is_some_and(|t| *t != RequestTenant::Global)
 }
 
 /// What a check decided.

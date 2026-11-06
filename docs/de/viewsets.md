@@ -747,10 +747,9 @@ die deine eigenen Handler senden:
 
 ## Berechtigungen und Drosselung
 
-> **Ein ViewSet ist standardmäßig öffentlich.** Das Einbinden eines solchen exponiert alle sechs CRUD-Verben
-> für jedermann — es gibt keine eingebaute Authentifizierung. Sichere es mit `permissions(...)`
-> (unten), stelle es hinter die [Auth-Middleware](auth-backends.md) (`require_auth`)
-> oder beides, bevor du Schreibzugriffe exponierst.
+> **Lesen ist standardmäßig öffentlich, Schreiben nicht.** Ein ViewSet ohne
+> Codenamen liefert List und Retrieve an jeden und verweigert das Einhängen,
+> solange Create, Update oder Destroy keine haben, außer mit `read_only` oder `allow_anonymous`.
 
 **Berechtigungen** sichern jede Aktion über Codenamen (ODER innerhalb einer Aktion):
 
@@ -765,8 +764,13 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router("/api/posts", pool);
+    .tenant_router("/api/posts");
 ```
+
+An `tenant_router` muss der Benutzer zum gerouteten Tenant gehören. An einem
+`.router(prefix, pool)` mit festem Pool zählt nur ein Benutzer aus deiner eigenen
+Single-Database-Auth-Schicht; der Benutzer eines Tenants (`require_auth`, eine
+Session) bekommt `403`. Unter Tenancy hänge gesicherte ViewSets mit `tenant_router` ein.
 
 Eine leere Aktionsliste = keine Prüfung. Die Durchsetzung liest einen authentifizierten Benutzer aus
 der Anfrage (die `tenancy`-Auth-Integration); Superuser umgehen sie, ein fehlender Benutzer
