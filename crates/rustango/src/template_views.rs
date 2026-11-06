@@ -561,6 +561,20 @@ async fn view_outcome(
 }
 
 impl ListView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self
+            .fields
+            .iter()
+            .flatten()
+            .chain(&self.filter_fields)
+            .chain(&self.search_fields)
+            .chain(&self.ordering_fields)
+            .chain(self.order_by.iter().map(|(n, _)| n))
+            .map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `ListView` for the given schema. Defaults: template
     /// name `<table>_list.html`, page size 20, max page size 100,
     /// no `ORDER BY`, all fields included, no filters, no search,
@@ -911,6 +925,7 @@ impl ListView {
     /// When [`Self::bulk_actions`] is on, also mounts `POST <prefix>`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("ListView");
         let bulk = self.bulk_actions_enabled;
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(ListViewState {
@@ -936,6 +951,7 @@ impl ListView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("ListView");
         let bulk = self.bulk_actions_enabled;
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantListViewState { vs: self, tera });
@@ -1293,6 +1309,12 @@ pub struct DetailView {
 }
 
 impl DetailView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().flatten().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// # Panics
     /// On a table only the admin or its own flow serves (API keys, SSO, TOTP).
     #[must_use]
@@ -1334,6 +1356,7 @@ impl DetailView {
 
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("DetailView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(DetailViewState {
             vs: self,
@@ -1351,6 +1374,7 @@ impl DetailView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("DetailView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantDetailViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}");
@@ -1454,6 +1478,12 @@ pub struct DeleteView {
 }
 
 impl DeleteView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().flatten().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `DeleteView` for the given schema. Defaults: template
     /// `<table>_confirm_delete.html`, redirect on success to `/`.
     ///
@@ -1478,6 +1508,7 @@ impl DeleteView {
     /// Mount as `GET`/`POST <prefix>/{pk}/delete`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("DeleteView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(DeleteViewState {
             vs: self,
@@ -1500,6 +1531,7 @@ impl DeleteView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("DeleteView");
         let (schema, access) = (self.schema, self.access.clone());
         let state = Arc::new(TenantDeleteViewState { vs: self, tera });
         let path = mount_path(prefix, "/{pk}/delete");
@@ -1618,6 +1650,12 @@ pub struct CreateView {
 }
 
 impl CreateView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self.fields.iter().map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start a `CreateView` that renders and writes only `fields` (names or
     /// columns); any other posted key is ignored. Defaults: template
     /// `<table>_form.html`, redirect to `/` on success.
@@ -1713,6 +1751,7 @@ impl CreateView {
     /// Mount as `GET`/`POST <prefix>/new`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("CreateView");
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1746,6 +1785,7 @@ impl CreateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("CreateView");
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,
@@ -1793,6 +1833,16 @@ pub struct UpdateView {
 }
 
 impl UpdateView {
+    /// Refuse to mount when a field list names a credential column.
+    fn refuse_credentials(&self, who: &str) {
+        let names = self
+            .fields
+            .iter()
+            .chain(&self.context_fields)
+            .map(String::as_str);
+        crate::core::table_policy::assert_no_credentials(self.schema, who, names);
+    }
+
     /// Start an `UpdateView` that renders and writes only `fields`; see
     /// [`CreateView::for_model`]. `object` holds `fields` and the primary key.
     ///
@@ -1863,6 +1913,7 @@ impl UpdateView {
     /// Mount as `GET`/`POST <prefix>/{pk}/edit`.
     #[must_use]
     pub fn router(self, prefix: &str, tera: Arc<Tera>, pool: Pool) -> Router<()> {
+        self.refuse_credentials("UpdateView");
         let state = Arc::new(FormViewState {
             schema: self.schema,
             template: self.template.clone(),
@@ -1896,6 +1947,7 @@ impl UpdateView {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant_router(self, prefix: &str, tera: Arc<Tera>) -> Router<()> {
+        self.refuse_credentials("UpdateView");
         let state = Arc::new(TenantFormViewState {
             schema: self.schema,
             template: self.template,

@@ -10,18 +10,23 @@ use super::{ModelEntry, ModelSchema, TableAccess};
 /// The strictest level the models registered on `table` declare, so a proxy
 /// cannot open what its base closes. `None` when no model registers it:
 /// there are no rows to serve, only the admin's custom views use such names.
+///
+/// Keyed ASCII-lowercase: SQLite and MySQL (`lower_case_table_names`) read
+/// `Rustango_Admin_Totp` as the same table.
 pub(crate) fn table_access(table: &str) -> Option<TableAccess> {
-    static BY_TABLE: OnceLock<HashMap<&'static str, TableAccess>> = OnceLock::new();
+    static BY_TABLE: OnceLock<HashMap<String, TableAccess>> = OnceLock::new();
     BY_TABLE
         .get_or_init(|| {
-            let mut by_table: HashMap<&'static str, TableAccess> = HashMap::new();
+            let mut by_table: HashMap<String, TableAccess> = HashMap::new();
             for e in inventory::iter::<ModelEntry> {
-                let level = by_table.entry(e.schema.table).or_insert(TableAccess::Open);
+                let level = by_table
+                    .entry(e.schema.table.to_ascii_lowercase())
+                    .or_insert(TableAccess::Open);
                 *level = (*level).max(e.schema.table_access());
             }
             by_table
         })
-        .get(table)
+        .get(&table.to_ascii_lowercase())
         .copied()
 }
 
@@ -34,6 +39,57 @@ pub(crate) fn assert_generic(schema: &ModelSchema, who: &str) {
         "{who}: `{}` is admin only (or written by its own flow); a generic view cannot serve it",
         schema.table
     );
+}
+
+/// Panic when `names` (the fields a generic surface `who` renders, accepts,
+/// filters, searches or sorts on) holds a credential of `schema`.
+pub(crate) fn assert_no_credentials<'a>(
+    schema: &ModelSchema,
+    who: &str,
+    names: impl IntoIterator<Item = &'a str>,
+) {
+    let names: Vec<&str> = names.into_iter().collect();
+    let found: Vec<&str> = schema
+        .scalar_fields()
+        .filter(|f| f.is_credential() && names.iter().any(|n| *n == f.name || *n == f.column))
+        .map(|f| f.name)
+        .collect();
+    assert!(
+        found.is_empty(),
+        "{who} `{}`: {found:?} hold credentials, which no generic view may render or accept; \
+         drop them from the view's field lists, or serve them from a handler of your own",
+        schema.table
+    );
+}
+
+#[cfg(all(test, feature = "tenancy"))]
+mod credential_tests {
+    use super::assert_no_credentials;
+
+    fn refusal(f: impl FnOnce()) -> String {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(f))
+            .err()
+            .and_then(|e| e.downcast_ref::<String>().cloned())
+            .unwrap_or_default()
+    }
+
+    /// A tenant user's hash and an org's database URL are credentials.
+    #[test]
+    fn user_hash_and_org_url_are_credentials_and_refused() {
+        use crate::core::Model as _;
+        let user = crate::tenancy::User::SCHEMA;
+        let org = crate::tenancy::Org::SCHEMA;
+        assert!(user.field("password_hash").unwrap().is_credential());
+        assert!(org.field("database_url").unwrap().is_credential());
+        assert!(
+            refusal(|| assert_no_credentials(user, "t", ["id", "password_hash"]))
+                .contains("password_hash")
+        );
+        assert!(
+            refusal(|| assert_no_credentials(org, "t", ["database_url"])).contains("database_url")
+        );
+        assert_no_credentials(user, "t", ["id", "username", "email"]);
+    }
 }
 
 #[cfg(all(test, feature = "tenancy"))]
@@ -148,6 +204,15 @@ mod tests {
         for (schema, level) in expect {
             assert_eq!(table_access(schema.table), Some(level), "{}", schema.table);
         }
+    }
+
+    /// SQLite and MySQL fold table-name case, so the lookup does too.
+    #[test]
+    fn table_lookup_ignores_case() {
+        assert_eq!(
+            table_access("Rustango_Operators"),
+            Some(TableAccess::AdminOnly)
+        );
     }
 
     /// A table no model registers has no declared level.

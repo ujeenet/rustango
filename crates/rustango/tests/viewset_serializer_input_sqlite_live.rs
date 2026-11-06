@@ -684,7 +684,8 @@ pub struct Acct {
     pub id: Auto<i64>,
     #[rustango(max_length = 50)]
     pub name: String,
-    #[rustango(max_length = 50)]
+    /// Not a credential for the rule: a write-only test value.
+    #[rustango(secret = false, max_length = 50)]
     pub secret: String,
 }
 

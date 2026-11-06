@@ -24,13 +24,25 @@ async fn a_token_id_is_spent_once(pool: &Pool) {
     assert!(!store.is_used("b").await);
 }
 
-/// Expired rows go on the next write, so the table stays bounded.
-async fn expired_ids_are_pruned(pool: &Pool) {
+/// Rows expired past the margin go on a store's first write; a row just
+/// expired stays, for a replica whose clock runs slower.
+async fn expired_ids_are_pruned_past_a_margin(pool: &Pool) {
     let store = DbJtiStore::new(pool.clone());
-    assert!(store.mark_used("old", now() - 10).await);
-    assert!(store.mark_used("new", now() + 60).await);
+    assert!(store.mark_used("old", now() - 400).await);
+    assert!(store.mark_used("recent", now() - 10).await);
+    // A fresh store (another process) prunes on its first write.
+    assert!(
+        DbJtiStore::new(pool.clone())
+            .mark_used("new", now() + 60)
+            .await
+    );
     assert!(!store.is_used("old").await);
+    assert!(store.is_used("recent").await);
     assert!(store.is_used("new").await);
+    // `store` pruned on its first write; the next prune waits its interval.
+    assert!(store.mark_used("old2", now() - 400).await);
+    assert!(store.mark_used("later", now() + 60).await);
+    assert!(store.is_used("old2").await, "one prune per interval");
 }
 
 /// An id longer than the column is refused, never truncated onto another.
@@ -52,7 +64,7 @@ tri_dialect_test! {
     model: UsedJti,
     scenarios: [
         a_token_id_is_spent_once,
-        expired_ids_are_pruned,
+        expired_ids_are_pruned_past_a_margin,
         an_overlong_id_is_refused,
         a_missing_table_refuses_tokens,
     ],

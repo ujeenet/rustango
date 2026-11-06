@@ -154,7 +154,7 @@ enveloppe JSON. Utilisez `.context_object_name("posts")` si vous préférez bouc
 plutôt que sur `object_list` dans le template.
 
 La taille de page vaut 20 par défaut. Un client peut demander `?page_size=N`,
-plafonné par `.max_page_size(n)` (100 par défaut). `.bulk_actions(true)` fait
+plafonné par `.max_page_size(n)` (100 par défaut) ; une page au-delà de la ligne `.max_offset(n)` (10 000 par défaut, `0` lève la limite) répond 400. `.bulk_actions(true)` fait
 accepter à la liste un POST avec un champ `action` et les pk choisies :
 `delete_selected` est intégrée, `.action(...)` ajoute les vôtres, et
 `.with_delete_confirmation(true)` affiche d'abord une page de confirmation.

@@ -33,21 +33,47 @@ fn column<C: Column>(_: C) -> &'static str {
 #[derive(Clone)]
 pub struct DbJtiStore {
     pool: Pool,
+    /// Unix second of this store's last prune.
+    last_prune: std::sync::Arc<std::sync::atomic::AtomicI64>,
 }
+
+/// A row stays this long past `exp`, so a replica whose clock runs fast
+/// never prunes one a slower replica still checks.
+const PRUNE_MARGIN_SECS: i64 = 300;
+
+/// Seconds between prunes: one range `DELETE` per write would take gap
+/// locks that deadlock concurrent writers on MySQL.
+const PRUNE_EVERY_SECS: i64 = 60;
 
 impl DbJtiStore {
     /// A store on `pool`, the registry (or single) database.
     #[must_use]
     pub fn new(pool: Pool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            last_prune: std::sync::Arc::new(std::sync::atomic::AtomicI64::new(i64::MIN)),
+        }
     }
 
-    /// Drop rows whose token has expired.
+    /// Drop rows expired more than [`PRUNE_MARGIN_SECS`] ago, at most once
+    /// per [`PRUNE_EVERY_SECS`]. Pruning never decides whether an id is spent.
     async fn prune(&self) {
-        let now = crate::clock::unix_now_i64().unwrap_or(0);
+        use std::sync::atomic::Ordering;
+        let Ok(now) = crate::clock::unix_now_i64() else {
+            return;
+        };
+        let last = self.last_prune.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < PRUNE_EVERY_SECS
+            || self
+                .last_prune
+                .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_err()
+        {
+            return;
+        }
         let query = DeleteQuery {
             model: UsedJti::SCHEMA,
-            where_clause: UsedJti::exp.lt(now).into(),
+            where_clause: UsedJti::exp.lt(now - PRUNE_MARGIN_SECS).into(),
         };
         if let Err(e) = crate::sql::delete_pool(&self.pool, &query).await {
             tracing::warn!(target: "rustango::tenancy", error = %e, "could not prune spent token ids");

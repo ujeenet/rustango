@@ -155,7 +155,7 @@ sobre JSON. Usa `.context_object_name("posts")` si prefieres iterar sobre `posts
 `object_list` en la plantilla.
 
 El tamaño de página es 20 por defecto. Un cliente puede pedir `?page_size=N`,
-limitado por `.max_page_size(n)` (100 por defecto). `.bulk_actions(true)` hace que
+limitado por `.max_page_size(n)` (100 por defecto); una página más allá de la fila `.max_offset(n)` (10 000 por defecto, `0` quita el límite) responde 400. `.bulk_actions(true)` hace que
 la lista acepte un POST con un campo `action` y las pk elegidas:
 `delete_selected` viene incluida, `.action(...)` añade las tuyas, y
 `.with_delete_confirmation(true)` muestra antes una página de confirmación.

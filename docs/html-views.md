@@ -153,7 +153,7 @@ envelope. Use `.context_object_name("posts")` if you'd rather loop over `posts`
 than `object_list` in the template.
 
 The page size defaults to 20. A client may ask for `?page_size=N`, capped by
-`.max_page_size(n)` (default 100). `.bulk_actions(true)` lets the list accept a
+`.max_page_size(n)` (default 100); a page past row `.max_offset(n)` (default 10 000, `0` lifts it) answers 400. `.bulk_actions(true)` lets the list accept a
 POST with an `action` field and the selected pks: `delete_selected` is built in,
 `.action(...)` adds your own, and `.with_delete_confirmation(true)` shows a
 confirm page first. `.with_fk_display(true)` adds a `<column>_display` value for
