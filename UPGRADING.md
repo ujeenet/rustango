@@ -150,6 +150,21 @@ untouched.
 
 ## Unreleased
 
+## 0.65.0
+
+- The deprecated items and the old tenant lock / idempotency key fallback that 0.64.0 announced for removal in 0.65.0 are still here; they go in 0.66.0. Deploy 0.64 or later everywhere before 0.66.0.
+- M2M `add()` returns the driver error when a unique key other than the `(src, dst)` link refuses the row (it used to return `Ok` with nothing written).
+- `QuerySet::reverse()` now swaps an explicit `NULLS FIRST`/`LAST`, keeps each `distinct_on` group's row (it matches `last()`), and also flips an `order_by` added after it; `reorder`, `unordered` and `replace_order_by` reset it.
+- Every template model view now panics at mount until it says who may use it. Add `.allow_anonymous()` to public pages and to pages behind your own auth layer; with `tenancy`, gate writes with `.permissions_for_model()` (`add` / `change` / `delete`) or `.login_required()`. `permissions_for_model()` gates GET too: List/Detail need `view`, and the Create/Update/Delete form and confirm pages need their own codename; a `ListView` with `bulk_actions(true)` needs `view`, `change` and `delete` for its POST.
+- A `ViewSet` (or `#[derive(ViewSet)]`) with open writes panics at mount instead of warning: add codenames for create, update and destroy, or `read_only` / `allow_anonymous`.
+- Codename and login gates on a fixed-pool `router(..)` now refuse (403) a credential bound to a tenant; on a `tenant_router` they refuse one bound to another tenant or to none. Use `tenant_router` for tenant users.
+- New registry table `rustango_used_jti`: run `migrate` before deploying. Until it exists the tenant admin refuses impersonation (it fails closed). `impersonation_jti_store(..)` still overrides it; an in-memory store now logs a warning.
+- `ModelSchema` and `ModelSchemaParts` gain `access`: add `access: None` to struct literals. Models of your own stay open unless you declare `access`.
+- A ViewSet or template view whose field lists name a credential column (`password_hash`, `database_url`, `client_secret`, TOTP secrets, sealed fields) panics at mount: drop the column, or serve it from a handler of your own (a ViewSet over `rustango_users` can no longer create users, whose hash is required). A column that only looks like one by name takes `#[rustango(secret = false)]`.
+- `ListView` answers 400 past offset 10 000 (`.max_offset(0)` lifts it); the admin list and audit log past 100 000.
+- A machine clock before 2024-01-01 now rejects tokens, sessions and signed values instead of accepting them; `signing::TimestampSigner::sign` no longer panics on such a clock.
+- Inside an `atomic` block, `get_or_create` / `update_or_create` roll back `create_fn`'s writes when it returns an error (before, MySQL and SQLite kept them).
+
 ## 0.64.0
 
 - Resource caps, all configurable: `FileCache` keeps 100 000 entries / 1 GiB and drops the oldest; `DatabaseCache` purges expired rows every 256 writes; `/refresh` allows 30 per user per minute (429 past it); a full `InMemoryJtiStore` (1 000 000) refuses refreshes and revocations; ViewSet lists answer 400 past offset 10 000; tenant pool builds past 16 at once or 600 a minute answer 503; `/ready` answers are reused for 1 s; the server holds 10 000 connections (`RUSTANGO_MAX_CONNECTIONS`); a recursive media listing over 100 000 collections is a 400. `0` lifts most caps.

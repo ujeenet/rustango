@@ -20,7 +20,7 @@ use crate::sql::Auto;
 // `permissions` so `auto_create_permissions` seeds
 // `rustango_media_collections.{add,change,delete,view}`, the codenames
 // `router::MediaPerms` checks. Not a column, so no migration.
-#[rustango(table = "rustango_media_collections", permissions)]
+#[rustango(table = "rustango_media_collections", access = "open", permissions)]
 pub struct MediaCollection {
     #[rustango(primary_key)]
     pub id: Auto<i64>,

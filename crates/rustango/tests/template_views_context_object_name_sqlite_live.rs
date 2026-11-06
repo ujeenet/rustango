@@ -76,7 +76,9 @@ async fn list_view_binds_context_object_name_alongside_object_list() {
         "ctx_post_list.html",
         "alt={{ posts | length }} legacy={{ object_list | length }}",
     );
-    let view = ListView::for_model(CtxPost::SCHEMA).context_object_name("posts");
+    let view = ListView::for_model(CtxPost::SCHEMA)
+        .allow_anonymous()
+        .context_object_name("posts");
     let app = view.router("/posts", tera, pool);
     let (status, body) = body_of(app, "/posts").await;
     assert_eq!(status, StatusCode::OK);
@@ -101,7 +103,7 @@ async fn list_view_without_context_object_name_only_binds_object_list() {
         "ctx_post_list.html",
         r#"alt={{ posts | default(value="MISSING") }} legacy={{ object_list | length }}"#,
     );
-    let view = ListView::for_model(CtxPost::SCHEMA);
+    let view = ListView::for_model(CtxPost::SCHEMA).allow_anonymous();
     let app = view.router("/posts", tera, pool);
     let (status, body) = body_of(app, "/posts").await;
     assert_eq!(status, StatusCode::OK);
@@ -116,7 +118,9 @@ async fn detail_view_binds_context_object_name_alongside_object() {
         "ctx_post_detail.html",
         "alt={{ post.title | safe }} legacy={{ object.title | safe }}",
     );
-    let view = DetailView::for_model(CtxPost::SCHEMA).context_object_name("post");
+    let view = DetailView::for_model(CtxPost::SCHEMA)
+        .allow_anonymous()
+        .context_object_name("post");
     let app = view.router("/posts", tera, pool);
     let (status, body) = body_of(app, "/posts/1").await;
     assert_eq!(status, StatusCode::OK);
@@ -131,7 +135,9 @@ async fn detail_view_lookup_field_probes_by_named_column() {
         "ctx_post_detail.html",
         "row={{ object.title | safe }} slug={{ object.slug | safe }}",
     );
-    let view = DetailView::for_model(CtxPost::SCHEMA).lookup_field("slug");
+    let view = DetailView::for_model(CtxPost::SCHEMA)
+        .allow_anonymous()
+        .lookup_field("slug");
     let app = view.router("/posts", tera, pool);
     // URL `/posts/world` probes WHERE slug = 'world' → returns row id=2.
     let (status, body) = body_of(app, "/posts/world").await;
@@ -144,7 +150,9 @@ async fn detail_view_lookup_field_probes_by_named_column() {
 async fn detail_view_lookup_field_unknown_column_returns_500() {
     let pool = fresh_pool().await;
     let tera = tera_with("ctx_post_detail.html", "ignored");
-    let view = DetailView::for_model(CtxPost::SCHEMA).lookup_field("not_a_real_field");
+    let view = DetailView::for_model(CtxPost::SCHEMA)
+        .allow_anonymous()
+        .lookup_field("not_a_real_field");
     let app = view.router("/posts", tera, pool);
     let (status, body) = body_of(app, "/posts/anything").await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
@@ -156,7 +164,9 @@ async fn detail_view_lookup_field_unknown_column_returns_500() {
 async fn detail_view_missing_row_returns_404_regardless_of_lookup_field() {
     let pool = fresh_pool().await;
     let tera = tera_with("ctx_post_detail.html", "ignored");
-    let view = DetailView::for_model(CtxPost::SCHEMA).lookup_field("slug");
+    let view = DetailView::for_model(CtxPost::SCHEMA)
+        .allow_anonymous()
+        .lookup_field("slug");
     let app = view.router("/posts", tera, pool);
     let (status, _) = body_of(app, "/posts/nonexistent").await;
     assert_eq!(status, StatusCode::NOT_FOUND);

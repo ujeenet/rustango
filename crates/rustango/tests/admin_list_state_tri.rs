@@ -793,6 +793,18 @@ async fn a_nul_byte_in_search_or_a_filter_is_400(pool: &Pool) {
     }
 }
 
+/// A page past the admin's offset cap is a 400, not a deep OFFSET scan.
+async fn a_page_past_the_offset_cap_is_400(pool: &Pool) {
+    get(pool, "/adminls_tag?page=2").await;
+    let (status, body) = send(
+        pool,
+        Request::builder().uri("/adminls_tag?page=10000000"),
+        Body::empty(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -817,5 +829,6 @@ tri_dialect_test! {
         bulk_action_selection_is_capped,
         reserved_name_facets_filter,
         a_nul_byte_in_search_or_a_filter_is_400,
+        a_page_past_the_offset_cap_is_400,
     ],
 }

@@ -174,7 +174,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.64.0`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.65.0`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -595,13 +595,14 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
 
 Register the new module by adding `pub mod post_view_set;` to `src/lib.rs` (`make:viewset` prints this line for you).
 
-The generated file starts with `read_only`. Leave it out, as above, and the ViewSet also serves create, update and delete. Open write actions log a warning when the router mounts. Put your own auth layer in front and add `allow_anonymous` to say that is intended; `permissions(...)` codenames need the `tenancy` feature and refuse to mount without it.
+The generated file starts with `read_only`. Leave it out, as above, and the ViewSet also serves create, update and delete. Open write actions refuse to mount. Put your own auth layer in front and add `allow_anonymous`, as above, to say that is intended; `permissions(...)` codenames need the `tenancy` feature and refuse to mount without it.
 
 ### 12b. Mount the routes
 
@@ -687,6 +688,7 @@ Wire the serializer into the ViewSet with the `serializer` attribute — list, r
     fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```

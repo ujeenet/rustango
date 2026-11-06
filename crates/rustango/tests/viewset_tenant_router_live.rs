@@ -143,6 +143,7 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     // tenant_router. If any of these silently no-op, the assertions
     // below would catch it.
     let vs_router = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
+        .allow_anonymous()
         .filter_fields(&["label"])
         .search_fields(&["label"])
         .ordering(&[("id", false)])
@@ -181,6 +182,7 @@ async fn throttle_budgets_are_per_tenant() {
     });
     org_b.insert(&pool.clone().into()).await.unwrap();
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
+        .allow_anonymous()
         .throttle_all(1, 60)
         .tenant_router("/api/widgets")
         .layer(Extension(tenant_ctx(&pool)));
@@ -216,6 +218,7 @@ async fn throttled_with_dead_tenant() -> Option<(String, axum::Router)> {
         ..TenantPoolsConfig::default()
     }));
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
+        .allow_anonymous()
         .throttle_all(1, 60)
         .tenant_router("/api/widgets")
         .layer(Extension(Arc::new(ctx)));
@@ -261,21 +264,25 @@ fn template_views_router() -> axum::Router {
         .unwrap();
     let t = Arc::new(t);
     CreateView::for_model(Code::SCHEMA, &["code"])
+        .allow_anonymous()
         .template("form.html")
         .success_url("/codes")
         .tenant_router("/codes", t.clone())
         .merge(
             DetailView::for_model(Widget::SCHEMA)
+                .allow_anonymous()
                 .template("page.html")
                 .tenant_router("/tv", t.clone())
                 .merge(
                     UpdateView::for_model(Widget::SCHEMA, &["label"])
+                        .allow_anonymous()
                         .template("page.html")
                         .success_url("/tv")
                         .tenant_router("/tv", t.clone()),
                 )
                 .merge(
                     DeleteView::for_model(Widget::SCHEMA)
+                        .allow_anonymous()
                         .template("page.html")
                         .success_url("/tv")
                         .tenant_router("/tv", t),

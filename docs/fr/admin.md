@@ -177,7 +177,8 @@ pour inverser le sens (`?sort=col&order=asc|desc`). La valeur par défaut vient
 de `ordering`.
 
 **Pagination.** `list_per_page` fixe la taille de page ; naviguez avec
-`?page=N`. Pour les très grandes tables, enregistrez-les avec
+`?page=N` ; une page au-delà de la ligne 100 000 (liste et journal d'audit)
+répond 400, affinez avec la recherche ou les filtres. Pour les très grandes tables, enregistrez-les avec
 `Builder::skip_count_for([...])` pour éviter le `SELECT COUNT(*)` (le
 pagineur affiche alors « Page N » sans total global) ; un `?count=skip` par
 requête fait la même chose ponctuellement.

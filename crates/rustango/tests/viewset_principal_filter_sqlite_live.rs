@@ -101,6 +101,7 @@ async fn router() -> axum::Router {
             .expect("seed");
     }
     ViewSet::for_model(Note::SCHEMA, &["id", "owner_id", "body"])
+        .allow_anonymous()
         .page_size(100)
         .filter_backend(OwnerFilter)
         .router("/notes", Pool::Sqlite(sq))
@@ -276,6 +277,7 @@ mod owned_by {
                 .expect("seed");
         }
         ViewSet::for_model(Note::SCHEMA, &["id", "owner_id", "body"])
+            .allow_anonymous()
             .page_size(100)
             .filter_backend(backend)
             .router("/notes", Pool::Sqlite(sq))

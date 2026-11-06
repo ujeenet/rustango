@@ -170,6 +170,7 @@ invertir la dirección (`?sort=col&order=asc|desc`). El valor por defecto provie
 `ordering`.
 
 **Paginación.** `list_per_page` establece el tamaño de página; navega con `?page=N`.
+Una página más allá de la fila 100 000 (lista y registro de auditoría) responde 400; acota con búsqueda o filtros.
 Para tablas muy grandes, regístralas con `Builder::skip_count_for([...])` para omitir el
 `SELECT COUNT(*)` (el paginador muestra entonces "Page N" sin un total general); un
 `?count=skip` por petición hace lo mismo de forma ad hoc.

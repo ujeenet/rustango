@@ -4,6 +4,8 @@
 use sqlx::postgres::{PgArguments, PgRow};
 use sqlx::query::Query;
 
+use std::borrow::Cow;
+
 use super::bind_query;
 use super::ExecError;
 use super::Postgres;
@@ -18,7 +20,7 @@ use crate::sql::Dialect as _;
 /// driver rejects it.
 pub(crate) async fn pg_insert_returning<'c, E>(
     executor: E,
-    query: &InsertQuery,
+    query: Cow<'_, InsertQuery>,
 ) -> Result<PgRow, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
@@ -27,7 +29,7 @@ where
         return Err(ExecError::EmptyReturning);
     }
     query.validate()?;
-    let stmt = Postgres.compile_insert(query)?;
+    let stmt = Postgres.compile_insert_cow(query)?;
     let mut q: Query<'_, sqlx::Postgres, PgArguments> = sqlx::query(&stmt.sql);
     for value in stmt.params {
         q = bind_query(q, value);

@@ -126,6 +126,7 @@ async fn viewset_update_and_delete_are_audited(pool: &Pool) {
     let pks = seed(pool).await;
     let app = || {
         rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"])
+            .allow_anonymous()
             .router("/docs", pool.clone())
     };
     let uri = format!("/docs/{}", pks[0]);
@@ -143,6 +144,7 @@ async fn viewset_update_and_delete_are_audited(pool: &Pool) {
 async fn viewset_create_is_audited(pool: &Pool) {
     let app = || {
         rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"])
+            .allow_anonymous()
             .router("/docs", pool.clone())
     };
     let (status, body) = post_json(app(), "/docs", r#"{"title":"n"}"#).await;
@@ -159,24 +161,29 @@ async fn template_views_writes_are_audited(pool: &Pool) {
     let pks = seed(pool).await;
     let tera = Arc::new(tera::Tera::default());
 
-    let app =
-        UpdateView::for_model(Doc::SCHEMA, &["title"]).router("/docs", tera.clone(), pool.clone());
+    let app = UpdateView::for_model(Doc::SCHEMA, &["title"])
+        .allow_anonymous()
+        .router("/docs", tera.clone(), pool.clone());
     let uri = format!("/docs/{}/edit", pks[0]);
     let status = send(app, Method::POST, &uri, "title=x".into(), true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     assert_eq!(ops(pool, "update").await, 1);
 
-    let app = DeleteView::for_model(Doc::SCHEMA).router("/docs", tera.clone(), pool.clone());
+    let app = DeleteView::for_model(Doc::SCHEMA).allow_anonymous().router(
+        "/docs",
+        tera.clone(),
+        pool.clone(),
+    );
     let uri = format!("/docs/{}/delete", pks[0]);
     let status = send(app, Method::POST, &uri, String::new(), true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
     // `Doc` is soft-delete, so the template views stamp it (#2082).
     assert_eq!(ops(pool, "soft_delete").await, 1);
 
-    let app =
-        ListView::for_model(Doc::SCHEMA)
-            .bulk_actions(true)
-            .router("/docs", tera, pool.clone());
+    let app = ListView::for_model(Doc::SCHEMA)
+        .allow_anonymous()
+        .bulk_actions(true)
+        .router("/docs", tera, pool.clone());
     let form = format!("action=delete_selected&_selected_action={}", pks[1]);
     let status = send(app, Method::POST, "/docs", form, true).await;
     assert_eq!(status, StatusCode::SEE_OTHER);
@@ -191,6 +198,7 @@ async fn template_create_and_model_form_are_audited(pool: &Pool) {
     let tera = Arc::new(tera::Tera::default());
     for url in ["/docs", "/docs/{pk}"] {
         let app = CreateView::for_model(Doc::SCHEMA, &["title"])
+            .allow_anonymous()
             .success_url(url)
             .router("/docs", tera.clone(), pool.clone());
         let status = send(app, Method::POST, "/docs/new", "title=c".into(), true).await;
@@ -269,7 +277,9 @@ mod sqlite_create {
         let pool = rustango::testkit::matrix::sqlite_file_pool().await;
         rustango::testkit::matrix::fresh_table::<Tok>(&pool).await;
         audit::ensure_table_pool(&pool).await.expect("audit table");
-        let app = ViewSet::for_model(Tok::SCHEMA, &["id", "name"]).router("/toks", pool.clone());
+        let app = ViewSet::for_model(Tok::SCHEMA, &["id", "name"])
+            .allow_anonymous()
+            .router("/toks", pool.clone());
         let (status, body) = post_json(app, "/toks", r#"{"name":"n"}"#).await;
         assert_eq!(status, StatusCode::CREATED, "{body}");
         let row = Tok::objects().fetch(&pool).await.unwrap().remove(0);
@@ -285,6 +295,7 @@ mod sqlite_create {
         rustango::testkit::matrix::fresh_table::<Doc>(&pool).await;
         let app = || {
             ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"])
+                .allow_anonymous()
                 .router("/docs", pool.clone())
         };
         for body in [r#"{"title":"n"}"#, r#"[{"title":"n"}]"#] {
@@ -325,6 +336,7 @@ mod serialized {
         let pks = seed(pool).await;
         let app =
             rustango::viewset::ViewSet::for_model(Doc::SCHEMA, &["id", "title", "deleted_at"])
+                .allow_anonymous()
                 .serializer::<DocSerializer>()
                 .router("/docs", pool.clone());
         let uri = format!("/docs/{}", pks[0]);

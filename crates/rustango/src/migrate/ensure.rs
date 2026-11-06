@@ -167,6 +167,40 @@ pub(crate) fn idempotent_ddl(
     .collect())
 }
 
+/// Which database holds a [`BootstrapTable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootstrapHolder {
+    /// The single database, or a tenancy registry.
+    Shared,
+    /// The single database, or every tenant; never a registry.
+    Tenant,
+}
+
+pub(crate) type EnsureFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
+
+/// A `managed = false` framework table `migrate` creates with idempotent DDL.
+/// Each registers with `inventory::submit!` next to its model.
+pub(crate) struct BootstrapTable {
+    pub(crate) table: &'static str,
+    pub(crate) holder: BootstrapHolder,
+    pub(crate) ensure: for<'a> fn(&'a Pool) -> EnsureFuture<'a>,
+    /// What `--dry-run` shows while the table is missing.
+    pub(crate) ddl: fn(&dyn crate::sql::Dialect) -> Result<Vec<String>, String>,
+}
+
+inventory::collect!(BootstrapTable);
+
+/// The bootstrap tables `holder` keeps, in table order.
+pub(crate) fn bootstrap_tables(holder: BootstrapHolder) -> Vec<&'static BootstrapTable> {
+    let mut tables: Vec<&'static BootstrapTable> = inventory::iter::<BootstrapTable>
+        .into_iter()
+        .filter(|b| b.holder == holder)
+        .collect();
+    tables.sort_by_key(|b| b.table);
+    tables
+}
+
 /// `stmts` as [`run_statements`] sends them, for a `--dry-run`.
 pub(crate) fn as_run<'a, I>(stmts: I, dialect: &'a str) -> impl Iterator<Item = String> + 'a
 where

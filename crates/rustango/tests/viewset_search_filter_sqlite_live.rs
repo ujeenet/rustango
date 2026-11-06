@@ -44,6 +44,7 @@ async fn make_router_searching_title() -> axum::Router {
     .expect("create");
     let pool = Pool::Sqlite(sq);
     rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
+        .allow_anonymous()
         .page_size(50)
         .search_fields(&["title"])
         .router("/posts", pool)
@@ -64,6 +65,7 @@ async fn make_router_searching_title_and_body() -> axum::Router {
     .expect("create");
     let pool = Pool::Sqlite(sq);
     rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
+        .allow_anonymous()
         .page_size(50)
         .search_fields(&["title", "body"])
         .router("/posts", pool)

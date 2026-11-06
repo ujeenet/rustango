@@ -190,9 +190,10 @@ pub fn verify_delivery(
     let Ok(at) = headers.timestamp.parse::<i64>() else {
         return false;
     };
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    // A clock that cannot be read accepts no delivery.
+    let Ok(now) = crate::clock::unix_now_i64() else {
+        return false;
+    };
     let max_age = i64::try_from(max_age.as_secs()).unwrap_or(i64::MAX);
     if now.abs_diff(at) > max_age.unsigned_abs() {
         return false;

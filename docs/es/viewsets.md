@@ -242,6 +242,7 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
@@ -505,6 +506,7 @@ serializador con `serializer = …`:
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 
@@ -596,7 +598,7 @@ eliminar", monta el ViewSet y sobrescribe la única ruta con tu propio handler
 | `ordering` | `"-published_at, id"` | ninguno | Orden por defecto (`-` = DESC). |
 | `page_size` | `20` | 20 | Filas por página (el `?page_size=` del cliente se limita a 100). |
 | `read_only` | *(flag)* | apagado | Expone solo GET (list + retrieve). |
-| `allow_anonymous` | *(flag)* | apagado | Indica que las acciones de escritura sin codenames deben ser abiertas; silencia el aviso al montar. |
+| `allow_anonymous` | *(flag)* | apagado | Indica que las acciones de escritura sin codenames deben ser abiertas; sin él (ni `read_only`) no se montan. |
 | `permissions(...)` | `permissions(create = "posts.add")` | ninguno | Codenames de permiso por acción; requiere `tenancy`. |
 
 ---
@@ -621,7 +623,7 @@ que las respuestas muestran y los bodies pueden escribir. Cada otro método devu
 | `openapi_query(bool)` | Describe la ruta `QUERY` en el documento OpenAPI generado (necesita herramientas de OpenAPI 3.2). Apagado por defecto; la ruta se monta igualmente. |
 | `related_filter(fk_field, backend)` | Limita qué filas destino puede nombrar una FK del cuerpo; cualquier otra es un `422`. |
 | `read_only()` | Solo GET. |
-| `allow_anonymous()` | Las escrituras sin codenames son intencionadas; omite el aviso al montar. |
+| `allow_anonymous()` | Las escrituras sin codenames son intencionadas; sin él no se montan. |
 | `max_bulk_create(n)` | Máximo de filas que puede llevar una creación masiva (1000 por defecto). |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Compuertas de codename por acción; ambas requieren `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Paginación por keyset (omite `COUNT(*)`). Cualquier columna NOT NULL de orden total: entero, timestamp, fecha, uuid o cadena. |
@@ -771,10 +773,9 @@ forma que envían tus propios handlers:
 
 ## Permisos y throttling
 
-> **Un ViewSet es público por defecto.** Montar uno expone los seis verbos CRUD a
-> cualquiera — no hay autenticación integrada. Protégelo con `permissions(...)`
-> (abajo), ponlo detrás del [middleware de autenticación](auth-backends.md)
-> (`require_auth`), o ambos, antes de exponer escrituras.
+> **Las lecturas son públicas por defecto; las escrituras no.** Un ViewSet sin
+> codenames sirve list y retrieve a cualquiera y no se monta mientras create,
+> update o destroy no tengan ninguno, salvo con `read_only` o `allow_anonymous`.
 
 **Los permisos** protegen cada acción con codenames (OR dentro de una acción):
 
@@ -789,8 +790,13 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router("/api/posts", pool);
+    .tenant_router("/api/posts");
 ```
+
+En `tenant_router` el usuario debe pertenecer al tenant enrutado. En un
+`.router(prefix, pool)` con pool fijo solo cuenta un usuario que tu propia capa
+de auth de base única puso en la petición; el usuario de un tenant (`require_auth`,
+una sesión) recibe `403`. Con tenancy, monta los ViewSets protegidos con `tenant_router`.
 
 Una lista de acción vacía = sin verificación. La aplicación lee un usuario
 autenticado de la petición (la integración de autenticación de `tenancy`); los

@@ -65,6 +65,7 @@ fn app(pool: &Pool) -> axum::Router {
         Item::SCHEMA,
         &["id", "name", "category_id", "created_at", "price"],
     )
+    .allow_anonymous()
     .filter_fields(&["category_id", "name", "created_at"])
     .search_fields(&["name"])
     .router("/items", pool.clone())
@@ -73,6 +74,7 @@ fn app(pool: &Pool) -> axum::Router {
             Item::SCHEMA,
             &["id", "name", "category_id", "created_at", "price"],
         )
+        .allow_anonymous()
         .filter_fields(&["price"])
         .filter_backend(price_min)
         .router("/priced", pool.clone()),

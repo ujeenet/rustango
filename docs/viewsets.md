@@ -234,6 +234,7 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
@@ -494,6 +495,7 @@ Both produce an `axum::Router` of the same CRUD routes.
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 
@@ -584,7 +586,7 @@ mount the ViewSet and override the one route with your own handler (see
 | `ordering` | `"-published_at, id"` | none | Default sort (`-` = DESC). |
 | `page_size` | `20` | 20 | Rows per page (client `?page_size=` capped at 100). |
 | `read_only` | *(flag)* | off | Expose GET (list + retrieve) only. |
-| `allow_anonymous` | *(flag)* | off | Say that write actions with no codenames are meant to be open; silences the mount warning. |
+| `allow_anonymous` | *(flag)* | off | Say that write actions with no codenames are meant to be open; without it (or `read_only`) they refuse to mount. |
 | `permissions(...)` | `permissions(create = "posts.add")` | none | Per-action permission codenames; needs `tenancy`. |
 
 ---
@@ -610,7 +612,7 @@ fields responses render and bodies may write. Every other method returns `Self`:
 | `openapi_query(bool)` | Describe the `QUERY` route in the generated OpenAPI document (needs OpenAPI 3.2 tooling). Off by default; the route is mounted either way. |
 | `related_filter(fk_field, backend)` | Limit which target rows a body's FK may name; any other is a `422`. |
 | `read_only()` | GET-only. |
-| `allow_anonymous()` | Writes without codenames are intended; skips the mount warning. |
+| `allow_anonymous()` | Writes without codenames are intended; without it they refuse to mount. |
 | `permissions(ViewSetPerms{…})` / `permissions_for_model::<T>()` | Per-action codename gates; both need `tenancy`. |
 | `cursor_pagination("id")` / `cursor_pagination_desc("id")` | Keyset pagination (skips `COUNT(*)`). Any totally-ordered NOT NULL column: integer, timestamp, date, uuid or string. |
 | `limit_offset_pagination()` | `?limit=&offset=` windowing. |
@@ -753,10 +755,9 @@ your own handlers send:
 
 ## Permissions and throttling
 
-> **A ViewSet is public by default.** Mounting one exposes all six CRUD verbs
-> to anyone — there is no built-in authentication. Gate it with `permissions(...)`
-> (below), put it behind the [auth middleware](auth-backends.md) (`require_auth`),
-> or both, before exposing writes.
+> **Reads are public by default; writes are not.** A ViewSet with no codenames
+> serves list and retrieve to anyone, and refuses to mount while create, update
+> or destroy has none, unless it is `read_only` or `allow_anonymous`.
 
 **Permissions** gate each action on codenames. A user needs all of an action's codenames:
 
@@ -771,8 +772,13 @@ ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
         update:   vec!["posts.change".into()],
         destroy:  vec!["posts.delete".into()],
     })
-    .router("/api/posts", pool);
+    .tenant_router("/api/posts");
 ```
+
+On `tenant_router` the user must belong to the routed tenant. On a fixed-pool
+`.router(prefix, pool)` only a user your own single-database auth layer put on
+the request counts; a tenant's user (`require_auth`, a session) is refused with
+`403`. Under tenancy, mount gated ViewSets with `tenant_router`.
 
 An empty action list = no check. Enforcement reads an authenticated user from
 the request (the `tenancy` auth integration); superusers bypass, a missing user

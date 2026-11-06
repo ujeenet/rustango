@@ -1,5 +1,7 @@
 //! Async executor — binds a `CompiledStatement` to sqlx and runs it.
 
+use std::borrow::Cow;
+
 use crate::core::{
     AggregateQuery, BulkInsertQuery, BulkUpdateQuery, CountQuery, DeleteQuery, InsertQuery, Model,
     SelectQuery, SqlValue, UpdateQuery,
@@ -13,6 +15,7 @@ use sqlx::postgres::{PgArguments, PgRow};
 #[cfg(feature = "postgres")]
 use sqlx::query::{Query, QueryAs};
 
+use super::writers::split_values;
 use super::Dialect;
 use super::ExecError;
 #[cfg(feature = "postgres")]
@@ -301,7 +304,7 @@ where
     let col = crate::core::joins::joined_label(alias, pk.column);
     if sqlx::ValueRef::is_null(&row.try_get_raw(col.as_str())?) {
         return Err(sqlx::Error::ColumnDecode {
-            index: col,
+            index: col.to_string(),
             source: format!("foreign-key target row in `{}` is missing", target.table).into(),
         });
     }
@@ -446,7 +449,10 @@ pub(crate) use pg_on::pg_insert_returning;
 
 // Writes on any `SqlExecutor` — see write_on.rs.
 mod write_on;
-pub use write_on::{bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on};
+pub use write_on::{
+    bulk_insert_on, bulk_insert_owned_on, delete_on, insert_on, insert_owned_on,
+    insert_returning_on, update_on,
+};
 
 mod row_to_json;
 #[cfg(feature = "postgres")]
@@ -903,7 +909,6 @@ pub use on::{PoolConn, PooledConn, SqlExecutor};
 mod atomic;
 #[cfg(feature = "jobs")]
 pub(crate) use atomic::in_any_block;
-#[cfg(feature = "jobs-postgres")]
 pub(crate) use atomic::in_block;
 pub(crate) use atomic::rolled_back;
 pub use atomic::{atomic, atomic_immediate, on_commit, on_commit_pending, AtomicTx, TxGuard};
@@ -1037,9 +1042,17 @@ pub async fn insert_returning_pool(
     pool: &Pool,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
+    insert_returning_cow(pool, Cow::Borrowed(query)).await
+}
+
+/// [`insert_returning_pool`] that moves an owned query's values.
+pub(crate) async fn insert_returning_cow(
+    pool: &Pool,
+    query: Cow<'_, InsertQuery>,
+) -> Result<InsertReturningPool, ExecError> {
     if let Some(w) = atomic::join(pool).await {
         let mut w = w?;
-        let row = insert_returning_tx(&mut w, query).await?;
+        let row = insert_returning_cow_tx(&mut w, query).await?;
         w.release().await?;
         return Ok(row);
     }
@@ -1060,7 +1073,7 @@ pub async fn insert_returning_pool(
         Pool::Sqlite(sq) => {
             // SQLite 3.35+ has `INSERT … RETURNING`, so this mirrors
             // the Postgres path.
-            let stmt = pool.dialect().compile_insert(query)?;
+            let stmt = pool.dialect().compile_insert_cow(query)?;
             let mut q: sqlx::query::Query<'_, sqlx::Sqlite, sqlx::sqlite::SqliteArguments<'_>> =
                 sqlx::query(&stmt.sql);
             for v in stmt.params {
@@ -1103,7 +1116,7 @@ impl ::core::fmt::Debug for InsertReturningPool {
 #[cfg(feature = "mysql")]
 async fn insert_mysql_auto_id<'c, E>(
     exec: E,
-    query: &InsertQuery,
+    query: Cow<'_, InsertQuery>,
 ) -> Result<InsertReturningPool, ExecError>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
@@ -1448,7 +1461,7 @@ pub async fn bulk_insert_pool(pool: &Pool, query: &BulkInsertQuery) -> Result<()
     // Keep every `pool.dialect()` a temporary: it yields `&dyn Dialect`,
     // which is not `Sync`, so holding one across an `.await` would make
     // this future non-Send.
-    let stmts = compile_bulk_insert_batches(pool.dialect(), query)?;
+    let stmts = compile_bulk_insert_batches(pool.dialect(), Cow::Borrowed(query))?;
     execute_all_or_none(pool, stmts).await.map(drop)
 }
 
@@ -1496,36 +1509,51 @@ pub(crate) async fn execute_batches_tx(
 /// One multi-row INSERT binds `rows × columns` parameters: 65535 on
 /// Postgres, 32766 on SQLite, `max_allowed_packet` on MySQL. Past the
 /// cap the driver fails with an opaque error.
+///
+/// An owned `query`'s values move into the statements uncopied.
 pub(crate) fn compile_bulk_insert_batches(
     dialect: &dyn Dialect,
-    query: &BulkInsertQuery,
+    query: Cow<'_, BulkInsertQuery>,
 ) -> Result<Vec<super::CompiledStatement>, ExecError> {
     query.validate()?;
     if query.rows.is_empty() {
         return Ok(Vec::new());
     }
     // Before chunking, so a repeated key resolves the same in any batch.
-    let query = &*query.last_per_conflict_key();
+    let query = BulkInsertQuery::last_per_conflict_key(query);
     let max_rows = rows_per_batch(dialect, query.columns.len(), usize::MAX);
     if query.rows.len() <= max_rows {
-        return Ok(vec![dialect.compile_bulk_insert(query)?]);
+        return Ok(vec![dialect.compile_bulk_insert_cow(query)?]);
     }
-    query
-        .rows
-        .chunks(max_rows)
-        .map(|chunk| {
+    let (head, rows) = split_values(query);
+    row_chunks(rows, max_rows)
+        .map(|rows| {
+            let batch = BulkInsertQuery {
+                rows,
+                ..head.header()
+            };
             dialect
-                .compile_bulk_insert(&BulkInsertQuery {
-                    model: query.model,
-                    columns: query.columns.clone(),
-                    rows: chunk.to_vec(),
-                    returning: query.returning.clone(),
-                    on_conflict: query.on_conflict.clone(),
-                    generated: query.generated.clone(),
-                })
+                .compile_bulk_insert_cow(Cow::Owned(batch))
                 .map_err(ExecError::from)
         })
         .collect()
+}
+
+/// `rows` in chunks of at most `max`: moved when owned, copied once when borrowed.
+fn row_chunks(
+    rows: Cow<'_, [Vec<SqlValue>]>,
+    max: usize,
+) -> Box<dyn Iterator<Item = Vec<Vec<SqlValue>>> + '_> {
+    match rows {
+        Cow::Borrowed(rows) => Box::new(rows.chunks(max).map(<[_]>::to_vec)),
+        Cow::Owned(rows) => {
+            let mut rows = rows.into_iter();
+            Box::new(std::iter::from_fn(move || {
+                let chunk: Vec<_> = rows.by_ref().take(max).collect();
+                (!chunk.is_empty()).then_some(chunk)
+            }))
+        }
+    }
 }
 
 /// `UPDATE … FROM (VALUES …)` (Postgres) / `UPDATE … INNER JOIN
@@ -1539,25 +1567,32 @@ pub async fn bulk_update_pool(pool: &Pool, query: &BulkUpdateQuery) -> Result<u6
     if query.rows.is_empty() {
         return Ok(0);
     }
-    let stmts = compile_bulk_update_batches(pool.dialect(), query, usize::MAX)?;
+    let stmts = compile_bulk_update_batches(pool.dialect(), Cow::Borrowed(query), usize::MAX)?;
     execute_all_or_none(pool, stmts).await
 }
 
-/// Compile `query` in batches of at most `max` rows that fit the bind cap.
+/// Compile `query` in batches of at most `max` rows that fit the bind cap;
+/// an owned `query`'s values move into them uncopied.
 pub(crate) fn compile_bulk_update_batches(
     dialect: &dyn Dialect,
-    query: &BulkUpdateQuery,
+    query: Cow<'_, BulkUpdateQuery>,
     max: usize,
 ) -> Result<Vec<super::CompiledStatement>, ExecError> {
     // Each row binds its PK plus one value per column (#2295).
     let max_rows = rows_per_batch(dialect, query.update_columns.len() + 1, max);
-    query
-        .rows
-        .chunks(max_rows)
-        .map(|chunk| {
-            let batch =
-                BulkUpdateQuery::new(query.model, query.update_columns.clone(), chunk.to_vec());
-            dialect.compile_bulk_update(&batch).map_err(ExecError::from)
+    if query.rows.is_empty() {
+        return Ok(Vec::new());
+    }
+    if query.rows.len() <= max_rows {
+        return Ok(vec![dialect.compile_bulk_update_cow(query)?]);
+    }
+    let (head, rows) = split_values(query);
+    row_chunks(rows, max_rows)
+        .map(|rows| {
+            let batch = BulkUpdateQuery::new(head.model, head.update_columns.clone(), rows);
+            dialect
+                .compile_bulk_update_cow(Cow::Owned(batch))
+                .map_err(ExecError::from)
         })
         .collect()
 }
@@ -1872,6 +1907,14 @@ pub async fn insert_returning_tx(
     tx: &mut PoolTx<'_>,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
+    insert_returning_cow_tx(tx, Cow::Borrowed(query)).await
+}
+
+/// [`insert_returning_tx`] that moves an owned query's values.
+pub(crate) async fn insert_returning_cow_tx(
+    tx: &mut PoolTx<'_>,
+    query: Cow<'_, InsertQuery>,
+) -> Result<InsertReturningPool, ExecError> {
     let gate = atomic::gate(tx)?;
     gate.check(
         async {
@@ -1890,7 +1933,7 @@ pub async fn insert_returning_tx(
                 TxConn::Mysql(t) => insert_mysql_auto_id(&mut **t, query).await,
                 #[cfg(feature = "sqlite")]
                 TxConn::Sqlite(t) => {
-                    let stmt = super::sqlite::DIALECT.compile_insert(query)?;
+                    let stmt = super::sqlite::DIALECT.compile_insert_cow(query)?;
                     let mut q: sqlx::query::Query<
                         '_,
                         sqlx::Sqlite,
@@ -1926,7 +1969,7 @@ pub(crate) async fn bulk_insert_pks_tx(
     let mut batch = BulkInsertQuery::new(query.model, query.columns.clone(), query.rows.clone())
         .returning(vec![pk.column]);
     batch.on_conflict.clone_from(&query.on_conflict);
-    let rows = bulk_insert_rows_tx(tx, &batch).await?;
+    let rows = bulk_insert_rows_tx(tx, Cow::Owned(batch)).await?;
     rows.iter()
         .map(|row| generated_pk(row, pk, query.model.table))
         .collect()
@@ -1944,10 +1987,11 @@ pub(crate) async fn bulk_insert_pks_tx(
 )]
 pub(crate) async fn bulk_insert_rows_tx(
     tx: &mut PoolTx<'_>,
-    query: &BulkInsertQuery,
+    query: Cow<'_, BulkInsertQuery>,
 ) -> Result<Vec<InsertReturningPool>, ExecError> {
     if query.returning.is_empty() {
-        bulk_insert_tx(tx, query).await?;
+        let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
+        execute_batches_tx(tx, stmts).await?;
         return Ok(Vec::new());
     }
     // Before compiling: the MySQL writer refuses RETURNING itself.
@@ -1958,8 +2002,8 @@ pub(crate) async fn bulk_insert_rows_tx(
             reason: "MySQL has no RETURNING to read the written rows",
         });
     }
-    let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
     let mut out = Vec::with_capacity(query.rows.len());
+    let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
     for stmt in stmts {
         crate::test_assertions::query_counter::bump();
         match &mut tx.conn {
@@ -2143,7 +2187,7 @@ async fn run_truncate(
 /// # Errors
 /// As [`bulk_insert_pool`].
 pub async fn bulk_insert_tx(tx: &mut PoolTx<'_>, query: &BulkInsertQuery) -> Result<(), ExecError> {
-    let stmts = compile_bulk_insert_batches(tx.dialect(), query)?;
+    let stmts = compile_bulk_insert_batches(tx.dialect(), Cow::Borrowed(query))?;
     execute_batches_tx(tx, stmts).await.map(drop)
 }
 
@@ -3491,7 +3535,7 @@ mod last_per_conflict_key_tests {
     }
 
     fn kept(q: &BulkInsertQuery) -> Vec<SqlValue> {
-        q.last_per_conflict_key()
+        BulkInsertQuery::last_per_conflict_key(Cow::Borrowed(q))
             .rows
             .iter()
             .map(|r| r[2].clone())
@@ -3539,7 +3583,8 @@ mod last_per_conflict_key_tests {
         let per_batch = i64::try_from(rows_per_batch(d, 3, usize::MAX)).unwrap();
         let mut rows: Vec<[SqlValue; 3]> = (0..per_batch).map(|i| row(Some(i), 0, i)).collect();
         rows.push(row(Some(0), 0, -1));
-        let batches = compile_bulk_insert_batches(d, &upsert(&["a", "b"], rows)).unwrap();
+        let batches =
+            compile_bulk_insert_batches(d, Cow::Owned(upsert(&["a", "b"], rows))).unwrap();
         let params: Vec<&SqlValue> = batches.iter().flat_map(|s| &s.params).collect();
         assert_eq!(params.len(), usize::try_from(per_batch).unwrap() * 3);
         assert_eq!(
@@ -3547,6 +3592,84 @@ mod last_per_conflict_key_tests {
             [&SqlValue::I64(1), &SqlValue::I64(0), &SqlValue::I64(1)]
         );
         assert_eq!(params[params.len() - 1], &SqlValue::I64(-1));
+    }
+}
+
+/// An owned query's values move into the compiled statements: the bound
+/// `String` is the caller's own buffer, not a copy.
+#[cfg(all(test, feature = "sqlite"))]
+mod owned_compile_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType, ModelSchema};
+
+    const ROW: &ModelSchema = &{
+        const FIELDS: &[FieldSchema] = &[
+            {
+                let mut f = FieldSchema::new("id", "id", FieldType::I64);
+                f.primary_key = true;
+                f
+            },
+            FieldSchema::new("s", "s", FieldType::String),
+        ];
+        let mut s = ModelSchema::new("OwnedRow", "owned_row");
+        s.fields = FIELDS;
+        s
+    };
+
+    /// `n` rows of `(id, text)` and the address of each text buffer.
+    fn rows(n: i64) -> (Vec<Vec<SqlValue>>, Vec<*const u8>) {
+        let texts: Vec<String> = (0..n).map(|i| format!("row {i}")).collect();
+        let ptrs = texts.iter().map(|t| t.as_ptr()).collect();
+        let rows = (0..n)
+            .zip(texts)
+            .map(|(i, t)| vec![SqlValue::I64(i), SqlValue::String(t)])
+            .collect();
+        (rows, ptrs)
+    }
+
+    fn bound_ptrs(stmts: &[crate::sql::CompiledStatement]) -> Vec<*const u8> {
+        stmts
+            .iter()
+            .flat_map(|s| &s.params)
+            .filter_map(|v| match v {
+                SqlValue::String(t) => Some(t.as_ptr()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn bulk_insert_moves_values_in_one_or_many_batches() {
+        let d = &crate::sql::Sqlite;
+        let per_batch = i64::try_from(rows_per_batch(d, 2, usize::MAX)).unwrap();
+        for n in [3, per_batch + 3] {
+            let (rows, ptrs) = rows(n);
+            let q = BulkInsertQuery::new(ROW, vec!["id", "s"], rows);
+            let stmts = compile_bulk_insert_batches(d, Cow::Owned(q)).unwrap();
+            assert_eq!(stmts.len(), if n > per_batch { 2 } else { 1 });
+            assert_eq!(bound_ptrs(&stmts), ptrs, "{n} rows were copied");
+        }
+    }
+
+    #[test]
+    fn bulk_update_moves_values_in_one_or_many_batches() {
+        let d = &crate::sql::Sqlite;
+        for (n, max) in [(3, usize::MAX), (5, 2)] {
+            let (rows, ptrs) = rows(n);
+            let q = BulkUpdateQuery::new(ROW, vec!["s"], rows);
+            let stmts = compile_bulk_update_batches(d, Cow::Owned(q), max).unwrap();
+            assert_eq!(bound_ptrs(&stmts), ptrs, "{n} rows were copied");
+        }
+    }
+
+    #[test]
+    fn insert_moves_values() {
+        let (mut rows, ptrs) = rows(1);
+        let q = InsertQuery::new(ROW, vec!["id", "s"], rows.remove(0));
+        let stmt = crate::sql::Sqlite
+            .compile_insert_cow(Cow::Owned(q))
+            .unwrap();
+        assert_eq!(bound_ptrs(&[stmt]), ptrs);
     }
 }
 

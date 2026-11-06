@@ -1,6 +1,8 @@
 //! Writes on any [`SqlExecutor`]: the one statement-level path the
 //! derive's `_on` and `_tx` methods share.
 
+use std::borrow::Cow;
+
 use super::{write_on, ExecError, InsertReturningPool, SqlExecutor};
 use crate::core::{BulkInsertQuery, DeleteQuery, InsertQuery, UpdateQuery};
 
@@ -12,8 +14,24 @@ pub async fn insert_on<'c, E: SqlExecutor<'c>>(
     executor: E,
     query: &InsertQuery,
 ) -> Result<(), ExecError> {
+    insert_cow_on(executor, Cow::Borrowed(query)).await
+}
+
+/// [`insert_on`] that moves `query`'s values into the statement.
+#[doc(hidden)]
+pub async fn insert_owned_on<'c, E: SqlExecutor<'c>>(
+    executor: E,
+    query: InsertQuery,
+) -> Result<(), ExecError> {
+    insert_cow_on(executor, Cow::Owned(query)).await
+}
+
+async fn insert_cow_on<'c, E: SqlExecutor<'c>>(
+    executor: E,
+    query: Cow<'_, InsertQuery>,
+) -> Result<(), ExecError> {
     query.validate()?;
-    let stmt = executor.dialect().compile_insert(query)?;
+    let stmt = executor.dialect().compile_insert_cow(query)?;
     write_on(executor, &stmt.sql, stmt.params).await.map(drop)
 }
 
@@ -25,13 +43,13 @@ pub async fn insert_on<'c, E: SqlExecutor<'c>>(
 /// [`insert_on`].
 pub async fn insert_returning_on<'c, E: SqlExecutor<'c>>(
     executor: E,
-    query: &InsertQuery,
+    query: InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
     if query.returning.is_empty() {
         return Err(ExecError::EmptyReturning);
     }
     query.validate()?;
-    executor.insert_returning(query.clone()).await
+    executor.insert_returning(query).await
 }
 
 /// UPDATE `query` on `executor`; returns the rows it changed.
@@ -90,7 +108,21 @@ pub async fn bulk_insert_on<'c, E: SqlExecutor<'c>>(
     if query.rows.is_empty() {
         return Ok(Vec::new());
     }
-    let mut query = query.clone();
+    bulk_insert_owned_on(executor, query.clone()).await
+}
+
+/// [`bulk_insert_on`] that moves `query`'s values into the statements.
+///
+/// # Errors
+/// As [`bulk_insert_on`].
+#[doc(hidden)]
+pub async fn bulk_insert_owned_on<'c, E: SqlExecutor<'c>>(
+    executor: E,
+    mut query: BulkInsertQuery,
+) -> Result<Vec<InsertReturningPool>, ExecError> {
+    if query.rows.is_empty() {
+        return Ok(Vec::new());
+    }
     // MySQL has no RETURNING: write the rows, read nothing back.
     if !executor.dialect().supports_returning() {
         query.returning.clear();

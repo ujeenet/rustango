@@ -88,6 +88,27 @@ Cada vista es `for_model(SCHEMA)` más un `.router(prefix, tera, pool)`. Montarl
 `posts_list.html`, `posts_detail.html`, y así sucesivamente. Reemplaza cualquiera de ellas con
 `.template("my_name.html")`.
 
+### Quién puede usar una vista
+
+Una vista de modelo no se monta hasta que dices quién puede usarla, así ninguna
+página sale abierta por accidente. Llama a una de estas en cada vista:
+
+| Llamada | Quién entra |
+|---|---|
+| `.allow_anonymous()` | cualquiera que llegue al router; pon tu propia capa de auth delante si hace falta |
+| `.login_required()` | cualquier usuario con sesión; los demás reciben `401` |
+| `.permissions(&["posts.change"])` | un usuario con sesión que tenga cada codename; los superusuarios pasan |
+| `.permissions_for_model()` | el codename del modelo: `view` para List y Detail, `add`, `change`, `delete` para las vistas de escritura |
+
+Las tres últimas requieren la feature `tenancy` y van en `.tenant_router(..)`:
+allí el usuario viene de `require_auth` / `optional_auth` o de la cookie de
+sesión y debe pertenecer a ese tenant. En un `.router(prefix, tera, pool)` con
+pool fijo solo cuenta un usuario que tu propia capa de auth de base única puso
+en la petición; el usuario de un tenant recibe `403`. Con
+`permissions_for_model()`, un `ListView` con `.bulk_actions(true)` necesita
+`view`, `change` y `delete` para su POST. Para enviar a los visitantes anónimos a
+una página de login en vez de un `401`, envuelve el router en `auth_decorators::login_required("/login")`.
+
 ---
 
 ## ListView
@@ -107,6 +128,7 @@ let app = ListView::for_model(Post::SCHEMA)
     .order_by("published_at", true)      // default sort, true = DESC
     .filter_fields(&["status", "author_id"])  // ?status=published
     .search_fields(&["title", "body"])        // ?search=rust
+    .allow_anonymous()                        // a public page
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -133,7 +155,7 @@ sobre JSON. Usa `.context_object_name("posts")` si prefieres iterar sobre `posts
 `object_list` en la plantilla.
 
 El tamaño de página es 20 por defecto. Un cliente puede pedir `?page_size=N`,
-limitado por `.max_page_size(n)` (100 por defecto). `.bulk_actions(true)` hace que
+limitado por `.max_page_size(n)` (100 por defecto); una página más allá de la fila `.max_offset(n)` (10 000 por defecto, `0` quita el límite) responde 400. `.bulk_actions(true)` hace que
 la lista acepte un POST con un campo `action` y las pk elegidas:
 `delete_selected` viene incluida, `.action(...)` añade las tuyas, y
 `.with_delete_confirmation(true)` muestra antes una página de confirmación.
@@ -145,7 +167,9 @@ que el parámetro se ignora hasta que nombras tú las columnas ordenables:
 
 ```rust
 fn post_list() -> ListView {
-    ListView::for_model(Post::SCHEMA).ordering_fields(&["title", "published_at"])
+    ListView::for_model(Post::SCHEMA)
+        .allow_anonymous()
+        .ordering_fields(&["title", "published_at"])
 }
 ```
 
@@ -166,6 +190,7 @@ use rustango::template_views::DetailView;
 
 let app = DetailView::for_model(Post::SCHEMA)
     .lookup_field("slug")          // GET /posts/{slug} instead of /posts/{id}
+    .allow_anonymous()
     .router("/posts", Arc::new(tera), pool);
 ```
 
@@ -193,7 +218,8 @@ use rustango::template_views::CreateView;
 
 let app = CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
     .success_url("/posts")         // where to send the browser after a save
-    .router("/posts", Arc::new(tera), pool);
+    .permissions_for_model()       // `posts.add`
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 La lista de campos es obligatoria. Es la lista blanca de escritura: el formulario
@@ -254,7 +280,8 @@ CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"])
         if errs.is_empty() { Ok(()) } else { Err(errs) }
     })
     .success_url("/posts")
-    .router("/posts", Arc::new(tera), pool);
+    .permissions_for_model()
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 También puedes reutilizar los validadores de una estructura `#[derive(Form)]` con `.form::<F>()`
@@ -268,7 +295,8 @@ use rustango::template_views::UpdateView;
 
 UpdateView::for_model(Post::SCHEMA, &["title", "body"])
     .success_url("/posts")
-    .router("/posts", Arc::new(tera), pool);
+    .permissions_for_model()       // `posts.change`
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 **DeleteView** — `GET /posts/{pk}/delete` renderiza una página de confirmación
@@ -279,18 +307,19 @@ use rustango::template_views::DeleteView;
 
 DeleteView::for_model(Post::SCHEMA)
     .success_url("/posts")
-    .router("/posts", Arc::new(tera), pool);
+    .permissions_for_model()       // `posts.delete`
+    .tenant_router("/posts", Arc::new(tera));
 ```
 
 Monta las cinco en el mismo prefijo y tienes un CRUD HTML completo:
 
 ```rust
 let app = axum::Router::new()
-    .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).success_url("/posts").router("/posts", tera.clone(), pool.clone()))
-    .merge(DeleteView::for_model(Post::SCHEMA).success_url("/posts").router("/posts", tera, pool));
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().tenant_router("/posts", tera.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().tenant_router("/posts", tera.clone()))
+    .merge(CreateView::for_model(Post::SCHEMA, &["title", "body", "author_id"]).permissions_for_model().success_url("/posts").tenant_router("/posts", tera.clone()))
+    .merge(UpdateView::for_model(Post::SCHEMA, &["title", "body"]).permissions_for_model().success_url("/posts").tenant_router("/posts", tera.clone()))
+    .merge(DeleteView::for_model(Post::SCHEMA).permissions_for_model().success_url("/posts").tenant_router("/posts", tera));
 ```
 
 ---
@@ -388,10 +417,10 @@ use rustango::template_views::{ListView, DetailView};
 
 let app = axum::Router::new()
     // JSON for API clients:
-    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).router("/api/posts", pool.clone()))
+    .merge(ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"]).read_only().router("/api/posts", pool.clone()))
     // HTML pages for browsers:
-    .merge(ListView::for_model(Post::SCHEMA).router("/posts", tera.clone(), pool.clone()))
-    .merge(DetailView::for_model(Post::SCHEMA).router("/posts", tera, pool));
+    .merge(ListView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera.clone(), pool.clone()))
+    .merge(DetailView::for_model(Post::SCHEMA).allow_anonymous().router("/posts", tera, pool));
 ```
 
 Ahora `GET /api/posts` devuelve el sobre JSON paginado y `GET /posts`

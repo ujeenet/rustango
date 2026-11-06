@@ -167,6 +167,7 @@ Eine Facetten-Karte zeigt bis zu 15 Werte; der Rest klappt in einen Link "+N mor
 Richtung umzukehren (`?sort=col&order=asc|desc`). Der Standard kommt aus `ordering`.
 
 **Paginierung.** `list_per_page` legt die Seitengröße fest; navigiere mit `?page=N`.
+Eine Seite hinter Zeile 100 000 (Liste und Audit-Log) antwortet mit 400; grenze mit Suche oder Filtern ein.
 Registriere sehr große Tabellen mit `Builder::skip_count_for([...])`, um das
 `SELECT COUNT(*)` zu überspringen (der Pager zeigt dann "Page N" ohne Gesamtsumme); ein
 `?count=skip` pro Anfrage bewirkt dasselbe ad hoc.

@@ -178,7 +178,7 @@ Das ergänzt den `cargo rustango ...`-Unterbefehl global. Bestätige, dass er vo
 cargo rustango --help
 ```
 
-Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.64.0`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
+Die Version des Scaffolders ist die, die dein Projekt pinnt — installierst du den neuesten, bekommst du das neueste rustango. Um ein Projekt auf einem älteren Release zu generieren, installiere stattdessen jenen Generator (`cargo install cargo-rustango --version 0.65.0`) — siehe [Scaffolding](scaffolding.md#die-version-des-generators-ist-die-die-dein-projekt-bekommt).
 
 ---
 
@@ -600,13 +600,14 @@ use crate::blog::models::Post;
     search_fields = "title, body",
     ordering      = "-published_at",
     page_size     = 20,
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```
 
 Registriere das neue Modul, indem du `pub mod post_view_set;` zu `src/lib.rs` hinzufügst (`make:viewset` gibt dir diese Zeile aus).
 
-Die generierte Datei beginnt mit `read_only`. Lässt du es weg, wie oben, bedient das ViewSet auch Create, Update und Delete. Offene Schreibaktionen loggen beim Einhängen des Routers eine Warnung. Setze deine eigene Auth-Schicht davor und füge `allow_anonymous` hinzu, um zu sagen, dass das gewollt ist; `permissions(...)`-Codenames brauchen die `tenancy`-Feature und verweigern ohne sie das Einhängen.
+Die generierte Datei beginnt mit `read_only`. Lässt du es weg, wie oben, bedient das ViewSet auch Create, Update und Delete. Offene Schreibaktionen verweigern das Einhängen des Routers. Setze deine eigene Auth-Schicht davor und füge `allow_anonymous` hinzu, wie oben, um zu sagen, dass das gewollt ist; `permissions(...)`-Codenames brauchen die `tenancy`-Feature und verweigern ohne sie das Einhängen.
 
 ### 12b. Die Routen einhängen
 
@@ -692,6 +693,7 @@ Verdrahte den Serializer mit dem ViewSet über das `serializer`-Attribut — Lis
     fields = "id, title, body, author_id, published_at",
     serializer = crate::post_serializer::PostSerializer,
     ordering = "-published_at",
+    allow_anonymous,
 )]
 pub struct PostViewSet;
 ```

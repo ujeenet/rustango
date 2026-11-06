@@ -40,6 +40,7 @@ async fn router(throttle: ViewSetThrottle) -> axum::Router {
     .await
     .expect("create");
     ViewSet::for_model(Post::SCHEMA, &["id", "title"])
+        .allow_anonymous()
         .throttle(throttle)
         .router("/posts", Pool::Sqlite(sq))
 }

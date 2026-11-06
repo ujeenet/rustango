@@ -484,6 +484,7 @@ async fn viewset_writes_clear_the_host_cache(pool: &Pool) {
     assert_eq!(resolve(pool, &host).await.as_deref(), Some(slug.as_str()));
     use rustango::core::Model as _;
     let app = rustango::viewset::ViewSet::for_model(OrgHost::SCHEMA, &["id", "hostname"])
+        .allow_anonymous()
         .router("/hosts", pool.clone());
     let uri = format!("/hosts/{}", row.id.get().unwrap());
     let req = Request::builder()
@@ -506,7 +507,6 @@ const ORG_FIELDS: &[&str] = &[
     "display_name",
     "storage_mode",
     "backend_kind",
-    "database_url",
     "host_pattern",
     "path_prefix",
     "port",
@@ -524,9 +524,11 @@ async fn api(
     use rustango::core::Model as _;
     use rustango::viewset::ViewSet;
     let app = ViewSet::for_model(Org::SCHEMA, ORG_FIELDS)
+        .allow_anonymous()
         .router("/orgs", pool.clone())
         .merge(
             ViewSet::for_model(OrgHost::SCHEMA, &["id", "org_id", "hostname", "enabled"])
+                .allow_anonymous()
                 .router("/hosts", pool.clone()),
         );
     let resp = app
@@ -558,7 +560,6 @@ fn org_json(slug: &str, host: &str) -> serde_json::Value {
         "display_name": slug,
         "storage_mode": "database",
         "backend_kind": "sqlite",
-        "database_url": "sqlite::memory:",
         "host_pattern": host,
         "active": true,
         "created_at": "2026-01-01T00:00:00Z",

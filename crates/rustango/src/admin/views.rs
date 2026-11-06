@@ -247,6 +247,10 @@ pub(crate) async fn index(state: AppState) -> Html<String> {
 /// Default page size when the model's `admin.list_per_page == 0`.
 const DEFAULT_PAGE_SIZE: i64 = 50;
 
+/// Deepest row the admin list may skip to: staff page deeper than a public
+/// list, but an unbounded `OFFSET` is still a full scan per request.
+pub(crate) const ADMIN_MAX_OFFSET: usize = 10 * crate::list_params::DEFAULT_MAX_OFFSET;
+
 /// Reserved query parameters; everything else is treated as a per-field filter.
 const RESERVED_PARAMS: &[&str] = &[
     "page",
@@ -363,7 +367,11 @@ pub(crate) async fn table_view(
         admin_cfg.list_per_page as i64
     };
     let page = crate::list_params::parse_page(&params);
-    let offset = crate::list_params::page_offset(page, page_size);
+    let offset = crate::list_params::check_offset(
+        crate::list_params::page_offset(page, page_size),
+        ADMIN_MAX_OFFSET,
+    )
+    .map_err(|e| AdminError::BadRequest(e.to_string()))?;
     let q = params
         .get("q")
         .map(|s| nul_free(s))

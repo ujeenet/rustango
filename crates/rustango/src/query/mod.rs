@@ -54,6 +54,9 @@ pub struct QuerySet<T: Model> {
     /// from `.order_by_expr(...)`. Lowered in registration order, so
     /// chain order survives mixed builder calls.
     order_by: Vec<PendingOrderItem>,
+    /// Set by [`Self::reverse`]: flip `order_by` at compile time, so the
+    /// flip sees the final `distinct_on` whatever the call order.
+    reversed: bool,
     /// Row-lock mode for `SELECT … FOR UPDATE`. `None` emits no lock
     /// clause.
     lock_mode: Option<crate::core::LockMode>,
@@ -201,6 +204,7 @@ impl<T: Model> Clone for QuerySet<T> {
             ad_hoc_joins: self.ad_hoc_joins.clone(),
             subquery_joins: self.subquery_joins.clone(),
             order_by: self.order_by.clone(),
+            reversed: self.reversed,
             lock_mode: self.lock_mode.clone(),
             compound: self.compound.clone(),
             head_order_by: self.head_order_by.clone(),
@@ -226,6 +230,7 @@ impl<T: Model> QuerySet<T> {
             ad_hoc_joins: Vec::new(),
             subquery_joins: Vec::new(),
             order_by: Vec::new(),
+            reversed: false,
             lock_mode: None,
             compound: Vec::new(),
             head_order_by: Vec::new(),
@@ -537,6 +542,7 @@ impl<T: Model> QuerySet<T> {
         // this point applies to the combined result. Later set-op calls
         // leave the frozen head alone.
         if self.compound.is_empty() {
+            self.apply_reverse();
             self.head_order_by = std::mem::take(&mut self.order_by);
             self.head_limit = self.limit.take();
             self.head_offset = self.offset.take();
@@ -593,6 +599,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn reorder(mut self, items: &[(&str, bool)]) -> Self {
         self.order_by.clear();
+        self.reversed = false;
         for (field, desc) in items {
             self.order_by.push(PendingOrderItem::Field {
                 name: (*field).to_owned(),
@@ -694,7 +701,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub(crate) fn ordered_or_by_pk(self) -> Self {
         match T::SCHEMA.primary_key() {
-            Some(pk) if self.order_by.is_empty() => self.order_by(&[(pk.name, false)]),
+            Some(pk) if self.order_by.is_empty() => self.replace_order_by(&[(pk.name, false)]),
             _ => self,
         }
     }
@@ -706,6 +713,7 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn unordered(mut self) -> Self {
         self.order_by.clear();
+        self.reversed = false;
         self
     }
 
@@ -920,13 +928,15 @@ impl<T: Model> QuerySet<T> {
     #[must_use]
     pub fn replace_order_by(mut self, items: &[(&str, bool)]) -> Self {
         self.order_by.clear();
+        self.reversed = false;
         self.order_by(items)
     }
 
-    /// Flips the direction of every pending `ORDER BY` entry.
-    /// `Random` has no direction, so it stays as it is.
-    ///
-    /// No-op when no ordering is set.
+    /// Flips the `ORDER BY` the queryset ends up with, as
+    /// [`Self::flip_order_by`] (the flip `last` uses), at compile time: call
+    /// order against `order_by` / `distinct_on` does not matter. Twice
+    /// cancels; `reorder`, `unordered` and `replace_order_by` reset it.
+    /// No-op when nothing orders the rows.
     ///
     /// ```ignore
     /// // newest first
@@ -937,15 +947,15 @@ impl<T: Model> QuerySet<T> {
     /// ```
     #[must_use]
     pub fn reverse(mut self) -> Self {
-        for item in &mut self.order_by {
-            match item {
-                PendingOrderItem::Field { desc, .. } | PendingOrderItem::Expr { desc, .. } => {
-                    *desc = !*desc
-                }
-                PendingOrderItem::Random => {}
-            }
-        }
+        self.reversed = !self.reversed;
         self
+    }
+
+    /// Apply a pending [`Self::reverse`] to `order_by`, once.
+    fn apply_reverse(&mut self) {
+        if std::mem::take(&mut self.reversed) {
+            *self = std::mem::take(self).flip_order_by();
+        }
     }
 
     /// Flip every ordering direction in place. `last` uses it to take
@@ -2002,6 +2012,7 @@ impl<T: Model> QuerySet<T> {
         // any opt-outs, before the resolver sees it. After this the
         // resolver cannot tell a scope filter from a user filter.
         self.apply_global_scopes();
+        self.apply_reverse();
         let model: &'static ModelSchema = T::SCHEMA;
         // Lower relation-spanning lookups (`author__name`) into aliased
         // predicates plus their FK-chain JOINs before resolving the
@@ -2246,6 +2257,7 @@ impl<T: Model> QuerySet<T> {
         // the same filters as a fetch. A `published_only` scope means
         // a wholesale delete still cannot reach unpublished rows.
         self.apply_global_scopes();
+        self.apply_reverse();
         self.refuse_unwritable_shape()?;
         let model: &'static ModelSchema = T::SCHEMA;
         let where_clause = resolve_pending(model, self.pending)?;
@@ -2462,6 +2474,7 @@ impl<T: Model> UpdateBuilder<T> {
         // As on the SELECT and DELETE paths: an `.update().set(...)`
         // must not escape the model's global scopes.
         self.qs.apply_global_scopes();
+        self.qs.apply_reverse();
         self.qs.refuse_unwritable_shape()?;
         let model: &'static ModelSchema = T::SCHEMA;
 

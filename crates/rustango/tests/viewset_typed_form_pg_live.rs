@@ -51,6 +51,7 @@ async fn app() -> Option<axum::Router> {
     rustango::testkit::matrix::fresh_table::<Post>(&pool).await;
     Some(
         rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "tags", "attrs", "blob"])
+            .allow_anonymous()
             .serializer::<PostSerializer>()
             .router("/posts", pool),
     )

@@ -11,7 +11,8 @@
 //!   filters.
 //! * [`parse_ordering`] — splits `?ordering=col,-col2`.
 //! * [`clamp_page_size`] — resolves `?page_size=N`.
-//! * [`parse_page`] / [`page_offset`] — `?page=N` and its overflow-safe offset.
+//! * [`parse_page`] / [`page_offset`] — `?page=N` and its overflow-safe offset;
+//!   [`check_offset`] refuses one past [`DEFAULT_MAX_OFFSET`] or the list's own cap.
 //! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`];
 //!   [`in_values_budget`] caps all lists of a request together.
 //! * [`reject_nul`] — refuses a filter or search value holding `\0`.
@@ -25,6 +26,8 @@
 //! [`clamp_page_size`]: crate::list_params::clamp_page_size
 //! [`parse_page`]: crate::list_params::parse_page
 //! [`page_offset`]: crate::list_params::page_offset
+//! [`check_offset`]: crate::list_params::check_offset
+//! [`DEFAULT_MAX_OFFSET`]: crate::list_params::DEFAULT_MAX_OFFSET
 //! [`split_in_list`]: crate::list_params::split_in_list
 //! [`MAX_IN_VALUES`]: crate::list_params::MAX_IN_VALUES
 //! [`in_values_budget`]: crate::list_params::in_values_budget
@@ -194,6 +197,36 @@ pub fn page_offset(page: i64, page_size: i64) -> i64 {
         .saturating_mul(page_size.max(0))
 }
 
+/// Default deepest row a list may skip to: a deeper `OFFSET` reads every
+/// skipped row, so one short URL costs a near-full scan.
+pub const DEFAULT_MAX_OFFSET: usize = 10_000;
+
+/// An offset past the list's cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct OffsetTooDeep;
+
+impl std::fmt::Display for OffsetTooDeep {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("this page is too deep; narrow the list with filters or use cursor pagination")
+    }
+}
+
+impl std::error::Error for OffsetTooDeep {}
+
+/// `offset`, unless it is past `max`; `max = 0` lifts the cap.
+///
+/// # Errors
+/// [`OffsetTooDeep`] when `offset > max`.
+pub fn check_offset(offset: i64, max: usize) -> Result<i64, OffsetTooDeep> {
+    let cap = i64::try_from(max).unwrap_or(i64::MAX);
+    if max > 0 && offset > cap {
+        Err(OffsetTooDeep)
+    } else {
+        Ok(offset)
+    }
+}
+
 /// A filter or search value holding a NUL byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -280,6 +313,13 @@ mod tests {
         assert_eq!(page_offset(3, 20), 40);
         assert_eq!(page_offset(i64::MAX, 50), i64::MAX);
         assert_eq!(page_offset(i64::MIN, 50), 0);
+    }
+
+    #[test]
+    fn check_offset_refuses_past_the_cap_and_zero_lifts_it() {
+        assert_eq!(check_offset(10, 10), Ok(10));
+        assert_eq!(check_offset(11, 10), Err(OffsetTooDeep));
+        assert_eq!(check_offset(i64::MAX, 0), Ok(i64::MAX));
     }
 
     #[test]

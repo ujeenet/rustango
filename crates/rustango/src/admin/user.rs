@@ -20,6 +20,7 @@ use crate::Model;
 #[derive(Model, Clone)]
 #[rustango(
     table = "rustango_admin_users",
+    access = "admin_only",
     app = "admin",
     display = "username",
     admin(

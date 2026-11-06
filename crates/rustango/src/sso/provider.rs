@@ -29,6 +29,7 @@ use crate::sql::Auto;
 #[derive(crate::Model, Debug, Clone)]
 #[rustango(
     table = "rustango_sso_providers",
+    access = "admin_only",
     admin(
         list_display = "slug, label, kind, enabled, sort_order",
         ordering = "sort_order",

@@ -73,7 +73,6 @@ pub use vector::Vector;
 // Always-on: tri-dialect entry points + traits that don't pin on PG.
 #[cfg(feature = "jobs")]
 pub(crate) use executor::in_any_block;
-#[cfg(feature = "jobs-postgres")]
 pub(crate) use executor::in_block;
 pub(crate) use executor::rolled_back;
 #[cfg(feature = "mysql")]
@@ -134,7 +133,8 @@ pub use executor::{bulk_insert_on, insert_on, update_on};
 pub mod __macro_internals {
     pub use super::executor::refuse_audited;
     pub use super::executor::{
-        bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on,
+        bulk_insert_on, bulk_insert_owned_on, delete_on, insert_on, insert_owned_on,
+        insert_returning_on, update_on,
     };
     pub use super::executor::{row_saved, write_tx, WriteTx};
 }

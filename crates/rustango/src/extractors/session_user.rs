@@ -57,33 +57,43 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
     type Rejection = std::convert::Infallible;
 
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(SessionUser(Self::read(parts).await.unwrap_or(None)))
+    }
+}
+
+impl SessionUser {
+    /// The session's user; `Err` when the tenant, its pool or the user row
+    /// could not be read, so an access gate can answer 503, not 401.
+    pub(crate) async fn read(parts: &Parts) -> Result<Option<User>, String> {
         let Some(keys) = session_keys(&parts.extensions) else {
-            return Ok(SessionUser(None));
+            return Ok(None);
         };
 
         // Resolve the tenant: needed for the slug check, and for the
         // pool that holds the user row.
         let org = match request_org(parts, &parts.extensions).await {
             Some(Ok(Some(o))) => o,
-            _ => return Ok(SessionUser(None)),
+            Some(Err(e)) => return Err(e.to_string()),
+            _ => return Ok(None),
         };
 
         let cookie_value = match extract_cookie(parts, tenant_console::COOKIE_NAME) {
             Some(v) => v,
-            None => return Ok(SessionUser(None)),
+            None => return Ok(None),
         };
 
         let Some(tenant) = crate::tenancy::TenantSlug::of(&org) else {
-            return Ok(SessionUser(None));
+            return Ok(None);
         };
         let payload = match tenant_console::decode(keys.session, &tenant, &cookie_value) {
             Ok(p) => p,
-            Err(_) => return Ok(SessionUser(None)),
+            Err(_) => return Ok(None),
         };
 
         let pool = match request_pool(&parts.extensions, &org).await {
             Some(Ok(p)) => p,
-            _ => return Ok(SessionUser(None)),
+            Some(Err(e)) => return Err(e.to_string()),
+            None => return Ok(None),
         };
 
         use crate::core::Column as _;
@@ -92,7 +102,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
             .where_(User::id.eq(payload.uid))
             .fetch(&pool)
             .await
-            .unwrap_or_default();
+            .map_err(|e| e.to_string())?;
 
         let user = users.into_iter().next().filter(|u| u.active);
         // Reject a session minted before the user's last password
@@ -107,7 +117,7 @@ impl<S: Send + Sync> FromRequestParts<S> for SessionUser {
                 u.sessions_revoked_at,
             )
         });
-        Ok(SessionUser(user))
+        Ok(user)
     }
 }
 

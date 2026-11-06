@@ -17,10 +17,10 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustango = "0.64"                                        # Postgres (the default backend)
+//! rustango = "0.65"                                        # Postgres (the default backend)
 //! # or pick another backend — see "Choosing a backend" below:
-//! rustango = { version = "0.64", default-features = false, features = ["sqlite", "batteries"] }
-//! rustango = { version = "0.64", default-features = false, features = ["mysql",  "batteries"] }
+//! rustango = { version = "0.65", default-features = false, features = ["sqlite", "batteries"] }
+//! rustango = { version = "0.65", default-features = false, features = ["mysql",  "batteries"] }
 //! ```
 //!
 //! `default = ["postgres", "batteries"]`. **`batteries`** is everything except
@@ -1023,6 +1023,10 @@ pub mod extractors;
 #[cfg(any(feature = "admin", feature = "tenancy"))]
 pub mod viewset;
 
+/// The access rule every generated model surface mounts with.
+#[cfg(any(feature = "admin", feature = "template_views"))]
+pub(crate) mod access;
+
 /// Shared list-endpoint query-parameter helpers — one place that owns the
 /// reserved-key skip list, `?ordering=` parsing and `?page_size=` clamping,
 /// so `viewset::handle_list` and `template_views::ListView` cannot drift
@@ -1098,6 +1102,9 @@ pub mod manager;
 /// Model-inheritance patterns — how to share fields between models:
 /// abstract bases, multi-table and proxy shapes. See [`inheritance`].
 pub mod inheritance;
+
+/// The wall clock in unix seconds; a broken clock fails expiry checks closed.
+pub mod clock;
 
 /// Composite-primary-key patterns — a multi-column key expressed as an
 /// `Auto<i64>` surrogate plus `unique_together`. See [`composite_pk`].

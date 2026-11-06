@@ -70,6 +70,7 @@ async fn sqlite_pool() -> Pool {
 /// ViewSet with the serializer wired in.
 async fn serializer_router() -> axum::Router {
     rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
+        .allow_anonymous()
         .page_size(50)
         .serializer::<PostSerializer>()
         .router("/posts", sqlite_pool().await)
@@ -179,6 +180,7 @@ async fn without_serializer_default_projection_is_unchanged() {
     // field-level projection still includes every column (id + body),
     // confirming the serializer path is what reshapes the output.
     let app = rustango::viewset::ViewSet::for_model(Post::SCHEMA, &["id", "title", "body"])
+        .allow_anonymous()
         .page_size(50)
         .router("/posts", sqlite_pool().await);
 

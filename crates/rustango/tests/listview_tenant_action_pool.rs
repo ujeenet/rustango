@@ -38,6 +38,7 @@ fn tenant_action_pool_builder_compiles_on_non_pg_sqlite_build() {
     // The whole point of the fix — this code compiles on a
     // `--features sqlite,tenancy,template_views` build (no PG).
     let _lv = ListView::for_model(<Post as rustango::core::Model>::SCHEMA)
+        .allow_anonymous()
         .bulk_actions(true)
         .tenant_action_pool("mark_published", "Mark Published", make_handler());
 }
@@ -46,6 +47,7 @@ fn tenant_action_pool_builder_compiles_on_non_pg_sqlite_build() {
 fn tenant_action_pool_chains_with_other_builders() {
     // Composes with the other ListView builders.
     let _lv = ListView::for_model(<Post as rustango::core::Model>::SCHEMA)
+        .allow_anonymous()
         .bulk_actions(true)
         .tenant_action_pool("publish", "Publish", make_handler())
         .tenant_action_pool("unpublish", "Unpublish", make_handler());

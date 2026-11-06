@@ -46,7 +46,7 @@
 //!
 //! [`verify`]: crate::signed_url::verify
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
@@ -74,14 +74,8 @@ const EXPIRES_PARAM: &str = "expires";
 /// query string.
 #[must_use]
 pub fn sign(url: &str, secret: &[u8], ttl: Option<Duration>) -> String {
-    // The opposite fallback to `current_unix_secs`, on purpose: both
-    // fail closed. A broken clock here stamps the URL in 1970, so it
-    // is already expired. `u64::MAX` would never expire.
-    let expires = ttl.map(|d| {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |t| t.as_secs().saturating_add(d.as_secs()))
-    });
+    // A broken clock stamps 1970, so the URL is born expired.
+    let expires = ttl.map(|d| crate::clock::unix_now_or(0).saturating_add(d.as_secs()));
     sign_at(url, secret, expires)
 }
 
@@ -106,7 +100,8 @@ pub fn sign_at(url: &str, secret: &[u8], expires_at: Option<u64>) -> String {
 /// # Errors
 /// [`SignedUrlError`] variants describe the specific failure mode.
 pub fn verify(url: &str, secret: &[u8]) -> Result<(), SignedUrlError> {
-    verify_at(url, secret, current_unix_secs())
+    // A broken clock reads as the far future: every URL has expired.
+    verify_at(url, secret, crate::clock::unix_now_or(u64::MAX))
 }
 
 /// Like [`verify`], but with the current time given in unix seconds.
@@ -150,23 +145,6 @@ pub fn verify_at(url: &str, secret: &[u8], now_secs: u64) -> Result<(), SignedUr
 }
 
 // ------------------------------------------------------------------ internals
-
-/// Wall clock in unix seconds, failing **closed**.
-///
-/// `duration_since` fails when the clock is before 1970: a dead RTC
-/// battery, a bad NTP step, a container that starts at epoch 0. This
-/// answers `u64::MAX` so every URL counts as expired. Answering `0`
-/// would make `now > exp` false for every stamp, so a broken clock
-/// would accept every expired link.
-fn current_unix_secs() -> u64 {
-    clock_secs(SystemTime::now().duration_since(UNIX_EPOCH))
-}
-
-/// The fallback value, split out so a test can reach it. The clock
-/// cannot be broken on demand.
-fn clock_secs<E>(elapsed: Result<Duration, E>) -> u64 {
-    elapsed.map_or(u64::MAX, |t| t.as_secs())
-}
 
 /// `url` without its `#fragment`, and the fragment with its `#`. The browser
 /// never sends the fragment, so it is not signed.
@@ -337,18 +315,16 @@ mod tests {
 
     #[test]
     fn a_clock_before_1970_expires_everything_instead_of_nothing() {
-        // `current_unix_secs` answers `u64::MAX` when the clock is
-        // unreadable, so `now > exp` holds for every stamp and all
-        // links expire. With `0` the opposite happens: one dead RTC
-        // battery and every expired link verifies again.
-        //
-        // First, the fallback value itself:
-        assert_eq!(
-            clock_secs::<()>(Err(())),
-            u64::MAX,
-            "an unreadable clock must read as `expired`, not as 1970",
+        let live = sign(
+            "https://example.com/f.pdf",
+            SECRET,
+            Some(Duration::from_secs(60)),
         );
-        assert_eq!(clock_secs::<()>(Ok(Duration::from_secs(42))), 42);
+        assert_eq!(verify(&live, SECRET), Ok(()));
+        assert_eq!(
+            crate::clock::with_broken_clock(|| verify(&live, SECRET)),
+            Err(SignedUrlError::Expired),
+        );
 
         // …then what it does to a real verification.
         let url = sign_at("https://example.com/f.pdf", SECRET, Some(2_000_000_000));

@@ -33,7 +33,7 @@
 //! assert_eq!(verified.get::<String>("role").as_deref(), Some("admin"));
 //! ```
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -77,7 +77,8 @@ impl Claims {
     pub fn new(subject: impl Into<String>) -> Self {
         let mut c = Self::default();
         c.inner.insert("sub".into(), Value::String(subject.into()));
-        c.inner.insert("iat".into(), Value::from(now_secs()));
+        c.inner
+            .insert("iat".into(), Value::from(crate::clock::unix_now_or(0)));
         c
     }
 
@@ -126,7 +127,8 @@ impl Claims {
     #[must_use]
     pub fn ttl(self, ttl: Duration) -> Self {
         let mut c = self;
-        let now = now_secs();
+        // A broken clock mints a token that is already expired.
+        let now = crate::clock::unix_now_or(0);
         c.inner.insert("iat".into(), Value::from(now));
         c.inner
             .insert("exp".into(), Value::from(now + ttl.as_secs()));
@@ -219,7 +221,7 @@ pub fn encode(claims: &Claims, secret: &[u8]) -> Result<String, JwtError> {
 /// # Errors
 /// See [`JwtError`]. A `secret` under 32 bytes is refused as in [`encode`].
 pub fn decode(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
-    decode_at(token, secret, now_secs())
+    decode_at(token, secret, crate::clock::unix_now_or(u64::MAX))
 }
 
 /// `decode` but with an explicit "current" time. Useful for tests +
@@ -241,7 +243,7 @@ pub fn decode_at(token: &str, secret: &[u8], now: u64) -> Result<Claims, JwtErro
 /// # Errors
 /// See [`JwtError`].
 pub fn decode_allowing_no_exp(token: &str, secret: &[u8]) -> Result<Claims, JwtError> {
-    decode_inner(token, secret, now_secs(), false)
+    decode_inner(token, secret, crate::clock::unix_now_or(u64::MAX), false)
 }
 
 /// [`decode_allowing_no_exp`] with an explicit "current" time.
@@ -377,15 +379,22 @@ fn check_key_len(secret: &[u8]) -> Result<(), JwtError> {
 // HMAC-SHA256 lives in `crate::crypto`, shared by every caller.
 use crate::crypto::hmac_sha256;
 
-fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn now_secs() -> u64 {
+        crate::clock::unix_now().unwrap()
+    }
+
+    /// A clock that cannot be read rejects every expiring token.
+    #[test]
+    fn a_broken_clock_rejects_an_unexpired_token() {
+        let token = encode(&Claims::new("x").ttl(Duration::from_secs(3600)), SECRET).unwrap();
+        assert!(decode(&token, SECRET).is_ok());
+        let refused = crate::clock::with_broken_clock(|| decode(&token, SECRET));
+        assert!(matches!(refused, Err(JwtError::Expired(_))), "{refused:?}");
+    }
 
     const SECRET: &[u8] = b"test-shared-secret-32-byte-string";
 

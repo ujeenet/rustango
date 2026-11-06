@@ -393,6 +393,7 @@ jobs:
             --test every_serve_shuts_down_gracefully \
             --test every_serving_path_is_observable \
             --test every_migrate_path_normalises_datetimes \
+            --test every_router_builder_declares_access \
             --test every_structural_guard_runs_in_ci \
             --test live_profile_stays_serial \
             --test live_suites_fail_loudly \
@@ -1632,6 +1633,7 @@ jobs:
           binary(=admin_audit_scope_tri) |
           binary(=admin_row_scope_tri) |
           binary(=admin_list_state_tri) |
+          binary(=used_jti_store_tri) |
           binary(=admin_write_errors_tri) |
           binary(=admin_write_targets_tri) |
           binary(=admin_edit_tri) |
@@ -1648,6 +1650,7 @@ jobs:
           binary(=pool_conn_tri) |
           binary(=orm_dialect_tri) |
           binary(=atomic_savepoints_tri) |
+          binary(=get_or_create_atomic_tri) |
           binary(=regex_tri) |
           binary(=testkit_matrix_forms_tri) |
           binary(=viewset_natural_pk_tri) |

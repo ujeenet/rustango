@@ -1446,48 +1446,98 @@ impl BulkInsertQuery {
 
     /// For a `DoUpdate`, this batch keeping only the last row of each repeated
     /// conflict key: PG refuses to update one row twice in a statement. NULL keys never conflict.
+    /// An owned batch drops the rows in place; a borrowed one is copied only if any repeat.
     #[must_use]
-    pub(crate) fn last_per_conflict_key(&self) -> std::borrow::Cow<'_, Self> {
-        use std::borrow::Cow;
-        let Some(ConflictClause::DoUpdate { target, .. }) = &self.on_conflict else {
-            return Cow::Borrowed(self);
+    pub(crate) fn last_per_conflict_key(query: Cow<'_, Self>) -> Cow<'_, Self> {
+        let Some(keep) = query.rows_to_keep() else {
+            return query;
         };
-        let Some(idx) = target
+        match query {
+            Cow::Borrowed(q) => Cow::Owned(Self {
+                rows: q
+                    .rows
+                    .iter()
+                    .zip(keep)
+                    .filter_map(|(row, k)| k.then(|| row.clone()))
+                    .collect(),
+                ..q.header()
+            }),
+            Cow::Owned(mut q) => {
+                let mut keep = keep.into_iter();
+                q.rows.retain(|_| keep.next().unwrap_or(true));
+                Cow::Owned(q)
+            }
+        }
+    }
+
+    /// Which rows [`Self::last_per_conflict_key`] keeps; `None` keeps all.
+    fn rows_to_keep(&self) -> Option<Vec<bool>> {
+        let Some(ConflictClause::DoUpdate { target, .. }) = &self.on_conflict else {
+            return None;
+        };
+        let idx = target
             .iter()
             .map(|t| self.columns.iter().position(|c| c == t))
-            .collect::<Option<Vec<usize>>>()
-        else {
-            return Cow::Borrowed(self);
-        };
+            .collect::<Option<Vec<usize>>>()?;
         let mut seen = std::collections::HashSet::new();
         let mut keep = vec![true; self.rows.len()];
         for (i, row) in self.rows.iter().enumerate().rev() {
-            let key: Option<Vec<String>> = idx
+            let keyed = idx
                 .iter()
-                .map(|&k| match row.get(k) {
-                    None | Some(SqlValue::Null) => None,
-                    Some(v) => Some(format!("{v:?}")),
-                })
-                .collect();
-            if key.is_some_and(|key| !seen.insert(key)) {
+                .all(|&k| !matches!(row.get(k), None | Some(SqlValue::Null)));
+            if keyed && !seen.insert(ConflictKey { row, idx: &idx }) {
                 keep[i] = false;
             }
         }
-        if keep.iter().all(|k| *k) {
-            return Cow::Borrowed(self);
+        keep.contains(&false).then_some(keep)
+    }
+
+    /// This query with no rows.
+    pub(crate) fn header(&self) -> Self {
+        Self {
+            model: self.model,
+            columns: self.columns.clone(),
+            rows: Vec::new(),
+            returning: self.returning.clone(),
+            on_conflict: self.on_conflict.clone(),
+            generated: self.generated.clone(),
         }
-        let rows = self
-            .rows
-            .iter()
-            .zip(keep)
-            .filter_map(|(row, k)| k.then(|| row.clone()))
-            .collect();
-        Cow::Owned(Self {
-            rows,
-            ..self.clone()
-        })
     }
 }
+
+/// A row's conflict-key cells, equal when their `Debug` forms are. Hashed
+/// by streaming that form, so a row costs no `String` unless it repeats.
+struct ConflictKey<'a> {
+    row: &'a [SqlValue],
+    idx: &'a [usize],
+}
+
+impl std::hash::Hash for ConflictKey<'_> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        struct Feed<'h, H>(&'h mut H);
+        impl<H: std::hash::Hasher> std::fmt::Write for Feed<'_, H> {
+            fn write_str(&mut self, s: &str) -> std::fmt::Result {
+                self.0.write(s.as_bytes());
+                Ok(())
+            }
+        }
+        for &k in self.idx {
+            let _ = std::fmt::Write::write_fmt(&mut Feed(state), format_args!("{:?}", self.row[k]));
+            // Never in UTF-8: ends the cell, so cells cannot run together.
+            state.write_u8(0xff);
+        }
+    }
+}
+
+impl PartialEq for ConflictKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.idx
+            .iter()
+            .all(|&k| format!("{:?}", self.row[k]) == format!("{:?}", other.row[k]))
+    }
+}
+
+impl Eq for ConflictKey<'_> {}
 
 /// One `column = value` pair in an `UPDATE … SET …`.
 ///
