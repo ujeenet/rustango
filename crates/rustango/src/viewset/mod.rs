@@ -6386,7 +6386,7 @@ mod credential_field_tests {
     /// Listing users works; naming the hash in any list refuses to mount.
     #[tokio::test]
     async fn a_viewset_naming_a_credential_refuses_to_mount() {
-        let fields = &["id", "username", "email"];
+        let fields = &["id", "username", "is_superuser"];
         assert_eq!(mount(ViewSet::for_model(User::SCHEMA, fields)).await, "");
         for vs in [
             ViewSet::for_model(User::SCHEMA, &["id", "password_hash"]),

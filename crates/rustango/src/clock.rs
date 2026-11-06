@@ -1,8 +1,9 @@
 //! The wall clock in unix seconds, and the one answer for a broken one.
 //!
-//! A clock that reads before 1970, or before [`CLOCK_FLOOR`] (an unset RTC
-//! boots near the epoch), is an error. Verifiers treat it as "expired";
-//! signers pick their fallback explicitly with [`unix_now_or`].
+//! A clock that reads before 1970, or before [`CLOCK_FLOOR`](crate::clock::CLOCK_FLOOR)
+//! (an unset RTC boots near the epoch), is an error. Verifiers treat it as
+//! "expired"; signers pick their fallback explicitly with
+//! [`unix_now_or`](crate::clock::unix_now_or).
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
