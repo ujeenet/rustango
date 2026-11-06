@@ -1320,9 +1320,10 @@ fn tenant_bootstrap() -> Vec<Bootstrap> {
 
 /// `migrate --squash` (#84a) — dev-iteration escape hatch.
 ///
-/// Deletes every pending (un-applied) migration JSON in `dir`, then
+/// Sets aside every pending (un-applied) migration JSON in `dir`, then
 /// re-runs `makemigrations` so the diff regenerates as a single
-/// fresh file against the current model registry. Recovers the
+/// fresh file against the current model registry. The pending files are
+/// deleted once that succeeds and put back on any failure. Recovers the
 /// "scaffolder shape → real shape" iteration cycle that hits the
 /// `AddColumn NOT NULL no default` validator rejection without
 /// touching the database.
@@ -1334,6 +1335,7 @@ fn tenant_bootstrap() -> Vec<Bootstrap> {
 /// pending migrations (nothing to do) or only one (`forget-pending`
 /// is the right verb for the single-file case).
 async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<(), MigrateError> {
+    SetAside::refuse_leftovers(dir)?;
     runner::ensure_ledger_pool(pool).await?;
     let all = file::list_dir(dir)?;
     let applied = runner::applied_set_pool(pool).await?;
@@ -1406,26 +1408,217 @@ async fn migrate_squash<W: Write>(pool: &Pool, dir: &Path, w: &mut W) -> Result<
     // declare it `replaces` them (see below).
     let removed: Vec<(String, super::MigrationScope)> =
         pending.iter().map(|m| (m.name.clone(), m.scope)).collect();
-    for m in &pending {
-        let path = file_path(dir, &m.name);
-        std::fs::remove_file(&path).map_err(|e| {
-            MigrateError::Validation(format!("migrate --squash: rm {}: {e}", path.display()))
-        })?;
-        writeln!(w, "  removed {}", path.display())?;
+    // Set aside, not deleted: a failed regeneration (or a panic) puts them back.
+    let aside = SetAside::take(dir, pending.iter().map(|m| m.name.as_str()))?;
+    let regenerated = (|| {
+        for (path, _) in &aside.moved {
+            writeln!(w, "  removed {}", path.display())?;
+        }
+        writeln!(w, "regenerating diff against current model registry...")?;
+        // Empty args means "default makemigrations behavior" — splits
+        // registry vs tenant in tenancy projects, single file otherwise.
+        // Pass through to the existing entry point so any future flags
+        // gain consistent behavior automatically.
+        // The pending files already hold any drop + add; refusing here would lose them.
+        makemigrations(dir, &["--drop-and-add".to_owned()], w)?;
+        stamp_replaces(dir, &aside.held_before(), &removed, w)
+    })();
+    match regenerated {
+        Ok(()) => {
+            for e in aside.discard() {
+                writeln!(w, "  {e}")?;
+            }
+            Ok(())
+        }
+        Err(e) => match aside.restore() {
+            Ok(()) => Err(e),
+            Err(r) => Err(MigrateError::Validation(format!(
+                "{e}; restoring the pending files failed too: {r}"
+            ))),
+        },
+    }
+}
+
+/// Suffix of a pending file `migrate --squash` has set aside.
+const SQUASH_BACKUP: &str = "json.squash-bak";
+
+/// The pending files `migrate --squash` renamed to `*.json.squash-bak`, and
+/// the folders it may write. Dropped unspent (a panic), it restores them.
+struct SetAside {
+    /// `(file, backup)` pairs, in the order they were moved.
+    moved: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+    /// Each folder the run writes, with the `*.json` names it held before
+    /// (pending ones excluded); `None` when the folder did not exist.
+    watched: Vec<(
+        std::path::PathBuf,
+        Option<std::collections::HashSet<String>>,
+    )>,
+    spent: bool,
+}
+
+impl SetAside {
+    /// Refuse a `dir` holding backups a crashed squash left behind.
+    fn refuse_leftovers(dir: &Path) -> Result<(), MigrateError> {
+        let mut left: Vec<String> = match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                .filter(|n| n.ends_with(&format!(".{SQUASH_BACKUP}")))
+                .collect(),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        if left.is_empty() {
+            return Ok(());
+        }
+        left.sort();
+        Err(MigrateError::Validation(format!(
+            "migrate --squash: refused — {} holds pending files an interrupted squash set \
+             aside: {}. Rename each back to `.json` (drop `.squash-bak`) to keep it, or \
+             delete it, then run again.",
+            dir.display(),
+            left.join(", "),
+        )))
     }
 
-    writeln!(w, "regenerating diff against current model registry...")?;
-    // Which files existed before regeneration, so we can tell which are new.
-    let before: std::collections::HashSet<String> =
-        file::list_dir(dir)?.into_iter().map(|m| m.name).collect();
-    // Empty args means "default makemigrations behavior" — splits
-    // registry vs tenant in tenancy projects, single file otherwise.
-    // Pass through to the existing entry point so any future flags
-    // gain consistent behavior automatically.
-    // The pending files already hold any drop + add; refusing here would lose them.
-    makemigrations(dir, &["--drop-and-add".to_owned()], w)?;
+    /// Note the folders' files, then rename each of `names` aside; a
+    /// failure puts back the ones moved.
+    fn take<'a>(dir: &Path, names: impl Iterator<Item = &'a str>) -> Result<Self, MigrateError> {
+        let names: Vec<&str> = names.collect();
+        // Tenancy projects also write the framework chain next to `dir`;
+        // `dir` comes first (see `held_before`).
+        let system = dir
+            .parent()
+            .unwrap_or(dir)
+            .join("system")
+            .join("migrations");
+        let mut watched = Vec::new();
+        for folder in [dir.to_path_buf(), system] {
+            let held = if folder.exists() {
+                let mut held = json_names(&folder)?;
+                if folder == dir {
+                    for n in &names {
+                        held.remove(*n);
+                    }
+                }
+                Some(held)
+            } else {
+                None
+            };
+            watched.push((folder, held));
+        }
+        let mut aside = Self {
+            moved: Vec::new(),
+            watched,
+            spent: false,
+        };
+        for (i, name) in names.iter().enumerate() {
+            let path = file_path(dir, name);
+            let backup = path.with_extension(SQUASH_BACKUP);
+            if let Err(e) = std::fs::rename(&path, &backup) {
+                // Still in place: not the run's to delete when `aside` drops.
+                if let Some(held) = aside.watched[0].1.as_mut() {
+                    held.extend(names[i..].iter().map(|n| (*n).to_owned()));
+                }
+                return Err(MigrateError::Validation(format!(
+                    "migrate --squash: move {}: {e}",
+                    path.display()
+                )));
+            }
+            aside.moved.push((path, backup));
+        }
+        Ok(aside)
+    }
 
-    stamp_replaces(dir, &before, &removed, w)
+    /// The `*.json` names the migrations folder held before the run,
+    /// pending ones excluded.
+    fn held_before(&self) -> std::collections::HashSet<String> {
+        self.watched[0].1.clone().unwrap_or_default()
+    }
+
+    /// Success: delete the backups. Returns what could not be deleted.
+    fn discard(mut self) -> Vec<String> {
+        self.spent = true;
+        self.moved
+            .iter()
+            .filter_map(|(_, backup)| {
+                let e = std::fs::remove_file(backup).err()?;
+                Some(format!("could not delete {}: {e}", backup.display()))
+            })
+            .collect()
+    }
+
+    /// Failure: delete what the run wrote, then put the originals back.
+    fn restore(mut self) -> Result<(), MigrateError> {
+        self.spent = true;
+        let errors = self.undo();
+        if errors.is_empty() {
+            return Ok(());
+        }
+        Err(MigrateError::Validation(format!(
+            "migrate --squash: {}",
+            errors.join("; ")
+        )))
+    }
+
+    /// Try every delete and rename, in that order; returns every failure.
+    fn undo(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (folder, held) in &self.watched {
+            let now = match json_names(folder) {
+                Ok(now) => now,
+                Err(MigrateError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    errors.push(format!("list {}: {e}", folder.display()));
+                    continue;
+                }
+            };
+            let new = now
+                .iter()
+                .filter(|n| held.as_ref().is_none_or(|h| !h.contains(*n)));
+            for name in new {
+                let path = file_path(folder, name);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    errors.push(format!("delete {}: {e}", path.display()));
+                }
+            }
+            if held.is_none() {
+                // Ours alone; a folder holding anything else stays.
+                let _ = std::fs::remove_dir(folder);
+            }
+        }
+        for (path, backup) in &self.moved {
+            if let Err(e) = std::fs::rename(backup, path) {
+                errors.push(format!(
+                    "restore {} from {}: {e}",
+                    path.display(),
+                    backup.display()
+                ));
+            }
+        }
+        errors
+    }
+}
+
+impl Drop for SetAside {
+    fn drop(&mut self) {
+        if self.spent {
+            return;
+        }
+        for e in self.undo() {
+            tracing::error!(target: "rustango::migrate", "migrate --squash: {e}");
+        }
+    }
+}
+
+/// The names of the `*.json` migration files in `dir`.
+fn json_names(dir: &Path) -> Result<std::collections::HashSet<String>, MigrateError> {
+    Ok(std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("json"))
+        .filter_map(|p| Some(p.file_stem()?.to_str()?.to_owned()))
+        .collect())
 }
 
 /// The system chain a single-database project applies.
@@ -11086,5 +11279,89 @@ mod db_cmd_tests {
                 assert!(err.contains("needs the `cache` feature"), "{verb}: {err}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod squash_aside_tests {
+    use super::*;
+
+    /// `<root>/migrations` holding `0001_a` (applied) and the pending `0002_b`, `0003_c`.
+    fn project() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("migrations");
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["0001_a", "0002_b", "0003_c"] {
+            std::fs::write(file_path(&dir, n), n).unwrap();
+        }
+        (root, dir)
+    }
+
+    fn names(dir: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    const PENDING: [&str; 2] = ["0002_b", "0003_c"];
+    const ORIGINAL: [&str; 3] = ["0001_a.json", "0002_b.json", "0003_c.json"];
+
+    /// A panic mid-squash puts the pending files back and drops what it wrote.
+    #[test]
+    fn a_panic_restores_the_pending_files() {
+        let (root, dir) = project();
+        let sys = root.path().join("system").join("migrations");
+        let caught = std::panic::catch_unwind(|| {
+            let _aside = SetAside::take(&dir, PENDING.into_iter()).unwrap();
+            std::fs::write(file_path(&dir, "0002_new"), "new").unwrap();
+            std::fs::create_dir_all(&sys).unwrap();
+            std::fs::write(file_path(&sys, "0001_sys"), "sys").unwrap();
+            panic!("mid-squash");
+        });
+        assert!(caught.is_err());
+        assert_eq!(names(&dir), ORIGINAL);
+        assert!(!sys.exists(), "the system folder it created is gone");
+    }
+
+    /// A folder that existed keeps its own files; only the new ones go.
+    #[test]
+    fn restore_removes_only_new_system_files() {
+        let (root, dir) = project();
+        let sys = root.path().join("system").join("migrations");
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::write(file_path(&sys, "0001_sys"), "sys").unwrap();
+        let aside = SetAside::take(&dir, PENDING.into_iter()).unwrap();
+        std::fs::write(file_path(&sys, "0002_sys"), "sys").unwrap();
+        aside.restore().unwrap();
+        assert_eq!(names(&sys), ["0001_sys.json"]);
+        assert_eq!(names(&dir), ORIGINAL);
+    }
+
+    /// One failed rename does not stop the others; every failure is reported.
+    #[test]
+    fn restore_tries_every_file() {
+        let (_root, dir) = project();
+        let aside = SetAside::take(&dir, PENDING.into_iter()).unwrap();
+        std::fs::remove_file(dir.join(format!("0002_b.{SQUASH_BACKUP}"))).unwrap();
+        let err = aside.restore().expect_err("0002_b's backup is gone");
+        assert!(err.to_string().contains("0002_b"), "{err}");
+        assert_eq!(names(&dir), ["0001_a.json", "0003_c.json"]);
+    }
+
+    /// A backup left by an interrupted squash refuses the next one.
+    #[test]
+    fn leftover_backups_refuse_a_squash() {
+        let (_root, dir) = project();
+        SetAside::refuse_leftovers(&dir).expect("no backups");
+        std::fs::rename(
+            file_path(&dir, "0003_c"),
+            dir.join(format!("0003_c.{SQUASH_BACKUP}")),
+        )
+        .unwrap();
+        let err = SetAside::refuse_leftovers(&dir).expect_err("a leftover");
+        assert!(err.to_string().contains("0003_c.json.squash-bak"), "{err}");
     }
 }

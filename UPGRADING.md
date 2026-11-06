@@ -150,6 +150,9 @@ untouched.
 
 ## Unreleased
 
+- M2M `add()` returns the driver error when a unique key other than the `(src, dst)` link refuses the row (it used to return `Ok` with nothing written).
+- `QuerySet::reverse()` now swaps an explicit `NULLS FIRST`/`LAST`, keeps each `distinct_on` group's row (it matches `last()`), and also flips an `order_by` added after it; `reorder`, `unordered` and `replace_order_by` reset it.
+
 ## 0.64.0
 
 - Resource caps, all configurable: `FileCache` keeps 100 000 entries / 1 GiB and drops the oldest; `DatabaseCache` purges expired rows every 256 writes; `/refresh` allows 30 per user per minute (429 past it); a full `InMemoryJtiStore` (1 000 000) refuses refreshes and revocations; ViewSet lists answer 400 past offset 10 000; tenant pool builds past 16 at once or 600 a minute answer 503; `/ready` answers are reused for 1 s; the server holds 10 000 connections (`RUSTANGO_MAX_CONNECTIONS`); a recursive media listing over 100 000 collections is a 400. `0` lifts most caps.

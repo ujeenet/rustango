@@ -4,6 +4,17 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** M2M `add()` treats only the exact `(src, dst)` link as already present; another unique key refusing the row is now an error, as in `set()`.
+- **Breaking:** `QuerySet::reverse()` is the flip `last()` uses, applied at compile time: it also swaps `NULLS FIRST`/`LAST`, flips only the `distinct_on` keys, and flips an `order_by` chained after it.
+
+### Fixed
+
+- `migrate --squash` sets the pending files aside and, on a failure or panic, deletes the files it wrote (`system/migrations` too) and puts them back; it refuses to run while an interrupted squash's `*.json.squash-bak` files remain.
+- A failed table probe in the migrate runner is an error, not "table missing" (which faked a squash over a table never dropped).
+- The translations editor saves a form in one transaction: a failure part-way writes nothing.
+
 ## [0.64.0] — 2026-11-05
 
 ### Added
