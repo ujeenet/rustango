@@ -84,25 +84,14 @@ fn in_bulk_emits_where_in_on_sqlite() {
     );
 }
 
-/// Empty ids → short-circuit returns empty map, no SQL. The runtime
-/// guards against this so `Op::In` with `SqlValue::List(vec![])` (which
-/// the writer rejects with `EmptyInList`) never reaches the compiler.
-/// Verify via a direct construction that an empty IN list IS rejected
-/// at compile — proves the short-circuit is necessary, not vestigial.
+/// Empty ids → short-circuit returns an empty map with no SQL. A raw empty
+/// IN list still compiles, to a predicate that matches nothing.
 #[test]
-fn empty_in_list_rejects_at_compile_so_short_circuit_is_load_bearing() {
-    use rustango::sql::SqlError;
+fn empty_in_list_compiles_to_match_nothing() {
     let q = Book::objects()
         .filter_op("id", Op::In, SqlValue::List(vec![]))
         .compile()
         .unwrap();
-    let err = Postgres.compile_select(&q).unwrap_err();
-    assert!(
-        matches!(err, SqlError::EmptyInList),
-        "raw empty IN list rejected: {err:?}"
-    );
-    // `in_bulk` with empty ids never reaches this codepath — it
-    // returns an empty HashMap before constructing the IN list. See
-    // `in_bulk_with_empty_ids_returns_empty_map_no_sql` in
-    // `tests/in_bulk_live.rs` for the runtime guarantee.
+    let stmt = Postgres.compile_select(&q).unwrap();
+    assert!(stmt.sql.ends_with("WHERE 1 = 0"), "{}", stmt.sql);
 }

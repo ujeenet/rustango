@@ -178,7 +178,7 @@ Esto añade el subcomando `cargo rustango ...` de forma global. Confirma que est
 cargo rustango --help
 ```
 
-La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.63.0`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
+La versión del propio generador de andamiaje es la que fija tu proyecto, así que instalar el más reciente te da el rustango más reciente. Para generar un proyecto sobre una versión anterior, instala ese generador en su lugar (`cargo install cargo-rustango --version 0.64.0`) — véase [Andamiaje](scaffolding.md#la-versión-del-propio-generador-es-la-que-obtiene-tu-proyecto).
 
 ---
 
@@ -256,7 +256,6 @@ El `.env` generado es compatible con Docker de fábrica. Como vamos a ejecutar `
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_APEX_DOMAIN=localhost
 ```
 
 Las credenciales, el puerto y el nombre de la base de datos (`myblog_dev`) ya coinciden con el servicio Postgres del `docker-compose.yml`, así que no necesitas tocarlos.
@@ -502,7 +501,7 @@ Ejecútalo:
 cargo run
 ```
 
-Deberías ver el id de tu nueva publicación y las filas leídas de vuelta. Restaura `src/main.rs` a su forma de servidor andamiada una vez que hayas confirmado que funciona — el siguiente paso parte de ahí.
+Deberías ver el id de tu nueva publicación y las filas leídas de vuelta. Restaura `src/main.rs` a su forma de servidor andamiada una vez que hayas confirmado que funciona — el siguiente paso parte de ahí. Quita también las tres líneas `use` de arriba: la forma de servidor no las usa y el compilador avisa de imports sin usar.
 
 ---
 
@@ -607,7 +606,7 @@ pub struct PostViewSet;
 
 Registra el nuevo módulo añadiendo `pub mod post_view_set;` a `src/lib.rs` (`make:viewset` te imprime esta línea).
 
-El archivo generado empieza con `read_only`. Si lo omites, como arriba, el ViewSet también sirve create, update y delete. Las acciones de escritura sin codenames de `permissions(...)` registran un aviso al montar el router; añade `allow_anonymous` para indicar que es intencionado.
+El archivo generado empieza con `read_only`. Si lo omites, como arriba, el ViewSet también sirve create, update y delete. Las acciones de escritura abiertas registran un aviso al montar el router. Pon tu propia capa de auth delante y añade `allow_anonymous` para indicar que es intencionado; los codenames de `permissions(...)` requieren la feature `tenancy` y sin ella impiden montar.
 
 ### 12b. Montar las rutas
 
@@ -626,7 +625,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-El ViewSet responde ahora en `/api/posts` y `/api/posts/{id}`.
+El ViewSet responde ahora en `/api/posts` y `/api/posts/{pk}`. La ruta es la tabla del modelo; el comentario al final de `src/post_view_set.rs` muestra esta misma línea, y `make:viewset` imprime la URL.
 
 ### 12c. Probar los endpoints
 
@@ -715,8 +714,9 @@ Incorpora el id del usuario (el "subject" del token) y cualquier claim personali
 use rustango::jwt::{encode, Claims};
 use std::time::Duration;
 
-// Derive the signing key from your session secret.
-let secret = std::env::var("RUSTANGO_SESSION_SECRET")?.into_bytes();
+// A key of its own, 32+ bytes: add `JWT_SECRET=<output of openssl rand -base64 32>`
+// to `.env`. (Step 3 leaves `RUSTANGO_SESSION_SECRET` unset in development.)
+let secret = std::env::var("JWT_SECRET")?.into_bytes();
 
 let mut claims = Claims::new(user_id.to_string());   // subject = user id
 claims.set("roles", vec!["editor"]);
@@ -870,10 +870,9 @@ running rustango system check (deploy mode)...
   [info]    config tier resolved to `dev`
   [warning] RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier
   [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
-  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to (…)
 ```
 
-(Los recuentos exactos de modelos/migraciones y las notas extra dependen de tu proyecto y sus features.) Esas tres advertencias son las esperadas para el entorno de desarrollo. En una configuración de producción — `RUSTANGO_ENV=prod`, una `DATABASE_URL` de base de datos gestionada, un dominio ápice configurado — desaparecen y verás `all checks passed`. Corrige cualquier advertencia o error restante antes de hacer push a producción.
+(Los recuentos exactos de modelos/migraciones y las notas extra dependen de tu proyecto y sus features.) Esas dos advertencias son las esperadas para el entorno de desarrollo. En una configuración de producción — `RUSTANGO_ENV=prod` y una `DATABASE_URL` de base de datos gestionada — desaparecen y verás `all checks passed`. Corrige cualquier advertencia o error restante antes de hacer push a producción.
 
 ---
 

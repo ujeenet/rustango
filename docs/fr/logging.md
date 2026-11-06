@@ -139,6 +139,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::humanize` | Filtres humanize |
 | `rustango::i18n` | Clés de traduction non stockées en base, rechargements du catalogue échoués |
 | `rustango::jobs` | Files de tâches de fond |
+| `rustango::jti_store` | Le magasin en mémoire des révocations JWT est plein |
 | `rustango::login` | État de limitation et de verrouillage de connexion qu'une purge de tenant n'a pas pu effacer |
 | `rustango::logging` | Avertissements de ce sous-système lui-même |
 | `rustango::manage` | Verbes `manage` |
@@ -157,6 +158,7 @@ la racine `rustango::`, donc `RUST_LOG=rustango=warn` les atteint tous :
 | `rustango::sql` | Exécution des requêtes |
 | `rustango::sql::lock` | Clauses de verrou de ligne |
 | `rustango::sso` | Liaison de comptes SSO |
+| `rustango::sso::landing` | Règles d'arrivée SSO : une règle sautée (id et tenant seulement) ou une table de règles illisible |
 | `rustango::static_files` | Montages de fichiers statiques |
 | `rustango::template_views` | Vues adossées à des templates |
 | `rustango::tenancy` | Multi-tenancy, général |

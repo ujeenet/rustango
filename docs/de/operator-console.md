@@ -105,6 +105,13 @@ Hostnamen werden beim Eingang normalisiert: kleingeschrieben, ohne Schema, ohne 
 
 Über die CLI: [`list-hosts` / `add-host` / `remove-host` / `set-host-enabled`](manage.md#hostnamen).
 
+**Tenants mit Pfad-Präfix teilen den Origin der Konsole.** Die Konsole und jeder
+Präfix-Tenant liegen auf dem Apex, also kann ein Skript auf einer Tenant-Seite
+Anfragen mit den Cookies eines Betreibers an die Konsole schicken. Der Server
+loggt beim Start eine Warnung, sobald ein Tenant ein Pfad-Präfix hat. Liefere
+Tenants in Produktion auf eigenen Hosts aus, oder melde dich in einem
+Browserprofil an der Konsole an, das nie Tenant-Seiten öffnet.
+
 ---
 
 ## Unbekannte Hosts

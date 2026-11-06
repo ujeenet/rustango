@@ -158,7 +158,7 @@ cargo rgo new shop --alias rgo
 
 ```toml
 [dependencies]
-rgo = { package = "rustango", version = "0.63", default-features = false, features = ["batteries"] }
+rgo = { package = "rustango", version = "0.64", default-features = false, features = ["batteries"] }
 
 [features]
 postgres = ["rgo/postgres"]
@@ -282,7 +282,7 @@ Cela écrit `src/blog/` contenant `mod.rs`, `models.rs` (un modèle de départ n
 
 Options :
 
-- **`--into <dir>`** — échafaude sous un répertoire de base autre que `src/` (par exemple un membre de workspace).
+- **`--into <dir>`** — échafaude plutôt sous `src/<dir>/` (`--into apps` écrit `src/apps/blog/`) ; affiche les lignes du module parent et de `urls.rs` à ajouter.
 - **`--with-manage-bin`** — génère aussi un `src/bin/manage.rs` (pour les architectures qui préfèrent un binaire manage séparé).
 
 ---
@@ -300,7 +300,7 @@ Au sein d'un projet, les verbes `make:*` échafaudent un fichier à la fois. La 
 | `make:job <Name>` | Un gestionnaire de job en arrière-plan |
 | `make:scheduled <Name>` | Une tâche à intervalle fixe pour `scheduler::Scheduler` |
 | `make:worker <Name>` | Un binaire worker sous `src/bin/` qui vide la file de jobs |
-| `make:notification <Name>` | Une notification multi-canal |
+| `make:notification <Name>` | Une notification par e-mail : une struct qui construit un `Email` |
 | `make:middleware <Name>` | Un squelette de middleware |
 | `make:test <Name>` | Un module de test utilisant le client de test in-process |
 
@@ -318,9 +318,11 @@ cargo run -- make:test post_smoke
 cargo rustango new myblog                              # 1. scaffold the project
 cd myblog
 cargo run -- startapp blog                             # 2. add a feature module
-# …add fields to src/blog/models.rs…
+# …rename the starter `Blog` in src/blog/models.rs to `Post`, add fields…
 cargo run -- makemigrations                            # 3. generate a migration
 cargo run -- migrate                                   # 4. apply it
 cargo run -- make:viewset PostViewSet --model Post     # 5. expose a JSON API
-cargo run                                              # 6. serve
+# …add `pub mod post_view_set;` to src/lib.rs and the `.nest_with` line from
+#    the end of src/post_view_set.rs to src/main.rs…
+cargo run                                              # 6. serve the URL make:viewset printed
 ```

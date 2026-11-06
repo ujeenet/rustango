@@ -68,7 +68,6 @@ use crate::sso::provider::resolve_by_slug;
 use crate::sso::{
     build_provider_for, open_flow, seal_flow, FlowPurpose, FlowScope, NormalizedUser,
 };
-use crate::tenancy::DefaultTenantDb;
 use crate::tenancy::User;
 
 // ===================================================================
@@ -440,9 +439,38 @@ impl Default for MemberAuthConfig {
 /// [`crate::server::Builder`] stack — the handlers read the
 /// `TenantContext` extension for the resolved tenant, its scoped
 /// pool, and the session secret.
+///
+///
+/// Each request is served for the backend of the tenant context mounted on
+/// it, so a SQLite tenant works in a build that also enables `postgres`.
 #[must_use]
 pub fn member_sso_router(config: MemberAuthConfig) -> Router<()> {
-    member_sso_router_for::<DefaultTenantDb>(config)
+    // `TenantScope` reads whichever tenant context is mounted, whatever its backend.
+    sso_routes(
+        config,
+        get(sso_begin::<TenantScope>),
+        get(sso_callback::<TenantScope>),
+    )
+}
+
+/// The begin and callback routes, plain and under a tenant's path prefix.
+fn sso_routes(
+    config: MemberAuthConfig,
+    begin: axum::routing::MethodRouter<()>,
+    callback: axum::routing::MethodRouter<()>,
+) -> Router<()> {
+    let login = config.login_base.trim_end_matches('/').to_owned();
+    let mut router = Router::new();
+    // A path-prefix tenant reaches the same routes under its prefix (#2145).
+    for mount in ["", "/{prefix}"] {
+        router = router
+            .route(&format!("{mount}{login}/sso/{{slug}}"), begin.clone())
+            .route(
+                &format!("{mount}{login}/sso/{{slug}}/callback"),
+                callback.clone(),
+            );
+    }
+    router.layer(Extension(config))
 }
 
 /// [`member_sso_router`] for a `Tenant<DB>` other than the default, e.g.
@@ -453,21 +481,11 @@ where
     DB: Database,
     Tenant<DB>: FromRequestParts<()> + Send,
 {
-    let login = config.login_base.trim_end_matches('/').to_owned();
-    let mut router = Router::new();
-    // A path-prefix tenant reaches the same routes under its prefix (#2145).
-    for mount in ["", "/{prefix}"] {
-        router = router
-            .route(
-                &format!("{mount}{login}/sso/{{slug}}"),
-                get(sso_begin::<DB>),
-            )
-            .route(
-                &format!("{mount}{login}/sso/{{slug}}/callback"),
-                get(sso_callback::<DB>),
-            );
-    }
-    router.layer(Extension(config))
+    sso_routes(
+        config,
+        get(sso_begin::<Tenant<DB>>),
+        get(sso_callback::<Tenant<DB>>),
+    )
 }
 
 /// Path params; `prefix` is set on the path-prefix tenant routes.
@@ -489,7 +507,9 @@ struct Mount {
 impl Mount {
     /// `None` when a prefixed route matched a path outside the prefix.
     fn of(t: &TenantScope, sso: &SsoPath, parts: &Parts, login_base: &str) -> Option<Self> {
-        let mount = Self::at(&t.org, parts.uri.path(), login_base);
+        // The full path: the dispatcher may have cut the tenant's prefix off.
+        let full = crate::urls::original_uri(&parts.uri, &parts.extensions).path();
+        let mount = Self::at(&t.org, full, login_base);
         (sso.prefix.is_none() || mount.path != "/").then_some(mount)
     }
 
@@ -611,8 +631,8 @@ pub(crate) fn external_base(parts: &Parts) -> Option<String> {
 
 /// `GET {login_base}/sso/{slug}` — begin the OAuth2 flow, redirect to
 /// the IdP, seal the flow into the transient flow cookie.
-fn sso_begin<DB: Database>(
-    t: Tenant<DB>,
+fn sso_begin<T: Into<TenantScope>>(
+    t: T,
     Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     req: Request,
@@ -684,8 +704,8 @@ async fn sso_begin_in(
 
 /// `GET {login_base}/sso/{slug}/callback` — exchange the code,
 /// find-or-provision the member, mint the member session cookie.
-fn sso_callback<DB: Database>(
-    t: Tenant<DB>,
+fn sso_callback<T: Into<TenantScope>>(
+    t: T,
     Path(sso): Path<SsoPath>,
     Extension(config): Extension<MemberAuthConfig>,
     Query(params): Query<CallbackParams>,
@@ -877,16 +897,17 @@ pub enum MemberSignIn {
 /// verified email ([`crate::sso::policy::admit`]); else, with
 /// `auto_provision`, a new linked member.
 ///
-/// **Applies none of the provider's sign-in policy** (domain, tenant and
-/// claim rules, sign-up mode, tenant settings): `auto_provision` alone lets
-/// anyone in. Call [`crate::sso::policy::admit`] with
-/// [`crate::sso::ResolvedProvider::effective_policy`] instead.
+/// A tenant provider key runs under that row's sign-in, sign-up and lifecycle
+/// rules, and every key under the tenant's settings. A shared or admin key's
+/// row is not in this database, so it never provisions. Prefer
+/// [`crate::sso::policy::admit`] with
+/// [`crate::sso::ResolvedProvider::effective_policy`].
 ///
 /// # Errors
 /// Storage failures.
 #[deprecated(
     since = "0.61.15",
-    note = "ignores the provider's sign-in policy; use `sso::policy::admit` with `ResolvedProvider::effective_policy()`"
+    note = "use `sso::policy::admit` with `ResolvedProvider::effective_policy()`"
 )]
 pub async fn find_or_provision_member(
     pool: &Pool,
@@ -896,8 +917,7 @@ pub async fn find_or_provision_member(
     auto_provision: bool,
 ) -> Result<MemberSignIn, String> {
     let identity = Identity::from_profile(profile.clone());
-    let policy = EffectivePolicy::legacy(allow_email_link)
-        .default_signup(member_default_signup(auto_provision));
+    let policy = legacy_policy(pool, provider, allow_email_link, auto_provision).await;
     match admit_member(pool, provider, &policy, &identity, "").await {
         Ok(id) => Ok(MemberSignIn::Member(id)),
         Err(Denied::Refused(r)) => {
@@ -905,6 +925,36 @@ pub async fn find_or_provision_member(
             Ok(MemberSignIn::of(&r))
         }
         Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The policy [`find_or_provision_member`] runs under, so `auto_provision`
+/// cannot skip the provider's rules.
+async fn legacy_policy(
+    pool: &Pool,
+    provider: &ProviderKey,
+    allow_email_link: bool,
+    auto_provision: bool,
+) -> EffectivePolicy {
+    let signup = member_default_signup(auto_provision);
+    let policy = match provider.source() {
+        LinkSource::App => EffectivePolicy::legacy(allow_email_link).default_signup(signup),
+        LinkSource::Tenant => {
+            let (rules, signups, lifecycle) = crate::sso::provider::read_rules::<
+                crate::sso::SsoProvider,
+            >(pool, provider.provider_id())
+            .await;
+            EffectivePolicy::new(rules, allow_email_link)
+                .with_signup(signups)
+                .with_lifecycle(lifecycle)
+                .default_signup(signup)
+        }
+        // Its rules live in another database: link only, never provision.
+        LinkSource::Shared | LinkSource::Admin => EffectivePolicy::legacy(allow_email_link),
+    };
+    match crate::sso::policy::TenantSettings::load(pool).await {
+        Ok(settings) => policy.tenant(&settings),
+        Err(e) => policy.tighten(Err(e)),
     }
 }
 
@@ -1473,10 +1523,9 @@ mod tests {
             .unwrap();
         let mut user = crate::testkit::user();
         user.insert(&pool).await.unwrap();
-        let org = crate::tenancy::Org {
-            path_prefix: Some("/acme".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.path_prefix = Some("/acme".into());
+        });
         let path_of = |cookie: &str| {
             cookie
                 .split("; ")

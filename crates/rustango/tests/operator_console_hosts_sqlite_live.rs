@@ -91,26 +91,11 @@ async fn boot() -> Booted {
     // A tenant with a base host, which is the row the page must render
     // as undeletable.
     let slug = unique("acme");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        storage_mode: "schema".into(),
-        backend_kind: "sqlite".into(),
-        database_url: None,
-        schema_name: Some(slug.clone()),
-        host_pattern: Some(format!("{slug}.example.com")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = Org::new(slug.clone());
+    org.storage_mode = "schema".into();
+    org.backend_kind = "sqlite".into();
+    org.schema_name = Some(slug.clone());
+    org.host_pattern = Some(format!("{slug}.example.com"));
     org.insert(&registry).await.expect("seed org");
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();
@@ -460,26 +445,11 @@ async fn a_host_belonging_to_another_tenant_cannot_be_touched() {
     let b = boot().await;
 
     let other = unique("other");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: other.clone(),
-        display_name: other.clone(),
-        storage_mode: "schema".into(),
-        backend_kind: "sqlite".into(),
-        database_url: None,
-        schema_name: Some(other.clone()),
-        host_pattern: Some(format!("{other}.example.com")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = Org::new(other.clone());
+    org.storage_mode = "schema".into();
+    org.backend_kind = "sqlite".into();
+    org.schema_name = Some(other.clone());
+    org.host_pattern = Some(format!("{other}.example.com"));
     org.insert(&b.registry).await.expect("seed other org");
     let victim = format!("owned.{other}.example.com");
     rustango::tenancy::add_host(&b.registry, &other, &victim, "apex.invalid")

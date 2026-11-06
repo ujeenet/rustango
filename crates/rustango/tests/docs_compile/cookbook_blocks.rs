@@ -85,6 +85,53 @@ mod b_5afe7ce8 {
     }
 }
 
+// use rustango::sql::sqlx;
+mod b_b1ff0430 {
+    use crate::prelude::*;
+    use rustango::sql::sqlx;
+    use rustango::tenancy::{TenantPools, TenantPoolsConfig};
+    use std::time::Duration;
+
+    fn tuned_pools<DB: sqlx::Database>(registry_pool: sqlx::Pool<DB>) -> TenantPools<DB> {
+        let cfg = TenantPoolsConfig {
+            max_cached_database_pools: 64,
+            database_pool_max_connections: 8,
+            database_pool_min_connections: 1,            // keep one warm
+            database_pool_acquire_timeout: Duration::from_secs(10),
+            database_pool_idle_timeout: Some(Duration::from_secs(10 * 60)),
+            database_pool_max_lifetime: Some(Duration::from_secs(30 * 60)),
+            prewarm_active_tenants: true,                // build all on boot
+            ..TenantPoolsConfig::default()
+        };
+        TenantPools::new(registry_pool).config(cfg)
+    }
+}
+
+// use rustango::tenancy::RouteConfig;
+mod b_bc699141 {
+    use crate::prelude::*;
+    pub async fn run(pool: Pool) -> Result<(), BoxError> {
+        let _ = {
+            use rustango::tenancy::RouteConfig;
+
+            let routes = RouteConfig::legacy();     // /__login, /__admin, /__static__, /__brand__
+            // or pick individually:
+            // let routes = RouteConfig {
+            //     login_url: "/sign-in".into(),
+            //     admin_url: "/control".into(),
+            //     ..RouteConfig::default()
+            // };
+
+            let registry = sqlx::SqlitePool::connect("sqlite://registry.db?mode=rwc").await?;
+            rustango::server::Builder::from_pool(registry, "sqlite://registry.db?mode=rwc", "localhost")
+                .routes(routes)
+                .serve("0.0.0.0:8080")
+                .await?;
+        };
+        Ok(())
+    }
+}
+
 // rustango::register_admin_inline!(
 mod b_468d9b1a {
     use crate::prelude::*;

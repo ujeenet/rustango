@@ -145,6 +145,12 @@ cookies use `Path=/<prefix>`, and `/acme`'s cookies are not sent to
 Host routing is the stronger choice for production. Path prefixes are handy
 in development, where you have one host.
 
+Path-prefix tenants also share the apex origin with the operator console. A
+script on a tenant page then runs on the console's origin and can act there as
+a signed-in operator, or in another prefix tenant's admin. The server warns at
+boot when it serves both. In production, give tenants their own hosts, or keep
+operators off tenant pages in the browser they use for the console.
+
 ## Storage modes
 
 Each tenant has a `storage_mode`: `schema` or `database`.
@@ -253,6 +259,10 @@ To open every active database-mode tenant's pool up front, run
 [`prewarm-pools`](manage.md#prewarm-pools), use the console button, or set
 `prewarm_active_tenants: true`.
 
+Cold pool builds are bounded: at most 16 at once (`max_concurrent_pool_builds`)
+and 600 a minute (`max_pool_builds_per_minute`); past either a request gets a
+503 with `Retry-After`. `0` lifts a limit.
+
 ## Migrations
 
 Each migration file has a scope, `registry` or `tenant`. `makemigrations` in
@@ -292,8 +302,8 @@ What carries it:
 - the tenant session cookie and the impersonation handoff token;
 - JWTs: the `tenant` and `org_id` claims must both match;
 - HMAC signing keys and MCP agent keys bound to a tenant;
-- `ScopedCache::for_tenant`, the page cache, idempotency keys and
-  `DistributedLock::for_tenant`, all keyed `#org:<id>:<slug>`;
+- `CacheScope::for_tenant`, the page cache, idempotency keys and
+  `CacheScope::locks`, all keyed `#org:<id>:<slug>`;
 - password-reset and verify links.
 
 Tenant API keys and users live in the tenant's own storage, which a purge
@@ -301,14 +311,14 @@ drops. An `Org` with no id (one not read from the registry) has no
 `TenantSlug`, and authentication refuses it.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` only for an Org that was not read from the registry.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

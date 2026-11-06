@@ -176,6 +176,7 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 | `.keepalive(Duration)` | 30 s | intervalle de `Ping`, trafic ou pas ; un pair muet pendant tout un intervalle après un ping est fermé |
 | `.on_message(fn(&str) -> Option<String>)` | aucun | gère le texte client→serveur ; renvoyez `Some(reply)` pour renvoyer un écho **à ce client uniquement** (appelez `hub.broadcast(..)` pour la diffusion) |
 | `.max_message_bytes(n)` | 1 MiB | ferme la connexion si un message client dépasse cette limite |
+| `.max_connections(n)` | aucune | sockets ouverts au plus ; au-delà `upgrade` répond 503 |
 
 **Les consommateurs lents** ne sont pas abandonnés en silence : un client à la traîne se voit dire
 qu'il a manqué `n` messages afin qu'il puisse se resynchroniser ou continuer : il
@@ -225,7 +226,7 @@ signal `Lagged` plutôt qu'une croissance mémoire illimitée.
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "0.63", features = ["sse", "websocket"] }
+rustango = { version = "0.64", features = ["sse", "websocket"] }
 ```
 
 - **`sse`** — le bus de diffusion `EventBus` (aucune dépendance en plus). Suffisant

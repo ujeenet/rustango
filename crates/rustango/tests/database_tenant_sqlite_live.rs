@@ -44,15 +44,14 @@ impl OrgResolver for FixedResolver {
 }
 
 fn fake_sqlite_org() -> Org {
-    Org {
-        id: rustango::sql::Auto::default(),
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::default();
+        o.slug = "acme".into();
+        o.display_name = "Acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+    })
 }
 
 /// A handler that returns `{slug}:{count}` after running a real query
@@ -140,10 +139,11 @@ impl OrgResolver for HeaderResolver {
             .get("x-tenant")
             .and_then(|h| h.to_str().ok())
             .unwrap_or("");
-        Ok(Some(Org {
-            slug: slug.into(),
-            database_url: None,
-            ..fake_sqlite_org()
+        Ok(Some({
+            let mut o = fake_sqlite_org();
+            o.slug = slug.into();
+            o.database_url = None;
+            o
         }))
     }
 }

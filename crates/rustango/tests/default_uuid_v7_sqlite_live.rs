@@ -96,7 +96,8 @@ async fn user_supplied_uuid_is_not_overwritten() {
         id: Auto::Set(custom),
         title: "Pre-supplied".into(),
     };
-    post.save(&pool).await.unwrap();
+    // A set PK is an UPDATE under `save`; a new row needs `insert`.
+    post.insert(&pool).await.unwrap();
     assert_eq!(
         post.id.get().copied(),
         Some(custom),

@@ -67,14 +67,13 @@ async fn body_text(resp: axum::response::Response) -> String {
 /// Insert a tenant Org pointing at the registry DB (database mode is
 /// the simplest setup for tests — same Postgres backs both layers).
 async fn seed_db_mode_tenant(pool: &sqlx::PgPool, slug: &str, url: &str) -> Org {
-    let mut org = Org {
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some(url.to_owned()),
-        host_pattern: Some(format!("{slug}.app.test")),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some(url.to_owned());
+        o.host_pattern = Some(format!("{slug}.app.test"));
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     org
 }

@@ -97,6 +97,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCo
 use tower::Service;
 
 use crate::body_limit::collect_capped;
+use crate::cache::keyspace::{Area, KeySpace};
 use crate::cache::{BoxedCache, CacheError};
 
 // ---------------------------------------------------------------- Wire format
@@ -344,7 +345,7 @@ impl CachePageLayer {
             &page.path,
             &self.query_key.of(&page.query),
             &page.host,
-            self.page_tenant(page).as_ref(),
+            &self.page_space(page),
             self.vary_on
                 .iter()
                 .map(|name| (name.as_str(), page.vary_value(name))),
@@ -353,12 +354,12 @@ impl CachePageLayer {
         )
     }
 
-    /// The page's tenant, or `None` when the layer does not key on tenants.
-    fn page_tenant(&self, page: &PageKey) -> Option<OrgKey> {
+    /// The page's tenant, or global when the layer does not key on tenants.
+    fn page_space(&self, page: &PageKey) -> KeySpace {
         if tenant_keyed(self.tenant_agnostic) {
-            page.tenant.clone().map(OrgKey)
+            page.space.clone()
         } else {
-            None
+            KeySpace::Global
         }
     }
 
@@ -379,7 +380,7 @@ impl CachePageLayer {
         let keyed = tenant_keyed(self.tenant_agnostic);
         let mut keys = Vec::new();
         for p in pages {
-            if keyed && p.tenant.is_none() {
+            if keyed && p.space == KeySpace::Global {
                 // Such a page is never cached, so this deletes nothing.
                 tracing::warn!(
                     target: "rustango::cache_page",
@@ -387,11 +388,17 @@ impl CachePageLayer {
                     "invalidate: page has no tenant but the layer keys on it"
                 );
             }
-            let tenant = self.page_tenant(p);
-            let counter = generation_key(&self.key_prefix, &p.path, &p.host, tenant.as_ref());
+            let space = self.page_space(p);
+            let counter = generation_key(&self.key_prefix, &p.path, &p.host, &space);
             // A long TTL, not `None`: a backend may give `None` its short
             // default, and a counter that expired would bring older entries back.
             let now = self.cache.incr(&counter, 1, Some(GENERATION_TTL)).await?;
+            // Remove in 0.65.0: bump the 0.63 counter too, so pods still on 0.63
+            // stop serving the page. Their own invalidations are not seen here.
+            let rest = generation_rest(&self.key_prefix, &p.path, &p.host, &space);
+            if let Some(old) = space.legacy_key(Area::Page, &rest) {
+                self.cache.incr(&old, 1, Some(GENERATION_TTL)).await?;
+            }
             let before = u64::try_from(now.saturating_sub(1)).unwrap_or(0);
             keys.push(self.key_for(p, before));
         }
@@ -412,7 +419,7 @@ pub struct PageKey {
     path: String,
     query: String,
     host: String,
-    tenant: Option<String>,
+    space: KeySpace,
     vary: Vec<(String, String)>,
 }
 
@@ -425,7 +432,7 @@ impl PageKey {
             path: path.into(),
             query: String::new(),
             host: host.into(),
-            tenant: None,
+            space: KeySpace::Global,
             vary: Vec::new(),
         }
     }
@@ -441,7 +448,7 @@ impl PageKey {
     #[cfg(feature = "tenancy")]
     #[must_use]
     pub fn tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        self.tenant = Some(tenant.namespace());
+        self.space = KeySpace::Tenant(tenant.clone());
         self
     }
 
@@ -545,18 +552,16 @@ where
                 return inner.call(req).await;
             }
 
-            let (req, tenant) = if tenant_keyed(tenant_agnostic) {
+            let (req, space) = if tenant_keyed(tenant_agnostic) {
                 request_tenant(req).await
             } else {
-                (req, PageTenant::NoTenant)
+                (req, Some(KeySpace::Global))
             };
-            let tenant = match tenant {
-                PageTenant::Unknown => return inner.call(req).await,
-                PageTenant::Org(ns) => Some(OrgKey(ns)),
-                PageTenant::NoTenant => None,
+            let Some(space) = space else {
+                return inner.call(req).await;
             };
             let (host, uri) = request_page(&req);
-            let counter = generation_key(&prefix, uri.path(), host, tenant.as_ref());
+            let counter = generation_key(&prefix, uri.path(), host, &space);
             // Unknown generation: a purged page could be served, so bypass.
             let Ok(generation) = read_generation(&cache, &counter).await else {
                 return inner.call(req).await;
@@ -585,7 +590,7 @@ where
             let Some(key) = compute_cache_key(
                 &prefix,
                 &req,
-                tenant.as_ref(),
+                &space,
                 &query_key,
                 &vary,
                 body_digest.as_deref(),
@@ -762,40 +767,30 @@ fn replace_bytes(hay: &[u8], from: &[u8], to: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// The tenant a page is cached for.
-#[cfg_attr(not(feature = "tenancy"), allow(dead_code))]
-enum PageTenant {
-    /// No tenant: tenancy is off, the route is tenant-agnostic, or the request is marked `Global`.
-    NoTenant,
-    /// The resolved tenant's `#org:<id>:<slug>`: a reused slug gets new keys.
-    Org(String),
-    /// Nothing mounted, no match, or resolution failed: never share a page.
-    Unknown,
-}
-
-/// The request's [`RequestTenant`](crate::tenancy::RequestTenant). Nothing
-/// mounted or stored is `Unknown` here: a misplaced layer must not share pages.
+/// The keys of the request's [`RequestTenant`](crate::tenancy::RequestTenant):
+/// a reused slug gets new keys. `None` (never share a page) when nothing is
+/// mounted or stored, no tenant matched, or resolution failed.
 #[cfg(feature = "tenancy")]
-async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
+async fn request_tenant(req: Request<Body>) -> (Request<Body>, Option<KeySpace>) {
     use crate::tenancy::RequestTenant;
     if RequestTenant::unmounted(req.extensions()) {
         warn_no_tenant_context();
-        return (req, PageTenant::Unknown);
+        return (req, None);
     }
     let (req, tenant) = RequestTenant::resolve_request(req).await;
-    let tenant = match tenant {
-        RequestTenant::Tenant(t) => PageTenant::Org(t.namespace()),
-        RequestTenant::Global => PageTenant::NoTenant,
+    let space = match tenant {
+        RequestTenant::Tenant(t) => Some(KeySpace::Tenant(t)),
+        RequestTenant::Global => Some(KeySpace::Global),
         // No match: the route may still vary on an input the resolver ignored.
-        _ => PageTenant::Unknown,
+        _ => None,
     };
-    (req, tenant)
+    (req, space)
 }
 
 #[cfg(not(feature = "tenancy"))]
 #[allow(clippy::unused_async)]
-async fn request_tenant(req: Request<Body>) -> (Request<Body>, PageTenant) {
-    (req, PageTenant::NoTenant)
+async fn request_tenant(req: Request<Body>) -> (Request<Body>, Option<KeySpace>) {
+    (req, Some(KeySpace::Global))
 }
 
 /// Log once per process: a misplaced layer would otherwise just stop caching.
@@ -839,7 +834,7 @@ fn request_page(req: &Request<Body>) -> (&str, &axum::http::Uri) {
 fn compute_cache_key(
     prefix: &str,
     req: &Request<Body>,
-    tenant: Option<&OrgKey>,
+    space: &KeySpace,
     query_key: &QueryKey,
     vary_on: &[HeaderName],
     body_digest: Option<&str>,
@@ -856,7 +851,7 @@ fn compute_cache_key(
         uri.path(),
         &query_key.of(uri.query().unwrap_or("")),
         host,
-        tenant,
+        space,
         values.iter().map(|(n, v)| (*n, v.as_str())),
         body_digest,
         generation,
@@ -882,16 +877,18 @@ const GENERATION_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 
 
 /// The key of a path's generation counter, which every page key of the
 /// path carries. `#` never starts a page key's method part.
-fn generation_key(prefix: &str, path: &str, host: &str, tenant: Option<&OrgKey>) -> String {
+fn generation_key(prefix: &str, path: &str, host: &str, space: &KeySpace) -> String {
+    space.key(Area::Page, &generation_rest(prefix, path, host, space))
+}
+
+/// [`generation_key`] before its key space: the 0.63 tenant counter.
+fn generation_rest(prefix: &str, path: &str, host: &str, space: &KeySpace) -> String {
     let mut k = format!("{prefix}|#gen|");
     write_lp(&mut k, path);
     write_lp(&mut k, host);
-    write_lp(&mut k, tenant.map_or("", |t| t.0.as_str()));
+    write_lp(&mut k, &space.namespace().unwrap_or_default());
     k
 }
-
-/// The tenant part of a key: [`TenantSlug::namespace`](crate::tenancy::TenantSlug).
-struct OrgKey(String);
 
 /// The path's current generation; 0 when it was never invalidated.
 async fn read_generation(cache: &BoxedCache, key: &str) -> Result<u64, CacheError> {
@@ -902,7 +899,8 @@ async fn read_generation(cache: &BoxedCache, key: &str) -> Result<u64, CacheErro
         .unwrap_or(0))
 }
 
-/// The only place the key format lives, as `prefix|<len>:<bytes>|...`.
+/// The only place the key format lives, as `prefix|<len>:<bytes>|...`,
+/// under `tenant:#org:<id>:<slug>:page:` for a tenant.
 ///
 /// Each part is length-prefixed, so a value holding a separator
 /// cannot make two different requests produce the same key.
@@ -916,7 +914,7 @@ fn build_key<'a>(
     path: &str,
     query: &str,
     host: &str,
-    tenant: Option<&OrgKey>,
+    space: &KeySpace,
     vary: impl Iterator<Item = (&'a str, &'a str)>,
     body_digest: Option<&str>,
     generation: u64,
@@ -929,7 +927,7 @@ fn build_key<'a>(
     write_lp(&mut k, query);
     write_lp(&mut k, host);
     // An org key is never empty, so "" means "tenant-agnostic".
-    write_lp(&mut k, tenant.map_or("", |t| t.0.as_str()));
+    write_lp(&mut k, &space.namespace().unwrap_or_default());
     for (name, v) in vary {
         write_lp(&mut k, name);
         write_lp(&mut k, v);
@@ -943,7 +941,7 @@ fn build_key<'a>(
     if generation > 0 {
         write_lp(&mut k, &format!("#gen:{generation}"));
     }
-    k
+    space.key(Area::Page, &k)
 }
 
 /// Base64 SHA-256 of a QUERY body. This key component makes only a
@@ -1388,6 +1386,26 @@ fn _trait_check(_h: &HeaderMap) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Until 0.65.0 a tenant invalidation also bumps the 0.63 counter, so pods
+    /// still on 0.63 stop serving the page.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn invalidate_bumps_the_old_counter_too() {
+        let cache: BoxedCache = Arc::new(crate::cache::InMemoryCache::new());
+        let layer = CachePageLayer::new(cache.clone());
+        let acme = crate::tenancy::TenantSlug::new(1, "acme");
+        let page = PageKey::new("/p", "h").tenant(&acme);
+        layer.invalidate([&page]).await.unwrap();
+        let old = "rustango.cache_page|#gen|2:/p|1:h|11:#org:1:acme|";
+        let new = format!("tenant:#org:1:acme:page:{old}");
+        assert_eq!(cache.get(&new).await.unwrap().as_deref(), Some("1"));
+        assert_eq!(
+            cache.get(old).await.unwrap().as_deref(),
+            Some("1"),
+            "0.63 counter"
+        );
+    }
 
     fn sample_page() -> CachedPage {
         let mut headers = HeaderMap::new();

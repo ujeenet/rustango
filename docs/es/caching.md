@@ -66,8 +66,9 @@ poco, y un valor no reconocido te da una caché en memoria con una advertencia.
 
 No existe el valor `postgres`: el backend de base de datos es `db` o `database`. Los
 valores van en minúsculas. Un valor desconocido o con otras mayúsculas (`Redis`, una
-errata), o `file` sin `file_cache_dir`, registra un `error` y recurre a una caché en
-memoria; una versión menor posterior lo rechazará.
+errata), o `file` sin `file_cache_dir`, se rechaza: `from_settings` hace panic al
+arrancar y `from_settings_async` devuelve el error. Un sustituto por proceso
+rompería lo que garantiza una caché compartida.
 
 `FileCache` barre una dieciseisava parte de su directorio en busca de entradas
 expiradas cada 16 escrituras. Llama a `FileCache::purge_expired()` de forma periódica
@@ -248,22 +249,23 @@ convierte la clave natural en la clave que se filtra: un handler — o peor, una
 tarea de fondo, que no tiene ningún tenant ambiental del que tirar — escribe
 `"stats:monthly"` para un tenant y todos los demás lo leen.
 
-Envuelve la caché compartida en un **`ScopedCache`** para que el namespace se
-aplique por ti y el sitio de llamada no pueda olvidarlo:
+Toma la vista del tenant con **`CacheScope::for_tenant(..).app()`** (por
+dentro un `ScopedCache`) para que el namespace se aplique por ti y el sitio de
+llamada no pueda olvidarlo:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` es en sí mismo un `Cache`, así que encaja en cualquier cosa que
+La vista es en sí misma un `Cache`, así que encaja en cualquier cosa que
 tome un `BoxedCache` — `cache_page`, `cache_fragment`, los rate limiters,
 `DistributedLock`. Reenvía al backend interno con las claves mapeadas en lugar
 de reimplementar nada, de modo que las primitivas nativas (Redis `INCRBY`,
@@ -298,13 +300,22 @@ El `Cache::clear()` sin acotar sigue siendo global al proceso, así que usa la
 vista acotada siempre que el cambio de un solo tenant sea lo que disparó la
 invalidación.
 
+Las claves de tenant son `tenant:#org:<id>:<slug>:<area>:<rest>`, con un área
+para las claves de la app, los locks, la idempotencia, las páginas, los límites
+de tasa de `KeyBy::Tenant`, las sesiones y los overrides de flags. El throttle
+de login, el bloqueo de cuentas y la caché de claves MCP mantienen su propio
+formato y su propia purga. Un `clear()` de la caché de app
+del tenant borra solo el área `app`, así que nunca libera el lock de un job en
+marcha.
+
 Un tenant nuevo puede reutilizar el slug de un tenant purgado. Para que
-`purge-tenant` borre las claves `ScopedCache::for_tenant` del tenant anterior, llama a
+`purge-tenant` borre las claves del tenant anterior, llama a
 `rustango::tenancy::decommission::clear_on_purge(cache)` al arrancar por cada caché
-que las guarde. La purga también borra allí los locks, las sesiones y los
-overrides de flags del tenant. Las entradas de idempotencia y de caché de página
-se quedan hasta que expiran: van ligadas al id de la org, así que el tenant nuevo
-no puede leerlas.
+que las guarde. La purga borra allí todas las áreas
+(`CacheScope::for_tenant(cache, &tenant).purge()` hace lo mismo a mano). Hasta
+0.65.0, las respuestas de idempotencia también se escriben bajo su clave de 0.63
+`idem:<sha>`; esa clave va con hash y sin prefijo de tenant, así que la purga no
+la encuentra y expira con su TTL (24 horas por defecto).
 
 ---
 
@@ -332,7 +343,8 @@ seguro por defecto:
 
 Para descartar una página tras una escritura, llama a
 `layer.invalidate(&[PageKey::new(path, host)]).await?` sobre un clon de la capa
-(añade `.tenant(org_id)` a la clave con tenancy). Purga todas las variantes cacheadas
+(con tenancy añade `.tenant(&slug)` a la clave, el `TenantSlug` de la
+petición, p. ej. de `RequestTenant::tenant()`). Purga todas las variantes cacheadas
 de esa ruta: cualquier query string, cualquier valor de `vary_on`, GET y `QUERY` por
 igual. Funciona con un contador de generación por ruta, así que cada GET cacheado lee
 una clave de caché pequeña más.
@@ -355,6 +367,10 @@ Con tenancy, monta la capa dentro de la capa de tenancy; consulta
 
 **Mantenimiento:** `DatabaseCache::purge_expired()` y
 `FileCache::purge_expired()` borran las entradas caducadas; llámalos periódicamente.
+`DatabaseCache` además borra un lote de filas caducadas cada 256 escrituras
+(`.purge_every(n)`, `0` lo desactiva). `FileCache` guarda como máximo 100 000 entradas
+y 1 GiB (`.max_entries(n)`, `.max_bytes(n)`, o `file_cache_max_entries` /
+`file_cache_max_bytes` en `[cache]`; `0` quita un límite) y borra primero las más antiguas.
 
 **Qué está construido sobre la caché:** las [sesiones](auth-sessions.md) del lado
 del servidor, la [limitación de tasa](middleware.md) distribuida

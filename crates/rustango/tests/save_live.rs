@@ -115,7 +115,7 @@ async fn save_updates_when_pk_set_without_changing_pk() {
 }
 
 #[tokio::test]
-async fn save_with_set_pk_matching_no_row_is_silent_ok() {
+async fn save_with_set_pk_matching_no_row_is_row_not_found() {
     let _g = save_lock().lock().await;
     let Some(pool) = fresh_pool().await else {
         return;
@@ -126,7 +126,14 @@ async fn save_with_set_pk_matching_no_row_is_silent_ok() {
         label: "ghost".into(),
         count: 0,
     };
-    t.save(&pool.clone().into()).await.unwrap();
+    let err = t.save(&pool.clone().into()).await;
+    assert!(
+        matches!(
+            err,
+            Err(rustango::sql::ExecError::Driver(sqlx::Error::RowNotFound))
+        ),
+        "{err:?}"
+    );
 
     assert_eq!(Thing::objects().count_on(&pool).await.unwrap(), 0);
 }

@@ -134,6 +134,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::humanize` | Humanize-Filter |
 | `rustango::i18n` | Übersetzungsschlüssel, die nicht in der Datenbank landen; fehlgeschlagenes Neuladen des Katalogs |
 | `rustango::jobs` | Hintergrund-Job-Queues |
+| `rustango::jti_store` | Der In-Memory-Speicher für JWT-Sperren ist voll |
 | `rustango::login` | Login-Drossel- und Sperrzustand, den ein Tenant-Purge nicht löschen konnte |
 | `rustango::logging` | Warnungen dieses Subsystems selbst |
 | `rustango::manage` | `manage`-Verben |
@@ -152,6 +153,7 @@ Jedes Event trägt ein **Target**, und genau darauf passt
 | `rustango::sql` | Query-Ausführung |
 | `rustango::sql::lock` | Row-Lock-Klauseln |
 | `rustango::sso` | SSO-Kontoverknüpfung |
+| `rustango::sso::landing` | SSO-Landing-Regeln: eine übersprungene Regel (nur ID und Tenant) oder eine unlesbare Regeltabelle |
 | `rustango::static_files` | Statische Datei-Mounts |
 | `rustango::template_views` | Template-basierte Views |
 | `rustango::tenancy` | Mandantenfähigkeit, allgemein |

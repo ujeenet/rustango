@@ -104,27 +104,14 @@ impl OrgResolver for AcmeResolver {
 }
 
 fn acme_org(database_url: String) -> Org {
-    Org {
-        // A registry row has an id; tokens and notifications bind to it.
-        id: Auto::Set(1),
-        slug: TENANT_SLUG.into(),
-        display_name: "Acme Inc.".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(database_url),
-        schema_name: None,
-        host_pattern: Some("acme.localhost".into()),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    }
+    let mut o = Org::new(TENANT_SLUG);
+    // A registry row has an id; tokens and notifications bind to it.
+    o.id = Auto::Set(1);
+    o.display_name = "Acme Inc.".into();
+    o.backend_kind = "sqlite".into();
+    o.database_url = Some(database_url);
+    o.host_pattern = Some("acme.localhost".into());
+    o
 }
 
 #[tokio::main]

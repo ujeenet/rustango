@@ -137,6 +137,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::humanize` | Filtros de humanize |
 | `rustango::i18n` | Claves de traducción que no se guardan en la base de datos, recargas del catálogo fallidas |
 | `rustango::jobs` | Colas de trabajos en segundo plano |
+| `rustango::jti_store` | El almacén en memoria de revocaciones JWT está lleno |
 | `rustango::login` | Estado de limitación y bloqueo de login que la purga de un tenant no pudo borrar |
 | `rustango::logging` | Avisos del propio subsistema |
 | `rustango::manage` | Verbos de `manage` |
@@ -155,6 +156,7 @@ Cada evento lleva un **target**, y es contra eso que casa
 | `rustango::sql` | Ejecución de consultas |
 | `rustango::sql::lock` | Cláusulas de bloqueo de fila |
 | `rustango::sso` | Enlace de cuentas SSO |
+| `rustango::sso::landing` | Reglas de destino SSO: una regla saltada (solo id y tenant) o una tabla de reglas ilegible |
 | `rustango::static_files` | Montajes de archivos estáticos |
 | `rustango::template_views` | Vistas basadas en plantillas |
 | `rustango::tenancy` | Multi-tenancy, general |

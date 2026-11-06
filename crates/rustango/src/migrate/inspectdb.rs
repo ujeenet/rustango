@@ -671,7 +671,7 @@ async fn list_tables_my(
                ORDER BY TABLE_NAME"#
         }
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -694,30 +694,30 @@ async fn list_columns_my(
     use sqlx::Row as _;
     // See `list_tables_my` for why every string column is `CAST AS CHAR`.
     let use_default = schema == "public" || schema.is_empty();
-    let sql = if use_default {
+    let schema_filter = if use_default { "DATABASE()" } else { "?" };
+    // MariaDB's JSON is LONGTEXT plus a `json_valid` CHECK named for the column.
+    let mut data_type = String::new();
+    crate::sql::ByServer {
+        mysql: "DATA_TYPE",
+        mariadb: "IF(EXISTS (SELECT 1 FROM information_schema.CHECK_CONSTRAINTS k \
+         WHERE k.CONSTRAINT_SCHEMA = columns.TABLE_SCHEMA AND k.TABLE_NAME = columns.TABLE_NAME \
+         AND k.CHECK_CLAUSE = CONCAT('json_valid(`', columns.COLUMN_NAME, '`)')), 'json', DATA_TYPE)",
+    }
+    .write(&mut data_type);
+    let sql = format!(
         r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
-                  CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
+                  CAST({data_type} AS CHAR)      AS DATA_TYPE,
                   CAST(COLUMN_TYPE AS CHAR)    AS COLUMN_TYPE,
                   CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
-                  CHARACTER_MAXIMUM_LENGTH,
+                  CAST(CHARACTER_MAXIMUM_LENGTH AS SIGNED) AS CHARACTER_MAXIMUM_LENGTH,
                   CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
-                  CAST(EXTRA AS CHAR)          AS EXTRA
+                  CAST(EXTRA AS CHAR)          AS EXTRA,
+                  CAST(VERSION() LIKE '%MariaDB%' AS SIGNED) AS IS_MARIADB
            FROM information_schema.columns
-           WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?
+           WHERE TABLE_SCHEMA = {schema_filter} AND TABLE_NAME = ?
            ORDER BY ORDINAL_POSITION"#
-    } else {
-        r#"SELECT CAST(COLUMN_NAME AS CHAR)    AS COLUMN_NAME,
-                  CAST(DATA_TYPE AS CHAR)      AS DATA_TYPE,
-                  CAST(COLUMN_TYPE AS CHAR)    AS COLUMN_TYPE,
-                  CAST(IS_NULLABLE AS CHAR)    AS IS_NULLABLE,
-                  CHARACTER_MAXIMUM_LENGTH,
-                  CAST(COLUMN_DEFAULT AS CHAR) AS COLUMN_DEFAULT,
-                  CAST(EXTRA AS CHAR)          AS EXTRA
-           FROM information_schema.columns
-           WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-           ORDER BY ORDINAL_POSITION"#
-    };
-    let mut q = sqlx::query(sql);
+    );
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -729,8 +729,7 @@ async fn list_columns_my(
         let data_type: String = r.try_get("DATA_TYPE").unwrap_or_default();
         let column_type: String = r.try_get("COLUMN_TYPE").unwrap_or_default();
         let nullable: String = r.try_get("IS_NULLABLE").unwrap_or_else(|_| "NO".into());
-        // `CHARACTER_MAXIMUM_LENGTH` is u64, so read it as i64 and
-        // narrow. Real column lengths fit easily.
+        // Cast to SIGNED: MariaDB reports it unsigned. Real lengths fit an i32.
         let max_length: Option<i32> = r
             .try_get::<Option<i64>, _>("CHARACTER_MAXIMUM_LENGTH")
             .ok()
@@ -739,7 +738,14 @@ async fn list_columns_my(
         let default: Option<String> = r.try_get("COLUMN_DEFAULT").ok().flatten();
         let extra: String = r.try_get("EXTRA").unwrap_or_default();
         let is_auto = extra.eq_ignore_ascii_case("auto_increment");
-        let default = default.map(|d| mysql_default_sql(&d, &data_type, &extra));
+        let mariadb = r.try_get::<i64, _>("IS_MARIADB").is_ok_and(|v| v == 1);
+        let default = default.and_then(|d| {
+            if mariadb {
+                mariadb_default_sql(&d, &data_type)
+            } else {
+                Some(mysql_default_sql(&d, &data_type, &extra))
+            }
+        });
         out.push(ColumnRow {
             name,
             udt_name: mysql_udt(&data_type, &column_type),
@@ -782,7 +788,7 @@ async fn list_pk_columns_my(
              AND tc.TABLE_SCHEMA = ? AND tc.TABLE_NAME = ?
            ORDER BY kcu.ORDINAL_POSITION"#
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -816,7 +822,7 @@ async fn list_fks_my(
            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
            ORDER BY ORDINAL_POSITION"#
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -865,7 +871,7 @@ async fn list_views_my(
                ORDER BY TABLE_NAME"#
         }
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if !use_default {
         q = q.bind(schema);
     }
@@ -918,7 +924,7 @@ async fn list_tables_sqlite(
     } else {
         "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if let Some(t) = only {
         q = q.bind(t);
     }
@@ -1046,7 +1052,7 @@ async fn list_views_sqlite(
     } else {
         "SELECT name FROM sqlite_master WHERE type = 'view' AND name NOT LIKE 'sqlite_%' ORDER BY name"
     };
-    let mut q = sqlx::query(sql);
+    let mut q = sqlx::query(&sql);
     if let Some(v) = only {
         q = q.bind(v);
     }
@@ -1181,6 +1187,29 @@ fn mysql_default_sql(default: &str, data_type: &str, extra: &str) -> String {
     } else {
         format!("'{}'", default.replace('\\', "\\\\").replace('\'', "''"))
     }
+}
+
+/// A MariaDB `COLUMN_DEFAULT` as SQL: literals come quoted, no default is
+/// `NULL`, and an expression is bare with no `DEFAULT_GENERATED` flag.
+#[cfg(any(feature = "mysql", test))]
+fn mariadb_default_sql(default: &str, data_type: &str) -> Option<String> {
+    if default == "NULL" {
+        return None;
+    }
+    if default.starts_with('\'') {
+        return Some(default.to_owned());
+    }
+    let upper = default.to_ascii_uppercase();
+    if upper.starts_with("CURRENT_TIMESTAMP") {
+        let bare = upper.strip_suffix("()").unwrap_or(&upper);
+        return Some(bare.to_owned());
+    }
+    let extra = if default.contains('(') {
+        "DEFAULT_GENERATED"
+    } else {
+        ""
+    };
+    Some(mysql_default_sql(default, data_type, extra))
 }
 
 /// Map a MySQL type token (see [`mysql_udt`]) to a `(rust_type, notes)` tuple.
@@ -1729,6 +1758,28 @@ mod tests {
         assert_eq!(
             mysql_default_sql("CURRENT_TIMESTAMP", "datetime", "DEFAULT_GENERATED"),
             "CURRENT_TIMESTAMP"
+        );
+    }
+
+    #[test]
+    fn mariadb_default_becomes_sql() {
+        assert_eq!(
+            mariadb_default_sql("'pending'", "varchar").as_deref(),
+            Some("'pending'")
+        );
+        assert_eq!(mariadb_default_sql("NULL", "date"), None);
+        assert_eq!(mariadb_default_sql("3", "tinyint").as_deref(), Some("3"));
+        assert_eq!(
+            mariadb_default_sql("uuid()", "char").as_deref(),
+            Some("(uuid())")
+        );
+        assert_eq!(
+            mariadb_default_sql("current_timestamp()", "datetime").as_deref(),
+            Some("CURRENT_TIMESTAMP")
+        );
+        assert_eq!(
+            mariadb_default_sql("current_timestamp(6)", "datetime").as_deref(),
+            Some("CURRENT_TIMESTAMP(6)")
         );
     }
 

@@ -552,7 +552,7 @@ impl Run<'_> {
             return Ok(Vec::new());
         }
         let scratch = Scratch::write(steps)?;
-        self.apply_dir(&scratch.0).await
+        self.apply_dir(scratch.path()).await
     }
 
     async fn apply_dir(&self, dir: &Path) -> Result<Vec<Migration>, MigrateError> {
@@ -911,20 +911,12 @@ async fn converge(
     )))
 }
 
-/// A temp dir holding the steps to run, removed on drop.
-struct Scratch(PathBuf);
+/// A fresh, private temp dir holding the steps to run, removed on drop.
+struct Scratch(tempfile::TempDir);
 
 impl Scratch {
     fn write(steps: &[Migration]) -> Result<Self, MigrateError> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "rustango_system_scoped_{}_{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::SeqCst)
-        ));
-        std::fs::create_dir_all(&dir)?;
-        let scratch = Self(dir);
+        let scratch = Self(file::private_tempdir("rustango_system_scoped_")?);
         let mut prev: Option<String> = None;
         for step in steps {
             // A waiting step is left out, so link each to the one before it here.
@@ -932,15 +924,13 @@ impl Scratch {
                 prev: prev.replace(step.name.clone()),
                 ..step.clone()
             };
-            file::write(&scratch.0.join(format!("{}.json", step.name)), &step)?;
+            file::write(&scratch.path().join(format!("{}.json", step.name)), &step)?;
         }
         Ok(scratch)
     }
-}
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+    fn path(&self) -> &Path {
+        self.0.path()
     }
 }
 
@@ -982,6 +972,141 @@ mod tests {
         );
         let parent = SchemaChange::CreateTable("z_parent".into());
         assert!(early_creations(&step, |c| *c == parent).is_empty());
+    }
+
+    /// Run `chain` from its own dir under the system ledger.
+    #[cfg(feature = "sqlite")]
+    async fn run_system(pool: &Pool, chain: &SystemChain) -> Result<(), MigrateError> {
+        runner::with_migrate_lock_held(pool, |held| {
+            runner::migrate_system_chain(held, pool, chain, chain.dir(), None)
+        })
+        .await
+        .map(drop)
+    }
+
+    /// A regenerated chain refuses to record itself over columns that differ
+    /// from it, rather than faking them; the same schema still converges.
+    #[cfg(feature = "sqlite")]
+    async fn column_drift_is_refused(pool: &Pool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent = table("cd_parent", None);
+        let child = |len: u32, nullable: bool, default: Option<&str>, unique: bool, del: &str| {
+            json!({ "name": "cd_child", "model": "cd_child", "fields": [
+                { "name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true },
+                { "name": "name", "column": "name", "ty": "string", "max_length": len,
+                  "nullable": nullable, "primary_key": false, "default": default },
+                { "name": "code", "column": "code", "ty": "string", "max_length": 20,
+                  "nullable": true, "primary_key": false, "unique": unique },
+                { "name": "p_id", "column": "p_id", "ty": "i64", "nullable": true,
+                  "primary_key": false,
+                  "fk": { "kind": "fk", "to": "cd_parent", "on": "id", "on_delete": del } },
+            ] })
+        };
+        let ops = vec![
+            json!({ "CreateTable": "cd_parent" }),
+            json!({ "CreateTable": "cd_child" }),
+        ];
+        let snap =
+            json!({ "tables": [parent.clone(), child(40, false, Some("'n'"), true, "CASCADE")] });
+        let dir = |name: &str, snap: Value| {
+            let dir = tmp.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            file::write(
+                &dir.join(format!("{name}.json")),
+                &mig(name, None, snap, ops.clone()),
+            )
+            .unwrap();
+            dir
+        };
+        run_system(pool, &SystemChain::shipped(dir("0001_cd", snap.clone())))
+            .await
+            .unwrap();
+        run_system(pool, &SystemChain::regenerated(dir("0001_cd_same", snap)))
+            .await
+            .expect("the schema the chain built has no drift");
+        let changed = json!({ "tables": [parent, child(60, true, None, false, "SET NULL")] });
+        let err = run_system(pool, &SystemChain::regenerated(dir("0001_cd_new", changed)))
+            .await
+            .expect_err("changed columns are refused, not faked");
+        let msg = err.to_string();
+        let mut wanted = vec![
+            "`cd_child.name` nullability: NOT NULL in the database, nullable",
+            "`cd_child.name` default: a DEFAULT in the database, no DEFAULT",
+            "`cd_child.code` uniqueness: UNIQUE in the database, not UNIQUE",
+            "`cd_child.p_id` ON DELETE: CASCADE in the database, SET NULL",
+        ];
+        // SQLite keeps no VARCHAR length.
+        if pool.dialect().name() != "sqlite" {
+            wanted.push("`cd_child.name` max_length: 40 in the database, 60");
+        }
+        for want in wanted {
+            assert!(
+                msg.contains(want),
+                "{}: {want}\n{msg}",
+                pool.dialect().name()
+            );
+        }
+        let applied = runner::applied_set_pool_with_ledger(pool, runner::SYSTEM_LEDGER_TABLE)
+            .await
+            .unwrap();
+        assert!(!applied.contains("0001_cd_new"), "{applied:?}");
+    }
+
+    // SQLite (in memory) is always reachable when compiled in, so the test
+    // never runs with nothing to check.
+    #[cfg(feature = "sqlite")]
+    #[tokio::test]
+    async fn regenerated_chain_refuses_column_drift() {
+        use crate::testkit::matrix::{Backend, OwnDatabase};
+        let mut ran = 0;
+        for backend in [Backend::Postgres, Backend::MySql, Backend::Sqlite] {
+            let Some(admin) = backend.pool().await else {
+                continue;
+            };
+            let db = OwnDatabase::on(&admin).await;
+            column_drift_is_refused(&db.pool).await;
+            ran += 1;
+        }
+        assert!(ran > 0, "no backend compiled in");
+    }
+
+    /// A dir left or planted under the old guessable name is never read;
+    /// the scratch dir is owner-only and gone once dropped.
+    #[test]
+    fn scratch_dir_is_fresh_and_private() {
+        let pid = std::process::id();
+        let planted: Vec<_> = (0..256)
+            .map(|n| std::env::temp_dir().join(format!("rustango_system_scoped_{pid}_{n}")))
+            .collect();
+        let bad = mig("0099_planted", None, json!({ "tables": [] }), vec![]);
+        for p in &planted {
+            std::fs::create_dir_all(p).unwrap();
+            file::write(&p.join("0099_planted.json"), &bad).unwrap();
+        }
+        let step = mig("0001_sys", None, json!({ "tables": [] }), vec![]);
+        let scratch = Scratch::write(std::slice::from_ref(&step));
+        // Read before the planted dirs go, as the old code ran in one of them.
+        let listed = scratch.as_ref().ok().map(|s| file::list_dir(s.path()));
+        for p in &planted {
+            let _ = std::fs::remove_dir_all(p);
+        }
+        let scratch = scratch.expect("scratch dir");
+        let path = scratch.path().to_path_buf();
+        let names: Vec<String> = listed
+            .expect("scratch dir")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        assert_eq!(names, ["0001_sys"], "{}", path.display());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o700, "{}", path.display());
+        }
+        drop(scratch);
+        assert!(!path.exists());
     }
 
     #[cfg(feature = "sqlite")]

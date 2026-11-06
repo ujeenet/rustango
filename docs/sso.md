@@ -42,7 +42,8 @@ unknown email; that is off by default.)
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), the link
 > table `rustango::sso::link` (`SsoLink`, `ProviderKey`, `sign_in`), the
 > bare-admin wiring `rustango::admin::sso`, per-tenant/console SSO
-> `rustango::tenancy::sso` (`SharedSsoProvider`), and member SSO
+> (shared providers: the registry table `rustango_shared_sso_providers`,
+> edited in the operator console), and member SSO
 > `rustango::tenancy::member_auth`.
 
 ## Callback URLs
@@ -170,6 +171,23 @@ The tenant-wide settings, one row.
 | `default_provider` | Slug of the provider the sign-in page opens straight away, except at `?local=1` or after an error. |
 | `signups_per_hour` | Most SSO sign-ups per hour. Empty: 100; `0`: no limit. |
 
+### `SsoLandingRule`
+
+Where a sign-in without `?next=` lands. Rules run in `position` order and the
+first match wins. The login gate keeps `next` for every page it bounces, so the
+rules apply when the sign-in has no `next`, for example one started at the
+login page. They apply to SSO and password sign-ins on the tenant admin
+and the bare admin; member sign-in ignores them. A rule whose path fails the
+`next` check (say the login page) is skipped. A missing table means no rules.
+
+| Field | What to enter |
+|---|---|
+| `position` | Rules are tried from the lowest number up and the first match wins. Equal numbers go by id. |
+| `match_kind` | `role`: the user holds the role in `match_value` (never on the bare admin, which has no roles). `claim`: the SSO sign-in carries claim `match_name` with `match_value`, read like a role-map claim. `any`: every sign-in; put it last as the default. |
+| `match_name` | The claim name, for `claim` rules only. Empty for the others. |
+| `match_value` | The role name (`role`) or the claim value (`claim`), matched exactly. Empty for `any`. |
+| `landing_url` | A path on this site starting with `/`, as on the tenant's own host, e.g. `/admin/reports`. A path prefix is added for you. Not access control: the page must check permissions itself. |
+
 ### `SsoSharedOverride`
 
 A tenant's narrowing of one shared provider. Empty fields keep the shared
@@ -221,9 +239,9 @@ auto-admin, so an end-user (member) login can build without pulling in
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.63", features = ["admin-sso"] }
+rustango = { version = "0.64", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.63", features = ["tenancy", "sso"] }
+rustango = { version = "0.64", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` and the historical `admin::sso::*` core paths are
@@ -261,9 +279,12 @@ feature emits an `AddColumn` / `DropColumn` migration for that column.
 On the tenant admin, `GET <login>/sso/<slug>?next=/path` lands on `/path`
 after sign-in. The path rides in the signed flow cookie and passes the same
 check as the password login: same-origin only, and inside the tenant's path
-prefix. Anything else lands on `admin_url`. The login page passes its own
-`?next` on to the SSO buttons. The bare admin does the same without the prefix
-rule, keeps the path through the TOTP step, and falls back to its prefix.
+prefix. Without a usable `next`, the tenant's
+[landing rules](#ssolandingrule) decide, and with no match the sign-in lands on
+`admin_url`. The login page passes its own `?next` on to the SSO buttons, and
+never makes one up. The bare admin does
+the same without the prefix rule, keeps the path through the TOTP step, and
+falls back to its prefix.
 
 The link table is a normal migrated model: in the tenant's storage for
 tenant logins, and in the admin database for the bare admin. A link is
@@ -387,10 +408,12 @@ Differences from the admin flow:
   and links it. An email that matches an existing account follows the
   `allow_email_link` rule above. Set it to `false` to refuse unknown
   emails. A native sign-in (an app that verified its own ID token) calls
-  `find_or_provision_member` directly, with `ProviderKey::app(issuer)` as
-  the key. Its `MemberSignIn` result is `Member(id)`, `NotLinked` (an
-  account has the email but may not be linked by it), `NoAccount`,
-  `Inactive`, `Unverified` or `Refused`.
+  `sso::policy::admit` with `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` and
+  `tenancy::member_auth::TenantAccounts(pool)`; the `EffectivePolicy` it
+  passes is the sign-in policy, so put its rules there. The deprecated
+  `find_or_provision_member` still applies a tenant provider's rules, but an
+  app key has none: with `auto_provision` it signs up any verified email.
 - **Its own session cookie.** The member cookie
   (`rustango_member_session`) is **domain-separated** from the tenant /
   admin session cookies: the signed message carries a per-domain tag and
@@ -591,7 +614,8 @@ with Apple isn't a preset; it needs id_token/JWKS verification.)
 - **No privileged email links** — a superuser is never linked by email;
   a role holder only with `allow_email_link_staff`. A link made by email
   keeps working after the user is promoted; delete it if that is not wanted.
-- **No auto-provisioning** for the admins — an unknown email can't get in.
+- **No auto-provisioning on the bare admin** — an unknown email can't get in.
+  A tenant admin provider signs people up only when its `signup_mode` says so.
 - **Secrets encrypted at rest** (`RUSTANGO_SECRET_KEY`), decrypted only
   in memory at login; edit forms mask the stored secret.
 - The flow cookie is short-lived (10 min), `HttpOnly`, `SameSite=Lax`,

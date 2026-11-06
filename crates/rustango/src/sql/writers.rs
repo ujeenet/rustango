@@ -374,6 +374,8 @@ impl<'d> Sql<'d> {
                     start + kw.len(),
                     " /*+ SET_VAR(group_concat_max_len = 4294967295) */",
                 );
+                // MariaDB ignores the hint (1 MiB cap) and takes SET STATEMENT.
+                self.sql.insert_str(0, &group_concat_statement_prefix());
             }
         }
         Ok(CompiledStatement {
@@ -381,6 +383,19 @@ impl<'d> Sql<'d> {
             params: self.params,
         })
     }
+}
+
+/// What a GROUP_CONCAT statement starts with: MariaDB's `SET STATEMENT`,
+/// which must stay first, so an `EXPLAIN` goes after it.
+pub(crate) fn group_concat_statement_prefix() -> String {
+    let mut sql = String::new();
+    super::mysql::ByServer {
+        mysql: "",
+        mariadb: "SET STATEMENT group_concat_max_len=4294967295 FOR",
+    }
+    .write(&mut sql);
+    sql.push(' ');
+    sql
 }
 
 /// The `::TYPE` a bind for a column gets on Postgres.
@@ -406,6 +421,15 @@ pub(super) fn null_cast_for(
         }
     }
     d.null_cast(field.ty).map(BindCast::Untyped)
+}
+
+/// SQL has no `IN ()`: an empty `IN` matches no row, an empty `NOT IN` every row.
+fn write_empty_in(b: &mut Sql<'_>, op: Op) {
+    b.sql.push_str(if matches!(op, Op::NotIn) {
+        "1 = 1"
+    } else {
+        "1 = 0"
+    });
 }
 
 /// The right side of `IN` / `NOT IN`. Where arrays bind, a list of one
@@ -472,20 +496,25 @@ fn array_bindable(elements: &[SqlValue]) -> bool {
 /// A SELECT that may correlate to the enclosing query through `OuterRef`.
 pub(super) fn write_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
     let scope = b.correlated_scope(query.model);
-    write_select_as(b, query, scope)
+    // Only the outermost SELECT may widen its select list (#2567).
+    let top_level = b.scope_stack.is_empty();
+    write_select_as(b, query, scope, top_level)
 }
 
 /// A derived-table SELECT, which cannot see the query it feeds.
 fn write_derived_select(b: &mut Sql<'_>, query: &SelectQuery) -> Result<(), SqlError> {
-    write_select_as(b, query, Scope::plain(query.model))
+    write_select_as(b, query, Scope::plain(query.model), false)
 }
 
-fn write_select_as(b: &mut Sql<'_>, query: &SelectQuery, scope: Scope) -> Result<(), SqlError> {
-    // Only the outermost SELECT may widen its select list (#2567).
-    let top_level = b.scope_stack.is_empty();
+fn write_select_as(
+    b: &mut Sql<'_>,
+    query: &SelectQuery,
+    scope: Scope,
+    order_helpers: bool,
+) -> Result<(), SqlError> {
     b.scope_stack.push(scope);
     let result = if query.compound.is_empty() {
-        write_select_inner(b, query, top_level)
+        write_select_inner(b, query, order_helpers)
     } else {
         write_compound_select(b, query)
     };
@@ -1010,7 +1039,17 @@ fn write_subquery_joins(
                     dialect: b.d.name(),
                 });
             }
-            b.sql.push_str(" LATERAL");
+            if b.d.name() == "mysql" {
+                // MariaDB has no LATERAL: its syntax error names the reason.
+                b.sql.push(' ');
+                super::mysql::ByServer {
+                    mysql: "LATERAL",
+                    mariadb: "~ LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB",
+                }
+                .write(&mut b.sql);
+            } else {
+                b.sql.push_str(" LATERAL");
+            }
         }
         b.sql.push_str(" (");
         // The subquery writers push their own scope frame, so an
@@ -1190,7 +1229,20 @@ fn write_select_body_qualified(
         } else {
             &query.order_by
         };
-    write_order_limit_offset(b, order_by, query.limit, query.offset)?;
+    if order_helpers && needs_helpers {
+        // PG matches an expression to its helper by text, which differs
+        // once it binds a value, so sort by the helper's name.
+        write_order_limit_offset_with(b, order_by, query.limit, query.offset, |b, i, item| {
+            if helper_expr(item).is_some() {
+                b.write_ident(&format!("__rustango_order{i}"));
+                Ok(())
+            } else {
+                write_order_target(b, item)
+            }
+        })?;
+    } else {
+        write_order_limit_offset(b, order_by, query.limit, query.offset)?;
+    }
 
     if let Some(lock) = &query.lock_mode {
         write_lock_clause(b, lock);
@@ -1248,15 +1300,34 @@ fn distinct_order_helpers(
                     .any(|j| j.alias == *alias && j.project.contains(column));
                 (!projected).then(|| (i, expr.clone()))
             }
-            OrderItem::Column { column, .. } => {
+            OrderItem::Column { column, .. }
+            | OrderItem::Expr {
+                expr: Expr::Column(column),
+                ..
+            } => {
                 let projected = query
                     .projection
                     .as_ref()
                     .is_none_or(|cols| cols.contains(column));
                 (!projected).then_some((i, Expr::Column(column)))
             }
-            _ => None,
+            _ => helper_expr(item).map(|expr| (i, expr.clone())),
         })
+}
+
+/// An ORDER BY expression that is not a plain column: under DISTINCT it
+/// always gets a helper, and the ORDER BY names that helper.
+fn helper_expr(item: &crate::core::OrderItem) -> Option<&crate::core::Expr> {
+    use crate::core::{Expr, OrderItem};
+    match item {
+        OrderItem::Expr {
+            expr: Expr::Column(_) | Expr::AliasedColumn { .. },
+            ..
+        }
+        | OrderItem::Column { .. }
+        | OrderItem::Random => None,
+        OrderItem::Expr { expr, .. } => Some(expr),
+    }
 }
 
 /// Emit `FOR UPDATE [NO KEY] [OF t1, t2] [SKIP LOCKED | NOWAIT]` for
@@ -1341,7 +1412,8 @@ fn write_from_source(
     b.sql.push_str(" FROM ");
     if let Some(sub) = source {
         b.sql.push('(');
-        write_derived_select(b, sub)?;
+        // The outer query reads named columns, so DISTINCT's helpers are safe.
+        write_select_as(b, sub, Scope::plain(sub.model), true)?;
         b.sql.push_str(") AS ");
         b.write_ident(scope.name);
     } else {
@@ -1629,6 +1701,39 @@ fn render_agg_order_by(b: &Sql<'_>, order_by: &[crate::core::OrderClause]) -> St
     s
 }
 
+/// What an `AnyValue` call aggregates over.
+#[derive(Clone, Copy)]
+enum AnyValueArg {
+    /// A plain column.
+    Column,
+    /// The `CASE WHEN <filter> THEN col END` stand-in for `FILTER`,
+    /// which yields NULL for every rejected row.
+    FilterCase,
+}
+
+/// The one writer for `AnyValue`. PG 16+ and MySQL have `any_value()`;
+/// SQLite and MariaDB use `min()`, as any value satisfies the contract.
+/// Over a filter CASE every dialect uses `MIN`, which skips the NULLs
+/// that `ANY_VALUE` may return.
+fn any_value_call(b: &Sql<'_>, arg: &str, kind: AnyValueArg) -> String {
+    if let AnyValueArg::FilterCase = kind {
+        return format!("MIN({arg})");
+    }
+    match b.d.name() {
+        "mysql" => {
+            let mut sql = String::new();
+            super::mysql::ByServer {
+                mysql: &format!("ANY_VALUE({arg})"),
+                mariadb: &format!("MIN({arg})"),
+            }
+            .write(&mut sql);
+            sql
+        }
+        "sqlite" => format!("min({arg})"),
+        _ => format!("any_value({arg})"),
+    }
+}
+
 /// Build the bare aggregate call for a flat variant, with no cast.
 /// It returns the string instead of writing it, so the caller can put
 /// it inside a `FILTER` clause and then apply [`apply_agg_cast`].
@@ -1644,16 +1749,7 @@ fn format_bare_aggregate(b: &Sql<'_>, expr: &AggregateExpr) -> Result<String, Sq
         AggregateExpr::Avg(col) => format!("AVG({})", col_sql(col)),
         AggregateExpr::Max(col) => format!("MAX({})", col_sql(col)),
         AggregateExpr::Min(col) => format!("MIN({})", col_sql(col)),
-        AggregateExpr::AnyValue(col) => {
-            // PG 16+ and MySQL have `any_value()`. SQLite does not,
-            // so use `min()`: any value satisfies the contract.
-            let ident = col_sql(col);
-            match b.d.name() {
-                "mysql" => format!("ANY_VALUE({ident})"),
-                "sqlite" => format!("min({ident})"),
-                _ => format!("any_value({ident})"),
-            }
-        }
+        AggregateExpr::AnyValue(col) => any_value_call(b, &col_sql(col), AnyValueArg::Column),
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
@@ -1887,7 +1983,7 @@ fn write_aggregate_kind(b: &mut Sql<'_>, expr: &AggregateExpr) -> Result<(), Sql
 
 /// MySQL stand-in for `<inner> FILTER (WHERE p)`, written as
 /// `<agg>(CASE WHEN p THEN <arg> END)`. `COUNT(*)` uses `THEN 1`,
-/// every other aggregate uses `THEN <col>`.
+/// every other aggregate uses `THEN <col>`; `AnyValue` becomes `MIN`.
 fn write_aggregate_as_case_when(
     b: &mut Sql<'_>,
     inner: &AggregateExpr,
@@ -1901,7 +1997,8 @@ fn write_aggregate_as_case_when(
         AggregateExpr::Avg(col) => ("AVG", Some(*col), ""),
         AggregateExpr::Max(col) => ("MAX", Some(*col), ""),
         AggregateExpr::Min(col) => ("MIN", Some(*col), ""),
-        AggregateExpr::AnyValue(col) => ("ANY_VALUE", Some(*col), ""),
+        // Wrapped by `any_value_call` below.
+        AggregateExpr::AnyValue(col) => ("", Some(*col), ""),
         AggregateExpr::StdDev(col)
         | AggregateExpr::StdDevPop(col)
         | AggregateExpr::Variance(col)
@@ -1930,10 +2027,9 @@ fn write_aggregate_as_case_when(
             });
         }
     };
+    // Write the CASE in place so its binds keep their text order, then
+    // lift it out to wrap it in the aggregate call and cast.
     let prior = b.sql.len();
-    b.sql.push_str(agg_kw);
-    b.sql.push('(');
-    b.sql.push_str(distinct_prefix);
     b.sql.push_str("CASE WHEN ");
     write_where_expr(b, filter, None)?;
     b.sql.push_str(" THEN ");
@@ -1941,13 +2037,18 @@ fn write_aggregate_as_case_when(
         Some(col) => b.write_scope_col(col),
         None => b.sql.push('1'),
     }
-    b.sql.push_str(" END)");
-    if let Some(kind) = aggregate_cast_kind(b, inner) {
-        let emitted = b.sql[prior..].to_string();
-        b.sql.truncate(prior);
-        let wrapped = apply_agg_cast(b.d, kind, &emitted);
-        b.sql.push_str(&wrapped);
-    }
+    b.sql.push_str(" END");
+    let case = b.sql[prior..].to_string();
+    b.sql.truncate(prior);
+    let call = match inner {
+        AggregateExpr::AnyValue(_) => any_value_call(b, &case, AnyValueArg::FilterCase),
+        _ => format!("{agg_kw}({distinct_prefix}{case})"),
+    };
+    let out = match aggregate_cast_kind(b, inner) {
+        Some(kind) => apply_agg_cast(b.d, kind, &call),
+        None => call,
+    };
+    b.sql.push_str(&out);
     Ok(())
 }
 
@@ -2680,6 +2781,84 @@ fn write_sqlite_json_value_eq(
 /// is standard SQL, accepted as-is by PG 9.0+, MySQL 8.0+ and
 /// SQLite 3.25+.
 fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(), SqlError> {
+    let start = b.sql.len();
+    let p0 = b.params.len();
+    write_window_call(b, w)?;
+    if b.d.name() == "mysql" {
+        write_mariadb_lag_default(b, w, start, p0)?;
+    }
+    Ok(())
+}
+
+/// MariaDB's LAG / LEAD take no default, so its arm picks the default by
+/// row position. Only when the default holds the call's one bind: both
+/// arms must bind the same values in the same order.
+fn write_mariadb_lag_default(
+    b: &mut Sql<'_>,
+    w: &crate::core::WindowExpr,
+    start: usize,
+    p0: usize,
+) -> Result<(), SqlError> {
+    use crate::core::{Expr, WindowFn};
+    let (Some(x), Some(Expr::Literal(SqlValue::I64(n))), Some(d), 3) =
+        (w.args.first(), w.args.get(1), w.args.get(2), w.args.len())
+    else {
+        return Ok(());
+    };
+    if !matches!(w.kind, WindowFn::Lag | WindowFn::Lead) || *n < 0 {
+        return Ok(());
+    }
+    let call_params = b.params.len() - p0;
+    let piece = |b: &mut Sql<'_>, write: &dyn Fn(&mut Sql<'_>) -> Result<(), SqlError>| {
+        let (at, pm) = (b.sql.len(), b.params.len());
+        write(b)?;
+        let text = b.sql[at..].to_owned();
+        let binds = b.params.len() - pm;
+        b.sql.truncate(at);
+        b.params.truncate(pm);
+        Ok::<_, SqlError>((text, binds))
+    };
+    let (x, x_binds) = piece(b, &|b| write_expr(b, x, None))?;
+    let (d, d_binds) = piece(b, &|b| write_expr(b, d, None))?;
+    let (spec, _) = piece(b, &|b| {
+        write_window_spec(b, w, true, false);
+        Ok(())
+    })?;
+    let (part, _) = piece(b, &|b| {
+        write_window_spec(b, w, false, false);
+        Ok(())
+    })?;
+    if x_binds != 0 || d_binds != call_params {
+        return Ok(());
+    }
+    // A JSON default carries its own per-server comments: read each arm
+    // as its server would, so neither arm holds a `*/`.
+    use super::mysql::resolve_by_server as resolve;
+    let my = resolve(&b.sql[start..], false);
+    let maria = [&x, &d, &spec, &part].map(|t| resolve(t, true));
+    let (Some(mysql), [Some(x), Some(d), Some(spec), Some(part)]) = (my, maria) else {
+        return Ok(());
+    };
+    let maria = match w.kind {
+        WindowFn::Lag => format!(
+            "(CASE WHEN ROW_NUMBER() OVER ({spec}) > {n} \
+             THEN LAG({x}, {n}) OVER ({spec}) ELSE {d} END)"
+        ),
+        _ => format!(
+            "(CASE WHEN COUNT(*) OVER ({part}) - ROW_NUMBER() OVER ({spec}) >= {n} \
+             THEN LEAD({x}, {n}) OVER ({spec}) ELSE {d} END)"
+        ),
+    };
+    b.sql.truncate(start);
+    super::mysql::ByServer {
+        mysql: &mysql,
+        mariadb: &maria,
+    }
+    .write(&mut b.sql);
+    Ok(())
+}
+
+fn write_window_call(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(), SqlError> {
     use crate::core::{Expr, WindowFn};
     let fn_name = match w.kind {
         WindowFn::RowNumber => "ROW_NUMBER",
@@ -2726,6 +2905,13 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         write_expr(b, arg, None)?;
     }
     b.sql.push_str(") OVER (");
+    write_window_spec(b, w, true, true);
+    b.sql.push(')');
+    Ok(())
+}
+
+/// `PARTITION BY … [ORDER BY …] [frame]`, the inside of `OVER (…)`.
+fn write_window_spec(b: &mut Sql<'_>, w: &crate::core::WindowExpr, order: bool, frame: bool) {
     let mut first_clause = true;
     if !w.partition_by.is_empty() {
         b.sql.push_str("PARTITION BY ");
@@ -2738,7 +2924,7 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         }
         first_clause = false;
     }
-    if !w.order_by.is_empty() {
+    if order && !w.order_by.is_empty() {
         if !first_clause {
             b.sql.push(' ');
         }
@@ -2754,14 +2940,12 @@ fn write_window_expr(b: &mut Sql<'_>, w: &crate::core::WindowExpr) -> Result<(),
         }
         first_clause = false;
     }
-    if let Some(frame) = &w.frame {
+    if let Some(f) = w.frame.as_ref().filter(|_| frame) {
         if !first_clause {
             b.sql.push(' ');
         }
-        write_window_frame(b, frame);
+        write_window_frame(b, f);
     }
-    b.sql.push(')');
-    Ok(())
 }
 
 fn write_window_frame(b: &mut Sql<'_>, frame: &crate::core::WindowFrame) {
@@ -4785,6 +4969,13 @@ fn write_expr_compare(
             write_like(b, &lhs_str, ty, v.clone(), negated, escaped);
             return Ok(());
         }
+        // SQLite's LIKE ignores case, and only a literal can become a GLOB.
+        if b.d.name() == "sqlite" {
+            return Err(SqlError::OpNotSupportedInDialect {
+                op: "case-sensitive LIKE with non-literal RHS",
+                dialect: b.d.name(),
+            });
+        }
         let p_start = b.sql.len();
         write_expr(b, rhs, None)?;
         let p = b.sql.split_off(p_start);
@@ -4843,7 +5034,8 @@ fn write_expr_compare(
                 return Err(SqlError::InRequiresList);
             };
             if elements.is_empty() {
-                return Err(SqlError::EmptyInList);
+                write_empty_in(b, op);
+                return Ok(());
             }
             write_expr(b, lhs, None)?;
             write_in_list(b, op, elements, None);
@@ -5204,10 +5396,11 @@ fn write_filter(
                 return Err(SqlError::InRequiresList);
             };
             if elements.is_empty() {
-                return Err(SqlError::EmptyInList);
+                write_empty_in(b, filter.op);
+            } else {
+                b.sql.push_str(&qualified_col);
+                write_in_list(b, filter.op, elements, cast);
             }
-            b.sql.push_str(&qualified_col);
-            write_in_list(b, filter.op, elements, cast);
         }
         Op::Between | Op::NotBetween => {
             let SqlValue::List(bounds) = &filter.value else {

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use rustango::sql::{sqlx, Auto};
+use rustango::sql::sqlx;
 use rustango::tenancy::{Org, TenantPools};
 use tower::ServiceExt as _;
 
@@ -55,26 +55,11 @@ async fn org(reg: &Registry, display_name: &str) -> String {
         "sqlite://{}?mode=rwc",
         reg.tmp.path().join(format!("{slug}.db")).display()
     );
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: display_name.to_owned(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(tenant_url),
-        schema_name: None,
-        host_pattern: Some(format!("{slug}.localhost")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = Org::new(slug.clone());
+    org.display_name = display_name.to_owned();
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(tenant_url);
+    org.host_pattern = Some(format!("{slug}.localhost"));
     org.insert(&reg.pools.registry_pool())
         .await
         .expect("seed org");

@@ -150,6 +150,52 @@ untouched.
 
 ## Unreleased
 
+## 0.64.0
+
+- Resource caps, all configurable: `FileCache` keeps 100 000 entries / 1 GiB and drops the oldest; `DatabaseCache` purges expired rows every 256 writes; `/refresh` allows 30 per user per minute (429 past it); a full `InMemoryJtiStore` (1 000 000) refuses refreshes and revocations; ViewSet lists answer 400 past offset 10 000; tenant pool builds past 16 at once or 600 a minute answer 503; `/ready` answers are reused for 1 s; the server holds 10 000 connections (`RUSTANGO_MAX_CONNECTIONS`); a recursive media listing over 100 000 collections is a 400. `0` lifts most caps.
+- `auth_routes::Config` gains `refresh_per_minute` and `TenantPoolsConfig` gains `max_concurrent_pool_builds` / `max_pool_builds_per_minute`: add `..Default::default()` to struct literals. `TenantRejection` and `DatabaseTenantRejection` gain `Busy` and are `#[non_exhaustive]`; `TenancyError` gains `PoolBusy`.
+- `tenancy::server::run` is deprecated (removed in 0.66.0): it skips the `[security]` / `[server]` layers. Serve through `manage::Cli` (`run-server`) or `server::Builder`.
+- HMAC clients of a path-prefix tenant sign the full URL path, prefix included (`/acme/webhooks`), as they see it.
+- Tenancy apps: `[admin] read_only_tables` now makes those tables read-only in the tenant admin, and `allowed_tables` hides the others. Check both lists before you deploy.
+- `RouteConfig::operator_session_ttl` now ends operator-console sessions; its default is 12 h (it said 7 days and did nothing). Values above 12 h are cut to 12 h.
+- `tenancy::manage::run` no longer serves `run-server`: serve with `manage::Cli::new().tenancy()`.
+- `RouteConfig::basic_auth_realm` and `ServerConfig::operator_show_only` are gone: delete them from struct literals. `JtiBlacklist::end_session` returns a `bool` (`#[must_use]`).
+- `makemigrations` refuses a renamed table (a dropped table beside a new one with the same columns). Write the `RenameTable` it names in a `makemigrations --empty` file, or pass `--drop-and-add` to drop the old table on purpose.
+- `Dialect`'s `drop_foreign_key_sql`, `drop_check_constraint_sql`, `drop_unique_index_sql`, `add_unique_constraint_sql` and comment statements take a `sql::TableTarget`: pass `TableTarget::bare(table)` where you passed `table`.
+- `migrate <target>` refuses a target an applied squash replaces; target the squash instead. `unapply` / `unapply_force` refuse a migration that is not in the ledger (they used to run its inverse anyway).
+- The deprecated items announced as removed in 0.64.0 (`register_tx_action*`, `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate`, `media::media_router`) are still here; they go in 0.65.0.
+- `find_or_provision_member` (deprecated) now enforces a tenant provider's rules, and with a shared or admin key it only links, never provisions. Move to `sso::policy::admit`.
+- `server::Builder` refuses to start, and `check --deploy` errors, when a registered model has a sealed (`EncryptedString`) field and `RUSTANGO_SECRET_KEY` is unset outside the dev and test tiers (`sso` registers one). Set the key; it used to panic at the first write.
+- `Cache` gains `delete_prefixes(&[&str])`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
+- Path-prefix tenants: app routes now see the path without the prefix (`/about`, not `/acme/about`). Drop routes you registered under `/{prefix}/…`; read the prefix from the `TenantPathPrefix` extension or the full path from `OriginalUri`.
+- `Cache` gains `delete_prefixes`, defaulting to one `delete_prefix` per prefix. A cache wrapper should forward it so the backend can batch.
+- On MariaDB a `NOT NULL` generated column is now created nullable (MariaDB has no `NOT NULL` there); MySQL, PostgreSQL and SQLite keep it.
+- New tenant table `rustango_sso_landing_rules`: run `makemigrations` and `migrate`. Until then sign-ins land as before.
+- Tenant keys of the app cache, locks, idempotency, page cache, `KeyBy::Tenant` rate limits, sessions and flag overrides move to `tenant:#org:<id>:<slug>:<area>:<rest>`; login throttle, lockout and MCP key-cache keys do not. Tenant app (`ScopedCache`) entries move to the `app` area and miss once; rename keys if you use it as a durable store. Page-cache and `KeyBy::Tenant` counters restart once; sessions and flag overrides keep their keys.
+- Tenant locks move to `tenant:<ns>:lock:<name>` and idempotency entries to `tenant:<ns>:idem:<sha>`. Until 0.65.0 this release also takes the old lock key and reads and writes the old idempotency entries and markers, so a 0.63 and a 0.64 pod never run one request or job twice; deploy 0.64 everywhere before 0.65.0. The purge cannot reach the hashed old idempotency copies; they expire with their TTL.
+- A global key name (app, lock, idempotency, page, rate limit, session, flag) starting with `tenant:` or `~` is stored with a `~` in front, so it can never land in a tenant's keyspace or its 0.63 lock key.
+- Tenant idempotency entries take 2x cache memory and twice the round trips until 0.65.0 (the 0.63 copy). Once every pod runs 0.64 and one TTL has passed, `IdempotencyLayer::legacy_keys(false)` drops the copy.
+- During a rolling deploy, `KeyBy::Tenant` limits count per version (a tenant has two budgets), and a page invalidation on a 0.63 pod is not seen by 0.64 pods until the entry's TTL. A 0.64 invalidation also bumps the 0.63 counter. The purge cannot reach the 0.63 idempotency copies and page counters; they keep their TTL.
+- `CacheScope::global(root).app().clear()` (and a global request's `app().clear()`) returns `CacheError::Refused`: it would wipe every tenant. Call the root cache's `clear()` if you mean it. `CacheError` gains `Refused`.
+- `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` are deprecated (removed in 0.66.0): use `CacheScope::for_tenant(cache, &tenant).app()` or `.locks()`; for `scoped`, put the namespace in the lock name.
+- `Org` is `#[non_exhaustive]`, so `Org { .. }` literals and `..testkit::org()` no longer compile outside rustango. Use `let mut o = Org::new(slug); o.field = …;` or `testkit::org_with(|o| o.field = …)`. Fields stay public.
+- Jobs can override `Job::run_with(&self, ctx: &JobCtx)` to read the job id, attempt and stop signal; jobs with only `run` need no change.
+- Without the `tenancy` feature, a ViewSet with `permissions(...)` codenames now panics at mount (it answered 403 to every gated request). Put your own auth layer in front and use `allow_anonymous`, or `read_only`.
+- `startapp --into <dir>` now means `src/<dir>/`, in the tenancy CLI too (it used to be relative to the project root). Run it from a workspace member's directory instead of `--into crates/web`.
+- `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is now applied; a value that is not a whole number of seconds of at least 1 stops the server.
+- `soft_delete` / `restore` (and `_on`) take `&mut self`: make the binding `mut`. They now set the soft-delete field on success.
+- `save()` on a PK with no row returns `ExecError::Driver(sqlx::Error::RowNotFound)` instead of `Ok(0)`. Call `insert` for a new row with a manual PK.
+- Inside `atomic(&pool, …)`, ORM writes given the same pool now join the block and roll back with it. A write while you hold `tx.lock()` returns `NestedAtomic`: drop the guard first. Reads on the pool still do not see the block's uncommitted writes.
+- `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` with every `Auto` PK set now write the PK (it was dropped and the rows inserted again); a mix of set and unset is refused.
+- A filter, search or autocomplete value with a NUL byte now gets a 400 on MySQL and SQLite too (it matched nothing). An admin computed-field `link` that is not a `/` path or an `http(s):` URL renders as plain text.
+- `migrate` with a regenerated system chain (no `system/migrations/` shipped) now stops when a framework column differs from the framework schema (nullability, `max_length`, DEFAULT, UNIQUE, ON DELETE) and lists each one; it used to mark the chain applied. Fix the columns by hand, or ship `system/migrations/`, then rerun.
+- `.aggregate().annotate(..)` with no `.values()` / `.group_by()` now returns one summary row. For a row per record with its columns, call `.annotate(..)` on the queryset.
+- `flip_order_by()` under `distinct_on` flips only the DISTINCT ON keys.
+- An empty `IN` list no longer returns `SqlError::EmptyInList`; it matches no row (`NOT IN`: every row).
+- `where_raw`, `where_(Q::..)` and their nested predicates now fail at `compile()` with `UnknownField` / `TypeMismatch` on a bad column or value type. `Q` takes column names (`author_id`, not `author`).
+- On SQLite, `LIKE` against a column or expression returns `OpNotSupportedInDialect`; match a literal pattern instead.
+- `refresh_from_db` and `fresh` now find a row outside the model's global scopes.
+
 ## 0.63.0
 
 - `dumpdata` now errors on a cell it cannot decode (a column whose type no longer matches the model) and on NaN or infinite floats; it used to write `null`. Fix the column or `--exclude` the model. A `dumpdata -o` file is now owner-only on Unix.
@@ -175,9 +221,9 @@ untouched.
 - `mcp::pagination` is private; the MCP `*/list` handlers still paginate. Use `rustango::pagination` in your own endpoints.
 - `Dialect` is sealed: only rustango's PostgreSQL, MySQL and SQLite dialects implement it, so a downstream `impl Dialect` no longer compiles (none could reach a `Pool`). Calling its methods is unchanged.
 - `InsertReturningPool` is hidden from the docs: it is plumbing for the derive and may change without notice.
-- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work, are deprecated and are removed in 0.64.0.
+- Bulk admin actions: move from `register_tx_action(t, n, |tx, pks| …)` to `register_action(t, n, ActionPerm::Change, |mut ctx| …)` and use `ctx.tx()` / `ctx.pks()`. The old methods still work, are deprecated and are removed in 0.65.0.
 - `ModelFormError::Database`'s `Display` is now `database error`. Log the error with `{:?}` or its `source()` to keep the driver detail.
-- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay deprecated one more minor and are removed in 0.64.0.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay deprecated one more minor and are removed in 0.65.0.
 
 ## 0.62.0
 
@@ -253,7 +299,7 @@ untouched.
 - `sql::bulk_insert_on` and the derive's `bulk_insert_on` take any `SqlExecutor`: a `&Pool`, a held `PoolConn`, a `PoolTx`, or a Postgres sqlx executor. Past the bind cap they write in chunks inside one transaction; a raw sqlx executor cannot, so it refuses there.
 - UpdateView's `object` holds only its field list and the primary key, and the bulk-delete confirm `objects` only the ListView `.fields()` and the key. A template that reads another column lists it with `UpdateView::context_fields`.
 - ViewSets now enforce every `register_object_permission!` hook and `register_queryset_scope!` scope on their table; `admin_add_hooks()` is removed. An API that guards rows itself calls `.skip_object_permissions()`.
-- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.64.0. `ObjectPermission` gains `origin`: build it with the macro.
+- Rename `register_admin_object_permission!` to `register_object_permission!` and `register_admin_queryset!` to `register_queryset_scope!`; the old names warn until 0.65.0. `ObjectPermission` gains `origin`: build it with the macro.
 - A hook that read `admin::session::is_superuser` should call `object_permissions::is_superuser`, which also accepts API superusers and never an agent or a credential for another tenant.
 - `ViewSet::for_model` panics on `rustango_api_keys` and `rustango_agents`.
 - A ViewSet page or offset list under a `view` hook is a 400 past `view_hook_scan_cap` rows; add a queryset scope or use cursor pagination for big tables.

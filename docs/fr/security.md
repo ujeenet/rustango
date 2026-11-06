@@ -48,6 +48,10 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Les tenants à préfixe de chemin partagent une origine avec la console
+opérateur : voir [Noms d'hôte](operator-console.md). En production, préférez un
+hôte par tenant.
+
 ---
 
 ## Définir les en-têtes de sécurité
@@ -184,13 +188,13 @@ En cas d'épuisement : `429 Too Many Requests` avec l'en-tête `Retry-After`. Ch
 
 ### Limites de connexion intégrées
 
-Chaque connexion par mot de passe intégrée (admin, console opérateur, admin de tenant, JWT `/auth/login`) passe par `rustango::login_throttle` avant la recherche de l'utilisateur. Il vérifie, dans l'ordre, un verrou par nom d'utilisateur (5 échecs, 15 min) qui compte les noms inconnus comme les vrais, une limite par IP (20 connexions échouées/min ; en IPv6, par /64) et une limite globale par point de connexion (600 connexions échouées/min chacun pour l'admin, la console opérateur et chaque tenant). Une connexion réussie ne compte pas dans les limites. Un nom d'utilisateur qui s'est connecté depuis une IP au cours des 30 derniers jours passe outre une limite globale épuisée depuis cette IP, pour qu'une attaque depuis de nombreuses IP ne puisse pas verrouiller tous les utilisateurs ; sa limite par IP et son verrou par nom d'utilisateur s'appliquent toujours. Une fois la ligne utilisateur trouvée, le verrou suit aussi le nom d'utilisateur stocké, de sorte que les graphies que la base considère égales (MySQL fait correspondre `alicé` à `alice`) partagent un même verrou. HTTP Basic et les clés d'API ont leur propre portée et ne comptent que les échecs. Une connexion refusée reçoit `429` avec `Retry-After`, et la même réponse que le compte existe ou non.
+Chaque connexion par mot de passe intégrée (admin, console opérateur, admin de tenant, JWT `/auth/login`) passe par `rustango::login_throttle` avant la recherche de l'utilisateur. Il vérifie, dans l'ordre, un verrou par nom d'utilisateur (5 échecs, 15 min) qui compte les noms inconnus comme les vrais, une limite par IP (20 connexions échouées/min ; en IPv6, par /64) et une limite globale par point de connexion (600 connexions échouées/min chacun pour l'admin, la console opérateur et chaque tenant). Une connexion réussie ne compte pas dans les limites. Un nom d'utilisateur qui s'est connecté depuis une IP au cours des 30 derniers jours passe outre une limite globale épuisée depuis cette IP, pour qu'une attaque depuis de nombreuses IP ne puisse pas verrouiller tous les utilisateurs. Depuis cette IP, il compte aussi sur son propre verrou par nom d'utilisateur, de sorte que les mauvais mots de passe d'un autre client ne le verrouillent pas ; sa limite par IP s'applique toujours. Une fois la ligne utilisateur trouvée, le verrou suit aussi le nom d'utilisateur stocké, de sorte que les graphies que la base considère égales (MySQL fait correspondre `alicé` à `alice`) partagent un même verrou. HTTP Basic et les clés d'API ont leur propre portée et ne comptent que les échecs. Une connexion refusée reçoit `429` avec `Retry-After`, et la même réponse que le compte existe ou non.
 
 Derrière un reverse proxy, montez `RealIpLayer` avec vos proxys comme ci-dessus ; une application `Cli` appelle plutôt `Cli::with_trusted_proxies(["127.0.0.1/32"])?`. Sans cela, chaque client a l'adresse du proxy et partage un seul compartiment par IP ; un avertissement est journalisé une fois quand des en-têtes de transfert arrivent.
 
 Le hachage des mots de passe exécute au plus une tâche par CPU, partagée par toutes les connexions ; HTTP Basic, les clés d'API et les secrets d'agent peuvent utiliser au plus la moitié des créneaux. Une connexion qui attend un créneau plus de `hash_wait_ms` (5 s) reçoit `503` avec `Retry-After`, pour les utilisateurs connus comme inconnus.
 
-Réglez-les sous `[auth]` : `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Une valeur définie dans le code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) l'emporte sur ces clés. Les compartiments par IP et global sont propres au processus, sauf si vous installez `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, qui les compte par fenêtres fixes dans un cache partagé (en cas d'erreur du cache, les deux retombent sur le processus ; une rafale à cheval sur une limite de fenêtre peut atteindre deux fois une limite ; des applications partageant un cache partagent les compteurs, sauf si chacune utilise son propre `ScopedCache`) ; la première connexion journalise un avertissement tant qu'ils sont propres au processus. Le verrou par nom d'utilisateur utilise `account_lockout::shared()`, que vous pouvez adosser à un cache partagé via `account_lockout::configure_shared`. Les échecs sont comptés dans une fenêtre fixe (1 heure par défaut) qui commence au premier échec : un attaquant dispose donc de `lockout_threshold - 1` essais par fenêtre sans verrou ; les limites par IP et globale bornent le reste.
+Réglez-les sous `[auth]` : `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Une valeur définie dans le code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) l'emporte sur ces clés. Les compartiments par IP et global sont propres au processus, sauf si vous installez `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, qui les compte par fenêtres fixes dans un cache partagé (en cas d'erreur du cache, les deux retombent sur le processus ; une rafale à cheval sur une limite de fenêtre peut atteindre deux fois une limite ; des applications partageant un cache partagent les compteurs, sauf si chacune utilise son propre `ScopedCache`) ; la première connexion journalise un avertissement tant qu'ils sont propres au processus. Le verrou par nom d'utilisateur utilise `account_lockout::shared()`, que vous pouvez adosser à un cache partagé via `account_lockout::configure_shared`. Les échecs sont comptés dans une fenêtre fixe (1 heure par défaut) qui commence au premier échec : un attaquant dispose donc de `lockout_threshold - 1` essais par fenêtre sans verrou ; les limites par IP et globale bornent le reste. Les clés `[auth]` sont appliquées par `manage::Cli` quand il charge les réglages ; une app qui construit `server::Builder` sans lui appelle plutôt les fonctions.
 
 **Champ de connexion.** Les utilisateurs d'un tenant se connectent avec leur nom d'utilisateur, sauf avec `[auth] login_field = "email"` (ou `Cli::login_field(LoginField::Email)` / `server::Builder::login_field`, qui l'emportent sur la clé). L'e-mail demande la feature `sso`, qui ajoute la colonne `email`. L'e-mail est comparé sans tenir compte de la casse sur chaque backend, dans le formulaire de connexion du tenant (libellé « Email »), en HTTP Basic et sur `/auth/login` (`{"username": …}` ou `{"email": …}`), et le verrou de connexion ci-dessus suit l'e-mail enregistré. Chaque utilisateur a besoin de son propre e-mail : un utilisateur sans e-mail ne peut pas se connecter, et un e-mail que deux utilisateurs partagent (casse ignorée) ne connecte aucun des deux. Le serveur journalise au démarrage chaque tenant qui a de tels utilisateurs ; il avertit au lieu de refuser de démarrer, pour que les données d'un tenant ne bloquent pas tous les tenants. `create-user --email` le définit.
 
@@ -340,7 +344,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 L'authentification est la manière dont vous confirmez qui effectue une requête. **Rustango** fournit trois backends prêts à l'emploi (Basic auth, clés d'API et JWT) et vous laisse écrire les vôtres en implémentant un seul trait. Vous les attachez aux routes, et les requêtes sans identifiant reconnu reçoivent un `401`.
 
-> **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. Il connecte le compte lié au subject de l'IdP (la liaison par email est optionnelle par fournisseur et ne s'applique jamais aux superusers ni au staff ; pas d'auto-provisionnement) et réutilise la session existante.
+> **SSO admin.** Pour permettre aux opérateurs de se connecter à l'admin avec un IdP externe (Google, Microsoft/Azure AD, GitHub, ou tout fournisseur OpenID Connect) au lieu d'un mot de passe, activez la feature `admin-sso` — voir le [guide SSO](sso.md). Les fournisseurs sont **gérés depuis l'interface admin sous forme de lignes** (plusieurs par surface ; par tenant, ou un ensemble partagé entre tenants), avec le secret client **chiffré au repos**. Il connecte le compte lié au subject de l'IdP (la liaison par email est optionnelle par fournisseur et ne s'applique jamais aux superusers ni au staff ; le bare admin n'inscrit jamais personne, un fournisseur de l'admin de tenant seulement selon son `signup_mode`) et réutilise la session existante.
 
 ### Trois backends prêts à l'emploi
 
@@ -513,7 +517,7 @@ if !verify_key_async(secret, &row.hash).await? {
 }
 ```
 
-Ces clés fonctionnent directement avec le `ApiKeyBackend` de la multi-tenancy — les deux utilisent le même format `{prefix}.{secret}` avec des secrets hachés en argon2id, de sorte qu'une clé émise ici s'authentifie là-bas sans travail supplémentaire.
+Ces clés fonctionnent directement avec le `ApiKeyBackend` de la multi-tenancy — les deux utilisent le même format `{prefix}.{secret}`. Le backend stocke un HMAC-SHA256 du secret (`hmac-sha256v2$…`) ; il accepte aussi un hash argon2id issu d'`api_keys` et le remplace par le HMAC au premier usage, de sorte qu'une clé émise ici s'authentifie là-bas sans travail supplémentaire.
 
 ---
 
@@ -789,7 +793,7 @@ Vérifications `--deploy` supplémentaires (durcissement pour la production) :
 
 Renvoie un code de sortie non nul en cas de constat de **niveau erreur** (idéal pour les gates de CI). Les avertissements ne déclenchent pas d'échec mais s'affichent dans la sortie.
 
-Pour des vérifications au-delà de ce qui est fourni, étendez avec du code personnalisé dans votre binaire `manage` avant de transmettre à `manage::run`.
+Pour des vérifications au-delà de ce qui est fourni, enregistrez votre propre verbe avec `register_command!` et lancez-le à côté de `check --deploy`.
 
 ---
 

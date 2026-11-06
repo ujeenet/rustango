@@ -194,10 +194,17 @@ mod scenarios {
             .await
             .expect("delete behind the instance's back");
         stale.qty = 99;
-        // #1029 — a 0-row UPDATE now surfaces as `Ok(0)`, where it
-        // used to be a silent `Ok(())`.
-        let affected = stale.save(pool).await.expect("save on a stale row");
-        assert_eq!(affected, 0, "stale-row save affected zero rows");
+        // A save whose PK matches no row is `RowNotFound`.
+        let err = stale.save(pool).await;
+        assert!(
+            matches!(
+                err,
+                Err(rustango::sql::ExecError::Driver(
+                    rustango::sql::sqlx::Error::RowNotFound
+                ))
+            ),
+            "stale-row save: {err:?}"
+        );
         assert_eq!(
             Sku::objects()
                 .filter("code", "stale")

@@ -137,7 +137,7 @@ async fn incr_covers_the_full_i64_range(pool: &Pool) {
 /// `ensure_table` adds the `expires` index it scans by (#1906).
 async fn purge_is_batched_and_indexed(pool: &Pool) {
     let table = "rustango_cache_purge";
-    let cache = fresh(pool, table).await;
+    let cache = fresh(pool, table).await.purge_every(0);
     cache
         .ensure_table()
         .await
@@ -164,6 +164,31 @@ async fn purge_is_batched_and_indexed(pool: &Pool) {
 
     assert_eq!(index_count(pool, format!("{table}_expires_idx")).await, 1);
     let _ = cache.drop_table().await;
+}
+
+/// Writes purge expired rows on their own, so keys nobody reads again do not pile up.
+async fn writes_purge_expired_rows(pool: &Pool) {
+    for (every, left) in [(4, 1), (0, 4)] {
+        let table = format!("rustango_cache_autopurge_{every}");
+        let cache = fresh(pool, &table).await.purge_every(every);
+        for i in 0..3 {
+            let ttl = Some(Duration::from_millis(1));
+            cache.set(&format!("old{i}"), "v", ttl).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(row_count(pool, &table).await, 3);
+        // The fourth write runs one purge batch; `0` never purges.
+        cache.set("live", "v", None).await.unwrap();
+        assert_eq!(row_count(pool, &table).await, left, "purge_every({every})");
+        assert!(cache.exists("live").await.unwrap());
+        let _ = cache.drop_table().await;
+    }
+}
+
+async fn row_count(pool: &Pool, table: &str) -> i64 {
+    let sql = format!("SELECT COUNT(*) FROM {}", pool.dialect().quote_ident(table));
+    let rows: Vec<(i64,)> = raw_query_pool(&sql, vec![], pool).await.unwrap();
+    rows[0].0
 }
 
 async fn index_count(pool: &Pool, index: String) -> i64 {
@@ -264,6 +289,7 @@ tri_dialect_test! {
         incr_covers_the_full_i64_range,
         incr_rules_match_every_backend,
         purge_is_batched_and_indexed,
+        writes_purge_expired_rows,
         index_failure_is_not_fatal,
         long_table_names_get_distinct_indexes,
     ],

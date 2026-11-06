@@ -376,7 +376,7 @@ This trips people up, so it's worth stating plainly:
 | Method | Behaviour |
 |---|---|
 | `save(&mut self, &pool)` | **INSERT** if the `Auto` PK is `Unset`, otherwise **UPDATE** |
-| `insert(&self, &pool)` | always **INSERT** |
+| `insert(&mut self, &pool)` (`&self` with no `Auto` field) | always **INSERT** |
 
 For the default `Auto<i64>` PK, `save` does the right thing automatically.
 For an **application-assigned PK** (a `String`/`Uuid` you set yourself), there's

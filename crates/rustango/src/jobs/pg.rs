@@ -83,8 +83,8 @@ use sqlx::PgPool;
 use tokio::sync::{Mutex, Notify};
 
 use super::{
-    DeadLetterFn, HandlerRegistry, Job, JobDeadLetter, JobError, JobQueue, Next, Registered,
-    Running, StopSignal, DEFAULT_SHUTDOWN_GRACE,
+    DeadLetterFn, HandlerRegistry, Job, JobCtx, JobDeadLetter, JobError, JobId, JobQueue, Next,
+    Registered, Running, StopSignal, DEFAULT_SHUTDOWN_GRACE,
 };
 use crate::sql::Pool;
 
@@ -760,7 +760,7 @@ async fn worker_loop(
             // Stop fired during the pick: hand the row back unrun.
             Ok(Some(row)) if stop.is_set() => unpick(&pool, &worker, row.id).await,
             Ok(Some(row)) => {
-                run_one(&pool, &registry, &dead_letter, &worker, row).await;
+                run_one(&pool, &registry, &dead_letter, &worker, row, &stop).await;
                 // Loop again immediately — there might be more.
             }
             Ok(None) => {
@@ -804,6 +804,8 @@ struct PickedJob {
     payload: Value,
     attempt: i32,
     max_attempts: i32,
+    /// Set at dispatch; with `id` it names the job even across a recreated table.
+    created_at: Option<DateTime<Utc>>,
     /// The enqueuer's context, empty on a table without the column.
     context: crate::task_context::TaskContext,
 }
@@ -817,9 +819,9 @@ async fn pick_one(
     use crate::task_context::TaskContext;
     let now: DateTime<Utc> = Utc::now();
     let cols = if with_context {
-        "id, name, payload, attempt, max_attempts, context"
+        "id, name, payload, attempt, max_attempts, created_at, context"
     } else {
-        "id, name, payload, attempt, max_attempts"
+        "id, name, payload, attempt, max_attempts, created_at"
     };
     match pool {
         #[cfg(feature = "postgres")]
@@ -851,6 +853,7 @@ async fn pick_one(
                 payload: row.try_get("payload")?,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                created_at: decode_created_at(row.try_get("created_at")),
                 context: TaskContext::from_stored(if with_context {
                     decode_context(row.try_get("context"))
                 } else {
@@ -909,6 +912,7 @@ async fn pick_one(
                 payload: payload_json.0,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                created_at: decode_created_at(row.try_get("created_at")),
                 context: TaskContext::from_stored(context.map(|c| c.0)),
             }))
         }
@@ -960,12 +964,20 @@ async fn pick_one(
                 payload,
                 attempt: row.try_get("attempt")?,
                 max_attempts: row.try_get("max_attempts")?,
+                created_at: decode_created_at(row.try_get("created_at")),
                 context: TaskContext::from_stored(
                     context.and_then(|c| serde_json::from_str(&c).ok()),
                 ),
             }))
         }
     }
+}
+
+/// The row is already locked here: an unreadable `created_at` only narrows
+/// the job id to the row id.
+fn decode_created_at(got: Result<DateTime<Utc>, sqlx::Error>) -> Option<DateTime<Utc>> {
+    got.map_err(|e| tracing::warn!(error = %e, "unreadable job created_at"))
+        .ok()
 }
 
 /// The row is already locked here: a bad `context` value must not stop
@@ -983,6 +995,7 @@ async fn run_one(
     dead_letter: &Arc<Mutex<Option<DeadLetterFn>>>,
     worker: &Worker,
     job: PickedJob,
+    stop: &StopSignal,
 ) {
     let entry = registry.lock().await.lookup(&job.name);
     let Some(entry) = entry else {
@@ -1003,12 +1016,12 @@ async fn run_one(
     }
 
     // The enqueuer's context, as `InMemoryJobQueue` does (#1229).
-    // `attempt` counts this run, so the run's 0-based number is one less.
-    let failed = runs.saturating_sub(1);
+    // `attempt` already counts this run; the row outlives its retries.
+    let ctx = JobCtx::new(JobId::of_row(job.id, job.created_at), runs, stop.clone());
     let run = job
         .context
         .clone()
-        .install((entry.handler)(job.payload.clone(), failed));
+        .install((entry.handler)(job.payload.clone(), ctx));
     let (outcome, held) = run_with_heartbeat(pool, worker, job.id, run).await;
     if !held {
         // Another worker may own the row now; its outcome is not ours to write.

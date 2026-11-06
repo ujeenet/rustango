@@ -14,6 +14,7 @@
 //! * [`parse_page`] / [`page_offset`] — `?page=N` and its overflow-safe offset.
 //! * [`split_in_list`] — a `__in` value, capped at [`MAX_IN_VALUES`];
 //!   [`in_values_budget`] caps all lists of a request together.
+//! * [`reject_nul`] — refuses a filter or search value holding `\0`.
 //!
 //! Each layer still builds its own WHERE clause, because viewset
 //! supports a richer filter syntax than the CBV.
@@ -27,6 +28,7 @@
 //! [`split_in_list`]: crate::list_params::split_in_list
 //! [`MAX_IN_VALUES`]: crate::list_params::MAX_IN_VALUES
 //! [`in_values_budget`]: crate::list_params::in_values_budget
+//! [`reject_nul`]: crate::list_params::reject_nul
 
 use std::collections::HashMap;
 
@@ -70,12 +72,17 @@ pub fn is_reserved_list_key(key: &str) -> bool {
 ///
 /// The result is empty when nothing survives, and the caller should
 /// then fall back to its default ordering.
+///
+/// A column is kept at its first mention only, and at most
+/// [`MAX_ORDERING_TERMS`] columns are kept, so a long query string
+/// cannot build a huge `ORDER BY`.
 #[must_use]
 pub fn parse_ordering(
     raw: &str,
     allowlist: &[String],
     schema: &'static ModelSchema,
 ) -> Vec<OrderItem> {
+    let mut seen: Vec<&'static str> = Vec::new();
     raw.split(',')
         .filter(|s| !s.is_empty())
         .filter_map(|part| {
@@ -87,12 +94,20 @@ pub fn parse_ordering(
             if !allowlist.iter().any(|f| f == field_name) {
                 return None;
             }
-            schema
-                .field(field_name)
-                .map(|f| OrderItem::column(f.column, desc))
+            let column = schema.field(field_name)?.column;
+            // A later term on the same column cannot change the order.
+            if seen.contains(&column) {
+                return None;
+            }
+            seen.push(column);
+            Some(OrderItem::column(column, desc))
         })
+        .take(MAX_ORDERING_TERMS)
         .collect()
 }
+
+/// Most `?ordering=` columns [`parse_ordering`] keeps.
+pub const MAX_ORDERING_TERMS: usize = 8;
 
 /// Work out the page size from `?page_size=N`.
 ///
@@ -179,6 +194,32 @@ pub fn page_offset(page: i64, page_size: i64) -> i64 {
         .saturating_mul(page_size.max(0))
 }
 
+/// A filter or search value holding a NUL byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct NulInValue;
+
+impl std::fmt::Display for NulInValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a query value must not contain a NUL byte")
+    }
+}
+
+impl std::error::Error for NulInValue {}
+
+/// `value`, unless it holds `\0`. Postgres refuses NUL in text, so every
+/// backend answers 400 for it rather than PG alone failing with a 500.
+///
+/// # Errors
+/// [`NulInValue`] when `value` contains a NUL byte.
+pub fn reject_nul(value: &str) -> Result<&str, NulInValue> {
+    if value.contains('\0') {
+        Err(NulInValue)
+    } else {
+        Ok(value)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +238,40 @@ mod tests {
         assert!(parse_ordering("secret,-secret", &[], schema).is_empty());
         let allowed = parse_ordering("-secret", &["secret".to_owned()], schema);
         assert_eq!(allowed.len(), 1);
+    }
+
+    /// Repeats collapse to the first mention, and at most eight columns sort.
+    #[test]
+    fn parse_ordering_dedups_and_caps() {
+        static FIELDS: &[crate::core::FieldSchema] = &[
+            crate::core::FieldSchema::new("a", "a", crate::core::FieldType::String),
+            crate::core::FieldSchema::new("b", "b", crate::core::FieldType::String),
+        ];
+        let mut schema = ModelSchema::new("lp_d", "lp_d");
+        schema.fields = FIELDS;
+        let schema: &'static ModelSchema = Box::leak(Box::new(schema));
+        let allow = ["a".to_owned(), "b".to_owned()];
+        let raw = ["-a"; 10_000].join(",") + ",b";
+        let got = parse_ordering(&raw, &allow, schema);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0], OrderItem::column("a", true));
+        assert_eq!(got[1], OrderItem::column("b", false));
+
+        let many: Vec<String> = (0..12).map(|i| format!("f{i}")).collect();
+        let fields: &'static [crate::core::FieldSchema] = Box::leak(
+            many.iter()
+                .map(|n| {
+                    let n: &'static str = Box::leak(n.clone().into_boxed_str());
+                    crate::core::FieldSchema::new(n, n, crate::core::FieldType::String)
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let mut wide = ModelSchema::new("lp_w", "lp_w");
+        wide.fields = fields;
+        let wide: &'static ModelSchema = Box::leak(Box::new(wide));
+        let got = parse_ordering(&many.join(","), &many, wide);
+        assert_eq!(got.len(), MAX_ORDERING_TERMS);
     }
 
     #[test]

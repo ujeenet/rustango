@@ -12,7 +12,7 @@ use std::time::Duration;
 use rustango::sql::{LoginPassword, Pool};
 use rustango::tenancy::db_server::{self, PasswordChange};
 use rustango::tenancy::{
-    BackendKind, DbServerError, DbServerSpec, Org, TenancyError, TenantPools, TlsMode,
+    BackendKind, DbServerError, DbServerSpec, TenancyError, TenantPools, TlsMode,
 };
 use rustango::tri_dialect_test;
 
@@ -464,13 +464,12 @@ async fn a_server_in_use_is_not_removed(pool: &Pool) {
         BackendKind::Sqlite => format!("sqlite://{}?mode=rwc", env.dir().join("acme.db").display()),
         _ => env.url.clone(),
     };
-    let mut org = Org {
-        slug: "acme".into(),
-        display_name: "acme".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(tenant_url),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "acme".into();
+        o.display_name = "acme".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(tenant_url);
+    });
     org.save(&env.registry).await.expect("insert org");
     let err = env
         .run(&["remove-db-server", "used"])
@@ -514,13 +513,12 @@ async fn an_unknown_tenant_url_blocks_removal(pool: &Pool) {
         ("lost", Some("env://RUSTANGO_DBS_UNSET_VAR_q7".to_owned())),
         ("blank", None),
     ] {
-        let mut org = Org {
-            slug: slug.into(),
-            display_name: slug.into(),
-            backend_kind: env.backend().as_str().into(),
-            database_url: url,
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.backend_kind = env.backend().as_str().into();
+            o.database_url = url;
+        });
         org.save(&env.registry).await.expect("insert org");
     }
     let err = env

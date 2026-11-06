@@ -276,6 +276,46 @@ pub async fn load_brand_asset(
     Ok((bytes, ct))
 }
 
+/// The `GET` response for a brand asset, streamed from storage so a
+/// request never buffers the whole file. Unknown or invalid names are a 404.
+pub(crate) async fn brand_asset_response(
+    slug: &str,
+    filename: &str,
+    storage: &BoxedStorage,
+    context: &str,
+) -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse as _;
+    let opened = async {
+        let key = storage_key(slug, filename)?;
+        let ct = content_type_for(filename).ok_or(BrandError::NotFound)?;
+        let body = storage.load_stream(&key).await.map_err(|e| match e {
+            StorageError::NotFound(_) => BrandError::NotFound,
+            other => other.into(),
+        })?;
+        Ok::<_, BrandError>((body, ct))
+    };
+    match opened.await {
+        Ok((body, ct)) => (
+            [
+                (header::CONTENT_TYPE, ct),
+                (header::CACHE_CONTROL, "public, max-age=300"),
+            ],
+            axum::body::Body::from_stream(body),
+        )
+            .into_response(),
+        Err(BrandError::NotFound | BrandError::InvalidSlug | BrandError::InvalidFilename) => {
+            (StatusCode::NOT_FOUND, "not found").into_response()
+        }
+        // Unauthenticated route; a storage error can name the bucket or path.
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            crate::error::server_error_body(context, &e),
+        )
+            .into_response(),
+    }
+}
+
 // ----- color + theme validators -------------------------------------
 
 /// Validate a `#RRGGBB` or `#RGB` hex color. Returns the lowercase
@@ -435,6 +475,59 @@ pub(crate) fn env_guard() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn assets_are_streamed_not_buffered() {
+        /// Storage whose whole-file `load` must not be called.
+        struct StreamOnly(crate::storage::InMemoryStorage);
+        #[async_trait::async_trait]
+        impl crate::storage::Storage for StreamOnly {
+            async fn save(&self, key: &str, data: &[u8]) -> Result<(), StorageError> {
+                self.0.save(key, data).await
+            }
+            async fn load(&self, _key: &str) -> Result<Vec<u8>, StorageError> {
+                panic!("brand assets must stream")
+            }
+            async fn load_stream(
+                &self,
+                key: &str,
+            ) -> Result<crate::storage::ByteStream, StorageError> {
+                Ok(self.0.load(key).await?.into())
+            }
+            async fn delete(&self, key: &str) -> Result<(), StorageError> {
+                self.0.delete(key).await
+            }
+            async fn exists(&self, key: &str) -> Result<bool, StorageError> {
+                self.0.exists(key).await
+            }
+            fn url(&self, _key: &str) -> Option<String> {
+                None
+            }
+        }
+        let storage: BoxedStorage = Arc::new(StreamOnly(crate::storage::InMemoryStorage::new()));
+        save_brand_asset(
+            "acme",
+            BrandAssetKind::Logo,
+            b"png!",
+            Some("image/png"),
+            &storage,
+        )
+        .await
+        .unwrap();
+        let ok = brand_asset_response("acme", "logo.png", &storage, "t").await;
+        assert_eq!(ok.status(), 200);
+        assert_eq!(ok.headers()["content-type"], "image/png");
+        let body = axum::body::to_bytes(ok.into_body(), 1024).await.unwrap();
+        assert_eq!(&body[..], b"png!");
+        for (slug, file) in [
+            ("acme", "favicon.ico"),
+            ("../x", "logo.png"),
+            ("acme", "a.exe"),
+        ] {
+            let r = brand_asset_response(slug, file, &storage, "t").await;
+            assert_eq!(r.status(), 404, "{slug}/{file}");
+        }
+    }
 
     #[tokio::test]
     async fn reupload_and_purge_leave_no_stale_brand_file() {

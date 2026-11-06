@@ -30,7 +30,7 @@ The name of a method tells you what it does. Once you learn these suffixes, you 
 ### Functions
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — the bare name takes a `rustango::sql::Pool` and is the everyday path. It works on Postgres, MySQL and SQLite, picking the dialect internally. This is what nearly all app code wants.
-- **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `aggregate` `fetch_on` take any `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) on all three backends; the rest of the `_on` family is still Postgres-only.
+- **`fetch_on(executor)`, `count_on(executor)`** — the `_on` suffix means "run this against the *executor* I'm handing you" — a connection or an open transaction rather than the pool. Reach for it when you need several statements inside one transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` and the `values` / `aggregate` `fetch_on` take any `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) on all three backends; so does the rest of the `_on` family.
 - **Writes follow the same rule.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` and `bulk_insert(rows, &pool)` take a `rustango::sql::Pool` on every backend; their `_on` forms take any `SqlExecutor`. An audited model refuses the `_on` forms, so use the `&pool` ones there. The old `_pool` names still compile but are deprecated.
 - **`from_X(value)`** — converts FROM another value (e.g. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — a builder method that sets one option and returns the object, so you can chain calls (e.g. `with_default_ttl(d)`, `with_access_ttl(secs)`).
@@ -291,7 +291,7 @@ into `default`, means anyone opting out has to know all thirty-eight.
 To trim a binary that doesn't need everything, opt out of the defaults and list only what you use:
 
 ```toml
-rustango = { version = "0.63", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.64", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

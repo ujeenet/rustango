@@ -268,6 +268,16 @@ impl TenantScope {
     }
 }
 
+/// The tenant argument a framework router's handlers take: `Tenant<DB>`
+/// serves one backend's context (the `_for::<DB>` routers), `TenantScope`
+/// any mounted one (the default routers).
+pub(crate) trait TenantArg<S>:
+    FromRequestParts<S> + Into<TenantScope> + Send + 'static
+{
+}
+
+impl<S, T> TenantArg<S> for T where T: FromRequestParts<S> + Into<TenantScope> + Send + 'static {}
+
 impl<DB: Database> From<Tenant<DB>> for TenantScope {
     fn from(t: Tenant<DB>) -> Self {
         Self {
@@ -299,6 +309,7 @@ impl Tenant<sqlx::Postgres> {
 
 /// Why the [`Tenant`] extractor failed.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TenantRejection {
     /// No `TenantContext` extension (nor, on SQLite / MySQL, a
     /// `DatabaseTenantContext`), so the server was not built with
@@ -309,6 +320,17 @@ pub enum TenantRejection {
     NotFound,
     /// The resolver or the pool acquire failed in the driver.
     Internal(String),
+    /// Too many tenant pools are being built: a 503 with `Retry-After`.
+    Busy,
+}
+
+impl From<TenancyError> for TenantRejection {
+    fn from(e: TenancyError) -> Self {
+        match e {
+            TenancyError::PoolBusy => Self::Busy,
+            e => Self::Internal(e.to_string()),
+        }
+    }
 }
 
 impl IntoResponse for TenantRejection {
@@ -325,6 +347,7 @@ impl IntoResponse for TenantRejection {
             Self::Internal(msg) => {
                 ApiError::logged(StatusCode::INTERNAL_SERVER_ERROR, "extractors::tenant", msg)
             }
+            Self::Busy => return TenancyError::pool_busy_response(),
         }
         .into_response()
     }
@@ -333,6 +356,14 @@ impl IntoResponse for TenantRejection {
 #[cfg(test)]
 mod rejection_tests {
     use super::*;
+
+    /// A refused cold pool build is a 503 the client can retry.
+    #[test]
+    fn a_busy_pool_build_is_a_503() {
+        let r = TenantRejection::from(TenancyError::PoolBusy).into_response();
+        assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(r.headers().contains_key(axum::http::header::RETRY_AFTER));
+    }
 
     /// A resolver failure is a 500 that withholds the driver text (#1193).
     #[tokio::test]
@@ -370,13 +401,12 @@ mod one_context_tests {
     }
 
     fn org(slug: &str) -> Org {
-        Org {
-            slug: slug.into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some("sqlite::memory:".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.slug = slug.into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some("sqlite::memory:".into());
+        })
     }
 
     fn secret() -> SessionSecret {
@@ -405,6 +435,22 @@ mod one_context_tests {
             .unwrap()
             .expect("an org")
             .slug
+    }
+
+    /// The dispatcher's org wins: under a stripped prefix the path names no tenant.
+    #[tokio::test]
+    async fn the_dispatched_org_wins_without_resolving_again() {
+        let mut p = parts();
+        p.extensions.insert(sqlite_ctx("from-the-path").await);
+        p.extensions
+            .insert(crate::tenancy::request_tenant::DispatchedOrg(org(
+                "dispatched",
+            )));
+        assert_eq!(auth_slug(&p).await, "dispatched");
+        let got = TenantScope::from_request_parts(&mut p, &())
+            .await
+            .map(|t| t.org.slug);
+        assert_eq!(got.ok().as_deref(), Some("dispatched"));
     }
 
     #[tokio::test]
@@ -466,7 +512,7 @@ async fn resolved_org(
     mounted
         .resolve(parts)
         .await
-        .map_err(|e| TenantRejection::Internal(e.to_string()))?
+        .map_err(TenantRejection::from)?
         .ok_or(TenantRejection::NotFound)
 }
 
@@ -483,7 +529,7 @@ where
         let pool = mounted
             .pool_for(&org)
             .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))?;
+            .map_err(TenantRejection::from)?;
         Ok(Self { org, pool })
     }
 }
@@ -505,7 +551,7 @@ where
         let org = resolved_org(mounted, parts).await?;
         Tenant::from_pools(org, &ctx.pools)
             .await
-            .map_err(|e| TenantRejection::Internal(e.to_string()))
+            .map_err(TenantRejection::from)
     }
 }
 
@@ -522,7 +568,7 @@ where
     DB: Database,
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
-    let internal = |e: TenancyError| TenantRejection::Internal(e.to_string());
+    let internal = TenantRejection::from;
     let mounted = super::MountedTenantContext::of(&parts.extensions)
         .ok_or(TenantRejection::MissingContext)?;
     let full = mounted.full::<DB>().cloned();

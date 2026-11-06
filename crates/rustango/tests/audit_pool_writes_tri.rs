@@ -206,7 +206,7 @@ async fn delete_writes_one_row(pool: &Pool) {
 }
 
 async fn no_row_changed_writes_no_audit_row(pool: &Pool) {
-    let note = insert_note(pool).await;
+    let mut note = insert_note(pool).await;
     assert_eq!(note.delete(pool).await.unwrap(), 1);
     assert_eq!(audit_rows(pool).await, 2);
     assert_eq!(note.delete(pool).await.unwrap(), 0);
@@ -274,7 +274,7 @@ async fn failed_pre_read_fails_the_save(pool: &Pool) {
 }
 
 async fn second_soft_delete_keeps_the_first_stamp(pool: &Pool) {
-    let note = insert_note(pool).await;
+    let mut note = insert_note(pool).await;
     assert_eq!(note.soft_delete(pool).await.unwrap(), 1);
     let first = Note::objects().fetch(pool).await.unwrap()[0].deleted_at;
     assert_eq!(note.soft_delete(pool).await.unwrap(), 0, "re-stamped");
@@ -863,9 +863,69 @@ async fn cascading_delete_waits_for_a_concurrent_writer(pool: &Pool) {
     assert_eq!(Book::objects().count(pool).await.unwrap(), 0, "cascaded");
 }
 
+/// Audited `&Pool` writes inside `atomic` join it: rolled back with their
+/// audit rows, or committed with them.
+async fn audited_writes_join_an_atomic_block(pool: &Pool) {
+    let note = insert_note(pool).await;
+    let pk = note.id.get().expect("pk").to_string();
+    let q = pool.clone();
+    let mut inner = note.clone();
+    let res: Result<(), rustango::sql::ExecError> = rustango::atomic!(pool, |_tx| {
+        inner.title = "rolled back".into();
+        inner.save(&q).await?;
+        inner.soft_delete(&q).await?;
+        Err(rustango::sql::ExecError::Sql(
+            rustango::sql::SqlError::EmptyInList,
+        ))
+    })
+    .await;
+    assert!(res.is_err());
+    let rows: Vec<Note> = Note::objects().fetch(pool).await.unwrap();
+    assert_eq!(rows[0].title, "hello", "the save committed");
+    assert!(rows[0].deleted_at.is_none(), "the soft delete committed");
+    assert_eq!(audit_rows(pool).await, 1, "their audit rows committed");
+
+    let q = pool.clone();
+    let mut inner = note.clone();
+    rustango::atomic!(pool, |_tx| {
+        inner.title = "kept".into();
+        inner.save(&q).await?;
+        Ok(())
+    })
+    .await
+    .expect("atomic");
+    let ops: Vec<String> = entries(pool, &pk)
+        .await
+        .into_iter()
+        .map(|e| e.operation)
+        .collect();
+    assert_eq!(ops, ["update", "create"]);
+}
+
+/// Saving a row that is gone is an error, with no audit row.
+async fn audited_save_of_a_missing_row_is_not_found(pool: &Pool) {
+    let mut note = insert_note(pool).await;
+    assert_eq!(note.delete(pool).await.unwrap(), 1);
+    note.title = "ghost".into();
+    let r = note.save(pool).await;
+    assert!(
+        matches!(
+            r,
+            Err(rustango::sql::ExecError::Driver(
+                rustango::sql::sqlx::Error::RowNotFound
+            ))
+        ),
+        "{r:?}"
+    );
+    assert_eq!(Note::objects().count(pool).await.unwrap(), 0);
+    assert_eq!(audit_rows(pool).await, 2);
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
+        audited_writes_join_an_atomic_block,
+        audited_save_of_a_missing_row_is_not_found,
         audited_on_writes_are_refused,
         tx_writes_are_audited,
         insert_records_the_assigned_pk,

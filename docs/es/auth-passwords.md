@@ -214,7 +214,7 @@ bloqueante, como máximo un trabajo por CPU a la vez.
 Un trabajo espera hasta `hash_wait()` un hueco libre (5 s por defecto,
 `DEFAULT_HASH_WAIT`) y luego falla con `PasswordError::Busy`. Responde con un
 503, igual para un usuario conocido y uno desconocido. Ajusta la espera con
-`[auth] hash_wait_ms` o `configure_hash_wait(duration)` al arrancar.
+`[auth] hash_wait_ms` o `configure_hash_wait(duration)` al arrancar. Las claves `[auth]` las aplica `manage::Cli` al cargar los ajustes; una app que construye `server::Builder` sin él llama a las funciones en su lugar.
 
 ---
 
@@ -224,7 +224,7 @@ Los hashes nuevos usan `argon2_params()`, por defecto `Argon2Params::DEFAULT`
 (m=19456 KiB, t=2, p=1). Súbelo con `[auth] argon2_memory_kib`,
 `argon2_iterations` y `argon2_parallelism`, o llama a
 `configure_argon2(Argon2Params::new(m, t, p)?)` al arrancar; un valor fijado en
-código gana sobre los ajustes. `Argon2Params::new` rechaza una combinación que
+código gana sobre los ajustes, y las claves solo se aplican vía `manage::Cli`. `Argon2Params::new` rechaza una combinación que
 argon2 no acepta.
 
 Los hashes antiguos siguen verificándose, porque su coste vive en la cadena PHC.

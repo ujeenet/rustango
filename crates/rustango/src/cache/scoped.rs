@@ -8,12 +8,12 @@
 //! folds a namespace into every key, so the call site cannot forget:
 //!
 //! ```ignore
-//! use rustango::cache::ScopedCache;
+//! use rustango::cache::CacheScope;
 //!
 //! // In a handler, from the Org the resolver already produced:
 //! let tenant = TenantSlug::of(&t.org).expect("a registry org");
-//! let cache = ScopedCache::for_tenant(shared_cache.clone(), &tenant);
-//! cache.set("stats:monthly", &json, ttl).await?;   // stored as `tenant:#org:7:acme:stats:monthly`
+//! let cache = CacheScope::for_tenant(shared_cache.clone(), &tenant).app();
+//! cache.set("stats:monthly", &json, ttl).await?;   // stored as `tenant:#org:7:acme:app:stats:monthly`
 //!
 //! // Invalidate just this tenant:
 //! cache.clear().await?;                            // other tenants keep their entries
@@ -36,9 +36,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::keyspace::{Area, KeySpace};
 use super::{BoxedCache, Cache, CacheError};
 
-/// The prefix `ScopedCache::for_tenant` puts before the tenant's namespace.
+/// The first part of every tenant key: `tenant:#org:<id>:<slug>:<area>:…`.
 pub const TENANT_PREFIX: &str = "tenant";
 
 /// A [`Cache`] view that namespaces every key. Cheap to clone.
@@ -48,6 +49,8 @@ pub struct ScopedCache {
     /// Includes the trailing separator, so mapping a key is one
     /// concat with no formatting choice per call.
     prefix: String,
+    /// Set for an area view: [`KeySpace::key`] maps each key.
+    space: Option<(KeySpace, Area)>,
 }
 
 impl ScopedCache {
@@ -61,15 +64,29 @@ impl ScopedCache {
         Self {
             prefix: format!("{}:", namespace.as_ref()),
             inner,
+            space: None,
         }
     }
 
-    /// Namespace `inner` for one tenant: `tenant:#org:<id>:<slug>:…`. The org id
-    /// keeps a tenant that reuses a purged slug out of the old one's entries.
+    /// The keys of `area` in `space`. A global app view keeps keys bare.
     #[cfg(feature = "tenancy")]
+    pub(crate) fn in_space(inner: BoxedCache, space: KeySpace, area: Area) -> Self {
+        Self {
+            prefix: space.key(area, ""),
+            inner,
+            space: Some((space, area)),
+        }
+    }
+
+    /// Namespace `inner` for one tenant's app keys: `tenant:#org:<id>:<slug>:app:…`.
+    #[cfg(feature = "tenancy")]
+    #[deprecated(
+        since = "0.64.0",
+        note = "use `CacheScope::for_tenant(inner, tenant).app()`; removed in 0.66.0"
+    )]
     #[must_use]
     pub fn for_tenant(inner: BoxedCache, tenant: &crate::tenancy::TenantSlug) -> Self {
-        Self::new(inner, format!("{TENANT_PREFIX}:{}", tenant.namespace()))
+        Self::in_space(inner, KeySpace::Tenant(tenant.clone()), Area::App)
     }
 
     /// The prefix every key gets, including its trailing separator.
@@ -86,7 +103,10 @@ impl ScopedCache {
     }
 
     fn k(&self, key: &str) -> String {
-        format!("{}{key}", self.prefix)
+        match &self.space {
+            Some((space, area)) => space.key(*area, key),
+            None => format!("{}{key}", self.prefix),
+        }
     }
 }
 
@@ -130,8 +150,15 @@ impl Cache for ScopedCache {
     }
 
     /// Clears **only this namespace**, via [`Cache::delete_prefix`]
-    /// on the inner cache.
+    /// on the inner cache. The global app view has no namespace, so it
+    /// refuses: that clear would wipe every tenant's keys.
     async fn clear(&self) -> Result<(), CacheError> {
+        if self.prefix.is_empty() {
+            return Err(CacheError::Refused(
+                "the global app cache has no prefix, so clear() would delete every                  tenant's sessions, locks and markers; call clear() on the root cache                  if that is what you mean"
+                    .to_owned(),
+            ));
+        }
         self.inner.delete_prefix(&self.prefix).await
     }
 
@@ -194,6 +221,12 @@ impl Cache for ScopedCache {
     /// `"<this>:x:"`.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
         self.inner.delete_prefix(&self.k(prefix)).await
+    }
+
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
+        let scoped: Vec<String> = prefixes.iter().map(|p| self.k(p)).collect();
+        let refs: Vec<&str> = scoped.iter().map(String::as_str).collect();
+        self.inner.delete_prefixes(&refs).await
     }
 }
 
@@ -271,10 +304,51 @@ mod tests {
     async fn a_reused_slug_does_not_see_the_purged_tenants_keys() {
         use crate::tenancy::TenantSlug;
         let shared = mem();
-        let old = ScopedCache::for_tenant(shared.clone(), &TenantSlug::new(1, "acme"));
-        let heir = ScopedCache::for_tenant(shared.clone(), &TenantSlug::new(2, "acme"));
+        let app = |id| KeySpace::Tenant(TenantSlug::new(id, "acme"));
+        let old = ScopedCache::in_space(shared.clone(), app(1), Area::App);
+        let heir = ScopedCache::in_space(shared.clone(), app(2), Area::App);
         old.set("k", "old", None).await.unwrap();
         assert_eq!(heir.get("k").await.unwrap(), None);
+    }
+
+    /// The deprecated `for_tenant` writes the new app layout.
+    #[cfg(feature = "tenancy")]
+    #[allow(deprecated)]
+    #[tokio::test]
+    async fn for_tenant_wraps_the_app_area() {
+        let shared = mem();
+        let t = crate::tenancy::TenantSlug::new(1, "acme");
+        let app = ScopedCache::for_tenant(shared.clone(), &t);
+        assert_eq!(app.prefix(), "tenant:#org:1:acme:app:");
+        app.set("k", "v", None).await.unwrap();
+        assert!(shared.exists("tenant:#org:1:acme:app:k").await.unwrap());
+    }
+
+    /// A global app view keeps keys bare but escapes `tenant:`, and refuses a
+    /// clear that would wipe every tenant.
+    #[cfg(feature = "tenancy")]
+    #[tokio::test]
+    async fn the_global_app_view_cannot_write_a_tenant_key() {
+        let shared = mem();
+        let app = ScopedCache::in_space(shared.clone(), KeySpace::Global, Area::App);
+        app.set("stats", "1", None).await.unwrap();
+        app.set("tenant:#org:1:acme:app:k", "forged", None)
+            .await
+            .unwrap();
+        assert!(shared.exists("stats").await.unwrap());
+        assert!(!shared.exists("tenant:#org:1:acme:app:k").await.unwrap());
+        assert_eq!(
+            app.get("tenant:#org:1:acme:app:k")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("forged")
+        );
+        assert!(matches!(app.clear().await, Err(CacheError::Refused(_))));
+        assert!(
+            shared.exists("stats").await.unwrap(),
+            "a global clear wiped the root"
+        );
     }
 
     /// Clearing `acme:` must not hit `acme-corp:`.

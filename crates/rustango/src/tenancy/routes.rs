@@ -42,11 +42,12 @@
 
 use std::time::Duration;
 
+/// Seconds that override [`RouteConfig::impersonation_ttl`] on the server.
+pub(crate) const IMPERSONATION_TTL_ENV: &str = "RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS";
+
 /// Apex / tenant URL prefixes. Every framework-internal URL is
 /// derived from this struct (login, logout, admin, audit, static
-/// asset paths, brand asset paths, plus the HTTP Basic auth
-/// realm string). Defaults match the pre-0.28 hardcoded values
-/// so existing apps don't break on upgrade.
+/// and brand asset paths), plus the session lifetimes.
 #[derive(Debug, Clone)]
 pub struct RouteConfig {
     /// URL of the login form / submit endpoint, on both the
@@ -98,22 +99,20 @@ pub struct RouteConfig {
     /// cookie (no `Domain=`) which Chromium accepts. Default
     /// `/_impersonation_handoff` (since v0.29).
     pub impersonation_handoff_url: String,
-    /// HTTP Basic auth realm. Used by the legacy
-    /// `protect_with_basic_auth` admin gate (pre-tenancy
-    /// projects); displayed by the browser's auth dialog.
-    /// Default `"Rustango Admin"`.
-    pub basic_auth_realm: String,
     /// Tenant-admin session lifetime. Default 7 days. Apps with
     /// tighter compliance requirements lower this; ones with
     /// a "remember me" UX raise it.
     pub tenant_session_ttl: Duration,
-    /// Operator-console session lifetime. Default 7 days.
+    /// Longest an operator-console session lasts from sign-in. Default
+    /// 12 hours, which is also the most: a longer value is cut to it. An
+    /// idle session still ends after 30 minutes.
     pub operator_session_ttl: Duration,
     /// Operator-as-superuser impersonation cookie lifetime.
     /// Default 1 hour. Short by design — long enough
     /// for a debugging session, short enough that an idle
     /// operator gets dropped before they can forget they're
-    /// impersonating.
+    /// impersonating. `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS`
+    /// overrides it when `server::Builder` assembles the server.
     pub impersonation_ttl: Duration,
 }
 
@@ -131,9 +130,8 @@ impl Default for RouteConfig {
             brand_url: "/_brand".to_owned(),
             change_password_url: "/change-password".to_owned(),
             impersonation_handoff_url: "/_impersonation_handoff".to_owned(),
-            basic_auth_realm: "Rustango Admin".to_owned(),
             tenant_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
-            operator_session_ttl: Duration::from_secs(7 * 24 * 60 * 60),
+            operator_session_ttl: Duration::from_secs(12 * 60 * 60),
             impersonation_ttl: Duration::from_secs(60 * 60),
         }
     }
@@ -203,6 +201,24 @@ impl RouteConfig {
         storage: &crate::storage::BoxedStorage,
     ) -> Option<String> {
         super::branding::brand_asset_url_at(self.brand_prefix(), slug, path, storage)
+    }
+
+    /// `self` with [`IMPERSONATION_TTL_ENV`] applied, when it is set.
+    ///
+    /// # Errors
+    /// The var is set but is not a whole number of seconds, or is `0`.
+    pub(crate) fn with_env_overrides(mut self) -> Result<Self, crate::env::EnvError> {
+        if let Some(secs) = crate::env::optional::<u32>(IMPERSONATION_TTL_ENV)? {
+            if secs == 0 {
+                return Err(crate::env::EnvError::Parse {
+                    name: IMPERSONATION_TTL_ENV.to_owned(),
+                    ty: "seconds",
+                    detail: "0 ends every impersonation at once; use 1 or more".to_owned(),
+                });
+            }
+            self.impersonation_ttl = Duration::from_secs(u64::from(secs));
+        }
+        Ok(self)
     }
 
     /// [`Self::brand_url`] without a trailing `/`, so links and routes never get `//`.
@@ -276,10 +292,9 @@ mod tests {
     /// Cookies scope to the prefix only when the request is under it.
     #[test]
     fn cookie_path_follows_the_request() {
-        let org = crate::tenancy::Org {
-            path_prefix: Some("/acme".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.path_prefix = Some("/acme".into());
+        });
         assert_eq!(cookie_path(&org, "/acme/__login"), "/acme");
         assert_eq!(cookie_path(&org, "/acmecorp/__login"), "/");
         assert_eq!(cookie_path(&crate::testkit::org(), "/acme/x"), "/");
@@ -332,7 +347,6 @@ mod tests {
         assert_eq!(r.brand_url, "/_brand");
         assert_eq!(r.change_password_url, "/change-password");
         assert_eq!(r.impersonation_handoff_url, "/_impersonation_handoff");
-        assert_eq!(r.basic_auth_realm, "Rustango Admin");
     }
 
     /// `friendly()` is now an alias for `default()` — same
@@ -376,7 +390,7 @@ mod tests {
     fn ttls_have_sensible_defaults() {
         let r = RouteConfig::default();
         assert_eq!(r.tenant_session_ttl.as_secs(), 7 * 24 * 60 * 60);
-        assert_eq!(r.operator_session_ttl.as_secs(), 7 * 24 * 60 * 60);
+        assert_eq!(r.operator_session_ttl.as_secs(), 12 * 60 * 60);
         assert_eq!(r.impersonation_ttl.as_secs(), 60 * 60);
     }
 }

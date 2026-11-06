@@ -174,6 +174,7 @@ ws.onmessage = (e) => { const t = JSON.parse(e.data); console.log('tick', t.valu
 | `.keepalive(Duration)` | 30 s | `Ping` interval, busy or idle; a peer silent for a whole interval after a ping is closed |
 | `.on_message(fn(&str) -> Option<String>)` | none | handle client→server text; return `Some(reply)` to echo **to that client only** (call `hub.broadcast(..)` for fan-out) |
 | `.max_message_bytes(n)` | 1 MiB | close the connection if a client message exceeds this |
+| `.max_connections(n)` | none | open sockets at most; past it `upgrade` answers 503 |
 
 **Slow consumers** don't get silently dropped: a lagging client is told it
 missed `n` messages so it can resync or carry on: it gets the text frame
@@ -223,7 +224,7 @@ buffer, and a client that falls further behind than `capacity` gets a
 
 ```toml
 # Cargo.toml — both are in Rustango's default set; list them if you slim features.
-rustango = { version = "0.63", features = ["sse", "websocket"] }
+rustango = { version = "0.64", features = ["sse", "websocket"] }
 ```
 
 - **`sse`** — the `EventBus` broadcast bus (no extra dependencies). Enough for

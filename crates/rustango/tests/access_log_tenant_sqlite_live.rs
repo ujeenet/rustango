@@ -44,16 +44,15 @@ async fn registry() -> (Pool, tempfile::TempDir) {
         .expect("framework tables");
     rustango::testkit::reset_org_cache();
     rustango::testkit::reset_registry_breaker();
-    let mut org = rustango::tenancy::Org {
-        id: rustango::sql::Auto::Unset,
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some("acme.app.test".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Unset;
+        o.slug = "acme".into();
+        o.display_name = "Acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some("acme.app.test".into());
+    });
     org.insert(&pool).await.expect("insert org");
     (pool, dir)
 }

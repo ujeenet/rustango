@@ -105,7 +105,12 @@ pub struct HealthRouter {
     include_db_probe: bool,
     /// Put each failing check's error text in the body. Off: it is logged only.
     show_errors: bool,
+    /// How long one `/ready` answer is reused. See [`Self::ready_cache`].
+    ready_cache: Duration,
 }
+
+/// One `/ready` answer and when it was made.
+type ReadyAnswer = Option<(Instant, StatusCode, Value)>;
 
 #[derive(Clone)]
 struct HealthState {
@@ -116,6 +121,9 @@ struct HealthState {
     show_errors: bool,
     /// When the last `SELECT 1` passed: a busy pool counts as up only shortly after.
     last_ping_ok: Arc<std::sync::Mutex<Option<Instant>>>,
+    ready_cache: Duration,
+    /// Held while the checks run, so concurrent probes share one run.
+    last_ready: Arc<tokio::sync::Mutex<ReadyAnswer>>,
 }
 
 /// How long a passed ping lets a fully busy pool count as up.
@@ -133,7 +141,16 @@ impl HealthRouter {
             per_check_timeout: Duration::from_secs(5),
             include_db_probe: true,
             show_errors: false,
+            ready_cache: Duration::from_secs(1),
         }
+    }
+
+    /// Reuse one `/ready` answer for `d` (default 1 second), so a flood of
+    /// probes runs the checks once per `d`. `Duration::ZERO` runs them every time.
+    #[must_use]
+    pub fn ready_cache(mut self, d: Duration) -> Self {
+        self.ready_cache = d;
+        self
     }
 
     /// Put each failing check's error in the `/ready` body. Errors can
@@ -286,6 +303,8 @@ impl HealthRouter {
             include_db_probe: self.include_db_probe,
             show_errors: self.show_errors,
             last_ping_ok: Arc::default(),
+            ready_cache: self.ready_cache,
+            last_ready: Arc::default(),
         };
         Router::new()
             .route(PROBE_PATHS[0], get(handle_live))
@@ -331,6 +350,23 @@ async fn handle_live() -> Response {
 }
 
 async fn handle_ready(State(state): State<HealthState>) -> Response {
+    if state.ready_cache.is_zero() {
+        let (status, body) = run_ready(&state).await;
+        return (status, Json(body)).into_response();
+    }
+    let mut last = state.last_ready.lock().await;
+    if let Some((at, status, body)) = last.as_ref() {
+        if at.elapsed() < state.ready_cache {
+            return (*status, Json(body.clone())).into_response();
+        }
+    }
+    let (status, body) = run_ready(&state).await;
+    *last = Some((Instant::now(), status, body.clone()));
+    (status, Json(body)).into_response()
+}
+
+/// Run every readiness check: the status and the JSON body.
+async fn run_ready(state: &HealthState) -> (StatusCode, Value) {
     let mut checks = serde_json::Map::new();
     let mut all_ok = true;
 
@@ -380,7 +416,7 @@ async fn handle_ready(State(state): State<HealthState>) -> Response {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-    (status, Json(body)).into_response()
+    (status, body)
 }
 
 /// Run `fut` under `timeout` and record how long it took.
@@ -534,6 +570,31 @@ mod tests {
         assert!(v["checks"]["always_ok"]["latency_ms"].is_number());
     }
 
+    /// Probes inside `ready_cache` reuse one run; `ZERO` runs every time.
+    #[tokio::test]
+    async fn ready_answers_are_cached_briefly() {
+        for (cache, runs) in [(Duration::from_secs(60), 1), (Duration::ZERO, 3)] {
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let seen = Arc::clone(&count);
+            let app = HealthRouter::new(lazy_pool())
+                .skip_db_probe()
+                .ready_cache(cache)
+                .check("counted", move || {
+                    seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    async { Ok(()) }
+                })
+                .into_router();
+            for _ in 0..3 {
+                let req = Request::builder()
+                    .uri("/ready")
+                    .body(Body::empty())
+                    .unwrap();
+                assert_eq!(app.clone().oneshot(req).await.unwrap().status(), 200);
+            }
+            assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), runs);
+        }
+    }
+
     #[tokio::test]
     async fn ready_returns_503_when_one_check_fails() {
         let app = HealthRouter::new(lazy_pool())
@@ -621,6 +682,7 @@ mod tests {
             .unwrap();
         let app = HealthRouter::new(Pool::Sqlite(sqlite.clone()))
             .timeout(Duration::from_millis(200))
+            .ready_cache(Duration::ZERO)
             .into_router();
         let ready = || {
             app.clone().oneshot(
@@ -855,6 +917,7 @@ mod tests {
             .skip_db_probe()
             .show_errors()
             .cache_probe("shared", cache)
+            .ready_cache(Duration::ZERO)
             .into_router();
         let ready = || {
             app.clone()

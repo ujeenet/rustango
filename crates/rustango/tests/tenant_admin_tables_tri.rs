@@ -174,13 +174,12 @@ async fn database_mode_tenant_admin(backend: Backend) {
     rustango::tenancy::migrate_registry_pool(&registry, &dir)
         .await
         .expect("registry migrate");
-    let mut org = rustango::tenancy::Org {
-        slug: "t1".into(),
-        display_name: "t1".into(),
-        backend_kind: backend.kind().into(),
-        database_url: Some(tenant_url),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "t1".into();
+        o.display_name = "t1".into();
+        o.backend_kind = backend.kind().into();
+        o.database_url = Some(tenant_url);
+    });
     org.insert(&registry).await.unwrap();
     let tenant = match &registry {
         #[cfg(feature = "postgres")]
@@ -402,15 +401,14 @@ async fn schema_mode_tenant_admin() {
     rustango::tenancy::migrate_registry_pool(&registry, &dir)
         .await
         .expect("registry migrate");
-    let mut org = rustango::tenancy::Org {
-        slug: "t1".into(),
-        display_name: "t1".into(),
-        storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".into(),
-        schema_name: Some("t1".into()),
-        database_url: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = "t1".into();
+        o.display_name = "t1".into();
+        o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".into();
+        o.schema_name = Some("t1".into());
+        o.database_url = None;
+    });
     org.insert(&registry).await.unwrap();
     let pg = registry.as_postgres().expect("a Postgres pool");
     let pools = rustango::tenancy::TenantPools::new(pg.clone());
@@ -458,15 +456,14 @@ async fn schema_mode_passkeys_stay_per_tenant() {
         .expect("registry migrate");
     let mut orgs = Vec::new();
     for slug in ["pa", "pb"] {
-        let mut org = rustango::tenancy::Org {
-            slug: slug.into(),
-            display_name: slug.into(),
-            storage_mode: rustango::tenancy::StorageMode::Schema.as_str().into(),
-            backend_kind: "postgres".into(),
-            schema_name: Some(slug.into()),
-            database_url: None,
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.into();
+            o.display_name = slug.into();
+            o.storage_mode = rustango::tenancy::StorageMode::Schema.as_str().into();
+            o.backend_kind = "postgres".into();
+            o.schema_name = Some(slug.into());
+            o.database_url = None;
+        });
         org.insert(&registry).await.unwrap();
         orgs.push(org);
     }

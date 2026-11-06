@@ -406,6 +406,7 @@ jobs:
             --test sqlite_datetime_ddl_is_consistent \
             --test system_migration_scopes \
             --test tracing_targets \
+            --test tenant_routers_serve_any_backend \
             --test every_test_suite_compiles_in_ci \
             --test framework_tables_are_never_hand_built \
             --test logging_fields_agree \
@@ -1548,8 +1549,6 @@ jobs:
       packages: read
     needs: [gate, tests_compile]
     runs-on: ubuntu-latest
-    # MariaDB has not run green yet: report it without blocking until it does.
-    continue-on-error: ${{ matrix.db == 'mariadb' }}
     strategy:
       fail-fast: false
       matrix:
@@ -1643,6 +1642,7 @@ jobs:
           binary(=prefetch_related_tri) |
           binary(=orm_relation_edges_tri) |
           binary(=orm_query_edges_tri) |
+          binary(=orm_query_shapes_tri) |
           binary(=orm_claim_lock_tri) |
           binary(=orm_core_counts_tri) |
           binary(=pool_conn_tri) |
@@ -1697,6 +1697,7 @@ jobs:
           binary(=update_validation_tri) |
           binary(=uuid_v7_pk_writes_tri) |
           binary(=orm_tx_helpers_tri) |
+          binary(=orm_save_state_tri) |
           binary(=fk_on_delete_tri) |
           binary(=apply_all_index_tri) |
           binary(=manage_data_verbs_tri) |
@@ -1721,6 +1722,7 @@ jobs:
           binary(=cache_delete_prefix_live) |
           binary(=cache_db_long_keys_tri) |
           binary(=cache_db_incr_tri) |
+          binary(=tenant_cache_keys_tri) |
           binary(=login_throttle_cache_tri) |
           binary(=tenant_request_scope_live) |
           binary(=like_escape_live) |
@@ -1776,6 +1778,92 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target-narrow
         run: cargo nextest run --profile live -p rustango --features mysql,testkit --test orm_core_counts_tri --test values_tri decimal
+
+  # The other server jobs run one test at a time, so every test lands on
+  # slot 0. This one runs suites on `Backend::pool` in parallel, so the
+  # per-slot databases and their concurrent first create are exercised.
+  live_parallel:
+    # Service images come from the GHCR mirror, see `postgres_test`.
+    permissions:
+      contents: read
+      packages: read
+    needs: [gate, tests_compile]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: ghcr.io/ujeenet/ci-pgvector:pg16
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          POSTGRES_USER: rustango
+          POSTGRES_PASSWORD: rustango
+          POSTGRES_DB: rustango_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rustango -d rustango_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 20
+      mysql:
+        image: ghcr.io/ujeenet/ci-mysql:8.0
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          MYSQL_ROOT_PASSWORD: rustango
+          MYSQL_DATABASE: rustango_test
+          MYSQL_USER: rustango
+          MYSQL_PASSWORD: rustango
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u rustango -prustango"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 30
+    env:
+      DATABASE_URL: postgres://rustango:rustango@localhost:5432/rustango_test
+      MYSQL_TEST_URL: mysql://rustango:rustango@127.0.0.1:3306/rustango_test
+    steps:
+      # Same disk reason and SHA pin as `postgres_test`.
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # v2.0.0
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: true
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        with:
+          tool: nextest@0.9.114
+      - uses: actions/download-artifact@v8
+        with:
+          name: nextest-archive
+          path: ${{ runner.temp }}
+      - name: Grant slot databases
+        run: |
+          mysql -h 127.0.0.1 -P 3306 -uroot -prustango -e "
+            GRANT ALL PRIVILEGES ON \`rustango-test-s%\`.* TO 'rustango'@'%';
+            FLUSH PRIVILEGES;"
+      # `--profile ci` with 4 threads: four slots at once, each on its own database.
+      - run: >-
+          cargo nextest run --profile ci --test-threads 4
+          --archive-file ${{ runner.temp }}/nextest-archive.tar.zst
+          --workspace-remap ${{ github.workspace }}
+          --extract-to ${{ github.workspace }}
+          -E 'binary(=bulk_upsert_tri) |
+          binary(=values_tri) |
+          binary(=explain_pool_tri) |
+          binary(=fixtures_mysql_live) |
+          binary(=audit_mysql_live)'
 
   # PostGIS geometry live suite (#443). The regular `postgres_test` runs
   # against `pgvector/pgvector:pg16`, which has no PostGIS, so the
@@ -2201,6 +2289,7 @@ jobs:
       - redis_live
       - s3_live
       - mysql_live
+      - live_parallel
       - postgis_live
       - e2e
       - tenant_e2e

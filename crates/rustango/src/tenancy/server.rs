@@ -48,7 +48,6 @@ use crate::tenancy::admin::TenantAdminBuilder;
 pub struct ServerConfig {
     pub bind: String,
     pub apex_domain: String,
-    pub operator_show_only: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -56,7 +55,6 @@ impl Default for ServerConfig {
         Self {
             bind: crate::env::default_bind(&crate::env::tier_from_env()).into(),
             apex_domain: "localhost".into(),
-            operator_show_only: vec!["rustango_orgs".into(), "rustango_operators".into()],
         }
     }
 }
@@ -280,10 +278,18 @@ fn pick_tenant_scheme(setting: Option<String>, secure: bool, host: &str) -> Stri
 /// from the manage CLI see "open http://acme.localhost:8080/" and
 /// know where to go.
 ///
+/// It serves without the `[security]` and `[server]` layers (allowed hosts,
+/// TLS redirect, security headers, body limits); `manage::Cli` and
+/// `server::Builder` apply them.
+///
 /// # Errors
 ///
 /// Returns [`TenancyError::Driver`] for connection / bind failures,
 /// or [`TenancyError::Validation`] for malformed config.
+#[deprecated(
+    since = "0.64.0",
+    note = "serves without the [security]/[server] layers; use `manage::Cli` or `server::Builder` (removed in 0.66.0)"
+)]
 pub async fn run<DB: Database, W: Write + Send>(
     pools: Arc<TenantPools<DB>>,
     registry_url: String,
@@ -293,6 +299,11 @@ pub async fn run<DB: Database, W: Write + Send>(
 where
     crate::sql::Pool: From<sqlx::Pool<DB>>,
 {
+    tracing::warn!(
+        target: "rustango::server",
+        "tenancy::server::run serves without the [security]/[server] layers and is \
+         removed in 0.66.0; serve through manage::Cli or server::Builder"
+    );
     if !no_operators_warn(&pools.registry_pool(), writer).await? {
         // No operator accounts — the user can still bring up the
         // server, but they can't log in. Loud warning, then proceed
@@ -436,7 +447,6 @@ async fn no_operators_warn<W: Write + Send>(
 #[cfg(all(test, feature = "sqlite"))]
 mod app_tests {
     use super::*;
-    use crate::sql::Auto;
     use crate::tenancy::branding;
     use axum::http::StatusCode;
 
@@ -461,26 +471,12 @@ mod app_tests {
         .await
         .expect("migrate-registry");
         let tenant_url = format!("sqlite://{}?mode=rwc", tmp.path().join("t.db").display());
-        let mut org = super::super::Org {
-            id: Auto::default(),
-            slug: "pfx-acme".into(),
-            display_name: "Acme".into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some(tenant_url),
-            schema_name: None,
-            host_pattern: None,
-            port: None,
-            path_prefix: Some("/acme".into()),
-            active: true,
-            created_at: chrono::Utc::now(),
-            brand_name: None,
-            brand_tagline: None,
-            logo_path,
-            favicon_path: None,
-            primary_color: None,
-            theme_mode: None,
-        };
+        let mut org = super::super::Org::new("pfx-acme");
+        org.display_name = "Acme".into();
+        org.backend_kind = "sqlite".into();
+        org.database_url = Some(tenant_url);
+        org.path_prefix = Some("/acme".into());
+        org.logo_path = logo_path;
         org.insert(&pools.registry_pool()).await.unwrap();
         let secret = crate::session::SessionSecret::from_bytes(vec![9; 32]);
         let keys = crate::tenancy::session::ServerKeys {
@@ -626,27 +622,22 @@ mod apex_tests {
     #[test]
     fn an_unroutable_org_gets_no_link() {
         let apex = LinkApex::default();
-        let bare = crate::tenancy::Org {
-            slug: "acme".into(),
-            host_pattern: None,
-            path_prefix: None,
-            port: None,
-            ..crate::testkit::org()
-        };
+        let bare = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+            o.host_pattern = None;
+            o.path_prefix = None;
+            o.port = None;
+        });
         assert!(matches!(
             tenant_link(&bare, "/x", None, &apex),
             Err(crate::tenancy::TenancyError::Validation(_))
         ));
-        let prefixed = crate::tenancy::Org {
-            path_prefix: Some("acme".into()),
-            ..bare.clone()
-        };
+        let mut prefixed = bare.clone();
+        prefixed.path_prefix = Some("acme".into());
         assert!(tenant_link(&prefixed, "/x", None, &apex).is_ok());
         // The built-in server does not route by port, so a port alone gets no link.
-        let ported = crate::tenancy::Org {
-            port: Some(8081),
-            ..bare
-        };
+        let mut ported = bare;
+        ported.port = Some(8081);
         assert!(tenant_link(&ported, "/x", None, &apex).is_err());
     }
 

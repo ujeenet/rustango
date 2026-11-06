@@ -322,14 +322,13 @@ async fn tenants_after_the_registry_restore_the_schema_on_mysql() {
         .await
         .unwrap();
     for (slug, db) in ["t1", "t2", "t3"].iter().zip(&dbs[1..]) {
-        let mut org = rustango::tenancy::Org {
-            slug: (*slug).into(),
-            display_name: (*slug).into(),
-            storage_mode: "database".into(),
-            backend_kind: "mysql".into(),
-            database_url: Some(db.url().to_owned()),
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = (*slug).into();
+            o.display_name = (*slug).into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "mysql".into();
+            o.database_url = Some(db.url().to_owned());
+        });
         org.insert(&registry).await.unwrap();
     }
     let t2 = sqlx::MySqlPool::connect(dbs[2].url()).await.unwrap();

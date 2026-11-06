@@ -13,7 +13,7 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
-    admin::TenantAdminBuilder, ChainResolver, HeaderResolver, Org, StorageMode, SubdomainResolver,
+    admin::TenantAdminBuilder, ChainResolver, HeaderResolver, StorageMode, SubdomainResolver,
     TenantPools,
 };
 use rustango::{migrate as rmig, Model};
@@ -86,14 +86,13 @@ async fn database_mode_admin_serves_tenant_data() {
 
     // Seed an org and a widget.
     let org_slug = unique("acme");
-    let mut org = Org {
-        slug: org_slug.clone(),
-        display_name: "ACME".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(format!("{org_slug}.app.test")),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = org_slug.clone();
+        o.display_name = "ACME".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(format!("{org_slug}.app.test"));
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let mut widget = Widget {
@@ -197,22 +196,20 @@ async fn schema_mode_admin_dispatches_with_search_path_set() {
     drop_schema(&pool, &globex_schema).await;
     let acme_slug = unique("acme");
     let globex_slug = unique("globex");
-    let mut acme_org = Org {
-        slug: acme_slug.clone(),
-        display_name: "ACME".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        schema_name: Some(acme_schema.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut acme_org = rustango::testkit::org_with(|o| {
+        o.slug = acme_slug.clone();
+        o.display_name = "ACME".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.schema_name = Some(acme_schema.clone());
+    });
     acme_org.insert(&pool.clone().into()).await.unwrap();
 
-    let mut globex_org = Org {
-        slug: globex_slug.clone(),
-        display_name: "Globex".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        schema_name: Some(globex_schema.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut globex_org = rustango::testkit::org_with(|o| {
+        o.slug = globex_slug.clone();
+        o.display_name = "Globex".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.schema_name = Some(globex_schema.clone());
+    });
     globex_org.insert(&pool.clone().into()).await.unwrap();
     // Migrated like `migrate-tenants`: a tenant pool refuses a bare schema.
     for org in [&acme_org, &globex_org] {
@@ -304,14 +301,13 @@ async fn subdomain_chain_resolves_via_host_header() {
 
     let slug = unique("subdomain_acme");
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: "ACME".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = "ACME".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));

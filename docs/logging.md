@@ -132,6 +132,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::humanize` | Humanize filters |
 | `rustango::i18n` | Translation keys kept out of the database, catalog reloads that failed |
 | `rustango::jobs` | Background job queues |
+| `rustango::jti_store` | The in-memory JWT revocation store is full |
 | `rustango::login` | Login throttle and lockout state a tenant purge could not clear |
 | `rustango::logging` | This subsystem's own warnings |
 | `rustango::manage` | `manage` verbs |
@@ -150,6 +151,7 @@ matches on. Framework events live under the `rustango::` root, so
 | `rustango::sql` | Query execution |
 | `rustango::sql::lock` | Row-lock clauses |
 | `rustango::sso` | SSO account linking |
+| `rustango::sso::landing` | SSO landing rules: a skipped rule (id and tenant only) or an unreadable rules table |
 | `rustango::static_files` | Static-file mounts |
 | `rustango::template_views` | Template-backed views |
 | `rustango::tenancy` | Tenancy, general |

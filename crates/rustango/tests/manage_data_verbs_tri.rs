@@ -819,8 +819,14 @@ async fn flush_breaks_a_nullable_cycle(pool: &Pool) {
 async fn fresh_pair(pool: &Pool, a: &'static ModelSchema, b: &'static ModelSchema) {
     use rustango::testkit::matrix::drop_table;
     // PG and MySQL drop the pair together; SQLite takes one table at a time.
+    // MariaDB refuses a pair that references each other unless FK checks are off.
     let q = |t| pool.dialect().quote_ident(t);
-    let both = format!("DROP TABLE IF EXISTS {}, {}", q(a.table), q(b.table));
+    let maria = if pool.dialect().name() == "mysql" {
+        "/*M! SET STATEMENT foreign_key_checks=0 FOR */ "
+    } else {
+        ""
+    };
+    let both = format!("{maria}DROP TABLE IF EXISTS {}, {}", q(a.table), q(b.table));
     let _ = raw_execute_pool(pool, &both, vec![]).await;
     drop_table(pool, b.table).await;
     drop_table(pool, a.table).await;

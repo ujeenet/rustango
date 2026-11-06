@@ -180,7 +180,7 @@ Ceci ajoute globalement la sous-commande `cargo rustango ...`. Vérifiez qu'elle
 cargo rustango --help
 ```
 
-La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.63.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
+La version du générateur de squelette est celle que votre projet épingle : installer le plus récent vous donne le rustango le plus récent. Pour générer un projet sur une version plus ancienne, installez plutôt ce générateur-là (`cargo install cargo-rustango --version 0.64.0`) — voir [Échafaudage](scaffolding.md#la-version-du-générateur-est-celle-que-votre-projet-obtient).
 
 ---
 
@@ -259,7 +259,6 @@ Le fichier `.env` généré est prêt à l'emploi avec Docker. Comme nous allons
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_APEX_DOMAIN=localhost
 ```
 
 Les identifiants, le port et le nom de la base de données (`myblog_dev`) correspondent déjà au service Postgres du `docker-compose.yml`, donc vous n'avez pas besoin d'y toucher.
@@ -506,7 +505,7 @@ Exécutez-le :
 cargo run
 ```
 
-Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lues en retour. Restaurez `src/main.rs` à sa forme de serveur générée par le squelette une fois que vous avez confirmé que cela fonctionne — l'étape suivante s'appuie sur cette forme.
+Vous devriez voir l'identifiant de votre nouvel article ainsi que les lignes lues en retour. Restaurez `src/main.rs` à sa forme de serveur générée par le squelette une fois que vous avez confirmé que cela fonctionne — l'étape suivante s'appuie sur cette forme. Supprimez aussi les trois lignes `use` ci-dessus : la forme serveur ne les utilise pas, et le compilateur signale des imports inutilisés.
 
 ---
 
@@ -611,7 +610,7 @@ pub struct PostViewSet;
 
 Enregistrez le nouveau module en ajoutant `pub mod post_view_set;` à `src/lib.rs` (`make:viewset` affiche cette ligne pour vous).
 
-Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture sans codenames `permissions(...)` journalisent un avertissement au montage du routeur ; ajoutez `allow_anonymous` pour indiquer que c'est voulu.
+Le fichier généré commence par `read_only`. Si vous l'omettez, comme ci-dessus, le ViewSet sert aussi la création, la mise à jour et la suppression. Les actions d'écriture ouvertes journalisent un avertissement au montage du routeur. Placez votre propre couche d'auth devant et ajoutez `allow_anonymous` pour indiquer que c'est voulu ; les codenames `permissions(...)` exigent la feature `tenancy` et refusent le montage sans elle.
 
 ### 12b. Monter les routes
 
@@ -630,7 +629,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{id}`.
+Le ViewSet répond désormais sur `/api/posts` et `/api/posts/{pk}`. Le chemin est la table du modèle ; le commentaire à la fin de `src/post_view_set.rs` montre cette même ligne, et `make:viewset` affiche l'URL.
 
 ### 12c. Essayer les points de terminaison
 
@@ -719,8 +718,9 @@ Intégrez l'identifiant de l'utilisateur (le « sujet » du jeton) et toute reve
 use rustango::jwt::{encode, Claims};
 use std::time::Duration;
 
-// Derive the signing key from your session secret.
-let secret = std::env::var("RUSTANGO_SESSION_SECRET")?.into_bytes();
+// A key of its own, 32+ bytes: add `JWT_SECRET=<output of openssl rand -base64 32>`
+// to `.env`. (Step 3 leaves `RUSTANGO_SESSION_SECRET` unset in development.)
+let secret = std::env::var("JWT_SECRET")?.into_bytes();
 
 let mut claims = Claims::new(user_id.to_string());   // subject = user id
 claims.set("roles", vec!["editor"]);
@@ -874,10 +874,9 @@ running rustango system check (deploy mode)...
   [info]    config tier resolved to `dev`
   [warning] RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier
   [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
-  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to (…)
 ```
 
-(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces trois avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod`, un `DATABASE_URL` de base de données géré, un domaine apex défini — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
+(Le nombre exact de modèles/migrations et les notes supplémentaires dépendent de votre projet et de ses features.) Ces deux avertissements sont ceux attendus en environnement de développement. Dans une configuration de production — `RUSTANGO_ENV=prod` et un `DATABASE_URL` de base de données géré — ils disparaissent et vous verrez `all checks passed`. Corrigez tout avertissement ou erreur restant avant de déployer en production.
 
 ---
 

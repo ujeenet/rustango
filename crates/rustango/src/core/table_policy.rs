@@ -38,6 +38,8 @@ const ADMIN_ONLY_TABLES: &[&str] = &[
     <crate::sso::policy::SsoSharedOverride as super::Model>::SCHEMA.table,
     #[cfg(feature = "sso")]
     <crate::sso::policy::SsoTenantPolicy as super::Model>::SCHEMA.table,
+    #[cfg(feature = "sso")]
+    <crate::sso::policy::SsoLandingRule as super::Model>::SCHEMA.table,
     #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
     <crate::tenancy::sso::SharedSsoProvider as super::Model>::SCHEMA.table,
 ];

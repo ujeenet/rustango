@@ -48,6 +48,9 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Path-prefix tenants share one origin with the operator console: see
+[Hostnames](operator-console.md#hostnames). Prefer a host per tenant in production.
+
 ---
 
 ## Setting security headers
@@ -184,13 +187,13 @@ When exhausted: `429 Too Many Requests` with `Retry-After` header. Every success
 
 ### Built-in login limits
 
-Every built-in password login (admin, operator console, tenant admin, JWT `/auth/login`) goes through `rustango::login_throttle` before the user lookup. It checks, in order, a per-username lock (5 failures, 15 min) that counts unknown usernames the same as real ones, a per-IP limit (20 failed logins/min; IPv6 counts per /64) and a global limit per login (600 failed logins/min each for the admin, the operator console and every tenant). A successful login does not count against the limits. A username that signed in from an IP in the last 30 days skips a spent global limit from that IP, so a spray from many IPs cannot lock every user out; its per-IP limit and username lock still apply. Once the user row is found, the lock also follows the stored username, so spellings the database treats as equal (MySQL matches `alicé` to `alice`) share one lock. HTTP Basic and API keys have their own scope and only count failures. A refused login gets `429` with `Retry-After`, and the same answer whether or not the account exists.
+Every built-in password login (admin, operator console, tenant admin, JWT `/auth/login`) goes through `rustango::login_throttle` before the user lookup. It checks, in order, a per-username lock (5 failures, 15 min) that counts unknown usernames the same as real ones, a per-IP limit (20 failed logins/min; IPv6 counts per /64) and a global limit per login (600 failed logins/min each for the admin, the operator console and every tenant). A successful login does not count against the limits. A username that signed in from an IP in the last 30 days skips a spent global limit from that IP, so a spray from many IPs cannot lock every user out. From that IP it also counts on its own username lock, so another client's bad passwords cannot lock the user out; its per-IP limit still applies. Once the user row is found, the lock also follows the stored username, so spellings the database treats as equal (MySQL matches `alicé` to `alice`) share one lock. HTTP Basic and API keys have their own scope and only count failures. A refused login gets `429` with `Retry-After`, and the same answer whether or not the account exists.
 
 Behind a reverse proxy, mount `RealIpLayer` with your proxies as shown above; a `Cli` app calls `Cli::with_trusted_proxies(["127.0.0.1/32"])?` or sets `[server] trusted_proxies = ["127.0.0.1/32"]` instead (code wins; an invalid entry stops boot). Without it every client has the proxy's address and shares one per-IP bucket; a warning is logged once when forwarding headers arrive.
 
 Password hashing runs at most one job per CPU, shared by every login; HTTP Basic, API keys and agent secrets may use at most half the slots. A login that waits longer than `hash_wait_ms` (5 s) for a slot gets `503` with `Retry-After`, for known and unknown users alike.
 
-Tune them under `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. A value set in code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) wins over these keys. The per-IP and global buckets are per process unless you install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, which counts them in fixed windows in a shared cache (on a cache error both fall back to the process; a burst across a window edge can reach twice a limit; apps sharing one cache share the counters unless each uses its own `ScopedCache`); the first login logs a warning while they are per process. The username lock uses `account_lockout::shared()`, which you can back with a shared cache via `account_lockout::configure_shared`. Failures count in a fixed window (1 hour by default) that starts at the first failure, so an attacker gets `lockout_threshold - 1` guesses per window without a lock; the per-IP and global limits bound the rest.
+Tune them under `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. A value set in code (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) wins over these keys. The per-IP and global buckets are per process unless you install `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, which counts them in fixed windows in a shared cache (on a cache error both fall back to the process; a burst across a window edge can reach twice a limit; apps sharing one cache share the counters unless each uses its own `ScopedCache`); the first login logs a warning while they are per process. The username lock uses `account_lockout::shared()`, which you can back with a shared cache via `account_lockout::configure_shared`. Failures count in a fixed window (1 hour by default) that starts at the first failure, so an attacker gets `lockout_threshold - 1` guesses per window without a lock; the per-IP and global limits bound the rest. The `[auth]` keys are applied by `manage::Cli` when it loads settings; an app that builds `server::Builder` without it calls the functions instead.
 
 **Sign-in field.** Tenant users sign in with their username unless `[auth] login_field = "email"` (or `Cli::login_field(LoginField::Email)` / `server::Builder::login_field`, which win over the key). Email needs the `sso` feature, which adds the `email` column. The email matches ignoring case on every backend, on the tenant sign-in form (labelled "Email"), HTTP Basic and `/auth/login` (`{"username": …}` or `{"email": …}`), and the login lock above follows the stored email. Each user needs their own email: a user without one cannot sign in, and an email two users share ignoring case signs neither in. The server logs each tenant with such users at boot; it warns rather than refusing to start, so one tenant's data cannot take every tenant down. `create-user --email` sets it.
 
@@ -340,7 +343,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 Authentication is how you confirm who is making a request. **Rustango** ships three ready-made backends (Basic auth, API keys, and JWTs) and lets you write your own. You attach them to routes, and requests without a recognized credential get a `401`.
 
-> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It signs in the account linked to the IdP subject (email linking is opt-in per provider and never applies to superusers or staff; no auto-provisioning) and reuses the existing session.
+> **Admin SSO.** To let operators sign in to the admin with an external IdP (Google, Microsoft/Azure AD, GitHub, or any OpenID Connect provider) instead of a password, enable the `admin-sso` feature — see the [SSO guide](sso.md). Providers are **managed from the admin UI as rows** (multiple per surface; per-tenant, or a shared set across tenants), with the client secret **encrypted at rest**. It signs in the account linked to the IdP subject (email linking is opt-in per provider and never applies to superusers or staff; the bare admin never signs anyone up, a tenant admin provider only per its `signup_mode`) and reuses the existing session.
 
 ### Three ready-made backends
 
@@ -516,7 +519,7 @@ if !verify_key_async(secret, &row.hash).await? {
 }
 ```
 
-These keys work directly with the multi-tenancy `ApiKeyBackend` — both use the same `{prefix}.{secret}` format with argon2id-hashed secrets, so a key issued here authenticates there with no extra work.
+These keys work directly with the multi-tenancy `ApiKeyBackend` — both use the same `{prefix}.{secret}` format. The backend stores an HMAC-SHA256 of the secret (`hmac-sha256v2$…`); it also accepts an argon2id hash from `api_keys` and swaps it for the HMAC on first use, so a key issued here authenticates there with no extra work.
 
 ---
 
@@ -792,7 +795,7 @@ Additional `--deploy` (production-hardening) checks:
 
 Returns non-zero exit on any **error-level** finding (good for CI gates). Warnings don't trigger failure but show in output.
 
-For checks beyond what ships, extend with custom code in your `manage` binary before forwarding to `manage::run`.
+For checks beyond what ships, register your own verb with `register_command!` and run it next to `check --deploy`.
 
 ---
 

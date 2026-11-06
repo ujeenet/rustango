@@ -1,7 +1,8 @@
 //! A [`Cache`] backend that stores one row per key in the database.
 //! The table is `cache_key`, `value` and `expires`,
 //! with the same layout on PG, MySQL and SQLite. Expired rows are
-//! removed on read; there is no background reaper.
+//! removed on read, and one [`PURGE_BATCH`] of them every
+//! [`DatabaseCache::purge_every`] writes.
 //!
 //! ## Quick start
 //!
@@ -46,6 +47,7 @@
 //! does the same from the CLI.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -62,6 +64,9 @@ const HASHED_HEAD_BYTES: usize = MAX_RAW_KEY_BYTES - 1 - 64;
 
 /// Most rows one [`DatabaseCache::purge_expired`] statement deletes.
 pub const PURGE_BATCH: u64 = 1000;
+
+/// Default for [`DatabaseCache::purge_every`]: one batch outpaces the writes between two.
+pub const PURGE_EVERY: u32 = 256;
 
 /// The `cache_key` column value: the key itself, or `{head}#{sha256 hex}`
 /// when it is longer than [`MAX_RAW_KEY_BYTES`] or already ends like a hash,
@@ -108,6 +113,9 @@ fn head(s: &str) -> &str {
 pub struct DatabaseCache {
     pool: Pool,
     table: String,
+    /// Writes between two purge batches; `0` never purges on write.
+    purge_every: u32,
+    sweep: Arc<super::Sweep>,
 }
 
 impl DatabaseCache {
@@ -118,7 +126,18 @@ impl DatabaseCache {
         Self {
             pool,
             table: table.into(),
+            purge_every: PURGE_EVERY,
+            sweep: Arc::default(),
         }
+    }
+
+    /// Delete one [`PURGE_BATCH`] of expired rows every `writes` writes
+    /// (default [`PURGE_EVERY`]), so keys nobody reads again do not pile up.
+    /// `0` turns it off; then run [`Self::purge_expired`] on a schedule.
+    #[must_use]
+    pub fn purge_every(mut self, writes: u32) -> Self {
+        self.purge_every = writes;
+        self
     }
 
     /// The configured table name.
@@ -241,6 +260,19 @@ impl DatabaseCache {
     /// # Errors
     /// [`CacheError::Connection`] when a DELETE fails.
     pub async fn purge_expired(&self) -> Result<u64, CacheError> {
+        let now = Self::now_unix_ms();
+        let mut total = 0;
+        loop {
+            let n = self.purge_batch(now).await?;
+            total += n;
+            if n < PURGE_BATCH {
+                return Ok(total);
+            }
+        }
+    }
+
+    /// One DELETE of at most [`PURGE_BATCH`] rows expired before `now`.
+    async fn purge_batch(&self, now: i64) -> Result<u64, CacheError> {
         let dialect = self.pool.dialect();
         let table = crate::sql::quote_qualified(dialect, &self.table);
         let p1 = dialect.placeholder(1);
@@ -256,17 +288,21 @@ impl DatabaseCache {
                  (SELECT cache_key FROM {table} WHERE {expired} LIMIT {PURGE_BATCH})"
             )
         };
-        let now = Self::now_unix_ms();
-        let mut total = 0;
-        loop {
-            let n = raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
-                .await
-                .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))?;
-            total += n;
-            if n < PURGE_BATCH {
-                return Ok(total);
-            }
+        raw_execute_pool(&self.pool, &sql, vec![SqlValue::I64(now)])
+            .await
+            .map_err(|e| CacheError::Connection(format!("purge_expired: {e}")))
+    }
+
+    /// Every `purge_every` writes, one purge batch. Best effort: a failure only skips it.
+    async fn after_write(&self) {
+        let n = self.sweep.writes.fetch_add(1, Ordering::Relaxed);
+        if self.purge_every == 0 || n % self.purge_every != self.purge_every - 1 {
+            return;
         }
+        let Some(_turn) = self.sweep.try_begin() else {
+            return;
+        };
+        let _ = self.purge_batch(Self::now_unix_ms()).await;
     }
 
     /// Drop `key` only if it is still expired, so a `set` racing the
@@ -362,6 +398,7 @@ impl Cache for DatabaseCache {
         )
         .await
         .map_err(|e| CacheError::Connection(format!("set: {e}")))?;
+        self.after_write().await;
         Ok(())
     }
 
@@ -412,6 +449,7 @@ impl Cache for DatabaseCache {
             .await
             .map_err(|e| CacheError::Connection(format!("add: {e}")))?;
             if inserted == 1 {
+                self.after_write().await;
                 return Ok(true);
             }
             let took = raw_execute_pool(
@@ -455,6 +493,9 @@ impl Cache for DatabaseCache {
         )
         .await
         .map_err(|e| CacheError::Connection(format!("add: {e}")))?;
+        if took == 1 {
+            self.after_write().await;
+        }
         Ok(took == 1)
     }
 
@@ -536,6 +577,7 @@ impl Cache for DatabaseCache {
         );
         let insert =
             format!("INSERT INTO {table} (cache_key, value, expires) VALUES ({p1}, {p2}, {p3})");
+        self.after_write().await;
         let value: String = if dialect.name() == "mysql" {
             // No RETURNING: read back in the same transaction, which still
             // holds the row lock the upsert took.

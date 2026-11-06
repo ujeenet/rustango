@@ -174,7 +174,7 @@ This adds the `cargo rustango ...` subcommand globally. Confirm it's there:
 cargo rustango --help
 ```
 
-The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.63.0`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
+The scaffolder's own version is the one your project pins, so installing the newest gives you the newest rustango. To generate a project on an older release, install that generator instead (`cargo install cargo-rustango --version 0.64.0`) — see [Scaffolding](scaffolding.md#the-generators-own-version-is-the-one-your-project-gets).
 
 ---
 
@@ -252,7 +252,6 @@ The generated `.env` is Docker-friendly out of the box. Because we'll run `cargo
 
 ```bash
 DATABASE_URL=postgres://rustango:rustango@localhost:5432/myblog_dev
-RUSTANGO_APEX_DOMAIN=localhost
 ```
 
 The credentials, port, and database name (`myblog_dev`) already match the `docker-compose.yml` Postgres service, so you don't need to touch those.
@@ -497,7 +496,7 @@ Run it:
 cargo run
 ```
 
-You should see your new post id and the rows read back. Restore `src/main.rs` to its scaffolded server shape once you've confirmed it works — the next step builds on that.
+You should see your new post id and the rows read back. Restore `src/main.rs` to its scaffolded server shape once you've confirmed it works — the next step builds on that. Remove the three `use` lines above as well: the server shape doesn't use them, and the compiler warns about unused imports.
 
 ---
 
@@ -602,7 +601,7 @@ pub struct PostViewSet;
 
 Register the new module by adding `pub mod post_view_set;` to `src/lib.rs` (`make:viewset` prints this line for you).
 
-The generated file starts with `read_only`. Leave it out, as above, and the ViewSet also serves create, update and delete. Write actions with no `permissions(...)` codenames log a warning when the router mounts; add `allow_anonymous` to say that is intended.
+The generated file starts with `read_only`. Leave it out, as above, and the ViewSet also serves create, update and delete. Open write actions log a warning when the router mounts. Put your own auth layer in front and add `allow_anonymous` to say that is intended; `permissions(...)` codenames need the `tenancy` feature and refuse to mount without it.
 
 ### 12b. Mount the routes
 
@@ -621,7 +620,7 @@ rustango::manage::Cli::new()
     .await
 ```
 
-The ViewSet now answers at `/api/posts` and `/api/posts/{id}`.
+The ViewSet now answers at `/api/posts` and `/api/posts/{pk}`. The path is the model's table; the comment at the end of `src/post_view_set.rs` shows this same line, and `make:viewset` prints the URL.
 
 ### 12c. Try the endpoints
 
@@ -710,8 +709,9 @@ Bake the user id (the token's "subject") and any custom claims, like roles, into
 use rustango::jwt::{encode, Claims};
 use std::time::Duration;
 
-// Derive the signing key from your session secret.
-let secret = std::env::var("RUSTANGO_SESSION_SECRET")?.into_bytes();
+// A key of its own, 32+ bytes: add `JWT_SECRET=<output of openssl rand -base64 32>`
+// to `.env`. (Step 3 leaves `RUSTANGO_SESSION_SECRET` unset in development.)
+let secret = std::env::var("JWT_SECRET")?.into_bytes();
 
 let mut claims = Claims::new(user_id.to_string());   // subject = user id
 claims.set("roles", vec!["editor"]);
@@ -864,10 +864,9 @@ running rustango system check (deploy mode)...
   [info]    config tier resolved to `dev`
   [warning] RUSTANGO_ENV is unset — set to `prod` so config loaders pick the right tier
   [warning] DATABASE_URL points at localhost / 127.0.0.1 — verify this is intended in production (…)
-  [warning] RUSTANGO_APEX_DOMAIN is unset / `localhost` — tenancy projects need this set to (…)
 ```
 
-(The exact model/migration counts and extra notes depend on your project and features.) Those three warnings are the expected dev-environment ones. In a production setup — `RUSTANGO_ENV=prod`, a managed-database `DATABASE_URL`, an apex domain set — they clear and you'll see `all checks passed`. Fix any remaining warnings or errors before pushing to production.
+(The exact model/migration counts and extra notes depend on your project and features.) Those two warnings are the expected dev-environment ones. In a production setup — `RUSTANGO_ENV=prod` and a managed-database `DATABASE_URL` — they clear and you'll see `all checks passed`. Fix any remaining warnings or errors before pushing to production.
 
 ---
 

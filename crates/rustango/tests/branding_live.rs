@@ -108,19 +108,18 @@ async fn seed_and_login(pool: &sqlx::PgPool) -> (axum::Router, String, String, S
         "brand_acme_{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: "Acme Inc".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some(slug.clone()),
-        host_pattern: Some(format!("{slug}.app.test")),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.clone();
+        o.display_name = "Acme Inc".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some(slug.clone());
+        o.host_pattern = Some(format!("{slug}.app.test"));
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
@@ -392,19 +391,18 @@ async fn tenant_admin_renders_brand_overrides() {
         "brand_render_{}",
         chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
     );
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: "Acme Inc".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(format!("{slug}.app.test")),
-        brand_name: Some("Acme Branded".into()),
-        brand_tagline: Some("Where work happens".into()),
-        logo_path: Some("logo.png".into()),
-        primary_color: Some("#2c5fb0".into()),
-        theme_mode: Some("dark".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = "Acme Inc".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(format!("{slug}.app.test"));
+        o.brand_name = Some("Acme Branded".into());
+        o.brand_tagline = Some("Where work happens".into());
+        o.logo_path = Some("logo.png".into());
+        o.primary_color = Some("#2c5fb0".into());
+        o.theme_mode = Some("dark".into());
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));

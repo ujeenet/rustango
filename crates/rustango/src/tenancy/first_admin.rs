@@ -529,12 +529,11 @@ mod tests {
     }
 
     fn org(id: i64) -> Org {
-        Org {
-            id: crate::sql::Auto::from(id),
-            slug: "acme".into(),
-            host_pattern: Some("acme.localhost".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::from(id);
+            o.slug = "acme".into();
+            o.host_pattern = Some("acme.localhost".into());
+        })
     }
 
     #[test]
@@ -563,10 +562,8 @@ mod tests {
     #[cfg(feature = "email")]
     #[test]
     fn a_tenant_name_cannot_break_the_subject() {
-        let tenant = Org {
-            display_name: "Acme\r\nBcc: eve@evil.test".into(),
-            ..org(7)
-        };
+        let mut tenant = org(7);
+        tenant.display_name = "Acme\r\nBcc: eve@evil.test".into();
         let admin = CreatedAdmin {
             user_id: 1,
             username: "ann".into(),

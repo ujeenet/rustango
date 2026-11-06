@@ -85,14 +85,13 @@ pub fn startapp(
         .base_dir
         .clone()
         .unwrap_or_else(|| PathBuf::from("src"));
-    let base_label = base_dir.display().to_string();
+    let base_label = slash_path(&base_dir);
     let app_dir = project_root.join(&base_dir).join(&opts.app_name);
     if !app_dir.exists() {
         std::fs::create_dir_all(&app_dir)?;
     }
 
     let mod_body = render_mod_template(&opts.app_name);
-    let singular = singularize(&opts.app_name);
     // Crate root for the generated `use ...` paths.
     let crate_root = opts.crate_root.as_deref().unwrap_or("rustango");
     // Unset, a renamed dependency in Cargo.toml moves every file to its name.
@@ -112,7 +111,7 @@ pub fn startapp(
         ),
         ("views.rs", VIEWS_TEMPLATE.into()),
         ("urls.rs", URLS_TEMPLATE.into()),
-        ("tests.rs", render_tests_template(&singular, crate_root)),
+        ("tests.rs", render_tests_template(crate_root)),
     ];
     for (filename, body) in entries {
         let path = app_dir.join(filename);
@@ -120,6 +119,113 @@ pub fn startapp(
         write_or_skip(&path, &rel, &fit(body), &mut report)?;
     }
 
+    // `src/apps` is a module of the crate in `src/`, not a crate root.
+    let is_root = |d: &Path| {
+        ["lib.rs", "main.rs"]
+            .iter()
+            .any(|f| project_root.join(d).join(f).exists())
+    };
+    let crate_src = match parent_module(&base_dir).filter(|_| !is_root(&base_dir)) {
+        Some(parent) => {
+            push_nested_steps(
+                project_root,
+                &base_dir,
+                &parent,
+                &opts.app_name,
+                &mut report,
+            );
+            PathBuf::from("src")
+        }
+        None => {
+            register_in_crate_root(project_root, &base_dir, &opts.app_name, &mut report)?;
+            base_dir.clone()
+        }
+    };
+
+    if let Some(template) = opts.manage_bin {
+        let bin_dir = project_root.join(&crate_src).join("bin");
+        if !bin_dir.exists() {
+            std::fs::create_dir_all(&bin_dir)?;
+        }
+        let path = bin_dir.join("manage.rs");
+        let rel = format!("{}/bin/manage.rs", slash_path(&crate_src));
+        write_or_skip(&path, &rel, &fit(template.to_owned()), &mut report)?;
+    }
+
+    Ok(report)
+}
+
+/// The `--into <dir>` of both `startapp` CLIs: a directory under `src/`.
+/// A leading `src/` is accepted, so `apps` and `src/apps` both mean `src/apps`.
+pub(crate) fn into_base_dir(dir: &str) -> PathBuf {
+    let dir = Path::new(dir);
+    if dir.starts_with("src") {
+        dir.to_path_buf()
+    } else {
+        Path::new("src").join(dir)
+    }
+}
+
+/// `p` with `/` separators, so a report reads the same on Windows.
+pub(crate) fn slash_path(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// `apps` for `src/apps`: the module path of a base dir nested in `src/`.
+fn parent_module(base_dir: &Path) -> Option<String> {
+    let rest = base_dir.strip_prefix("src").ok()?;
+    let parts: Vec<String> = rest
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("::"))
+}
+
+/// An app in a nested module (`src/apps/shop`): its parent module file and
+/// the root `urls.rs` are left to the user, who owns their layout.
+fn push_nested_steps(
+    project_root: &Path,
+    base_dir: &Path,
+    parent: &str,
+    app: &str,
+    report: &mut StartAppReport,
+) {
+    let flat = base_dir.with_extension("rs");
+    let mod_file = if project_root.join(&flat).exists() {
+        flat
+    } else {
+        base_dir.join("mod.rs")
+    };
+    let top = parent.split("::").next().unwrap_or(parent);
+    let binary_only =
+        project_root.join("src/main.rs").exists() && !project_root.join("src/lib.rs").exists();
+    let root = if binary_only {
+        format!("`mod {top};` to src/main.rs")
+    } else {
+        format!("`pub mod {top};` to src/lib.rs")
+    };
+    report.manual_steps.push(format!(
+        "{}: add `pub mod {app};` (and {root})",
+        slash_path(&mod_file)
+    ));
+    if project_root.join("src/urls.rs").exists() {
+        report.manual_steps.push(format!(
+            "src/urls.rs: add `.merge(crate::{parent}::{app}::urls::api())` to your aggregator router"
+        ));
+    }
+}
+
+/// Declare the app in the crate root at `base_dir` and merge its routes
+/// into `base_dir/urls.rs`, or list either edit as a manual step.
+fn register_in_crate_root(
+    project_root: &Path,
+    base_dir: &Path,
+    app: &str,
+    report: &mut StartAppReport,
+) -> Result<(), MigrateError> {
     // Register the new app in the project's entry file. If the file
     // does not have the expected shape, skip the edit and add an
     // "add this manually" hint to `report.manual_steps`.
@@ -128,8 +234,9 @@ pub fn startapp(
     // in the library so binaries under `src/bin/` can reach them; a
     // `mod <app>;` in `main.rs` is invisible to the library's
     // `urls.rs`. Older projects with only a `main.rs` still work.
-    let main_path = project_root.join(&base_dir).join("main.rs");
-    let lib_path = project_root.join(&base_dir).join("lib.rs");
+    let base_label = slash_path(base_dir);
+    let main_path = project_root.join(base_dir).join("main.rs");
+    let lib_path = project_root.join(base_dir).join("lib.rs");
     let entry_path = if lib_path.exists() {
         Some(lib_path)
     } else if main_path.exists() {
@@ -143,7 +250,7 @@ pub fn startapp(
             .unwrap_or(&path)
             .display()
             .to_string();
-        match try_register_app_in_entry(&path, &opts.app_name)? {
+        match try_register_app_in_entry(&path, app)? {
             EntryEditOutcome::Patched => report.patched.push(rel),
             EntryEditOutcome::AlreadyRegistered => {} // silent — idempotent
             EntryEditOutcome::CouldNotFindAnchor => {
@@ -155,49 +262,36 @@ pub fn startapp(
                     "mod"
                 };
                 report.manual_steps.push(format!(
-                    "{rel}: add `{vis} {};` near the other `mod` declarations",
-                    opts.app_name
+                    "{rel}: add `{vis} {app};` near the other `mod` declarations"
                 ));
             }
         }
     } else {
         // Nothing to patch, but the module still has to be compiled in.
         report.manual_steps.push(format!(
-            "{base_label}/lib.rs: add `pub mod {};` so its models register",
-            opts.app_name
+            "{base_label}/lib.rs: add `pub mod {app};` so its models register"
         ));
     }
 
-    let urls_path = project_root.join(&base_dir).join("urls.rs");
+    let urls_path = project_root.join(base_dir).join("urls.rs");
     if urls_path.exists() {
         let rel = urls_path
             .strip_prefix(project_root)
             .unwrap_or(&urls_path)
             .display()
             .to_string();
-        match try_merge_app_into_urls(&urls_path, &opts.app_name)? {
+        match try_merge_app_into_urls(&urls_path, app)? {
             EntryEditOutcome::Patched => report.patched.push(rel),
             EntryEditOutcome::AlreadyRegistered => {}
             EntryEditOutcome::CouldNotFindAnchor => {
                 report.manual_steps.push(format!(
-                    "{rel}: add `.merge(crate::{}::urls::api())` to your aggregator router",
-                    opts.app_name
+                    "{rel}: add `.merge(crate::{app}::urls::api())` to your aggregator router"
                 ));
             }
         }
     }
 
-    if let Some(template) = opts.manage_bin {
-        let bin_dir = project_root.join(&base_dir).join("bin");
-        if !bin_dir.exists() {
-            std::fs::create_dir_all(&bin_dir)?;
-        }
-        let path = bin_dir.join("manage.rs");
-        let rel = format!("{base_label}/bin/manage.rs");
-        write_or_skip(&path, &rel, &fit(template.to_owned()), &mut report)?;
-    }
-
-    Ok(report)
+    Ok(())
 }
 
 /// The name `root`'s Cargo.toml gives a renamed rustango dependency
@@ -610,9 +704,9 @@ pub fn api() -> Router<()> {
 }
 ";
 
-/// Default `tests.rs` body, rendered per app so the smoke test can
-/// name the starter model's table.
-fn render_tests_template(singular_table: &str, crate_root: &str) -> String {
+/// Default `tests.rs` body. The inventory smoke test looks for any model
+/// of this app's `models` module, so renaming the starter model keeps it green.
+fn render_tests_template(crate_root: &str) -> String {
     // `mod.rs` already declares this file as the `tests` module, so
     // the body sits at module scope. Wrapping it in another
     // `mod tests { }` would nest to `<app>::tests::tests` and break
@@ -635,22 +729,20 @@ async fn router_builds() {{
 
 /// Smoke test — every `#[derive(Model)]` in `models.rs` registers
 /// itself in `inventory` at link time. The auto-admin walks that
-/// registry, so seeing your model here is the canonical
-/// confirmation that the admin will pick it up.
-///
-/// If you rename the starter model's `table = \"...\"`, update
-/// the literal below.
+/// registry, so seeing a model here is the canonical confirmation
+/// that the admin will pick it up.
 #[test]
 fn starter_model_registered_in_inventory() {{
     use {crate_root}::core::ModelEntry;
-    let tables: Vec<&'static str> = {crate_root}::inventory::iter::<ModelEntry>
+    // `<crate>::<app>::tests` -> `<crate>::<app>::models`.
+    let app = module_path!().rsplit_once(\"::\").map_or(\"\", |(app, _)| app);
+    let models = format!(\"{{app}}::models\");
+    let found: Vec<&'static str> = {crate_root}::inventory::iter::<ModelEntry>
         .into_iter()
+        .filter(|e| e.module_path == models)
         .map(|e| e.schema.table)
         .collect();
-    assert!(
-        tables.contains(&\"{singular_table}\"),
-        \"`{singular_table}` missing from inventory; tables: {{tables:?}}\",
-    );
+    assert!(!found.is_empty(), \"no model of `{{models}}` in inventory\");
 }}
 "
     )
@@ -1046,17 +1138,19 @@ mod tests {
         );
     }
 
+    /// Renaming the starter model (`Blog` to `Post`, table `posts`) keeps the
+    /// smoke test green: it names the app's module, not a table.
     #[test]
-    fn rendered_tests_template_asserts_inventory_registration() {
-        let body = render_tests_template("post", "rustango");
+    fn rendered_tests_template_names_no_table() {
+        let body = render_tests_template("rustango");
         assert!(
             body.contains("starter_model_registered_in_inventory"),
             "expected inventory smoke test, got: {body}"
         );
-        assert!(
-            body.contains("\"post\""),
-            "expected singular table literal in test, got: {body}"
-        );
+        assert!(body.contains("e.module_path == models"), "{body}");
+        let models = render_models_template("blog", "rustango");
+        assert!(models.contains("table = \"blog\""), "{models}");
+        assert!(!body.contains("\"blog\""), "{body}");
     }
 
     #[test]
@@ -1100,11 +1194,11 @@ mod tests {
     #[test]
     fn rendered_tests_template_threads_crate_root() {
         // Default root.
-        let default_body = render_tests_template("post", "rustango");
+        let default_body = render_tests_template("rustango");
         assert!(default_body.contains("use rustango::core::ModelEntry;"));
 
         // Renamed root.
-        let renamed_body = render_tests_template("post", "rustango_orm");
+        let renamed_body = render_tests_template("rustango_orm");
         assert!(renamed_body.contains("use rustango_orm::core::ModelEntry;"));
         assert!(!renamed_body.contains("use rustango::"));
     }
@@ -1160,7 +1254,6 @@ mod tests {
             tests.contains("starter_model_registered_in_inventory"),
             "tests: {tests}"
         );
-        assert!(tests.contains("\"post\""), "tests: {tests}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1290,6 +1383,55 @@ mod tests {
             "expected a manual-step hint for urls.rs, got: {:?}",
             report.manual_steps
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `--into apps` lands in `src/apps/`, and the hint names its mod file.
+    #[test]
+    fn into_a_nested_dir_writes_under_src() {
+        assert_eq!(into_base_dir("apps"), PathBuf::from("src/apps"));
+        assert_eq!(into_base_dir("src/apps"), PathBuf::from("src/apps"));
+        let root = fresh_root("into_nested");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod urls;\n").unwrap();
+        std::fs::write(
+            root.join("src/urls.rs"),
+            "pub fn api() -> axum::Router<()> {\n    Router::new()\n}\n",
+        )
+        .unwrap();
+        let report = startapp(
+            &root,
+            &StartAppOptions {
+                app_name: "shop".into(),
+                manage_bin: Some(SINGLE_TENANT_MANAGE_BIN),
+                base_dir: Some(into_base_dir("apps")),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(root.join("src/apps/shop/models.rs").exists());
+        assert!(!root.join("apps").exists());
+        assert!(
+            report.written.iter().any(|p| p == "src/apps/shop/mod.rs"),
+            "{:?}",
+            report.written
+        );
+        assert!(
+            root.join("src/bin/manage.rs").exists(),
+            "{:?}",
+            report.written
+        );
+        assert_eq!(
+            report.manual_steps,
+            [
+                "src/apps/mod.rs: add `pub mod shop;` (and `pub mod apps;` to src/lib.rs)",
+                "src/urls.rs: add `.merge(crate::apps::shop::urls::api())` to your aggregator router",
+            ],
+        );
+        // Nothing patched: lib.rs and urls.rs name `apps`, which the user owns.
+        assert!(report.patched.is_empty(), "{:?}", report.patched);
+        let lib = std::fs::read_to_string(root.join("src/lib.rs")).unwrap();
+        assert_eq!(lib, "pub mod urls;\n");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

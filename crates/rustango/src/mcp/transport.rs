@@ -110,8 +110,8 @@ pub(crate) async fn handle_message(
 /// then filters the shared bus, so an agent never sees another
 /// agent's or another tenant's frames. It ends at the JWT's `exp`, or
 /// within a minute of a revoke.
-pub(crate) fn sse_handler<DB: crate::sql::sqlx::Database>(
-    t: crate::extractors::Tenant<DB>,
+pub(crate) fn sse_handler<T: Into<crate::extractors::TenantScope>>(
+    t: T,
     axum::extract::State(state): axum::extract::State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: axum::http::HeaderMap,
@@ -660,12 +660,11 @@ mod tests {
 
     /// Org `id`'s registry row in `pool`, `active` or not.
     async fn seed_org(pool: &crate::sql::Pool, id: i64, active: bool) {
-        let mut org = crate::tenancy::Org {
-            id: crate::sql::Auto::Set(id),
-            slug: format!("live-{id}"),
-            active,
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.id = crate::sql::Auto::Set(id);
+            o.slug = format!("live-{id}");
+            o.active = active;
+        });
         org.insert(pool).await.unwrap();
     }
 

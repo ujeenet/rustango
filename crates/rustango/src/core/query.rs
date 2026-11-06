@@ -421,17 +421,31 @@ impl WhereExpr {
     ///
     /// # Errors
     /// Returns [`QueryError::UnknownField`] when a predicate names a
-    /// column the model does not have, at any depth.
+    /// column the model does not have, at any depth, and
+    /// [`QueryError::TypeMismatch`] when its value has another type.
     pub fn validate(&self, model: &'static ModelSchema) -> Result<(), QueryError> {
         match self {
             Self::Predicate(f) => {
-                if model.field_by_column(f.column).is_none() {
+                let Some(field) = model.field_by_column(f.column) else {
                     return Err(QueryError::UnknownField {
                         model: model.name,
                         field: f.column.to_owned(),
                     });
+                };
+                // A raw LIKE casts a non-text column, as `Q::like("n", "%4%")`.
+                let like = matches!(
+                    f.op,
+                    Op::Like
+                        | Op::NotLike
+                        | Op::LikeEscaped
+                        | Op::ILike
+                        | Op::NotILike
+                        | Op::ILikeEscaped
+                );
+                if like && matches!(f.value, SqlValue::String(_)) {
+                    return Ok(());
                 }
-                Ok(())
+                check_value_type(model, field, f.op, &f.value)
             }
             Self::ColumnCompare(cf) => {
                 if model.field_by_column(cf.column).is_none() {
@@ -476,6 +490,38 @@ impl WhereExpr {
             // reachable here, so a bad column shows up at runtime.
             Self::ExprCompare { .. } => Ok(()),
         }
+    }
+}
+
+/// A predicate value must have its field's type. `IsNull` carries a flag,
+/// `In` a list, `JsonHasKey` a text key, and a text pattern on a JSON
+/// column matches its text, so those skip the check.
+///
+/// # Errors
+/// [`QueryError::TypeMismatch`] when the value has another type.
+pub(crate) fn check_value_type(
+    model: &'static ModelSchema,
+    field: &super::FieldSchema,
+    op: Op,
+    value: &SqlValue,
+) -> Result<(), QueryError> {
+    let json_text = field.ty == super::FieldType::Json
+        && matches!(value, SqlValue::String(_))
+        && matches!(
+            op,
+            Op::Like | Op::NotLike | Op::LikeEscaped | Op::ILike | Op::NotILike | Op::ILikeEscaped
+        );
+    if json_text || matches!(op, Op::IsNull | Op::In | Op::JsonHasKey) {
+        return Ok(());
+    }
+    match value.field_type() {
+        Some(actual) if actual != field.ty => Err(QueryError::TypeMismatch {
+            model: model.name,
+            field: field.name.to_owned(),
+            expected: field.ty,
+            actual,
+        }),
+        _ => Ok(()),
     }
 }
 

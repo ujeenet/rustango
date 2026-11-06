@@ -21,16 +21,15 @@ use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{for_each_tenant, Org, SweepError, TenantPools};
 
 fn db_org(slug: &str, url: &str, active: bool) -> Org {
-    Org {
-        id: Auto::default(),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(url.to_owned()),
-        active,
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(url.to_owned());
+        o.active = active;
+    })
 }
 
 fn shared_mem(name: &str) -> String {

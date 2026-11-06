@@ -123,8 +123,7 @@ async fn in_bulk_by_non_pk_unique_column_keys_on_that_column() {
 }
 
 /// Empty `ids` short-circuits — no SQL is issued, an empty map is
-/// returned. Avoids `Op::In` with an empty list (which the SQL writer
-/// would reject with `EmptyInList`).
+/// returned.
 #[tokio::test]
 async fn in_bulk_with_empty_ids_returns_empty_map_no_sql() {
     let _g = lock().lock().await;

@@ -42,4 +42,6 @@ mod tenant;
 pub use database_tenant::{DatabaseTenant, DatabaseTenantContext, DatabaseTenantRejection};
 pub(crate) use mounted::MountedTenantContext;
 pub use session_user::{SessionOperator, SessionUser};
+#[cfg_attr(not(any(feature = "mcp", feature = "tenancy")), allow(unused_imports))]
+pub(crate) use tenant::TenantArg;
 pub use tenant::{Tenant, TenantContext, TenantRejection, TenantScope};

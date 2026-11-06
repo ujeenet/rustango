@@ -47,8 +47,9 @@ impl CastValue for EncryptedString {
     const KIND: crate::core::FieldCast = crate::core::FieldCast::Sealed;
 
     fn to_db(value: &String) -> String {
-        // Infallible by contract; a missing key is a deploy-time
-        // misconfiguration and fails fast (like a missing DB URL).
+        // Infallible by contract; the server refuses to start and
+        // `check --deploy` errors before a missing key gets here
+        // (`sealed_key_problem`).
         encrypt(value.as_bytes()).unwrap_or_else(|e| {
             panic!("encrypted cast write failed: {e}");
         })
@@ -59,6 +60,32 @@ impl CastValue for EncryptedString {
         String::from_utf8(plaintext)
             .map_err(|e| CastError(format!("decrypted bytes not UTF-8: {e}")))
     }
+}
+
+/// Why a sealed field's first write would panic: a registered model has
+/// one and no key is set. The server's boot and `check --deploy` refuse on it.
+pub(crate) fn sealed_key_problem() -> Option<String> {
+    let sealed = inventory::iter::<crate::core::ModelEntry>
+        .into_iter()
+        .flat_map(|e| e.schema.fields.iter().map(move |f| (e.schema.table, f)))
+        .find(|(_, f)| f.cast == Some(crate::core::FieldCast::Sealed))
+        .map(|(table, f)| (table, f.column));
+    missing_key_problem(sealed, || crate::aead::env_key().is_some())
+}
+
+fn missing_key_problem(
+    sealed: Option<(&str, &str)>,
+    key_set: impl FnOnce() -> bool,
+) -> Option<String> {
+    let (table, column) = sealed?;
+    if key_set() {
+        return None;
+    }
+    Some(format!(
+        "`{table}.{column}` is sealed but {} is not set, so its first write would fail; \
+         set 32+ random bytes (`openssl rand -base64 48`)",
+        crate::aead::KEY_VAR
+    ))
 }
 
 /// The cast's wording for each failure; unchanged since the code moved.
@@ -92,6 +119,16 @@ mod tests {
     fn with_key() {
         // SAFETY: single-threaded unit test process for this module.
         crate::aead::set_test_key();
+    }
+
+    /// A sealed field with no key is reported up front, before a write panics.
+    #[test]
+    fn a_sealed_field_without_a_key_is_a_problem() {
+        let sealed = Some(("sso", "client_secret"));
+        let msg = super::missing_key_problem(sealed, || false).expect("not reported");
+        assert!(msg.contains("sso.client_secret") && msg.contains("RUSTANGO_SECRET_KEY"));
+        assert_eq!(super::missing_key_problem(sealed, || true), None);
+        assert_eq!(super::missing_key_problem(None, || false), None);
     }
 
     #[test]

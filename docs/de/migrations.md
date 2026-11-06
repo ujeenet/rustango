@@ -57,6 +57,9 @@ ohne Tenancy. Nicht-Tenancy-Anwendungen, die ein Framework-Subsystem verwenden (
 
 ## Squash-Reconciliation — `Migration.replaces`
 
+> **Nur Single-Database.** Das `migrate` der Mandantenfähigkeit (`Cli::tenancy()`)
+> lehnt `--squash` ab.
+
 Ein **Squash** kollabiert eine Reihe von Migrationen in eine einzige frisch
 generierte Datei, die denselben Endzustand nachbildet — praktisch, wenn ein Stapel
 halbfertiger Migrationen leichter neu zu generieren als zu reparieren ist.

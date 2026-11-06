@@ -385,15 +385,18 @@ impl Lockout {
         let _ = self.cache.delete(&self.lock_key(account)).await;
     }
 
-    /// Clear the counters and locks of every account starting with `prefix`.
+    /// The key prefixes holding the counters and locks of every account
+    /// starting with `prefix`, in [`Self::cache`].
     #[cfg(feature = "tenancy")]
-    pub(crate) async fn clear_accounts_with_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        for kind in ["attempts", "failures", "window", "locked"] {
-            self.cache
-                .delete_prefix(&format!("{}{kind}:{prefix}", self.key_prefix))
-                .await?;
-        }
-        Ok(())
+    pub(crate) fn account_prefixes(&self, prefix: &str) -> [String; 4] {
+        ["attempts", "failures", "window", "locked"]
+            .map(|kind| format!("{}{kind}:{prefix}", self.key_prefix))
+    }
+
+    /// The cache the counters and locks live in.
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn cache(&self) -> &Arc<dyn Cache> {
+        &self.cache
     }
 
     /// Attempts counted in the current window: failures, plus reserved

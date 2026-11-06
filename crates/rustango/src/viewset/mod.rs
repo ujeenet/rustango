@@ -140,6 +140,15 @@ use crate::sql::Pool;
 
 // ------------------------------------------------------------------ Permissions config
 
+/// How to close or acknowledge open write actions, naming only what this
+/// build has: codenames need `tenancy`.
+#[cfg(feature = "tenancy")]
+const OPEN_WRITES_FIX: &str = "add `permissions(...)` (derive) or `.permissions_for_model()`, \
+     or set `read_only` / `allow_anonymous` if this is intended";
+#[cfg(not(feature = "tenancy"))]
+const OPEN_WRITES_FIX: &str =
+    "set `read_only`, or `allow_anonymous` behind your own auth layer if this is intended";
+
 /// Permission codenames required for each `ViewSet` action. The user
 /// needs every codename in the list; an empty vec skips the check.
 #[derive(Clone, Default)]
@@ -710,6 +719,9 @@ where
 /// rows per request, a fifth of the admin's default.
 const DEFAULT_VIEW_HOOK_SCAN_CAP: usize = 2_000;
 
+/// Default [`ViewSet::max_offset`]: deeper pages scan too many rows per request.
+pub const DEFAULT_MAX_OFFSET: usize = 10_000;
+
 /// The largest `view_hook_scan_cap`: each list request reads that many rows.
 const MAX_VIEW_HOOK_SCAN_CAP: usize = 100_000;
 
@@ -749,6 +761,10 @@ pub struct ViewSet {
     /// Largest page a client may request via `?page_size=` / `?limit=`.
     /// Defaults to 100. See [`ViewSet::max_page_size`].
     max_page_size: usize,
+    /// Deepest row a list may skip to. See [`ViewSet::max_offset`].
+    max_offset: usize,
+    /// Whether lists run `COUNT(*)`. See [`ViewSet::count`].
+    count: bool,
     /// Name of the path capture for the detail routes — `pk` by default,
     /// giving `/{pk}`. See [`ViewSet::pk_param`].
     pk_param: String,
@@ -804,6 +820,8 @@ impl ViewSet {
             throttle: ViewSetThrottle::default(),
             serializer: None,
             max_page_size: 100,
+            max_offset: DEFAULT_MAX_OFFSET,
+            count: true,
             pk_param: "pk".to_owned(),
             max_bulk_create: 1000,
             hooks: crate::object_permissions::Hooks::All,
@@ -1061,6 +1079,35 @@ impl ViewSet {
         self
     }
 
+    /// Deepest row `?offset=` or `?page=` may skip to (default
+    /// [`DEFAULT_MAX_OFFSET`]); past it a `400` points to cursor pagination.
+    /// `0` lifts the cap.
+    #[must_use]
+    pub fn max_offset(mut self, n: usize) -> Self {
+        self.max_offset = n;
+        self
+    }
+
+    /// `false` skips the `COUNT(*)` each page-number or limit/offset list
+    /// runs; `count` (and `last_page`) are then `null`. Default `true`.
+    #[must_use]
+    pub fn count(mut self, on: bool) -> Self {
+        self.count = on;
+        self
+    }
+
+    /// The `400` for an `offset` past [`Self::max_offset`], if it is.
+    fn offset_refused(&self, offset: i64) -> Option<Response> {
+        let max = i64::try_from(self.max_offset).unwrap_or(i64::MAX);
+        let over = self.max_offset > 0 && offset > max;
+        over.then(|| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "this page is too deep; narrow the list with filters or use cursor pagination",
+            )
+        })
+    }
+
     /// Most rows a bulk create (JSON array body) may carry; more is a
     /// `413`. Default 1000; each row also spends one `create` throttle unit.
     #[must_use]
@@ -1108,7 +1155,8 @@ impl ViewSet {
 
     /// Permission codenames required per action. Empty vec = allow all;
     /// an open write action logs a warning at mount unless
-    /// [`Self::allow_anonymous`] is set.
+    /// [`Self::allow_anonymous`] is set. Codenames need the `tenancy`
+    /// feature: without it, mounting a ViewSet that sets any panics.
     pub fn permissions(mut self, perms: ViewSetPerms) -> Self {
         self.perms = perms;
         self
@@ -1274,6 +1322,7 @@ impl ViewSet {
     fn router_with_source(self, prefix: &str, pool_source: PoolSource) -> Router {
         self.assert_cursor_is_rendered();
         self.assert_related_rows_are_unhooked();
+        self.assert_codenames_can_be_checked();
         let open = self.open_write_actions();
         if !open.is_empty() {
             tracing::warn!(
@@ -1282,8 +1331,7 @@ impl ViewSet {
                 prefix,
                 actions = ?open,
                 "ViewSet write actions need no permission, so any caller that reaches this \
-                 router can run them; set .permissions_for_model(), .read_only(), or \
-                 .allow_anonymous() if this is intended"
+                 router can run them; {OPEN_WRITES_FIX}"
             );
         }
         let state = Arc::new(ViewSetState {
@@ -1604,6 +1652,24 @@ impl ViewSet {
         }
     }
 
+    /// Without `tenancy` no engine checks codenames, so every gated request
+    /// would get 403 forever: refuse at mount instead.
+    fn assert_codenames_can_be_checked(&self) {
+        if cfg!(feature = "tenancy") {
+            return;
+        }
+        let p = &self.perms;
+        let gated = [&p.list, &p.retrieve, &p.create, &p.update, &p.destroy]
+            .iter()
+            .any(|codenames| !codenames.is_empty());
+        assert!(
+            !gated,
+            "ViewSet `{}`: permission codenames need the `tenancy` feature; on a \
+             single-database app use allow_anonymous behind your own auth layer, or read_only",
+            self.schema.table
+        );
+    }
+
     /// A serializer must render the cursor column and the primary key.
     fn assert_cursor_is_rendered(&self) {
         let PaginationStyle::Cursor { field, .. } = self.pagination else {
@@ -1684,7 +1750,7 @@ impl ViewSetState {
                 match crate::tenancy::middleware::request_org(parts, &parts.extensions).await {
                     Some(Ok(Some(org))) => Ok(Scope::Tenant(Box::new(org))),
                     Some(Ok(None)) => Ok(Scope::Unknown),
-                    Some(Err(e)) => Err(TenantRejection::Internal(e.to_string()).into_response()),
+                    Some(Err(e)) => Err(TenantRejection::from(e).into_response()),
                     None => Err(TenantRejection::MissingContext.into_response()),
                 }
             }
@@ -1709,9 +1775,7 @@ impl ViewSetState {
                 };
                 match crate::tenancy::middleware::request_pool(&parts.extensions, org).await {
                     Some(Ok(pool)) => pool,
-                    Some(Err(e)) => {
-                        return Err(TenantRejection::Internal(e.to_string()).into_response())
-                    }
+                    Some(Err(e)) => return Err(TenantRejection::from(e).into_response()),
                     None => return Err(TenantRejection::MissingContext.into_response()),
                 }
             }
@@ -1757,11 +1821,10 @@ impl ViewSetState {
         }
         #[cfg(not(feature = "tenancy"))]
         {
-            // Without tenancy there is no `AuthenticatedUser` and no
-            // `has_perm` engine, so codenames with nothing to check
-            // them against are denied. 403, not 401: authenticating
-            // cannot satisfy a check with no engine behind it, and
-            // 401 would send a token client into a refresh loop.
+            // Mount refuses codenames without tenancy; should one get
+            // here anyway, there is no `has_perm` engine, so deny. 403,
+            // not 401: authenticating cannot satisfy it, and 401 would
+            // send a token client into a refresh loop.
             let _ = (parts, conn);
             PermOutcome::Forbidden
         }
@@ -2654,6 +2717,7 @@ fn build_lookup_filter(
     if raw.is_empty() {
         return Ok(None);
     }
+    crate::list_params::reject_nul(raw).map_err(|e| FilterError::Invalid(e.to_string()))?;
     let column = field.column;
     let predicate = |op: Op, value: SqlValue| WhereExpr::Predicate(Filter { column, op, value });
     let parse =
@@ -2913,10 +2977,16 @@ async fn run_list(
 
     // Search
     // No `search_fields`: `?search=` is not a filter here.
-    let search = params
+    let search = match params
         .get("search")
-        .filter(|s| !s.is_empty() && !state.vs.search_fields.is_empty())
-        .cloned();
+        .map(|s| crate::list_params::reject_nul(s))
+        .transpose()
+    {
+        Ok(s) => s
+            .filter(|s| !s.is_empty() && !state.vs.search_fields.is_empty())
+            .map(str::to_owned),
+        Err(e) => return json_error(StatusCode::BAD_REQUEST, &format!("`search`: {e}")),
+    };
     let search_clause = search.map(|q| SearchClause {
         query: q,
         columns: state
@@ -2991,6 +3061,9 @@ async fn run_list(
         PaginationStyle::PageNumber => {
             let page = crate::list_params::parse_page(&params);
             let offset = crate::list_params::page_offset(page, page_size);
+            if let Some(refused) = state.vs.offset_refused(offset) {
+                return refused;
+            }
 
             // Struct-update over `SelectQuery::new` for the
             // paginated list query.
@@ -3021,8 +3094,12 @@ async fn run_list(
             } else {
                 or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
             };
-            let count = or_500!(acq.count_rows(&count_q).await);
-            let last_page = ((count - 1).max(0) / page_size) + 1;
+            let (count, last_page) = if state.vs.count {
+                let count = or_500!(acq.count_rows(&count_q).await);
+                (Some(count), Some(((count - 1).max(0) / page_size) + 1))
+            } else {
+                (None, None)
+            };
             json_response(json!({
                 "count": count,
                 "page": page,
@@ -3064,6 +3141,9 @@ async fn run_list(
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(0)
                 .max(0);
+            if let Some(refused) = state.vs.offset_refused(offset) {
+                return refused;
+            }
 
             let select_q = SelectQuery {
                 where_clause: where_clause.clone(),
@@ -3084,7 +3164,11 @@ async fn run_list(
             } else {
                 or_500!(render_list(&state, &mut acq, &select_q, &fields).await)
             };
-            let count = or_500!(acq.count_rows(&count_q).await);
+            let count = if state.vs.count {
+                Some(or_500!(acq.count_rows(&count_q).await))
+            } else {
+                None
+            };
             json_response(json!({
                 "count": count,
                 "limit": limit,
@@ -5601,6 +5685,52 @@ mod scan_cap_tests {
     }
 }
 
+/// Without `tenancy` nothing checks codenames: the `sqlite,admin` lib run covers it.
+#[cfg(all(test, not(feature = "tenancy"), feature = "sqlite"))]
+mod no_tenancy_tests {
+    use super::{ViewSet, ViewSetPerms, OPEN_WRITES_FIX};
+    use crate::core::Model as _;
+    use crate::sql::Auto;
+
+    #[derive(crate::Model, Debug, Clone)]
+    #[rustango(table = "vs_open_note")]
+    #[allow(dead_code)]
+    pub struct Note {
+        #[rustango(primary_key)]
+        pub id: Auto<i64>,
+        #[rustango(max_length = 200)]
+        pub title: String,
+    }
+
+    /// The open-writes warning names only fixes this build has.
+    #[test]
+    fn the_open_writes_fix_names_no_codenames() {
+        assert!(!OPEN_WRITES_FIX.contains("permissions_for_model"));
+        assert!(
+            OPEN_WRITES_FIX.contains("read_only") && OPEN_WRITES_FIX.contains("allow_anonymous")
+        );
+    }
+
+    /// Codenames fail at mount instead of answering 403 forever.
+    #[tokio::test]
+    async fn codenames_without_tenancy_refuse_to_mount() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        let vs = ViewSet::for_model(Note::SCHEMA, &["id", "title"]).permissions(ViewSetPerms {
+            list: vec!["vs_open_note.view".into()],
+            ..ViewSetPerms::default()
+        });
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = vs.router("/api/notes", pool);
+        }))
+        .expect_err("codenames must not mount without tenancy");
+        let msg = panic.downcast_ref::<String>().cloned().unwrap_or_default();
+        assert!(
+            msg.contains("need the `tenancy` feature") && msg.contains("allow_anonymous"),
+            "{msg}"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "sso"))]
 mod sso_table_tests {
     use super::ViewSet;
@@ -5622,6 +5752,7 @@ mod sso_table_tests {
             crate::sso::policy::SsoInvite::SCHEMA,
             crate::sso::policy::SsoSharedOverride::SCHEMA,
             crate::sso::policy::SsoTenantPolicy::SCHEMA,
+            crate::sso::policy::SsoLandingRule::SCHEMA,
         ];
         #[cfg(all(feature = "tenancy", feature = "admin-sso"))]
         schemas.push(crate::tenancy::sso::SharedSsoProvider::SCHEMA);

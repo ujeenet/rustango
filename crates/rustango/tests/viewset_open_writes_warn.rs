@@ -11,7 +11,9 @@
 use rustango::core::Model as _;
 use rustango::sql::{sqlx, Auto, Pool};
 use rustango::testkit::CaptureWriter;
-use rustango::viewset::{ViewSet, ViewSetPerms};
+use rustango::viewset::ViewSet;
+#[cfg(feature = "tenancy")]
+use rustango::viewset::ViewSetPerms;
 use rustango::Model;
 
 #[derive(Model, Debug, Clone)]
@@ -45,35 +47,49 @@ async fn open_writes_warn_unless_acknowledged() {
     assert!(open.contains("WARN"), "{open}");
     assert!(open.contains("rustango::viewset"), "{open}");
     assert!(open.contains("vs_open_note"), "{open}");
-
-    // Only the one open write action is named.
-    let one_open = mount_logs(
-        vs().permissions(ViewSetPerms {
-            create: vec!["vs_open_note.add".into()],
-            update: vec!["vs_open_note.change".into()],
-            ..ViewSetPerms::default()
-        }),
-        pool.clone(),
-    );
+    // The fix it names exists in this build; the no-tenancy text is a
+    // unit test in `viewset`, which the `sqlite,admin` lib run covers.
     assert!(
-        one_open.contains("destroy") && !one_open.contains("create"),
-        "{one_open}"
+        open.contains("allow_anonymous") && open.contains("read_only"),
+        "{open}"
     );
+    #[cfg(feature = "tenancy")]
+    assert!(open.contains("permissions_for_model"), "{open}");
 
     for (what, quiet) in [
         ("read_only", vs().read_only()),
         ("allow_anonymous", vs().allow_anonymous()),
-        (
-            "permissions",
-            vs().permissions(ViewSetPerms {
-                create: vec!["vs_open_note.add".into()],
-                update: vec!["vs_open_note.change".into()],
-                destroy: vec!["vs_open_note.delete".into()],
-                ..ViewSetPerms::default()
-            }),
-        ),
     ] {
         let logs = mount_logs(quiet, pool.clone());
         assert!(!logs.contains("WARN"), "{what}: {logs}");
     }
+}
+
+#[cfg(feature = "tenancy")]
+fn write_perms(destroy: bool) -> ViewSetPerms {
+    ViewSetPerms {
+        create: vec!["vs_open_note.add".into()],
+        update: vec!["vs_open_note.change".into()],
+        destroy: if destroy {
+            vec!["vs_open_note.delete".into()]
+        } else {
+            Vec::new()
+        },
+        ..ViewSetPerms::default()
+    }
+}
+
+/// With tenancy, codenames close the write actions they name.
+#[cfg(feature = "tenancy")]
+#[tokio::test]
+async fn codenames_close_open_writes() {
+    let pool = Pool::Sqlite(sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap());
+    let vs = || ViewSet::for_model(Note::SCHEMA, &["id", "title"]);
+    let one_open = mount_logs(vs().permissions(write_perms(false)), pool.clone());
+    assert!(
+        one_open.contains("destroy") && !one_open.contains("create"),
+        "{one_open}"
+    );
+    let logs = mount_logs(vs().permissions(write_perms(true)), pool);
+    assert!(!logs.contains("WARN"), "{logs}");
 }

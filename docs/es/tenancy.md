@@ -149,6 +149,13 @@ llevan el prefijo también.
 El enrutado por host es la opción más fuerte en producción. Los prefijos de
 ruta son útiles en desarrollo, donde tienes un solo host.
 
+Los tenants con prefijo de ruta comparten además el origen del apex con la
+consola de operador. Un script en una página del tenant corre entonces en el
+origen de la consola y puede actuar allí como un operador con sesión, o en el
+admin de otro tenant con prefijo. El servidor avisa al arrancar cuando sirve
+ambos. En producción, da a cada tenant su propio host, o no abras páginas de
+tenants en el navegador que usas para la consola.
+
 ## Modos de almacenamiento
 
 Cada tenant tiene un `storage_mode`: `schema` o `database`.
@@ -261,6 +268,10 @@ Para abrir de antemano el pool de cada tenant activo en modo database,
 ejecuta [`prewarm-pools`](manage.md#prewarm-pools), usa el botón de la
 consola o pon `prewarm_active_tenants: true`.
 
+Las construcciones de pool en frío están limitadas: como máximo 16 a la vez
+(`max_concurrent_pool_builds`) y 600 por minuto (`max_pool_builds_per_minute`);
+por encima una petición recibe un 503 con `Retry-After`. `0` quita un límite.
+
 ## Migraciones
 
 Cada archivo de migración tiene un scope, `registry` o `tenant`.
@@ -302,8 +313,8 @@ Lo que lo lleva:
 - la cookie de sesión del tenant y el token de traspaso de suplantación;
 - los JWT: los claims `tenant` y `org_id` deben coincidir los dos;
 - las claves de firma HMAC y las claves de agentes MCP atadas a un tenant;
-- `ScopedCache::for_tenant`, la caché de página, las claves de idempotencia
-  y `DistributedLock::for_tenant`, todos con la clave `#org:<id>:<slug>`;
+- `CacheScope::for_tenant`, la caché de página, las claves de idempotencia
+  y `CacheScope::locks`, todos con la clave `#org:<id>:<slug>`;
 - los enlaces de restablecer contraseña y de verificación.
 
 Las claves API y los usuarios del tenant viven en su propio almacenamiento,
@@ -311,14 +322,14 @@ que una purga borra. Una `Org` sin id (no leída del registry) no tiene
 `TenantSlug`, y la autenticación la rechaza.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` solo para una Org que no se leyó del registry.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

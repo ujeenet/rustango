@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use rustango::cache::{BoxedCache, InMemoryCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope, InMemoryCache};
 use rustango::extractors::TenantScope;
 use rustango::sql::sqlx::Database;
 use rustango::sql::Auto;
@@ -61,20 +61,20 @@ fn sized<DB: Database>(b: rustango::server::Builder<DB>) -> rustango::server::Bu
 
 // --- "Credentials and caches bind to the org id" example.
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` only for an Org that was not read from the registry.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 
-#[test]
-fn a_reused_slug_gets_a_new_cache_namespace() {
+#[tokio::test]
+async fn a_reused_slug_gets_a_new_cache_namespace() {
     let cache: BoxedCache = Arc::new(InMemoryCache::new());
-    let old = ScopedCache::for_tenant(cache.clone(), &TenantSlug::new(7, "acme"));
-    let new = ScopedCache::for_tenant(cache, &TenantSlug::new(8, "acme"));
-    assert_eq!(old.prefix(), "tenant:#org:7:acme:");
-    assert_eq!(new.prefix(), "tenant:#org:8:acme:");
-    assert_ne!(TenantSlug::new(7, "acme"), TenantSlug::new(8, "acme"));
+    let old = CacheScope::for_tenant(cache.clone(), &TenantSlug::new(7, "acme")).app();
+    let new = CacheScope::for_tenant(cache.clone(), &TenantSlug::new(8, "acme")).app();
+    old.set("k", "old", None).await.unwrap();
+    assert!(cache.exists("tenant:#org:7:acme:app:k").await.unwrap());
+    assert_eq!(new.get("k").await.unwrap(), None);
 }
 
 #[test]

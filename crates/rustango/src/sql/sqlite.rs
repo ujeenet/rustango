@@ -18,7 +18,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_sqlite, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError};
+use super::{CompiledStatement, Dialect, SqlError, TableTarget};
 
 /// The `strftime` format for the one text shape a SQLite datetime
 /// column may hold.
@@ -123,6 +123,21 @@ impl Dialect for Sqlite {
 
     // SQLite uses the trait defaults for quoting and placeholders.
 
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT MIN(ii.name) FROM pragma_index_list(?) il, pragma_index_info(il.name) ii \
+             WHERE il.\"unique\" = 1 AND il.origin <> 'pk' AND il.partial = 0 \
+             GROUP BY il.name HAVING COUNT(*) = 1 AND MIN(ii.name) IS NOT NULL",
+        )
+    }
+
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT MIN(f.\"from\"), MIN(f.on_delete) FROM pragma_foreign_key_list(?) f \
+             GROUP BY f.id HAVING COUNT(*) = 1",
+        )
+    }
+
     /// A write transaction on the runner's lock file; BUSY means held.
     fn acquire_session_lock_sql(&self) -> Option<String> {
         Some("BEGIN IMMEDIATE".into())
@@ -167,7 +182,7 @@ impl Dialect for Sqlite {
     /// SQLite has no `ALTER TABLE … DROP CONSTRAINT`, so there is no
     /// statement to return. Rebuild the table without the constraint
     /// instead.
-    fn drop_check_constraint_sql(&self, _table: &str, _name: &str) -> Option<String> {
+    fn drop_check_constraint_sql(&self, _table: TableTarget<'_>, _name: &str) -> Option<String> {
         None
     }
 
@@ -176,17 +191,22 @@ impl Dialect for Sqlite {
     ///
     /// Naming the constraint would not help. There is no statement to
     /// name, whether or not the emitter gave the key a name.
-    fn drop_foreign_key_sql(&self, _table: &str, _name: &str) -> Option<String> {
+    fn drop_foreign_key_sql(&self, _table: TableTarget<'_>, _name: &str) -> Option<String> {
         None
     }
 
     /// A unique index: SQLite has no `ADD CONSTRAINT`, and refuses
     /// `ADD COLUMN … UNIQUE`.
-    fn add_unique_constraint_sql(&self, table: &str, name: &str, column: &str) -> String {
+    fn add_unique_constraint_sql(
+        &self,
+        table: TableTarget<'_>,
+        name: &str,
+        column: &str,
+    ) -> String {
         format!(
             "CREATE UNIQUE INDEX {} ON {} ({})",
             self.quote_ident(name),
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(column)
         )
     }

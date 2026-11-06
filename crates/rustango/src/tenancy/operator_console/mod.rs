@@ -158,6 +158,9 @@ struct ConsoleState {
     /// the shared providers page. Default `/login`.
     #[cfg_attr(not(feature = "admin-sso"), allow(dead_code))]
     tenant_login_url: String,
+    /// Longest a console session lasts from sign-in, in seconds:
+    /// `RouteConfig::operator_session_ttl`, at most `SESSION_TTL_SECS`.
+    session_lifetime: i64,
     /// Operator second-factor settings, read from env at boot.
     #[cfg(feature = "totp")]
     totp: Arc<totp::Gate>,
@@ -626,6 +629,7 @@ pub(crate) fn router_full_unlogged(
     tenant_session_secret: Option<SessionSecret>,
     tenant_handoff_url: String,
     tenant_login_url: String,
+    operator_session_ttl: std::time::Duration,
 ) -> Router {
     router_unlogged(
         registry,
@@ -636,6 +640,7 @@ pub(crate) fn router_full_unlogged(
         tenant_session_secret,
         tenant_handoff_url,
         tenant_login_url,
+        operator_session_ttl,
     )
 }
 
@@ -658,6 +663,7 @@ fn router_inner(
         tenant_session_secret,
         tenant_handoff_url,
         super::routes::RouteConfig::default().login_url,
+        super::routes::RouteConfig::default().operator_session_ttl,
     )
     .access_log(access_log_layer())
 }
@@ -680,6 +686,7 @@ fn router_unlogged(
     tenant_session_secret: Option<SessionSecret>,
     tenant_handoff_url: String,
     tenant_login_url: String,
+    operator_session_ttl: std::time::Duration,
 ) -> Router {
     let mut tera = crate::template_extensions::html_tera();
     crate::template_extensions::register_help_filter(&mut tera);
@@ -780,6 +787,7 @@ fn router_unlogged(
         tenant_session_secret: tenant_session_secret.map(Arc::new),
         tenant_handoff_url,
         tenant_login_url,
+        session_lifetime: session::lifetime_secs(operator_session_ttl),
         #[cfg(feature = "totp")]
         totp: Arc::new(totp::Gate::from_env()),
     };
@@ -1298,7 +1306,10 @@ async fn require_session(
             let mut resp = next.run(req).await;
             // Activity slides the idle deadline, unless the handler set
             // its own cookie (a password change): the last one wins.
-            if let Some(renewed) = payload.renewed().filter(|_| !sets_session_cookie(&resp)) {
+            if let Some(renewed) = payload
+                .renewed_within(state.session_lifetime)
+                .filter(|_| !sets_session_cookie(&resp))
+            {
                 resp.headers_mut().append(
                     header::SET_COOKIE,
                     session_cookie(&state.session_secret, &renewed),
@@ -1642,7 +1653,7 @@ async fn logout(
 fn new_session_cookie(state: &ConsoleState, op: &auth::Operator) -> HeaderValue {
     let mut payload = SessionPayload::new(
         op.id.get().copied().unwrap_or_default(),
-        SESSION_IDLE_SECS,
+        SESSION_IDLE_SECS.min(state.session_lifetime),
         session::PasswordFingerprint::of(&state.session_secret, &op.password_hash),
     );
     payload.iat = crate::session::issued_at(op.sessions_revoked_at);
@@ -1695,6 +1706,7 @@ async fn live_session(
 ) -> Result<Option<(auth::Operator, SessionPayload)>, crate::sql::ExecError> {
     let Some(payload) = crate::cookies::cookie_from_headers(headers, COOKIE_NAME)
         .and_then(|val| session::decode(&state.session_secret, val).ok())
+        .filter(|p| !p.outlived(state.session_lifetime, chrono::Utc::now().timestamp()))
     else {
         return Ok(None);
     };
@@ -2469,20 +2481,13 @@ async fn serve_brand_asset(
     State(state): State<ConsoleState>,
     axum::extract::Path((slug, filename)): axum::extract::Path<(String, String)>,
 ) -> Response<Body> {
-    match branding::load_brand_asset(&slug, &filename, &state.brand_storage).await {
-        Ok((bytes, ct)) => Response::builder()
-            .status(StatusCode::OK)
-            .header(header::CONTENT_TYPE, ct)
-            .header(header::CACHE_CONTROL, "public, max-age=300")
-            .body(Body::from(bytes))
-            .expect("response builds"),
-        Err(
-            branding::BrandError::NotFound
-            | branding::BrandError::InvalidSlug
-            | branding::BrandError::InvalidFilename,
-        ) => (StatusCode::NOT_FOUND, "not found").into_response(),
-        Err(e) => server_error("operator_console::brand_asset", &e),
-    }
+    branding::brand_asset_response(
+        &slug,
+        &filename,
+        &state.brand_storage,
+        "operator_console::brand_asset",
+    )
+    .await
 }
 
 // ----------------------------- static asset
@@ -3108,5 +3113,90 @@ mod opbrand_tests {
         s.theme_mode = Some("midnight".into());
         OpBrand::apply_brand_settings(&mut b, &s);
         assert_eq!(b.theme_mode, original);
+    }
+}
+
+#[cfg(all(test, feature = "sqlite"))]
+mod session_lifetime_tests {
+    use super::*;
+    use tower::ServiceExt as _;
+
+    /// `operator_session_ttl` ends a console session that many seconds
+    /// after sign-in, though its idle deadline has not passed.
+    #[tokio::test]
+    async fn the_operator_session_ttl_caps_a_console_session() {
+        let pool = crate::sql::Pool::connect("sqlite::memory:").await.unwrap();
+        crate::testkit::create_tables_for::<auth::Operator>(&pool)
+            .await
+            .unwrap();
+        let mut op = auth::Operator {
+            id: crate::sql::Auto::default(),
+            username: "op".into(),
+            password_hash: "$hash".into(),
+            active: true,
+            created_at: chrono::Utc::now(),
+            password_changed_at: None,
+            sessions_revoked_at: None,
+        };
+        op.insert(&pool).await.unwrap();
+        let secret = SessionSecret::from_bytes(b"operator-console-ttl-secret-32b!".to_vec());
+        let app = router_full_unlogged(
+            pool,
+            None,
+            None,
+            secret.clone(),
+            crate::tenancy::branding::default_brand_storage(),
+            None,
+            "/_impersonation_handoff".into(),
+            "/login".into(),
+            std::time::Duration::from_secs(60),
+        );
+        let now = chrono::Utc::now().timestamp();
+        let status = |signed_in_ago: i64| {
+            let payload = SessionPayload {
+                oid: op.id.get().copied().unwrap(),
+                exp: now + 600,
+                iat: now - signed_in_ago,
+                pwf: session::PasswordFingerprint::of(&secret, &op.password_hash),
+            };
+            let req = axum::http::Request::get("/change-password")
+                .header(
+                    header::COOKIE,
+                    format!("{COOKIE_NAME}={}", session::encode(&secret, &payload)),
+                )
+                .body(axum::body::Body::empty())
+                .unwrap();
+            let app = app.clone();
+            async move { app.oneshot(req).await.unwrap().status() }
+        };
+        assert_eq!(status(10).await, StatusCode::OK);
+        assert!(status(120).await.is_redirection(), "outlived the 60 s ttl");
+    }
+
+    /// A renewal never moves the deadline past the configured lifetime.
+    #[test]
+    fn renewal_stays_inside_the_lifetime() {
+        let now = chrono::Utc::now().timestamp();
+        let p = SessionPayload {
+            oid: 1,
+            // An older cookie's far deadline.
+            exp: now + 600,
+            iat: now - 50,
+            pwf: session::PasswordFingerprint::of(
+                &SessionSecret::from_bytes(b"operator-console-ttl-secret-32b!".to_vec()),
+                "$h",
+            ),
+        };
+        let renewed = p.renewed_within(60).expect("stale");
+        assert!(
+            renewed.exp <= p.iat + 60,
+            "{} > {}",
+            renewed.exp,
+            p.iat + 60
+        );
+        assert_eq!(
+            session::lifetime_secs(std::time::Duration::from_secs(7 * 86_400)),
+            12 * 3600
+        );
     }
 }

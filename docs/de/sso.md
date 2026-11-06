@@ -47,7 +47,8 @@ unbekannte E-Mail auch ein Konto anlegen; das ist standardmäßig aus.)
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), die
 > Link-Tabelle `rustango::sso::link` (`SsoLink`, `ProviderKey`, `sign_in`), die
 > Bare-Admin-Verdrahtung `rustango::admin::sso`, das SSO pro Tenant/Konsole
-> `rustango::tenancy::sso` (`SharedSsoProvider`) und das Member-SSO
+> (gemeinsame Provider: die Registry-Tabelle `rustango_shared_sso_providers`,
+> in der Operator-Konsole bearbeitet) und das Member-SSO
 > `rustango::tenancy::member_auth`.
 
 ## Callback-URLs
@@ -179,6 +180,24 @@ Die tenantweiten Einstellungen, eine Zeile.
 | `default_provider` | Slug des Anbieters, den die Anmeldeseite sofort öffnet, außer bei `?local=1` oder nach einem Fehler. |
 | `signups_per_hour` | Höchstens so viele SSO-Registrierungen pro Stunde. Leer: 100; `0`: keine Grenze. |
 
+### `SsoLandingRule`
+
+Wohin eine Anmeldung ohne `?next=` führt. Die Regeln laufen nach `position`, die
+erste passende gewinnt. Das Login-Gate behält `next` für jede Seite, die es
+umleitet; die Regeln greifen also, wenn die Anmeldung kein `next` hat, etwa wenn
+sie auf der Anmeldeseite selbst beginnt. Sie gelten für SSO- und Passwort-Anmeldungen im
+Tenant-Admin und im Bare-Admin; die Mitglieder-Anmeldung ignoriert sie. Eine
+Regel, deren Pfad die `next`-Prüfung nicht besteht (etwa die Anmeldeseite), wird
+übersprungen. Fehlt die Tabelle, gibt es keine Regeln.
+
+| Feld | Was eintragen |
+|---|---|
+| `position` | Die Regeln werden von der kleinsten Zahl an geprüft, die erste passende gewinnt. Bei gleicher Zahl entscheidet die ID. |
+| `match_kind` | `role`: der Benutzer hat die Rolle aus `match_value` (nie im Bare-Admin, der keine Rollen hat). `claim`: die SSO-Anmeldung trägt den Claim `match_name` mit `match_value`, gelesen wie ein Claim der Rollenzuordnung. `any`: jede Anmeldung; als Standard ans Ende stellen. |
+| `match_name` | Der Claim-Name, nur für `claim`-Regeln. Sonst leer. |
+| `match_value` | Der Rollenname (`role`) oder der Claim-Wert (`claim`), exakt verglichen. Für `any` leer. |
+| `landing_url` | Ein Pfad auf dieser Seite, der mit `/` beginnt, wie auf dem eigenen Host des Tenants, z. B. `/admin/reports`. Ein Pfadpräfix wird ergänzt. Keine Zugriffskontrolle: die Seite muss die Rechte selbst prüfen. |
+
 ### `SsoSharedOverride`
 
 Die Einschränkung eines geteilten Anbieters durch einen Tenant. Leere
@@ -230,9 +249,9 @@ Auto-Admin, sodass eine Endbenutzer-Anmeldung (Member) gebaut werden kann, ohne
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.63", features = ["admin-sso"] }
+rustango = { version = "0.64", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.63", features = ["tenancy", "sso"] }
+rustango = { version = "0.64", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` und die historischen `admin::sso::*`-Kernpfade sind
@@ -270,10 +289,11 @@ diese Spalte aus.
 Im Tenant-Admin landet `GET <login>/sso/<slug>?next=/pfad` nach der Anmeldung
 auf `/pfad`. Der Pfad steckt im signierten Flow-Cookie und durchläuft dieselbe
 Prüfung wie bei der Passwort-Anmeldung: nur gleicher Origin und innerhalb des
-Pfadpräfixes des Tenants. Alles andere landet auf `admin_url`. Die Anmeldeseite
-gibt ihr eigenes `?next` an die SSO-Buttons weiter. Der Bare-Admin macht es
-ebenso, ohne die Präfix-Regel, behält den Pfad über den TOTP-Schritt und fällt
-auf sein Präfix zurück.
+Pfadpräfixes des Tenants. Ohne brauchbares `next` entscheiden die
+[Landing-Regeln](#ssolandingrule) des Tenants, und ohne Treffer landet die
+Anmeldung auf `admin_url`. Die Anmeldeseite gibt ihr eigenes `?next` an die
+SSO-Buttons weiter und erfindet nie eines. Der Bare-Admin macht es ebenso, ohne die Präfix-Regel,
+behält den Pfad über den TOTP-Schritt und fällt auf sein Präfix zurück.
 
 Die Link-Tabelle ist ein normales migriertes Modell: im Speicher des Tenants für
 Tenant-Anmeldungen und in der Admin-Datenbank für den Bare-Admin. Eine
@@ -405,10 +425,13 @@ Unterschiede zum Admin-Ablauf:
   einem bestehenden Konto passt, folgt der obigen `allow_email_link`-Regel.
   Setzen Sie es auf `false`, um unbekannte E-Mails abzuweisen. Eine native
   Anmeldung (eine App, die ihr ID-Token selbst geprüft hat) ruft
-  `find_or_provision_member` direkt auf, mit `ProviderKey::app(issuer)` als
-  Schlüssel. Ihr Ergebnis `MemberSignIn` ist `Member(id)`, `NotLinked` (ein
-  Konto hat die E-Mail, darf aber nicht darüber verknüpft werden), `NoAccount`,
-  `Inactive`, `Unverified` oder `Refused`.
+  `sso::policy::admit` mit `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` und
+  `tenancy::member_auth::TenantAccounts(pool)` auf; die übergebene
+  `EffectivePolicy` ist die Anmelde-Policy, gehören ihre Regeln also dorthin.
+  Das veraltete `find_or_provision_member` wendet die Regeln eines
+  Tenant-Providers noch an, aber ein App-Schlüssel hat keine: Mit
+  `auto_provision` registriert es jede verifizierte E-Mail.
 - **Ein eigenes Session-Cookie.** Das Member-Cookie
   (`rustango_member_session`) ist von den Tenant- / Admin-Session-Cookies
   **domänengetrennt**: die signierte Nachricht trägt einen Tag pro Domäne und
@@ -590,8 +613,9 @@ with Apple ist kein Preset; es benötigt id_token/JWKS-Verifizierung.)
   per E-Mail verknüpft, ein Rolleninhaber nur mit `allow_email_link_staff`. Eine per E-Mail angelegte Verknüpfung
   funktioniert weiter, nachdem der Benutzer befördert wurde; löschen Sie sie,
   wenn das nicht gewollt ist.
-- **Keine Auto-Provisionierung** für die Admins — eine unbekannte E-Mail
-  kommt nicht hinein.
+- **Keine Auto-Provisionierung im Bare-Admin** — eine unbekannte E-Mail
+  kommt nicht hinein. Ein Tenant-Admin-Provider registriert nur, wenn sein
+  `signup_mode` es erlaubt.
 - **Secrets im Ruhezustand verschlüsselt** (`RUSTANGO_SECRET_KEY`), nur zur
   Anmeldezeit im Speicher entschlüsselt; Bearbeitungsformulare maskieren das
   gespeicherte Secret.

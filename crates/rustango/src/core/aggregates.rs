@@ -9,16 +9,19 @@
 //! use rustango::core::aggregates::{count, sum, avg};
 //! use rustango::core::Column as _;
 //!
-//! Post::objects()
-//!     .aggregate("posts_total", count("id"))
-//!     .aggregate("active_posts", count("id").filter(Post::active.eq(true)))
-//!     .aggregate(
+//! // One summary row: `.aggregate()` adds no GROUP BY.
+//! let rows = Post::objects()
+//!     .aggregate()
+//!     .annotate("posts_total", count("id").into())
+//!     .annotate("active_posts", count("id").filter(Post::active.eq(true)).into())
+//!     .annotate(
 //!         "revenue_or_zero",
 //!         sum("price")
 //!             .filter(Post::status.eq("published"))
-//!             .default(0_i64),
+//!             .default(0_i64)
+//!             .into(),
 //!     )
-//!     .compute(&pool).await?;
+//!     .fetch(&pool).await?;
 //! ```
 //!
 //! ## Wrap order
@@ -43,7 +46,7 @@ use super::SqlValue;
 
 /// Builder for an [`AggregateExpr`]. Start from a free function in
 /// this module ([`count`], [`sum`], …) and pass the result to anything
-/// taking `impl Into<AggregateExpr>`, such as `QuerySet::aggregate`.
+/// taking an [`AggregateExpr`] via `.into()`, such as `.annotate(..)`.
 #[must_use]
 pub struct AggregateBuilder {
     kind: AggregateExpr,

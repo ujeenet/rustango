@@ -939,7 +939,7 @@ pub(crate) fn bind_query_sqlite<'a>(
 pub async fn insert_pool(pool: &Pool, query: &InsertQuery) -> Result<(), ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_insert(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await?;
+    write_pool(pool, &stmt.sql, stmt.params).await?;
     Ok(())
 }
 
@@ -954,6 +954,12 @@ pub async fn insert_or_ignore(pool: &Pool, query: &InsertQuery) -> Result<bool, 
         on_conflict: Some(crate::core::ConflictClause::DoNothing),
         ..query.clone()
     };
+    if let Some(w) = atomic::join(pool).await {
+        let mut w = w?;
+        let inserted = insert_or_ignore_tx(&mut w, &query).await?;
+        w.release().await?;
+        return Ok(inserted);
+    }
     query.validate()?;
     let stmt = pool.dialect().compile_insert(&query)?;
     match pool {
@@ -1031,6 +1037,12 @@ pub async fn insert_returning_pool(
     pool: &Pool,
     query: &InsertQuery,
 ) -> Result<InsertReturningPool, ExecError> {
+    if let Some(w) = atomic::join(pool).await {
+        let mut w = w?;
+        let row = insert_returning_tx(&mut w, query).await?;
+        w.release().await?;
+        return Ok(row);
+    }
     crate::test_assertions::query_counter::bump();
     query.validate()?;
     if query.returning.is_empty() {
@@ -1167,10 +1179,15 @@ fn generated_pk(
                 })
             }
             #[cfg(feature = "mysql")]
+            // An id too wide for the key is unreadable, never wrapped.
             crate::sql::InsertReturningPool::MySqlAutoId(id) => match pk_field.ty {
                 T::I64 => Ok(SqlValue::I64(*id)),
-                T::I32 => Ok(SqlValue::I32(*id as i32)),
-                T::I16 => Ok(SqlValue::I16(*id as i16)),
+                T::I32 => i32::try_from(*id)
+                    .map(SqlValue::I32)
+                    .map_err(|_| unreadable()),
+                T::I16 => i16::try_from(*id)
+                    .map(SqlValue::I16)
+                    .map_err(|_| unreadable()),
                 _ => Err(unreadable()),
             },
             #[cfg(feature = "sqlite")]
@@ -1322,7 +1339,7 @@ pub(crate) async fn stored_keys(
 pub async fn update_pool(pool: &Pool, query: &UpdateQuery) -> Result<u64, ExecError> {
     query.validate()?;
     let stmt = pool.dialect().compile_update(query)?;
-    execute_pool(pool, &stmt.sql, stmt.params).await
+    write_pool(pool, &stmt.sql, stmt.params).await
 }
 
 /// `DELETE` against either backend; returns rows affected.
@@ -1371,7 +1388,7 @@ pub(crate) async fn delete_plan_pool(
     plan: crate::sql::DeletePlan,
 ) -> Result<u64, ExecError> {
     if plan.is_one_statement() {
-        return execute_pool(pool, &plan.owner.sql, plan.owner.params).await;
+        return write_pool(pool, &plan.owner.sql, plan.owner.params).await;
     }
     atomic(pool, move |tx| {
         Box::pin(async move {
@@ -1448,9 +1465,9 @@ pub(crate) async fn execute_all_or_none(
     pool: &Pool,
     mut stmts: Vec<super::CompiledStatement>,
 ) -> Result<u64, ExecError> {
-    if stmts.len() == 1 && !atomic::in_block(pool) {
+    if stmts.len() == 1 {
         let stmt = stmts.remove(0);
-        return execute_pool(pool, &stmt.sql, stmt.params).await;
+        return write_pool(pool, &stmt.sql, stmt.params).await;
     }
     atomic(pool, move |tx| {
         Box::pin(async move {
@@ -1671,6 +1688,83 @@ pub(crate) async fn execute_unprepared_pool(pool: &Pool, sql: &str) -> Result<()
 }
 
 // ---- internal dispatch helpers ----
+
+/// Run one ORM write on `pool`; inside an [`atomic`] block on it, in a
+/// savepoint of the block's transaction, so the block's rollback undoes it.
+async fn write_pool(pool: &Pool, sql: &str, binds: Vec<SqlValue>) -> Result<u64, ExecError> {
+    if let Some(w) = atomic::join(pool).await {
+        let mut w = w?;
+        let n = execute_tx(&mut w, sql, binds).await?;
+        w.release().await?;
+        return Ok(n);
+    }
+    execute_pool(pool, sql, binds).await
+}
+
+/// The transaction a multi-statement ORM write runs in: its own, or a
+/// savepoint of the open [`atomic`] block on the same pool.
+#[doc(hidden)]
+pub struct WriteTx(WriteTxConn);
+
+enum WriteTxConn {
+    Own(PoolTx<'static>),
+    Joined(atomic::JoinedWrite),
+}
+
+/// Begin a write on `pool`: a savepoint inside an [`atomic`] block on it,
+/// else [`write_transaction`]. Finish with [`WriteTx::commit`].
+///
+/// # Errors
+/// Driver errors from `BEGIN` / `SAVEPOINT`; [`ExecError::NestedAtomic`]
+/// while the block's guard is held.
+#[doc(hidden)]
+pub async fn write_tx(pool: &Pool) -> Result<WriteTx, ExecError> {
+    match atomic::join(pool).await {
+        Some(w) => Ok(WriteTx(WriteTxConn::Joined(w?))),
+        None => Ok(WriteTx(WriteTxConn::Own(write_transaction(pool).await?))),
+    }
+}
+
+impl WriteTx {
+    /// Commit, or release the block's savepoint (the block commits it).
+    ///
+    /// # Errors
+    /// Driver errors from `COMMIT` / `RELEASE SAVEPOINT`.
+    pub async fn commit(self) -> Result<(), ExecError> {
+        match self.0 {
+            WriteTxConn::Own(tx) => Ok(tx.commit().await?),
+            WriteTxConn::Joined(w) => w.release().await,
+        }
+    }
+}
+
+impl std::ops::Deref for WriteTx {
+    type Target = PoolTx<'static>;
+    fn deref(&self) -> &PoolTx<'static> {
+        match &self.0 {
+            WriteTxConn::Own(tx) => tx,
+            WriteTxConn::Joined(w) => w,
+        }
+    }
+}
+
+impl std::ops::DerefMut for WriteTx {
+    fn deref_mut(&mut self) -> &mut PoolTx<'static> {
+        match &mut self.0 {
+            WriteTxConn::Own(tx) => tx,
+            WriteTxConn::Joined(w) => w,
+        }
+    }
+}
+
+/// `save()`'s UPDATE count: no row matched the PK is `RowNotFound`, not `Ok(0)`.
+#[doc(hidden)]
+pub fn row_saved(n: u64) -> Result<u64, ExecError> {
+    if n == 0 {
+        return Err(sqlx::Error::RowNotFound.into());
+    }
+    Ok(n)
+}
 
 /// Run a parameterized statement that returns no rows. Shared by the
 /// non-`FromRow` `_pool` functions.
@@ -2142,18 +2236,14 @@ where
 }
 
 /// [`run_on`] for a statement that returns no rows: the rows affected.
+/// Each executor counts the statement where it runs it.
 pub(crate) async fn write_on<'c, E: SqlExecutor<'c>>(
     exec: E,
     sql: &str,
     params: Vec<SqlValue>,
 ) -> Result<u64, ExecError> {
     let guard = exec.guard()?;
-    crate::test_assertions::query_counter::bump();
-    guard.check(
-        exec.execute_rows(sql, params)
-            .await
-            .map_err(ExecError::from),
-    )
+    guard.check(exec.execute_rows(sql, params).await)
 }
 
 mod traits;
@@ -3347,6 +3437,26 @@ mod in_chunk_tests {
         // A row wider than the cap still gets a batch of its own.
         assert_eq!(rows_per_batch(pg, 70_000, usize::MAX), 1);
         assert_eq!(rows_per_batch(pg, 0, 0), 1);
+    }
+}
+
+#[cfg(all(test, feature = "mysql"))]
+mod generated_pk_tests {
+    use super::*;
+    use crate::core::{FieldSchema, FieldType};
+
+    #[test]
+    fn a_mysql_id_too_wide_for_the_pk_is_refused() {
+        let id = |n| crate::sql::InsertReturningPool::MySqlAutoId(n);
+        let small = FieldSchema::new("id", "id", FieldType::I16);
+        let int = FieldSchema::new("id", "id", FieldType::I32);
+        assert_eq!(generated_pk(&id(7), &small, "t").unwrap(), SqlValue::I16(7));
+        for (n, f) in [(70_000, &small), (3_000_000_000, &int)] {
+            assert!(matches!(
+                generated_pk(&id(n), f, "t"),
+                Err(ExecError::GeneratedPkUnreadable { table: "t", .. })
+            ));
+        }
     }
 }
 

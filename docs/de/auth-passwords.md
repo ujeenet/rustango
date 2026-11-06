@@ -215,7 +215,7 @@ Ein Job wartet bis zu `hash_wait()` auf einen freien Platz (Standard 5 s,
 `DEFAULT_HASH_WAIT`) und schlägt dann mit `PasswordError::Busy` fehl. Antworten
 Sie darauf mit einem 503, gleich für einen bekannten und einen unbekannten
 Benutzer. Setzen Sie die Wartezeit mit `[auth] hash_wait_ms` oder beim Start mit
-`configure_hash_wait(duration)`.
+`configure_hash_wait(duration)`. Die `[auth]`-Schlüssel wendet `manage::Cli` beim Laden der Einstellungen an; eine App, die `server::Builder` ohne ihn baut, ruft stattdessen die Funktionen auf.
 
 ---
 
@@ -225,7 +225,7 @@ Neue Hashes nutzen `argon2_params()`, standardmäßig `Argon2Params::DEFAULT`
 (m=19456 KiB, t=2, p=1). Erhöhen Sie sie mit `[auth] argon2_memory_kib`,
 `argon2_iterations` und `argon2_parallelism`, oder rufen Sie beim Start
 `configure_argon2(Argon2Params::new(m, t, p)?)` auf; ein im Code gesetzter Wert
-gewinnt gegen die Einstellungen. `Argon2Params::new` lehnt eine Kombination ab,
+gewinnt gegen die Einstellungen, und die Schlüssel wirken nur über `manage::Cli`. `Argon2Params::new` lehnt eine Kombination ab,
 die argon2 ablehnt.
 
 Alte Hashes verifizieren weiterhin, denn ihre Kosten stehen in der

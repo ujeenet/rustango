@@ -19,8 +19,8 @@ use rustango::tenancy::tenant_console::{
     encode as encode_session, PasswordFingerprint, TenantSessionPayload, COOKIE_NAME,
 };
 use rustango::tenancy::{
-    admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, Org, StorageMode,
-    SubdomainResolver, TenantPools,
+    admin::TenantAdminBuilder, routes::RouteConfig, ChainResolver, StorageMode, SubdomainResolver,
+    TenantPools,
 };
 use tokio::sync::Mutex;
 use tower::ServiceExt;
@@ -67,19 +67,18 @@ async fn change_password_anonymous_redirects_to_login() {
     // `database_mode_admin_serves_tenant_data` test uses).
     let slug = unique("chpw_anon");
     let host_pattern = format!("{slug}.app.test");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: "Test".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(url.clone()),
-        schema_name: None,
-        host_pattern: Some(host_pattern.clone()),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.clone();
+        o.display_name = "Test".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(url.clone());
+        o.schema_name = None;
+        o.host_pattern = Some(host_pattern.clone());
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let pools = Arc::new(TenantPools::new(pool.clone()));
@@ -125,19 +124,18 @@ async fn change_password_authenticated_get_renders_form() {
 
     let slug = unique("chpw_auth");
     let host_pattern = format!("{slug}.app.test");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: "Test".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(url.clone()),
-        schema_name: None,
-        host_pattern: Some(host_pattern.clone()),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.clone();
+        o.display_name = "Test".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(url.clone());
+        o.schema_name = None;
+        o.host_pattern = Some(host_pattern.clone());
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     // Seed a user so validate_session can look it up.
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
@@ -213,19 +211,18 @@ async fn change_password_post_updates_stored_hash_when_current_matches() {
 
     let slug = unique("chpw_post");
     let host_pattern = format!("{slug}.app.test");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: "Test".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(url.clone()),
-        schema_name: None,
-        host_pattern: Some(host_pattern.clone()),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.clone();
+        o.display_name = "Test".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(url.clone());
+        o.schema_name = None;
+        o.host_pattern = Some(host_pattern.clone());
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("old-pw-secret").unwrap();
     let user_id: i64 = sqlx::query_scalar(
@@ -304,19 +301,18 @@ async fn change_password_post_rejects_wrong_current() {
 
     let slug = unique("chpw_rej");
     let host_pattern = format!("{slug}.app.test");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: "Test".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(url.clone()),
-        schema_name: None,
-        host_pattern: Some(host_pattern.clone()),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.clone();
+        o.display_name = "Test".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(url.clone());
+        o.schema_name = None;
+        o.host_pattern = Some(host_pattern.clone());
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("real-current").unwrap();
     let user_id: i64 = sqlx::query_scalar(
@@ -407,19 +403,18 @@ async fn session_minted_before_password_rotation_is_rejected() {
 
     let slug = unique("chpw_pwd_at");
     let host_pattern = format!("{slug}.app.test");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: "Test".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some(url.clone()),
-        schema_name: None,
-        host_pattern: Some(host_pattern.clone()),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.clone();
+        o.display_name = "Test".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some(url.clone());
+        o.schema_name = None;
+        o.host_pattern = Some(host_pattern.clone());
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     let hash = rustango::tenancy::password::hash("starting-pw").unwrap();
     let user_id: i64 = sqlx::query_scalar(

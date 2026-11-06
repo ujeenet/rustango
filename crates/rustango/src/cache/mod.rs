@@ -62,6 +62,7 @@ pub mod redis_backend;
 #[cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 pub use db_backend::DatabaseCache;
 
+pub(crate) mod keyspace;
 #[cfg(feature = "tenancy")]
 mod scope;
 pub mod scoped;
@@ -79,6 +80,10 @@ pub enum CacheError {
     Connection(String),
     #[error("cache serialization error: {0}")]
     Serialization(String),
+    /// The call would do more than its view allows, such as a global app
+    /// view's `clear()` wiping every tenant.
+    #[error("cache operation refused: {0}")]
+    Refused(String),
 }
 
 /// The error every backend returns when `incr` would leave the i64 range.
@@ -324,6 +329,15 @@ pub trait Cache: Send + Sync + 'static {
              a safe fallback for a scoped delete."
         )))
     }
+
+    /// [`Self::delete_prefix`] for each of `prefixes`. `RedisCache` does it
+    /// in one keyspace scan; the default deletes one prefix at a time.
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
+        for p in prefixes {
+            self.delete_prefix(p).await?;
+        }
+        Ok(())
+    }
 }
 
 /// `Arc<dyn Cache>` alias — the standard way to share a cache instance.
@@ -369,7 +383,7 @@ fn settings_backend(s: &crate::config::CacheSettings) -> Result<SettingsBackend<
 /// - `"null"` / `"none"` → [`NullCache`]
 /// - `"file"` → [`FileCache`]. Needs `file_cache_dir`.
 /// - `"redis"`, `"db"` / `"database"` → **panics**, see below
-/// - anything else → [`InMemoryCache`], logged at `error`
+/// - anything else, or `"file"` without `file_cache_dir` → **panics**
 ///
 /// # Panics
 /// On `backend = "redis"` or `"db"`. Both need to connect, which this
@@ -409,7 +423,7 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
              every protection that depends on the cache being shared across replicas."
         ),
         Ok(SettingsBackend::Null) => Arc::new(NullCache),
-        Ok(SettingsBackend::File(dir)) => Arc::new(FileCache::new(dir)),
+        Ok(SettingsBackend::File(dir)) => Arc::new(file_cache(s, dir)),
         // `DatabaseCache` needs a runtime `Pool` and an async
         // `ensure_table()`. Settings alone cannot describe it, so even
         // the async resolver cannot build this one.
@@ -426,6 +440,19 @@ pub fn from_settings(s: &crate::config::CacheSettings) -> BoxedCache {
         ),
         Ok(SettingsBackend::Memory) => Arc::new(InMemoryCache::new()),
     }
+}
+
+/// A [`FileCache`] at `dir` with the `[cache]` caps.
+#[cfg(feature = "config")]
+fn file_cache(s: &crate::config::CacheSettings, dir: &std::path::Path) -> FileCache {
+    let mut cache = FileCache::new(dir);
+    if let Some(n) = s.file_cache_max_entries {
+        cache = cache.max_entries(n);
+    }
+    if let Some(n) = s.file_cache_max_bytes {
+        cache = cache.max_bytes(n);
+    }
+    cache
 }
 
 /// [`from_settings`], but it can also build backends that connect —
@@ -1090,11 +1117,26 @@ impl Cache for InMemoryCache {
 /// Where the filesystem has no locks, they run unlocked after one warning.
 /// Keep the directory private (0700): anyone who can open a lock file
 /// can stall writers for up to 5 seconds per call.
-/// There is no entry cap with a cull strategy. The directory is per host.
+/// Past [`FileCache::max_entries`] or [`FileCache::max_bytes`] the sweep
+/// removes the oldest-written entries; each write sweep checks one stripe
+/// against its sixteenth of the cap. The directory is per host.
 /// File I/O runs on tokio's blocking pool, or inline outside a tokio runtime.
 pub struct FileCache {
     dir: std::path::PathBuf,
     sweep: Arc<Sweep>,
+    limits: FileLimits,
+}
+
+/// Default [`FileCache::max_entries`].
+pub const FILE_CACHE_MAX_ENTRIES: usize = 100_000;
+/// Default [`FileCache::max_bytes`]: 1 GiB.
+pub const FILE_CACHE_MAX_BYTES: u64 = 1 << 30;
+
+/// The size caps of a [`FileCache`] directory.
+#[derive(Clone, Copy)]
+struct FileLimits {
+    entries: usize,
+    bytes: u64,
 }
 
 /// Write count and next stripe for the bounded expiry sweep.
@@ -1138,7 +1180,27 @@ impl FileCache {
         Self {
             dir: dir.into(),
             sweep: Arc::default(),
+            limits: FileLimits {
+                entries: FILE_CACHE_MAX_ENTRIES,
+                bytes: FILE_CACHE_MAX_BYTES,
+            },
         }
+    }
+
+    /// Most entries kept (default [`FILE_CACHE_MAX_ENTRIES`]); past it the
+    /// oldest-written go first. `0` lifts the cap.
+    #[must_use]
+    pub fn max_entries(mut self, n: usize) -> Self {
+        self.limits.entries = n;
+        self
+    }
+
+    /// Most bytes of entry files kept (default [`FILE_CACHE_MAX_BYTES`]);
+    /// past it the oldest-written go first. `0` lifts the cap.
+    #[must_use]
+    pub fn max_bytes(mut self, n: u64) -> Self {
+        self.limits.bytes = n;
+        self
     }
 
     /// Create the cache dir, owner-only on Unix: entries hold keys in clear.
@@ -1157,9 +1219,9 @@ impl FileCache {
         &self.dir
     }
 
-    /// Delete every expired or unreadable entry now and return how many
-    /// went. Writes already sweep a sixteenth of the directory every 16
-    /// calls; run this on a schedule to reclaim space sooner.
+    /// Delete every expired or unreadable entry now, then the oldest past
+    /// the caps, and return how many went. Writes already sweep a sixteenth
+    /// of the directory every 16 calls; run this on a schedule to reclaim space sooner.
     ///
     /// # Errors
     /// [`CacheError::Connection`] when the directory cannot be read.
@@ -1283,7 +1345,8 @@ impl FileCache {
         at != 0 && Self::now_unix_millis() > at
     }
 
-    /// Remove dead entries whose name starts with `stripe` (all when `None`).
+    /// Remove dead entries whose name starts with `stripe` (all when `None`),
+    /// then the oldest live ones past that part's share of the caps.
     fn sweep_dir(&self, stripe: Option<char>) -> Result<u64, CacheError> {
         let entries = match std::fs::read_dir(&self.dir) {
             Ok(e) => e,
@@ -1291,6 +1354,7 @@ impl FileCache {
             Err(e) => return Err(CacheError::Connection(format!("read_dir: {e}"))),
         };
         let mut removed = 0;
+        let mut live = Vec::new();
         for entry in entries.flatten() {
             // Name first: entries outside the stripe cost no stat or path.
             let name = entry.file_name();
@@ -1304,7 +1368,14 @@ impl FileCache {
                 continue;
             }
             let path = entry.path();
-            if !entry.file_type().is_ok_and(|t| t.is_file()) || !Self::header_dead(&path) {
+            if !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+            if !Self::header_dead(&path) {
+                if let Ok(meta) = entry.metadata() {
+                    let at = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+                    live.push((at, meta.len(), path));
+                }
                 continue;
             }
             // Re-checked under the stripe lock, so a racing `set` survives.
@@ -1312,7 +1383,46 @@ impl FileCache {
                 removed += 1;
             }
         }
-        Ok(removed)
+        let parts = if stripe.is_some() { 16 } else { 1 };
+        Ok(removed + self.evict_oldest(live, parts))
+    }
+
+    /// Remove the oldest of `live` until it fits `1 / parts` of the caps.
+    fn evict_oldest(
+        &self,
+        mut live: Vec<(std::time::SystemTime, u64, std::path::PathBuf)>,
+        parts: usize,
+    ) -> u64 {
+        let max_entries = match self.limits.entries {
+            0 => usize::MAX,
+            n => n.div_ceil(parts),
+        };
+        let max_bytes = match self.limits.bytes {
+            0 => u64::MAX,
+            n => n / parts as u64,
+        };
+        let mut bytes: u64 = live.iter().map(|(_, len, _)| len).sum();
+        if live.len() <= max_entries && bytes <= max_bytes {
+            return 0;
+        }
+        live.sort_unstable_by_key(|(at, _, _)| *at);
+        let (mut count, mut removed) = (live.len(), 0);
+        for (at, len, path) in live {
+            if count <= max_entries && bytes <= max_bytes {
+                break;
+            }
+            // A racing write since the scan made it new: keep it.
+            let Ok(_lock) = self.lock_entry(&path) else {
+                continue;
+            };
+            let same = std::fs::metadata(&path).and_then(|m| m.modified()).ok() == Some(at);
+            if same && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
+            count -= 1;
+            bytes = bytes.saturating_sub(len);
+        }
+        removed
     }
 
     /// Every `SWEEP_EVERY` writes, sweep the next stripe. Best effort.
@@ -1346,6 +1456,7 @@ impl FileCache {
         let me = Self {
             dir: self.dir.clone(),
             sweep: self.sweep.clone(),
+            limits: self.limits,
         };
         rt.spawn_blocking(move || op(&me))
             .await
@@ -1383,14 +1494,7 @@ impl FileCache {
             .and_then(|n| n.get(..2))
             .unwrap_or("00");
         self.make_dir()?;
-        let mut opts = std::fs::OpenOptions::new();
-        opts.create(true).truncate(false).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-        }
-        opts.open(self.dir.join(format!(".lock-{stripe}")))
+        crate::private_file::open_or_create(&self.dir.join(format!(".lock-{stripe}")))
             .map_err(|e| CacheError::Connection(format!("open lock: {e}")))
     }
 
@@ -1912,6 +2016,70 @@ mod file_cache_tests {
         assert_eq!(removed, 2);
         assert!(gone);
         assert_eq!(live, (Some("v".into()), Some("v".into())));
+    }
+
+    fn entry_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|p| p.extension().is_some_and(|e| e == "cache"))
+            .collect()
+    }
+
+    /// Past `max_entries` a full sweep drops the oldest entries; under it nothing goes.
+    #[tokio::test]
+    async fn file_cache_cap_evicts_the_oldest() {
+        for (cap, left) in [(10, 10), (100, 40)] {
+            let dir = tmp_dir("cap");
+            let cache = FileCache::new(&dir).max_entries(cap);
+            for i in 0..40 {
+                cache.set(&format!("k{i}"), "v", None).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            cache.purge_expired().await.unwrap();
+            let files = entry_files(&dir).len();
+            let newest = cache.get("k39").await.unwrap();
+            let oldest = cache.get("k0").await.unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+            assert_eq!(files, left, "max_entries({cap})");
+            assert_eq!(newest.as_deref(), Some("v"));
+            assert_eq!(oldest.is_some(), left == 40);
+        }
+    }
+
+    /// `max_bytes` caps the directory's size the same way.
+    #[tokio::test]
+    async fn file_cache_byte_cap_evicts_the_oldest() {
+        let dir = tmp_dir("bytes");
+        let cache = FileCache::new(&dir).max_bytes(10_000);
+        let value = "x".repeat(1000);
+        for i in 0..30 {
+            cache.set(&format!("k{i}"), &value, None).await.unwrap();
+        }
+        cache.purge_expired().await.unwrap();
+        let total: u64 = entry_files(&dir)
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .sum();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(total <= 10_000 && total > 8_000, "{total} bytes left");
+    }
+
+    /// Writes alone keep the directory near its cap: each sweep trims one stripe.
+    #[tokio::test]
+    async fn file_cache_writes_enforce_the_cap() {
+        let dir = tmp_dir("capw");
+        let cache = FileCache::new(&dir).max_entries(16);
+        for i in 0..512 {
+            cache.set(&format!("k{i}"), "v", None).await.unwrap();
+        }
+        let files = entry_files(&dir).len();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            files < 300,
+            "{files} entries after 512 writes with a cap of 16"
+        );
     }
 
     /// Hold `key`'s stripe lock from outside the cache.

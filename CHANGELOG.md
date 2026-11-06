@@ -4,6 +4,105 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.64.0] — 2026-11-05
+
+### Added
+
+- `Cache::delete_prefixes(&[&str])` deletes several prefixes in one call; `RedisCache` does it in one `SCAN`, so a tenant purge scans the keyspace once per cache, not once per prefix.
+- `CacheScope::for_tenant(root, &tenant)` and `CacheScope::global(root)` for jobs; `locks()` gives the scope's `DistributedLock`, `purge()` deletes every key of its tenant.
+- `Job::run_with(&JobCtx)` defaults to `run()`; both queues call it. `JobCtx` gives the job id (stable across retries; the database queue's is row id plus enqueue time), `idempotency_key(scope)` for outside systems, the attempt number and a shutdown signal.
+- `Org::new(slug)` and `testkit::org_with(|o| …)` build an `Org` with its defaults.
+- SSO landing rules (`SsoLandingRule`, table `rustango_sso_landing_rules`): where a sign-in with no `?next` lands, by role, claim or `any`, in `position` order. The login gate keeps `next` for every page it bounces, so rules apply to a sign-in started at the login page itself. Tenant and bare-admin SSO and password sign-ins follow them; member sign-in does not. Superuser-only in the admin; a bad rule is skipped, a missing table means none.
+- `FileCache::max_entries` / `max_bytes` (defaults 100 000 entries, 1 GiB; `[cache] file_cache_max_entries` / `file_cache_max_bytes`): past a cap the sweep drops the oldest entries.
+- `DatabaseCache::purge_every(n)`: one batch of expired rows is deleted every 256 writes by default.
+- `auth_routes::Config::refresh_per_minute` (default 30) throttles `/refresh` per user with a 429; `InMemoryJtiStore::with_capacity` (default 1 000 000) refuses new entries when full.
+- `TenantPoolsConfig::max_concurrent_pool_builds` (16) and `max_pool_builds_per_minute` (600) bound cold database-mode pool builds; past them a 503 with `Retry-After` (`TenancyError::PoolBusy`).
+- `ViewSet::max_offset(n)` (default 10 000; deeper is a 400) and `ViewSet::count(false)` to skip `COUNT(*)`.
+- `WsHub::max_connections(n)`, `HealthRouter::ready_cache(d)` (default 1 s), `MediaManager::with_max_subtree(n)` (default 100 000) and `RUSTANGO_MAX_CONNECTIONS` (default 10 000) for the serve loop.
+
+### Changed
+
+- **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
+- `FileCache` lock files open through the crate's one owner-only, no-follow file opener.
+- The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply.
+- Tenant keys of the app cache, locks, idempotency, page cache, `KeyBy::Tenant` rate limits, sessions and flag overrides are `tenant:#org:<id>:<slug>:<area>:<rest>`; login throttle, account lockout and the MCP key cache keep their layout. Global keys keep their bytes, except a name starting with `tenant:` or `~`, which gets a `~` in front.
+- Until 0.65.0, tenant locks also take the 0.63 key, idempotency also reads and writes the 0.63 entry and marker (`IdempotencyLayer::legacy_keys(false)` turns that off), and a page invalidation also bumps the 0.63 counter.
+- The global app view's `clear()` returns the new `CacheError::Refused` instead of clearing every tenant.
+- `RedisCache::delete_prefixes` scans once per prefix when the prefixes share under 8 bytes.
+- Every tenant cache key is `tenant:#org:<id>:<slug>:<area>:<rest>` (areas `app`, `lock`, `idem`, `page`, `rl`, `session`, `flag`); global keys keep their bytes, and a global app, page or rate-limit key starting with `tenant:` or `~` gets a `~` in front.
+- Until 0.65.0, tenant locks also take the 0.63 key and idempotency also reads and writes the 0.63 entry and marker, so a rolling deploy never runs a request or a job twice.
+- A tenant purge now also deletes the tenant's idempotency, page-cache and `KeyBy::Tenant` rate-limit keys.
+- The tenant password form leaves its hidden `next` empty when the request had none, so landing rules can apply to a sign-in started at the login page.
+- **Breaking:** without the `tenancy` feature, mounting a ViewSet that sets permission codenames panics with the fix, instead of answering 403 forever; the open-writes warning and `make:viewset` name only what the build has.
+- `server::Builder` warns at boot when path-prefix tenants share the apex origin with the operator console.
+- **Breaking:** `soft_delete`, `restore` and their `_on` forms take `&mut self` and set the soft-delete field when a row changed, so a later `save` keeps the change.
+- **Breaking:** `save()` (and `save_on` / `save_tx`) on a row whose PK matches nothing returns `RowNotFound` instead of `Ok(0)`.
+- ORM writes on a `&Pool` inside `atomic` on that pool join the block in a savepoint, single statements and audited writes included; with the block's guard held they return `NestedAtomic`.
+
+### Deprecated
+
+- `ScopedCache::for_tenant`, `DistributedLock::for_tenant` and `DistributedLock::scoped` (removed in 0.66.0): use `CacheScope::for_tenant(..).app()` / `.locks()`.
+- **Breaking:** `Org` is `#[non_exhaustive]`: outside rustango, build it with `Org::new` (or `testkit::org_with`), not a struct literal.
+- `tenancy::server::run` (removed in 0.66.0): it serves without the `[security]` / `[server]` layers; use `manage::Cli` or `server::Builder`.
+
+### Fixed
+
+- A NUL byte in a ViewSet, admin or `ListView` filter, search or autocomplete value is a 400 on every backend, not a Postgres 500 (new `list_params::reject_nul`).
+- An admin computed-field `link` links only a `/` path or an `http:`/`https:` URL; any other scheme renders as plain text.
+- The operator console's audit "only this record" link URL-encodes the table and pk; the debug panel HTML-escapes the request method.
+- `bulk_upsert_pool` / `bulk_insert_or_ignore_pool` keep a set `Auto` PK, so an upsert by id updates instead of inserting copies; a mix of set and unset PKs is `BulkAutoMixed`, as in `bulk_insert`.
+- A single-statement `save`, `insert`, `delete` or update on a `&Pool` inside `atomic` no longer commits outside the block.
+- `DatabaseCache` rows nobody read again (page cache, rate limits, throttles) are now purged on write instead of staying forever.
+- `RateLimitLayer::per_header` keys buckets by a hash of the header value, not the raw value.
+- MCP audit rows keep at most 8 KiB of redacted arguments, plus their size and SHA-256.
+- Brand assets stream from storage instead of being read whole per request.
+- `?ordering=` keeps a column once and at most 8 columns.
+- HTTP/2 connections get a timer and keep-alive pings.
+- The SSO idle sweep skips a provider whose `auto_deactivate_after_days` is past the calendar instead of panicking and stopping for every later tenant; stored values read as at most 36500 days and the operator console refuses more.
+- A server or `check --deploy` with a sealed (`EncryptedString`) field and no `RUSTANGO_SECRET_KEY` now refuses up front, not with a panic at the first write.
+- `text::dedent`, the `add` and `divisibleby` template filters, and the SSO `exp`/`nbf` check no longer panic on a split UTF-8 indent or on `i64` overflow.
+- MariaDB: a `NOT NULL` generated column is created without the `NOT NULL` MariaDB refuses; `truncate` / `clear_tables` turn FK checks off with `SET STATEMENT` (MariaDB ignores `SET_VAR`); `AnyValue` writes `MIN`; `values()`, `inspectdb` and the jobs queue read a JSON column as JSON; `inspectdb` reads quoted defaults and unsigned lengths; `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
+- MySQL / MariaDB: a filtered `AnyValue` is written as `MIN(CASE WHEN …)`, so a row the filter rejects can no longer turn the result NULL.
+- `make:viewset` mounts the ViewSet at the model's table (`/api/posts`), not the module name (`/api/post_view_set`), and prints the URL it answers at.
+- MariaDB: `lag` / `lead` with a default work (MariaDB's take none); `join_lateral` fails with an error that names `LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB`; `inspectdb` and the jobs queue see a JSON column as `json`; the media descendant walk reads its `parent_id` index instead of scanning every collection per step.
+- MariaDB: `string_agg` is no longer cut at 1 MiB (`SET STATEMENT group_concat_max_len`, since MariaDB ignores the `SET_VAR` hint); `lag` / `lead` with a JSON default work.
+- Path-prefix tenants: the `server::Builder` dispatcher strips the prefix before the app's routes (`/acme/about` reaches `/about`); `OriginalUri` keeps the full path and the new `TenantPathPrefix` extension names the prefix. `Tenant`, `TenantScope`, `SessionUser` and `require_auth` use the tenant the dispatcher resolved instead of resolving again, and CSRF exemptions match the tenant-relative path.
+- `RUSTANGO_OPERATOR_IMPERSONATION_TTL_SECS` is read: `server::Builder` applies it to the impersonation cookie, and a bad or zero value stops boot.
+- `startapp --into <dir>` writes under `src/<dir>/` in both CLIs and prints the parent `mod` and `urls.rs` lines to add.
+- `make:worker` needs `jobs-postgres`, which its queue uses; `make:api_routes` routes each app model at its table, like `make:viewset`.
+- The startapp smoke test checks the app's own models, so renaming the starter model keeps `cargo test` green.
+- The fullstack index links the admin at its configured prefix, not a fixed `/admin`.
+- Guides: viewsets, getting-started, scaffolding, manage and the cookbook match what the generators write.
+- `member_sso_router()` serves the backend of the mounted tenant context, so a SQLite or MySQL tenant signs in under a build that also enables `postgres`; it answered 500 there.
+- The viewsets guide loads an author before posting, and its test creates its own, so the `author_id` foreign key holds; the fullstack `check --deploy` sample drops the tenancy-only apex warning.
+- `make:notification` no longer says the notifications layer is still to come; it points at `notifications::Notification` for several channels.
+- The deprecated `find_or_provision_member` applies a tenant provider's sign-in, sign-up and lifecycle rules and the tenant's settings; a shared or admin key no longer provisions. `auto_provision` alone no longer lets anyone in.
+- Items announced as removed in 0.64.0 stay deprecated until 0.65.0, and their notes say so.
+- Guides: cookbook, orm, caching, models, api-conventions, manage, migrations, sso, security, auth, mcp and email match the code; `cache::from_settings` documents that a bad backend panics.
+- Template views' `tenant_router()`, `require_bearer`, `JwtAuth::router()` and the MCP routers (`secure_tenant_router`, `secure_tenant_router_from_settings`, `tenant_router_authed`) serve the backend of the mounted tenant context, so SQLite and MySQL tenants work under a build that also enables `postgres`; they answered 500 there. The `_for::<DB>` variants are unchanged. `require_bearer` now takes `TenantScope` instead of `Tenant`.
+- A tenancy app applies `[admin] read_only_tables`, `allowed_tables`, `subtitle` and `url_prefix` to the tenant admin; `server::Builder::admin_read_only` is new.
+- `RouteConfig::operator_session_ttl` caps operator-console sessions (default 12 h, also the most).
+- `[server] request_timeout_secs` also covers the tenant admin and the operator console (`server::Builder::request_timeout`).
+- `tenancy::manage::run` refuses `run-server`, which skipped every `[security]` / `[server]` layer, and points at `manage::Cli`.
+- Ending an impersonation logs an error when the revoke was not recorded; `JtiBlacklist::end_session` returns whether it was.
+- `[errors] enabled` without `template_views`, and tenancy-only `[routes]` keys on a single-database app, now warn; `check-settings` marks those keys "tenancy apps only".
+- `RouteConfig::basic_auth_realm` and `tenancy::server::ServerConfig::operator_show_only`, which nothing read, are removed; the `save_quietly` docs say ORM writes send no signals.
+- Migrations: `makemigrations` refuses a model whose `table =` changed with its columns kept (it wrote a drop + create that emptied the table) and names the `RenameTable` route; every `DropTable` now warns. `migrate <target>` refuses a target an applied squash replaces, `unapply` refuses a migration that is not applied, and `migrate_embedded` reconciles squashes like `migrate`. On SQLite a migration whose ledger row committed is no longer reported as failed when only the FK restore failed.
+- System migrations stage their files in a fresh, owner-only temp dir; a leftover or planted dir under the old guessable name is never read.
+- A regenerated system chain refuses, listing each column, when the database differs from it in nullability, `max_length`, having a DEFAULT, UNIQUE or ON DELETE; it used to record itself as applied.
+- PostgreSQL: drops, alters, renames, index drops, UNIQUE adds, CHECK drops and comments name the table in the migration's schema, and FK and UNIQUE names are looked up there before their drop, so a schema-mode tenant migration never reaches a same-named table in `public`.
+- SQLite: a table rebuild no longer fails when a view or another table's trigger names the table; it refuses one that would break a view.
+- `HmacAuthLayer` signs the URL the client sent (`OriginalUri`): under a path-prefix tenant it checked the stripped path, so real signatures failed and one tenant's signature passed on another tenant's path.
+- The login throttle lets a client that signed in to an account lately (same username and IP) past that account's lock, so a guesser's bad passwords no longer lock its owner out; the lock stays on for everyone else.
+- ORM: `.aggregate().annotate(..)` with no `.values()` returns one summary row, not one row per record; `QuerySet::annotate` and relation aggregates still keep each row.
+- ORM: `last()` under `distinct_on` keeps the row each group picked; `flip_order_by` flips only the DISTINCT ON keys there.
+- ORM: `count()` / `exists()` over `distinct()` with a relation `order_by` and a `limit`, and `distinct()` with `order_by_expr`, no longer fail on PostgreSQL and MySQL.
+- ORM: an empty `IN` list matches no row and an empty `NOT IN` every row, also inside a `Q` OR branch, instead of failing the query.
+- ORM: SQLite refuses a case-sensitive `LIKE` against a non-literal pattern, which it matched ignoring case.
+- ORM: `where_raw` and `Q` predicates are checked at `compile()` (unknown column, wrong value type), as documented.
+- ORM: `refresh_from_db` and `fresh` reload the row by key outside the model's global scopes, like `save()`.
+- MySQL: a generated id too wide for an `i32` / `i16` key returns `GeneratedPkUnreadable` instead of wrapping.
+
 ## [0.63.0] — 2026-11-04
 
 ### Added
@@ -43,9 +142,9 @@ All notable changes to rustango. The format follows [Keep a Changelog](https://k
 
 ### Deprecated
 
-- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`. Removed in 0.64.0.
+- The six `register_tx_action*` / `admin_register_tx_action*` methods and `AdminTxActionFn`; use `register_action`. Removed in 0.65.0.
 - `session::load_session_secret_for_tier`, which panics on prod; use `try_load_session_secret_for_tier` and report its error.
-- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay one more minor; removed in 0.64.0.
+- `register_admin_object_permission!`, `register_admin_queryset!`, `BoundedDmlReason::SetOperation`, `i18n::timezone::activate` and `media::media_router` stay one more minor; removed in 0.65.0.
 
 ### Fixed
 

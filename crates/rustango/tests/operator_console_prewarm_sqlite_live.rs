@@ -74,26 +74,9 @@ async fn boot(edit: bool) -> Booted {
     for i in 0..2 {
         let slug = unique(&format!("t{i}"));
         let db = tmp.path().join(format!("{slug}.db"));
-        let mut org = Org {
-            id: Auto::default(),
-            slug: slug.clone(),
-            display_name: slug.clone(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some(format!("sqlite://{}?mode=rwc", db.display())),
-            schema_name: None,
-            host_pattern: None,
-            port: None,
-            path_prefix: None,
-            active: true,
-            created_at: chrono::Utc::now(),
-            brand_name: None,
-            brand_tagline: None,
-            logo_path: None,
-            favicon_path: None,
-            primary_color: None,
-            theme_mode: None,
-        };
+        let mut org = Org::new(slug.clone());
+        org.backend_kind = "sqlite".into();
+        org.database_url = Some(format!("sqlite://{}?mode=rwc", db.display()));
         org.insert(&registry).await.expect("seed org");
     }
 

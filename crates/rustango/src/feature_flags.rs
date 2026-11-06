@@ -51,15 +51,14 @@
 
 use std::time::Duration;
 
+use crate::cache::keyspace::{Area, KeySpace};
 use crate::cache::{BoxedCache, CacheError};
-
-const KEY_PREFIX: &str = "flag";
 
 #[derive(Clone)]
 pub struct FeatureFlags {
     cache: BoxedCache,
-    /// Holds the per-user overrides: `cache`, or its tenant view.
-    users: BoxedCache,
+    /// Where the per-user overrides live: global, or one tenant.
+    users: KeySpace,
     /// `None` = never expire; a kill switch must not lapse on its own.
     ttl: Option<Duration>,
 }
@@ -68,19 +67,24 @@ impl FeatureFlags {
     #[must_use]
     pub fn new(cache: BoxedCache) -> Self {
         Self {
-            users: cache.clone(),
             cache,
+            users: KeySpace::Global,
             ttl: None,
         }
+    }
+
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn in_space(mut self, users: KeySpace) -> Self {
+        self.users = users;
+        self
     }
 
     /// Keep per-user overrides to one tenant, since user ids repeat across
     /// tenants. The global state and the percentage stay platform-wide.
     #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        self.users = crate::cache::ScopedCache::for_tenant(self.cache.clone(), tenant).boxed();
-        self
+    pub fn for_tenant(self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.in_space(KeySpace::Tenant(tenant.clone()))
     }
 
     /// Make every write expire after `ttl`; the flag then reads as never
@@ -92,22 +96,23 @@ impl FeatureFlags {
     }
 
     fn global_key(&self, name: &str) -> String {
-        format!("{KEY_PREFIX}:{name}")
+        KeySpace::Global.key(Area::Flag, name)
     }
 
     fn user_key(&self, name: &str, user_id: &str) -> String {
-        format!("{KEY_PREFIX}:{name}:user:{user_id}")
+        self.users
+            .key(Area::Flag, &format!("{name}:user:{user_id}"))
     }
 
     fn pct_key(&self, name: &str) -> String {
-        format!("{KEY_PREFIX}:{name}:pct")
+        KeySpace::Global.key(Area::Flag, &format!("{name}:pct"))
     }
 
     /// One write; `set_forever` so a backend default TTL cannot expire it.
-    async fn put(&self, cache: &BoxedCache, key: &str, value: &str) -> Result<(), CacheError> {
+    async fn put(&self, key: &str, value: &str) -> Result<(), CacheError> {
         match self.ttl {
-            Some(ttl) => cache.set(key, value, Some(ttl)).await,
-            None => cache.set_forever(key, value).await,
+            Some(ttl) => self.cache.set(key, value, Some(ttl)).await,
+            None => self.cache.set_forever(key, value).await,
         }
     }
 
@@ -116,7 +121,7 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error: the flag did not change.
     pub async fn enable(&self, name: &str) -> Result<(), CacheError> {
-        self.put(&self.cache, &self.global_key(name), "on").await
+        self.put(&self.global_key(name), "on").await
     }
 
     /// Globally disable the flag. This beats any rollout percentage,
@@ -126,7 +131,7 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error: the flag did not change.
     pub async fn disable(&self, name: &str) -> Result<(), CacheError> {
-        self.put(&self.cache, &self.global_key(name), "off").await
+        self.put(&self.global_key(name), "off").await
     }
 
     /// Drop the global state, the percentage and the overrides of the
@@ -139,7 +144,7 @@ impl FeatureFlags {
         self.cache.delete(&self.global_key(name)).await?;
         self.cache.delete(&self.pct_key(name)).await?;
         for u in known_user_ids {
-            self.users.delete(&self.user_key(name, u)).await?;
+            self.cache.delete(&self.user_key(name, u)).await?;
         }
         Ok(())
     }
@@ -152,8 +157,7 @@ impl FeatureFlags {
     /// The cache write's error.
     pub async fn set_percentage(&self, name: &str, percent: u8) -> Result<(), CacheError> {
         let p = percent.min(100);
-        self.put(&self.cache, &self.pct_key(name), &p.to_string())
-            .await
+        self.put(&self.pct_key(name), &p.to_string()).await
     }
 
     /// Turn the flag on for one user, whatever the global state says.
@@ -162,8 +166,7 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error.
     pub async fn enable_for_user(&self, name: &str, user_id: &str) -> Result<(), CacheError> {
-        self.put(&self.users, &self.user_key(name, user_id), "on")
-            .await
+        self.put(&self.user_key(name, user_id), "on").await
     }
 
     /// Turn the flag off for one user.
@@ -171,8 +174,7 @@ impl FeatureFlags {
     /// # Errors
     /// The cache write's error.
     pub async fn disable_for_user(&self, name: &str, user_id: &str) -> Result<(), CacheError> {
-        self.put(&self.users, &self.user_key(name, user_id), "off")
-            .await
+        self.put(&self.user_key(name, user_id), "off").await
     }
 
     /// Read the global state only. Returns `false` when the flag is off
@@ -195,7 +197,7 @@ impl FeatureFlags {
     pub async fn is_enabled_for(&self, name: &str, user_id: &str) -> bool {
         // 1. Per-user override.
         match self
-            .users
+            .cache
             .get(&self.user_key(name, user_id))
             .await
             .ok()

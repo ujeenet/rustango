@@ -7,7 +7,9 @@
 //! One `RequestTenant` per request, on its own host and under apex +
 //! `/<prefix>/`, where every tenant shares one cookie: the dispatcher marks
 //! it, `CacheScope` scopes sessions and flags by it, `KeyBy::Tenant` counts
-//! by it, and the unresolved router is `Global`.
+//! by it, and the unresolved router is `Global`. App routes see the
+//! tenant-relative path, tenant extractors serve the dispatcher's tenant,
+//! and CSRF exemptions match the tenant-relative path.
 //!
 //! PG runs schema mode (skips without `DATABASE_URL`), SQLite and MySQL
 //! database mode (MySQL skips without `MYSQL_TEST_URL`).
@@ -17,18 +19,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
+use axum::extract::OriginalUri;
 use axum::extract::Query;
 use axum::http::{Request, StatusCode};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use rustango::cache::{BoxedCache, CacheScope, InMemoryCache};
 use rustango::cache_page::CachePageLayer;
+use rustango::extractors::TenantScope;
 use rustango::idempotency::{IdempotencyLayer, IdempotencyRouterExt as _};
 use rustango::rate_limit::KeyBy;
 use rustango::rate_limit_cache::{CacheRateLimitLayer, CacheRateLimitRouterExt as _};
 use rustango::sessions::Session;
-use rustango::sql::{sqlx, Auto};
-use rustango::tenancy::{Org, RequestTenant, TenantPools, TenantSlug};
+use rustango::sql::sqlx;
+use rustango::tenancy::{Org, RequestTenant, TenantPathPrefix, TenantPools, TenantSlug};
 use tower::ServiceExt as _;
 
 #[cfg(any(feature = "postgres", feature = "mysql"))]
@@ -84,10 +88,40 @@ fn run(n: &AtomicUsize) -> String {
 fn api(root: BoxedCache) -> Router {
     let limited =
         CacheRateLimitLayer::new(root.clone(), 1, Duration::from_secs(3600)).key_by(KeyBy::Tenant);
+    // One route serves both routings: the dispatcher strips the prefix.
     let rl = Router::new()
         .route("/rl", get(|| async { "ok" }))
-        .route("/{prefix}/rl", get(|| async { "ok" }))
         .cache_rate_limit(limited);
+    let csrf = rustango::forms::csrf::with_config(
+        rustango::forms::csrf::CsrfConfig::default().exempt_prefix("/beacon"),
+    );
+    let posts = Router::new()
+        .route("/beacon", post(|| async { "beacon" }))
+        .route("/guarded", post(|| async { "guarded" }))
+        .layer(csrf);
+    let rl = rl
+        .route(
+            "/about",
+            get(|req: Request<Body>| async move {
+                let orig = req.extensions().get::<OriginalUri>().map(|o| o.0.clone());
+                let prefix = TenantPathPrefix::get(req.extensions()).map_or("-", |p| p.as_str());
+                format!(
+                    "path={} orig={} prefix={prefix}",
+                    req.uri().path(),
+                    orig.map_or_else(String::new, |o| o.path().to_owned())
+                )
+            }),
+        )
+        .route("/who", get(|t: TenantScope| async move { t.org.slug }))
+        .merge(posts);
+    #[cfg(feature = "hmac-auth")]
+    let rl = rl.merge(
+        Router::new()
+            .route("/signed", post(|| async { "signed" }))
+            .layer(rustango::hmac_auth::HmacAuthLayer::new(Arc::new(
+                |k: &str| (k == HMAC_KEY).then(|| HMAC_SECRET.to_vec()),
+            ))),
+    );
     let (idem, n) = (IdempotencyLayer::new(root.clone()), runs());
     rl.merge(pages(&root))
         .fallback(move |Query(q): Query<Op>, req: Request<Body>| {
@@ -130,6 +164,27 @@ fn api(root: BoxedCache) -> Router {
             }
         })
         .idempotency(idem)
+}
+
+#[cfg(feature = "hmac-auth")]
+const HMAC_KEY: &str = "k1";
+#[cfg(feature = "hmac-auth")]
+const HMAC_SECRET: &[u8] = b"hmac-secret-for-the-prefix-test!";
+
+/// A POST to `path` on `slug`, signed for `signed_path` (the URL the client sees).
+#[cfg(feature = "hmac-auth")]
+fn signed_post(routing: Routing, slug: &str, path: &str, signed_path: &str) -> Request<Body> {
+    let req = routing.request(slug, path, None);
+    let host = req.headers()["host"].to_str().unwrap().to_owned();
+    let (date, auth) =
+        rustango::hmac_auth::sign_now(HMAC_KEY, HMAC_SECRET, "POST", &host, signed_path, "", b"");
+    routing
+        .builder(slug, path, None)
+        .method("POST")
+        .header("x-date", date)
+        .header("authorization", auth)
+        .body(Body::empty())
+        .unwrap()
 }
 
 /// The Builder's no-tenant router: says what it was marked; a POST runs.
@@ -221,6 +276,84 @@ async fn scenario(app: &Router, a: &str, b: &str) {
             );
         }
 
+        // App routes see the tenant-relative path; the prefix stays readable.
+        let pre = match routing {
+            Routing::OwnHost => String::new(),
+            Routing::ApexPrefix => format!("/{a}"),
+        };
+        let shown = if pre.is_empty() { "-" } else { pre.as_str() };
+        assert_eq!(
+            call(app, routing.request(a, "/about?x=1", None)).await,
+            format!("path=/about orig={pre}/about prefix={shown}"),
+            "{routing:?}"
+        );
+        // The extractor serves the dispatcher's tenant, never a forged one.
+        for (what, app) in [("", app), ("forged ", &forged)] {
+            assert_eq!(
+                call(app, routing.request(a, "/who", None)).await,
+                a,
+                "{what}{routing:?}"
+            );
+        }
+        // A CSRF exemption matches the tenant-relative path; a sibling is still checked.
+        let post_to = |path: &str| {
+            routing
+                .builder(a, path, None)
+                .method("POST")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            send(app, post_to("/beacon")).await.0,
+            StatusCode::OK,
+            "{routing:?}"
+        );
+        assert_eq!(
+            send(app, post_to("/guarded")).await.0,
+            StatusCode::FORBIDDEN,
+            "{routing:?}"
+        );
+        // HMAC signs the URL the client sent, prefix included, so a signature
+        // for one tenant's path never passes on another's.
+        #[cfg(feature = "hmac-auth")]
+        {
+            let real = format!("{pre}/signed");
+            let ok = signed_post(routing, a, "/signed", &real);
+            assert_eq!(
+                send(app, ok).await,
+                (StatusCode::OK, "signed".into()),
+                "{routing:?}"
+            );
+            if matches!(routing, Routing::ApexPrefix) {
+                let replay = signed_post(routing, b, "/signed", &real);
+                assert_eq!(
+                    send(app, replay).await.0,
+                    StatusCode::UNAUTHORIZED,
+                    "replay on {b}"
+                );
+                let stripped = signed_post(routing, a, "/signed", "/signed");
+                assert_eq!(
+                    send(app, stripped).await.0,
+                    StatusCode::UNAUTHORIZED,
+                    "stripped path"
+                );
+            }
+        }
+        // The tenant admin under the prefix keeps its prefixed paths.
+        let gate = app
+            .clone()
+            .oneshot(routing.request(a, "/admin", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            gate.headers()["location"].to_str().unwrap(),
+            format!(
+                "{pre}/login?next={}",
+                rustango::url_codec::url_encode(&format!("{pre}/admin"))
+            ),
+            "{routing:?}"
+        );
+
         // Idempotency: the tenant's own retry replays; the other tenant runs.
         let first = call(app, routing.keyed(a, "/probe?op=run")).await;
         let again = call(app, routing.keyed(a, "/probe?op=run")).await;
@@ -287,26 +420,31 @@ async fn failed_resolution(app: &Router, registry: impl std::future::Future<Outp
 }
 
 fn org(slug: &str, storage: &str, backend: &str, url: Option<String>) -> Org {
-    Org {
-        id: Auto::default(),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: storage.into(),
-        backend_kind: backend.into(),
-        database_url: url,
-        schema_name: (storage == "schema").then(|| slug.to_owned()),
-        host_pattern: Some(format!("{slug}.localhost")),
-        port: None,
-        path_prefix: Some(format!("/{slug}")),
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    }
+    let mut o = Org::new(slug.to_owned());
+    o.storage_mode = storage.into();
+    o.backend_kind = backend.into();
+    o.database_url = url;
+    o.schema_name = (storage == "schema").then(|| slug.to_owned());
+    o.host_pattern = Some(format!("{slug}.localhost"));
+    o.path_prefix = Some(format!("/{slug}"));
+    o
+}
+
+/// The boot warning when path-prefix tenants share the console's apex.
+const SHARED_APEX: &str = "path-prefix tenants share the apex origin";
+
+/// `boot`'s output and the warnings it logged.
+async fn boot_log<T>(boot: impl std::future::Future<Output = T>) -> (T, String) {
+    use tracing::instrument::WithSubscriber as _;
+    let buf = rustango::testkit::CaptureWriter::default();
+    let sink = buf.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+    let out = boot.with_subscriber(subscriber).await;
+    (out, buf.contents())
 }
 
 async fn migrate_registry<DB: sqlx::Database>(pools: &TenantPools<DB>, url: &str)
@@ -335,6 +473,23 @@ async fn sqlite_database_mode_scopes_by_the_request_tenant() {
     let pool = sqlx::SqlitePool::connect(&url).await.unwrap();
     let pools = TenantPools::<sqlx::Sqlite>::new(pool.clone());
     migrate_registry(&pools, &url).await;
+    let root: BoxedCache = Arc::new(InMemoryCache::new());
+    let boot = |pool: sqlx::SqlitePool, url: String| {
+        let root = root.clone();
+        boot_log(async move {
+            rustango::server::Builder::from_pool(pool, url, "localhost")
+                .api(api(root.clone()))
+                .unresolved_tenant(unresolved(&root))
+                .into_router()
+                .await
+                .expect("assemble")
+        })
+    };
+    let (_, log) = boot(pool.clone(), url.clone()).await;
+    assert!(
+        !log.contains(SHARED_APEX),
+        "warned with no prefix tenant: {log}"
+    );
     for slug in ["acme", "globex"] {
         let db = format!(
             "sqlite://{}?mode=rwc",
@@ -343,13 +498,9 @@ async fn sqlite_database_mode_scopes_by_the_request_tenant() {
         let mut o = org(slug, "database", "sqlite", Some(db));
         o.insert(&pools.registry_pool()).await.unwrap();
     }
-    let root: BoxedCache = Arc::new(InMemoryCache::new());
-    let app = rustango::server::Builder::from_pool(pool.clone(), url, "localhost")
-        .api(api(root.clone()))
-        .unresolved_tenant(unresolved(&root))
-        .into_router()
-        .await
-        .expect("assemble");
+    // Path-prefix tenants share the console's origin: one warning at boot.
+    let (app, log) = boot(pool.clone(), url).await;
+    assert_eq!(log.matches(SHARED_APEX).count(), 1, "{log}");
     scenario(&app, "acme", "globex").await;
     failed_resolution(&app, pool.close()).await;
 }

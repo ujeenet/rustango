@@ -81,7 +81,7 @@ Mit **T** markierte Verben brauchen das Feature `tenancy` und werden über
 | Verb | Was es tut |
 |---|---|
 | `makemigrations [name]` / `--empty <name>` | Erzeugt eine Migration aus dem Model-Diff |
-| `migrate [target]` / `--dry-run` / `--squash` | Wendet ausstehende Migrationen an |
+| `migrate [target]` / `--dry-run` / `--squash` / `--fake` | Wendet ausstehende Migrationen an (`--squash` nur Single-Database, `--fake` nur Tenancy) |
 | `downgrade [N \| <target>]` | Rollt die letzten N Migrationen zurück, oder die nach `<target>` (Tenant-Scope) |
 | `showmigrations` / `status` | Listet Migrationen und ihren Anwendungsstand |
 | `sqlmigrate <name>` | Gibt das SQL einer Migration aus, ohne es auszuführen |
@@ -231,8 +231,10 @@ Eine gelöschte Spalte neben einer neuen Spalte desselben Typs in einer Tabelle
 sieht nach einem umbenannten Feld aus, und Löschen+Hinzufügen würde ihre Daten
 löschen. `makemigrations` verweigert das und nennt die Spalten; schreiben Sie
 das `RenameColumn` wie unten, oder übergeben Sie `--drop-and-add`, um bewusst
-zu löschen und hinzuzufügen. Jedes andere `DropColumn` warnt, dass seine Daten
-verloren gehen.
+zu löschen und hinzuzufügen. Eine gelöschte Tabelle neben einer neuen Tabelle
+mit denselben Spalten (ein geändertes `table =`) wird genauso verweigert;
+schreiben Sie stattdessen ein `RenameTable`. Jedes andere `DropColumn` oder
+`DropTable` warnt, dass seine Daten verloren gehen.
 
 ### `makemigrations --app <app>`
 
@@ -348,7 +350,15 @@ cargo run -- migrate 0001_initial       # roll back to 0001 (unapply 0002+)
 cargo run -- migrate zero               # unapply EVERY migration
 ```
 
+Ein Ziel, das ein angewendeter Squash ersetzt hat, wird verweigert: Der Wechsel
+dorthin würde den Squash und seine Zeilen rückgängig machen. Wählen Sie den
+Squash oder eine Migration außerhalb davon als Ziel. Das Zurückrollen verweigert
+eine Migration, die das Ledger nicht angewendet hat.
+
 ### `migrate --squash`
+
+> **Nur Single-Database.** Das `migrate` der Mandantenfähigkeit (`Cli::tenancy()`)
+> lehnt `--squash` ab.
 
 Fasst jede **ausstehende** (nicht angewendete) Migration in einem frisch
 generierten Diff zusammen — der Dev-Iterations-Notausgang, wenn ein Stapel
@@ -394,6 +404,9 @@ denn das ist ein echter Konflikt und keine bekannt-äquivalente Historie.
 
 ### `migrate --fake <name>`
 
+Nur in Tenancy-Projekten (`Cli::tenancy()`): das Single-Database-`migrate`
+lehnt `--fake` als unbekanntes Flag ab.
+
 Stempelt eine Migration als angewendet **ohne ihr SQL auszuführen** — der
 Betreiber-Notausgang, wenn die Datenbank bereits im Zielzustand ist, das
 Ledger es aber nicht weiß (eine außerhalb des Kanals eingerichtete DB, eine
@@ -418,6 +431,9 @@ die Tabellen des Frameworks leben pro Tenant, ihre Reparatur ist also eine
 Per-Tenant-Aufgabe.
 
 ### `downgrade [N | <target>]`
+
+`<target>` geht nur in einem Tenancy-Projekt; das Single-Database-`downgrade`
+nimmt eine Schrittzahl.
 
 Rollt die letzten N angewendeten Migrationen zurück (Standard 1). Jede Migration muss reversibel sein: Schemaänderungen
 kehren sich automatisch um, aber Datenoperationen brauchen ein definiertes
@@ -632,13 +648,16 @@ Pool-Vorlage — generierte `src/post_view_set.rs`:
 pub struct PostViewSet;
 ```
 
-Sie startet als `read_only`: fügen Sie hinter einer Auth-Schicht
-`permissions(create = "...", ...)` hinzu und entfernen Sie dann `read_only`, um
-Schreibzugriffe zu bedienen. `--model Post` importiert `crate::models::Post`;
-passen Sie die `use`-Zeile an, wenn das Modell in einer App liegt.
+Sie startet als `read_only`. Sichern Sie Schreibzugriffe vorher ab: mit
+`tenancy` fügen Sie hinter einer Auth-Schicht `permissions(create = "...", ...)`
+hinzu und entfernen `read_only`; in einer Single-Database-App setzen Sie Ihre
+eigene Auth-Schicht davor und ersetzen `read_only` durch `allow_anonymous`
+(Codenamen verweigern dort das Mounten). `--model Post` sucht `Post`
+in `src/models.rs` oder im `models.rs` einer App und importiert es von dort;
+`--model blog::models::Post` nennt den Pfad direkt.
 
 In `src/main.rs` mit dem Pool des Servers einbinden:
-`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/post_view_set", pool))`.
+`.nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))`. Der Pfad ist die Tabelle des Modells (hier `posts`); der Snake-Name des Modells, falls es noch nicht einkompiliert ist.
 
 Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `pub fn router() -> Router<()>`, gebaut aus
@@ -646,7 +665,7 @@ Tenant-Vorlage — **kein Derive**. Sie erzeugt ein
 `.permissions_for_model::<Post>()` und der restlichen Builder-Kette
 (`filter_fields` / `search_fields` / `ordering` / `ordering_fields` /
 `page_size` / `read_only`) als auskommentierte Zeilen vorgestubbt, am Ende
-`.tenant_router("/api/post_view_set")`. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
+`.tenant_router("/api/posts")`. Die Verbindung wird pro Anfrage über den `Tenant`-Extractor
 aufgelöst statt einmalig beim Einbinden eingefangen — ein `router()` bedient also
 jeden Tenant.
 
@@ -811,7 +830,7 @@ Gibt die Version des **Rustango**-Frameworks aus.
 
 ```bash
 $ cargo run -- version
-rustango 0.63.0
+rustango 0.64.0
 ```
 
 ### `about`
@@ -823,7 +842,7 @@ Umgebungsvariablen. Legen Sie dies in Support-Tickets, wenn etwas nicht stimmt.
 ```bash
 $ cargo run -- about
 rustango
-  version:        0.63.0
+  version:        0.64.0
   models:         3 registered
   apps:           1 (blog)
   RUSTANGO_ENV:   local
@@ -1557,7 +1576,7 @@ impl rustango::tenancy::TenantUserModel for AppUser {}
 #[rustango::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     rustango::manage::Cli::new()
-        .api(my_app::urls::router())
+        .api(my_app::urls::api())
         .tenancy()
         .user_model::<AppUser>()
         .run().await
@@ -1667,6 +1686,11 @@ ohne Ping als bereit, damit eine Lastspitze nicht alle Replikas zugleich
 scheitern lässt. Nach 30 Sekunden pingt es wieder; eine hängende Datenbank gibt
 also weiter `503`. Jeder Prozess merkt sich seinen eigenen letzten Ping.
 
+Eine `/ready`-Antwort wird 1 Sekunde wiederverwendet, sodass eine Flut von Probes
+die Checks einmal pro Sekunde ausführt; `HealthRouter::ready_cache(d)` ändert das.
+Der Server hält höchstens `RUSTANGO_MAX_CONNECTIONS` (10 000) Verbindungen; die
+nächste wartet im Backlog.
+
 Bei einer App mit einer Datenbank `migrate_on_boot` abschalten und `migrate`
 einmal als Job vor dem Deploy laufen lassen (siehe `runserver` oben).
 
@@ -1740,8 +1764,7 @@ mit dem Passwort), `DB_NAME` und `DB_PARAMS`. Für SQLite `DB_DRIVER=sqlite`
 und `DB_NAME` als Dateipfad setzen. `DB_PASSWORD` und `DB_PASSWORD_FILE`
 zusammen zu setzen ist ein Fehler. Sind beide Varianten gesetzt, gewinnt
 `DATABASE_URL`, eine einzige Warnung (Passwort verborgen) sagt es, und
-`check --deploy` listet es auf; ab 0.62.0 gewinnen die `DB_*`-Variablen,
-also bleib bei einer Variante.
+`check --deploy` listet es auf; bleib also bei einer Variante.
 
 ---
 
@@ -1817,7 +1840,8 @@ Warum das sicher ist:
 
 ```bash
 cargo run -- startapp blog        # if not done yet
-# Edit src/blog/models.rs — add #[derive(Model)]
+# Edit src/blog/models.rs — rename the starter `Blog` to `Post`
+#   (table = "posts") and add its fields
 # (startapp already added `pub mod blog;` to src/lib.rs)
 cargo run -- makemigrations
 cargo run -- migrate
@@ -1829,7 +1853,8 @@ cargo run -- migrate
 cargo run -- make:viewset PostViewSet --model Post
 # Edit src/post_view_set.rs — fill in field lists
 # Add `pub mod post_view_set;` to src/lib.rs
-# Mount it in src/main.rs: .nest_with("/api", |pool| PostViewSet::router("/posts", pool))
+# Mount it in src/main.rs, as the end of src/post_view_set.rs shows:
+#   .nest_with("/api", |pool| myapp::post_view_set::PostViewSet::router("/posts", pool))
 cargo run                        # GET /api/posts now works
 ```
 
@@ -1882,7 +1907,7 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 
 | Feld | Standard | Zweck |
 |---|---|---|
-| `max_cached_database_pools` | 64 | Obergrenze für den Pool-Cache. Ist er voll, scheitert der nächste nicht-gecachte Tenant (keine stille Verdrängung). |
+| `max_cached_database_pools` | 64 | Obergrenze für den Pool-Cache. Ist er voll, wird der am längsten nicht genutzte Tenant-Pool geschlossen. |
 | `database_pool_max_connections` | 16 | `max_connections` pro Pool. Halten Sie es klein, damit ein Tenant-Fan-out PGs `max_connections` nicht erschöpft. |
 | `database_pool_min_connections` | 0 | Hält jederzeit N Verbindungen warm. `≥1` senkt die Latenz des ersten Requests, indem der TCP/TLS/Auth-Roundtrip beim Boot bezahlt wird. |
 | `database_pool_acquire_timeout` | 30s | Wie lange `pool.acquire()` wartet, bevor es mit `PoolTimedOut` scheitert. |
@@ -1891,6 +1916,8 @@ sei denn, Sie schalten das Pre-Warming ein. Die Einstellungen leben auf
 | `prewarm_active_tenants` | false | Wenn true, ruft `Server::Builder::serve` beim Boot `prewarm_database_tenants()` auf. |
 | `max_cached_scoped_pools` | 64 | Obergrenze für die gecachten Pools pro Tenant bei Tenants im schema-Modus. |
 | `scoped_pool_max_connections` | 8 | `max_connections` jedes Tenant-Pools im schema-Modus. |
+| `max_concurrent_pool_builds` | 16 | Gleichzeitige Pool-Aufbauten im Datenbank-Modus; ein Aufbau wartet bis `database_pool_acquire_timeout`, dann 503. `0` = keine Grenze. |
+| `max_pool_builds_per_minute` | 600 | Pool-Aufbauten im Datenbank-Modus pro Minute; darüber 503. `0` = keine Grenze. |
 
 Mit `Cli` übergeben Sie die Konfiguration über `Cli::with_tenant_pools(config)`.
 

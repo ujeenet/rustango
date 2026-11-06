@@ -153,6 +153,17 @@ pub struct TenantPoolsConfig {
     /// Default: 8.
     pub scoped_pool_max_connections: u32,
 
+    /// Most database-mode pools built at once, across tenants. A build
+    /// waits up to `database_pool_acquire_timeout` for a slot, then fails
+    /// with [`TenancyError::PoolBusy`] (a 503). `0` means no limit. Default: 16.
+    pub max_concurrent_pool_builds: usize,
+
+    /// Most database-mode pools built per minute; past it a build fails
+    /// with [`TenancyError::PoolBusy`]. Bounds the reconnect storm when
+    /// requests cycle through more tenants than the cache holds.
+    /// `0` means no limit. Default: 600.
+    pub max_pool_builds_per_minute: u32,
+
     /// The app's media disks. With the `media` feature, purging a tenant
     /// deletes its `rustango_media` objects from them first (#2569).
     /// Default: `None` (objects are counted and left).
@@ -177,6 +188,8 @@ impl Default for TenantPoolsConfig {
             // shared per tenant now, and 2 deadlocks the documented
             // `Tenant::conn` + `t.pool()` + job-worker combination.
             scoped_pool_max_connections: 8,
+            max_concurrent_pool_builds: 16,
+            max_pool_builds_per_minute: 600,
             media_storage: None,
         }
     }
@@ -504,6 +517,7 @@ fn shared_error(e: &TenancyError) -> TenancyError {
         TenancyError::Resolution(s) => TenancyError::Resolution(s.clone()),
         TenancyError::Validation(s) => TenancyError::Validation(s.clone()),
         TenancyError::Busy => TenancyError::Busy,
+        TenancyError::PoolBusy => TenancyError::PoolBusy,
         TenancyError::Secrets(SecretsError::NotFound(s)) => {
             TenancyError::Secrets(SecretsError::NotFound(s.clone()))
         }
@@ -517,6 +531,43 @@ fn shared_error(e: &TenancyError) -> TenancyError {
             TenancyError::Driver(sqlx::Error::PoolTimedOut)
         }
         other => TenancyError::Driver(sqlx::Error::Io(std::io::Error::other(other.to_string()))),
+    }
+}
+
+/// Bounds cold database-mode pool builds: how many run at once and how
+/// many start per minute, from [`TenantPoolsConfig`].
+pub(crate) struct BuildGate {
+    slots: tokio::sync::Semaphore,
+    per_minute: Option<crate::rate_limit::RateLimitLayer>,
+    wait: std::time::Duration,
+}
+
+impl BuildGate {
+    pub(crate) fn new(config: &TenantPoolsConfig) -> Self {
+        let slots = match config.max_concurrent_pool_builds {
+            0 => tokio::sync::Semaphore::MAX_PERMITS,
+            n => n.min(tokio::sync::Semaphore::MAX_PERMITS),
+        };
+        let minute = std::time::Duration::from_secs(60);
+        Self {
+            slots: tokio::sync::Semaphore::new(slots),
+            per_minute: (config.max_pool_builds_per_minute > 0).then(|| {
+                crate::rate_limit::RateLimitLayer::global(config.max_pool_builds_per_minute, minute)
+            }),
+            wait: config.database_pool_acquire_timeout,
+        }
+    }
+
+    /// A build slot, held for the build; [`TenancyError::PoolBusy`] when
+    /// the minute's budget is spent or no slot frees up in time.
+    pub(crate) async fn admit(&self) -> Result<tokio::sync::SemaphorePermit<'_>, TenancyError> {
+        if let Some(limit) = &self.per_minute {
+            limit.take("").await.map_err(|_| TenancyError::PoolBusy)?;
+        }
+        match tokio::time::timeout(self.wait, self.slots.acquire()).await {
+            Ok(Ok(permit)) => Ok(permit),
+            _ => Err(TenancyError::PoolBusy),
+        }
     }
 }
 
@@ -581,6 +632,8 @@ pub struct TenantPools<DB: Database = DefaultTenantDb> {
     building_scoped: SingleFlight<sqlx::Pool<DB>>,
     #[cfg_attr(not(feature = "postgres"), allow(dead_code))]
     building_held: SingleFlight<sqlx::Pool<DB>>,
+    /// Built from `config` on first use, so `.config(…)` still applies.
+    gate: std::sync::OnceLock<BuildGate>,
 }
 
 /// Warns once a cache passes 80% of its cap, so the operator hears
@@ -673,6 +726,7 @@ impl<DB: Database> TenantPools<DB> {
             building_held_database: SingleFlight::default(),
             building_scoped: SingleFlight::default(),
             building_held: SingleFlight::default(),
+            gate: std::sync::OnceLock::new(),
         }
     }
 
@@ -687,6 +741,7 @@ impl<DB: Database> TenantPools<DB> {
     #[must_use]
     pub fn config(mut self, config: TenantPoolsConfig) -> Self {
         self.config = config;
+        self.gate = std::sync::OnceLock::new();
         self
     }
 
@@ -1173,6 +1228,11 @@ impl<DB: Database> TenantPools<DB> {
         // `.instrument`, not `enter()`: a guard held across `.await`
         // tags other tasks' events with this tenant (#1884).
         async {
+            let _slot = self
+                .gate
+                .get_or_init(|| BuildGate::new(&self.config))
+                .admit()
+                .await?;
             let resolve_start = std::time::Instant::now();
             // Resolve + connect outside the write lock so vault calls
             // don't block other tenants' lookups.
@@ -2364,10 +2424,9 @@ mod tests {
     /// A tenant whose secret lookup fails.
     #[cfg(feature = "sqlite")]
     fn failing_sqlite_org() -> Org {
-        Org {
-            database_url: Some("fail".into()),
-            ..cold_sqlite_org()
-        }
+        let mut o = cold_sqlite_org();
+        o.database_url = Some("fail".into());
+        o
     }
 
     /// Waiters get the first build's error instead of each retrying in turn.
@@ -2464,13 +2523,12 @@ mod tests {
 
     #[cfg(feature = "sqlite")]
     fn cold_sqlite_org() -> Org {
-        Org {
-            slug: "cold".into(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: Some("sqlite::memory:".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.slug = "cold".into();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = Some("sqlite::memory:".into());
+        })
     }
 
     /// A cold tenant hit by many requests at once resolves and connects once.
@@ -2532,10 +2590,11 @@ mod tests {
     fn moved_sqlite_orgs(dir: &std::path::Path) -> (Org, Org, String, String) {
         let file = |name: &str| dir.join(name).to_string_lossy().into_owned();
         let (old, new) = (file("old.db"), file("new.db"));
-        let org = |path: &str| Org {
-            slug: "moved".into(),
-            database_url: Some(format!("sqlite:{path}?mode=rwc")),
-            ..cold_sqlite_org()
+        let org = |path: &str| {
+            let mut o = cold_sqlite_org();
+            o.slug = "moved".into();
+            o.database_url = Some(format!("sqlite:{path}?mode=rwc"));
+            o
         };
         (org(&old), org(&new), old, new)
     }
@@ -2599,10 +2658,8 @@ mod tests {
         let calls: Vec<_> = ["cold", "cold_v2"]
             .into_iter()
             .map(|schema| {
-                let org = Org {
-                    schema_name: Some(schema.into()),
-                    ..cold_schema_org()
-                };
+                let mut org = cold_schema_org();
+                org.schema_name = Some(schema.into());
                 let p = pools.clone();
                 tokio::spawn(async move { p.scoped_pool(&org).await })
             })
@@ -2701,12 +2758,11 @@ mod tests {
 
     #[cfg(feature = "postgres")]
     fn cold_schema_org() -> Org {
-        Org {
-            slug: "cold".into(),
-            storage_mode: "schema".into(),
-            schema_name: Some("cold".into()),
-            ..crate::testkit::org()
-        }
+        crate::testkit::org_with(|o| {
+            o.slug = "cold".into();
+            o.storage_mode = "schema".into();
+            o.schema_name = Some("cold".into());
+        })
     }
 
     /// `new` is what the builder, CLI and console use, so it must resolve
@@ -2797,12 +2853,11 @@ mod tests {
             sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy"),
             Parked(gate.clone()),
         );
-        let org = Org {
-            slug: "leaky".into(),
-            storage_mode: "database".into(),
-            database_url: Some("ref".into()),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.slug = "leaky".into();
+            o.storage_mode = "database".into();
+            o.database_url = Some("ref".into());
+        });
         let (res, ()) = tokio::join!(pools.pool_for_database_mode(&org), async {
             tokio::task::yield_now().await;
             tracing::info!("other-task-event");

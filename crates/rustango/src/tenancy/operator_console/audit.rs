@@ -83,6 +83,7 @@ pub(super) async fn audit_list(
                 "occurred_at": e.occurred_at.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
                 "entity_table": e.entity_table,
                 "entity_pk": e.entity_pk,
+                "record_query": record_query(&e.entity_table, &e.entity_pk),
                 "operation": e.operation,
                 "source": e.source,
                 "who": who(&e.source),
@@ -131,6 +132,16 @@ fn filter_suffix(filter: &crate::audit::AuditFilter) -> String {
         }
     }
     out
+}
+
+/// The URL-encoded query of the "only this record" link.
+fn record_query(entity_table: &str, entity_pk: &str) -> String {
+    let only = crate::audit::AuditFilter {
+        entity_table: Some(entity_table.to_owned()),
+        entity_pk: Some(entity_pk.to_owned()),
+        ..Default::default()
+    };
+    filter_suffix(&only).trim_start_matches('&').to_owned()
 }
 
 /// The actor in `operator:<id>:<verb>`, or the raw source.

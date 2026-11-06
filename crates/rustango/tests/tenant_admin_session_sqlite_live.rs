@@ -89,14 +89,13 @@ async fn boot() -> Env {
 
     let slug = unique("t");
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug: slug.clone(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(tenant_url.clone()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(tenant_url.clone());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(&registry).await.expect("seed org");
     let bound = rustango::tenancy::TenantSlug::of(&org).expect("org id");
 
@@ -1314,7 +1313,7 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
     };
     user.insert(&env.tenant).await.expect("seed user");
 
-    // Opened directly: the form's `next` is the tenant root.
+    // Opened directly: the form invents no `next`.
     let form = env.get("/t1/__login", "").await;
     assert_eq!(form.status(), StatusCode::OK);
     let html = axum::body::to_bytes(form.into_body(), usize::MAX)
@@ -1322,7 +1321,7 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
         .unwrap();
     let html = String::from_utf8_lossy(&html);
     assert!(
-        html.contains(r#"name="next" value="&#x2F;t1&#x2F;""#),
+        html.contains(r#"name="next" value="""#),
         "login form next: {html}"
     );
 
@@ -1338,8 +1337,16 @@ async fn a_path_prefix_tenant_login_lands_under_its_prefix() {
             resp.headers()["location"].to_str().unwrap().to_owned()
         }
     };
-    // The form's own default, and every `next` that would leave the tenant.
-    for next in ["/t1/", "/", "/t2/x", "/t1/__login", "/t1/../t2/x", "/t1x/y"] {
+    // The form's empty `next`, and every `next` that would leave the tenant.
+    for next in [
+        "",
+        "/t1/",
+        "/",
+        "/t2/x",
+        "/t1/__login",
+        "/t1/../t2/x",
+        "/t1x/y",
+    ] {
         assert_eq!(login_to(next).await, "/t1/", "next={next}");
     }
     assert_eq!(login_to("/t1/p/abc").await, "/t1/p/abc");
@@ -1364,7 +1371,7 @@ async fn a_host_tenant_login_defaults_to_the_root() {
         .unwrap();
     let html = String::from_utf8_lossy(&html);
     assert!(
-        html.contains(r#"name="next" value="&#x2F;""#),
+        html.contains(r#"name="next" value="""#),
         "login form next: {html}"
     );
     let mut user = User {
@@ -1377,6 +1384,15 @@ async fn a_host_tenant_login_defaults_to_the_root() {
             "/__login",
             "",
             "username=alice&password=first-password&_csrf=t&next=%2F__login",
+        )
+        .await;
+    assert_eq!(resp.headers()["location"], "/");
+    // The form's own empty `next` lands on the root too.
+    let resp = env
+        .post(
+            "/__login",
+            "",
+            "username=alice&password=first-password&_csrf=t&next=",
         )
         .await;
     assert_eq!(resp.headers()["location"], "/");
@@ -1566,4 +1582,52 @@ async fn a_tenant_action_gets_the_tenant_tx_rows_user_and_org() {
         ["done", "new", "done"],
         "written in the tenant's transaction"
     );
+}
+
+/// `server::Builder::admin_read_only` reaches the tenant admin: a create
+/// on a read-only table is refused there, and works without the call.
+#[tokio::test]
+async fn a_read_only_table_refuses_writes_in_the_tenant_admin() {
+    let env = boot().await;
+    let mut org = Org::objects()
+        .filter("slug", env.slug.as_str())
+        .fetch(&env.registry)
+        .await
+        .unwrap()
+        .remove(0);
+    org.host_pattern = None;
+    org.path_prefix = Some("/acme".into());
+    org.save(&env.registry).await.expect("prefix org");
+    rustango::tenancy::invalidate_org_cache();
+    let mut user = User {
+        username: "ro-boss".into(),
+        is_superuser: true,
+        password_hash: rustango::tenancy::password::hash("ro-password-123").unwrap(),
+        ..rustango::testkit::user()
+    };
+    user.insert(&env.tenant).await.expect("seed user");
+    let create = |read_only: bool| {
+        let reg_url = env.reg_url.clone();
+        async move {
+            let registry = sqlx::SqlitePool::connect(&reg_url).await.unwrap();
+            let b = rustango::server::Builder::from_pool(registry, reg_url, "apex.test")
+                .routes(RouteConfig::legacy());
+            let b = if read_only {
+                b.admin_read_only(["rustango_users"])
+            } else {
+                b
+            };
+            let app = b.into_router().await.expect("router");
+            let form = "username=ro-boss&password=ro-password-123&_csrf=t".to_owned();
+            let signed = apex_request(&app, "POST", "/acme/__login", "", form).await;
+            let session = signed.headers()["set-cookie"].to_str().unwrap();
+            let session = session.split(';').next().unwrap().to_owned();
+            let body = format!("username={}&_csrf=t", unique("new"));
+            apex_request(&app, "POST", "/acme/__admin/rustango_users", &session, body)
+                .await
+                .status()
+        }
+    };
+    assert_eq!(create(true).await, StatusCode::FORBIDDEN);
+    assert_ne!(create(false).await, StatusCode::FORBIDDEN);
 }

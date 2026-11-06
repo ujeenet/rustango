@@ -221,4 +221,5 @@ cast_sqlx_impls!(sqlx::Sqlite);
 mod encrypted;
 #[cfg(all(feature = "admin", feature = "sso"))]
 pub(crate) use encrypted::encrypt;
+pub(crate) use encrypted::sealed_key_problem;
 pub use encrypted::EncryptedString;

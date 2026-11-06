@@ -698,7 +698,9 @@ fn preview_schema_op(
     // The runner looks these names up live; this is the name it has then.
     if let (Some(fk), Some(_)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
         if let Some(name) = live.take(&fk.table, &fk.column) {
-            statements.extend(dialect.drop_foreign_key_sql(&fk.table, &name));
+            statements.extend(
+                dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&fk.table), &name),
+            );
         }
     }
     // So does a MySQL key MODIFY with the FKs other tables point at it.
@@ -719,7 +721,9 @@ fn preview_schema_op(
         for (t, c) in live.columns() {
             if refs.contains(&at_end(&t, &c)) {
                 if let Some(name) = live.take(&t, &c) {
-                    statements.extend(dialect.drop_foreign_key_sql(&t, &name));
+                    statements.extend(
+                        dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&t), &name),
+                    );
                 }
             }
         }
@@ -730,7 +734,8 @@ fn preview_schema_op(
     // Apply drops the name it finds in the catalog; this is the usual one.
     if let (Some(u), Some(_)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
         let name = ddl::unique_constraint_name(&u.table, &u.column);
-        statements.extend(dialect.drop_unique_index_sql(&u.table, &name));
+        statements
+            .extend(dialect.drop_unique_index_sql(crate::sql::TableTarget::bare(&u.table), &name));
     }
     // An index's FK, as apply finds it: by the index's first column, when no
     // other index (declared, UNIQUE or the PK) starts with it at this op.
@@ -792,11 +797,9 @@ fn preview_schema_op(
     }
     statements.extend(drops);
     // Apply finds these by their columns; this is the usual name.
-    statements.extend(
-        step.drop_composite_fks
-            .iter()
-            .filter_map(|fk| dialect.drop_foreign_key_sql(&fk.table, &fk.usual_name())),
-    );
+    statements.extend(step.drop_composite_fks.iter().filter_map(|fk| {
+        dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&fk.table), &fk.usual_name())
+    }));
     statements.extend(step.batch.immediate);
     if let Some(retry) = &step.retry {
         statements.extend(retry.preview().map(|l| format!("-- {l}")));
@@ -1221,7 +1224,7 @@ async fn migrate_pool_with_ledger_opts(
     .await
 }
 
-/// The pool runner's apply loop; the caller holds the migrate lock.
+/// The pool runner's apply loop over `dir`; the caller holds the migrate lock.
 async fn migrate_pool_body(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -1231,6 +1234,18 @@ async fn migrate_pool_body(
     observer: Option<&dyn MigrationObserver>,
 ) -> Result<Vec<Migration>, MigrateError> {
     let all = file::list_dir(dir)?;
+    apply_chain(pool, all, ledger, fake_initial, origin, observer).await
+}
+
+/// Apply `all`'s pending files, squashes reconciled; the caller holds the lock.
+async fn apply_chain(
+    pool: &crate::sql::Pool,
+    all: Vec<Migration>,
+    ledger: &str,
+    fake_initial: bool,
+    origin: ChainOrigin,
+    observer: Option<&dyn MigrationObserver>,
+) -> Result<Vec<Migration>, MigrateError> {
     let mut applied = applied_set_pool_with_ledger(pool, ledger).await?;
     if origin == ChainOrigin::Regenerated && !applied.is_empty() {
         // Match the live schema, not the names, then record the chain.
@@ -1247,8 +1262,8 @@ async fn migrate_pool_body(
         }
         if !unfixed.is_empty() {
             return Err(MigrateError::Validation(format!(
-                "the framework schema is missing objects `migrate` cannot add; \
-                     add them by hand, then rerun `migrate`:\n  - {}",
+                "the database differs from the framework schema in ways `migrate` \
+                     cannot fix; fix them by hand, then rerun `migrate`:\n  - {}",
                 unfixed.join("\n  - ")
             )));
         }
@@ -1681,21 +1696,31 @@ pub(crate) fn migration_states<'a>(
     all: &'a [Migration],
     applied: &'a HashSet<String>,
 ) -> impl Iterator<Item = (&'a Migration, MigrationState)> + 'a {
-    let superseded: HashSet<&str> = all
-        .iter()
-        .filter(|m| applied.contains(&m.name))
-        .flat_map(|m| m.replaces.iter().map(String::as_str))
-        .collect();
     all.iter().map(move |m| {
         let state = if applied.contains(&m.name) {
             MigrationState::Applied
-        } else if superseded.contains(m.name.as_str()) {
+        } else if replaced_by(all, applied, &m.name).is_some() {
             MigrationState::Replaced
         } else {
             MigrationState::Pending
         };
         (m, state)
     })
+}
+
+/// The applied squash in `all` that replaces `name`.
+fn replaced_by<'a>(all: &'a [Migration], applied: &HashSet<String>, name: &str) -> Option<&'a str> {
+    all.iter()
+        .find(|m| applied.contains(&m.name) && m.replaces.iter().any(|r| r == name))
+        .map(|m| m.name.as_str())
+}
+
+/// Moving to or rolling back `name` would undo `squash` and its rows.
+fn replaced_error(name: &str, squash: &str) -> MigrateError {
+    MigrateError::Validation(format!(
+        "`{name}` was replaced by the applied squash `{squash}`; target `{squash}` \
+         or a migration outside it instead"
+    ))
 }
 
 /// `ledger`'s names, or none when it does not exist yet. Never creates it,
@@ -1844,13 +1869,15 @@ fn create_only_tables(mig: &Migration) -> Option<Vec<String>> {
 
 /// Create what `mig` creates and the database lacks: missing tables with
 /// their indexes, and missing columns of tables already there. One object
-/// at a time, so one failure does not block the rest; returns the failures.
+/// at a time, so one failure does not block the rest; returns the failures,
+/// and the columns that differ from `mig`, which it cannot alter.
 async fn converge_regenerated(
     pool: &crate::sql::Pool,
     mig: &Migration,
 ) -> Result<Vec<String>, MigrateError> {
     use super::diff::SchemaChange as SC;
     let mut groups: Vec<Vec<SC>> = Vec::new();
+    let mut drift = Vec::new();
     for op in &mig.forward {
         let Operation::Schema(change) = op else {
             continue;
@@ -1873,6 +1900,7 @@ async fn converge_regenerated(
         let (SC::CreateTable(_), Some(snap)) = (change, mig.snapshot.table(table)) else {
             continue;
         };
+        drift.extend(super::ensure::column_drift(pool, snap, &mig.snapshot.indexes).await?);
         let live = super::ensure::live_columns(pool, table).await?;
         groups.extend(
             snap.fields
@@ -1902,8 +1930,9 @@ async fn converge_regenerated(
             );
         }
     }
-    let failed = super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?;
+    let mut failed = super::ensure::converge_groups(pool, &mig.snapshot, &groups).await?;
     warn_on_index_clash(pool, mig).await?;
+    failed.extend(drift);
     Ok(failed)
 }
 
@@ -2462,6 +2491,9 @@ struct Step {
     index_fks: Option<Box<IndexFks>>,
     /// The column whose FK the step adds back before the migration ends.
     readded_now: Option<(String, String)>,
+    /// The schema its catalog lookups and drops are in (PG), not `search_path`'s pick.
+    #[cfg_attr(not(any(feature = "mysql", feature = "postgres")), allow(dead_code))]
+    schema: Option<String>,
 }
 
 /// The FKs a MySQL index drop must take off first, found in the catalog:
@@ -2641,7 +2673,9 @@ impl IndexFks {
                     }
                 }
             };
-            drops.extend(dialect.drop_foreign_key_sql(&self.table, name));
+            drops.extend(
+                dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&self.table), name),
+            );
             readds.extend(readd);
         }
         (drops, readds)
@@ -2673,7 +2707,9 @@ impl IndexFks {
         }
         let drops = names
             .iter()
-            .filter_map(|n| dialect.drop_foreign_key_sql(&self.table, n))
+            .filter_map(|n| {
+                dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&self.table), n)
+            })
             .collect();
         match fate {
             FkFate::Readd(sql) => (drops, Some(sql.to_owned())),
@@ -3158,6 +3194,7 @@ fn render_step(
         drop_composite_fks,
         index_fks,
         readded_now,
+        schema: schema.map(str::to_owned),
     })
 }
 
@@ -3607,17 +3644,19 @@ macro_rules! step_statements {
     ($conn:expr, $step:expr, $dialect:expr) => {{
         use crate::sql::Dialect as _;
         let (step, dialect): (&Step, _) = ($step, $dialect);
+        // Looked up and dropped in the step's schema, not whatever `search_path` finds.
+        let schema = step.schema.as_deref();
         let mut out = Vec::new();
         if let (Some(fk), Some(sql)) = (&step.drop_fks, dialect.foreign_key_names_sql()) {
             let names: Vec<String> = sqlx::query_scalar(sql)
-                .bind(&fk.table)
+                .bind(dialect.catalog_table(super::diff::target(schema, &fk.table)))
                 .bind(&fk.column)
                 .fetch_all(&mut *$conn)
                 .await?;
             out.extend(
                 names
                     .iter()
-                    .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                    .filter_map(|n| dialect.drop_foreign_key_sql(super::diff::target(schema, &fk.table), n)),
             );
         }
         if let (Some((table, column)), Some(sql)) = (
@@ -3631,12 +3670,12 @@ macro_rules! step_statements {
                 .await?;
             out.extend(
                 fks.iter()
-                    .filter_map(|(t, n)| dialect.drop_foreign_key_sql(t, n)),
+                    .filter_map(|(t, n)| dialect.drop_foreign_key_sql(super::diff::target(schema, t), n)),
             );
         }
         if let (Some(u), Some(sql)) = (&step.drop_unique, dialect.unique_index_names_sql()) {
             let names: Vec<String> = sqlx::query_scalar(sql)
-                .bind(&u.table)
+                .bind(dialect.catalog_table(super::diff::target(schema, &u.table)))
                 .bind(&u.column)
                 .fetch_all(&mut *$conn)
                 .await?;
@@ -3644,13 +3683,13 @@ macro_rules! step_statements {
                 names
                     .iter()
                     .filter(|n| !u.keep.contains(n))
-                    .filter_map(|n| dialect.drop_unique_index_sql(&u.table, n)),
+                    .filter_map(|n| dialect.drop_unique_index_sql(super::diff::target(schema, &u.table), n)),
             );
         }
         if let Some(sql) = dialect.foreign_key_columns_sql() {
             for fk in &step.drop_composite_fks {
                 let rows: Vec<(String, String, String)> = sqlx::query_as(sql)
-                    .bind(&fk.table)
+                    .bind(dialect.catalog_table(super::diff::target(schema, &fk.table)))
                     .fetch_all(&mut *$conn)
                     .await?;
                 let names = fk
@@ -3667,7 +3706,7 @@ macro_rules! step_statements {
                 out.extend(
                     names
                         .iter()
-                        .filter_map(|n| dialect.drop_foreign_key_sql(&fk.table, n)),
+                        .filter_map(|n| dialect.drop_foreign_key_sql(super::diff::target(schema, &fk.table), n)),
                 );
             }
         }
@@ -3733,7 +3772,9 @@ async fn mysql_composite_drops(
     }
     let mut drops = Vec::new();
     for fk in fks {
-        drops.extend(dialect.drop_foreign_key_sql(&fk.table, &fk.name));
+        drops.extend(
+            dialect.drop_foreign_key_sql(crate::sql::TableTarget::bare(&fk.table), &fk.name),
+        );
         dropped.push(fk.add_sql(&dialect, &cd.renames));
     }
     Ok(drops)
@@ -3979,33 +4020,12 @@ async fn atomic_sqlite(
             .iter()
             .filter(|op| matches!(op, Operation::Schema(_)))
             .count();
-        match ran {
-            Ok(()) => {}
-            // The last range also wrote the ledger: the migration is applied.
-            Err(SegmentFailed {
-                committed: true,
-                error,
-            }) if last => return Err(error),
-            Err(SegmentFailed { committed, error }) => {
-                if committed {
-                    applied += range.len();
-                    ddl_applied += ran_ddl;
-                }
-                if applied == 0 {
-                    return Err(error);
-                }
-                let source = match error {
-                    MigrateError::Driver(d) => d,
-                    other => sqlx::Error::Protocol(other.to_string()),
-                };
-                return Err(MigrateError::PartiallyApplied {
-                    migration: name.to_owned(),
-                    applied,
-                    total,
-                    ddl_applied,
-                    source: Box::new(source),
-                });
+        if let Err(failed) = ran {
+            if failed.committed {
+                applied += range.len();
+                ddl_applied += ran_ddl;
             }
+            return failed.outcome(name, last, applied, ddl_applied, total);
         }
         applied += range.len();
         ddl_applied += ran_ddl;
@@ -4019,6 +4039,44 @@ async fn atomic_sqlite(
 struct SegmentFailed {
     committed: bool,
     error: MigrateError,
+}
+
+#[cfg(feature = "sqlite")]
+impl SegmentFailed {
+    /// The run's result, `applied` counting this range if it committed. A
+    /// committed last range wrote the ledger row, so it only warns.
+    fn outcome(
+        self,
+        name: &str,
+        last: bool,
+        applied: usize,
+        ddl_applied: usize,
+        total: usize,
+    ) -> Result<(), MigrateError> {
+        let Self { committed, error } = self;
+        if committed && last {
+            tracing::warn!(
+                target: "rustango::migrate",
+                migration = %name,
+                "ran and recorded in the ledger, but restoring SQLite FK enforcement failed: {error}"
+            );
+            return Ok(());
+        }
+        if applied == 0 {
+            return Err(error);
+        }
+        let source = match error {
+            MigrateError::Driver(d) => d,
+            other => sqlx::Error::Protocol(other.to_string()),
+        };
+        Err(MigrateError::PartiallyApplied {
+            migration: name.to_owned(),
+            applied,
+            total,
+            ddl_applied,
+            source: Box::new(source),
+        })
+    }
 }
 
 /// `ops` cut where a RunSQL meets a rebuild: FK enforcement can only change
@@ -4339,7 +4397,8 @@ async fn apply_nonatomic_pool(
 /// Move the database to a specific migration target on any backend.
 ///
 /// # Errors
-/// [`MigrateError`]: a driver, ledger or validation error.
+/// [`MigrateError`]: a driver, ledger or validation error. A target an
+/// applied squash replaces is refused.
 pub async fn migrate_to_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4407,6 +4466,9 @@ pub(crate) async fn migrate_to_locked(
     }
 
     target_on_disk(&all, dir, target)?;
+    if let Some(squash) = replaced_by(&all, &applied, target) {
+        return Err(replaced_error(target, squash));
+    }
 
     let mut applied = applied;
     let mut moved = Moved {
@@ -4599,7 +4661,8 @@ pub(crate) async fn rollback_pool(
 /// [`unapply_force_pool`] to bypass).
 ///
 /// # Errors
-/// [`MigrateError`]: a driver, ledger or validation error. A target that is not the head is refused.
+/// [`MigrateError`]: a driver, ledger or validation error. A target that is
+/// not the head, or not applied, is refused.
 pub async fn unapply_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4630,7 +4693,8 @@ pub async fn unapply_pool_with_ledger(
 /// order. Caller accepts responsibility for the resulting schema state.
 ///
 /// # Errors
-/// [`MigrateError`]: a driver, ledger or validation error.
+/// [`MigrateError`]: a driver, ledger or validation error. A target that
+/// is not applied is refused.
 pub async fn unapply_force_pool(
     pool: &crate::sql::Pool,
     dir: &Path,
@@ -4804,10 +4868,17 @@ async fn unapply_locked_pool(
             MigrateError::Validation(format!("migration `{name}` not found in {}", dir.display()))
         })?;
 
+    // Its inverse would undo what it never ran, or what a squash holds now.
+    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
+    if !applied.contains(name) {
+        return Err(replaced_by(&all, &applied, name).map_or_else(
+            || MigrateError::Validation(format!("migration `{name}` is not applied")),
+            |squash| replaced_error(name, squash),
+        ));
+    }
     let prev_snapshot = prev_snapshot(&all, &target, dir)?;
 
     let inverted = invert_migration(&target, &prev_snapshot)?;
-    let applied = applied_set_pool_with_ledger(pool, ledger).await?;
     let after = super::make::rollback_snapshot(&all, &applied, &target, prev_snapshot);
 
     if target.atomic {
@@ -4944,6 +5015,7 @@ async fn unapply_atomic_pool(
 ///
 /// Each entry's first item must equal the migration's `name` field
 /// — a divergence would mean the slice was hand-built incorrectly.
+/// Squashes reconcile as in [`migrate_pool`].
 ///
 /// # Errors
 /// [`MigrateError`]: a driver, ledger or validation error, and
@@ -4975,21 +5047,7 @@ async fn migrate_embedded_pool_with_ledger(
         }
         all.sort_by(|a, b| a.name.cmp(&b.name));
         file::validate_chain(&all, "embedded slice")?;
-
-        let applied = applied_set_pool_with_ledger(pool, ledger).await?;
-        let pending: Vec<Migration> = all
-            .iter()
-            .filter(|m| !applied.contains(&m.name))
-            .cloned()
-            .collect();
-
-        let mut newly = Vec::with_capacity(pending.len());
-        for mig in pending {
-            let before = snapshot_before(&all, &mig)?;
-            apply_one_pool(pool, &mig, &before, ledger).await?;
-            newly.push(mig);
-        }
-        Ok(newly)
+        apply_chain(pool, all, ledger, false, ChainOrigin::OnDisk, None).await
     })
     .await
 }
@@ -5054,6 +5112,24 @@ mod tests {
         assert!(super::mysql_lock_taken(Some(1)).unwrap());
         assert!(!super::mysql_lock_taken(Some(0)).unwrap());
         assert!(super::mysql_lock_taken(None).is_err());
+    }
+
+    /// Only the FK restore failed after the last range committed the ledger
+    /// row: the migration is applied, so the run is `Ok`.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_restore_failure_after_the_ledger_commit_is_ok() {
+        use super::{MigrateError, SegmentFailed};
+        let failed = |committed| SegmentFailed {
+            committed,
+            error: MigrateError::Validation("restore".into()),
+        };
+        assert!(failed(true).outcome("m", true, 2, 1, 2).is_ok());
+        assert!(failed(false).outcome("m", true, 0, 0, 2).is_err());
+        assert!(matches!(
+            failed(true).outcome("m", false, 1, 1, 2),
+            Err(MigrateError::PartiallyApplied { applied: 1, .. })
+        ));
     }
 
     /// SQLite finds `CaseT` under any case, so the check must too.

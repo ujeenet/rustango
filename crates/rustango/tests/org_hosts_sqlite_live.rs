@@ -60,16 +60,15 @@ async fn registry_with_org() -> Pool {
     rustango::testkit::migrate_framework(&pool)
         .await
         .expect("framework tables");
-    let mut org = Org {
-        id: rustango::sql::Auto::Unset,
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some("acme.example.com".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Unset;
+        o.slug = "acme".into();
+        o.display_name = "Acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some("acme.example.com".into());
+    });
     org.insert(&pool).await.expect("insert org");
     pool
 }
@@ -168,16 +167,15 @@ async fn a_host_matching_another_tenants_base_is_refused() {
 async fn removal_is_scoped_to_the_owning_org() {
     let _guard = cache_lock().lock().await;
     let pool = registry_with_org().await;
-    let mut other = Org {
-        id: rustango::sql::Auto::Unset,
-        slug: "globex".into(),
-        display_name: "Globex".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some("globex.example.com".into()),
-        ..rustango::testkit::org()
-    };
+    let mut other = rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Unset;
+        o.slug = "globex".into();
+        o.display_name = "Globex".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some("globex.example.com".into());
+    });
     other.insert(&pool).await.expect("insert org");
     add_host(&pool, "acme", "scoped.acme.com", "apex.invalid")
         .await
@@ -258,16 +256,15 @@ async fn an_existing_registry_gains_the_table_on_a_plain_migrate() {
     rustango::testkit::create_tables(&pool, &models)
         .await
         .expect("pre-upgrade tables");
-    let mut org = Org {
-        id: rustango::sql::Auto::Unset,
-        slug: "legacy".into(),
-        display_name: "Legacy".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some("legacy.example.com".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Unset;
+        o.slug = "legacy".into();
+        o.display_name = "Legacy".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some("legacy.example.com".into());
+    });
     org.insert(&pool).await.expect("existing org survives");
 
     assert!(
@@ -332,16 +329,15 @@ async fn a_populated_host_table_survives_a_re_migrate() {
     rustango::testkit::migrate_framework(&pool)
         .await
         .expect("framework tables");
-    let mut org = Org {
-        id: rustango::sql::Auto::Unset,
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some("acme.example.com".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Unset;
+        o.slug = "acme".into();
+        o.display_name = "Acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some("acme.example.com".into());
+    });
     org.insert(&pool).await.expect("insert org");
 
     // Real operator data in the table before the upgrade runs.
