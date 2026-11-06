@@ -3,7 +3,7 @@
 
 #![cfg(any(feature = "postgres", feature = "mysql", feature = "sqlite"))]
 
-use rustango::core::AggregateExpr;
+use rustango::core::{AggregateExpr, SqlValue};
 use rustango::query::QuerySet;
 use rustango::sql::sqlx;
 use rustango::sql::{CounterPool as _, FetcherPool as _, ForeignKey, Pool, PoolConn, PooledConn};
@@ -203,8 +203,10 @@ async fn queries_run_on_the_held_session(pool: &Pool) {
             .aggregate()
             .annotate("n", AggregateExpr::Count(None))
     };
-    assert!(agg().fetch_on(&mut *c).await.unwrap().is_empty());
-    assert!(!agg().fetch(pool).await.unwrap().is_empty());
+    // One summary row each: none on the held session, some on the pool.
+    let n = |rows: Vec<std::collections::HashMap<String, SqlValue>>| rows[0]["n"].clone();
+    assert_eq!(n(agg().fetch_on(&mut *c).await.unwrap()), SqlValue::I64(0));
+    assert_ne!(n(agg().fetch(pool).await.unwrap()), SqlValue::I64(0));
     assert_eq!(by_id().count(pool).await.unwrap(), 2);
 }
 

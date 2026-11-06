@@ -330,18 +330,19 @@ pub(crate) fn signals_suppressed() -> bool {
     SUPPRESS_SIGNALS.try_with(|v| *v).unwrap_or(false)
 }
 
-/// Turn off every `send_*` while awaiting `fut`. Use it when loading
-/// fixtures in bulk, running a migration that touches rows, or doing
-/// internal bookkeeping that should not trigger receivers.
+/// Turn off every `send_*` while awaiting `fut`. ORM writes send no
+/// signals themselves, so this silences only the `send_*` calls that
+/// `fut` makes: your own, or a helper's that sends after it writes.
 ///
 /// Calls nest; the outer state comes back on exit.
 ///
 /// ```ignore
-/// use rustango::signals::without_signals;
+/// use rustango::signals::{send_post_save, without_signals, PostSaveContext};
 ///
 /// without_signals(async {
 ///     for row in batch {
 ///         row.save(&pool).await?;
+///         send_post_save(&row, PostSaveContext { created: true }).await; // silenced
 ///     }
 ///     Ok::<_, ExecError>(())
 /// }).await?;
@@ -353,11 +354,12 @@ where
     SUPPRESS_SIGNALS.scope(true, fut).await
 }
 
-/// [`without_signals`] under a name that reads better around a save.
-/// You still make the save call; this only wraps it.
+/// [`without_signals`] under a name that reads better around a save
+/// that sends its own signals. `post.save(&pool)` alone sends none.
 ///
 /// ```ignore
-/// signals::save_quietly(post.save(&pool)).await?;
+/// // `save_and_notify` saves, then calls `send_post_save`.
+/// signals::save_quietly(save_and_notify(&mut post, &pool)).await?;
 /// ```
 pub async fn save_quietly<F, R>(fut: F) -> R
 where
@@ -367,7 +369,7 @@ where
 }
 
 /// [`without_signals`] under a name that reads better around a
-/// delete.
+/// delete that sends its own signals; `delete` alone sends none.
 pub async fn delete_quietly<F, R>(fut: F) -> R
 where
     F: std::future::Future<Output = R>,

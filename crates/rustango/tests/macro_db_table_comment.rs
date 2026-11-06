@@ -107,7 +107,7 @@ fn pg_escapes_single_quotes_in_comment() {
     // dialect APIs directly — the macro layer doesn't need its own
     // escape since the SQL emitters do the work.
     let stmt = Postgres
-        .table_comment_statement("t", "it's tricky")
+        .table_comment_statement(rustango::sql::TableTarget::bare("t"), "it's tricky")
         .expect("PG emits a stmt");
     assert!(
         stmt.contains("'it''s tricky'"),

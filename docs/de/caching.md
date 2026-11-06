@@ -67,8 +67,9 @@ unbekannter Wert liefert einen In-Memory-Cache mit einer Warnung.
 
 Es gibt keinen Wert `postgres` — das DB-Backend heißt `db` oder `database`. Werte
 sind kleingeschrieben. Ein unbekannter oder falsch geschriebener Wert (`Redis`,
-ein Tippfehler) oder `file` ohne `file_cache_dir` loggt einen `error` und fällt
-auf einen In-Memory-Cache zurück; ein späteres Minor-Release wird ihn ablehnen.
+ein Tippfehler) oder `file` ohne `file_cache_dir` wird abgelehnt: `from_settings`
+panict beim Start, `from_settings_async` gibt den Fehler zurück. Ein Ersatz pro
+Prozess würde brechen, was ein geteilter Cache garantiert.
 
 `FileCache` räumt alle 16 Schreibvorgänge ein Sechzehntel seines Verzeichnisses
 von abgelaufenen Einträgen. Rufe `FileCache::purge_expired()` regelmäßig auf, um
@@ -251,24 +252,25 @@ Multi-Tenancy den naheliegenden Key zum undichten Key: ein Handler (oder
 schlimmer ein Background-Task, der gar keinen ambienten Tenant hat) schreibt
 `"stats:monthly"` für einen Tenant, und jeder andere Tenant liest es zurück.
 
-Wickle den gemeinsamen Cache in einen **`ScopedCache`**, damit der Namespace
-für dich angewendet wird und die Aufrufstelle es nicht vergessen kann:
+Nimm die Sicht des Tenants mit **`CacheScope::for_tenant(..).app()`** (intern
+ein `ScopedCache`), damit der Namespace für dich angewendet wird und die
+Aufrufstelle es nicht vergessen kann:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` ist selbst ein `Cache` und passt damit überall hinein, wo ein
+Die Sicht ist selbst ein `Cache` und passt damit überall hinein, wo ein
 `BoxedCache` erwartet wird — `cache_page`, `cache_fragment`, die Rate-Limiter,
-`DistributedLock`. Er leitet mit gemappten Keys an das innere Backend weiter,
+`DistributedLock`. Sie leitet mit gemappten Keys an das innere Backend weiter,
 statt etwas neu zu implementieren, sodass native Primitive (Redis `INCRBY`,
 `SET NX`) ihre Atomarität behalten. `get_many` / `set_many` / `delete_many` werden
 auch weitergeleitet, aber kein mitgeliefertes Backend bündelt sie bisher: jeder
@@ -301,13 +303,20 @@ Das ungescopete `Cache::clear()` ist weiterhin prozessweit — greife also zur
 gescopeten Sicht, wann immer die Änderung eines einzelnen Tenants die
 Invalidierung ausgelöst hat.
 
+Tenant-Keys sind `tenant:#org:<id>:<slug>:<area>:<rest>`, mit je einem
+Bereich für App-Keys, Locks, Idempotency, Seiten, `KeyBy::Tenant`-Rate-Limits,
+Sessions und Flag-Overrides. Login-Throttle, Account-Lockout und der
+MCP-Key-Cache behalten ihr eigenes Layout und ihren eigenen Purge. Ein `clear()` des Tenant-App-Caches löscht nur den Bereich
+`app` und gibt also nie den Lock eines laufenden Jobs frei.
+
 Der Slug eines gelöschten Tenants kann von einem neuen Tenant wiederverwendet
-werden. Damit `purge-tenant` die `ScopedCache::for_tenant`-Keys des alten Tenants
-löscht, rufe beim Start `rustango::tenancy::decommission::clear_on_purge(cache)`
-für jeden Cache auf, der sie hält. Der Purge löscht dort auch die Locks, Sessions
-und Flag-Overrides des Tenants. Idempotency- und Page-Cache-Einträge bleiben, bis
-sie ablaufen: sie sind an die Org-ID gebunden, also kann der neue Tenant sie
-nicht lesen.
+werden. Damit `purge-tenant` die Keys des alten Tenants löscht, rufe beim Start
+`rustango::tenancy::decommission::clear_on_purge(cache)` für jeden Cache auf,
+der sie hält. Der Purge löscht dort jeden Bereich
+(`CacheScope::for_tenant(cache, &tenant).purge()` tut dasselbe von Hand). Bis
+0.65.0 werden Idempotency-Antworten auch unter ihrem 0.63-Key `idem:<sha>`
+geschrieben; dieser Key ist gehasht und hat kein Tenant-Präfix, der Purge findet
+ihn also nicht, und er läuft mit seiner TTL ab (standardmäßig 24 Stunden).
 
 ---
 
@@ -336,7 +345,8 @@ in einem beliebigen `BoxedCache`; `.timeout(dur)` legt fest, wie lange (Standard
 
 Um eine Seite nach einem Schreibvorgang zu verwerfen, rufe
 `layer.invalidate(&[PageKey::new(path, host)]).await?` auf einem Klon des Layers
-auf (unter Tenancy hänge `.tenant(org_id)` an den Key). Das löscht jede gecachte
+auf (unter Tenancy hänge `.tenant(&slug)` an den Key, den `TenantSlug` der
+Anfrage, z. B. aus `RequestTenant::tenant()`). Das löscht jede gecachte
 Variante dieses Pfads: jeden Query-String, jeden `vary_on`-Wert, GET und `QUERY`
 gleichermaßen. Es arbeitet mit einem Generationszähler pro Pfad, daher liest
 jeder gecachte GET einen weiteren kleinen Cache-Key.
@@ -359,6 +369,10 @@ Unter Tenancy hängst du den Layer innerhalb des Tenancy-Layers ein; siehe
 
 **Aufräumen:** `DatabaseCache::purge_expired()` und
 `FileCache::purge_expired()` löschen abgelaufene Einträge; rufe sie zeitgesteuert auf.
+`DatabaseCache` löscht zudem alle 256 Schreibvorgänge einen Schub abgelaufener Zeilen
+(`.purge_every(n)`, `0` schaltet das ab). `FileCache` behält höchstens 100 000 Einträge
+und 1 GiB (`.max_entries(n)`, `.max_bytes(n)` oder `file_cache_max_entries` /
+`file_cache_max_bytes` in `[cache]`; `0` hebt eine Grenze auf) und löscht die ältesten zuerst.
 
 **Was auf dem Cache aufbaut:** serverseitige [Sessions](auth-sessions.md),
 verteiltes [Rate Limiting](middleware.md) (`CacheRateLimitLayer`),

@@ -34,8 +34,9 @@ de sorte que le serveur peut faire confiance à ses paramètres sans rien stocke
 
 ## Les URL signées : le socle
 
-`sign` ajoute une signature HMAC-SHA256 (et une expiration facultative) sur le chemin + la
-requête de l'URL. `verify` la recalcule : altérez un paramètre quelconque, utilisez le mauvais
+`sign` ajoute une signature HMAC-SHA256 (et une expiration facultative) sur toute l'URL
+avant le fragment : schéma, hôte, chemin et requête. Vérifiez l'URL publique
+complète, pas `req.uri()` (sans schéma ni hôte). `verify` la recalcule : altérez un paramètre quelconque, utilisez le mauvais
 secret ou laissez-la expirer, et elle échoue.
 
 ```rust

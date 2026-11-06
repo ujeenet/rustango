@@ -149,6 +149,13 @@ Präfix ebenfalls.
 Host-Routing ist die stärkere Wahl für die Produktion. Pfad-Präfixe sind
 praktisch in der Entwicklung, wo du nur einen Host hast.
 
+Tenants mit Pfad-Präfix teilen sich außerdem den Apex-Origin mit der
+Betreiberkonsole. Ein Skript auf einer Tenant-Seite läuft dann im Origin der
+Konsole und kann dort als angemeldeter Betreiber handeln, oder im Admin eines
+anderen Präfix-Tenants. Der Server warnt beim Start, wenn er beides ausliefert.
+Gib Tenants in Produktion eigene Hosts, oder öffne im Browser, den du für die
+Konsole nutzt, keine Tenant-Seiten.
+
 ## Speichermodi
 
 Jeder Tenant hat einen `storage_mode`: `schema` oder `database`.
@@ -263,6 +270,10 @@ Um den Pool jedes aktiven Tenants im Datenbank-Modus vorab zu öffnen, führe
 [`prewarm-pools`](manage.md#prewarm-pools) aus, nutze den Knopf in der
 Konsole oder setze `prewarm_active_tenants: true`.
 
+Kalte Pool-Aufbauten sind begrenzt: höchstens 16 gleichzeitig
+(`max_concurrent_pool_builds`) und 600 pro Minute (`max_pool_builds_per_minute`);
+darüber erhält eine Anfrage ein 503 mit `Retry-After`. `0` hebt eine Grenze auf.
+
 ## Migrationen
 
 Jede Migrationsdatei hat einen Scope, `registry` oder `tenant`.
@@ -305,8 +316,8 @@ Was ihn trägt:
 - JWTs: die Claims `tenant` und `org_id` müssen beide passen;
 - HMAC-Signaturschlüssel und MCP-Agent-Schlüssel, die an einen Tenant
   gebunden sind;
-- `ScopedCache::for_tenant`, der Seiten-Cache, Idempotenz-Schlüssel und
-  `DistributedLock::for_tenant`, alle mit dem Schlüssel `#org:<id>:<slug>`;
+- `CacheScope::for_tenant`, der Seiten-Cache, Idempotenz-Schlüssel und
+  `CacheScope::locks`, alle mit dem Schlüssel `#org:<id>:<slug>`;
 - Links zum Zurücksetzen des Passworts und zur Bestätigung.
 
 API-Schlüssel und Benutzer eines Tenants liegen in seinem eigenen Speicher,
@@ -314,14 +325,14 @@ den ein Purge löscht. Eine `Org` ohne ID (nicht aus der Registry gelesen) hat
 keinen `TenantSlug`, und die Anmeldung lehnt sie ab.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` nur für eine Org, die nicht aus der Registry gelesen wurde.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

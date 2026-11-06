@@ -274,6 +274,123 @@ pub(crate) async fn creation_schema(pool: &Pool) -> Result<Option<String>, sqlx:
     }
 }
 
+/// How `t`'s live columns differ from it in what converge cannot change:
+/// nullability, `max_length`, having a DEFAULT, UNIQUE and ON DELETE.
+///
+/// # Errors
+/// Driver failures from the catalog reads.
+pub(crate) async fn column_drift(
+    pool: &Pool,
+    t: &super::TableSnapshot,
+    indexes: &[super::IndexSnapshot],
+) -> Result<Vec<String>, super::MigrateError> {
+    let dialect = pool.dialect();
+    let schema = creation_schema(pool).await?.unwrap_or_default();
+    let live = super::inspectdb::list_columns(pool, &schema, &t.name).await?;
+    let at = crate::sql::TableTarget::in_schema(
+        Some(schema.as_str()).filter(|s| !s.is_empty()),
+        &t.name,
+    );
+    let table = || vec![crate::core::SqlValue::from(dialect.catalog_table(at))];
+    let unique = match dialect.unique_columns_sql() {
+        Some(sql) => Some(
+            crate::sql::raw_query_pool::<(String,)>(sql, table(), pool)
+                .await?
+                .into_iter()
+                .map(|(c,)| c)
+                .collect(),
+        ),
+        None => None,
+    };
+    let on_delete = match dialect.fk_delete_actions_sql() {
+        Some(sql) => Some(
+            crate::sql::raw_query_pool::<(String, String)>(sql, table(), pool)
+                .await?
+                .into_iter()
+                .collect(),
+        ),
+        None => None,
+    };
+    let live = LiveTable {
+        columns: &live,
+        unique: unique.as_ref(),
+        on_delete: on_delete.as_ref(),
+    };
+    Ok(drift_lines(dialect.name(), t, indexes, &live))
+}
+
+/// What the catalog says about one table, for [`drift_lines`].
+struct LiveTable<'a> {
+    columns: &'a [super::inspectdb::ColumnRow],
+    unique: Option<&'a std::collections::HashSet<String>>,
+    on_delete: Option<&'a std::collections::HashMap<String, String>>,
+}
+
+/// [`column_drift`]'s comparison. A primary key, serial or generated column
+/// is skipped, as is an FK the database lacks: converge reports neither.
+fn drift_lines(
+    dialect: &str,
+    t: &super::TableSnapshot,
+    indexes: &[super::IndexSnapshot],
+    live: &LiveTable<'_>,
+) -> Vec<String> {
+    let null = |n: bool| if n { "nullable" } else { "NOT NULL" };
+    let has = |d: bool| if d { "a DEFAULT" } else { "no DEFAULT" };
+    let yes = |u: bool| if u { "UNIQUE" } else { "not UNIQUE" };
+    // RESTRICT and NO ACTION both refuse the delete; MariaDB reports either.
+    let action = |a: Option<&str>| match a.map(str::to_ascii_uppercase).as_deref() {
+        None | Some("RESTRICT" | "NO ACTION") => "NO ACTION".to_owned(),
+        Some(other) => other.to_owned(),
+    };
+    let mut out = Vec::new();
+    for f in &t.fields {
+        if f.primary_key || f.auto || f.generated_as.is_some() {
+            continue;
+        }
+        let Some(col) = live.columns.iter().find(|c| c.name == f.column) else {
+            continue;
+        };
+        let mut differs = |what: &str, db: &str, want: &str| {
+            out.push(format!(
+                "`{}.{}` {what}: {db} in the database, {want} in the framework schema",
+                t.name, f.column
+            ));
+        };
+        // SQLite adds a UUID column to a filled table nullable, with no DEFAULT.
+        let backfilled = dialect == "sqlite" && super::diff::is_uuid_default(f);
+        if col.nullable != f.nullable && !(backfilled && col.nullable) {
+            differs("nullability", null(col.nullable), null(f.nullable));
+        }
+        if let (Some(db), Some(want), "string") = (col.max_length, f.max_length, f.ty.as_str()) {
+            if i64::from(db) != i64::from(want) {
+                differs("max_length", &db.to_string(), &want.to_string());
+            }
+        }
+        let db_default = col.default.is_some();
+        if db_default != f.default.is_some() && !(backfilled && !db_default) {
+            differs("default", has(db_default), has(f.default.is_some()));
+        }
+        if let Some(unique) = live.unique {
+            let db = unique.contains(&f.column);
+            // A declared single-column UNIQUE index makes it unique too.
+            let indexed = indexes
+                .iter()
+                .any(|i| i.table == t.name && i.unique && i.columns == [f.column.as_str()]);
+            if db != f.unique && !(db && indexed) {
+                differs("uniqueness", yes(db), yes(f.unique));
+            }
+        }
+        let db_action = live.on_delete.and_then(|m| m.get(&f.column));
+        if let (Some(rel), Some(db)) = (&f.fk, db_action) {
+            let (db, want) = (action(Some(db)), action(rel.on_delete.as_deref()));
+            if db != want {
+                differs("ON DELETE", &db, &want);
+            }
+        }
+    }
+    out
+}
+
 /// Apply each group of `changes` on its own, FKs last, so one object that
 /// fails does not block the others. Returns what could not be applied.
 ///
@@ -493,7 +610,7 @@ pub(super) fn filled_table_retry(
             field.default = Some(format!("'{now}'"));
             "added with a fixed DEFAULT: SQLite can't add `now()` to a table with rows"
         } else if super::diff::is_uuid_default(field) {
-            backfill = Some(super::diff::fill_nulls_sql(table, field, dialect));
+            backfill = Some(super::diff::fill_nulls_sql(table, field, dialect, None));
             field.default = None;
             field.nullable = true;
             "added nullable with no DEFAULT: SQLite can't add a UUID DEFAULT to a table with rows"

@@ -92,6 +92,50 @@ impl RequestTenant {
     }
 }
 
+/// The path prefix a path-prefix tenant is served under (`/acme`), with no
+/// trailing slash. The dispatcher strips it before the app's routes, so a
+/// handler reads it here to build absolute URLs. Absent on a tenant's own host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TenantPathPrefix(String);
+
+impl TenantPathPrefix {
+    /// The prefix, e.g. `/acme`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// The prefix the dispatcher stored on this request, if any.
+    #[must_use]
+    pub fn get(extensions: &Extensions) -> Option<&Self> {
+        extensions.get::<Self>()
+    }
+}
+
+/// The org the dispatcher resolved. Crate-private, so no outer layer can
+/// plant one; the tenant extractors read it instead of resolving again.
+#[derive(Clone)]
+pub(crate) struct DispatchedOrg(pub(crate) super::Org);
+
+/// Store the dispatcher's answer on `ext`: the [`RequestTenant`] marker, the
+/// org, and the prefix when the request is under it. Replaces whatever an
+/// outer layer stored.
+pub(crate) fn store_dispatched<E>(
+    ext: &mut Extensions,
+    found: Result<Option<super::Org>, E>,
+    prefix: Option<&str>,
+) {
+    ext.remove::<DispatchedOrg>();
+    ext.remove::<TenantPathPrefix>();
+    if let Ok(Some(org)) = &found {
+        if let Some(p) = prefix {
+            ext.insert(TenantPathPrefix(p.trim_end_matches('/').to_owned()));
+        }
+        ext.insert(DispatchedOrg(org.clone()));
+    }
+    ext.insert(RequestTenant::from_resolution(found));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,10 +163,9 @@ mod tests {
 
     #[test]
     fn an_org_without_an_id_is_unknown() {
-        let org = crate::tenancy::Org {
-            slug: "acme".into(),
-            ..crate::testkit::org()
-        };
+        let org = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+        });
         assert_eq!(
             RequestTenant::from_resolution::<()>(Ok(Some(org))),
             RequestTenant::Unknown

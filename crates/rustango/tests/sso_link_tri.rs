@@ -427,7 +427,7 @@ async fn a_link_older_than_its_account(pool: &Pool) {
     set_stale_links(StaleLinks::Warn);
     create_link(pool, &key, "sub-old", 42).await.unwrap();
     age_link(pool, "sub-old").await;
-    #[cfg(feature = "runtime")]
+    // `tenancy` brings `runtime`, so the subscriber is always there.
     let logs = {
         use tracing::instrument::WithSubscriber as _;
         let buf = rustango::testkit::CaptureWriter::default();
@@ -443,14 +443,6 @@ async fn a_link_older_than_its_account(pool: &Pool) {
         assert_eq!(got.unwrap(), 42, "Warn keeps signing in");
         buf.contents()
     };
-    #[cfg(not(feature = "runtime"))]
-    assert_eq!(
-        sign_in(pool, &key, false, &p, &One(Some(reused)))
-            .await
-            .unwrap(),
-        42
-    );
-    #[cfg(feature = "runtime")]
     assert!(
         logs.contains("older than its account") && logs.contains("42"),
         "{logs}"

@@ -146,8 +146,8 @@ fn any_value_emits_per_dialect() {
             .compile_aggregate(&q)
             .unwrap()
             .sql
-            .contains("ANY_VALUE(`tag`)"),
-        "MySQL ANY_VALUE"
+            .contains("/*!80000 ANY_VALUE(`tag`) */ /*M! MIN(`tag`) */"),
+        "MySQL ANY_VALUE, MariaDB MIN"
     );
     assert!(
         Sqlite
@@ -268,4 +268,70 @@ fn array_agg_composes_with_group_by() {
     assert!(stmt.sql.contains(r#"SELECT "author""#));
     assert!(stmt.sql.contains(r#"array_agg("tag")"#));
     assert!(stmt.sql.contains(r#"GROUP BY "author""#));
+}
+
+// ---------- MariaDB arms ----------
+
+/// MariaDB ignores the `SET_VAR` hint, so it gets `SET STATEMENT`
+/// first; the MySQL text after the empty arm is unchanged.
+#[test]
+fn group_concat_lifts_the_cap_on_mysql_and_mariadb() {
+    let q = aggregate_query(AggregateExpr::string_agg("tag", ", "), "tags");
+    let sql = MySql.compile_aggregate(&q).unwrap().sql;
+    let (lead, rest) = sql.split_at(sql.find("SELECT").expect("a SELECT"));
+    assert_eq!(
+        lead,
+        "/*!80000  */ /*M! SET STATEMENT group_concat_max_len=4294967295 FOR */ "
+    );
+    assert!(
+        rest.starts_with("SELECT /*+ SET_VAR(group_concat_max_len = 4294967295) */ "),
+        "{sql}"
+    );
+}
+
+/// A JSON default carries `/*!80000 CAST(…)*/`; each arm reads it as its
+/// server does, and both bind the default once.
+#[test]
+fn lag_with_a_json_default_has_a_mariadb_arm() {
+    use rustango::core::window::lag;
+    let expr: AggregateExpr = lag("tag", 1, Some(SqlValue::Json(serde_json::json!({"a": 1}))))
+        .partition_by("author")
+        .order_by(&[("id", false)])
+        .into();
+    let stmt = MySql
+        .compile_aggregate(&aggregate_query(expr, "prev"))
+        .unwrap();
+    assert!(
+        stmt.sql.contains(
+            "/*!80000 LAG(`tag`, 1,  CAST(? AS JSON)) OVER (PARTITION BY `author` ORDER BY `id`) */ \
+             /*M! (CASE WHEN ROW_NUMBER() OVER (PARTITION BY `author` ORDER BY `id`) > 1 \
+             THEN LAG(`tag`, 1) OVER (PARTITION BY `author` ORDER BY `id`) ELSE ? END) */"
+        ),
+        "{}",
+        stmt.sql
+    );
+    assert_eq!(stmt.params.len(), 1);
+}
+
+/// An integer default needs no unwrapping: the MySQL arm is the old call.
+#[test]
+fn lead_with_an_int_default_keeps_the_mysql_call() {
+    use rustango::core::window::lead;
+    let expr: AggregateExpr = lead("tag", 2, Some(SqlValue::I64(0)))
+        .partition_by("author")
+        .order_by(&[("id", false)])
+        .into();
+    let stmt = MySql
+        .compile_aggregate(&aggregate_query(expr, "next"))
+        .unwrap();
+    assert!(
+        stmt.sql.contains(
+            "/*!80000 LEAD(`tag`, 2, ?) OVER (PARTITION BY `author` ORDER BY `id`) */ \
+             /*M! (CASE WHEN COUNT(*) OVER (PARTITION BY `author`) - ROW_NUMBER() OVER \
+             (PARTITION BY `author` ORDER BY `id`) >= 2 THEN LEAD(`tag`, 2) OVER \
+             (PARTITION BY `author` ORDER BY `id`) ELSE ? END) */"
+        ),
+        "{}",
+        stmt.sql
+    );
 }

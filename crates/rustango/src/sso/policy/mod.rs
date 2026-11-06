@@ -11,13 +11,15 @@ pub(crate) mod admin;
 pub mod domain;
 pub mod identity;
 pub mod jwks;
+#[cfg(feature = "admin")]
+pub(crate) mod landing;
 pub mod models;
 pub mod signup;
 pub mod tenant;
 
 pub use domain::{DomainList, DomainRule, EmailAddr, PolicyError, TokenList};
 pub use identity::{IdToken, Identity, RequiredClaims};
-pub use models::{SsoInvite, SsoSharedOverride, SsoTenantPolicy};
+pub use models::{SsoInvite, SsoLandingRule, SsoSharedOverride, SsoTenantPolicy};
 pub use signup::{InviteTarget, RoleMap, RoleNames, SignupColumns, SignupPolicy};
 pub use tenant::{SharedOverride, TenantSettings};
 
@@ -320,6 +322,9 @@ impl SignInPolicy {
     }
 }
 
+/// Largest `auto_deactivate_after_days` kept, 100 years; a larger stored value reads as this.
+pub(crate) const MAX_DEACTIVATE_DAYS: i64 = 36_500;
+
 /// A layer's password and session rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -354,7 +359,7 @@ impl Lifecycle {
             v => Ok(v),
         };
         let days = positive("auto_deactivate_after_days", auto_deactivate_after_days)?
-            .map(|d| i32::try_from(d).unwrap_or(i32::MAX));
+            .map(|d| i32::try_from(d.min(MAX_DEACTIVATE_DAYS)).unwrap_or(i32::MAX));
         Ok(Self {
             sso_only,
             auto_deactivate_after_days: days,
@@ -1733,6 +1738,8 @@ mod tests {
         assert_eq!(p.session_ttl(86_400, true), 600);
         assert_eq!(p.session_ttl(100, true), 100);
         assert!(Lifecycle::parse(false, None, Some(0), None).is_err());
+        let huge = Lifecycle::parse(false, Some(i64::from(i32::MAX)), None, None).unwrap();
+        assert_eq!(huge.auto_deactivate_after_days, Some(36_500), "not capped");
         let bad = EffectivePolicy::legacy(true).with_lifecycle(Lifecycle::parse(
             false,
             Some(-1),

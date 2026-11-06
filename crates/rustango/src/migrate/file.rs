@@ -187,6 +187,17 @@ pub fn write(path: &Path, migration: &Migration) -> Result<(), MigrateError> {
     Ok(())
 }
 
+/// A new temp dir with a random name, owner-only on Unix: a leftover or
+/// planted dir is never reused, so only this run's files are applied.
+pub(crate) fn private_tempdir(prefix: &str) -> std::io::Result<tempfile::TempDir> {
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(prefix);
+    // tempfile makes dirs (unlike files) with the default 0777 less the umask.
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    builder.tempdir()
+}
+
 /// Load every `*.json` migration in `dir`, sorted lexicographically by
 /// file name (which is the canonical apply order).
 ///

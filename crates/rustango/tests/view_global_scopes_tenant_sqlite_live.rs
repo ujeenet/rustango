@@ -2,14 +2,8 @@
 //! The template views' `tenant_router()` copies apply global scopes too (#1746),
 //! and audit their writes (#1794), and honour soft delete (#2082).
 
-// `not(postgres)`: the `Tenant` extractor looks up `TenantContext<DefaultDb>`,
-// which is Postgres once that feature is on.
-#![cfg(all(
-    feature = "sqlite",
-    feature = "tenancy",
-    feature = "template_views",
-    not(feature = "postgres")
-))]
+// No `not(postgres)`: `tenant_router()` serves whichever backend is mounted.
+#![cfg(all(feature = "sqlite", feature = "tenancy", feature = "template_views"))]
 
 use std::sync::Arc;
 
@@ -136,13 +130,12 @@ async fn app(name: &str) -> (Router, Pool, Vec<i64>, Vec<i64>) {
         }
     }
 
-    let org = Org {
-        slug: "acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(url),
-        ..rustango::testkit::org()
-    };
+    let org = rustango::testkit::org_with(|o| {
+        o.slug = "acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(url);
+    });
     let registry = sqlx::SqlitePool::connect("sqlite::memory:")
         .await
         .expect("registry");

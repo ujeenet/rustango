@@ -505,9 +505,9 @@ pub fn detect_changes(prev: &SchemaSnapshot, current: &SchemaSnapshot) -> Vec<Sc
     changes
 }
 
-/// Warnings for every dropped column in `changes` (its data is deleted; a
-/// NOT NULL one with no default also cannot be unapplied once the table
-/// has rows), and for a junction dropped beside a new one with its ends.
+/// Warnings for every dropped table and column in `changes` (its data is
+/// deleted; a NOT NULL column with no default also cannot be unapplied once
+/// the table has rows), and for a junction dropped beside a new one with its ends.
 pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]) -> Vec<String> {
     changes
         .iter()
@@ -522,6 +522,9 @@ pub(crate) fn irreversible_drops(prev: &SchemaSnapshot, changes: &[SchemaChange]
                     );
                 }
                 Some(w)
+            }
+            SchemaChange::DropTable(table) => {
+                Some(format!("dropping table `{table}` deletes every row in it"))
             }
             SchemaChange::DropM2MTable { through } => {
                 let gone = prev.m2m_table(through)?;
@@ -582,6 +585,36 @@ pub(crate) fn suspected_renames(
             {
                 if t == table && ty(current, t, added).as_ref() == Some(&dropped) {
                     out.push((table.clone(), column.clone(), added.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `(dropped, created)` for each table `changes` drops beside a new table
+/// with the same column names: likely a changed `table =`, which a drop +
+/// create empties. Never guessed into a `RenameTable`.
+pub(crate) fn suspected_table_renames(
+    prev: &SchemaSnapshot,
+    current: &SchemaSnapshot,
+    changes: &[SchemaChange],
+) -> Vec<(String, String)> {
+    fn columns(t: &TableSnapshot) -> std::collections::BTreeSet<&str> {
+        t.fields.iter().map(|f| f.column.as_str()).collect()
+    }
+    let mut out = Vec::new();
+    for c in changes {
+        let SchemaChange::DropTable(old) = c else {
+            continue;
+        };
+        let Some(dropped) = prev.table(old).map(columns) else {
+            continue;
+        };
+        for a in changes {
+            if let SchemaChange::CreateTable(new) = a {
+                if current.table(new).map(columns).as_ref() == Some(&dropped) {
+                    out.push((old.clone(), new.clone()));
                 }
             }
         }
@@ -1075,16 +1108,25 @@ pub(crate) fn render_changes_split_for_empty(
 /// The quoted `REFERENCES` target, schema-qualified when `schema` is set.
 /// A registry model's table is shared, so it resolves through `search_path` (#1718).
 fn fk_target(dialect: &dyn crate::sql::Dialect, schema: Option<&str>, table: &str) -> String {
+    target(schema, table).quoted(dialect)
+}
+
+/// `table` in `schema`, unless it is a shared registry table.
+pub(crate) fn target<'a>(schema: Option<&'a str>, table: &'a str) -> crate::sql::TableTarget<'a> {
+    in_table_schema(schema, table, table)
+}
+
+/// `name` (a table or index) in the schema [`target`] puts `table` in.
+fn in_table_schema<'a>(
+    schema: Option<&'a str>,
+    table: &str,
+    name: &'a str,
+) -> crate::sql::TableTarget<'a> {
     let shared = || {
         crate::core::ModelEntry::for_table(table)
             .is_some_and(|e| e.schema.scope == crate::core::ModelScope::Registry)
     };
-    match schema {
-        Some(s) if !shared() => {
-            format!("{}.{}", dialect.quote_ident(s), dialect.quote_ident(table))
-        }
-        _ => dialect.quote_ident(table),
-    }
+    crate::sql::TableTarget::in_schema(schema.filter(|_| !shared()), name)
 }
 
 /// An `AlterColumn*` on MySQL or SQLite (#1676). MySQL restates the whole
@@ -1134,14 +1176,18 @@ fn alter_column_elsewhere(
     match unique {
         Some(true) => {
             let name = unique_names.get(table, &f.column)?;
-            out.immediate
-                .push(dialect.add_unique_constraint_sql(table, &name, &f.column));
+            out.immediate.push(dialect.add_unique_constraint_sql(
+                target(schema, table),
+                &name,
+                &f.column,
+            ));
         }
         // The runner drops it by its name in the catalog.
         Some(false) => {}
         None => {
             if !f.nullable && f.default.is_some() {
-                out.immediate.push(fill_nulls_sql(table, f, dialect));
+                out.immediate
+                    .push(fill_nulls_sql(table, f, dialect, schema));
             }
             out.immediate.push(format!(
                 "ALTER TABLE {} MODIFY COLUMN {}",
@@ -1155,7 +1201,7 @@ fn alter_column_elsewhere(
 
 /// PG's `COMMENT ON COLUMN` for `f`; MySQL inlines it and SQLite has none (#2270).
 fn column_comment(
-    table: &str,
+    table: crate::sql::TableTarget<'_>,
     f: &FieldSnapshot,
     dialect: &dyn crate::sql::Dialect,
 ) -> Option<String> {
@@ -1182,13 +1228,15 @@ fn column_definition(f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> St
         sql_type_with_dialect(f, dialect)
     );
     if let Some(expr) = &f.generated_as {
-        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
-    } else if let Some(expr) = &f.default {
-        let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
-        let _ = write!(sql, " DEFAULT {rendered}");
-    }
-    if !f.nullable {
-        sql.push_str(" NOT NULL");
+        dialect.write_generated_column(&mut sql, expr, f.nullable);
+    } else {
+        if let Some(expr) = &f.default {
+            let rendered = render_column_default(expr, &f.ty, f.max_length, dialect);
+            let _ = write!(sql, " DEFAULT {rendered}");
+        }
+        if !f.nullable {
+            sql.push_str(" NOT NULL");
+        }
     }
     if let Some(comment) = &f.db_comment {
         if let Some(inline) = dialect.write_inline_column_comment(comment) {
@@ -1362,11 +1410,12 @@ fn render_changes_split_inner(
                 out.immediate
                     .push(create_table_sql_from_snapshot_with_dialect(table, dialect));
                 for f in &table.fields {
-                    out.immediate.extend(column_comment(name, f, dialect));
+                    out.immediate
+                        .extend(column_comment(target(schema, name), f, dialect));
                 }
                 if let Some(comment) = &table.db_table_comment {
                     out.immediate
-                        .extend(dialect.table_comment_statement(name, comment));
+                        .extend(dialect.table_comment_statement(target(schema, name), comment));
                 }
                 if !dialect.inline_fks_in_create_table() {
                     out.deferred_fks
@@ -1395,7 +1444,7 @@ fn render_changes_split_inner(
                 }
                 out.immediate.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
-                    dialect.quote_ident(table),
+                    fk_target(dialect, schema, table),
                     dialect.quote_ident(column),
                 ));
             }
@@ -1463,9 +1512,11 @@ fn render_changes_split_inner(
                     out.immediate
                         .extend(add_column_then_not_null(table, f, dialect));
                 } else {
-                    out.immediate.push(add_column_sql(table, f, dialect));
+                    out.immediate
+                        .push(add_column_sql(table, f, dialect, schema));
                 }
-                out.immediate.extend(column_comment(table, f, dialect));
+                out.immediate
+                    .extend(column_comment(target(schema, table), f, dialect));
                 if f.fk.is_some()
                     && dialect.inline_fks_in_create_table()
                     && inline_fk_on_add_column(f, dialect).is_none()
@@ -1479,8 +1530,11 @@ fn render_changes_split_inner(
                 // CREATE TABLE's UNIQUE and FK, which a bare ADD COLUMN lacks (#1877).
                 if f.unique && !f.primary_key {
                     let name = unique_names.get(table, column)?;
-                    out.immediate
-                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                    out.immediate.push(dialect.add_unique_constraint_sql(
+                        target(schema, table),
+                        &name,
+                        column,
+                    ));
                 }
                 if let Some(rel) =
                     f.fk.as_ref()
@@ -1500,8 +1554,10 @@ fn render_changes_split_inner(
                 } else {
                     ""
                 };
-                out.immediate
-                    .push(format!("DROP TABLE {}{cascade}", dialect.quote_ident(name)));
+                out.immediate.push(format!(
+                    "DROP TABLE {}{cascade}",
+                    fk_target(dialect, schema, name)
+                ));
             }
             SchemaChange::AlterColumnType { table, column, .. }
             | SchemaChange::AlterColumnNullable { table, column, .. }
@@ -1641,15 +1697,17 @@ fn render_changes_split_inner(
                 // SET NOT NULL fails on them (#1881).
                 let field = current.table(table).and_then(|t| t.field(column));
                 if let Some(f) = field.filter(|f| !*nullable && f.default.is_some()) {
-                    out.immediate.push(fill_nulls_sql(table, f, dialect));
+                    out.immediate
+                        .push(fill_nulls_sql(table, f, dialect, schema));
                 }
                 let action = if *nullable {
                     "DROP NOT NULL"
                 } else {
                     "SET NOT NULL"
                 };
+                let target = fk_target(dialect, schema, table);
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" {action}"#,
+                    r#"ALTER TABLE {target} ALTER COLUMN "{column}" {action}"#,
                 ));
             }
             SchemaChange::AlterColumnDefault {
@@ -1657,19 +1715,22 @@ fn render_changes_split_inner(
                 column,
                 from: _,
                 to,
-            } => match to {
-                Some(expr) => {
-                    // Empty-string default → the literal `''`, not nothing
-                    // (#1161), so we don't emit `SET DEFAULT ` (invalid).
-                    let rendered: &str = if expr.is_empty() { "''" } else { expr };
-                    out.immediate.push(format!(
-                        r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
-                    ));
+            } => {
+                let target = fk_target(dialect, schema, table);
+                match to {
+                    Some(expr) => {
+                        // Empty-string default → the literal `''`, not nothing
+                        // (#1161), so we don't emit `SET DEFAULT ` (invalid).
+                        let rendered: &str = if expr.is_empty() { "''" } else { expr };
+                        out.immediate.push(format!(
+                            r#"ALTER TABLE {target} ALTER COLUMN "{column}" SET DEFAULT {rendered}"#,
+                        ));
+                    }
+                    None => out.immediate.push(format!(
+                        r#"ALTER TABLE {target} ALTER COLUMN "{column}" DROP DEFAULT"#,
+                    )),
                 }
-                None => out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" DROP DEFAULT"#,
-                )),
-            },
+            }
             SchemaChange::AlterColumnMaxLength {
                 table,
                 column,
@@ -1687,21 +1748,25 @@ fn render_changes_split_inner(
                 };
                 // No `USING`: a `::VARCHAR(n)` cast truncates, and without
                 // it PG refuses to shrink over longer values (#1878).
+                let target = fk_target(dialect, schema, table);
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" ALTER COLUMN "{column}" TYPE {pg_to}"#,
+                    r#"ALTER TABLE {target} ALTER COLUMN "{column}" TYPE {pg_to}"#,
                 ));
             }
             // An empty comment drops it on PG.
             SchemaChange::AlterColumnComment {
                 table, column, to, ..
             } => out.immediate.extend(dialect.column_comment_statement(
-                table,
+                target(schema, table),
                 column,
                 to.as_deref().unwrap_or(""),
             )),
-            SchemaChange::AlterTableComment { table, to, .. } => out
-                .immediate
-                .extend(dialect.alter_table_comment_statement(table, to.as_deref().unwrap_or(""))),
+            SchemaChange::AlterTableComment { table, to, .. } => {
+                out.immediate.extend(dialect.alter_table_comment_statement(
+                    target(schema, table),
+                    to.as_deref().unwrap_or(""),
+                ))
+            }
             SchemaChange::AlterColumnUnique {
                 table,
                 column,
@@ -1710,12 +1775,15 @@ fn render_changes_split_inner(
                 // The runner drops the name it finds in the catalog (#2133).
                 if *unique {
                     let name = unique_names.get(table, column)?;
-                    out.immediate
-                        .push(dialect.add_unique_constraint_sql(table, &name, column));
+                    out.immediate.push(dialect.add_unique_constraint_sql(
+                        target(schema, table),
+                        &name,
+                        column,
+                    ));
                 } else if !by_catalog {
                     out.immediate.push(format!(
                         "ALTER TABLE {} DROP CONSTRAINT {}",
-                        dialect.quote_ident(table),
+                        fk_target(dialect, schema, table),
                         dialect.quote_ident(&unique_names.get(table, column)?),
                     ));
                 }
@@ -1737,7 +1805,7 @@ fn render_changes_split_inner(
             SchemaChange::RenameTable { old_name, new_name } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} RENAME TO {}",
-                    dialect.quote_ident(old_name),
+                    fk_target(dialect, schema, old_name),
                     dialect.quote_ident(new_name),
                 ));
             }
@@ -1748,7 +1816,7 @@ fn render_changes_split_inner(
             } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} RENAME COLUMN {} TO {}",
-                    dialect.quote_ident(table),
+                    fk_target(dialect, schema, table),
                     dialect.quote_ident(old_column),
                     dialect.quote_ident(new_column),
                 ));
@@ -1861,7 +1929,7 @@ fn render_changes_split_inner(
                 }
                 out.immediate.push(format!(
                     "DROP INDEX IF EXISTS {}",
-                    dialect.quote_ident(name)
+                    in_table_schema(schema, table, name).quoted(dialect)
                 ));
             }
             // SQLite takes CHECKs and composite FKs only in `CREATE TABLE` (#2127).
@@ -1887,7 +1955,7 @@ fn render_changes_split_inner(
             SchemaChange::AddCheckConstraint { name, table, expr } => {
                 out.immediate.push(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({expr})",
-                    dialect.quote_ident(table),
+                    fk_target(dialect, schema, table),
                     dialect.quote_ident(name),
                 ));
             }
@@ -1899,7 +1967,8 @@ fn render_changes_split_inner(
                 // This arm used to test `dialect.name() == "sqlite"`
                 // itself and then hand-write the statement — which is
                 // how it came to send PostgreSQL syntax to MySQL (#559).
-                let Some(sql) = dialect.drop_check_constraint_sql(table, name) else {
+                let Some(sql) = dialect.drop_check_constraint_sql(target(schema, table), name)
+                else {
                     return Err(format!(
                         "DropCheckConstraint for `{table}.{name}` is not yet supported on \
                          dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
@@ -1940,7 +2009,8 @@ fn render_changes_split_inner(
                     .map(|(col, op)| format!(r#""{col}" WITH {op}"#))
                     .collect();
                 let mut stmt = format!(
-                    r#"ALTER TABLE "{table}" ADD CONSTRAINT "{name}" EXCLUDE USING {using} ({})"#,
+                    r#"ALTER TABLE {} ADD CONSTRAINT "{name}" EXCLUDE USING {using} ({})"#,
+                    fk_target(dialect, schema, table),
                     elem_sql.join(", "),
                 );
                 if let Some(pred) = where_clause {
@@ -1959,7 +2029,8 @@ fn render_changes_split_inner(
                     continue;
                 }
                 out.immediate.push(format!(
-                    r#"ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{name}""#,
+                    r#"ALTER TABLE {} DROP CONSTRAINT IF EXISTS "{name}""#,
+                    fk_target(dialect, schema, table),
                 ));
             }
             SchemaChange::CreateM2MTable {
@@ -2022,7 +2093,7 @@ fn render_changes_split_inner(
                 };
                 out.immediate.push(format!(
                     "DROP TABLE IF EXISTS {}{cascade}",
-                    dialect.quote_ident(through)
+                    fk_target(dialect, schema, through)
                 ));
             }
             SchemaChange::AddCompositeFk {
@@ -2038,7 +2109,7 @@ fn render_changes_split_inner(
             SchemaChange::DropCompositeFk { table, name } => {
                 // The usual name; the runner finds the live one by its columns.
                 let fk = super::ddl::fk_constraint_name(table, name);
-                let Some(sql) = dialect.drop_foreign_key_sql(table, &fk) else {
+                let Some(sql) = dialect.drop_foreign_key_sql(target(schema, table), &fk) else {
                     return Err(format!(
                         "DropCompositeFk for `{table}.{name}` is not yet supported on \
                          dialect `{}`. That dialect has no `ALTER TABLE DROP CONSTRAINT` \
@@ -2121,10 +2192,7 @@ pub(super) fn create_table_sql_as(
         // Mirrors the live-registry behavior in
         // `migrate::ddl::write_column_def`.
         if let Some(expr) = &f.generated_as {
-            let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
-            if !f.nullable {
-                sql.push_str(" NOT NULL");
-            }
+            dialect.write_generated_column(&mut sql, expr, f.nullable);
             // db_comment still applies on MySQL even for generated columns.
             if let Some(comment) = &f.db_comment {
                 if let Some(inline) = dialect.write_inline_column_comment(comment) {
@@ -2267,7 +2335,7 @@ fn composite_fk_sql(
     };
     format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-        dialect.quote_ident(table),
+        fk_target(dialect, schema, table),
         dialect.quote_ident(&super::ddl::fk_constraint_name(table, name)),
         cols(from),
         fk_target(dialect, schema, to),
@@ -2366,7 +2434,7 @@ fn m2m_fk_sql(
 ) -> String {
     format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE CASCADE",
-        dialect.quote_ident(through),
+        fk_target(dialect, schema, through),
         dialect.quote_ident(&super::ddl::fk_constraint_name(through, column)),
         dialect.quote_ident(column),
         fk_target(dialect, schema, to),
@@ -2574,7 +2642,7 @@ fn field_fk_sql(
 ) -> Result<String, String> {
     let mut s = format!(
         "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({})",
-        dialect.quote_ident(table),
+        fk_target(dialect, schema, table),
         dialect.quote_ident(&super::ddl::fk_constraint_name(table, column)),
         dialect.quote_ident(column),
         fk_target(dialect, schema, &rel.to),
@@ -2617,20 +2685,22 @@ fn render_column_default(
     dialect.translate_default_expr(expr_to_render, ty, max_length)
 }
 
-fn add_column_sql(table: &str, f: &FieldSnapshot, dialect: &dyn crate::sql::Dialect) -> String {
+fn add_column_sql(
+    table: &str,
+    f: &FieldSnapshot,
+    dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
+) -> String {
     let col_q = dialect.quote_ident(&f.column);
     let mut sql = format!(
         "ALTER TABLE {} ADD COLUMN {} {}",
-        dialect.quote_ident(table),
+        fk_target(dialect, schema, table),
         col_q,
         sql_type_with_dialect(f, dialect)
     );
     // As CREATE TABLE: no DEFAULT, CHECK or FK beside the expression.
     if let Some(expr) = &f.generated_as {
-        let _ = write!(sql, " GENERATED ALWAYS AS ({expr}) STORED");
-        if !f.nullable {
-            sql.push_str(" NOT NULL");
-        }
+        dialect.write_generated_column(&mut sql, expr, f.nullable);
         sql.push_str(&inline_comment(f, dialect));
         return sql;
     }
@@ -2690,8 +2760,8 @@ fn add_column_backfilled(
     );
     let null = if f.nullable { "" } else { " NOT NULL" };
     vec![
-        add_column_sql(table, &bare, dialect),
-        fill_nulls_sql(table, f, dialect),
+        add_column_sql(table, &bare, dialect, None),
+        fill_nulls_sql(table, f, dialect, None),
         format!(
             "ALTER TABLE {} MODIFY COLUMN {} {} DEFAULT {value}{null}{}",
             dialect.quote_ident(table),
@@ -2721,7 +2791,7 @@ fn add_column_then_not_null(
         ..f.clone()
     };
     vec![
-        add_column_sql(table, &bare, dialect),
+        add_column_sql(table, &bare, dialect, None),
         format!(
             "ALTER TABLE {} MODIFY COLUMN {} {} NOT NULL{}",
             dialect.quote_ident(table),
@@ -2737,6 +2807,7 @@ pub(crate) fn fill_nulls_sql(
     table: &str,
     f: &FieldSnapshot,
     dialect: &dyn crate::sql::Dialect,
+    schema: Option<&str>,
 ) -> String {
     let value = render_column_default(
         f.default.as_deref().unwrap_or_default(),
@@ -2746,7 +2817,7 @@ pub(crate) fn fill_nulls_sql(
     );
     format!(
         "UPDATE {t} SET {c} = {value} WHERE {c} IS NULL",
-        t = dialect.quote_ident(table),
+        t = fk_target(dialect, schema, table),
         c = dialect.quote_ident(&f.column),
     )
 }
@@ -2944,6 +3015,46 @@ mod sql_type_tests {
             suspected_renames(&prev, &current, &changes),
             vec![("posts".into(), "subtitle".into(), "tagline".into())]
         );
+    }
+
+    /// A dropped table beside a new one with its columns is a suspected
+    /// rename; other columns are not. Every dropped table warns.
+    #[test]
+    fn a_dropped_table_beside_one_with_its_columns_is_a_suspected_rename() {
+        let table = |name: &str, columns: &[&str]| TableSnapshot {
+            name: name.into(),
+            model: "M".into(),
+            fields: columns
+                .iter()
+                .map(|c| FieldSnapshot {
+                    name: (*c).into(),
+                    column: (*c).into(),
+                    ..fs("i64", false)
+                })
+                .collect(),
+            composite_fks: Vec::new(),
+            db_table_comment: None,
+        };
+        let prev = SchemaSnapshot {
+            tables: vec![
+                table("posts", &["id", "n"]),
+                table("tags", &["id", "label"]),
+            ],
+            ..Default::default()
+        };
+        let current = SchemaSnapshot {
+            tables: vec![table("articles", &["n", "id"]), table("labels", &["id"])],
+            ..Default::default()
+        };
+        let changes = detect_changes(&prev, &current);
+        assert_eq!(
+            suspected_table_renames(&prev, &current, &changes),
+            vec![("posts".into(), "articles".into())]
+        );
+        let warned = irreversible_drops(&prev, &changes);
+        assert_eq!(warned.len(), 2, "{warned:?}");
+        assert!(warned.iter().any(|w| w.contains("`posts`")), "{warned:?}");
+        assert!(warned.iter().any(|w| w.contains("`tags`")), "{warned:?}");
     }
 
     /// Swapping one M2M for another with the same ends drops the rows: say so.
@@ -4109,6 +4220,81 @@ mod sql_type_tests {
         assert!(stmt.contains(r#"ADD CONSTRAINT "child_fk_child_parent_composite_fkey""#));
         assert!(stmt.contains(r#"FOREIGN KEY ("pa_id", "pb_id")"#));
         assert!(stmt.contains(r#"REFERENCES "parent" ("a_id", "b_id")"#));
+    }
+
+    /// Drops, alters and renames name the table in the schema, so they never
+    /// reach a same-named table later on `search_path`.
+    #[test]
+    fn in_schema_render_qualifies_every_drop_and_alter() {
+        let snap = alter_snap();
+        let (t, c) = (|| "t".to_owned(), || "c".to_owned());
+        let changes = [
+            SchemaChange::DropColumn {
+                table: t(),
+                column: c(),
+            },
+            SchemaChange::DropTable(t()),
+            SchemaChange::DropM2MTable { through: t() },
+            SchemaChange::AddColumn {
+                table: t(),
+                column: c(),
+            },
+            SchemaChange::AlterColumnNullable {
+                table: t(),
+                column: c(),
+                nullable: false,
+            },
+            SchemaChange::AlterColumnDefault {
+                table: t(),
+                column: c(),
+                from: None,
+                to: Some("8".into()),
+            },
+            SchemaChange::AlterColumnDefault {
+                table: t(),
+                column: c(),
+                from: None,
+                to: None,
+            },
+            SchemaChange::AlterColumnMaxLength {
+                table: t(),
+                column: c(),
+                from: None,
+                to: Some(9),
+            },
+            SchemaChange::RenameTable {
+                old_name: t(),
+                new_name: "u".into(),
+            },
+            SchemaChange::RenameColumn {
+                table: t(),
+                old_column: c(),
+                new_column: "d".into(),
+            },
+            SchemaChange::DropIndex {
+                name: "t_c_idx".into(),
+                table: t(),
+            },
+            SchemaChange::AddCheckConstraint {
+                name: "t_c_check".into(),
+                table: t(),
+                expr: "c > 0".into(),
+            },
+        ];
+        for change in changes {
+            let out = render_changes_split_in_schema(
+                std::slice::from_ref(&change),
+                &snap,
+                &crate::sql::Postgres,
+                Some("t1"),
+            )
+            .unwrap();
+            let stmts: Vec<&String> = out.immediate.iter().chain(&out.deferred_fks).collect();
+            assert!(!stmts.is_empty(), "{change:?}");
+            for stmt in stmts {
+                assert!(stmt.contains(r#""t1"."t"#), "{change:?}: {stmt}");
+            }
+        }
     }
 
     /// #1645 — the m2m and composite arms qualify their targets too.

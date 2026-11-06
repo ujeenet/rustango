@@ -4,10 +4,10 @@
 //! `database_tenant_sqlite_live.rs` (DatabaseTenant<Sqlite> path).
 //!
 //! Confirms `fn handler(t: Tenant<sqlx::Sqlite>)` resolves the org,
-//! checks out a sqlite connection, and answers a real query — no
-//! Postgres in the binary.
+//! checks out a sqlite connection, and answers a real query, with or
+//! without Postgres in the binary.
 
-#![cfg(all(feature = "sqlite", feature = "tenancy", not(feature = "postgres")))]
+#![cfg(all(feature = "sqlite", feature = "tenancy"))]
 
 use std::sync::Arc;
 
@@ -42,17 +42,15 @@ impl OrgResolver for FixedResolver {
 }
 
 fn fake_sqlite_org() -> Org {
-    Org {
-        id: rustango::sql::Auto::default(),
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(
-            "sqlite:file:tenant_extractor_sqlite_test?mode=memory&cache=shared".into(),
-        ),
-        ..rustango::testkit::org()
-    }
+    let mut o = rustango::testkit::org();
+    o.id = rustango::sql::Auto::default();
+    o.slug = "acme".into();
+    o.display_name = "Acme".into();
+    o.storage_mode = "database".into();
+    o.backend_kind = "sqlite".into();
+    o.database_url =
+        Some("sqlite:file:tenant_extractor_sqlite_test?mode=memory&cache=shared".into());
+    o
 }
 
 async fn handler(mut t: Tenant<sqlx::Sqlite>) -> impl IntoResponse {

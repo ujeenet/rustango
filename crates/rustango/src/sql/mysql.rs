@@ -16,7 +16,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_count, write_delete, write_insert, write_select,
     write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError};
+use super::{CompiledStatement, Dialect, SqlError, TableTarget};
 
 /// The insert id a skipped `DoNothing` insert reports. No auto-increment
 /// column reaches it: a signed BIGINT stops at 2^63 - 1.
@@ -41,6 +41,35 @@ impl ByServer<'_> {
         sql.push_str(self.mariadb);
         sql.push_str(" */");
     }
+}
+
+/// `sql` as one server reads it: its own `/*!80000 …*/` or `/*M! …*/`
+/// text unwrapped, the other's dropped. `None` for any other comment,
+/// which this cannot read.
+pub(crate) fn resolve_by_server(sql: &str, mariadb: bool) -> Option<String> {
+    let mut out = String::with_capacity(sql.len());
+    let mut rest = sql;
+    while let Some(at) = rest.find("/*") {
+        out.push_str(&rest[..at]);
+        let block = &rest[at..];
+        let (mine, body) = if let Some(b) = block.strip_prefix("/*!80000") {
+            (!mariadb, b)
+        } else if let Some(b) = block.strip_prefix("/*M!") {
+            if b.starts_with(|c: char| c.is_ascii_digit()) {
+                return None;
+            }
+            (mariadb, b)
+        } else {
+            return None;
+        };
+        let end = body.find("*/")?;
+        if mine {
+            out.push_str(&body[..end]);
+        }
+        rest = &body[end + 2..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// The `MySQL` 8.4+ dialect. Stateless; construct with `MySql`.
@@ -323,16 +352,35 @@ impl Dialect for MySql {
         Some(format!(" COMMENT {}", self.quote_literal(comment)))
     }
 
+    /// MariaDB refuses `NULL` / `NOT NULL` on a generated column.
+    fn write_generated_column(&self, sql: &mut String, expr: &str, nullable: bool) {
+        sql.push_str(" GENERATED ALWAYS AS (");
+        sql.push_str(expr);
+        sql.push_str(") STORED");
+        if !nullable {
+            sql.push(' ');
+            ByServer {
+                mysql: "NOT NULL",
+                mariadb: "",
+            }
+            .write(sql);
+        }
+    }
+
     /// MySQL writes a table comment as a `COMMENT='…'` trailer after
     /// the closing paren.
     fn write_inline_table_comment(&self, comment: &str) -> Option<String> {
         Some(format!(" COMMENT={}", self.quote_literal(comment)))
     }
 
-    fn alter_table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+    fn alter_table_comment_statement(
+        &self,
+        table: TableTarget<'_>,
+        comment: &str,
+    ) -> Option<String> {
         Some(format!(
             "ALTER TABLE {}{}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.write_inline_table_comment(comment)?
         ))
     }
@@ -589,8 +637,8 @@ impl Dialect for MySql {
     /// **So this is not idempotent.** Dropping a constraint that is
     /// already gone is an error, where the Postgres form does
     /// nothing.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
-        let mut sql = format!("ALTER TABLE {} DROP ", self.quote_ident(table));
+    fn drop_check_constraint_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
+        let mut sql = format!("ALTER TABLE {} DROP ", table.quoted(self));
         ByServer {
             mysql: "CHECK",
             mariadb: "CONSTRAINT",
@@ -603,10 +651,10 @@ impl Dialect for MySql {
 
     /// MySQL spells this `DROP FOREIGN KEY` and takes no
     /// `IF EXISTS`, so it is not idempotent either.
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn drop_foreign_key_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP FOREIGN KEY {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }
@@ -618,14 +666,20 @@ impl Dialect for MySql {
         None
     }
 
+    /// MariaDB ignores the `SET_VAR` hint and takes `SET STATEMENT` instead.
     fn clear_tables_sql(&self, tables: &[&str]) -> Vec<String> {
         tables
             .iter()
             .map(|t| {
-                format!(
-                    "DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM {}",
-                    self.quote_ident(t)
-                )
+                let mut sql = String::new();
+                ByServer {
+                    mysql: "",
+                    mariadb: "SET STATEMENT foreign_key_checks=0 FOR",
+                }
+                .write(&mut sql);
+                sql.push_str(" DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM ");
+                sql.push_str(&self.quote_ident(t));
+                sql
             })
             .collect()
     }
@@ -761,10 +815,37 @@ impl Dialect for MySql {
         )
     }
 
-    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(s.COLUMN_NAME AS CHAR) FROM information_schema.STATISTICS s \
+             WHERE s.TABLE_SCHEMA = DATABASE() AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0 \
+             AND s.INDEX_NAME <> 'PRIMARY' AND s.COLUMN_NAME IS NOT NULL \
+             AND s.SUB_PART IS NULL AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.STATISTICS o \
+             WHERE o.TABLE_SCHEMA = s.TABLE_SCHEMA AND o.TABLE_NAME = s.TABLE_NAME \
+             AND o.INDEX_NAME = s.INDEX_NAME AND o.SEQ_IN_INDEX > 1)",
+        )
+    }
+
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT CAST(k.COLUMN_NAME AS CHAR), CAST(r.DELETE_RULE AS CHAR) \
+             FROM information_schema.KEY_COLUMN_USAGE k \
+             JOIN information_schema.REFERENTIAL_CONSTRAINTS r \
+             ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA \
+             AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME \
+             WHERE k.TABLE_SCHEMA = DATABASE() AND k.TABLE_NAME = ? \
+             AND k.REFERENCED_TABLE_NAME IS NOT NULL AND NOT EXISTS (\
+             SELECT 1 FROM information_schema.KEY_COLUMN_USAGE o \
+             WHERE o.TABLE_SCHEMA = k.TABLE_SCHEMA AND o.TABLE_NAME = k.TABLE_NAME \
+             AND o.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND o.ORDINAL_POSITION > 1)",
+        )
+    }
+
+    fn drop_unique_index_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP INDEX {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }
@@ -1388,6 +1469,48 @@ mod tests {
             "LONGTEXT CHARACTER SET utf8mb4 /*!80000 COLLATE utf8mb4_0900_as_ci */ \
              /*M!101000 COLLATE utf8mb4_uca1400_nopad_as_ci */"
         );
+    }
+
+    /// MariaDB refuses `NOT NULL` on a generated column; MySQL keeps it.
+    #[test]
+    fn generated_not_null_is_mysql_only() {
+        let mut sql = String::new();
+        MySql.write_generated_column(&mut sql, "a + 1", false);
+        assert_eq!(
+            sql,
+            " GENERATED ALWAYS AS (a + 1) STORED /*!80000 NOT NULL */ /*M!  */"
+        );
+        let mut sql = String::new();
+        MySql.write_generated_column(&mut sql, "a + 1", true);
+        assert_eq!(sql, " GENERATED ALWAYS AS (a + 1) STORED");
+    }
+
+    /// MariaDB has no `SET_VAR` hint, so it takes `SET STATEMENT … FOR`.
+    #[test]
+    fn clear_tables_drops_fk_checks_on_both_servers() {
+        assert_eq!(
+            MySql.clear_tables_sql(&["t"]),
+            [
+                "/*!80000  */ /*M! SET STATEMENT foreign_key_checks=0 FOR */ \
+              DELETE /*+ SET_VAR(foreign_key_checks=0) */ FROM `t`"
+            ]
+        );
+    }
+
+    /// Each server's view of per-server comments; other comments are unread.
+    #[test]
+    fn resolve_by_server_reads_each_servers_text() {
+        let json = "f(/*!80000 CAST(*/?/*!80000 AS JSON)*/)";
+        assert_eq!(
+            resolve_by_server(json, false).as_deref(),
+            Some("f( CAST(? AS JSON))")
+        );
+        assert_eq!(resolve_by_server(json, true).as_deref(), Some("f(?)"));
+        let both = "a /*!80000 b */ /*M! c */ d";
+        assert_eq!(resolve_by_server(both, true).as_deref(), Some("a   c  d"));
+        assert_eq!(resolve_by_server("x /*+ hint */", false), None);
+        assert_eq!(resolve_by_server("x /*M!101000 y */", true), None);
+        assert_eq!(resolve_by_server("plain", true).as_deref(), Some("plain"));
     }
 
     #[test]

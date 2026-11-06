@@ -851,13 +851,12 @@ async fn an_unreadable_tenant_url_blocks_the_drop(pool: &Pool) {
     } else {
         "mysql"
     };
-    let mut other = Org {
-        slug: slug("bad"),
-        storage_mode: "database".into(),
-        backend_kind: env.backend().as_str().into(),
-        database_url: Some(format!("{scheme}://u:p@db.internal:notaport/x")),
-        ..rustango::testkit::org()
-    };
+    let mut other = rustango::testkit::org_with(|o| {
+        o.slug = slug("bad");
+        o.storage_mode = "database".into();
+        o.backend_kind = env.backend().as_str().into();
+        o.database_url = Some(format!("{scheme}://u:p@db.internal:notaport/x"));
+    });
     other
         .insert(&env.registry)
         .await

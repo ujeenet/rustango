@@ -51,7 +51,6 @@ use serde_json::Value;
 
 use crate::cache::{BoxedCache, CacheError};
 
-const KEY_PREFIX: &str = "session";
 const DEFAULT_TTL_SECS: u64 = 60 * 60 * 24 * 14; // 2 weeks
 const ID_BYTES: usize = 24; // 192 bits, base64 → 32 chars
 
@@ -138,6 +137,7 @@ pub enum SessionError {
 #[derive(Clone)]
 pub struct SessionStore {
     cache: BoxedCache,
+    space: crate::cache::keyspace::KeySpace,
     ttl: Arc<Duration>,
 }
 
@@ -146,17 +146,23 @@ impl SessionStore {
     pub fn new(cache: BoxedCache) -> Self {
         Self {
             cache,
+            space: crate::cache::keyspace::KeySpace::Global,
             ttl: Arc::new(Duration::from_secs(DEFAULT_TTL_SECS)),
         }
+    }
+
+    #[cfg(feature = "tenancy")]
+    pub(crate) fn in_space(mut self, space: crate::cache::keyspace::KeySpace) -> Self {
+        self.space = space;
+        self
     }
 
     /// Keep sessions to one tenant: `tenant:#org:<id>:<slug>:session:<id>`.
     /// Unscoped, a session id saved under one tenant loads under every other.
     #[cfg(feature = "tenancy")]
     #[must_use]
-    pub fn for_tenant(mut self, tenant: &crate::tenancy::TenantSlug) -> Self {
-        self.cache = crate::cache::ScopedCache::for_tenant(self.cache, tenant).boxed();
-        self
+    pub fn for_tenant(self, tenant: &crate::tenancy::TenantSlug) -> Self {
+        self.in_space(crate::cache::keyspace::KeySpace::Tenant(tenant.clone()))
     }
 
     /// Set the per-session TTL. Default is 2 weeks.
@@ -234,7 +240,7 @@ impl SessionStore {
     }
 
     fn cache_key(&self, id: &str) -> String {
-        format!("{KEY_PREFIX}:{id}")
+        self.space.key(crate::cache::keyspace::Area::Session, id)
     }
 }
 

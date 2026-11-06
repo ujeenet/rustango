@@ -49,7 +49,7 @@ Registry-scoped — a tenant's own history lives in that tenant's admin.</p>
       <td>
         <code>{{ e.entity_table }}</code>
         <a class="btn-link"
-           href="{{ console_prefix }}/audit?entity_table={{ e.entity_table }}&entity_pk={{ e.entity_pk }}"
+           href="{{ console_prefix }}/audit?{{ e.record_query }}"
            title="Show only this record's history">{{ e.entity_pk }}</a>
       </td>
       <td>

@@ -56,15 +56,14 @@ impl OrgResolver for HostResolver {
         if slug.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Org {
-            id: rustango::sql::Auto::default(),
-            slug: slug.to_owned(),
-            display_name: slug.to_owned(),
-            storage_mode: "database".into(),
-            backend_kind: "sqlite".into(),
-            database_url: None,
-            ..rustango::testkit::org()
-        }))
+        Ok(Some(rustango::testkit::org_with(|o| {
+            o.id = rustango::sql::Auto::default();
+            o.slug = slug.to_owned();
+            o.display_name = slug.to_owned();
+            o.storage_mode = "database".into();
+            o.backend_kind = "sqlite".into();
+            o.database_url = None;
+        })))
     }
 }
 

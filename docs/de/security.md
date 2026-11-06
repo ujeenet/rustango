@@ -48,6 +48,9 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Tenants mit Pfad-Präfix teilen einen Origin mit der Betreiberkonsole: siehe
+[Hostnamen](operator-console.md#hostnamen). In Produktion besser ein Host pro Tenant.
+
 ---
 
 ## Security-Header setzen
@@ -184,13 +187,13 @@ Bei Erschöpfung: `429 Too Many Requests` mit `Retry-After`-Header. Jede erfolgr
 
 ### Eingebaute Login-Limits
 
-Jeder eingebaute Passwort-Login (Admin, Operator-Konsole, Tenant-Admin, JWT `/auth/login`) läuft vor dem Benutzer-Lookup durch `rustango::login_throttle`. Er prüft der Reihe nach eine Sperre pro Benutzername (5 Fehlversuche, 15 Min.), die unbekannte Benutzernamen genauso zählt wie echte, ein Limit pro IP (20 fehlgeschlagene Logins/Min.; IPv6 zählt pro /64) und ein globales Limit pro Login (je 600 fehlgeschlagene Logins/Min. für den Admin, die Operator-Konsole und jeden Tenant). Ein erfolgreicher Login zählt nicht gegen die Limits. Ein Benutzername, der sich in den letzten 30 Tagen von einer IP angemeldet hat, überspringt von dieser IP ein ausgeschöpftes globales Limit, sodass ein Spray von vielen IPs nicht jeden Benutzer aussperren kann; sein IP-Limit und seine Benutzernamen-Sperre gelten weiter. Sobald die Benutzerzeile gefunden ist, folgt die Sperre auch dem gespeicherten Benutzernamen, sodass Schreibweisen, die die Datenbank als gleich behandelt (MySQL setzt `alicé` mit `alice` gleich), eine Sperre teilen. HTTP Basic und API-Keys haben ihren eigenen Bereich und zählen nur Fehlversuche. Ein abgelehnter Login bekommt `429` mit `Retry-After`, und dieselbe Antwort, ob das Konto existiert oder nicht.
+Jeder eingebaute Passwort-Login (Admin, Operator-Konsole, Tenant-Admin, JWT `/auth/login`) läuft vor dem Benutzer-Lookup durch `rustango::login_throttle`. Er prüft der Reihe nach eine Sperre pro Benutzername (5 Fehlversuche, 15 Min.), die unbekannte Benutzernamen genauso zählt wie echte, ein Limit pro IP (20 fehlgeschlagene Logins/Min.; IPv6 zählt pro /64) und ein globales Limit pro Login (je 600 fehlgeschlagene Logins/Min. für den Admin, die Operator-Konsole und jeden Tenant). Ein erfolgreicher Login zählt nicht gegen die Limits. Ein Benutzername, der sich in den letzten 30 Tagen von einer IP angemeldet hat, überspringt von dieser IP ein ausgeschöpftes globales Limit, sodass ein Spray von vielen IPs nicht jeden Benutzer aussperren kann. Von dieser IP zählt er außerdem auf eine eigene Benutzernamen-Sperre, sodass falsche Passwörter eines anderen Clients den Benutzer nicht aussperren; sein IP-Limit gilt weiter. Sobald die Benutzerzeile gefunden ist, folgt die Sperre auch dem gespeicherten Benutzernamen, sodass Schreibweisen, die die Datenbank als gleich behandelt (MySQL setzt `alicé` mit `alice` gleich), eine Sperre teilen. HTTP Basic und API-Keys haben ihren eigenen Bereich und zählen nur Fehlversuche. Ein abgelehnter Login bekommt `429` mit `Retry-After`, und dieselbe Antwort, ob das Konto existiert oder nicht.
 
 Hinter einem Reverse Proxy mountest du `RealIpLayer` mit deinen Proxys wie oben gezeigt; eine `Cli`-App ruft stattdessen `Cli::with_trusted_proxies(["127.0.0.1/32"])?` auf. Ohne das hat jeder Client die Adresse des Proxys und teilt sich einen IP-Bucket; eine Warnung wird einmal geloggt, wenn Forwarding-Header eintreffen.
 
 Passwort-Hashing führt höchstens einen Job pro CPU aus, geteilt von jedem Login; HTTP Basic, API-Keys und Agent-Secrets dürfen höchstens die Hälfte der Slots belegen. Ein Login, der länger als `hash_wait_ms` (5 s) auf einen Slot wartet, bekommt `503` mit `Retry-After`, für bekannte und unbekannte Benutzer gleichermaßen.
 
-Feinjustiert wird unter `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Ein im Code gesetzter Wert (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) gewinnt über diese Schlüssel. Die IP- und globalen Buckets gelten pro Prozess, außer du installierst `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, das sie in festen Fenstern in einem geteilten Cache zählt (bei einem Cache-Fehler fallen beide auf den Prozess zurück; ein Burst über eine Fenstergrenze kann das Doppelte eines Limits erreichen; Apps, die sich einen Cache teilen, teilen die Zähler, außer jede nutzt ihren eigenen `ScopedCache`); der erste Login loggt eine Warnung, solange sie pro Prozess gelten. Die Benutzernamen-Sperre nutzt `account_lockout::shared()`, das du über `account_lockout::configure_shared` mit einem geteilten Cache unterlegen kannst. Fehlversuche zählen in einem festen Fenster (standardmäßig 1 Stunde), das mit dem ersten Fehlversuch beginnt, ein Angreifer bekommt also `lockout_threshold - 1` Versuche pro Fenster ohne Sperre; die IP- und globalen Limits begrenzen den Rest.
+Feinjustiert wird unter `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Ein im Code gesetzter Wert (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) gewinnt über diese Schlüssel. Die IP- und globalen Buckets gelten pro Prozess, außer du installierst `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, das sie in festen Fenstern in einem geteilten Cache zählt (bei einem Cache-Fehler fallen beide auf den Prozess zurück; ein Burst über eine Fenstergrenze kann das Doppelte eines Limits erreichen; Apps, die sich einen Cache teilen, teilen die Zähler, außer jede nutzt ihren eigenen `ScopedCache`); der erste Login loggt eine Warnung, solange sie pro Prozess gelten. Die Benutzernamen-Sperre nutzt `account_lockout::shared()`, das du über `account_lockout::configure_shared` mit einem geteilten Cache unterlegen kannst. Fehlversuche zählen in einem festen Fenster (standardmäßig 1 Stunde), das mit dem ersten Fehlversuch beginnt, ein Angreifer bekommt also `lockout_threshold - 1` Versuche pro Fenster ohne Sperre; die IP- und globalen Limits begrenzen den Rest. Die `[auth]`-Schlüssel wendet `manage::Cli` beim Laden der Einstellungen an; eine App, die `server::Builder` ohne ihn baut, ruft stattdessen die Funktionen auf.
 
 **Anmeldefeld.** Tenant-Benutzer melden sich mit ihrem Benutzernamen an, außer bei `[auth] login_field = "email"` (oder `Cli::login_field(LoginField::Email)` / `server::Builder::login_field`, die über den Schlüssel gewinnen). E-Mail braucht das Feature `sso`, das die Spalte `email` anlegt. Die E-Mail passt auf jedem Backend ohne Rücksicht auf Groß- und Kleinschreibung, im Tenant-Anmeldeformular (Beschriftung „Email“), bei HTTP Basic und `/auth/login` (`{"username": …}` oder `{"email": …}`), und die Login-Sperre oben folgt der gespeicherten E-Mail. Jeder Benutzer braucht eine eigene E-Mail: ein Benutzer ohne kann sich nicht anmelden, und eine E-Mail, die sich zwei Benutzer (ohne Groß-/Kleinschreibung) teilen, meldet keinen an. Der Server loggt beim Start jeden Tenant mit solchen Benutzern; er warnt, statt den Start zu verweigern, damit die Daten eines Tenants nicht alle Tenants lahmlegen. `create-user --email` setzt sie.
 
@@ -340,7 +343,7 @@ sqlx::query(&sql).bind(1).fetch_all(&pool).await?;
 
 Authentifizierung ist die Art, wie du bestätigst, wer eine Anfrage stellt. **Rustango** bringt drei fertige Backends mit (Basic Auth, API-Keys und JWTs) und lässt dich eigene schreiben, indem du ein einziges Trait implementierst. Du hängst sie an Routen an, und Anfragen ohne ein erkanntes Credential erhalten ein `401`.
 
-> **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es meldet das Konto an, das mit dem IdP-Subject verknüpft ist (Verknüpfen per E-Mail ist pro Provider optional und gilt nie für Superuser oder Staff; kein Auto-Provisioning) und verwendet die bestehende Session wieder.
+> **Admin-SSO.** Um Betreibern zu erlauben, sich mit einem externen IdP (Google, Microsoft/Azure AD, GitHub oder einem beliebigen OpenID-Connect-Provider) statt mit einem Passwort im Admin anzumelden, aktiviere das `admin-sso`-Feature — siehe den [SSO-Leitfaden](sso.md). Provider werden **im Admin-UI als Zeilen verwaltet** (mehrere pro Surface; pro Tenant oder ein gemeinsames Set über Tenants hinweg), wobei das Client-Secret **verschlüsselt gespeichert** wird. Es meldet das Konto an, das mit dem IdP-Subject verknüpft ist (Verknüpfen per E-Mail ist pro Provider optional und gilt nie für Superuser oder Staff; der Bare-Admin registriert nie, ein Tenant-Admin-Provider nur laut seinem `signup_mode`) und verwendet die bestehende Session wieder.
 
 ### Drei fertige Backends
 
@@ -513,7 +516,7 @@ if !verify_key_async(secret, &row.hash).await? {
 }
 ```
 
-Diese Keys funktionieren direkt mit dem Multi-Tenancy-`ApiKeyBackend` — beide verwenden dasselbe `{prefix}.{secret}`-Format mit argon2id-gehashten Secrets, sodass ein hier ausgestellter Key dort ohne zusätzliche Arbeit authentifiziert.
+Diese Keys funktionieren direkt mit dem Multi-Tenancy-`ApiKeyBackend` — beide verwenden dasselbe `{prefix}.{secret}`-Format. Das Backend speichert einen HMAC-SHA256 des Secrets (`hmac-sha256v2$…`); es akzeptiert auch einen argon2id-Hash aus `api_keys` und tauscht ihn bei der ersten Nutzung gegen den HMAC, sodass ein hier ausgestellter Key dort ohne zusätzliche Arbeit authentifiziert.
 
 ---
 
@@ -789,7 +792,7 @@ Zusätzliche `--deploy`-Prüfungen (Produktionshärtung):
 
 Gibt bei jedem Befund auf **Error-Level** einen Exit-Code ungleich null zurück (gut für CI-Gates). Warnungen lösen kein Fehlschlagen aus, erscheinen aber in der Ausgabe.
 
-Für Prüfungen jenseits des Mitgelieferten erweitere mit benutzerdefiniertem Code in deinem `manage`-Binary, bevor du an `manage::run` weiterleitest.
+Für Prüfungen jenseits des Mitgelieferten registriere ein eigenes Verb mit `register_command!` und führe es neben `check --deploy` aus.
 
 ---
 

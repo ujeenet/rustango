@@ -193,6 +193,7 @@ fn app(pool: &Pool) -> axum::Router {
             ListView::for_model(Event::SCHEMA)
                 .template("list.html")
                 .filter_fields(&["author_id", "done", "token", "day", "note", "at"])
+                .search_fields(&["note"])
                 .router("/events", t.clone(), pool.clone()),
         )
         .merge(
@@ -416,6 +417,14 @@ async fn list_filters_bind_typed_values(pool: &Pool) {
         let (status, body) = send(pool, Method::GET, uri, "").await;
         assert_eq!(status, StatusCode::OK, "{uri}: {body}");
         assert_eq!(body, want, "{uri}");
+    }
+}
+
+/// Postgres refuses a NUL byte in text, so every backend answers 400, not 500.
+async fn a_nul_byte_in_a_list_filter_or_search_is_400(pool: &Pool) {
+    for uri in ["/events?note=a%00b", "/events?search=a%00b"] {
+        let (status, body) = send(pool, Method::GET, uri, "").await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
     }
 }
 
@@ -1005,6 +1014,7 @@ tri_dialect_test! {
         a_composite_unique_clash_is_a_form_wide_error,
         create_and_update_bind_typed_values,
         list_filters_bind_typed_values,
+        a_nul_byte_in_a_list_filter_or_search_is_400,
         fk_display_binds_the_target_pk_type,
         garbage_url_pk_is_a_404,
         huge_page_is_an_empty_page,

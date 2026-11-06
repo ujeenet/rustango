@@ -47,8 +47,8 @@ peut aussi créer un compte pour un email inconnu ; c'est désactivé par défau
 > (`SsoProvider`, `build_provider`, `verified_email`, `ResolvedSso`,
 > `SsoError`), la table de liens `rustango::sso::link` (`SsoLink`,
 > `ProviderKey`, `sign_in`), le câblage bare-admin `rustango::admin::sso`, le SSO
-> par tenant / console `rustango::tenancy::sso`
-> (`SharedSsoProvider`), et le SSO membre
+> par tenant / console (fournisseurs partagés : la table du registre
+> `rustango_shared_sso_providers`, éditée dans la console opérateur), et le SSO membre
 > `rustango::tenancy::member_auth`.
 
 ## URL de callback
@@ -181,6 +181,25 @@ Les réglages de tout le tenant, une ligne.
 | `default_provider` | Slug du provider que la page de connexion ouvre directement, sauf à `?local=1` ou après une erreur. |
 | `signups_per_hour` | Nombre maximal d'inscriptions SSO par heure. Vide : 100 ; `0` : pas de limite. |
 
+### `SsoLandingRule`
+
+Où mène une connexion sans `?next=`. Les règles passent dans l'ordre de
+`position` et la première qui correspond gagne. Le contrôle de connexion garde
+`next` pour chaque page qu'il renvoie, donc les règles s'appliquent quand la
+connexion n'a pas de `next`, par exemple une connexion commencée sur la page de
+connexion elle-même. Elles valent pour les connexions
+SSO et par mot de passe sur l'admin du tenant et l'admin nu ; la connexion des
+membres les ignore. Une règle dont le chemin échoue au contrôle de `next` (par
+exemple la page de connexion) est sautée. Sans la table, il n'y a pas de règle.
+
+| Champ | Quoi saisir |
+|---|---|
+| `position` | Les règles sont essayées du plus petit nombre au plus grand et la première qui correspond gagne. À nombre égal, l'id décide. |
+| `match_kind` | `role` : l'utilisateur a le rôle de `match_value` (jamais sur l'admin nu, qui n'a pas de rôles). `claim` : la connexion SSO porte le claim `match_name` avec `match_value`, lu comme un claim du mappage de rôles. `any` : toute connexion ; à mettre en dernier comme valeur par défaut. |
+| `match_name` | Le nom du claim, pour les règles `claim` seulement. Vide pour les autres. |
+| `match_value` | Le nom du rôle (`role`) ou la valeur du claim (`claim`), comparé exactement. Vide pour `any`. |
+| `landing_url` | Un chemin de ce site qui commence par `/`, tel que sur l'hôte propre du tenant, p. ex. `/admin/reports`. Le préfixe de chemin est ajouté pour vous. Pas un contrôle d'accès : la page doit vérifier les droits elle-même. |
+
 ### `SsoSharedOverride`
 
 La restriction d'un provider partagé par un tenant. Les champs vides
@@ -232,9 +251,9 @@ peut se compiler sans tirer `crate::admin` :
 ```toml
 [dependencies]
 # Connexion admin avec SSO :
-rustango = { version = "0.63", features = ["admin-sso"] }
+rustango = { version = "0.64", features = ["admin-sso"] }
 # SSO membre (utilisateur final) sans l'auto-admin :
-rustango = { version = "0.63", features = ["tenancy", "sso"] }
+rustango = { version = "0.64", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` et les anciens chemins du cœur `admin::sso::*` sont
@@ -276,10 +295,11 @@ nu reste derrière `admin-sso`. Activer ou désactiver la fonctionnalité
 Sur l'admin du tenant, `GET <login>/sso/<slug>?next=/chemin` mène à `/chemin`
 après la connexion. Le chemin voyage dans le cookie de flux signé et passe le
 même contrôle que la connexion par mot de passe : même origine uniquement, et
-dans le préfixe de chemin du tenant. Tout le reste mène à `admin_url`. La page
-de connexion transmet son propre `?next` aux boutons SSO. L'admin nu fait de
-même sans la règle du préfixe, garde le chemin pendant l'étape TOTP et revient
-à son préfixe.
+dans le préfixe de chemin du tenant. Sans `next` valable, les
+[règles d'arrivée](#ssolandingrule) du tenant décident, et sans correspondance la
+connexion mène à `admin_url`. La page de connexion transmet son propre `?next`
+aux boutons SSO et n'en invente jamais. L'admin nu fait de même sans la règle du préfixe, garde le chemin
+pendant l'étape TOTP et revient à son préfixe.
 
 La table de liens est un modèle migré normal : dans le stockage du tenant
 pour les connexions tenant, et dans la base de l'admin pour le bare admin.
@@ -417,10 +437,13 @@ Différences avec le flux admin :
   correspond à un compte existant suit la règle `allow_email_link`
   ci-dessus. Mettez-le à `false` pour refuser les emails inconnus. Une
   connexion native (une app qui a vérifié elle-même son ID token) appelle
-  directement `find_or_provision_member`, avec `ProviderKey::app(issuer)`
-  comme clé. Son résultat `MemberSignIn` vaut `Member(id)`, `NotLinked` (un
-  compte a cet email mais ne peut pas être lié par lui), `NoAccount`,
-  `Inactive`, `Unverified` ou `Refused`.
+  `sso::policy::admit` avec `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` et
+  `tenancy::member_auth::TenantAccounts(pool)` ; l'`EffectivePolicy` passée
+  est la politique de connexion, mettez-y donc ses règles. Le
+  `find_or_provision_member` déprécié applique encore les règles d'un
+  fournisseur de tenant, mais une clé d'app n'en a pas : avec
+  `auto_provision`, il inscrit tout email vérifié.
 - **Son propre cookie de session.** Le cookie membre
   (`rustango_member_session`) est **séparé par domaine** des cookies de
   session tenant / admin : le message signé porte une étiquette
@@ -608,8 +631,9 @@ préréglage ; il nécessite une vérification id_token/JWKS.)
   lié par email, un détenteur de rôle seulement avec `allow_email_link_staff`. Un lien créé par email continue de
   fonctionner après la promotion de l'utilisateur ; supprimez-le si ce
   n'est pas voulu.
-- **Pas de provisionnement automatique** pour les admins — un email inconnu
-  ne peut pas entrer.
+- **Pas de provisionnement automatique sur le bare admin** — un email inconnu
+  ne peut pas entrer. Un fournisseur de l'admin de tenant n'inscrit que si son
+  `signup_mode` le permet.
 - **Secrets chiffrés au repos** (`RUSTANGO_SECRET_KEY`), déchiffrés
   uniquement en mémoire au moment de la connexion ; les formulaires
   d'édition masquent le secret stocké.

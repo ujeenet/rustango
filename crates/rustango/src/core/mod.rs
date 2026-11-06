@@ -30,6 +30,7 @@ pub use column::{Column, TypedAssignment, TypedExpr, TypedFieldList, TypedFilter
 pub use error::{BoundedDmlReason, QueryError};
 pub use expr::{BinOp, CaseBranch, Expr, JsonPathStep, ScalarFn, VectorMetric, F};
 pub use field_type::{ArrayElem, FieldType, RangeElem};
+pub(crate) use query::check_value_type;
 pub use query::{
     escape_like, AggregateExpr, AggregateQuery, Assignment, BulkInsertQuery, BulkUpdateQuery,
     ColumnFilter, CompoundBranch, ConflictClause, CountQuery, CtFilter, DeleteQuery, DerivedSource,

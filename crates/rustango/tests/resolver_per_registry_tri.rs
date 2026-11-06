@@ -37,14 +37,13 @@ fn unique(label: &str) -> String {
 /// Insert an active org whose base host is `<slug>.app.test`.
 async fn add_org(pool: &Pool, slug: &str) -> String {
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug: slug.into(),
-        display_name: slug.into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.into();
+        o.display_name = slug.into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(pool).await.expect("insert org");
     host
 }
@@ -162,16 +161,15 @@ async fn header_and_port_lookups_are_cached(pool: &Pool) {
     let port = free_port(pool).await;
     assert_eq!(answers(pool, &slug, port).await, [None, None, None, None]);
 
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        backend_kind: "sqlite".into(),
-        database_url: Some("sqlite::memory:".into()),
-        host_pattern: Some(format!("{slug}.app.test")),
-        path_prefix: Some(format!("/{slug}")),
-        port: Some(port),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = slug.clone();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some("sqlite::memory:".into());
+        o.host_pattern = Some(format!("{slug}.app.test"));
+        o.path_prefix = Some(format!("/{slug}"));
+        o.port = Some(port);
+    });
     org.insert(pool).await.expect("insert org");
     assert_eq!(
         answers(pool, &slug, port).await,

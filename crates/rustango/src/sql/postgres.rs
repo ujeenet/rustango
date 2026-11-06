@@ -18,7 +18,7 @@ use super::writers::{
     write_aggregate, write_bulk_insert, write_bulk_update_pg, write_count, write_delete,
     write_insert, write_select, write_update, Sql,
 };
-use super::{CompiledStatement, Dialect, SqlError};
+use super::{CompiledStatement, Dialect, SqlError, TableTarget};
 
 /// A string literal whose meaning does not depend on
 /// `standard_conforming_strings`: `E'…'` once a `\` is present.
@@ -64,10 +64,10 @@ impl Dialect for Postgres {
     // SQLite has no `ALTER TABLE … DROP CONSTRAINT` at all and returns
     // `None`. These were the trait's default body until it became clear
     // that defaulting to the PG form is what shipped #559 to MySQL.
-    fn drop_check_constraint_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn drop_check_constraint_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }
@@ -331,20 +331,20 @@ impl Dialect for Postgres {
         }
     }
 
-    fn drop_foreign_key_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn drop_foreign_key_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }
 
-    /// `to_regclass` resolves the table through `search_path`, as the DDL does.
+    /// Binds [`Dialect::catalog_table`]: a schema-qualified name resolves only there.
     fn foreign_key_names_sql(&self) -> Option<&'static str> {
         Some(
             "SELECT c.conname::text FROM pg_constraint c \
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
-             WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass($1) \
              AND a.attname = $2 AND cardinality(c.conkey) = 1",
         )
     }
@@ -355,7 +355,7 @@ impl Dialect for Postgres {
              CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) \
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum \
              JOIN pg_class r ON r.oid = c.confrelid \
-             WHERE c.contype = 'f' AND c.conrelid = to_regclass(quote_ident($1)) \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass($1) \
              ORDER BY c.conname, k.ord",
         )
     }
@@ -369,32 +369,62 @@ impl Dialect for Postgres {
         Some(
             "SELECT c.conname::text FROM pg_constraint c \
              JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = ANY (c.conkey) \
-             WHERE c.contype = 'u' AND c.conrelid = to_regclass(quote_ident($1)) \
+             WHERE c.contype = 'u' AND c.conrelid = to_regclass($1) \
              AND a.attname = $2 AND cardinality(c.conkey) = 1",
         )
     }
 
-    fn drop_unique_index_sql(&self, table: &str, name: &str) -> Option<String> {
+    fn unique_columns_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT a.attname::text FROM pg_index i \
+             JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = i.indkey[0] \
+             WHERE i.indrelid = to_regclass($1) AND i.indisunique \
+             AND NOT i.indisprimary AND i.indnkeyatts = 1 \
+             AND i.indpred IS NULL AND i.indexprs IS NULL",
+        )
+    }
+
+    fn fk_delete_actions_sql(&self) -> Option<&'static str> {
+        Some(
+            "SELECT a.attname::text, CASE c.confdeltype WHEN 'c' THEN 'CASCADE' \
+             WHEN 'n' THEN 'SET NULL' WHEN 'd' THEN 'SET DEFAULT' WHEN 'r' THEN 'RESTRICT' \
+             ELSE 'NO ACTION' END FROM pg_constraint c \
+             JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] \
+             WHERE c.contype = 'f' AND c.conrelid = to_regclass($1) \
+             AND cardinality(c.conkey) = 1",
+        )
+    }
+
+    fn catalog_table(&self, table: TableTarget<'_>) -> String {
+        table.quoted(self)
+    }
+
+    fn drop_unique_index_sql(&self, table: TableTarget<'_>, name: &str) -> Option<String> {
         Some(format!(
             "ALTER TABLE {} DROP CONSTRAINT {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(name)
         ))
     }
 
-    fn column_comment_statement(&self, table: &str, column: &str, comment: &str) -> Option<String> {
+    fn column_comment_statement(
+        &self,
+        table: TableTarget<'_>,
+        column: &str,
+        comment: &str,
+    ) -> Option<String> {
         Some(format!(
             "COMMENT ON COLUMN {}.{} IS {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_ident(column),
             self.quote_literal(comment),
         ))
     }
 
-    fn table_comment_statement(&self, table: &str, comment: &str) -> Option<String> {
+    fn table_comment_statement(&self, table: TableTarget<'_>, comment: &str) -> Option<String> {
         Some(format!(
             "COMMENT ON TABLE {} IS {}",
-            self.quote_ident(table),
+            table.quoted(self),
             self.quote_literal(comment),
         ))
     }

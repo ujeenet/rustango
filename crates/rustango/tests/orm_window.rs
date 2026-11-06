@@ -30,7 +30,8 @@ mod scenarios {
 
     use rustango::core::joins::aliased;
     use rustango::core::window::{
-        dense_rank, first_value, lag, ntile, rank, sum_over, FrameBoundary, FrameKind, WindowFrame,
+        dense_rank, first_value, lag, lead, ntile, rank, sum_over, FrameBoundary, FrameKind,
+        WindowFrame,
     };
     use rustango::core::{Join, JoinKind, Model as _, Op, SqlValue, WhereExpr};
     use rustango::sql::{raw_execute_pool, Auto, ExecError, FetcherPool as _, Pool, SqlError};
@@ -140,6 +141,15 @@ mod scenarios {
 
     /// `lag("points", default 0)` partitioned per player —
     /// previous-row navigation with an out-of-range default.
+    async fn is_mariadb(pool: &Pool) -> bool {
+        pool.dialect().name() == "mysql" && {
+            let v: Vec<(String,)> = rustango::sql::raw_query_pool("SELECT VERSION()", vec![], pool)
+                .await
+                .expect("version");
+            v[0].0.contains("MariaDB")
+        }
+    }
+
     pub async fn check_lag_with_default(pool: &Pool) {
         let rows = Score::objects()
             .aggregate()
@@ -168,6 +178,36 @@ mod scenarios {
         let prev: Vec<i64> = rows.iter().map(|r| as_i64(r, "prev")).collect();
         // alice d1 (no prev → 0), alice d2 (prev 30), bob d1 → 0, bob d2 → 20.
         assert_eq!(prev, vec![0, 30, 0, 20]);
+    }
+
+    /// LEAD's default fills only the rows with no next row.
+    pub async fn check_lead_with_default(pool: &Pool) {
+        let rows = Score::objects()
+            .aggregate()
+            .group_by("player")
+            .group_by("points")
+            .group_by("day")
+            .annotate(
+                "next",
+                lead("points", 1, Some(SqlValue::I64(-1)))
+                    .partition_by("player")
+                    .order_by(&[("day", false)])
+                    .into(),
+            )
+            .filter(
+                "player",
+                Op::In,
+                SqlValue::List(vec![
+                    SqlValue::String("alice".into()),
+                    SqlValue::String("carol".into()),
+                ]),
+            )
+            .order_by(&[("player", false), ("day", false)])
+            .fetch(pool)
+            .await
+            .expect("lead window");
+        let next: Vec<i64> = rows.iter().map(|r| as_i64(r, "next")).collect();
+        assert_eq!(next, vec![35, -1, -1]);
     }
 
     /// FIRST_VALUE with an explicit ROWS frame — every row sees its
@@ -337,6 +377,13 @@ mod scenarios {
                      if LATERAL now works there, update the dialect support matrix"
                 ),
             }
+        } else if is_mariadb(pool).await {
+            let err = res.map(|rows: Vec<Tenant>| rows.len()).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("LATERAL_JOIN_IS_NOT_SUPPORTED_ON_MARIADB"),
+                "{err}"
+            );
         } else {
             let rows: Vec<Tenant> = res.expect("LATERAL top-2 per tenant");
             // 2 tenants × top-2 lateral rows each → 4 joined rows.
@@ -408,6 +455,7 @@ mod pg_live {
     pg_case!(check_rank_partitioned);
     pg_case!(check_dense_rank_ties);
     pg_case!(check_lag_with_default);
+    pg_case!(check_lead_with_default);
     pg_case!(check_first_value_rows_frame);
     pg_case!(check_ntile_buckets);
     pg_case!(check_sum_over_running_total);
@@ -460,6 +508,7 @@ mod sqlite_live {
     sqlite_case!(check_rank_partitioned);
     sqlite_case!(check_dense_rank_ties);
     sqlite_case!(check_lag_with_default);
+    sqlite_case!(check_lead_with_default);
     sqlite_case!(check_first_value_rows_frame);
     sqlite_case!(check_ntile_buckets);
     sqlite_case!(check_sum_over_running_total);
@@ -530,6 +579,7 @@ mod mysql_live {
     mysql_case!(check_rank_partitioned);
     mysql_case!(check_dense_rank_ties);
     mysql_case!(check_lag_with_default);
+    mysql_case!(check_lead_with_default);
     mysql_case!(check_first_value_rows_frame);
     mysql_case!(check_ntile_buckets);
     mysql_case!(check_sum_over_running_total);

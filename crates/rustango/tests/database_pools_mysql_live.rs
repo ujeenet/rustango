@@ -22,13 +22,12 @@ use rustango::sql::sqlx::{self, Row};
 use rustango::tenancy::{BackendKind, DatabasePools, Org};
 
 fn fake_mysql_org(slug: &str, url: &str) -> Org {
-    Org {
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        backend_kind: "mysql".into(),
-        database_url: Some(url.to_owned()),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.backend_kind = "mysql".into();
+        o.database_url = Some(url.to_owned());
+    })
 }
 
 #[tokio::test]

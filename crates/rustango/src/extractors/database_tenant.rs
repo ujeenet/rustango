@@ -104,6 +104,7 @@ impl<DB: Database> DatabaseTenant<DB> {
 /// shape as [`super::TenantRejection`], but is a separate type so
 /// the compiler catches a mix-up.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum DatabaseTenantRejection {
     /// No `DatabaseTenantContext` extension, so the server was not
     /// built for this backend.
@@ -112,6 +113,17 @@ pub enum DatabaseTenantRejection {
     NotFound,
     /// The resolver or the pool acquire failed in the driver.
     Internal(String),
+    /// Too many tenant pools are being built: a 503 with `Retry-After`.
+    Busy,
+}
+
+impl From<crate::tenancy::TenancyError> for DatabaseTenantRejection {
+    fn from(e: crate::tenancy::TenancyError) -> Self {
+        match e {
+            crate::tenancy::TenancyError::PoolBusy => Self::Busy,
+            e => Self::Internal(e.to_string()),
+        }
+    }
 }
 
 impl IntoResponse for DatabaseTenantRejection {
@@ -130,6 +142,7 @@ impl IntoResponse for DatabaseTenantRejection {
                 "extractors::database_tenant",
                 msg,
             ),
+            Self::Busy => return crate::tenancy::TenancyError::pool_busy_response(),
         }
         .into_response()
     }
@@ -153,13 +166,13 @@ where
         let org = mounted
             .resolve(parts)
             .await
-            .map_err(|e| DatabaseTenantRejection::Internal(e.to_string()))?
+            .map_err(DatabaseTenantRejection::from)?
             .ok_or(DatabaseTenantRejection::NotFound)?;
         let conn = ctx
             .pools
             .acquire(&org)
             .await
-            .map_err(|e| DatabaseTenantRejection::Internal(e.to_string()))?;
+            .map_err(DatabaseTenantRejection::from)?;
         Ok(DatabaseTenant { org, conn })
     }
 }

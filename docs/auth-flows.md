@@ -34,8 +34,9 @@ trust its parameters without storing anything.
 
 ## Signed URLs: the substrate
 
-`sign` appends an HMAC-SHA256 signature (and optional expiry) over the URL's path
-+ query. `verify` recomputes it: tamper with any parameter, use the wrong secret,
+`sign` appends an HMAC-SHA256 signature (and optional expiry) over the whole URL
+before the fragment: scheme, host, path and query. Verify the full public URL,
+not `req.uri()` (which has no scheme or host). `verify` recomputes it: tamper with any parameter, use the wrong secret,
 or let it expire, and it fails.
 
 ```rust

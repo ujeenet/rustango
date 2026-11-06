@@ -93,6 +93,7 @@ fn the_walk_covers_every_framework_model() {
         "rustango_operator_totp",
         "rustango_sso_providers",
         "rustango_shared_sso_providers",
+        "rustango_sso_landing_rules",
     ] {
         assert!(seen.contains(&table), "{table} is not registered: {seen:?}");
     }

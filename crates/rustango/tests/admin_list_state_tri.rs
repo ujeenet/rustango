@@ -780,6 +780,19 @@ async fn autocomplete_without_search_columns_is_empty(pool: &Pool) {
     );
 }
 
+/// Postgres refuses a NUL byte in text, so every backend answers 400, not 500.
+async fn a_nul_byte_in_search_or_a_filter_is_400(pool: &Pool) {
+    for uri in [
+        "/adminls_tag?q=a%00b",
+        "/adminls_tag?tag=a%00b",
+        "/adminls_item?kind=a%00b",
+        "/adminls_tag/__autocomplete?q=a%00b",
+    ] {
+        let (status, body) = send(pool, Request::builder().uri(uri), Body::empty()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+    }
+}
+
 tri_dialect_test! {
     setup: setup,
     scenarios: [
@@ -803,5 +816,6 @@ tri_dialect_test! {
         noncanonical_active_value_is_listed_once,
         bulk_action_selection_is_capped,
         reserved_name_facets_filter,
+        a_nul_byte_in_search_or_a_filter_is_400,
     ],
 }

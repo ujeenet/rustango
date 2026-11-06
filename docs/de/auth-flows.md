@@ -34,8 +34,9 @@ der Server ihren Parametern vertrauen kann, ohne irgendetwas zu speichern.
 
 ## Signierte URLs: das Fundament
 
-`sign` hängt eine HMAC-SHA256-Signatur (und einen optionalen Ablauf) über den Pfad + die Query der
-URL an. `verify` berechnet sie neu: Manipulieren Sie irgendeinen Parameter, verwenden Sie das
+`sign` hängt eine HMAC-SHA256-Signatur (und einen optionalen Ablauf) über die ganze
+URL vor dem Fragment an: Schema, Host, Pfad und Query. Prüfe die volle öffentliche
+URL, nicht `req.uri()` (ohne Schema und Host). `verify` berechnet sie neu: Manipulieren Sie irgendeinen Parameter, verwenden Sie das
 falsche Secret oder lassen Sie sie ablaufen, und sie schlägt fehl.
 
 ```rust

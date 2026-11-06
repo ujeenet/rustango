@@ -65,26 +65,12 @@ async fn boot() -> Booted {
 
     // A stored logo, so the edit page renders a `/__brand__/` preview.
     let slug = unique("acme");
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.clone(),
-        display_name: slug.clone(),
-        storage_mode: "schema".into(),
-        backend_kind: "sqlite".into(),
-        database_url: None,
-        schema_name: Some(slug.clone()),
-        host_pattern: Some(format!("{slug}.example.com")),
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: Some("logo.png".into()),
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = Org::new(slug.clone());
+    org.storage_mode = "schema".into();
+    org.backend_kind = "sqlite".into();
+    org.schema_name = Some(slug.clone());
+    org.host_pattern = Some(format!("{slug}.example.com"));
+    org.logo_path = Some("logo.png".into());
     org.insert(&registry).await.expect("seed org");
 
     let provisioner = Provisioner::new(pools.clone(), url.clone(), migrations.path()).erased();

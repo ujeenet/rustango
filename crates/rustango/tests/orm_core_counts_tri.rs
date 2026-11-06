@@ -11,8 +11,8 @@ use rustango::core::{
     SqlValue, WhereExpr,
 };
 use rustango::sql::{
-    atomic, bulk_insert_pool, CounterPool as _, ExecError, ExistsPool as _, FetcherPool as _,
-    ForeignKey, Pool,
+    atomic, bulk_insert_pool, raw_query_pool, CounterPool as _, ExecError, ExistsPool as _,
+    FetcherPool as _, ForeignKey, Pool,
 };
 use rustango::{tri_dialect_test, Model};
 
@@ -604,7 +604,8 @@ async fn grouped_aggregate_join_column_order_by(pool: &Pool) {
 }
 
 /// #1975: ordering by a joined column that is not grouped needs it in
-/// the derived rows. Only SQLite accepts that ungrouped ORDER BY.
+/// the derived rows. PG and MySQL's `ONLY_FULL_GROUP_BY` (off by default
+/// on MariaDB) refuse that ungrouped ORDER BY.
 async fn grouped_aggregate_order_by_ungrouped_join_column(pool: &Pool) {
     let rows = Book::objects()
         .join(author_join())
@@ -614,7 +615,18 @@ async fn grouped_aggregate_order_by_ungrouped_join_column(pool: &Pool) {
         .order_by(&[("a.id", true)])
         .fetch(pool)
         .await;
-    if pool.backend_name() != "sqlite" {
+    let strict = match pool.backend_name() {
+        "sqlite" => false,
+        "mysql" => {
+            let mode: Vec<(String,)> =
+                raw_query_pool("SELECT CAST(@@SESSION.sql_mode AS CHAR)", vec![], pool)
+                    .await
+                    .expect("sql_mode");
+            mode[0].0.contains("ONLY_FULL_GROUP_BY")
+        }
+        _ => true,
+    };
+    if strict {
         // Rejected for the grouping, not for a column the rows lack.
         let err = rows.unwrap_err().to_string();
         assert!(err.contains("GROUP BY"), "{err}");

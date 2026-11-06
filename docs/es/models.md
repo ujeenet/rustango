@@ -382,7 +382,7 @@ Esto confunde a la gente, así que vale la pena decirlo con claridad:
 | Método | Comportamiento |
 |---|---|
 | `save(&mut self, &pool)` | **INSERT** si la PK `Auto` está `Unset`, de lo contrario **UPDATE** |
-| `insert(&self, &pool)` | siempre **INSERT** |
+| `insert(&mut self, &pool)` (`&self` sin campo `Auto`) | siempre **INSERT** |
 
 Para la PK `Auto<i64>` por defecto, `save` hace lo correcto automáticamente. Para una
 **PK asignada por la aplicación** (un `String`/`Uuid` que estableces tú mismo), no hay un

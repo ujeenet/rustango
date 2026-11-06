@@ -65,7 +65,7 @@ MCP es el feature opcional `mcp` (desactivado por defecto). Actívalo:
 
 ```toml
 # Cargo.toml
-rustango = { version = "0.63", features = ["mcp"] }
+rustango = { version = "0.64", features = ["mcp"] }
 ```
 
 Arrastra `tenancy` (agentes/skills), `sse` (el flujo de notificaciones),
@@ -161,7 +161,7 @@ El router autenticado monta: `POST {prefix}` (JSON-RPC), `GET {prefix}`
 (notificaciones SSE), `POST {prefix}/token` (credencial → JWT),
 `POST {prefix}/oauth/token` (OAuth 2.1), y los dos documentos de descubrimiento
 `.well-known/*`. Firma los tokens de agente con `RUSTANGO_SESSION_SECRET`. Si
-falta o tiene menos de 32 bytes, fuera de prod usa la clave de sesión de tenant
+falta, o no es base64 que decodifique a al menos 32 bytes, fuera de prod usa la clave de sesión de tenant
 guardada en `./var/`; en prod avisa y usa una clave aleatoria por proceso: los
 tokens no sobreviven a un reinicio.
 Cada proceso mantiene como mucho 8 streams SSE abiertos por agente y 256 por
@@ -185,7 +185,7 @@ sin token recibe `401`.
 // ← 200
 { "jsonrpc": "2.0", "id": 1, "result": {
     "protocolVersion": "2025-06-18",
-    "serverInfo": { "name": "rustango", "version": "0.63.0" },
+    "serverInfo": { "name": "rustango", "version": "0.64.0" },
     "capabilities": { "tools": { "listChanged": true }, "prompts": { "listChanged": true },
                       "resources": { "listChanged": true, "subscribe": false },
                       "logging": {}, "completions": {} } } }

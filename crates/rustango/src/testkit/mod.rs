@@ -12,8 +12,7 @@
 //! * ~20 files that hand-write `CREATE TABLE rustango_users/orgs/…`
 //!   (in all three dialect quote styles) then fail at runtime with
 //!   "no such column" once the model's insert/fetch emits the new one.
-//! * ~75 struct-literal sites (`Org { … }` / `User { … }` /
-//!   `AdminUser { … }`) that fail to compile (E0063) because these
+//! * ~75 struct-literal sites (`Org`, `User`, `AdminUser`) that fail to compile (E0063) because these
 //!   models can't derive `Default` (`Auto<i64>` PK + `NOT NULL`
 //!   fields).
 //!
@@ -266,12 +265,11 @@ pub async fn migrate_schema(
     schema: &str,
     registry_url: &str,
 ) -> Result<(), crate::tenancy::TenancyError> {
-    let org = crate::tenancy::Org {
-        slug: schema.to_owned(),
-        storage_mode: crate::tenancy::StorageMode::Schema.as_str().to_owned(),
-        schema_name: Some(schema.to_owned()),
-        ..org()
-    };
+    let org = org_with(|o| {
+        o.slug = schema.to_owned();
+        o.storage_mode = crate::tenancy::StorageMode::Schema.as_str().to_owned();
+        o.schema_name = Some(schema.to_owned());
+    });
     migrate_schema_tenant(pools, &org, registry_url).await
 }
 
@@ -360,34 +358,23 @@ pub fn routed_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     out
 }
 
-/// A fully-populated [`Org`](crate::tenancy::Org) with valid defaults,
-/// for struct-update construction: `Org { slug: "x".into(), ..testkit::org() }`.
-///
-/// Adding a nullable/defaulted column to `Org` updates only this
-/// function — never the call sites.
+/// A valid unsaved [`Org`](crate::tenancy::Org): [`Org::new`](crate::tenancy::Org::new)
+/// for `acme`, shown as `Acme`. Tweak it with [`org_with`].
 #[cfg(feature = "tenancy")]
 #[must_use]
 pub fn org() -> crate::tenancy::Org {
-    crate::tenancy::Org {
-        id: crate::sql::Auto::Unset,
-        slug: "acme".into(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "postgres".into(),
-        database_url: None,
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    }
+    let mut org = crate::tenancy::Org::new("acme");
+    org.display_name = "Acme".into();
+    org
+}
+
+/// [`org`] with `f` applied: `org_with(|o| o.slug = "x".into())`.
+#[cfg(feature = "tenancy")]
+#[must_use]
+pub fn org_with(f: impl FnOnce(&mut crate::tenancy::Org)) -> crate::tenancy::Org {
+    let mut org = org();
+    f(&mut org);
+    org
 }
 
 /// A fully-populated tenant [`User`](crate::tenancy::User) with valid
@@ -582,6 +569,52 @@ pub mod sso_admin {
     pub use crate::sso::policy::admin::{relink, unlink};
 }
 
+#[cfg(all(test, feature = "tenancy"))]
+mod org_tests {
+    use crate::tenancy::Org;
+
+    /// `org` as JSON, without the clock.
+    fn fields(org: &Org) -> serde_json::Value {
+        let mut v = serde_json::to_value(org).unwrap();
+        v.as_object_mut().unwrap().remove("created_at");
+        v
+    }
+
+    /// `Org::new` keeps the defaults `testkit::org()` spelled out before it.
+    #[test]
+    fn org_new_keeps_the_old_testkit_defaults() {
+        let old = Org {
+            id: crate::sql::Auto::Unset,
+            slug: "acme".into(),
+            display_name: "Acme".into(),
+            storage_mode: "database".into(),
+            backend_kind: "postgres".into(),
+            database_url: None,
+            schema_name: None,
+            host_pattern: None,
+            port: None,
+            path_prefix: None,
+            active: true,
+            created_at: chrono::Utc::now(),
+            brand_name: None,
+            brand_tagline: None,
+            logo_path: None,
+            favicon_path: None,
+            primary_color: None,
+            theme_mode: None,
+        };
+        assert_eq!(fields(&super::org()), fields(&old));
+        let mut new = Org::new("acme");
+        assert_eq!(new.display_name, "acme", "named after its slug");
+        new.display_name = "Acme".into();
+        assert_eq!(fields(&new), fields(&old));
+        assert!(new.id.get().is_none(), "unsaved");
+        let tweaked = super::org_with(|o| o.port = Some(8080));
+        assert_eq!(tweaked.port, Some(8080));
+        assert_eq!(tweaked.slug, "acme");
+    }
+}
+
 #[cfg(all(test, feature = "sqlite", feature = "tenancy", feature = "admin"))]
 mod tests {
     use super::*;
@@ -610,10 +643,9 @@ mod tests {
 
         // Factories build fully-populated instances; struct-update only
         // overrides what the test cares about.
-        let mut org = crate::tenancy::Org {
-            slug: "acme".into(),
-            ..org()
-        };
+        let mut org = org_with(|o| {
+            o.slug = "acme".into();
+        });
         org.insert(&pool).await.expect("insert org");
         let mut admin = crate::admin::AdminUser {
             username: "root".into(),

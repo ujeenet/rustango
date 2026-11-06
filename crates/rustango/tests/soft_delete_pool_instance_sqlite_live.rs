@@ -58,7 +58,7 @@ async fn soft_delete_pool_marks_row_trashed_but_keeps_in_table() {
     let pk = seed_one(&pool).await;
 
     // Seed row is alive.
-    let row: Post = Post::find_or_fail(pk, &pool).await.unwrap();
+    let mut row: Post = Post::find_or_fail(pk, &pool).await.unwrap();
     assert!(row.deleted_at.is_none());
 
     // Soft-delete.
@@ -87,11 +87,11 @@ async fn restore_pool_clears_deleted_at_back_to_null() {
     let pool = make_pool().await;
     let pk = seed_one(&pool).await;
 
-    let row = Post::find_or_fail(pk, &pool).await.unwrap();
+    let mut row = Post::find_or_fail(pk, &pool).await.unwrap();
     row.soft_delete(&pool).await.unwrap();
 
     // Re-fetch the trashed version, then restore.
-    let trashed: Post = QuerySet::<Post>::default()
+    let mut trashed: Post = QuerySet::<Post>::default()
         .only_trashed()
         .fetch(&pool)
         .await

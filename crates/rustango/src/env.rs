@@ -573,7 +573,7 @@ pub(crate) fn set_settings_database_url(url: &str) {
 /// A blank value counts as unset, so `DATABASE_URL=` falls through.
 ///
 /// When both env styles are set, `DATABASE_URL` wins and one warning per
-/// process says so. 0.62.0 flips this: the separate vars will win.
+/// process says so.
 ///
 /// # Errors
 /// - [`EnvError::MissingRequired`] when neither style is set, or when
@@ -620,7 +620,7 @@ fn database_style_conflict_with(get: &dyn Fn(&str) -> Option<String>) -> Option<
     }
     Some(format!(
         "both DATABASE_URL and {} are set; using DATABASE_URL ({}). \
-         From 0.62.0 the DB_* vars win; unset one of the two styles",
+         Unset one of the two styles",
         parts.join(", "),
         crate::sql::connect_diagnosis::redact(&url),
     ))
@@ -1333,7 +1333,11 @@ mod tests {
             msg.contains("DB_USER, DB_NAME") && !msg.contains("DB_HOST"),
             "{msg}"
         );
-        assert!(msg.contains("0.62.0"), "{msg}");
+        // It names the winner and makes no promise about a future release.
+        assert!(
+            msg.contains("using DATABASE_URL") && !msg.contains("0.62"),
+            "{msg}"
+        );
         assert!(
             database_style_conflict_with(&vars(&[("DATABASE_URL", "sqlite::memory:")])).is_none()
         );

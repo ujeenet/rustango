@@ -10,8 +10,8 @@ use http::{HeaderName, HeaderValue, Request};
 use rustango::migrate;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
-    ChainResolver, HeaderResolver, ListenerPort, Org, OrgResolver, PathPrefixResolver,
-    PortResolver, StorageMode, SubdomainResolver,
+    ChainResolver, HeaderResolver, ListenerPort, OrgResolver, PathPrefixResolver, PortResolver,
+    StorageMode, SubdomainResolver,
 };
 
 use tokio::sync::Mutex;
@@ -42,68 +42,64 @@ async fn seed_orgs(pool: &sqlx::PgPool) {
     // re-seeds the same schema, so a leftover entry from the previous
     // one would be served instead of the rows just written.
     rustango::testkit::reset_org_cache();
-    let mut acme = Org {
-        id: Auto::default(),
-        slug: "acme".into(),
-        display_name: "ACME".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("acme".into()),
-        host_pattern: Some("acme.app.test".into()),
-        port: None,
-        path_prefix: Some("/acme".into()),
-        ..rustango::testkit::org()
-    };
+    let mut acme = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "acme".into();
+        o.display_name = "ACME".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("acme".into());
+        o.host_pattern = Some("acme.app.test".into());
+        o.port = None;
+        o.path_prefix = Some("/acme".into());
+    });
     acme.insert(&pool.clone().into()).await.unwrap();
 
     // Header-only: no host_pattern, just the slug.
-    let mut globex = Org {
-        id: Auto::default(),
-        slug: "globex".into(),
-        display_name: "Globex".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: Some("env://TENANT_GLOBEX_DB_URL".into()),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut globex = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "globex".into();
+        o.display_name = "Globex".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = Some("env://TENANT_GLOBEX_DB_URL".into());
+        o.schema_name = None;
+        o.host_pattern = None;
+        o.port = None;
+        o.path_prefix = None;
+    });
     globex.insert(&pool.clone().into()).await.unwrap();
 
     // Port-based: dedicated port 9001, no host or path.
-    let mut initech = Org {
-        id: Auto::default(),
-        slug: "initech".into(),
-        display_name: "Initech".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("initech".into()),
-        host_pattern: None,
-        port: Some(9001),
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut initech = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "initech".into();
+        o.display_name = "Initech".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("initech".into());
+        o.host_pattern = None;
+        o.port = Some(9001);
+        o.path_prefix = None;
+    });
     initech.insert(&pool.clone().into()).await.unwrap();
 
     // Inactive — every resolver should skip.
-    let mut frozen = Org {
-        id: Auto::default(),
-        slug: "frozen".into(),
-        display_name: "Frozen".into(),
-        storage_mode: StorageMode::Schema.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: None,
-        schema_name: Some("frozen".into()),
-        host_pattern: Some("frozen.app.test".into()),
-        port: None,
-        path_prefix: None,
-        active: false,
-        ..rustango::testkit::org()
-    };
+    let mut frozen = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = "frozen".into();
+        o.display_name = "Frozen".into();
+        o.storage_mode = StorageMode::Schema.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = None;
+        o.schema_name = Some("frozen".into());
+        o.host_pattern = Some("frozen.app.test".into());
+        o.port = None;
+        o.path_prefix = None;
+        o.active = false;
+    });
     frozen.insert(&pool.clone().into()).await.unwrap();
 }
 

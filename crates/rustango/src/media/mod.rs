@@ -365,7 +365,12 @@ pub struct MediaManager {
     pool: crate::sql::Pool,
     registry: StorageRegistry,
     max_upload_bytes: u64,
+    max_subtree: usize,
 }
+
+/// Default [`MediaManager::with_max_subtree`]: above both bind caps, so a
+/// wide tree still lists, yet a recursive listing's id list stays bounded.
+pub const DEFAULT_MAX_SUBTREE: usize = 100_000;
 
 impl MediaManager {
     /// A manager over `pool`, on any backend.
@@ -375,6 +380,7 @@ impl MediaManager {
             pool: pool.into(),
             registry,
             max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            max_subtree: DEFAULT_MAX_SUBTREE,
         }
     }
 
@@ -390,6 +396,14 @@ impl MediaManager {
     #[must_use]
     pub fn with_max_upload_bytes(mut self, bytes: u64) -> Self {
         self.max_upload_bytes = bytes;
+        self
+    }
+
+    /// Refuse a recursive listing whose subtree has more than `n`
+    /// collections, root included. Default [`DEFAULT_MAX_SUBTREE`].
+    #[must_use]
+    pub fn with_max_subtree(mut self, n: usize) -> Self {
+        self.max_subtree = n;
         self
     }
 
@@ -1340,23 +1354,34 @@ impl MediaManager {
     }
 
     async fn collect_descendant_ids(&self, root: i64) -> Result<Vec<i64>, MediaError> {
-        // Recursive CTE over the parent_id chain. The same syntax
-        // works on PG, MySQL 8+ and SQLite 3.8+.
-        let p = self.pool.dialect().placeholder(1);
-        let sql = format!(
-            "WITH RECURSIVE sub AS ( \
-                 SELECT id FROM rustango_media_collections \
-                  WHERE id = {p} AND deleted_at IS NULL \
-                 UNION \
-                 SELECT c.id FROM rustango_media_collections c \
-                   JOIN sub ON c.parent_id = sub.id \
-                  WHERE c.deleted_at IS NULL \
-             ) SELECT id FROM sub"
-        );
-        let rows: Vec<(i64,)> =
-            crate::sql::raw_query_pool(&sql, vec![crate::core::SqlValue::I64(root)], &self.pool)
+        // One row past the cap says it is over without reading the rest.
+        let limit = self
+            .max_subtree
+            .saturating_add(1)
+            .min(usize::try_from(i64::MAX).unwrap_or(usize::MAX));
+        let run = |hint| {
+            let sql = descendant_walk_sql(self.pool.dialect(), hint, limit);
+            async move {
+                crate::sql::raw_query_pool::<(i64,)>(
+                    &sql,
+                    vec![crate::core::SqlValue::I64(root)],
+                    &self.pool,
+                )
                 .await
-                .map_err(media_err_from_exec)?;
+            }
+        };
+        let rows = match run(true).await {
+            // An unmigrated table lacks the hinted index (MariaDB 1176).
+            Err(e) if is_mysql_missing_key(&e) => run(false).await,
+            other => other,
+        }
+        .map_err(media_err_from_exec)?;
+        if rows.len() > self.max_subtree {
+            return Err(MediaError::Other(format!(
+                "collection {root} has more than {} collections below it",
+                self.max_subtree
+            )));
+        }
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
@@ -1924,6 +1949,58 @@ fn tag_ids_of(tags: &[MediaTag]) -> Vec<i64> {
 fn is_deadlock(e: &sqlx::Error) -> bool {
     matches!(e, sqlx::Error::Database(d)
         if matches!(d.code().as_deref(), Some("40001" | "40P01")))
+}
+
+/// The recursive CTE over the `parent_id` chain; PG, MySQL 8+ and SQLite
+/// 3.8+ share it. MariaDB plans the step for a 2-row `sub` and scans every
+/// collection per row, so with `hint` it reads `sub` first through the
+/// `parent_id` index.
+fn descendant_walk_sql(d: &dyn crate::sql::Dialect, hint: bool, limit: usize) -> String {
+    const STEP_FROM: &str = "FROM rustango_media_collections c JOIN sub";
+    let from = if hint && d.name() == "mysql" {
+        use crate::core::Model as _;
+        let index = MediaCollection::SCHEMA
+            .indexes
+            .iter()
+            .find(|i| i.columns == ["parent_id"])
+            .map(|i| i.name)
+            .expect("parent_id is indexed");
+        let mut from = String::new();
+        crate::sql::ByServer {
+            mysql: STEP_FROM,
+            mariadb: &format!(
+                "FROM sub STRAIGHT_JOIN rustango_media_collections c \
+                 FORCE INDEX FOR JOIN (`{index}`)"
+            ),
+        }
+        .write(&mut from);
+        from
+    } else {
+        STEP_FROM.to_owned()
+    };
+    let p = d.placeholder(1);
+    format!(
+        "WITH RECURSIVE sub AS ( \
+             SELECT id FROM rustango_media_collections \
+              WHERE id = {p} AND deleted_at IS NULL \
+             UNION \
+             SELECT c.id {from} \
+               ON c.parent_id = sub.id \
+              WHERE c.deleted_at IS NULL \
+         ) SELECT id FROM sub LIMIT {limit}"
+    )
+}
+
+/// MySQL 1176: a `FORCE INDEX` names a key the table does not have.
+fn is_mysql_missing_key(e: &crate::sql::ExecError) -> bool {
+    #[cfg(feature = "mysql")]
+    if let crate::sql::ExecError::Driver(sqlx::Error::Database(d)) = e {
+        return d
+            .try_downcast_ref::<sqlx::mysql::MySqlDatabaseError>()
+            .is_some_and(|m| m.number() == 1176);
+    }
+    let _ = e;
+    false
 }
 
 /// MySQL 1869 (a skip-on-conflict insert met a row it inserted itself)

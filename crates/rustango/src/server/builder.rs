@@ -33,9 +33,10 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     registry_url: String,
     pools: Arc<TenantPools<DB>>,
     registry: sqlx::Pool<DB>,
-    show_only: Vec<String>,
+    pub(crate) show_only: Vec<String>,
+    pub(crate) read_only: Vec<String>,
     admin_title: Option<String>,
-    admin_subtitle: Option<String>,
+    pub(crate) admin_subtitle: Option<String>,
     api: Option<ApiRouter>,
     admin_actions: Vec<PendingAction>,
     /// Bootstrap initializer used by [`Builder::migrate`]. Defaults
@@ -110,6 +111,8 @@ pub struct Builder<DB: Database = DefaultTenantDb> {
     /// operator console, which it never covered.
     #[cfg(feature = "_http_layers")]
     body_limit: Option<crate::body_limit::BodyLimitLayer>,
+    #[cfg(feature = "_http_layers")]
+    pub(crate) request_timeout: Option<crate::request_timeout::RequestTimeoutLayer>,
     /// Outermost, so the access log and every throttle see its
     /// `TrustedRealIp` (#1745).
     #[cfg(feature = "_http_layers")]
@@ -177,6 +180,7 @@ impl<DB: Database> Builder<DB> {
             pools,
             registry,
             show_only: Vec::new(),
+            read_only: Vec::new(),
             admin_title: None,
             admin_subtitle: None,
             api: None,
@@ -201,6 +205,8 @@ impl<DB: Database> Builder<DB> {
             ssl_redirect: None,
             #[cfg(feature = "_http_layers")]
             body_limit: None,
+            #[cfg(feature = "_http_layers")]
+            request_timeout: None,
             #[cfg(feature = "_http_layers")]
             real_ip: None,
             header_resolver: None,
@@ -260,6 +266,15 @@ impl<DB: Database> Builder<DB> {
     #[must_use]
     pub fn body_limit(mut self, layer: crate::body_limit::BodyLimitLayer) -> Self {
         self.body_limit = Some(layer);
+        self
+    }
+
+    /// Time out handlers on the tenant admin and operator console. The api
+    /// router keeps its own layer. `Cli` calls this from `[server] request_timeout_secs`.
+    #[cfg(feature = "_http_layers")]
+    #[must_use]
+    pub fn request_timeout(mut self, layer: crate::request_timeout::RequestTimeoutLayer) -> Self {
+        self.request_timeout = Some(layer);
         self
     }
 
@@ -590,6 +605,18 @@ impl<DB: Database> Builder<DB> {
         self
     }
 
+    /// Make these tables read-only in the tenant admin: its write routes
+    /// refuse. Same shape as [`TenantAdminBuilder::read_only`]; calls add up.
+    #[must_use]
+    pub fn admin_read_only<I, S>(mut self, tables: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.read_only.extend(tables.into_iter().map(Into::into));
+        self
+    }
+
     /// Mount user-supplied API routes on the tenant subdomain. The
     /// router must be stateless ([`Router<()>`]); the
     /// [`crate::extractors::Tenant`] extractor reads from extensions,
@@ -634,7 +661,7 @@ impl<DB: Database> Builder<DB> {
     /// [`Self::admin_register_action`] with `ActionPerm::Change` and a `(tx, pks)` handler.
     #[deprecated(
         since = "0.63.0",
-        note = "use `admin_register_action(table, name, ActionPerm::Change, handler)`; removed in 0.64.0"
+        note = "use `admin_register_action(table, name, ActionPerm::Change, handler)`; removed in 0.65.0"
     )]
     #[must_use]
     pub fn admin_register_tx_action<F>(
@@ -663,7 +690,7 @@ impl<DB: Database> Builder<DB> {
     /// [`Self::admin_register_action`] with a `(tx, pks)` handler.
     #[deprecated(
         since = "0.63.0",
-        note = "use `admin_register_action`, whose handler takes an `ActionCtx`; removed in 0.64.0"
+        note = "use `admin_register_action`, whose handler takes an `ActionCtx`; removed in 0.65.0"
     )]
     #[must_use]
     pub fn admin_register_tx_action_with_perm<F>(
@@ -809,10 +836,16 @@ impl<DB: Database> Builder<DB> {
     ///
     /// # Errors
     /// Pre-warm and bootstrap failures surfaced during assembly.
-    pub async fn into_router(self) -> Result<Router, Box<dyn std::error::Error>>
+    pub async fn into_router(mut self) -> Result<Router, Box<dyn std::error::Error>>
     where
         crate::sql::Pool: From<sqlx::Pool<DB>>,
     {
+        self.routes = self.routes.with_env_overrides()?;
+        // A sealed field's first write would panic instead.
+        #[cfg(feature = "casts")]
+        if let Some(problem) = crate::casts::sealed_key_problem() {
+            return Err(problem.into());
+        }
         #[cfg(feature = "postgres")]
         crate::tenancy::refuse_registry_shadow(self.pools.as_ref()).await?;
         let resolver_for_admin = self.resolver();
@@ -875,6 +908,9 @@ impl<DB: Database> Builder<DB> {
         tenant_admin_builder = tenant_admin_builder.brand_storage(brand_storage.clone());
         if !self.show_only.is_empty() {
             tenant_admin_builder = tenant_admin_builder.show_only(self.show_only.clone());
+        }
+        if !self.read_only.is_empty() {
+            tenant_admin_builder = tenant_admin_builder.read_only(self.read_only.clone());
         }
         if let Some(t) = self.admin_title {
             tenant_admin_builder = tenant_admin_builder.title(t);
@@ -942,7 +978,11 @@ impl<DB: Database> Builder<DB> {
         // every URL the admin doesn't claim.
         let admin_routes = build_admin_routes(&tenant_admin, &self.routes);
         #[cfg(feature = "_http_layers")]
-        let admin_routes = with_body_limit(admin_routes, self.body_limit.clone());
+        let admin_routes = limits(
+            admin_routes,
+            self.body_limit.clone(),
+            self.request_timeout.clone(),
+        );
         let tenant_app = match api {
             Some(router) => router.layer(Extension(ctx.clone())).merge(admin_routes),
             None => admin_routes,
@@ -951,8 +991,20 @@ impl<DB: Database> Builder<DB> {
         // under the prefix, the rest to the same tenant app.
         let prefixed = build_admin_routes(&tenant_admin, &self.routes.under_prefix("/{prefix}"));
         #[cfg(feature = "_http_layers")]
-        let prefixed = with_body_limit(prefixed, self.body_limit.clone());
-        let prefix_app = prefixed.fallback_service(tenant_app.clone());
+        let prefixed = limits(
+            prefixed,
+            self.body_limit.clone(),
+            self.request_timeout.clone(),
+        );
+        // The app's own routes see the tenant-relative path (`/about`, not
+        // `/acme/about`); `OriginalUri` and `TenantPathPrefix` keep the prefix.
+        let prefix_app = prefixed.fallback_service(tower::service_fn({
+            let tenant_app = tenant_app.clone();
+            move |req: axum::http::Request<axum::body::Body>| {
+                let mut app = tenant_app.clone();
+                async move { app.as_service().oneshot(strip_tenant_prefix(req)).await }
+            }
+        }));
         let registry_pool: crate::sql::Pool = self.registry.clone().into();
         // Health too: a load balancer probes by IP, which resolves no tenant.
         let unresolved = self.unresolved.map(|r| {
@@ -965,7 +1017,7 @@ impl<DB: Database> Builder<DB> {
                 None => r,
             };
             #[cfg(feature = "_http_layers")]
-            let r = with_body_limit(r, self.body_limit.clone());
+            let r = limits(r, self.body_limit.clone(), self.request_timeout.clone());
             r
         });
 
@@ -1007,6 +1059,7 @@ impl<DB: Database> Builder<DB> {
                 ),
             }
         }
+        warn_if_prefix_tenants_share_the_console(&registry_pool).await;
         // Links are signed with the tenant admin's own secret and path.
         let handover = crate::tenancy::FirstAdminHandover::new(&session_secret_for_tenant)
             .set_password_path(self.routes.change_password_url.clone())
@@ -1042,6 +1095,7 @@ impl<DB: Database> Builder<DB> {
             // console.
             self.routes.impersonation_handoff_url.clone(),
             self.routes.login_url.clone(),
+            self.routes.operator_session_ttl,
         );
         let operator_admin = match health {
             Some(health) => operator_admin.merge(health),
@@ -1049,7 +1103,7 @@ impl<DB: Database> Builder<DB> {
         }
         .layer(Extension(link_apex));
         #[cfg(feature = "_http_layers")]
-        let operator_admin = with_body_limit(operator_admin, self.body_limit);
+        let operator_admin = limits(operator_admin, self.body_limit, self.request_timeout);
         // With an outer access log, it logs the console (#1788).
         let operator_admin = if self.access_log.is_some() {
             operator_admin
@@ -1374,14 +1428,15 @@ pub(crate) async fn resolve(
     use crate::tenancy::OrgResolver as _;
     let (mut parts, body) = req.into_parts();
     let found = resolver.resolve(&parts, registry).await;
+    let mut prefix = None;
     let resolution = match &found {
         Ok(None) => Resolution::None,
         Ok(Some(org)) => {
-            if org
+            prefix = org
                 .path_prefix
-                .as_deref()
-                .is_some_and(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), p))
-            {
+                .clone()
+                .filter(|p| crate::tenancy::routes::path_is_under(parts.uri.path(), p));
+            if prefix.is_some() {
                 Resolution::PrefixTenant
             } else {
                 Resolution::Tenant
@@ -1393,10 +1448,54 @@ pub(crate) async fn resolve(
         }
     };
     // Layers further in read this answer instead of resolving again.
-    parts
-        .extensions
-        .insert(crate::tenancy::RequestTenant::from_resolution(found));
+    crate::tenancy::request_tenant::store_dispatched(
+        &mut parts.extensions,
+        found,
+        prefix.as_deref(),
+    );
     (axum::http::Request::from_parts(parts, body), resolution)
+}
+
+/// `req` with its [`crate::tenancy::TenantPathPrefix`] cut from the path:
+/// `/acme/about?x` → `/about?x`, `/acme` → `/`.
+fn strip_tenant_prefix(
+    mut req: axum::http::Request<axum::body::Body>,
+) -> axum::http::Request<axum::body::Body> {
+    let Some(prefix) = crate::tenancy::TenantPathPrefix::get(req.extensions()) else {
+        return req;
+    };
+    let uri = req.uri();
+    let Some(rest) = uri.path().strip_prefix(prefix.as_str()) else {
+        return req;
+    };
+    let path = if rest.is_empty() { "/" } else { rest };
+    let pq = match uri.query() {
+        Some(q) => format!("{path}?{q}"),
+        None => path.to_owned(),
+    };
+    if let Ok(stripped) = pq.parse::<axum::http::Uri>() {
+        *req.uri_mut() = stripped;
+    }
+    req
+}
+
+/// Path-prefix tenants live on the apex, the console's origin: a script on a
+/// tenant page can call the console with an operator's cookies. Warn once at boot.
+async fn warn_if_prefix_tenants_share_the_console(registry: &crate::sql::Pool) {
+    use crate::core::Column as _;
+    use crate::sql::ExistsPool as _;
+    let prefixed = crate::tenancy::Org::objects()
+        .where_(crate::tenancy::Org::path_prefix.is_not_null())
+        .exists(registry)
+        .await;
+    if prefixed.unwrap_or(false) {
+        tracing::warn!(
+            target: "rustango::server",
+            "path-prefix tenants share the apex origin with the operator console, so a \
+             script on a tenant page can act in the console as a signed-in operator; serve \
+             tenants on their own hosts in production (docs/operator-console.md)"
+        );
+    }
 }
 
 /// Mark a request the console or the unresolved router serves: no tenant.
@@ -1406,10 +1505,20 @@ fn global(mut req: axum::http::Request<axum::body::Body>) -> axum::http::Request
     req
 }
 
+/// `r` with the handler timeout inside the body cap, as the api router has them.
 #[cfg(feature = "_http_layers")]
-fn with_body_limit(r: Router, layer: Option<crate::body_limit::BodyLimitLayer>) -> Router {
+fn limits(
+    r: Router,
+    body: Option<crate::body_limit::BodyLimitLayer>,
+    timeout: Option<crate::request_timeout::RequestTimeoutLayer>,
+) -> Router {
     use crate::body_limit::BodyLimitRouterExt as _;
-    match layer {
+    use crate::request_timeout::RequestTimeoutRouterExt as _;
+    let r = match timeout {
+        Some(t) => r.request_timeout(t),
+        None => r,
+    };
+    match body {
         Some(l) => r.body_limit(l),
         None => r,
     }
@@ -1565,12 +1674,11 @@ pub(crate) mod resolver_tests {
         crate::testkit::create_tables_for::<Org>(&pool)
             .await
             .expect("orgs");
-        let mut org = Org {
-            slug: "acme".into(),
-            display_name: "acme".into(),
-            backend_kind: "sqlite".into(),
-            ..crate::testkit::org()
-        };
+        let mut org = crate::testkit::org_with(|o| {
+            o.slug = "acme".into();
+            o.display_name = "acme".into();
+            o.backend_kind = "sqlite".into();
+        });
         org.insert(&pool).await.expect("insert org");
         (tmp, sq, url)
     }
@@ -1609,11 +1717,10 @@ pub(crate) mod resolver_tests {
             .await
             .expect("orgs");
         if with_org {
-            let mut org = Org {
-                backend_kind: "sqlite".into(),
-                host_pattern: Some("acme.localhost".into()),
-                ..crate::testkit::org()
-            };
+            let mut org = crate::testkit::org_with(|o| {
+                o.backend_kind = "sqlite".into();
+                o.host_pattern = Some("acme.localhost".into());
+            });
             org.insert(&pool).await.expect("insert org");
         }
         (tmp, sq, url)
@@ -2015,6 +2122,30 @@ mod secrets_tests {
         assert_eq!(b.pools().resolve_secret("x").await.unwrap(), "fixed");
     }
 
+    /// The impersonation TTL env var reaches the routes the server builds
+    /// with, and a bad value stops it instead of running on the default.
+    #[tokio::test]
+    async fn impersonation_ttl_env_is_read_and_checked() {
+        // Every test that sets this var holds the lock.
+        static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        const VAR: &str = crate::tenancy::routes::IMPERSONATION_TTL_ENV;
+        let _g = LOCK.lock().await;
+        for bad in ["abc", "0", "-5"] {
+            std::env::set_var(VAR, bad);
+            let err = builder().into_router().await.err().map(|e| e.to_string());
+            assert!(
+                err.as_deref().is_some_and(|e| e.contains(VAR)),
+                "{bad}: {err:?}"
+            );
+        }
+        std::env::set_var(VAR, "900");
+        let routes = crate::tenancy::RouteConfig::default().with_env_overrides();
+        std::env::remove_var(VAR);
+        assert_eq!(routes.unwrap().impersonation_ttl.as_secs(), 900);
+        let routes = crate::tenancy::RouteConfig::default().with_env_overrides();
+        assert_eq!(routes.unwrap().impersonation_ttl.as_secs(), 60 * 60);
+    }
+
     #[tokio::test]
     async fn require_sealed_survives_rebuilds() {
         let b = builder()
@@ -2022,6 +2153,31 @@ mod secrets_tests {
             .secrets(Fixed)
             .tenant_pools(crate::tenancy::TenantPoolsConfig::default());
         assert!(b.pools().secrets().requires_sealed());
+    }
+}
+
+#[cfg(test)]
+mod strip_prefix_tests {
+    use axum::body::Body;
+    use axum::http::Request;
+
+    fn stripped(uri: &str, prefix: Option<&str>) -> String {
+        let mut req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let org = crate::testkit::org_with(|o| o.slug = "acme".into());
+        crate::tenancy::request_tenant::store_dispatched::<()>(
+            req.extensions_mut(),
+            Ok(Some(org)),
+            prefix,
+        );
+        super::strip_tenant_prefix(req).uri().to_string()
+    }
+
+    #[test]
+    fn the_prefix_comes_off_and_the_query_stays() {
+        assert_eq!(stripped("/acme/about?x=1", Some("/acme")), "/about?x=1");
+        assert_eq!(stripped("/acme", Some("/acme/")), "/");
+        assert_eq!(stripped("/acme/", Some("/acme")), "/");
+        assert_eq!(stripped("/acme/about", None), "/acme/about");
     }
 }
 

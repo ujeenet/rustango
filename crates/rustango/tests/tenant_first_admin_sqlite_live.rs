@@ -1030,14 +1030,16 @@ async fn a_path_prefix_tenant_first_admin_signs_in_end_to_end() {
     assert!(done.contains("Password set"), "{done}");
     let login_page =
         body_of(tenant_req(&admin, "apex.test", "GET", &format!("{prefix}/login"), "").await).await;
-    let next = format!(r#"name="next" value="&#x2F;{slug}&#x2F;""#);
-    assert!(login_page.contains(&next), "{login_page}");
+    assert!(
+        login_page.contains(r#"name="next" value="""#),
+        "{login_page}"
+    );
     let login = tenant_req(
         &admin,
         "apex.test",
         "POST",
         &format!("{prefix}/login"),
-        &format!("username=pat&password={NEW_PASSWORD}&_csrf=t&next=%2F{slug}%2F"),
+        &format!("username=pat&password={NEW_PASSWORD}&_csrf=t&next="),
     )
     .await;
     assert_eq!(login.status(), StatusCode::SEE_OTHER);

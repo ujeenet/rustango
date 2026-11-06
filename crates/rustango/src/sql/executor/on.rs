@@ -179,7 +179,7 @@ pub trait SqlExecutor<'c>: sealed::Sealed<'c> + Send + Sized {
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e;
 
@@ -315,11 +315,12 @@ fn pg_exec<'c: 'e, 'e, 'q: 'e, E>(
     exec: E,
     sql: &'q str,
     params: Vec<SqlValue>,
-) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+) -> BoxFuture<'e, Result<u64, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Postgres>,
 {
     let q = params.into_iter().fold(sqlx::query(sql), super::bind_query);
+    crate::test_assertions::query_counter::bump();
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
 }
@@ -329,13 +330,14 @@ fn my_exec<'c: 'e, 'e, 'q: 'e, E>(
     exec: E,
     sql: &'q str,
     params: Vec<SqlValue>,
-) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+) -> BoxFuture<'e, Result<u64, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::MySql>,
 {
     let q = params
         .into_iter()
         .fold(sqlx::query(sql), super::bind_query_my);
+    crate::test_assertions::query_counter::bump();
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
 }
@@ -345,13 +347,14 @@ fn sq_exec<'c: 'e, 'e, 'q: 'e, E>(
     exec: E,
     sql: &'q str,
     params: Vec<SqlValue>,
-) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+) -> BoxFuture<'e, Result<u64, ExecError>>
 where
     E: sqlx::Executor<'c, Database = sqlx::Sqlite>,
 {
     let q = params
         .into_iter()
         .fold(sqlx::query(sql), super::bind_query_sqlite);
+    crate::test_assertions::query_counter::bump();
     let done = exec.execute(q);
     Box::pin(async move { Ok(done.await?.rows_affected()) })
 }
@@ -418,18 +421,12 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
     {
-        match self {
-            #[cfg(feature = "postgres")]
-            Pool::Postgres(p) => pg_exec(p, sql, params),
-            #[cfg(feature = "mysql")]
-            Pool::Mysql(p) => my_exec(p, sql, params),
-            #[cfg(feature = "sqlite")]
-            Pool::Sqlite(p) => sq_exec(p, sql, params),
-        }
+        // Joins an open `atomic` block on this pool.
+        Box::pin(super::write_pool(self, sql, params))
     }
 
     fn runs_plans(&self) -> bool {
@@ -463,7 +460,7 @@ impl<'c> SqlExecutor<'c> for &'c Pool {
         Self: 'e,
     {
         Box::pin(async move {
-            let mut tx = super::transaction_pool(self).await?;
+            let mut tx = super::write_tx(self).await?;
             let rows = super::bulk_insert_rows_tx(&mut tx, &query).await?;
             tx.commit().await?;
             Ok(rows)
@@ -504,7 +501,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolConn {
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
     {
@@ -604,7 +601,7 @@ impl<'c> SqlExecutor<'c> for &'c mut PoolTx<'_> {
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
     {
@@ -679,7 +676,7 @@ impl<'c, E: sqlx::Executor<'c, Database = sqlx::Postgres>> SqlExecutor<'c> for E
         self,
         sql: &'q str,
         params: Vec<SqlValue>,
-    ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+    ) -> BoxFuture<'e, Result<u64, ExecError>>
     where
         'c: 'e,
     {
@@ -770,7 +767,7 @@ macro_rules! database_conn_executor {
                 self,
                 sql: &'q str,
                 params: Vec<SqlValue>,
-            ) -> BoxFuture<'e, Result<u64, sqlx::Error>>
+            ) -> BoxFuture<'e, Result<u64, ExecError>>
             where
                 'c: 'e,
             {

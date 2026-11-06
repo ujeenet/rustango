@@ -119,8 +119,16 @@ impl<'a> MountedTenantContext<'a> {
         self.erased().downcast_ref()
     }
 
-    /// Resolve the request's Org against this context's registry.
+    /// The request's Org: the one the dispatcher resolved, else resolved
+    /// against this context's registry.
     pub(crate) async fn resolve(self, parts: &Parts) -> Result<Option<Org>, TenancyError> {
+        // Under a stripped prefix the path no longer names the tenant.
+        if let Some(d) = parts
+            .extensions
+            .get::<crate::tenancy::request_tenant::DispatchedOrg>()
+        {
+            return Ok(Some(d.0.clone()));
+        }
         each!(self, |c|
             full => c.resolver.resolve_in(parts, &TenantRegistry::new(c.pools.registry_pool())).await,
             db => c.resolver.resolve_in(parts, &TenantRegistry::new(c.registry.clone())).await)

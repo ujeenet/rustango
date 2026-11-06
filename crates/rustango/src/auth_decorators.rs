@@ -708,6 +708,20 @@ pub(crate) fn login_next(next: Option<&str>, login_url: &str, logout_url: &str) 
         .filter(|s| !s.starts_with(login_url) && !s.starts_with(logout_url))
 }
 
+/// The path of `next` as a browser resolves it: query and fragment cut,
+/// percent-decoded, `\` read as `/`.
+#[cfg(any(feature = "tenancy", all(feature = "admin", feature = "sso")))]
+pub(crate) fn resolved_path(next: &str) -> String {
+    let raw = next.split(['?', '#']).next().unwrap_or_default();
+    crate::url_codec::url_decode(raw).replace('\\', "/")
+}
+
+/// Whether a resolved path has a `.` or `..` segment a browser would collapse.
+#[cfg(any(feature = "tenancy", all(feature = "admin", feature = "sso")))]
+pub(crate) fn has_dot_segment(resolved: &str) -> bool {
+    resolved.split('/').any(|seg| seg == "." || seg == "..")
+}
+
 /// Shared check for the raw and the decoded form of `next`. The path
 /// must start with `/` and must NOT start with `//` (scheme-relative)
 /// or `/\` (backslash host).

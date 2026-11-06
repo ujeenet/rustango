@@ -705,3 +705,244 @@ async fn an_extension_only_schema_joins_the_path() {
         "ext_only missing from B's path: {path}"
     );
 }
+
+/// Writes `name` (after `prev`) holding one schema op on `widgets`.
+fn widgets_step(
+    dir: &std::path::Path,
+    name: &str,
+    prev: Option<&str>,
+    fields: &serde_json::Value,
+    op: serde_json::Value,
+) {
+    let tables = if fields.is_null() {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([{ "name": "widgets", "model": "Widget", "fields": fields }])
+    };
+    // Not atomic, so a leaked drop before a failing statement stays.
+    let mig: rustango::migrate::file::Migration = serde_json::from_value(serde_json::json!({
+        "name": name, "created_at": "2026-01-01T00:00:00Z", "prev": prev, "atomic": false,
+        "snapshot": { "tables": tables }, "forward": [{ "schema": op }],
+    }))
+    .unwrap();
+    rustango::migrate::file::write(&dir.join(format!("{name}.json")), &mig).unwrap();
+}
+
+/// A tenant migration's drops, alters, constraints and comments stay in its schema: a same-named
+/// table in `public`, later on the migrate `search_path`, is never touched.
+#[tokio::test]
+async fn tenant_ddl_never_reaches_a_same_named_public_table() {
+    use serde_json::json;
+    let Ok(admin_url) = std::env::var("DATABASE_URL") else {
+        return;
+    };
+    let db = ScratchDb::create(&admin_url, "rustango_tddl").await;
+    let url = db.url().to_owned();
+    let admin = sqlx::PgPool::connect(&url).await.unwrap();
+    for sql in [
+        "CREATE TABLE public.widgets (id BIGINT PRIMARY KEY, note TEXT NOT NULL DEFAULT 'keep', \
+         code TEXT CONSTRAINT widgets_code_key UNIQUE, \
+         parent_id BIGINT CONSTRAINT widgets_parent_id_fkey REFERENCES public.widgets (id), \
+         CONSTRAINT widgets_id_parent_key UNIQUE (id, parent_id), \
+         CONSTRAINT widgets_pair_fkey FOREIGN KEY (parent_id, id) \
+         REFERENCES public.widgets (id, parent_id), \
+         CONSTRAINT ck_widgets_id CHECK (id > 0))",
+        "CREATE INDEX widgets_note_idx ON public.widgets (note)",
+        "INSERT INTO public.widgets (id) VALUES (1)",
+    ] {
+        sqlx::query(sql).execute(&admin).await.unwrap();
+    }
+    let fields = json!([
+        { "name": "id", "column": "id", "ty": "i64", "nullable": false, "primary_key": true },
+        { "name": "note", "column": "note", "ty": "string", "nullable": false,
+          "primary_key": false, "default": "'keep'" },
+        { "name": "code", "column": "code", "ty": "string", "nullable": true,
+          "primary_key": false, "unique": true },
+        { "name": "parent", "column": "parent_id", "ty": "i64", "nullable": true,
+          "primary_key": false, "fk": { "kind": "fk", "to": "widgets", "on": "id" } },
+    ]);
+    let with = |i: usize, key: &str, value: serde_json::Value| {
+        let mut f = fields.clone();
+        f[i][key] = value;
+        f
+    };
+    let without = |i: usize| {
+        let mut f = fields.clone();
+        f.as_array_mut().unwrap().remove(i);
+        f
+    };
+    let ops = [
+        (
+            "nullable",
+            with(1, "nullable", json!(true)),
+            json!({ "AlterColumnNullable":
+            { "table": "widgets", "column": "note", "nullable": true } }),
+        ),
+        (
+            "default",
+            with(1, "default", serde_json::Value::Null),
+            json!({ "AlterColumnDefault":
+            { "table": "widgets", "column": "note", "from": "'keep'", "to": null } }),
+        ),
+        (
+            "index",
+            fields.clone(),
+            json!({ "DropIndex":
+            { "name": "widgets_note_idx", "table": "widgets" } }),
+        ),
+        (
+            "column",
+            without(1),
+            json!({ "DropColumn": { "table": "widgets", "column": "note" } }),
+        ),
+        (
+            "unique",
+            with(1, "unique", json!(true)),
+            json!({ "AlterColumnUnique":
+            { "table": "widgets", "column": "note", "unique": true } }),
+        ),
+        (
+            "unique_drop",
+            with(2, "unique", json!(false)),
+            json!({ "AlterColumnUnique":
+            { "table": "widgets", "column": "code", "unique": false } }),
+        ),
+        (
+            "check",
+            fields.clone(),
+            json!({ "DropCheckConstraint": { "name": "ck_widgets_id", "table": "widgets" } }),
+        ),
+        (
+            "col_comment",
+            with(1, "db_comment", json!("leak")),
+            json!({ "AlterColumnComment":
+            { "table": "widgets", "column": "note", "from": null, "to": "leak" } }),
+        ),
+        (
+            "table_comment",
+            fields.clone(),
+            json!({ "AlterTableComment": { "table": "widgets", "from": null, "to": "leak" } }),
+        ),
+        (
+            "fk",
+            without(3),
+            json!({ "DropColumn": { "table": "widgets", "column": "parent_id" } }),
+        ),
+        (
+            "composite",
+            fields.clone(),
+            json!({ "DropCompositeFk": { "table": "widgets", "name": "pair" } }),
+        ),
+        (
+            "table",
+            serde_json::Value::Null,
+            json!({ "DropTable": "widgets" }),
+        ),
+        (
+            "rename",
+            serde_json::Value::Null,
+            json!({ "RenameTable": { "old_name": "widgets", "new_name": "gadgets" } }),
+        ),
+    ];
+    for (tag, snap, op) in ops {
+        // Its own tenant schema, which lost `widgets` after creating it.
+        let schema = format!("t_{tag}");
+        sqlx::query(&format!("CREATE SCHEMA {schema}"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        let path = format!("SET search_path TO {schema}, public");
+        let tenant = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .after_connect(move |conn, _| {
+                let path = path.clone();
+                Box::pin(async move { sqlx::query(&path).execute(conn).await.map(drop) })
+            })
+            .connect(&url)
+            .await
+            .unwrap();
+        let pool = rustango::sql::Pool::from(tenant.clone());
+        let tmp = tempfile::tempdir().unwrap();
+        widgets_step(
+            tmp.path(),
+            "0001_initial",
+            None,
+            &fields,
+            json!({ "CreateTable": "widgets" }),
+        );
+        rustango::migrate::migrate_pool(&pool, tmp.path())
+            .await
+            .unwrap();
+        sqlx::query(&format!("DROP TABLE {schema}.widgets"))
+            .execute(&admin)
+            .await
+            .unwrap();
+        widgets_step(tmp.path(), "0002_op", Some("0001_initial"), &snap, op);
+        // Fails, or is a no-op for `DROP INDEX IF EXISTS`: the tenant has no widgets.
+        let _ = rustango::migrate::migrate_pool(&pool, tmp.path()).await;
+        tenant.close().await;
+    }
+    let (note_null, note_default): (String, Option<String>) = sqlx::query_as(
+        "SELECT is_nullable::text, column_default::text FROM information_schema.columns \
+         WHERE table_schema = 'public' AND table_name = 'widgets' AND column_name = 'note'",
+    )
+    .fetch_optional(&admin)
+    .await
+    .unwrap()
+    .expect("public.widgets.note still exists");
+    // Every leak at once, so a revert shows each statement that reached public.
+    let mut leaks = Vec::new();
+    if note_null != "NO" {
+        leaks.push("note lost NOT NULL".to_owned());
+    }
+    if !note_default.is_some_and(|d| d.contains("keep")) {
+        leaks.push("note lost its default".to_owned());
+    }
+    let index: Option<String> = sqlx::query_scalar(
+        "SELECT indexname::text FROM pg_indexes \
+         WHERE schemaname = 'public' AND indexname = 'widgets_note_idx'",
+    )
+    .fetch_optional(&admin)
+    .await
+    .unwrap();
+    if index.is_none() {
+        leaks.push("index dropped".to_owned());
+    }
+    let renamed: Option<String> = sqlx::query_scalar("SELECT to_regclass('public.gadgets')::text")
+        .fetch_one(&admin)
+        .await
+        .unwrap();
+    if renamed.is_some() {
+        leaks.push("table renamed".to_owned());
+    }
+    let constraints: Vec<String> = sqlx::query_scalar(
+        "SELECT conname::text FROM pg_constraint \
+         WHERE conrelid = 'public.widgets'::regclass ORDER BY conname",
+    )
+    .fetch_all(&admin)
+    .await
+    .unwrap();
+    let kept = [
+        "ck_widgets_id",
+        "widgets_code_key",
+        "widgets_id_parent_key",
+        "widgets_pair_fkey",
+        "widgets_parent_id_fkey",
+        "widgets_pkey",
+    ];
+    if constraints != kept {
+        leaks.push(format!("constraints are {constraints:?}"));
+    }
+    let comments: (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT obj_description('public.widgets'::regclass, 'pg_class'), \
+         col_description('public.widgets'::regclass, 2)",
+    )
+    .fetch_one(&admin)
+    .await
+    .unwrap();
+    if comments != (None, None) {
+        leaks.push(format!("comments are {comments:?}"));
+    }
+    assert!(leaks.is_empty(), "tenant DDL reached public: {leaks:?}");
+    admin.close().await;
+}

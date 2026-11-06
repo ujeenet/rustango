@@ -156,15 +156,14 @@ impl rustango::tenancy::OrgResolver for CookbookTenant {
         _parts: &axum::http::request::Parts,
         _registry: &rustango::sql::Pool,
     ) -> Result<Option<rustango::tenancy::Org>, rustango::tenancy::TenancyError> {
-        Ok(Some(rustango::tenancy::Org {
-            id: rustango::sql::Auto::Set(1),
-            slug: TENANT.to_owned(),
-            display_name: TENANT.to_owned(),
-            storage_mode: "schema".into(),
-            backend_kind: "postgres".into(),
-            database_url: None,
-            ..rustango::testkit::org()
-        }))
+        Ok(Some(rustango::testkit::org_with(|o| {
+            o.id = rustango::sql::Auto::Set(1);
+            o.slug = TENANT.to_owned();
+            o.display_name = TENANT.to_owned();
+            o.storage_mode = "schema".into();
+            o.backend_kind = "postgres".into();
+            o.database_url = None;
+        })))
     }
 }
 

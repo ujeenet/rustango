@@ -16,8 +16,9 @@ en Rust.
 
 > **Source :** `rustango::jobs` (`Job`, `JobQueue`, `InMemoryJobQueue`,
 > `JobError`, `JobDeadLetter`) et `rustango::jobs::DatabaseJobQueue` (la file
-> adossée à une table, alias de `pg::PgJobQueue`) — derrière la feature `jobs`
-> (activée par défaut).
+> adossée à une table, alias de `pg::PgJobQueue`) — derrière la feature `jobs` ;
+> `DatabaseJobQueue` et `make:worker` demandent aussi `jobs-postgres` (toutes
+> deux activées par défaut).
 >
 > **Version exécutable :** les extraits in-memory, nouvelle tentative et
 > dead-letter sont copiés depuis [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)
@@ -34,6 +35,7 @@ en Rust.
 - [Étape 4 — Câbler dans votre application](#étape-4--câbler-dans-votre-application) — l'exemple complet
 - [Faire tourner les workers (CLI + production)](#faire-tourner-les-workers-cli--production)
 - [Nouvelles tentatives et backoff](#nouvelles-tentatives-et-backoff)
+- [Le contexte de la tâche : id, tentative, arrêt](#le-contexte-de-la-tâche--id-tentative-arrêt)
 - [Le handler dead-letter](#le-handler-dead-letter)
 - [La file persistante (production)](#la-file-persistante-production)
 - [Les tâches en multi-tenancy](#les-tâches-en-multi-tenancy)
@@ -117,9 +119,10 @@ queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 les nouvelles tentatives en attente restent en file, et un nouveau `start()` les
 reprend.
 
-Les tâches sont **at-least-once** (au moins une fois). Aucun signal d'arrêt
-n'atteint une tâche en cours, et une tâche interrompue repart du début (la file
-en base libère sa ligne même si la tâche venait de se terminer). L'interruption
+Les tâches sont **at-least-once** (au moins une fois). Une tâche en cours voit
+l'arrêt via [`JobCtx::stopping`](#le-contexte-de-la-tâche--id-tentative-arrêt),
+et une tâche interrompue repart du début (la file en base libère sa ligne même
+si la tâche venait de se terminer). L'interruption
 consomme une tentative. Rendez chaque tâche idempotente.
 
 Conservez le `Arc<InMemoryJobQueue>` dans l'état de votre application pour que
@@ -320,6 +323,48 @@ l'attente depuis le payload, surchargez `fn max_attempts(&self) -> u32` ou
 renvoient `MAX_ATTEMPTS` et `retry_backoff`. Le plafond est lu au dispatch.
 `jobs::exponential_backoff(base, failed_attempt)` est la courbe par défaut avec
 votre propre base : `base`, doublée à chaque échec, plafonnée à `base · 1024`.
+
+---
+
+## Le contexte de la tâche : id, tentative, arrêt
+
+Les deux files appellent `Job::run_with(&self, ctx: &JobCtx)`. Par défaut, il
+appelle `run()` : les tâches qui n'implémentent que `run` fonctionnent sans
+changement. Surchargez-le pour lire :
+
+- `ctx.id()` — l'id de la tâche, le même à chaque nouvelle tentative. Unique dans sa file seulement.
+- `ctx.idempotency_key(scope)` — l'id sous votre portée, pour un système externe.
+- `ctx.attempt()` — 1 à la première exécution, 2 à la première nouvelle tentative.
+- `ctx.stopping()` / `ctx.is_stopping()` — la file s'arrête ; terminez dans le
+  délai `shutdown_grace`, sinon l'exécution est interrompue et remise en file.
+
+Utilisez `idempotency_key` comme clé vue par un système externe, pour qu'un débit
+relancé ne soit pas débité deux fois. L'id de la file en base est l'id de la ligne
+plus son heure de mise en file : une table recréée ne le répète pas. Les tenants
+qui ont leur propre table de tâches repartent tout de même de la ligne 1 ; passez
+une portée qui distingue les tables, comme le slug du tenant :
+
+```rust
+use rustango::jobs::{Job, JobCtx, JobError};
+
+#[async_trait::async_trait]
+impl Job for ChargeCard {
+    const NAME: &'static str = "charge_card";
+
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("ChargeCard runs through run_with".into()))
+    }
+
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let key = ctx.idempotency_key(&self.tenant);   // la même clé à chaque nouvelle tentative
+        stripe_charge(self.order_id, self.cents, &key)
+            .await
+            .map_err(|e| JobError::Retryable(e.to_string()))
+    }
+}
+```
+
+Un handler passé à `register_with` reçoit seulement le payload, pas le contexte.
 
 ---
 
@@ -548,10 +593,10 @@ Si vous protégez le balayage pour qu'une seule réplique l'exécute, **cadrez l
 verrou par tenant** :
 
 ```rust
-use rustango::distributed_lock::DistributedLock;
+use rustango::cache::CacheScope;
 
 let tenant = TenantSlug::of(&org).expect("a registry org");
-let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
+let lock = CacheScope::for_tenant(cache.clone(), &tenant).locks();
 // Tick every minute; this runs once per UTC day across replicas.
 lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
@@ -581,7 +626,8 @@ acquire refusé est le résultat attendu, donc rien n'est journalisé. C'est une
 
 **Méthodes de `JobQueue` :** `register::<T>()` · `dispatch(&payload)` · `start()` ·
 `register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (tâches en
-attente de prise en charge). Les deux files ont `on_dead_letter` et
+attente de prise en charge). `Job::run_with` reçoit un `JobCtx` (`id`, `attempt`,
+`stopping`). Les deux files ont `on_dead_letter` et
 `shutdown_grace`. `DatabaseJobQueue` ajoute `ensure_table_pool`,
 `with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
 `queue_name`, `reclaim_stuck_after` et `reclaim_stuck_jobs_pool`.

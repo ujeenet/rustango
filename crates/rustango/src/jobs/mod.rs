@@ -132,6 +132,101 @@ pub trait Job: Send + Sync + Sized + Serialize + DeserializeOwned + 'static {
     /// **Neither queue carries a session or a tenant.** Anything else a
     /// job needs travels in its payload.
     async fn run(&self) -> Result<(), JobError>;
+
+    /// What the queues call: [`Self::run`] by default. Override it to read the
+    /// run's [`JobCtx`], such as the job id as an idempotency key.
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let _ = ctx;
+        self.run().await
+    }
+}
+
+// ------------------------------------------------------------------ JobCtx
+
+/// A queued job's id, the same on every run of it. Unique on its queue only:
+/// for an outside system use [`JobCtx::idempotency_key`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct JobId(Arc<str>);
+
+impl JobId {
+    /// A database row's id: the row id and its enqueue time in µs, so a
+    /// recreated table, whose ids restart at 1, does not repeat one.
+    #[cfg(feature = "jobs-postgres")]
+    pub(crate) fn of_row(id: i64, created_at: Option<chrono::DateTime<chrono::Utc>>) -> Self {
+        match created_at {
+            Some(at) => Self(format!("{id}-{}", at.timestamp_micros()).into()),
+            None => Self(id.to_string().into()),
+        }
+    }
+
+    /// The id as text, e.g. for an idempotency-key header.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for JobId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One run of a job, as [`Job::run_with`] sees it.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct JobCtx {
+    id: JobId,
+    attempt: u32,
+    stop: StopSignal,
+}
+
+impl JobCtx {
+    pub(crate) fn new(id: JobId, attempt: u32, stop: StopSignal) -> Self {
+        Self { id, attempt, stop }
+    }
+
+    /// The job's id, stable across its retries.
+    #[must_use]
+    pub fn id(&self) -> &JobId {
+        &self.id
+    }
+
+    /// [`Self::id`] under `scope`, for an outside system such as a payment
+    /// API. Pass what tells this queue's table apart from others, e.g. the
+    /// tenant slug when each tenant has its own job table.
+    #[must_use]
+    pub fn idempotency_key(&self, scope: &str) -> String {
+        format!("{scope}:{}", self.id)
+    }
+
+    /// This run's number: 1 for the first run, 2 for the first retry.
+    #[must_use]
+    pub fn attempt(&self) -> u32 {
+        self.attempt
+    }
+
+    /// `true` once the queue is shutting down.
+    #[must_use]
+    pub fn is_stopping(&self) -> bool {
+        self.stop.is_set()
+    }
+
+    /// Resolves once the queue starts shutting down. The job then has the
+    /// shutdown grace period to finish before it is aborted and re-queued.
+    pub async fn stopping(&self) {
+        self.stop.clone().wait().await;
+    }
+}
+
+impl std::fmt::Debug for JobCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JobCtx")
+            .field("id", &self.id)
+            .field("attempt", &self.attempt)
+            .field("stopping", &self.is_stopping())
+            .finish()
+    }
 }
 
 // ------------------------------------------------------------------ Queue trait
@@ -174,8 +269,9 @@ pub trait JobQueue: Send + Sync + 'static {
     /// ([`DEFAULT_SHUTDOWN_GRACE`]), then are aborted and handed back
     /// to the queue. Queued jobs stay queued for the next `start`.
     ///
-    /// No signal reaches a running job, and an aborted one runs again
-    /// from the start, so jobs are at-least-once: make them idempotent.
+    /// A running job sees the stop through [`JobCtx::stopping`]. An aborted
+    /// one runs again from the start, so jobs are at-least-once: make them
+    /// idempotent, for example with [`JobCtx::id`].
     async fn shutdown(&self);
 
     /// Number of jobs currently queued (waiting to be picked up).
@@ -199,7 +295,6 @@ pub(crate) struct Running {
 pub(crate) struct StopSignal(watch::Receiver<bool>);
 
 impl StopSignal {
-    #[cfg_attr(not(feature = "jobs-postgres"), allow(dead_code))]
     /// Also true once the queue is dropped without `shutdown`.
     pub(crate) fn is_set(&self) -> bool {
         *self.0.borrow() || self.0.has_changed().is_err()
@@ -247,6 +342,8 @@ impl Running {
 #[derive(Debug, Clone)]
 struct JobEnvelope {
     name: &'static str,
+    /// Set at dispatch; a retry or a re-queue keeps it.
+    id: JobId,
     payload: serde_json::Value,
     attempt: u32,
     max_attempts: u32,
@@ -264,9 +361,10 @@ struct JobEnvelope {
 // ------------------------------------------------------------------ Handler registry
 
 /// Type-erased async handler. The queue stores one per registered Job::NAME.
-/// It takes the payload and the 0-based number of the run.
-type HandlerFn =
-    Arc<dyn Fn(serde_json::Value, u32) -> Pin<Box<dyn Future<Output = Ran> + Send>> + Send + Sync>;
+/// It takes the payload and the run's context.
+type HandlerFn = Arc<
+    dyn Fn(serde_json::Value, JobCtx) -> Pin<Box<dyn Future<Output = Ran> + Send>> + Send + Sync,
+>;
 
 /// One run's result, and the wait before its retry should it fail.
 struct Ran {
@@ -367,7 +465,7 @@ struct HandlerRegistry {
 
 impl HandlerRegistry {
     fn register<T: Job>(&mut self) {
-        self.register_with::<T, _, _>(|job: T| async move { job.run().await });
+        self.register_handler::<T, _, _>(|job: T, ctx| async move { job.run_with(&ctx).await });
     }
 
     /// Register `T` with `run` standing in for [`Job::run`].
@@ -377,9 +475,20 @@ impl HandlerRegistry {
         F: Fn(T) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<(), JobError>> + Send + 'static,
     {
+        self.register_handler::<T, _, _>(move |job: T, _ctx| run(job));
+    }
+
+    fn register_handler<T, F, Fut>(&mut self, run: F)
+    where
+        T: Job,
+        F: Fn(T, JobCtx) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<(), JobError>> + Send + 'static,
+    {
         let run = Arc::new(run);
-        let handler: HandlerFn = Arc::new(move |payload, failed_attempt| {
+        let handler: HandlerFn = Arc::new(move |payload, ctx: JobCtx| {
             let run = run.clone();
+            // 0-based, as the backoff hooks count.
+            let failed_attempt = ctx.attempt().saturating_sub(1);
             Box::pin(async move {
                 let job: T = match serde_json::from_value(payload) {
                     Ok(job) => job,
@@ -400,7 +509,7 @@ impl HandlerRegistry {
                 let (result, asked) = RETRY_AFTER
                     .scope(std::cell::Cell::new(None), async move {
                         // A panic is a failed run, not a dead worker (#1843).
-                        let result = crate::panic_guard::catch_unwind(run(job))
+                        let result = crate::panic_guard::catch_unwind(run(job, ctx))
                             .await
                             .unwrap_or_else(|panic| {
                                 let msg = crate::panic_guard::panic_message(&*panic);
@@ -611,6 +720,7 @@ impl JobQueue for InMemoryJobQueue {
         let value = serde_json::to_value(payload).map_err(|e| JobError::Queue(e.to_string()))?;
         let envelope = JobEnvelope {
             name: T::NAME,
+            id: JobId(uuid::Uuid::new_v4().to_string().into()),
             payload: value,
             attempt: 0,
             max_attempts: max_attempts(payload),
@@ -766,13 +876,14 @@ async fn worker_loop(w: InMemoryWorker) {
         };
 
         let payload = envelope.payload.clone();
+        let ctx = JobCtx::new(envelope.id.clone(), envelope.attempt + 1, stop.clone());
         // Run the handler inside the context the caller had at
         // `dispatch`. Without this the job sees none of it — an audit
         // row written here would record `system` and lose the actor.
         let ran = envelope
             .context
             .clone()
-            .install((entry.handler)(payload, envelope.attempt))
+            .install((entry.handler)(payload, ctx))
             .await;
         current.lock().unwrap().take();
 
@@ -916,7 +1027,7 @@ mod tests {
         let mut reg = HandlerRegistry::default();
         reg.register::<Forever>();
         let handler = reg.lookup(Forever::NAME).unwrap().handler;
-        let wait = handler(serde_json::Value::Null, 0).await.retry_in;
+        let wait = handler(serde_json::Value::Null, first_run()).await.retry_in;
         assert_eq!(wait, Duration::from_secs(365 * 86_400));
         let _ = tokio::time::Instant::now() + wait;
         let _ = chrono::Utc::now() + chrono::Duration::from_std(wait).unwrap();
@@ -979,7 +1090,7 @@ mod tests {
         let mut reg = HandlerRegistry::default();
         reg.register::<Hooked>();
         let handler = reg.lookup(Hooked::NAME).unwrap().handler;
-        let ran = handler(serde_json::Value::Null, 0).await;
+        let ran = handler(serde_json::Value::Null, first_run()).await;
         assert_eq!(ran.retry_in, Duration::from_millis(7));
         RUNS.store(0, Ordering::SeqCst);
 
@@ -1625,6 +1736,169 @@ mod tests {
         }
         assert_eq!(HANG_RUNS.load(Ordering::SeqCst), 1, "not run again");
         assert_eq!(q.pending_count().await, 0);
+        q.shutdown().await;
+    }
+
+    /// A first run's context, for calling a handler directly.
+    fn first_run() -> JobCtx {
+        JobCtx::new(JobId("t".into()), 1, Running::new().1)
+    }
+
+    /// Every run's `(id, attempt)` per probe token.
+    static CTX_SEEN: std::sync::Mutex<Vec<(u64, String, u32)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Records its context; fails its first run.
+    #[derive(Serialize, Deserialize)]
+    struct CtxProbe {
+        token: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl Job for CtxProbe {
+        const NAME: &'static str = "test:ctx_probe";
+        fn retry_backoff(_: u32) -> Duration {
+            Duration::from_millis(5)
+        }
+        async fn run(&self) -> Result<(), JobError> {
+            Err(JobError::Fatal("the queue calls run_with".into()))
+        }
+        async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+            let id = ctx.id().as_str().to_owned();
+            CTX_SEEN
+                .lock()
+                .unwrap()
+                .push((self.token, id, ctx.attempt()));
+            if ctx.attempt() == 1 {
+                return Err(JobError::Retryable("once more".into()));
+            }
+            Ok(())
+        }
+    }
+
+    fn ctx_seen(token: u64) -> Vec<(String, u32)> {
+        let seen = CTX_SEEN.lock().unwrap();
+        seen.iter()
+            .filter(|(t, ..)| *t == token)
+            .map(|(_, id, n)| (id.clone(), *n))
+            .collect()
+    }
+
+    /// A retry sees the first run's id and the next attempt number.
+    #[tokio::test]
+    async fn a_retry_keeps_the_job_id_and_counts_the_attempt() {
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<CtxProbe>().await;
+        q.start().await;
+        q.dispatch(&CtxProbe { token: 1 }).await.unwrap();
+        q.dispatch(&CtxProbe { token: 2 }).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while ctx_seen(1).len() < 2 || ctx_seen(2).len() < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "no retry");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        q.shutdown().await;
+        let (one, two) = (ctx_seen(1), ctx_seen(2));
+        assert_eq!(one[0].0, one[1].0, "same id on the retry");
+        assert_eq!((one[0].1, one[1].1), (1, 2));
+        assert_ne!(one[0].0, two[0].0, "each job has its own id");
+    }
+
+    /// The key carries the caller's scope, so two tenants' tables, whose
+    /// first rows share an id, give different keys.
+    #[test]
+    fn the_idempotency_key_is_scoped() {
+        let ctx = first_run();
+        assert_eq!(ctx.idempotency_key("acme"), "acme:t");
+        assert_ne!(ctx.idempotency_key("acme"), ctx.idempotency_key("globex"));
+    }
+
+    /// A row id alone repeats once a table is recreated; its enqueue time does not.
+    #[cfg(feature = "jobs-postgres")]
+    #[test]
+    fn a_row_id_is_told_apart_by_its_enqueue_time() {
+        let at = chrono::DateTime::from_timestamp_micros(1_700_000_000_123_456).unwrap();
+        let later = at + chrono::Duration::microseconds(1);
+        assert_eq!(JobId::of_row(1, Some(at)).as_str(), "1-1700000000123456");
+        assert_ne!(JobId::of_row(1, Some(at)), JobId::of_row(1, Some(later)));
+        assert_eq!(JobId::of_row(1, None).as_str(), "1");
+    }
+
+    static STOP_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    /// Waits for the queue to stop, then finishes.
+    #[derive(Serialize, Deserialize)]
+    struct UntilStop;
+
+    #[async_trait::async_trait]
+    impl Job for UntilStop {
+        const NAME: &'static str = "test:until_stop";
+        async fn run(&self) -> Result<(), JobError> {
+            Err(JobError::Fatal("the queue calls run_with".into()))
+        }
+        async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+            STOP_SEEN.fetch_add(1, Ordering::SeqCst);
+            ctx.stopping().await;
+            assert!(ctx.is_stopping());
+            STOP_SEEN.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// `shutdown` reaches a running job, which then finishes within the grace.
+    #[tokio::test]
+    async fn shutdown_fires_a_running_jobs_stop_signal() {
+        let q = InMemoryJobQueue::with_workers(1).shutdown_grace(Duration::from_secs(10));
+        q.register::<UntilStop>().await;
+        q.start().await;
+        q.dispatch(&UntilStop).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while STOP_SEEN.load(Ordering::SeqCst) == 0 {
+            assert!(tokio::time::Instant::now() < deadline, "never ran");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let began = std::time::Instant::now();
+        q.shutdown().await;
+        assert!(
+            began.elapsed() < Duration::from_secs(5),
+            "waited out the grace"
+        );
+        assert_eq!(
+            STOP_SEEN.load(Ordering::SeqCst),
+            2,
+            "finished on the signal"
+        );
+        assert_eq!(q.pending_count().await, 0, "done, not re-queued");
+    }
+
+    static RUN_ONLY: AtomicUsize = AtomicUsize::new(0);
+
+    /// A job written before `run_with`.
+    #[derive(Serialize, Deserialize)]
+    struct RunOnly;
+
+    #[async_trait::async_trait]
+    impl Job for RunOnly {
+        const NAME: &'static str = "test:run_only";
+        async fn run(&self) -> Result<(), JobError> {
+            RUN_ONLY.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// The default `run_with` runs a job that implements only `run`.
+    #[tokio::test]
+    async fn a_job_with_only_run_still_runs() {
+        RunOnly.run_with(&first_run()).await.unwrap();
+        assert_eq!(RUN_ONLY.load(Ordering::SeqCst), 1);
+        let q = InMemoryJobQueue::with_workers(1);
+        q.register::<RunOnly>().await;
+        q.start().await;
+        q.dispatch(&RunOnly).await.unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while RUN_ONLY.load(Ordering::SeqCst) < 2 {
+            assert!(tokio::time::Instant::now() < deadline, "never ran");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         q.shutdown().await;
     }
 

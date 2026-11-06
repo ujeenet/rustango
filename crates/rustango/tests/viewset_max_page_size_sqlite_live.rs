@@ -145,9 +145,62 @@ async fn status_of(app: axum::Router, uri: &str) -> StatusCode {
 async fn huge_page_number_is_an_empty_page() {
     let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
         .page_size(20)
+        .max_offset(0)
         .router("/notes", pool_with_rows().await);
     let n = count_returned(app, &format!("/notes?page={}", i64::MAX)).await;
     assert_eq!(n, 0);
+}
+
+/// An offset past `max_offset` is a 400 in both styles; at the cap, or with no cap, it runs.
+#[tokio::test]
+async fn offset_past_the_cap_is_a_400() {
+    let max = rustango::viewset::DEFAULT_MAX_OFFSET;
+    let lo = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .pagination(rustango::viewset::PaginationStyle::LimitOffset)
+        .router("/notes", pool_with_rows().await);
+    let at = status_of(lo.clone(), &format!("/notes?offset={max}")).await;
+    assert_eq!(at, StatusCode::OK);
+    let over = status_of(lo, &format!("/notes?offset={}", max + 1)).await;
+    assert_eq!(over, StatusCode::BAD_REQUEST);
+
+    let pages = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .page_size(10)
+        .router("/notes", pool_with_rows().await);
+    let last = max / 10 + 1;
+    assert_eq!(
+        status_of(pages.clone(), &format!("/notes?page={last}")).await,
+        StatusCode::OK
+    );
+    let over = status_of(pages, &format!("/notes?page={}", last + 1)).await;
+    assert_eq!(over, StatusCode::BAD_REQUEST);
+
+    let open = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+        .pagination(rustango::viewset::PaginationStyle::LimitOffset)
+        .max_offset(0)
+        .router("/notes", pool_with_rows().await);
+    let far = status_of(open, &format!("/notes?offset={}", max * 100)).await;
+    assert_eq!(far, StatusCode::OK);
+}
+
+/// `.count(false)` skips the `COUNT(*)`: `count` is null, the rows are the same.
+#[tokio::test]
+async fn count_can_be_skipped() {
+    for (count, expect) in [(true, Value::from(250)), (false, Value::Null)] {
+        let app = ViewSet::for_model(Note::SCHEMA, &["id", "title"])
+            .page_size(10)
+            .count(count)
+            .router("/notes", pool_with_rows().await);
+        let res = app
+            .oneshot(Request::get("/notes?page=2").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let json: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["count"], expect, "count({count})");
+        assert_eq!(json["results"].as_array().map(Vec::len), Some(10));
+    }
 }
 
 /// An `__in` list over the cap is a 400; one at the cap still runs (#1865).

@@ -96,6 +96,7 @@ menos de 32 bytes, así un servidor mal configurado no arranca. Los campos de
 | `refresh_ttl_secs` | 7 días | vida del token de refresco |
 | `refresh_absolute_ttl_secs` | 30 días | lo máximo que dura un login entre refrescos; debe ser > 0 |
 | `refresh_reuse_grace_secs` | `10` | ventana de reintento tras una rotación; `0` trata toda reutilización como robo |
+| `refresh_per_minute` | `30` | renovaciones por usuario y minuto en este proceso; por encima un 429; `0` lo desactiva |
 | `session_secret` | `None` | clave de firma explícita en lugar de `RUSTANGO_SESSION_SECRET` |
 | `jti_store` | `None` | almacén de revocación; `None` es el de memoria |
 | `extra_claims` | `None` | hook que añade claims a ambos tokens en el login y en cada refresco |

@@ -11,6 +11,8 @@ pub(crate) enum Reader {
     Framework,
     /// Only the named constructor reads it, and the app calls that.
     App(&'static str),
+    /// Only a tenancy app (`Cli::tenancy()`) reads it.
+    Tenancy,
 }
 
 /// One settings key.
@@ -43,6 +45,7 @@ const fn secret(path: &'static str, reader: Reader) -> Key {
 }
 
 const F: Reader = Reader::Framework;
+const TENANCY: Reader = Reader::Tenancy;
 const ADMIN: Reader = Reader::App("admin::Builder::from_settings");
 const CACHE: Reader = Reader::App("cache::from_settings_async");
 const JOBS: Reader = Reader::App("jobs::inmemory_from_settings");
@@ -68,6 +71,30 @@ pub(crate) const REMOVED: &[(&str, &str)] = &[
     ("auth.jwt.issuer", "tokens carry no `iss`; remove it"),
     ("auth.jwt.audience", "tokens carry no `aud`; remove it"),
 ];
+
+/// `[routes]` keys only a tenancy app reads: set on a single-database app,
+/// they change nothing.
+#[cfg(feature = "manage")]
+pub(crate) fn tenancy_only_routes(s: &super::RoutesSettings) -> Vec<&'static str> {
+    [
+        ("routes.legacy_preset", s.legacy_preset.is_some()),
+        ("routes.login_url", s.login_url.is_some()),
+        ("routes.logout_url", s.logout_url.is_some()),
+        ("routes.brand_url", s.brand_url.is_some()),
+        (
+            "routes.impersonation_handoff_url",
+            s.impersonation_handoff_url.is_some(),
+        ),
+    ]
+    .into_iter()
+    .filter(|(_, set)| *set)
+    .map(|(k, _)| k)
+    .filter(|k| {
+        KEYS.iter()
+            .any(|key| key.path == *k && matches!(key.reader, Reader::Tenancy))
+    })
+    .collect()
+}
 
 /// The [`REMOVED`] entry an ignored key path falls under.
 pub(crate) fn removed(path: &str) -> Option<(&'static str, &'static str)> {
@@ -121,6 +148,8 @@ pub(crate) const KEYS: &[Key] = &[
     key("cache.backend", CACHE),
     secret("cache.redis_url", CACHE),
     key("cache.file_cache_dir", CACHE),
+    key("cache.file_cache_max_entries", CACHE),
+    key("cache.file_cache_max_bytes", CACHE),
     key("cache.redis_connect_timeout_ms", CACHE),
     key("cache.redis_command_timeout_ms", CACHE),
     key("jobs.backend", JOBS),
@@ -182,15 +211,15 @@ pub(crate) const KEYS: &[Key] = &[
     key("security.secure_redirect_exempt", F),
     key("security.secure_proxy_ssl_header", F),
     key("security.secure_cookies", F),
-    key("routes.legacy_preset", F),
-    key("routes.login_url", F),
-    key("routes.logout_url", F),
+    key("routes.legacy_preset", TENANCY),
+    key("routes.login_url", TENANCY),
+    key("routes.logout_url", TENANCY),
     key("routes.admin_url", F),
     key("routes.audit_url", F),
     key("routes.static_url", F),
-    key("routes.brand_url", F),
+    key("routes.brand_url", TENANCY),
     key("routes.change_password_url", F),
-    key("routes.impersonation_handoff_url", F),
+    key("routes.impersonation_handoff_url", TENANCY),
     key("audit.retention_days", F),
     key("audit.redact_query_params", F),
     key("logging.level", F),

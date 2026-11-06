@@ -45,7 +45,8 @@ correo desconocido; está desactivado por defecto.)
 > `build_provider`, `verified_email`, `ResolvedSso`, `SsoError`), la tabla de
 > enlaces `rustango::sso::link` (`SsoLink`, `ProviderKey`, `sign_in`), el cableado del
 > bare-admin `rustango::admin::sso`, el SSO por tenant/consola
-> `rustango::tenancy::sso` (`SharedSsoProvider`) y el SSO de miembro
+> (proveedores compartidos: la tabla del registro `rustango_shared_sso_providers`,
+> editada en la consola del operador) y el SSO de miembro
 > `rustango::tenancy::member_auth`.
 
 ## URL de callback
@@ -176,6 +177,24 @@ Los ajustes de todo el tenant, una fila.
 | `default_provider` | Slug del proveedor que la página de inicio de sesión abre directamente, salvo en `?local=1` o tras un error. |
 | `signups_per_hour` | Máximo de registros SSO por hora. Vacío: 100; `0`: sin límite. |
 
+### `SsoLandingRule`
+
+Adónde lleva un inicio de sesión sin `?next=`. Las reglas se aplican por
+`position` y gana la primera que coincide. El control de acceso conserva `next`
+para cada página que redirige, así que las reglas valen cuando el inicio no trae
+`next`, por ejemplo uno empezado en la propia página de inicio de sesión. Valen para el inicio con SSO y con
+contraseña en el admin del tenant y en el admin básico; el inicio de los miembros
+las ignora. Una regla cuya ruta no pasa la comprobación de `next` (p. ej. la
+página de inicio de sesión) se salta. Si falta la tabla, no hay reglas.
+
+| Campo | Qué poner |
+|---|---|
+| `position` | Las reglas se prueban desde el número más bajo y gana la primera que coincide. A igual número decide el id. |
+| `match_kind` | `role`: el usuario tiene el rol de `match_value` (nunca en el admin básico, que no tiene roles). `claim`: el inicio SSO trae el claim `match_name` con `match_value`, leído como un claim del mapa de roles. `any`: todo inicio de sesión; póngala al final como valor por defecto. |
+| `match_name` | El nombre del claim, solo para reglas `claim`. Vacío en las demás. |
+| `match_value` | El nombre del rol (`role`) o el valor del claim (`claim`), comparado exactamente. Vacío para `any`. |
+| `landing_url` | Una ruta de este sitio que empieza por `/`, como en el host propio del tenant, p. ej. `/admin/reports`. El prefijo de ruta se añade solo. No es control de acceso: la página debe comprobar los permisos. |
+
 ### `SsoSharedOverride`
 
 La restricción de un proveedor compartido por un tenant. Los campos vacíos
@@ -227,9 +246,9 @@ compilarse sin arrastrar `crate::admin`:
 ```toml
 [dependencies]
 # Admin login with SSO:
-rustango = { version = "0.63", features = ["admin-sso"] }
+rustango = { version = "0.64", features = ["admin-sso"] }
 # Member (end-user) SSO without the auto-admin:
-rustango = { version = "0.63", features = ["tenancy", "sso"] }
+rustango = { version = "0.64", features = ["tenancy", "sso"] }
 ```
 
 `admin::sso_provider` y las rutas históricas del núcleo `admin::sso::*` son
@@ -267,8 +286,10 @@ para esa columna.
 En el admin del tenant, `GET <login>/sso/<slug>?next=/ruta` lleva a `/ruta`
 tras iniciar sesión. La ruta viaja en la cookie de flujo firmada y pasa la
 misma comprobación que el inicio de sesión con contraseña: solo mismo origen y
-dentro del prefijo de ruta del tenant. Cualquier otra cosa lleva a `admin_url`.
-La página de inicio de sesión pasa su propio `?next` a los botones SSO. El
+dentro del prefijo de ruta del tenant. Sin un `next` válido deciden las
+[reglas de destino](#ssolandingrule) del tenant, y sin coincidencia el inicio
+lleva a `admin_url`. La página de inicio de sesión pasa su propio `?next` a los
+botones SSO y nunca inventa uno. El
 admin básico hace lo mismo sin la regla del prefijo, conserva la ruta durante
 el paso TOTP y vuelve a su prefijo.
 
@@ -398,11 +419,14 @@ Diferencias respecto al flujo del admin:
   usuarios de SSO no pueden iniciar sesión con contraseña) — y la enlaza. Un
   correo que coincide con una cuenta existente sigue la regla `allow_email_link`
   de arriba. Ponlo a `false` para rechazar correos desconocidos. Un inicio de
-  sesión nativo (una app que verificó su propio ID token) llama directamente a
-  `find_or_provision_member`, con `ProviderKey::app(issuer)` como clave. Su
-  resultado `MemberSignIn` es `Member(id)`, `NotLinked` (una cuenta tiene el
-  correo pero no puede enlazarse por él), `NoAccount`, `Inactive`, `Unverified`
-  o `Refused`.
+  sesión nativo (una app que verificó su propio ID token) llama a
+  `sso::policy::admit` con `AdmitRequest::new(pool, Surface::Member,
+  &ProviderKey::app(issuer), &policy, &Identity::from_profile(profile))` y
+  `tenancy::member_auth::TenantAccounts(pool)`; la `EffectivePolicy` que pasa
+  es la política de inicio de sesión, así que pon ahí sus reglas. El
+  `find_or_provision_member` obsoleto aún aplica las reglas de un proveedor de
+  tenant, pero una clave de app no tiene ninguna: con `auto_provision` registra
+  cualquier correo verificado.
 - **Su propia cookie de sesión.** La cookie de miembro
   (`rustango_member_session`) está **separada por dominio** de las cookies de
   sesión de tenant / admin: el mensaje firmado lleva una etiqueta por dominio y
@@ -584,8 +608,9 @@ emisor y hora).
 - **Sin enlaces privilegiados por correo** — un superusuario nunca se enlaza
   por correo, y quien tiene roles solo con `allow_email_link_staff`. Un enlace creado por correo sigue funcionando después
   de ascender al usuario; bórralo si no se desea.
-- **Sin aprovisionamiento automático** para los admins — un correo desconocido
-  no puede entrar.
+- **Sin aprovisionamiento automático en el bare admin** — un correo desconocido
+  no puede entrar. Un proveedor del admin de tenant solo registra cuando su
+  `signup_mode` lo permite.
 - **Secretos cifrados en reposo** (`RUSTANGO_SECRET_KEY`), descifrados solo en
   memoria al iniciar sesión; los formularios de edición enmascaran el secreto
   almacenado.

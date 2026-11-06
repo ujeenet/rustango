@@ -152,6 +152,13 @@ tenant portent aussi le préfixe.
 Le routage par hôte est le meilleur choix en production. Les préfixes de
 chemin sont pratiques en développement, quand vous n'avez qu'un hôte.
 
+Les tenants à préfixe de chemin partagent aussi l'origine de l'apex avec la
+console opérateur. Un script sur une page du tenant s'exécute alors sur
+l'origine de la console et peut y agir comme un opérateur connecté, ou dans
+l'admin d'un autre tenant à préfixe. Le serveur avertit au démarrage quand il
+sert les deux. En production, donnez à chaque tenant son propre hôte, ou
+n'ouvrez pas de pages de tenant dans le navigateur utilisé pour la console.
+
 ## Modes de stockage
 
 Chaque tenant a un `storage_mode` : `schema` ou `database`.
@@ -266,6 +273,10 @@ Pour ouvrir d'avance le pool de chaque tenant actif en mode base, lancez
 [`prewarm-pools`](manage.md#prewarm-pools), utilisez le bouton de la console
 ou mettez `prewarm_active_tenants: true`.
 
+Les constructions de pool à froid sont bornées : au plus 16 à la fois
+(`max_concurrent_pool_builds`) et 600 par minute (`max_pool_builds_per_minute`) ;
+au-delà une requête reçoit un 503 avec `Retry-After`. `0` lève une limite.
+
 ## Migrations
 
 Chaque fichier de migration a un scope, `registry` ou `tenant`.
@@ -307,8 +318,8 @@ Ce qui le porte :
 - le cookie de session du tenant et le jeton de passage d'impersonation ;
 - les JWT : les claims `tenant` et `org_id` doivent tous deux correspondre ;
 - les clés de signature HMAC et les clés d'agents MCP liées à un tenant ;
-- `ScopedCache::for_tenant`, le cache de page, les clés d'idempotence et
-  `DistributedLock::for_tenant`, tous avec la clé `#org:<id>:<slug>` ;
+- `CacheScope::for_tenant`, le cache de page, les clés d'idempotence et
+  `CacheScope::locks`, tous avec la clé `#org:<id>:<slug>` ;
 - les liens de réinitialisation de mot de passe et de vérification.
 
 Les clés d'API et les utilisateurs du tenant vivent dans son propre
@@ -316,14 +327,14 @@ stockage, qu'une purge supprime. Une `Org` sans id (non lue depuis le
 registry) n'a pas de `TenantSlug`, et l'authentification la refuse.
 
 ```rust
-use rustango::cache::{BoxedCache, ScopedCache};
+use rustango::cache::{BoxedCache, CacheScope};
 use rustango::extractors::TenantScope;
 use rustango::tenancy::TenantSlug;
 
-fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<ScopedCache> {
+fn tenant_cache(cache: BoxedCache, t: &TenantScope) -> Option<BoxedCache> {
     // `None` seulement pour une Org qui n'a pas été lue depuis le registry.
     let tenant = TenantSlug::of(&t.org)?;
-    Some(ScopedCache::for_tenant(cache, &tenant))
+    Some(CacheScope::for_tenant(cache, &tenant).app())
 }
 ```
 

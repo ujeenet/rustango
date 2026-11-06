@@ -13,7 +13,7 @@ use http_body_util::BodyExt;
 use rustango::sql::{sqlx, FetcherPool as _, Pool};
 use rustango::tenancy::session::SessionSecret;
 use rustango::tenancy::{
-    admin::TenantAdminBuilder, routes::RouteConfig, tenant_console, ChainResolver, Org,
+    admin::TenantAdminBuilder, routes::RouteConfig, tenant_console, ChainResolver,
     SubdomainResolver, TenantPools, User,
 };
 use rustango::tri_dialect_test;
@@ -98,14 +98,13 @@ async fn tenant(pool: &Pool, session: bool) -> Tenant {
     setup(&db).await;
     let slug = unique("st");
     let host = format!("{slug}.app.test");
-    let mut org = Org {
-        slug,
-        storage_mode: "database".into(),
-        backend_kind: kind.into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(host.clone()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug;
+        o.storage_mode = "database".into();
+        o.backend_kind = kind.into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(host.clone());
+    });
     org.insert(&db).await.expect("seed org");
     let admin = match &db {
         #[cfg(feature = "postgres")]
@@ -230,11 +229,17 @@ async fn perms_stay_with_their_request(pool: &Pool) {
     // Without a session the index is not served, so a 200 below proves one.
     let (status, body, _) = env.send("GET", "/__admin/", String::new(), "").await;
     assert_ne!(status, StatusCode::OK, "anonymous index: {body}");
+    // Searched, so a long shared users table cannot page the name away.
+    let find = |u: &User| format!("{list}?q={}", u.username);
     for _ in 0..2 {
-        let (status, body, _) = env.send("GET", list, String::new(), &boss_cookie).await;
+        let (status, body, _) = env
+            .send("GET", &find(&clerk), String::new(), &boss_cookie)
+            .await;
         assert_eq!(status, StatusCode::OK, "superuser: {body}");
         assert!(body.contains(&clerk.username), "{body}");
-        let (status, body, _) = env.send("GET", list, String::new(), &clerk_cookie).await;
+        let (status, body, _) = env
+            .send("GET", &find(&boss), String::new(), &clerk_cookie)
+            .await;
         // No `{table}.view` hides the table, so it is a 404, not a 403.
         assert_eq!(status, StatusCode::NOT_FOUND, "no-perm user: {body}");
         assert!(!body.contains(&boss.username), "{body}");

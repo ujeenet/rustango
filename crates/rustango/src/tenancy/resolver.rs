@@ -1013,10 +1013,9 @@ async fn active_org_by_id_answers_from_the_cache() {
     crate::testkit::create_tables_for::<Org>(&pool)
         .await
         .unwrap();
-    let mut org = Org {
-        slug: "idc".into(),
-        ..crate::testkit::org()
-    };
+    let mut org = crate::testkit::org_with(|o| {
+        o.slug = "idc".into();
+    });
     org.insert(&pool).await.unwrap();
     let id = *org.id.get().unwrap();
     assert!(active_org_by_id(&pool, id).await.unwrap().is_some());

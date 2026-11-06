@@ -197,7 +197,7 @@ async fn auto_now_add_and_soft_delete() {
     a.save(&pool).await.unwrap();
     let id = a.id.get().copied().unwrap();
 
-    let row = Article::find_or_fail(id, &pool).await.unwrap();
+    let mut row = Article::find_or_fail(id, &pool).await.unwrap();
     assert!(
         row.created_at.get().is_some(),
         "auto_now_add populated created_at"

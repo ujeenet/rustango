@@ -294,8 +294,8 @@ async fn migrate_pool_ledger_round_trips() {
     assert!(applied.is_empty());
 }
 
-/// #1742: the stock `mysql:8` database defaults to `utf8mb4_0900_ai_ci`,
-/// so `check --deploy` must name it.
+/// #1742: the stock `mysql:8` database defaults to `utf8mb4_0900_ai_ci`
+/// (MariaDB to another `_ci` one), so `check --deploy` must name it.
 #[tokio::test]
 async fn check_deploy_warns_on_a_case_insensitive_database() {
     let Some(pool) = pool_or_skip().await else {
@@ -311,8 +311,16 @@ async fn check_deploy_warns_on_a_case_insensitive_database() {
     )
     .await;
     let out = String::from_utf8(out).unwrap();
+    let db: Vec<(String,)> =
+        rustango::sql::raw_query_pool("SELECT CAST(@@collation_database AS CHAR)", vec![], &pool)
+            .await
+            .unwrap();
+    assert!(db[0].0.ends_with("_ci"), "the stock image is case-blind");
     assert!(
-        out.contains("[warning] database default collation `utf8mb4_0900_ai_ci`"),
+        out.contains(&format!(
+            "[warning] database default collation `{}`",
+            db[0].0
+        )),
         "{out}"
     );
 }

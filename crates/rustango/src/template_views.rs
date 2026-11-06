@@ -794,12 +794,15 @@ async fn handle_list(
         Ok(v) => v,
         Err(msg) => return template_error(&msg),
     };
-    let where_clause = build_list_where(
+    let where_clause = match build_list_where(
         state.vs.schema,
         &state.vs.filter_fields,
         &state.vs.search_fields,
         &params,
-    );
+    ) {
+        Ok(w) => w,
+        Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
     // #562 — struct-update over SelectQuery::new for the list+filter
     // query (custom WHERE + paginate).
     let select_q = SelectQuery {
@@ -2594,8 +2597,9 @@ fn build_list_where(
     filter_fields: &[String],
     search_fields: &[String],
     params: &HashMap<String, String>,
-) -> WhereExpr {
+) -> Result<WhereExpr, crate::list_params::NulInValue> {
     use crate::core::Filter;
+    use crate::list_params::reject_nul;
 
     let mut predicates: Vec<WhereExpr> = Vec::new();
 
@@ -2616,7 +2620,7 @@ fn build_list_where(
         let Some(field) = schema.field(key) else {
             continue;
         };
-        let Some(value) = filter_value(field, val) else {
+        let Some(value) = filter_value(field, reject_nul(val)?) else {
             continue;
         };
         predicates.push(WhereExpr::Predicate(Filter {
@@ -2628,6 +2632,7 @@ fn build_list_where(
 
     // ILIKE search across `search_fields`, OR-combined.
     if let Some(q) = params.get("search").filter(|s| !s.is_empty()) {
+        let q = reject_nul(q)?;
         // Escape LIKE metacharacters (`!`-based, portable) and pair
         // with `Op::ILikeEscaped` so `ESCAPE '!'` is emitted — the only
         // way the escaping is honored on SQLite (#1257).
@@ -2649,13 +2654,13 @@ fn build_list_where(
         }
     }
 
-    if predicates.is_empty() {
+    Ok(if predicates.is_empty() {
         WhereExpr::And(vec![])
     } else if predicates.len() == 1 {
         predicates.remove(0)
     } else {
         WhereExpr::And(predicates)
-    }
+    })
 }
 
 /// A `?field=value` filter typed as its field (#1915). `None` ignores the
@@ -3726,7 +3731,8 @@ where
 #[cfg(feature = "tenancy")]
 mod tenant {
     use super::*;
-    use crate::extractors::Tenant;
+    // Any mounted backend: a SQLite tenant works in a build that also has Postgres.
+    use crate::extractors::TenantScope;
 
     // ---------- ListView ----------
 
@@ -3741,7 +3747,7 @@ mod tenant {
         parts: Parts,
         csrf: CsrfCookie,
         Query(params): Query<HashMap<String, String>>,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let page = crate::list_params::parse_page(&params);
         let page_size =
@@ -3757,12 +3763,15 @@ mod tenant {
             Ok(v) => v,
             Err(msg) => return template_error(&msg),
         };
-        let where_clause = build_list_where(
+        let where_clause = match build_list_where(
             state.vs.schema,
             &state.vs.filter_fields,
             &state.vs.search_fields,
             &params,
-        );
+        ) {
+            Ok(w) => w,
+            Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+        };
         // #562 — struct-update over SelectQuery::new for the
         // tenant-side list+filter query (custom WHERE + paginate).
         let select_q = SelectQuery {
@@ -3817,7 +3826,7 @@ mod tenant {
     /// action against it, and 303s back to the same prefix.
     pub(super) async fn handle_list_action_tenant(
         State(state): State<Arc<TenantListViewState>>,
-        t: Tenant,
+        t: TenantScope,
         req: axum::extract::Request,
     ) -> Response {
         let (parts, body) = req.into_parts();
@@ -3949,7 +3958,7 @@ mod tenant {
         State(state): State<Arc<TenantDetailViewState>>,
         parts: Parts,
         Path(pk): Path<String>,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         // #379 — `lookup_field` opt-in: probe by the named column
         // instead of the PK. Tenant variant mirrors the
@@ -3994,7 +4003,7 @@ mod tenant {
         parts: Parts,
         Path(pk): Path<String>,
         csrf: CsrfCookie,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -4026,7 +4035,7 @@ mod tenant {
     pub(super) async fn handle_delete_submit_tenant(
         State(state): State<Arc<TenantDeleteViewState>>,
         Path(pk): Path<String>,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let Some(pk_field) = state.vs.schema.primary_key() else {
             return template_error(&format!(
@@ -4088,7 +4097,7 @@ mod tenant {
     pub(super) async fn handle_create_post_tenant(
         State(state): State<Arc<TenantFormViewState>>,
         parts: Parts,
-        t: Tenant,
+        t: TenantScope,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let (mut columns, mut values, mut errors) = parse_form(
@@ -4125,7 +4134,7 @@ mod tenant {
         parts: Parts,
         Path(pk): Path<String>,
         csrf: CsrfCookie,
-        t: Tenant,
+        t: TenantScope,
     ) -> Response {
         let page = state.page();
         let object = match page.object(t.pool(), &pk).await {
@@ -4141,7 +4150,7 @@ mod tenant {
         State(state): State<Arc<TenantFormViewState>>,
         Path(pk): Path<String>,
         parts: Parts,
-        t: Tenant,
+        t: TenantScope,
         axum::Form(form): axum::Form<HashMap<String, String>>,
     ) -> Response {
         let Some(pk_field) = state.schema.primary_key() else {
@@ -4554,7 +4563,7 @@ mod tests {
     #[test]
     fn build_list_where_empty_params_returns_empty_and() {
         let s = schema_two_fields();
-        let where_clause = build_list_where(s, &["title".into()], &[], &HashMap::new());
+        let where_clause = build_list_where(s, &["title".into()], &[], &HashMap::new()).unwrap();
         match where_clause {
             WhereExpr::And(v) => assert!(v.is_empty()),
             other => panic!("expected empty And, got {other:?}"),
@@ -4568,7 +4577,7 @@ mod tests {
         let s = schema_two_fields();
         let mut params = HashMap::new();
         params.insert("title".to_owned(), "Hello".to_owned());
-        let where_clause = build_list_where(s, &["title".into()], &[], &params);
+        let where_clause = build_list_where(s, &["title".into()], &[], &params).unwrap();
         match where_clause {
             WhereExpr::Predicate(f) => {
                 assert_eq!(f.column, "title");
@@ -4585,7 +4594,7 @@ mod tests {
         let s = schema_two_fields();
         let mut params = HashMap::new();
         params.insert("category".to_owned(), "tech".to_owned()); // not in allowlist
-        let where_clause = build_list_where(s, &["title".into()], &[], &params);
+        let where_clause = build_list_where(s, &["title".into()], &[], &params).unwrap();
         match where_clause {
             WhereExpr::And(v) => assert!(v.is_empty()),
             other => panic!("expected empty And, got {other:?}"),
@@ -4600,7 +4609,8 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("page".to_owned(), "2".to_owned());
         params.insert("page_size".to_owned(), "50".to_owned());
-        let where_clause = build_list_where(s, &["page".into(), "page_size".into()], &[], &params);
+        let where_clause =
+            build_list_where(s, &["page".into(), "page_size".into()], &[], &params).unwrap();
         match where_clause {
             WhereExpr::And(v) => assert!(v.is_empty()),
             other => panic!("expected empty And, got {other:?}"),
@@ -4614,7 +4624,7 @@ mod tests {
         let s = schema_two_fields();
         let mut params = HashMap::new();
         params.insert("search".to_owned(), "Hello".to_owned());
-        let where_clause = build_list_where(s, &[], &["title".into()], &params);
+        let where_clause = build_list_where(s, &[], &["title".into()], &params).unwrap();
         match where_clause {
             WhereExpr::Predicate(f) => {
                 assert_eq!(f.column, "title");
@@ -4643,7 +4653,8 @@ mod tests {
             &["title".into()],
             &["title".into(), "score".into()],
             &params,
-        );
+        )
+        .unwrap();
         match where_clause {
             WhereExpr::And(branches) => {
                 assert_eq!(branches.len(), 2, "expected filter AND search");
@@ -4673,7 +4684,7 @@ mod tests {
         let s = schema_two_fields();
         let mut params = HashMap::new();
         params.insert("search".to_owned(), String::new());
-        let where_clause = build_list_where(s, &[], &["title".into()], &params);
+        let where_clause = build_list_where(s, &[], &["title".into()], &params).unwrap();
         match where_clause {
             WhereExpr::And(v) => assert!(v.is_empty()),
             other => panic!("expected empty And, got {other:?}"),

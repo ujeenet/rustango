@@ -386,31 +386,13 @@ async fn showmigrations_without_tenants_owes_nothing() {
 /// An unreachable tenant fails `prewarm-pools` and `audit-cleanup`.
 #[tokio::test]
 async fn an_unreachable_tenant_fails_prewarm_and_audit_cleanup() {
-    use rustango::sql::Auto;
     let b = boot().await;
     b.run(&["migrate-registry"]).await.expect("registry");
     // The parent dir does not exist, so SQLite cannot open the file.
     let gone = b._tmp.path().join("no-such-dir").join("gone.db");
-    let mut org = rustango::tenancy::Org {
-        id: Auto::default(),
-        slug: "gone".into(),
-        display_name: "gone".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(format!("sqlite://{}?mode=rwc", gone.display())),
-        schema_name: None,
-        host_pattern: None,
-        port: None,
-        path_prefix: None,
-        active: true,
-        created_at: chrono::Utc::now(),
-        brand_name: None,
-        brand_tagline: None,
-        logo_path: None,
-        favicon_path: None,
-        primary_color: None,
-        theme_mode: None,
-    };
+    let mut org = rustango::tenancy::Org::new("gone");
+    org.backend_kind = "sqlite".into();
+    org.database_url = Some(format!("sqlite://{}?mode=rwc", gone.display()));
     org.insert(&b.pools.registry_pool())
         .await
         .expect("seed org");

@@ -3773,6 +3773,7 @@ fn inherent_impl_tokens(
                 /// Save this row to its table against either backend.
                 /// `INSERT` when the `Auto<T>` PK is `Unset`, else
                 /// `UPDATE` keyed on the PK; global scopes do not apply.
+                /// A PK with no row is `RowNotFound`: use `insert` for a new row.
                 ///
                 /// # Errors
                 /// As [`Self::save`].
@@ -3968,12 +3969,13 @@ fn inherent_impl_tokens(
                     );
                     self.__rustango_save_with_diff(pool, &_query, ::core::option::Option::None)
                         .await
+                        .and_then(#root::sql::__macro_internals::row_saved)
                 },
             );
             quote! {
                 /// Save this row on any backend, with a diff audit row
                 /// (before and after) in the same transaction. An `Unset`
-                /// `Auto` PK inserts instead.
+                /// `Auto` PK inserts instead; a PK with no row is `RowNotFound`.
                 ///
                 /// The audit row's `changes` JSON contains one
                 /// `{ "field": { "before": …, "after": … } }` entry
@@ -4446,17 +4448,7 @@ fn inherent_impl_tokens(
                 &mut self,
                 pool: &#root::sql::Pool,
             ) -> ::core::result::Result<(), #root::sql::ExecError> {
-                use #root::sql::FetcherPool as _;
-                let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
-                    ::core::clone::Clone::clone(&self.#pk_ident),
-                );
-                let mut _rows: ::std::vec::Vec<Self> =
-                    #root::query::QuerySet::<Self>::default()
-                        .filter(::core::stringify!(#pk_ident), _pk_val)
-                        .limit(1)
-                        .fetch(pool)
-                        .await?;
-                match _rows.into_iter().next() {
+                match self.fresh(pool).await? {
                     ::core::option::Option::Some(_fresh) => {
                         *self = _fresh;
                         ::core::result::Result::Ok(())
@@ -4631,8 +4623,10 @@ fn inherent_impl_tokens(
                 let _pk_val: #root::core::SqlValue = ::core::convert::Into::into(
                     ::core::clone::Clone::clone(&self.#pk_ident),
                 );
+                // By key alone, as `save()` and `delete()` write it.
                 let _rows: ::std::vec::Vec<Self> =
                     #root::query::QuerySet::<Self>::default()
+                        .without_global_scopes()
                         .filter(::core::stringify!(#pk_ident), _pk_val)
                         .limit(1)
                         .fetch(pool)
@@ -6585,7 +6579,9 @@ fn inherent_impl_tokens(
                         ),
                     )),
                 );
-                #root::sql::__macro_internals::update_on(_executor, &_query).await
+                #root::sql::__macro_internals::update_on(_executor, &_query)
+                    .await
+                    .and_then(#root::sql::__macro_internals::row_saved)
             },
         );
         let upsert = if fields.pk_is_auto {
@@ -6766,6 +6762,17 @@ fn inherent_impl_tokens(
                 .expect("soft_delete_column without ident");
             let refuse_soft_delete = refuse("soft_delete_on");
             let refuse_restore = refuse("restore_on");
+            // `self` takes the written value, so a later `save` keeps it.
+            let mark_deleted = quote! {
+                if _n > 0 {
+                    self.#sd_field_ident = ::core::option::Option::Some(_now);
+                }
+            };
+            let mark_restored = quote! {
+                if _n > 0 {
+                    self.#sd_field_ident = ::core::option::Option::None;
+                }
+            };
             quote! {
                 /// Soft-delete this row on any [`#root::sql::SqlExecutor`]: set
                 /// its `#[rustango(soft_delete)]` column to now. An audited
@@ -6774,10 +6781,11 @@ fn inherent_impl_tokens(
                 /// # Errors
                 /// As [`Self::delete`].
                 pub async fn soft_delete_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
-                    &self,
+                    &mut self,
                     _executor: _E,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #refuse_soft_delete
+                    let _now = #root::__chrono::Utc::now();
                     let _query = #root::soft_delete::__mark_query(
                         <Self as #root::core::Model>::SCHEMA,
                         #col_lit,
@@ -6785,9 +6793,11 @@ fn inherent_impl_tokens(
                         ::core::convert::Into::<#root::core::SqlValue>::into(
                             ::core::clone::Clone::clone(&self.#pk_ident)
                         ),
-                        ::core::option::Option::Some(#root::__chrono::Utc::now()),
+                        ::core::option::Option::Some(_now),
                     );
-                    #root::sql::__macro_internals::update_on(_executor, &_query).await
+                    let _n = #root::sql::__macro_internals::update_on(_executor, &_query).await?;
+                    #mark_deleted
+                    ::core::result::Result::Ok(_n)
                 }
 
                 /// Inverse of [`Self::soft_delete_on`]: clear the soft-delete
@@ -6796,7 +6806,7 @@ fn inherent_impl_tokens(
                 /// # Errors
                 /// As [`Self::delete`].
                 pub async fn restore_on<'_c, _E: #root::sql::SqlExecutor<'_c>>(
-                    &self,
+                    &mut self,
                     _executor: _E,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     #refuse_restore
@@ -6809,7 +6819,9 @@ fn inherent_impl_tokens(
                         ),
                         ::core::option::Option::None,
                     );
-                    #root::sql::__macro_internals::update_on(_executor, &_query).await
+                    let _n = #root::sql::__macro_internals::update_on(_executor, &_query).await?;
+                    #mark_restored
+                    ::core::result::Result::Ok(_n)
                 }
 
                 /// Soft-delete this row on any backend. Eloquent `Model::delete()` semantics on
@@ -6821,12 +6833,13 @@ fn inherent_impl_tokens(
                 /// `soft_delete::active_filter` /
                 /// `compose_with_active`) filter trashed rows out by
                 /// reading `IS NULL` on the same column. Keyed on the PK;
-                /// global scopes do not apply.
+                /// global scopes do not apply. When a row changed, `self`
+                /// takes the stamp too, so a later `save` keeps it.
                 ///
                 /// # Errors
                 /// As [`#root::sql::update_pool`].
                 pub async fn soft_delete(
-                    &self,
+                    &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     let _now = #root::__chrono::Utc::now();
@@ -6839,19 +6852,22 @@ fn inherent_impl_tokens(
                         ),
                         ::core::option::Option::Some(_now),
                     );
-                    #pool_softdelete_run
+                    let _n = { #pool_softdelete_run }?;
+                    #mark_deleted
+                    ::core::result::Result::Ok(_n)
                 }
 
                 /// Tri-dialect counterpart of [`Self::restore_on`].
                 /// Clears the `#[rustango(soft_delete)]` column back
                 /// to `NULL`, marking the row live again. Eloquent
                 /// `Model::restore()` parity. Keyed on the PK; global
-                /// scopes do not apply.
+                /// scopes do not apply. When a row changed, `self` is
+                /// cleared too.
                 ///
                 /// # Errors
                 /// As [`#root::sql::update_pool`].
                 pub async fn restore(
-                    &self,
+                    &mut self,
                     pool: &#root::sql::Pool,
                 ) -> ::core::result::Result<u64, #root::sql::ExecError> {
                     let _query = #root::soft_delete::__mark_query(
@@ -6863,7 +6879,9 @@ fn inherent_impl_tokens(
                         ),
                         ::core::option::Option::None,
                     );
-                    #pool_restore_run
+                    let _n = { #pool_restore_run }?;
+                    #mark_restored
+                    ::core::result::Result::Ok(_n)
                 }
 
                 /// Hard-delete this row, ignoring the soft-delete
@@ -7234,8 +7252,8 @@ fn inherent_impl_tokens(
     // `Create` entry each in one transaction.
     let bulk_pool_body = if audited_fields.is_some() {
         quote! {
-            let mut _tx = #root::sql::write_transaction(pool).await?;
-            Self::__rustango_bulk_insert_exec(rows, &mut _tx).await?;
+            let mut _tx = #root::sql::__macro_internals::write_tx(pool).await?;
+            Self::__rustango_bulk_insert_exec(rows, &mut *_tx).await?;
             // MySQL has no RETURNING: a database-filled PK stays unset.
             if rows.iter().any(|_row| _row.__rustango_audit_pk().is_empty()) {
                 return ::core::result::Result::Err(#root::sql::ExecError::AuditUnsupported {
@@ -7308,34 +7326,10 @@ fn inherent_impl_tokens(
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
-                let _first_unset = matches!(
-                    rows[0].#first_auto_ident,
-                    #root::sql::Auto::Unset
-                );
-                #( #uniformity )*
                 for _row in rows.iter_mut() {
                     #( #fill_in_place )*
                 }
-                let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<#root::core::SqlValue>,
-                > = ::std::vec::Vec::with_capacity(rows.len());
-                let _columns: ::std::vec::Vec<&'static str> = if _first_unset {
-                    for _row in rows.iter() {
-                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
-                            ::std::vec::Vec::new();
-                        #( #pushes_no_auto )*
-                        _all_rows.push(_row_vals);
-                    }
-                    ::std::vec![ #( #cols_no_auto ),* ]
-                } else {
-                    for _row in rows.iter() {
-                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
-                            ::std::vec::Vec::new();
-                        #( #pushes_all )*
-                        _all_rows.push(_row_vals);
-                    }
-                    ::std::vec![ #( #cols_all ),* ]
-                };
+                let (_columns, _all_rows) = Self::__rustango_bulk_rows(rows)?;
                 let _query = #root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
                     _columns,
@@ -7359,6 +7353,49 @@ fn inherent_impl_tokens(
                     #root::sql::apply_auto_pk(_row, _row_mut)?;
                 }
                 ::core::result::Result::Ok(())
+            }
+
+            /// Columns and per-row values for every bulk write. A database-filled
+            /// `Auto` is left out when every row leaves it `Unset`, written when
+            /// every row sets it; a mix is `BulkAutoMixed`.
+            #[doc(hidden)]
+            pub fn __rustango_bulk_rows(
+                rows: &[Self],
+            ) -> ::core::result::Result<
+                (
+                    ::std::vec::Vec<&'static str>,
+                    ::std::vec::Vec<::std::vec::Vec<#root::core::SqlValue>>,
+                ),
+                #root::sql::ExecError,
+            > {
+                let _first_unset = match rows.first() {
+                    ::core::option::Option::Some(_r) => {
+                        matches!(_r.#first_auto_ident, #root::sql::Auto::Unset)
+                    }
+                    ::core::option::Option::None => true,
+                };
+                #( #uniformity )*
+                let mut _all_rows: ::std::vec::Vec<
+                    ::std::vec::Vec<#root::core::SqlValue>,
+                > = ::std::vec::Vec::with_capacity(rows.len());
+                let _columns: ::std::vec::Vec<&'static str> = if _first_unset {
+                    for _row in rows.iter() {
+                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
+                            ::std::vec::Vec::new();
+                        #( #pushes_no_auto )*
+                        _all_rows.push(_row_vals);
+                    }
+                    ::std::vec![ #( #cols_no_auto ),* ]
+                } else {
+                    for _row in rows.iter() {
+                        let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
+                            ::std::vec::Vec::new();
+                        #( #pushes_all )*
+                        _all_rows.push(_row_vals);
+                    }
+                    ::std::vec![ #( #cols_all ),* ]
+                };
+                ::core::result::Result::Ok((_columns, _all_rows))
             }
         }
     } else {
@@ -7399,6 +7436,28 @@ fn inherent_impl_tokens(
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
+                let (_columns, _all_rows) = Self::__rustango_bulk_rows(rows)?;
+                let _query = #root::core::BulkInsertQuery::new(
+                    <Self as #root::core::Model>::SCHEMA,
+                    _columns,
+                    _all_rows,
+                );
+                #root::sql::__macro_internals::bulk_insert_on(_executor, &_query)
+                    .await
+                    .map(drop)
+            }
+
+            /// Columns and per-row values for every bulk write.
+            #[doc(hidden)]
+            pub fn __rustango_bulk_rows(
+                rows: &[Self],
+            ) -> ::core::result::Result<
+                (
+                    ::std::vec::Vec<&'static str>,
+                    ::std::vec::Vec<::std::vec::Vec<#root::core::SqlValue>>,
+                ),
+                #root::sql::ExecError,
+            > {
                 let mut _all_rows: ::std::vec::Vec<
                     ::std::vec::Vec<#root::core::SqlValue>,
                 > = ::std::vec::Vec::with_capacity(rows.len());
@@ -7408,25 +7467,15 @@ fn inherent_impl_tokens(
                     #( #pushes_all )*
                     _all_rows.push(_row_vals);
                 }
-                let _query = #root::core::BulkInsertQuery::new(
-                    <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #cols_all ),* ],
-                    _all_rows,
-                );
-                #root::sql::__macro_internals::bulk_insert_on(_executor, &_query)
-                    .await
-                    .map(drop)
+                ::core::result::Result::Ok((::std::vec![ #( #cols_all ),* ], _all_rows))
             }
         }
     };
 
     // Tri-dialect `bulk_upsert_pool` — issue #267 / T1.5. Always emitted
     // (no postgres-feature gate); routes through the existing
-    // `bulk_insert_pool` + per-dialect conflict writer.
-    //
-    // Auto<T> PKs are required to be `Auto::Unset` for every row so the
-    // sequence picks the PK for fresh inserts; the UPDATE branch never
-    // touches the Auto column.
+    // `bulk_insert_pool` + per-dialect conflict writer. Its columns come
+    // from `__rustango_bulk_rows`, as `bulk_insert`'s do.
     // Audited models audit each written row; MySQL, with no RETURNING,
     // is refused there (#1747, #1795).
     let run_conflict_bulk_insert = match (audited_fields.is_some(), primary_key.is_some()) {
@@ -7446,19 +7495,6 @@ fn inherent_impl_tokens(
     let bulk_upsert_pool_method = {
         let (gen_idents, gen_cols): (Vec<_>, Vec<_>) =
             fields.uuid_v7_fields.iter().cloned().unzip();
-        // Pick the "no Auto" columns when the model has Auto fields,
-        // else every column.
-        let (upsert_cols, upsert_pushes): (Vec<_>, Vec<_>) = if fields.has_auto {
-            (
-                fields.bulk_columns_no_auto.clone(),
-                fields.bulk_pushes_no_auto.clone(),
-            )
-        } else {
-            (
-                fields.bulk_columns_all.clone(),
-                fields.bulk_pushes_all.clone(),
-            )
-        };
         quote! {
             /// Tri-dialect bulk insert that updates on conflict — the
             /// "import a batch idempotently" shape. Issue #267 / T1.5.
@@ -7478,9 +7514,9 @@ fn inherent_impl_tokens(
             /// conflict — every other column is left untouched on the
             /// existing row.
             ///
-            /// Auto-PK rows must all have `Auto::Unset` (the sequence
-            /// picks the PK on insert; the update path never touches
-            /// the Auto column). Auto-set rows trigger a hard error.
+            /// A database-filled `Auto` PK follows [`Self::bulk_insert`]: all
+            /// `Unset` leaves it to the database, all `Set` writes it (so
+            /// `target = ["id"]` updates by id), a mix is `BulkAutoMixed`.
             /// Rows repeating a `target` key: the last one wins.
             /// Empty slice is a no-op. On an audited model each written
             /// row gets a `create` or `update` audit row; MySQL refuses it.
@@ -7497,15 +7533,7 @@ fn inherent_impl_tokens(
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
-                let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<#root::core::SqlValue>,
-                > = ::std::vec::Vec::with_capacity(rows.len());
-                for _row in rows.iter() {
-                    let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #upsert_pushes )*
-                    _all_rows.push(_row_vals);
-                }
+                let (_columns, _all_rows) = Self::__rustango_bulk_rows(rows)?;
                 #[allow(unused_mut)]
                 let mut _generated: ::std::vec::Vec<&'static str> = ::std::vec::Vec::new();
                 #(
@@ -7515,7 +7543,7 @@ fn inherent_impl_tokens(
                 )*
                 let _query = #root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #upsert_cols ),* ],
+                    _columns,
                     _all_rows,
                 )
                 .on_conflict_do_update(target, update_cols)
@@ -7539,18 +7567,10 @@ fn inherent_impl_tokens(
                 if rows.is_empty() {
                     return ::core::result::Result::Ok(());
                 }
-                let mut _all_rows: ::std::vec::Vec<
-                    ::std::vec::Vec<#root::core::SqlValue>,
-                > = ::std::vec::Vec::with_capacity(rows.len());
-                for _row in rows.iter() {
-                    let mut _row_vals: ::std::vec::Vec<#root::core::SqlValue> =
-                        ::std::vec::Vec::new();
-                    #( #upsert_pushes )*
-                    _all_rows.push(_row_vals);
-                }
+                let (_columns, _all_rows) = Self::__rustango_bulk_rows(rows)?;
                 let _query = #root::core::BulkInsertQuery::new(
                     <Self as #root::core::Model>::SCHEMA,
-                    ::std::vec![ #( #upsert_cols ),* ],
+                    _columns,
                     _all_rows,
                 )
                 .on_conflict_do_nothing();

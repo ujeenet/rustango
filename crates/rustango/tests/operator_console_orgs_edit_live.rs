@@ -131,19 +131,18 @@ async fn boot() -> Option<(axum::Router, String, sqlx::PgPool, String)> {
 }
 
 async fn seed_org(pool: &sqlx::PgPool, slug: &str, mode: StorageMode, db_url: Option<&str>) {
-    let mut org = Org {
-        id: Auto::default(),
-        slug: slug.to_owned(),
-        display_name: format!("display for {slug}"),
-        storage_mode: mode.as_str().into(),
-        backend_kind: "postgres".to_owned(),
-        database_url: db_url.map(str::to_owned),
-        schema_name: None,
-        host_pattern: Some(format!("{slug}.example.com")),
-        port: None,
-        path_prefix: None,
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.id = Auto::default();
+        o.slug = slug.to_owned();
+        o.display_name = format!("display for {slug}");
+        o.storage_mode = mode.as_str().into();
+        o.backend_kind = "postgres".to_owned();
+        o.database_url = db_url.map(str::to_owned);
+        o.schema_name = None;
+        o.host_pattern = Some(format!("{slug}.example.com"));
+        o.port = None;
+        o.path_prefix = None;
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 }
 

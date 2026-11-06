@@ -44,12 +44,10 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("COOKBOOK.md", "98c57dc3", "#[rustango(table = \"orders\", db_table_comment = \"Customer purchase records — see /docs/orders.md\")]"),
     ("COOKBOOK.md", "9e08df0d", "#[rustango("),
     ("COOKBOOK.md", "b090bc44", "use rustango::core::{Filter, Op, SqlValue, WhereExpr};"),
-    ("COOKBOOK.md", "b6abb412", "use rustango::tenancy::RouteConfig;"),
     ("COOKBOOK.md", "bb85f197", "#[rustango("),
     ("COOKBOOK.md", "bd955c96", "#[derive(Model)]"),
     ("COOKBOOK.md", "c6640b53", "// Find-or-default in one call. Returns (row, exists: bool) so"),
     ("COOKBOOK.md", "cc7e33a1", "#[derive(Model)]"),
-    ("COOKBOOK.md", "d13b66a5", "use rustango::tenancy::TenantPoolsConfig;"),
     ("COOKBOOK.md", "d9300ef9", "ensure_seeded(&pool).await?;"),
     ("COOKBOOK.md", "e184aeeb", "use rustango::template_views::{ListView, DetailView, CreateView, UpdateView, DeleteView};"),
     ("COOKBOOK.md", "e70be996", "#[rustango(table = \"post\", get_latest_by = \"-created_at\")]"),
@@ -89,14 +87,13 @@ const KNOWN_FAILING: &[(&str, &str, &str)] = &[
     ("orm.md", "c2aca856", "use rustango::core::Column as _;"),
     ("orm.md", "ceb8de63", "post.save_partial_typed((Post::title, Post::slug), &pool).await?;"),
     ("orm.md", "d91565ef", "let posts = Post::objects()"),
-    ("orm.md", "db8435cb", "use rustango::sql::sqlx;"),
     ("orm.md", "e115b399", "use rustango::core::joins::aliased;"),
     ("orm.md", "ee6e61e1", "// Page-number — page 2 of 50-row pages = LIMIT 50 OFFSET 50."),
     ("orm.md", "f0c6d25d", "// .only(...) — fetch only the named columns."),
 ];
 
 /// The size of [`KNOWN_FAILING`]. It may only go down.
-const KNOWN_FAILING_MAX: usize = 77;
+const KNOWN_FAILING_MAX: usize = 74;
 
 struct Page {
     name: &'static str,

@@ -14,8 +14,8 @@ failures.
 
 > **Source:** `rustango::jobs` (`Job`, `JobQueue`, `InMemoryJobQueue`,
 > `JobError`, `JobDeadLetter`) and `rustango::jobs::DatabaseJobQueue` (the
-> table-backed queue, alias of `pg::PgJobQueue`) — behind the `jobs` feature (on
-> by default).
+> table-backed queue, alias of `pg::PgJobQueue`) — behind the `jobs` feature;
+> `DatabaseJobQueue` and `make:worker` also need `jobs-postgres` (both on by default).
 >
 > **Runnable version:** the in-memory, retry, and dead-letter snippets are
 > copied from [`jobs_doc.rs`](https://github.com/ujeenet/rustango/blob/main/crates/rustango/tests/jobs_doc.rs)
@@ -32,6 +32,7 @@ failures.
 - [Step 4 — Wire it into your app](#step-4--wire-it-into-your-app) — the full example
 - [Running the workers (CLI + production)](#running-the-workers-cli--production)
 - [Retries and backoff](#retries-and-backoff)
+- [The job context: id, attempt, stop](#the-job-context-id-attempt-stop)
 - [The dead-letter handler](#the-dead-letter-handler)
 - [The persistent queue (production)](#the-persistent-queue-production)
 - [Jobs under multi-tenancy](#jobs-under-multi-tenancy)
@@ -110,7 +111,8 @@ queue.shutdown().await;   // on shutdown: drain in-flight jobs, then stop
 then aborts and re-queues them. Queued jobs and parked retries stay queued, and
 `start()` again picks them up.
 
-Jobs are **at-least-once**. No stop signal reaches a running job, and an aborted
+Jobs are **at-least-once**. A running job sees the stop through
+[`JobCtx::stopping`](#the-job-context-id-attempt-stop), and an aborted
 job runs again from the start (the DB queue releases its row even if the job had
 just finished). The abort spends an attempt. Make every job idempotent.
 
@@ -305,6 +307,47 @@ the payload, override `fn max_attempts(&self) -> u32` or
 return `MAX_ATTEMPTS` and `retry_backoff`. The cap is read at dispatch.
 `jobs::exponential_backoff(base, failed_attempt)` is the default curve with your
 own base: `base`, doubled per failure, capped at `base · 1024`.
+
+---
+
+## The job context: id, attempt, stop
+
+Both queues call `Job::run_with(&self, ctx: &JobCtx)`. By default it calls
+`run()`, so jobs that implement only `run` work unchanged. Override it to read:
+
+- `ctx.id()` — the job's id, the same on every retry. Unique on its queue only.
+- `ctx.idempotency_key(scope)` — the id under your scope, for an outside system.
+- `ctx.attempt()` — 1 for the first run, 2 for the first retry.
+- `ctx.stopping()` / `ctx.is_stopping()` — the queue is shutting down; finish
+  within `shutdown_grace` or the run is aborted and re-queued.
+
+Use `idempotency_key` as the key an outside system sees, so a retried charge is
+not charged twice. The database queue's id is the row id plus its enqueue time,
+so a recreated table does not repeat it. Tenants with their own job tables still
+start at row 1, so pass a scope that tells the tables apart, such as the tenant
+slug:
+
+```rust
+use rustango::jobs::{Job, JobCtx, JobError};
+
+#[async_trait::async_trait]
+impl Job for ChargeCard {
+    const NAME: &'static str = "charge_card";
+
+    async fn run(&self) -> Result<(), JobError> {
+        Err(JobError::Fatal("ChargeCard runs through run_with".into()))
+    }
+
+    async fn run_with(&self, ctx: &JobCtx) -> Result<(), JobError> {
+        let key = ctx.idempotency_key(&self.tenant);   // same key on every retry
+        stripe_charge(self.order_id, self.cents, &key)
+            .await
+            .map_err(|e| JobError::Retryable(e.to_string()))
+    }
+}
+```
+
+A handler passed to `register_with` gets the payload only, not the context.
 
 ---
 
@@ -523,10 +566,10 @@ If you guard the sweep so only one replica runs it, **scope the lock per
 tenant**:
 
 ```rust
-use rustango::distributed_lock::DistributedLock;
+use rustango::cache::CacheScope;
 
 let tenant = TenantSlug::of(&org).expect("a registry org");
-let lock = DistributedLock::new(cache.clone()).for_tenant(&tenant);
+let lock = CacheScope::for_tenant(cache.clone(), &tenant).locks();
 // Tick every minute; this runs once per UTC day across replicas.
 lock.once_per_period("nightly_prune", day, || prune(&org)).await;
 ```
@@ -556,7 +599,8 @@ the expected outcome, so nothing is logged. This is a known gap.
 
 **`JobQueue` methods:** `register::<T>()` · `dispatch(&payload)` · `start()` ·
 `register_with::<T, _, _>(handler)` · `shutdown()` · `pending_count()` (jobs
-waiting to be picked up). Both queues have `on_dead_letter` and
+waiting to be picked up). `Job::run_with` gets a `JobCtx` (`id`, `attempt`,
+`stopping`). Both queues have `on_dead_letter` and
 `shutdown_grace`. The `DatabaseJobQueue` adds `ensure_table_pool`,
 `with_workers_pool`, `new_pool`, `poll_interval`, `heartbeat_interval`,
 `queue_name`, `reclaim_stuck_after` and `reclaim_stuck_jobs_pool`.

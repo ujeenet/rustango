@@ -295,10 +295,18 @@ async fn encode_off_runtime(
     bytes: axum::body::Bytes,
     level: u32,
 ) -> std::io::Result<Vec<u8>> {
+    off_runtime(bytes, move |b| encode(enc, b, level)).await
+}
+
+/// Run `f` on `bytes`, on the blocking pool from [`BLOCKING_THRESHOLD`] up.
+async fn off_runtime<F>(bytes: axum::body::Bytes, f: F) -> std::io::Result<Vec<u8>>
+where
+    F: FnOnce(&[u8]) -> std::io::Result<Vec<u8>> + Send + 'static,
+{
     if bytes.len() < BLOCKING_THRESHOLD {
-        return encode(enc, &bytes, level);
+        return f(&bytes);
     }
-    tokio::task::spawn_blocking(move || encode(enc, &bytes, level))
+    tokio::task::spawn_blocking(move || f(&bytes))
         .await
         .map_err(std::io::Error::other)?
 }
@@ -830,28 +838,20 @@ mod tests {
         assert_eq!(raw.headers()[ETAG], "\"abc\"");
     }
 
-    /// A large body is compressed off the runtime thread, so other tasks
-    /// keep running meanwhile.
+    /// A large body is compressed off the runtime thread: the encoder waits
+    /// for a task only the (single) runtime thread can run.
     #[tokio::test(flavor = "current_thread")]
     async fn a_large_body_does_not_block_the_runtime() {
-        let body: String = (0..256 * 1024)
-            .map(|i| char::from(b'a' + ((i * 7919) % 26) as u8))
-            .collect();
-        let app = Router::new()
-            .route(
-                "/big",
-                get(move || async move { ([(CONTENT_TYPE, "text/plain")], body).into_response() }),
-            )
-            .compression(CompressionLayer::default());
-        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let r = ran.clone();
-        tokio::spawn(async move { r.store(true, std::sync::atomic::Ordering::SeqCst) });
-        let resp = req(app, Some("gzip"), "/big").await;
-        assert_eq!(resp.headers()[CONTENT_ENCODING], "gzip");
-        assert!(
-            ran.load(std::sync::atomic::Ordering::SeqCst),
-            "the compressor held the only runtime thread"
-        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move { tx.send(()).unwrap() });
+        let body = axum::body::Bytes::from(vec![b'a'; BLOCKING_THRESHOLD]);
+        let out = off_runtime(body, move |b| {
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .map_err(|_| std::io::Error::other("the encoder held the runtime thread"))?;
+            encode(Encoding::Gzip, b, 6)
+        })
+        .await;
+        assert!(out.is_ok(), "{out:?}");
     }
 
     #[test]

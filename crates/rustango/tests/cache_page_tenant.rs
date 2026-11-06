@@ -34,12 +34,11 @@ async fn registry() -> Pool {
         .await
         .expect("orgs table");
     for slug in ["acme", "globex"] {
-        let mut org = Org {
-            slug: slug.to_owned(),
-            display_name: slug.to_owned(),
-            backend_kind: "sqlite".into(),
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.to_owned();
+            o.display_name = slug.to_owned();
+            o.backend_kind = "sqlite".into();
+        });
         org.insert(&pool).await.expect("insert org");
     }
     pool
@@ -261,12 +260,11 @@ async fn server_builder_keys_the_page_on_the_tenant() {
         .await
         .expect("orgs");
     for slug in ["acme", "globex"] {
-        let mut org = Org {
-            slug: slug.to_owned(),
-            display_name: slug.to_owned(),
-            backend_kind: "sqlite".into(),
-            ..rustango::testkit::org()
-        };
+        let mut org = rustango::testkit::org_with(|o| {
+            o.slug = slug.to_owned();
+            o.display_name = slug.to_owned();
+            o.backend_kind = "sqlite".into();
+        });
         org.insert(&pool).await.expect("insert org");
     }
     let hits = Arc::new(AtomicU32::new(0));
@@ -335,12 +333,11 @@ async fn a_reused_slug_does_not_get_the_purged_tenants_page() {
         .unwrap()
         .remove(0);
     old.delete(&registry).await.unwrap();
-    let mut heir = Org {
-        slug: "acme".into(),
-        display_name: "acme".into(),
-        backend_kind: "sqlite".into(),
-        ..rustango::testkit::org()
-    };
+    let mut heir = rustango::testkit::org_with(|o| {
+        o.slug = "acme".into();
+        o.display_name = "acme".into();
+        o.backend_kind = "sqlite".into();
+    });
     heir.insert(&registry).await.unwrap();
     assert_ne!(heir.id.get(), old.id.get());
     rustango::tenancy::invalidate_org_cache();

@@ -568,9 +568,13 @@ async fn composite_fk_drop_finds_the_live_name(pool: &Pool) {
             .await
             .expect("FK names");
         for (n,) in names {
-            exec(pool, &d.drop_foreign_key_sql(old, &n).expect("drop"))
-                .await
-                .expect("drop the FK");
+            exec(
+                pool,
+                &d.drop_foreign_key_sql(rustango::sql::TableTarget::bare(old), &n)
+                    .expect("drop"),
+            )
+            .await
+            .expect("drop the FK");
         }
         exec(
             pool,
@@ -1170,6 +1174,146 @@ async fn exec(pool: &Pool, sql: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// `name` creating `new` (id + `n`), its snapshot holding `all`; a squash
+/// when `replaces` is set.
+fn creates(
+    name: &str,
+    prev: Option<&str>,
+    new: &[&str],
+    all: &[&str],
+    replaces: &[&str],
+) -> Migration {
+    Migration {
+        name: name.into(),
+        created_at: "2026-11-05T00:00:00Z".into(),
+        prev: prev.map(Into::into),
+        atomic: true,
+        scope: rustango::migrate::MigrationScope::default(),
+        replaces: replaces.iter().map(|s| (*s).to_owned()).collect(),
+        merges: Vec::new(),
+        snapshot: snap(
+            all.iter()
+                .map(|t| table(t, vec![id(), col("n", true)]))
+                .collect(),
+        ),
+        forward: new
+            .iter()
+            .map(|t| Operation::Schema(SchemaChange::CreateTable((*t).into())))
+            .collect(),
+    }
+}
+
+/// `0001_a` + `0002_b`, then `0003_sq` replacing both; the old files kept.
+fn squash_chain(a: &str, b: &str) -> [Migration; 3] {
+    [
+        creates("0001_a", None, &[a], &[a], &[]),
+        creates("0002_b", Some("0001_a"), &[b], &[a, b], &[]),
+        creates("0003_sq", None, &[a, b], &[a, b], &["0001_a", "0002_b"]),
+    ]
+}
+
+async fn rows(pool: &Pool, t: &str) -> Result<i64, String> {
+    let sql = format!("SELECT COUNT(*) FROM {}", pool.dialect().quote_ident(t));
+    rustango::sql::raw_query_pool::<(i64,)>(&sql, Vec::new(), pool)
+        .await
+        .map(|r| r[0].0)
+        .map_err(|e| e.to_string())
+}
+
+async fn ledger_rows(pool: &Pool, ledger: &str) -> Vec<String> {
+    let sql = format!(
+        "SELECT name FROM {} ORDER BY name",
+        pool.dialect().quote_ident(ledger)
+    );
+    rustango::sql::raw_query_pool::<(String,)>(&sql, Vec::new(), pool)
+        .await
+        .expect("ledger")
+        .into_iter()
+        .map(|(n,)| n)
+        .collect()
+}
+
+/// An applied squash with its replaced files still on disk: `migrate
+/// <replaced>` and `unapply <replaced>` are refused and keep every row.
+async fn replaced_targets_are_refused(pool: &Pool) {
+    let (a, b, ledger) = ("mr_sq_a", "mr_sq_b", "mr_sq_ledger");
+    let dir = fresh(pool, &[a, b], ledger).await;
+    for m in squash_chain(a, b) {
+        write(dir.path(), &m);
+    }
+    let runner = rustango::migrate::Builder::default().ledger(ledger);
+    runner.migrate(pool, dir.path()).await.expect("migrate");
+    assert_eq!(ledger_rows(pool, ledger).await, ["0003_sq"]);
+    for t in [a, b] {
+        let q = pool.dialect().quote_ident(t);
+        exec(pool, &format!("INSERT INTO {q} (n) VALUES (1)"))
+            .await
+            .unwrap();
+    }
+
+    let err = runner
+        .migrate_to(pool, dir.path(), "0001_a")
+        .await
+        .expect_err("a replaced target is refused");
+    assert!(err.to_string().contains("0003_sq"), "{err}");
+    for verb in ["unapply", "unapply_force"] {
+        let res = if verb == "unapply" {
+            runner.unapply(pool, dir.path(), "0002_b").await
+        } else {
+            runner.unapply_force(pool, dir.path(), "0002_b").await
+        };
+        let err = res.expect_err("a migration not in the ledger is refused");
+        assert!(err.to_string().contains("0003_sq"), "{verb}: {err}");
+    }
+    for t in [a, b] {
+        assert_eq!(
+            rows(pool, t).await,
+            Ok(1),
+            "{t} on {}",
+            pool.dialect().name()
+        );
+    }
+    assert_eq!(ledger_rows(pool, ledger).await, ["0003_sq"]);
+    for t in [b, a, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
+/// `migrate_embedded` reconciles a squash over the files it replaces.
+async fn embedded_squash_reconciles(pool: &Pool) {
+    let (a, b, ledger) = ("mr_se_a", "mr_se_b", "mr_se_ledger");
+    let _dir = fresh(pool, &[a, b], ledger).await;
+    let chain = squash_chain(a, b);
+    let json: Vec<(String, String)> = chain
+        .iter()
+        .map(|m| (m.name.clone(), serde_json::to_string(m).unwrap()))
+        .collect();
+    let slice = |n: usize| -> Vec<(&str, &str)> {
+        json[..n]
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    };
+    let runner = rustango::migrate::Builder::default().ledger(ledger);
+    runner
+        .migrate_embedded(pool, &slice(2))
+        .await
+        .expect("old files");
+    let q = pool.dialect().quote_ident(a);
+    exec(pool, &format!("INSERT INTO {q} (n) VALUES (1)"))
+        .await
+        .unwrap();
+    runner
+        .migrate_embedded(pool, &slice(3))
+        .await
+        .unwrap_or_else(|e| panic!("squash on {}: {e}", pool.dialect().name()));
+    assert_eq!(ledger_rows(pool, ledger).await, ["0003_sq"]);
+    assert_eq!(rows(pool, a).await, Ok(1));
+    for t in [b, a, ledger] {
+        drop_table(pool, t).await;
+    }
+}
+
 /// A downgrade refused at its second op ran nothing: the first op's
 /// column is still there and the migration still applied.
 async fn refused_downgrade_runs_nothing(pool: &Pool) {
@@ -1534,6 +1678,8 @@ tri_dialect_test!(
         applying_a_branch_keeps_the_others_column,
         refused_downgrade_runs_nothing,
         refused_loose_downgrade_runs_nothing,
+        replaced_targets_are_refused,
+        embedded_squash_reconciles,
         unique_key_over_duplicates_is_refused,
         keys_over_the_mysql_byte_cap_are_refused_up_front,
         one_connection_pool_migrates,

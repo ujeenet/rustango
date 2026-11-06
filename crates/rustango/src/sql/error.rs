@@ -49,7 +49,8 @@ pub enum SqlError {
     #[error("relation aggregate `{kind}` requires a target column")]
     RelAggregateMissingColumn { kind: &'static str },
 
-    /// `Op::In` with an empty list; SQL has no `IN ()`.
+    /// `Op::In` with an empty list. The writers no longer return it: an
+    /// empty list now writes `1 = 0` (`NOT IN`: `1 = 1`).
     #[error("empty `IN` list is not supported")]
     EmptyInList,
 

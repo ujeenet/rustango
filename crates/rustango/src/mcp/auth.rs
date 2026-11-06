@@ -9,8 +9,9 @@
 //!
 //! **HTTP handlers.** [`agent_token`] trades a `{name, secret}` pair
 //! for a scoped JWT, and [`post_authed`] is the JSON-RPC endpoint
-//! behind such a token. Both resolve the tenant with the [`Tenant`]
-//! extractor and work on that tenant's pool, so a token minted for
+//! behind such a token. Both resolve the tenant with the
+//! [`TenantScope`](crate::extractors::TenantScope) extractor (any mounted
+//! backend) and work on that tenant's pool, so a token minted for
 //! one tenant is refused on another.
 
 use std::sync::Arc;
@@ -23,7 +24,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::extractors::{Tenant, TenantScope};
+use crate::extractors::TenantScope;
 use crate::login_throttle::{ClientIp, LoginRefused, LoginScope};
 use crate::tenancy::jwt_lifecycle::{JwtIssueError, JwtLifecycle};
 use crate::tenancy::{AgentError, TenancyError, TenantSlug};
@@ -268,8 +269,8 @@ pub(crate) async fn mint_agent_jwt(
 
 /// `POST {prefix}/token`: trade `{name, secret}` for a scoped token,
 /// pinned to the request's tenant.
-pub(crate) fn agent_token<DB: crate::sql::sqlx::Database>(
-    t: Tenant<DB>,
+pub(crate) fn agent_token<T: Into<TenantScope>>(
+    t: T,
     State(state): State<AuthedMcpState>,
     ip: ClientIp,
     Json(input): Json<AgentTokenInput>,
@@ -441,8 +442,8 @@ pub(crate) async fn authenticate_bearer_until(
 /// `POST {prefix}`, authenticated: require an agent token, then run
 /// the JSON-RPC message. A token for another tenant, or a revoked or
 /// expired one, is refused.
-pub(crate) fn post_authed<DB: crate::sql::sqlx::Database>(
-    t: Tenant<DB>,
+pub(crate) fn post_authed<T: Into<TenantScope>>(
+    t: T,
     State(state): State<AuthedMcpState>,
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
     headers: HeaderMap,

@@ -10,15 +10,13 @@
 //! * a token minted for another tenant is refused even though both tenants
 //!   share one signing key.
 
-// `not(postgres)`: the `Tenant` extractor looks up `TenantContext<DefaultDb>`,
-// and enabling the postgres feature makes that Postgres — the sqlite context
-// this test hands it would simply not be found.
+// No `not(postgres)`: `require_bearer` and `JwtAuth::router` serve whichever
+// backend is mounted.
 #![cfg(all(
     feature = "sqlite",
     feature = "tenancy",
     feature = "passwords",
-    feature = "admin",
-    not(feature = "postgres")
+    feature = "admin"
 ))]
 
 use std::sync::Arc;
@@ -98,15 +96,14 @@ fn org(slug: &str, name: &str) -> Org {
         .abs()
         % 1_000_000
         + 1;
-    Org {
-        id: rustango::sql::Auto::Set(id),
-        slug: slug.to_owned(),
-        display_name: "Acme".into(),
-        storage_mode: "database".into(),
-        backend_kind: "sqlite".into(),
-        database_url: Some(db_url(name)),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::Set(id);
+        o.slug = slug.to_owned();
+        o.display_name = "Acme".into();
+        o.storage_mode = "database".into();
+        o.backend_kind = "sqlite".into();
+        o.database_url = Some(db_url(name));
+    })
 }
 
 async fn seed_member(pool: &Pool, username: &str, active: bool) -> i64 {

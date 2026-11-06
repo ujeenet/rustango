@@ -444,14 +444,15 @@ async fn insert_link(
     }
     query.validate()?;
     // SQLite serializes the check and insert at BEGIN; PG/MySQL can race.
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     let present = SelectQuery::new(query.model).where_clause(WhereExpr::and_predicates(link));
-    if super::executor::count_rows_on(&mut tx, &CountQuery::from_select(present)).await? > 0 {
+    if super::executor::count_rows_on(&mut *tx, &CountQuery::from_select(present)).await? > 0 {
+        tx.commit().await?;
         return Ok(false);
     }
     // A unique key the check did not cover may still skip the row.
     let inserted = super::executor::insert_or_ignore_tx(&mut tx, query).await?;
-    tx.commit().await.map_err(ExecError::Driver)?;
+    tx.commit().await?;
     Ok(inserted)
 }
 
@@ -480,7 +481,7 @@ async fn replace(
     let ins = BulkInsertQuery::new(junction, columns, rows);
     ins.validate()?;
     // SQLite has no row lock: take its write lock at BEGIN instead.
-    let mut tx = crate::sql::write_transaction(pool).await?;
+    let mut tx = crate::sql::write_tx(pool).await?;
     for lock in locks {
         let stmt = pool.dialect().compile_select(&lock)?;
         super::executor::raw_execute_tx(&mut tx, &stmt.sql, stmt.params).await?;
@@ -501,7 +502,7 @@ async fn replace(
     let del = DeleteQuery::new(junction, WhereExpr::and_predicates(owner));
     let deleted = super::executor::delete_tx(&mut tx, &del).await?;
     super::executor::bulk_insert_tx(&mut tx, &ins).await?;
-    tx.commit().await.map_err(ExecError::Driver)?;
+    tx.commit().await?;
     // Old keys unreadable: the change is unknown, so report no diff.
     let Some(old) = old else {
         let changed = !dsts.is_empty() || deleted > 0;

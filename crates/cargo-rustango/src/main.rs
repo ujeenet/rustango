@@ -2011,10 +2011,14 @@ mod tests {
         assert!(Template::Tenant.offers("mcp") && Template::Api.offers("csrf"));
     }
 
-    /// The index links `/admin` only where an admin is mounted.
+    /// The index links the admin only where one is mounted, at the prefix
+    /// `main.rs` nests it under rather than a fixed `/admin`.
     #[test]
     fn only_fullstack_links_the_admin() {
-        assert!(templates::views_rs(Template::Fullstack).contains("href=\\\"/admin\\\""));
+        let views = templates::views_rs(Template::Fullstack);
+        assert!(views.contains("href=\\\"{admin}\\\""), "{views}");
+        assert!(views.contains("crate::urls::admin_prefix("), "{views}");
+        assert!(!views.contains("\"/admin\""), "{views}");
         for template in [Template::Api, Template::Tenant] {
             let views = templates::views_rs(template);
             assert!(!views.contains("/admin"), "{template:?}: {views}");

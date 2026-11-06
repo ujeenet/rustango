@@ -5,7 +5,7 @@
 //! StdDev/Variance — no built-in.
 
 use rustango::core::aggregates::{
-    avg, count, count_all, count_distinct, max, min, stddev, stddev_pop, sum, variance,
+    any_value, avg, count, count_all, count_distinct, max, min, stddev, stddev_pop, sum, variance,
     variance_pop,
 };
 use rustango::core::{
@@ -169,6 +169,21 @@ fn mysql_filtered_max_min_avg_rewrite_uniformly() {
             stmt.sql
         );
     }
+}
+
+#[test]
+fn mysql_filtered_any_value_uses_min_over_case_when() {
+    // ANY_VALUE can pick the NULL a rejected row yields; MIN skips it,
+    // and MariaDB has no ANY_VALUE.
+    let q = agg(any_value("pages").filter(Post::status.eq("draft")).into());
+    let stmt = MySql.compile_aggregate(&q).unwrap();
+    assert!(
+        stmt.sql
+            .contains("MIN(CASE WHEN `status` = ? THEN `pages` END) AS `agg`"),
+        "got: {}",
+        stmt.sql
+    );
+    assert!(!stmt.sql.contains("ANY_VALUE"), "got: {}", stmt.sql);
 }
 
 // ---------- COALESCE-on-empty (default=) ----------

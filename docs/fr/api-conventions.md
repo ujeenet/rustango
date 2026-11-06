@@ -30,7 +30,7 @@ Le nom d'une méthode indique ce qu'elle fait. Une fois ces suffixes assimilés,
 ### Fonctions
 
 - **`fetch(&pool)`, `count(&pool)`, `first(&pool)`, `find(pk, &pool)`** — le nom nu prend un `rustango::sql::Pool` et constitue le chemin ordinaire. Il fonctionne sur Postgres, MySQL et SQLite, en choisissant le dialecte en interne. C'est ce que veut la quasi-totalité du code applicatif.
-- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` et le `fetch_on` de `values` / `aggregate` acceptent n'importe quel `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) sur les trois backends ; le reste de la famille `_on` est encore réservé à Postgres.
+- **`fetch_on(executor)`, `count_on(executor)`** — le suffixe `_on` signifie « exécute ceci contre l'*executor* que je te fournis » — une connexion ou une transaction ouverte plutôt que le pool. À utiliser quand il faut plusieurs instructions dans une même transaction. `fetch_on` / `first_on` / `count_on` / `exists_on` et le `fetch_on` de `values` / `aggregate` acceptent n'importe quel `SqlExecutor` (`&mut PoolConn`, `&mut PoolTx`, `&Pool`) sur les trois backends ; le reste de la famille `_on` aussi.
 - **Les écritures suivent la même règle.** `save(&pool)`, `insert(&pool)`, `delete(&pool)`, `upsert(&pool)` et `bulk_insert(rows, &pool)` prennent un `rustango::sql::Pool` sur chaque backend ; leurs formes `_on` prennent n'importe quel `SqlExecutor`. Un modèle audité refuse les formes `_on` : utilisez alors les variantes `&pool`. Les anciens noms `_pool` compilent encore mais sont dépréciés.
 - **`from_X(value)`** — convertit DEPUIS une autre valeur (par ex. `from_model(post)`, `from_base32(s)`).
 - **`with_X(value)`** — une méthode de builder qui définit une option et retourne l'objet, ce qui permet d'enchaîner les appels (par ex. `with_default_ttl(d)`, `with_access_ttl(secs)`).
@@ -291,7 +291,7 @@ quiconque s'en retire à connaître toute la liste.
 Pour réduire un binaire qui n'a pas besoin de tout, désactivez les valeurs par défaut et ne listez que ce que vous utilisez :
 
 ```toml
-rustango = { version = "0.63", default-features = false, features = ["postgres", "admin"] }
+rustango = { version = "0.64", default-features = false, features = ["postgres", "admin"] }
 ```
 
 ---

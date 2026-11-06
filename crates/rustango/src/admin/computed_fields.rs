@@ -57,7 +57,8 @@ pub struct ComputedField {
     /// its own escaping.
     pub render: ComputedFieldRenderFn,
     /// Optional per-row link. On `Some(url)` the list view wraps the
-    /// cell in `<a href="{url}">…</a>`. On `None`, the default,
+    /// cell in `<a href="{url}">…</a>`; only a `/` path or an `http:`/`https:`
+    /// URL links, any other scheme renders plain. On `None`, the default,
     /// `list_display_links` decides whether the cell links.
     pub link: Option<ComputedFieldLinkFn>,
 }

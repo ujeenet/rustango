@@ -15,15 +15,14 @@ use rustango::tenancy::{BackendKind, DatabasePools, Org};
 /// invocation gets its own database (the `:memory:` connection
 /// returned by sqlx is keyed per connection-string).
 fn fake_sqlite_org(slug: &str) -> Org {
-    Org {
-        id: rustango::sql::Auto::default(),
-        slug: slug.to_owned(),
-        display_name: slug.to_owned(),
-        storage_mode: "database".to_owned(),
-        backend_kind: "sqlite".to_owned(),
-        database_url: Some("sqlite::memory:".to_owned()),
-        ..rustango::testkit::org()
-    }
+    rustango::testkit::org_with(|o| {
+        o.id = rustango::sql::Auto::default();
+        o.slug = slug.to_owned();
+        o.display_name = slug.to_owned();
+        o.storage_mode = "database".to_owned();
+        o.backend_kind = "sqlite".to_owned();
+        o.database_url = Some("sqlite::memory:".to_owned());
+    })
 }
 
 #[tokio::test]

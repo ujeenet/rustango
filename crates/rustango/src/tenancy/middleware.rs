@@ -149,6 +149,7 @@ async fn tenant_pool(parts: &Parts, ext: &axum::http::Extensions) -> Result<(Org
     };
     match request_pool(ext, &org).await {
         Some(Ok(pool)) => Ok((org, pool)),
+        Some(Err(TenancyError::PoolBusy)) => Err(TenancyError::pool_busy_response()),
         Some(Err(e)) => {
             tracing::error!(error = %e, slug = %org.slug, "require_auth: tenant pool failed");
             Err(ApiError::internal("tenant pool unavailable").into_response())

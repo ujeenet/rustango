@@ -66,6 +66,8 @@ use crate::sse::EventBus;
 pub struct WsHub<T: Clone + Send + 'static> {
     bus: EventBus<T>,
     config: WsConfig,
+    /// Open-socket slots; `None` means no cap. See [`Self::max_connections`].
+    slots: Option<std::sync::Arc<tokio::sync::Semaphore>>,
 }
 
 /// Per-connection tuning knobs.
@@ -98,15 +100,25 @@ impl Default for WsConfig {
 impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
     #[must_use]
     pub fn new(bus: EventBus<T>) -> Self {
-        Self {
-            bus,
-            config: WsConfig::default(),
-        }
+        Self::with_config(bus, WsConfig::default())
     }
 
     #[must_use]
     pub fn with_config(bus: EventBus<T>, config: WsConfig) -> Self {
-        Self { bus, config }
+        Self {
+            bus,
+            config,
+            slots: None,
+        }
+    }
+
+    /// Hold at most `n` sockets open through [`Self::upgrade`]; past it
+    /// the upgrade is a `503`. No cap by default.
+    #[must_use]
+    pub fn max_connections(mut self, n: usize) -> Self {
+        let n = n.min(tokio::sync::Semaphore::MAX_PERMITS);
+        self.slots = Some(std::sync::Arc::new(tokio::sync::Semaphore::new(n)));
+        self
     }
 
     /// Set the keepalive interval. Shorter spots dead connections
@@ -143,11 +155,27 @@ impl<T: Clone + Send + Serialize + 'static> WsHub<T> {
     where
         T: DeserializeOwned,
     {
+        use axum::response::IntoResponse as _;
+        let slot = match &self.slots {
+            Some(slots) => match std::sync::Arc::clone(slots).try_acquire_owned() {
+                Ok(slot) => Some(slot),
+                Err(_) => {
+                    return crate::api_errors::ApiError::service_unavailable(
+                        "too many open WebSockets, try again",
+                    )
+                    .into_response()
+                }
+            },
+            None => None,
+        };
         let hub = self.clone();
         let max = self.config.max_message_bytes;
         ws.max_message_size(max)
             .max_frame_size(max)
-            .on_upgrade(move |socket| ws_handler(socket, hub, shutdown))
+            .on_upgrade(move |socket| async move {
+                ws_handler(socket, hub, shutdown).await;
+                drop(slot);
+            })
     }
 
     /// Send `event` to every connected client and return how many
@@ -388,7 +416,13 @@ mod tests {
 
     /// Serve `hub` on a loopback port and finish the client handshake.
     async fn open(hub: WsHub<String>) -> tokio::net::TcpStream {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (head, tcp) = handshake(serve(hub).await).await;
+        assert!(head.starts_with(b"HTTP/1.1 101"));
+        tcp
+    }
+
+    /// Serve `hub` at `/ws` on a loopback port.
+    async fn serve(hub: WsHub<String>) -> std::net::SocketAddr {
         let app = axum::Router::new().route(
             "/ws",
             axum::routing::get(move |ws: axum::extract::WebSocketUpgrade| {
@@ -399,6 +433,41 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        addr
+    }
+
+    /// Past `max_connections` an upgrade is a 503; a closed socket frees its slot.
+    #[tokio::test]
+    async fn sockets_past_the_cap_are_refused() {
+        let addr = serve(WsHub::new(EventBus::<String>::new(4)).max_connections(1)).await;
+        let (head, first) = handshake(addr).await;
+        assert!(head.starts_with(b"HTTP/1.1 101"));
+        let (head, _) = handshake(addr).await;
+        assert!(
+            head.starts_with(b"HTTP/1.1 503"),
+            "{}",
+            String::from_utf8_lossy(&head)
+        );
+        drop(first);
+        let mut freed = false;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            if handshake(addr).await.0.starts_with(b"HTTP/1.1 101") {
+                freed = true;
+                break;
+            }
+        }
+        assert!(freed, "the slot never came back");
+
+        let open_hub = serve(WsHub::new(EventBus::<String>::new(4))).await;
+        let (a, _ka) = handshake(open_hub).await;
+        let (b, _kb) = handshake(open_hub).await;
+        assert!(a.starts_with(b"HTTP/1.1 101") && b.starts_with(b"HTTP/1.1 101"));
+    }
+
+    /// Send the upgrade request; the response head and the socket.
+    async fn handshake(addr: std::net::SocketAddr) -> (Vec<u8>, tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let mut tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         tcp.write_all(
             b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
@@ -412,8 +481,7 @@ mod tests {
             tcp.read_exact(&mut b).await.unwrap();
             head.push(b[0]);
         }
-        assert!(head.starts_with(b"HTTP/1.1 101"));
-        tcp
+        (head, tcp)
     }
 
     /// A peer that never answers a ping is closed, not kept forever.

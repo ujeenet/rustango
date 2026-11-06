@@ -214,16 +214,19 @@ fn mysql_and_sqlite_keep_one_placeholder_per_element() {
 }
 
 #[test]
-fn empty_in_list_is_rejected() {
-    let err = pg()
-        .compile_select(
-            &User::objects()
-                .filter_op("id", Op::In, SqlValue::List(vec![]))
-                .compile()
-                .unwrap(),
-        )
-        .unwrap_err();
-    assert!(matches!(err, SqlError::EmptyInList));
+fn empty_in_list_matches_nothing() {
+    for (op, want) in [(Op::In, "WHERE 1 = 0"), (Op::NotIn, "WHERE 1 = 1")] {
+        let stmt = pg()
+            .compile_select(
+                &User::objects()
+                    .filter_op("id", op, SqlValue::List(vec![]))
+                    .compile()
+                    .unwrap(),
+            )
+            .unwrap();
+        assert!(stmt.sql.ends_with(want), "{}", stmt.sql);
+        assert!(stmt.params.is_empty());
+    }
 }
 
 #[test]
@@ -555,10 +558,10 @@ fn delete_with_is_null_does_not_consume_placeholder() {
 fn delete_propagates_filter_errors() {
     let query = DeleteQuery::new(
         User::SCHEMA,
-        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::List(vec![]))),
+        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::I64(1))),
     );
     let err = pg().compile_delete(&query).unwrap_err();
-    assert!(matches!(err, SqlError::EmptyInList));
+    assert!(matches!(err, SqlError::InRequiresList));
 }
 
 // ---------------- LIMIT / OFFSET on SelectQuery ----------------
@@ -648,10 +651,10 @@ fn count_with_filters() {
 fn count_propagates_filter_errors() {
     let q = CountQuery::new(
         User::SCHEMA,
-        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::List(vec![]))),
+        WhereExpr::Predicate(Filter::new("id", Op::In, SqlValue::I64(1))),
     );
     let err = pg().compile_count(&q).unwrap_err();
-    assert!(matches!(err, SqlError::EmptyInList));
+    assert!(matches!(err, SqlError::InRequiresList));
 }
 
 // ---------------- SEARCH ----------------

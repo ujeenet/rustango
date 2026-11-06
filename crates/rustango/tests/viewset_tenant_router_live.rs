@@ -27,7 +27,7 @@ use rustango::core::Model as _;
 use rustango::extractors::TenantContext;
 use rustango::sql::{sqlx, Auto};
 use rustango::tenancy::{
-    session::SessionSecret, ChainResolver, HeaderResolver, Org, StorageMode, TenantPools,
+    session::SessionSecret, ChainResolver, HeaderResolver, StorageMode, TenantPools,
     TenantPoolsConfig,
 };
 use rustango::viewset::ViewSet;
@@ -128,14 +128,13 @@ async fn fixture(pool: sqlx::PgPool) -> (String, sqlx::PgPool, axum::Router) {
     // otherwise need to manage manually — and the per-request conn
     // path is exercised the same way for either mode.
     let slug = unique("vstest");
-    let mut org = Org {
-        slug: slug.clone(),
-        display_name: "VS Test".into(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some(url.clone()),
-        host_pattern: Some(format!("{slug}.app.test")),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = slug.clone();
+        o.display_name = "VS Test".into();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some(url.clone());
+        o.host_pattern = Some(format!("{slug}.app.test"));
+    });
     org.insert(&pool.clone().into()).await.unwrap();
 
     let ctx = tenant_ctx(&pool);
@@ -175,12 +174,11 @@ async fn throttle_budgets_are_per_tenant() {
     let Some(pool) = pool().await else { return };
     let (slug_a, pool, _app) = fixture(pool).await;
     let slug_b = unique("vstest");
-    let mut org_b = Org {
-        slug: slug_b.clone(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some(std::env::var("DATABASE_URL").unwrap()),
-        ..rustango::testkit::org()
-    };
+    let mut org_b = rustango::testkit::org_with(|o| {
+        o.slug = slug_b.clone();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some(std::env::var("DATABASE_URL").unwrap());
+    });
     org_b.insert(&pool.clone().into()).await.unwrap();
     let app = ViewSet::for_model(Widget::SCHEMA, &["id", "label"])
         .throttle_all(1, 60)
@@ -206,12 +204,11 @@ async fn throttled_with_dead_tenant() -> Option<(String, axum::Router)> {
     let pool = pool().await?;
     let (_slug, pool, _app) = fixture(pool).await;
     let dead = unique("vsdead");
-    let mut org = Org {
-        slug: dead.clone(),
-        storage_mode: StorageMode::Database.as_str().into(),
-        database_url: Some("postgres://nobody:x@127.0.0.1:1/none".into()),
-        ..rustango::testkit::org()
-    };
+    let mut org = rustango::testkit::org_with(|o| {
+        o.slug = dead.clone();
+        o.storage_mode = StorageMode::Database.as_str().into();
+        o.database_url = Some("postgres://nobody:x@127.0.0.1:1/none".into());
+    });
     org.insert(&pool.clone().into()).await.unwrap();
     let mut ctx = Arc::into_inner(tenant_ctx(&pool)).unwrap();
     ctx.pools = Arc::new(TenantPools::new(pool).config(TenantPoolsConfig {

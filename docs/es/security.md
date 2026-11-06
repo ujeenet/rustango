@@ -48,6 +48,9 @@ let app = Router::new()
 // Plus: argon2 for passwords, JWT lifecycle for tokens, TOTP for MFA.
 ```
 
+Los tenants con prefijo de ruta comparten origen con la consola de operador:
+ver [Hostnames](operator-console.md). En producción, mejor un host por tenant.
+
 ---
 
 ## Establecer cabeceras de seguridad
@@ -184,13 +187,13 @@ Cuando se agota: `429 Too Many Requests` con la cabecera `Retry-After`. Cada res
 
 ### Límites de login incorporados
 
-Cada login por contraseña incorporado (admin, consola de operador, admin de tenant, `/auth/login` de JWT) pasa por `rustango::login_throttle` antes de buscar al usuario. Comprueba, por orden, un bloqueo por nombre de usuario (5 fallos, 15 min) que cuenta los nombres desconocidos igual que los reales, un límite por IP (20 logins fallidos/min; IPv6 cuenta por /64) y un límite global por login (600 logins fallidos/min cada uno para el admin, la consola de operador y cada tenant). Un login correcto no cuenta contra los límites. Un nombre de usuario que inició sesión desde una IP en los últimos 30 días se salta desde esa IP un límite global agotado, para que un ataque desde muchas IP no pueda bloquear a todos los usuarios; su límite por IP y su bloqueo por nombre siguen aplicándose. Una vez encontrada la fila del usuario, el bloqueo sigue también al nombre de usuario guardado, así que las grafías que la base de datos trata como iguales (MySQL hace coincidir `alicé` con `alice`) comparten un bloqueo. HTTP Basic y las claves de API tienen su propio ámbito y solo cuentan fallos. Un login rechazado recibe `429` con `Retry-After`, y la misma respuesta exista o no la cuenta.
+Cada login por contraseña incorporado (admin, consola de operador, admin de tenant, `/auth/login` de JWT) pasa por `rustango::login_throttle` antes de buscar al usuario. Comprueba, por orden, un bloqueo por nombre de usuario (5 fallos, 15 min) que cuenta los nombres desconocidos igual que los reales, un límite por IP (20 logins fallidos/min; IPv6 cuenta por /64) y un límite global por login (600 logins fallidos/min cada uno para el admin, la consola de operador y cada tenant). Un login correcto no cuenta contra los límites. Un nombre de usuario que inició sesión desde una IP en los últimos 30 días se salta desde esa IP un límite global agotado, para que un ataque desde muchas IP no pueda bloquear a todos los usuarios. Desde esa IP cuenta además en su propio bloqueo por nombre, así que las contraseñas erróneas de otro cliente no bloquean al usuario; su límite por IP sigue aplicándose. Una vez encontrada la fila del usuario, el bloqueo sigue también al nombre de usuario guardado, así que las grafías que la base de datos trata como iguales (MySQL hace coincidir `alicé` con `alice`) comparten un bloqueo. HTTP Basic y las claves de API tienen su propio ámbito y solo cuentan fallos. Un login rechazado recibe `429` con `Retry-After`, y la misma respuesta exista o no la cuenta.
 
 Detrás de un proxy inverso, monta `RealIpLayer` con tus proxies como se muestra arriba; una app `Cli` llama en su lugar a `Cli::with_trusted_proxies(["127.0.0.1/32"])?`. Sin ello, todos los clientes tienen la dirección del proxy y comparten un único cubo por IP; se registra una advertencia una vez cuando llegan cabeceras de reenvío.
 
 El hash de contraseñas ejecuta como mucho un trabajo por CPU, compartido por todos los logins; HTTP Basic, las claves de API y los secretos de agente pueden usar como mucho la mitad de los huecos. Un login que espera más de `hash_wait_ms` (5 s) por un hueco recibe `503` con `Retry-After`, tanto para usuarios conocidos como desconocidos.
 
-Ajústalos bajo `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Un valor fijado en código (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) prevalece sobre estas claves. Los cubos por IP y global son por proceso salvo que instales `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, que los cuenta en ventanas fijas en una caché compartida (ante un error de caché ambos vuelven al proceso; una ráfaga que cruza el borde de una ventana puede llegar al doble de un límite; las apps que comparten una caché comparten los contadores salvo que cada una use su propio `ScopedCache`); el primer login registra una advertencia mientras sean por proceso. El bloqueo por nombre de usuario usa `account_lockout::shared()`, que puedes respaldar con una caché compartida mediante `account_lockout::configure_shared`. Los fallos cuentan en una ventana fija (1 hora por defecto) que empieza con el primer fallo, así que un atacante tiene `lockout_threshold - 1` intentos por ventana sin bloqueo; los límites por IP y global acotan el resto.
+Ajústalos bajo `[auth]`: `login_ip_limit`, `login_ip_window_secs`, `login_global_limit`, `login_global_window_secs`, `lockout_threshold`, `lockout_duration_secs`, `hash_wait_ms`. Un valor fijado en código (`login_throttle::configure_shared`, `account_lockout::configure_shared`, `passwords::configure_hash_wait`) prevalece sobre estas claves. Los cubos por IP y global son por proceso salvo que instales `login_throttle::configure_shared(LoginThrottle::with_cache(limits, cache))`, que los cuenta en ventanas fijas en una caché compartida (ante un error de caché ambos vuelven al proceso; una ráfaga que cruza el borde de una ventana puede llegar al doble de un límite; las apps que comparten una caché comparten los contadores salvo que cada una use su propio `ScopedCache`); el primer login registra una advertencia mientras sean por proceso. El bloqueo por nombre de usuario usa `account_lockout::shared()`, que puedes respaldar con una caché compartida mediante `account_lockout::configure_shared`. Los fallos cuentan en una ventana fija (1 hora por defecto) que empieza con el primer fallo, así que un atacante tiene `lockout_threshold - 1` intentos por ventana sin bloqueo; los límites por IP y global acotan el resto. Las claves `[auth]` las aplica `manage::Cli` al cargar los ajustes; una app que construye `server::Builder` sin él llama a las funciones en su lugar.
 
 **Campo de inicio de sesión.** Los usuarios de un tenant inician sesión con su nombre de usuario, salvo con `[auth] login_field = "email"` (o `Cli::login_field(LoginField::Email)` / `server::Builder::login_field`, que prevalecen sobre la clave). El email requiere la feature `sso`, que añade la columna `email`. El email coincide sin distinguir mayúsculas en cada backend, en el formulario de inicio de sesión del tenant (etiqueta "Email"), en HTTP Basic y en `/auth/login` (`{"username": …}` o `{"email": …}`), y el bloqueo de inicio de sesión de arriba sigue al email guardado. Cada usuario necesita su propio email: un usuario sin email no puede iniciar sesión, y un email que comparten dos usuarios (sin distinguir mayúsculas) no deja entrar a ninguno. El servidor registra al arrancar cada tenant con usuarios así; avisa en lugar de negarse a arrancar, para que los datos de un tenant no tumben a todos. `create-user --email` lo fija.
 
@@ -345,8 +348,8 @@ La autenticación es cómo confirmas quién está haciendo una petición. **Rust
 > del admin como filas** (varios por superficie; por inquilino, o un conjunto
 > compartido entre inquilinos), con el secreto de cliente **cifrado en reposo**.
 > Inicia sesión con la cuenta enlazada al subject del IdP (el enlace por email es
-> opcional por proveedor y nunca se aplica a superusuarios ni staff; sin
-> auto-aprovisionamiento) y reutiliza la sesión existente.
+> opcional por proveedor y nunca se aplica a superusuarios ni staff; el bare admin nunca
+> registra a nadie, un proveedor del admin de tenant solo según su `signup_mode`) y reutiliza la sesión existente.
 
 ### Tres backends listos para usar
 
@@ -519,7 +522,7 @@ if !verify_key_async(secret, &row.hash).await? {
 }
 ```
 
-Estas claves funcionan directamente con el `ApiKeyBackend` de multi-tenencia — ambos usan el mismo formato `{prefix}.{secret}` con secretos hasheados con argon2id, así que una clave emitida aquí autentica allí sin trabajo adicional.
+Estas claves funcionan directamente con el `ApiKeyBackend` de multi-tenencia — ambos usan el mismo formato `{prefix}.{secret}`. El backend guarda un HMAC-SHA256 del secreto (`hmac-sha256v2$…`); también acepta un hash argon2id de `api_keys` y lo cambia por el HMAC en el primer uso, así que una clave emitida aquí autentica allí sin trabajo adicional.
 
 ---
 
@@ -795,7 +798,7 @@ Comprobaciones adicionales de `--deploy` (endurecimiento para producción):
 
 Devuelve un código de salida distinto de cero ante cualquier hallazgo de **nivel de error** (bueno para las puertas de CI). Las advertencias no provocan un fallo pero aparecen en la salida.
 
-Para comprobaciones más allá de las que se incluyen, extiende con código personalizado en tu binario `manage` antes de reenviar a `manage::run`.
+Para comprobaciones más allá de las que se incluyen, registra tu propio verbo con `register_command!` y ejecútalo junto a `check --deploy`.
 
 ---
 

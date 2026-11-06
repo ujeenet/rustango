@@ -127,6 +127,101 @@ fn ttl_ms(d: Duration) -> u64 {
         .clamp(1, MAX_TTL_MS)
 }
 
+impl RedisCache {
+    /// `SCAN MATCH pattern`, deleting each batch's keys that `keep` accepts.
+    async fn scan_delete(
+        &self,
+        pattern: &str,
+        keep: impl Fn(&str) -> bool + Send + Sync,
+    ) -> Result<(), CacheError> {
+        let mut conn = self.conn.clone();
+        let mut cursor: u64 = 0;
+        loop {
+            let (next, mut keys): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(512)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| CacheError::Connection(format!("scan: {e}")))?;
+            keys.retain(|k| keep(k));
+
+            if !keys.is_empty() {
+                redis::cmd("DEL")
+                    .arg(&keys)
+                    .query_async::<()>(&mut conn)
+                    .await
+                    .map_err(|e| CacheError::Connection(format!("del: {e}")))?;
+            }
+
+            // Only a zero cursor means the scan is finished. An empty
+            // batch does not, and a full one does not mean more.
+            if next == 0 {
+                return Ok(());
+            }
+            cursor = next;
+        }
+    }
+}
+
+/// `MATCH` takes a glob, so `*`, `?`, `[`, `]` and `\` are escaped; else a
+/// prefix holding one would match outside its namespace.
+fn glob_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// A glob matching every key under any of `prefixes`: their common prefix,
+/// or their longest common substring when that is longer.
+fn shared_pattern(prefixes: &[&str]) -> Option<String> {
+    let first = prefixes[0];
+    let lcp = prefixes[1..].iter().fold(first, |acc, p| {
+        let n = acc
+            .char_indices()
+            .zip(p.chars())
+            .find(|((_, a), b)| a != b)
+            .map_or(acc.len().min(p.len()), |((i, _), _)| i);
+        &acc[..n]
+    });
+    let shortest = prefixes
+        .iter()
+        .min_by_key(|p| p.len())
+        .copied()
+        .unwrap_or("");
+    let mut at: Vec<usize> = shortest.char_indices().map(|(i, _)| i).collect();
+    at.push(shortest.len());
+    let chars = at.len() - 1;
+    // Longest first, so the first hit is the longest.
+    let lcs = (1..=chars)
+        .rev()
+        .find_map(|len| {
+            (0..=chars - len)
+                .map(|i| &shortest[at[i]..at[i + len]])
+                .find(|sub| prefixes.iter().all(|p| p.contains(sub)))
+        })
+        .unwrap_or("");
+    // A short shared part would make Redis send most key names to the client.
+    if lcp.len().max(lcs.len()) < MIN_SHARED_PATTERN {
+        return None;
+    }
+    Some(if lcp.len() >= lcs.len() {
+        format!("{}*", glob_escape(lcp))
+    } else {
+        format!("*{}*", glob_escape(lcs))
+    })
+}
+
+/// Shortest shared part worth one scan for several prefixes (`#org:1:` is 7).
+const MIN_SHARED_PATTERN: usize = 8;
+
 #[async_trait]
 impl Cache for RedisCache {
     async fn get(&self, key: &str) -> Result<Option<String>, CacheError> {
@@ -257,42 +352,29 @@ impl Cache for RedisCache {
     /// prefix are escaped. Otherwise a prefix holding one of them
     /// would match outside its namespace.
     async fn delete_prefix(&self, prefix: &str) -> Result<(), CacheError> {
-        let mut conn = self.conn.clone();
-        let mut pattern = String::with_capacity(prefix.len() + 1);
-        for ch in prefix.chars() {
-            if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
-                pattern.push('\\');
-            }
-            pattern.push(ch);
-        }
-        pattern.push('*');
+        let pattern = format!("{}*", glob_escape(prefix));
+        self.scan_delete(&pattern, |_| true).await
+    }
 
-        let mut cursor: u64 = 0;
-        loop {
-            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(512)
-                .query_async(&mut conn)
-                .await
-                .map_err(|e| CacheError::Connection(format!("scan: {e}")))?;
-
-            if !keys.is_empty() {
-                redis::cmd("DEL")
-                    .arg(&keys)
-                    .query_async::<()>(&mut conn)
-                    .await
-                    .map_err(|e| CacheError::Connection(format!("del: {e}")))?;
-            }
-
-            // Only a zero cursor means the scan is finished. An empty
-            // batch does not, and a full one does not mean more.
-            if next == 0 {
-                return Ok(());
-            }
-            cursor = next;
+    /// One `SCAN` for all of `prefixes`: `MATCH` on the substring they
+    /// share, then only keys starting with one of them are deleted.
+    /// Prefixes that share too little scan one at a time instead.
+    async fn delete_prefixes(&self, prefixes: &[&str]) -> Result<(), CacheError> {
+        match prefixes {
+            [] => Ok(()),
+            [one] => self.delete_prefix(one).await,
+            many => match shared_pattern(many) {
+                Some(pattern) => {
+                    self.scan_delete(&pattern, |k| many.iter().any(|p| k.starts_with(p)))
+                        .await
+                }
+                None => {
+                    for p in many {
+                        self.delete_prefix(p).await?;
+                    }
+                    Ok(())
+                }
+            },
         }
     }
 
@@ -373,7 +455,7 @@ mod tests {
         assert!(config.contains("max_delay: Some(1000)"), "{config}");
     }
 
-    /// Reads RESP commands and answers `+OK`, recording each one.
+    /// Reads RESP commands and answers them, recording each one.
     async fn ok_server() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -403,8 +485,14 @@ mod tests {
                             buf.truncate(len);
                             cmd.push(String::from_utf8(buf).unwrap());
                         }
+                        // A finished, empty `SCAN`; `+OK` for the rest.
+                        let reply: &[u8] = if cmd[0].eq_ignore_ascii_case("SCAN") {
+                            b"*2\r\n$1\r\n0\r\n*0\r\n"
+                        } else {
+                            b"+OK\r\n"
+                        };
                         log.lock().unwrap().push(cmd);
-                        w.write_all(b"+OK\r\n").await.unwrap();
+                        w.write_all(reply).await.unwrap();
                     }
                 });
             }
@@ -434,6 +522,55 @@ mod tests {
         let sent = |name: &str| seen.iter().any(|c| c[0].eq_ignore_ascii_case(name));
         assert!(sent("PEXPIRE") && sent("PERSIST"), "{seen:?}");
         assert!(!sent("GET") && !sent("SET"), "{seen:?}");
+    }
+
+    /// Many prefixes cost one keyspace scan, matched on what they share.
+    #[tokio::test]
+    async fn delete_prefixes_scans_once() {
+        let (url, seen) = ok_server().await;
+        let cache = RedisCache::new(&url).await.expect("connect");
+        cache
+            .delete_prefixes(&["a:#org:1:x:", "b:#org:1:x:"])
+            .await
+            .expect("delete");
+        let seen = seen.lock().unwrap();
+        let scans: Vec<_> = seen
+            .iter()
+            .filter(|c| c[0].eq_ignore_ascii_case("SCAN"))
+            .collect();
+        assert_eq!(scans.len(), 1, "{seen:?}");
+        assert_eq!(scans[0][3], "*:#org:1:x:*");
+    }
+
+    #[test]
+    fn shared_pattern_picks_the_longer_match() {
+        let p = |v: &[&str]| shared_pattern(v);
+        assert_eq!(p(&["abcdefg:x", "abcdefg:y"]).as_deref(), Some("abcdefg:*"));
+        assert_eq!(
+            p(&["a:#org:1:", "bb:#org:1:"]).as_deref(),
+            Some("*:#org:1:*")
+        );
+        assert_eq!(
+            p(&["kk[1]*:ab", "kk[1]*:ac"]).as_deref(),
+            Some("kk\\[1\\]\\*:a*")
+        );
+        assert_eq!(p(&["x", "y"]), None);
+        assert_eq!(p(&["ab:x", "ab:y"]), None);
+    }
+
+    /// Prefixes sharing too little get one selective scan each, never `MATCH *`.
+    #[tokio::test]
+    async fn unrelated_prefixes_scan_one_at_a_time() {
+        let (url, seen) = ok_server().await;
+        let cache = RedisCache::new(&url).await.expect("connect");
+        cache.delete_prefixes(&["a:", "b:"]).await.expect("delete");
+        let seen = seen.lock().unwrap();
+        let patterns: Vec<&str> = seen
+            .iter()
+            .filter(|c| c[0].eq_ignore_ascii_case("SCAN"))
+            .map(|c| c[3].as_str())
+            .collect();
+        assert_eq!(patterns, ["a:*", "b:*"], "{seen:?}");
     }
 
     /// A server that accepts but never answers fails the connect, not hangs it.

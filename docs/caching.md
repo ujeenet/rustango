@@ -60,8 +60,9 @@ let cache: BoxedCache = Arc::new(InMemoryCache::new());
 
 There is no `postgres` value — the DB backend is `db` or `database`. Values
 are lowercase. An unknown or mis-cased value (`Redis`, a typo), or `file`
-without `file_cache_dir`, logs an `error` and falls back to an in-memory cache;
-a later minor release will refuse it.
+without `file_cache_dir`, is refused: `from_settings` panics at boot and
+`from_settings_async` returns the error. A per-process stand-in would break
+what a shared cache guarantees.
 
 `FileCache` sweeps one sixteenth of its directory for expired entries every 16
 writes. Call `FileCache::purge_expired()` on a schedule to sweep it all. New
@@ -235,22 +236,23 @@ key the leaky key: a handler — or worse a background task, which has no
 ambient tenant to borrow from — writes `"stats:monthly"` for one tenant and
 every other tenant reads it back.
 
-Wrap the shared cache in a **`ScopedCache`** so the namespace is applied for
-you and the call site cannot forget:
+Take the tenant's view with **`CacheScope::for_tenant(..).app()`** (a
+`ScopedCache` under the hood), so the namespace is applied for you and the call
+site cannot forget:
 
 ```rust
-use rustango::cache::ScopedCache;
+use rustango::cache::CacheScope;
 
 // From the Org the resolver already produced:
 let tenant = TenantSlug::of(&t.org).expect("a registry org");
-let cache = ScopedCache::for_tenant(shared.clone(), &tenant);
+let cache = CacheScope::for_tenant(shared.clone(), &tenant).app();
 
-cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:stats:monthly
+cache.set("stats:monthly", &json, ttl).await?;   // stored as tenant:#org:7:acme:app:stats:monthly
 cache.get("stats:monthly").await?;               // reads only acme's entry
 cache.clear().await?;                            // drops ONLY acme's entries
 ```
 
-`ScopedCache` is itself a `Cache`, so it drops into anything taking a
+The view is itself a `Cache`, so it drops into anything taking a
 `BoxedCache` — `cache_page`, `cache_fragment`, the rate limiters,
 `DistributedLock`. It forwards to the inner backend with mapped keys rather
 than reimplementing anything, so native primitives (Redis `INCRBY`, `SET NX`)
@@ -281,12 +283,20 @@ Two things worth knowing:
 The unscoped `Cache::clear()` is still process-global, so reach for the scoped
 view whenever a single tenant's change is what triggered the invalidation.
 
+Tenant keys are `tenant:#org:<id>:<slug>:<area>:<rest>`, one area each for
+app keys, locks, idempotency, pages, `KeyBy::Tenant` rate limits, sessions and
+flag overrides. Login throttle, account lockout and the MCP key cache keep
+their own layout and their own purge. A tenant app `clear()` drops only the `app` area, so it never frees
+a running job's lock.
+
 A purged tenant's slug can be reused by a new tenant. To make `purge-tenant`
-delete the old tenant's `ScopedCache::for_tenant` keys, call
+delete the old tenant's keys, call
 `rustango::tenancy::decommission::clear_on_purge(cache)` at boot for each cache
-that holds them. The purge also deletes the tenant's locks, sessions and flag
-overrides there. Idempotency and page-cache entries stay until they expire:
-they are bound to the org id, so the new tenant cannot read them.
+that holds them. The purge deletes every area there
+(`CacheScope::for_tenant(cache, &tenant).purge()` does the same by hand). Until
+0.65.0, idempotency answers are also written under their 0.63 key `idem:<sha>`;
+that key is hashed and has no tenant prefix, so the purge cannot find it and it
+expires with its TTL (24 hours by default).
 
 ---
 
@@ -314,7 +324,8 @@ by default:
 
 To drop a page after a write, call
 `layer.invalidate(&[PageKey::new(path, host)]).await?` on a clone of the layer
-(add `.tenant(org_id)` to the key under tenancy). It purges every cached variant
+(under tenancy add `.tenant(&slug)`, the request's `TenantSlug`, e.g. from
+`RequestTenant::tenant()`). It purges every cached variant
 of that path: any query string, any `vary_on` value, GET and `QUERY` alike. It
 works through a per-path generation counter, so each cached GET reads one more
 small cache key.
@@ -337,6 +348,10 @@ Under tenancy, mount the layer inside the tenancy layer; see
 
 **Housekeeping:** `DatabaseCache::purge_expired()` and
 `FileCache::purge_expired()` delete expired entries; call them on a schedule.
+`DatabaseCache` also deletes one batch of expired rows every 256 writes
+(`.purge_every(n)`, `0` turns it off). `FileCache` keeps at most 100 000 entries
+and 1 GiB (`.max_entries(n)`, `.max_bytes(n)`, or `file_cache_max_entries` /
+`file_cache_max_bytes` in `[cache]`; `0` lifts a cap) and drops the oldest first.
 
 **What's built on the cache:** server-side [sessions](auth-sessions.md),
 distributed [rate limiting](middleware.md) (`CacheRateLimitLayer`), idempotency

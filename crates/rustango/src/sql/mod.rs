@@ -50,12 +50,15 @@ pub use connect_diagnosis::{ConnectDiagnosis, ConnectFault};
 pub(crate) use dialect::is_uuid_expr;
 #[cfg(any(feature = "cache", feature = "postgres"))]
 pub(crate) use dialect::quote_qualified;
+// Its callers outside `sql` (media listing, inspectdb) are feature-gated.
+#[allow(unused_imports)]
+pub(crate) use mysql::ByServer;
 // Its callers are feature-gated (PG schemas, SQLite inspectdb).
 #[allow(unused_imports)]
 pub(crate) use dialect::quote_with;
 pub(crate) use dialect::refuse_unbindable_values;
 pub(crate) use dialect::split_qualified;
-pub use dialect::Dialect;
+pub use dialect::{Dialect, TableTarget};
 pub use error::{is_mysql_dup_index_error, is_pg_dup_object_error, ExecError, SqlError};
 #[cfg(any(feature = "template_views", feature = "admin", feature = "tenancy"))]
 pub(crate) use error::{Refusal, STILL_REFERENCED};
@@ -101,7 +104,7 @@ pub use executor::{
 pub(crate) use executor::{
     bulk_insert_pks_tx, compile_bulk_update_batches, count_rows_on, execute_batches_tx,
     execute_unprepared_pool, fetch_in_chunks, fetch_select_in_chunks, fetch_values_list_on,
-    inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx,
+    inserted_pk, rows_per_batch, run_delete_statements_tx, truncate_refusal, truncate_tx, write_tx,
 };
 #[cfg(feature = "admin")]
 pub(crate) use executor::{select_one_row_as_json_tx, select_rows_as_json_tx};
@@ -133,6 +136,7 @@ pub mod __macro_internals {
     pub use super::executor::{
         bulk_insert_on, delete_on, insert_on, insert_returning_on, update_on,
     };
+    pub use super::executor::{row_saved, write_tx, WriteTx};
 }
 
 /// The per-dialect `SqlValue` binders, so nothing outside `executor`

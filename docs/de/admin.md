@@ -523,6 +523,9 @@ read_only_tables = ["orders"]
 | `allowed_tables` | `[]`, jedes Modell | | Wie `show_only` |
 | `read_only_tables` | `[]` | | Wie `read_only` |
 
+Eine Tenancy-App (`Cli::tenancy()`) wendet `title`, `subtitle`, `url_prefix`,
+`allowed_tables` und `read_only_tables` auch auf den Tenant-Admin an.
+
 Auch `[brand] primary_color` färbt diesen Admin nicht; es ist für die
 [Operator-Konsole](operator-console.md#branding). Das Session-Cookie ist
 `Secure`, außer bei `[security] secure_cookies = false`.
